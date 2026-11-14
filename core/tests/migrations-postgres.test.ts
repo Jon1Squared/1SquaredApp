@@ -20,7 +20,7 @@ import * as corePkg from '@platform/core';
 import { loadPgModule } from '../src/tenancy/pgDriver';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import * as tenantRuntimePkg from '@/platform/tenantRuntime';
-import { createSeedStore } from '@/server/store';
+import { createSeedStore } from '@/seed/seedStoreBuilder';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { buildSystemJobTenantContext } from '../../scripts/lib/systemJobTenantContext';
 import { runMigrateJobSweep } from '../../scripts/run-job';
@@ -183,8 +183,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
-    expect(await runner.getActiveTables(ctx)).toEqual(
+    // Round-trip rollback 0015 -> 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    const activeAt0015 = await runner.getActiveTables(ctx);
+    expect(activeAt0015).toEqual(
       expect.arrayContaining([
         'people',
         'person_emails',
@@ -230,6 +231,10 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'job_runs',
       ]),
     );
+    expect(activeAt0015).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0015')).toBe(true);
+    const activeAfter0015Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0015Rollback).toContain('matter_restriction_metadata');
     expect(await runner.rollbackVersion(ctx, '0014')).toBe(true);
     const activeAfter0014Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0014Rollback).not.toContain('job_runs');
@@ -997,5 +1002,112 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const appliedAfterRecovery = await runner.listAppliedMigrations(ctx);
     const mig0008 = appliedAfterRecovery.find((m) => m.version === '0008');
     expect(mig0008?.checksum).toBe(expected0008Checksum);
+  });
+
+  it('round-trips 0015_transitional_bridges_contract (up -> down -> up), dropping and back-populating matter_restriction_metadata and people.employment_json with tenant role privileges (R408)', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-contract-0015', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-contract-0015');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+    const store = createSeedStore();
+    await importFirmStoreModulesToPostgres({
+      ctx,
+      store,
+      modules: ['parties', 'matters', 'hr'],
+      clearFirst: true,
+      tenantConfig: {
+        ...tenantRuntimePkg.getActiveTenantConfiguration(),
+        tenantId: ctx.tenantId,
+      },
+    });
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      // Seed a restricted staff matter so rollback back-population of matter_restriction_metadata is verified with non-default values
+      const sampleMatterId = store.matters[0]!.id;
+      await client.query(
+        `UPDATE public.matters
+            SET is_staff_matter = TRUE,
+                restricted_access_user_ids_json = $3::jsonb
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, sampleMatterId, JSON.stringify(['P-000001', 'P-000002'])],
+      );
+
+      // At 0015 (up), neither matter_restriction_metadata nor people.employment_json exists
+      const tableAt0015 = await client.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'matter_restriction_metadata'`,
+      );
+      expect(tableAt0015.rowCount).toBe(0);
+
+      const colAt0015 = await client.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'people' AND column_name = 'employment_json'`,
+      );
+      expect(colAt0015.rowCount).toBe(0);
+
+      // Roll back 0015 -> downSql recreates and back-populates both bridges and grants tenant role privileges
+      expect(await runner.rollbackVersion(ctx, '0015')).toBe(true);
+
+      const tableAfterDown = await client.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'matter_restriction_metadata'`,
+      );
+      expect(tableAfterDown.rowCount).toBe(1);
+
+      const colAfterDown = await client.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'people' AND column_name = 'employment_json'`,
+      );
+      expect(colAfterDown.rowCount).toBe(1);
+
+      const bridgeRow = await client.query<{
+        is_restricted: boolean;
+        restricted_access_user_ids: string[];
+      }>(
+        `SELECT is_restricted, restricted_access_user_ids
+           FROM public.matter_restriction_metadata
+          WHERE tenant_id = $1 AND matter_id = $2`,
+        [ctx.tenantId, sampleMatterId],
+      );
+      expect(bridgeRow.rows[0]).toEqual({
+        is_restricted: true,
+        restricted_access_user_ids: ['P-000001', 'P-000002'],
+      });
+
+      const empBackpopulated = await client.query<{
+        id: string;
+        employment_json: { jobTitle?: string } | null;
+      }>(
+        `SELECT id, employment_json
+           FROM public.people
+          WHERE tenant_id = $1 AND id = 'P-000001'`,
+        [ctx.tenantId],
+      );
+      expect(empBackpopulated.rows[0]?.employment_json?.jobTitle).toBeTruthy();
+
+      // Verify role_tenant_<slug>_<env> was granted SELECT, INSERT, UPDATE, DELETE on recreated matter_restriction_metadata
+      const privCheck = await client.query<{ has_select: boolean; has_insert: boolean }>(
+        `SELECT
+           has_table_privilege('role_tenant_mig_contract_0015_test', 'public.matter_restriction_metadata', 'SELECT') AS has_select,
+           has_table_privilege('role_tenant_mig_contract_0015_test', 'public.matter_restriction_metadata', 'INSERT') AS has_insert`,
+      );
+      expect(privCheck.rows[0]).toEqual({ has_select: true, has_insert: true });
+
+      // Re-apply 0015 -> upSql drops both bridges again
+      const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0015']);
+
+      const tableAfterReapply = await client.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'matter_restriction_metadata'`,
+      );
+      expect(tableAfterReapply.rowCount).toBe(0);
+
+      const colAfterReapply = await client.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'people' AND column_name = 'employment_json'`,
+      );
+      expect(colAfterReapply.rowCount).toBe(0);
+    } finally {
+      await client.end();
+    }
   });
 });

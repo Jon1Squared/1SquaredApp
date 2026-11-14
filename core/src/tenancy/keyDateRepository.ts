@@ -6,8 +6,9 @@
  *    transaction starting with `SET LOCAL ROLE <tenant_role>` (`TenantScopedRepository`).
  * 2. Key dates are never deleted in normal operation (updates increment `version`; edits to confirmed dates
  *    create a superseding record).
- * 3. Restricted (staff) matters: entries are returned ONLY if `matter_restriction_metadata` marks the matter
- *    unrestricted OR `restricted_access_user_ids` contains `viewerId`. Otherwise omitted completely at the data layer.
+ * 3. Restricted (staff / ethical-wall) matters: entries are returned ONLY if `public.matters` marks the matter
+ *    unrestricted (`NOT (is_staff_matter OR has_ethical_wall)`) OR `restricted_access_user_ids_json` contains
+ *    `viewerId`. Otherwise omitted completely at the data layer.
  */
 
 import type {

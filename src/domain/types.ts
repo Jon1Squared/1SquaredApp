@@ -1813,5 +1813,20 @@ export interface AppSnapshot {
   recentIds: string[];
 }
 
+export function slug(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+
+export function vid(listKey: string, label: string): string {
+  return `${listKey}.${slug(label)}`;
+}
+
+
 
 

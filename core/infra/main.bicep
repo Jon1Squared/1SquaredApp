@@ -81,9 +81,6 @@ param enablePdfConverterContainerApp bool = false
 @description('Container image reference for the internal PDF converter Container App')
 param pdfConverterContainerImage string = ''
 
-@description('Whether to deploy the manual store-import Container Apps job used during S0-14..S0-18 cut-overs')
-param enableStoreImportJob bool = true
-
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
 param enableSchedulerJobs bool = true
 
@@ -153,7 +150,6 @@ module platform 'modules/platform.bicep' = {
     appContainerImage: appContainerImage
     enablePdfConverterContainerApp: enablePdfConverterContainerApp
     pdfConverterContainerImage: pdfConverterContainerImage
-    enableStoreImportJob: enableStoreImportJob
     enableSchedulerJobs: enableSchedulerJobs
     enableKeyDateRemindersJob: enableKeyDateRemindersJob
     enableUsageRetentionPurgeJob: enableUsageRetentionPurgeJob
@@ -211,7 +207,6 @@ output applicationInsightsName string = platform.outputs.applicationInsightsName
 output jobFailureAlertRuleName string = platform.outputs.jobFailureAlertRuleName
 output sharedPostgresServerFqdn string = platform.outputs.sharedPostgresServerFqdn
 output migrateJobName string = platform.outputs.migrateJobName
-output storeImportJobName string = platform.outputs.storeImportJobName
 output tenantOutputs array = [
   for (tenant, idx) in effectiveTenants: {
     tenantSlug: tenantDeployments[idx].outputs.tenantSlug

@@ -45,7 +45,7 @@ import {
 } from '../../src/server/entraAuth';
 import { validateKeyDateManualEntry } from '../../src/domain/keyDates';
 import { isActionDenied } from '../../src/domain/actionResult';
-import { getStore, saveStore } from '../../src/server/store';
+import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import {
   auditEntriesForRecord,
   getKeyDateRepository,
@@ -971,202 +971,191 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
   });
 
   it('gates saveMatterCostsConfig, signOffMatterCostsRecord, and syncMatterCostsRatesFromPms on featureFlags', async () => {
-    const store = getStore();
-    const snapshot = structuredClone(store);
-    try {
-      const sampleConfig = createDefaultMatterCostsConfig(store.values, {
-        clientProfileCode: notALawFirmBaseConfig.tenantId,
-        displayName: notALawFirmBaseConfig.displayName,
-        primaryDomain: notALawFirmBaseConfig.branding.primaryDomain,
-      });
+    const store = loadCommittedSeedStore();
+    const sampleConfig = createDefaultMatterCostsConfig(store.values, {
+      clientProfileCode: notALawFirmBaseConfig.tenantId,
+      displayName: notALawFirmBaseConfig.displayName,
+      primaryDomain: notALawFirmBaseConfig.branding.primaryDomain,
+    });
 
-      setActiveTenantConfigForTesting({
-        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
-        featureFlags: {
-          ...notALawFirmBaseConfig.featureFlags,
-          enableMatterCostsGovernance: false,
-          enablePmsLiveRateSync: false,
-        },
-      });
+    setActiveTenantConfigForTesting({
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      featureFlags: {
+        ...notALawFirmBaseConfig.featureFlags,
+        enableMatterCostsGovernance: false,
+        enablePmsLiveRateSync: false,
+      },
+    });
 
-      await expect(saveMatterCostsConfig(sampleConfig, 'P-0001')).rejects.toThrow(
-        AuthorisationError,
-      );
-      await expect(syncMatterCostsRatesFromPms('P-0001')).rejects.toThrow(
-        AuthorisationError,
-      );
+    await expect(saveMatterCostsConfig(sampleConfig, 'P-0001')).rejects.toThrow(
+      AuthorisationError,
+    );
+    await expect(syncMatterCostsRatesFromPms('P-0001')).rejects.toThrow(
+      AuthorisationError,
+    );
 
-      const targetMatter = store.matters[0]!;
-      const signOffDenied = await runWithActiveActorSession(
-        {
+    const targetMatter = store.matters[0]!;
+    const signOffDenied = await runWithActiveActorSession(
+      {
+        tenantId: 'not-a-law-firm',
+        personId: 'P-0001',
+        tokenRoles: ['managing_partner', 'admin'],
+        mfaVerified: true,
+        expiresAtMs: Date.now() + 60_000,
+        verifiedSession: {
+          __verifiedEntraSession: true,
           tenantId: 'not-a-law-firm',
           personId: 'P-0001',
-          tokenRoles: ['managing_partner', 'admin'],
+          entraObjectId: '00000000-0000-4000-8000-000000000001',
+          email: 'aldous.vane@notalawfirm.example',
+          displayName: 'Aldous Vane',
+          mappedRoles: ['managing_partner', 'admin'],
           mfaVerified: true,
-          expiresAtMs: Date.now() + 60_000,
-          verifiedSession: {
-            __verifiedEntraSession: true,
-            tenantId: 'not-a-law-firm',
-            personId: 'P-0001',
-            entraObjectId: '00000000-0000-4000-8000-000000000001',
-            email: 'aldous.vane@notalawfirm.example',
-            displayName: 'Aldous Vane',
-            mappedRoles: ['managing_partner', 'admin'],
-            mfaVerified: true,
-            issuedAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          },
+          issuedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
         },
-        async () =>
-          signOffMatterCostsRecord(
-            targetMatter.id,
-            'P-0001',
-            'Attempted sign-off while feature disabled',
-          ),
-      );
-      expect(isActionDenied(signOffDenied)).toBe(true);
-      expect(signOffDenied.code).toBe('FORBIDDEN');
-      expect(signOffDenied.matter).toBeNull();
-      expect(signOffDenied.errors).toBeUndefined();
-      expect(signOffDenied.message).toContain(
-        'enableMatterCostsGovernance is false',
-      );
-    } finally {
-      saveStore(snapshot);
-    }
+      },
+      async () =>
+        signOffMatterCostsRecord(
+          targetMatter.id,
+          'P-0001',
+          'Attempted sign-off while feature disabled',
+        ),
+    );
+    expect(isActionDenied(signOffDenied)).toBe(true);
+    expect(signOffDenied.code).toBe('FORBIDDEN');
+    expect(signOffDenied.matter).toBeNull();
+    expect(signOffDenied.errors).toBeUndefined();
+    expect(signOffDenied.message).toContain(
+      'enableMatterCostsGovernance is false',
+    );
   });
 
   it('audits submitTemplateVersionService accurately under requireApproval true vs false (R287)', async () => {
-    const store = getStore();
-    const snapshot = structuredClone(store);
+    const store = loadCommittedSeedStore();
     const templateAuditMark = await markAuditPosition();
-    try {
-      const docxBase64 = Buffer.from(
-        buildValidDocxArchive({
-          paragraphs: [
-            { text: 'Dear {{client.name}}, ref {{matter.reference}}.' },
-          ],
-        }),
-      ).toString('base64');
+    const docxBase64 = Buffer.from(
+      buildValidDocxArchive({
+        paragraphs: [
+          { text: 'Dear {{client.name}}, ref {{matter.reference}}.' },
+        ],
+      }),
+    ).toString('base64');
 
-      const adminPerson = store.people.find((p) => p.id === 'P-000001')!;
-      const sessionPayload = verifySignedEntraSessionCookie(
-        createSignedEntraSessionCookie({
-          personId: adminPerson.id,
-          tenantId: 'not-a-law-firm',
-          oid:
-            adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
-          tid: '11111111-2222-3333-4444-000000000000',
-          sub: adminPerson.id,
-          email:
-            adminPerson.emails[0]?.address ?? 'aldous.vane@notalawfirm.example',
-          displayName: `${adminPerson.firstName} ${adminPerson.surname}`,
-          entraRoles: ['managing_partner', 'admin'],
-          mappedRoles: ['managing_partner', 'admin'],
-          entraGroups: [],
-          mfaVerified: true,
-          amr: ['pwd', 'mfa'],
-          authenticatedAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        }),
-      )!;
+    const adminPerson = store.people.find((p) => p.id === 'P-000001')!;
+    const sessionPayload = verifySignedEntraSessionCookie(
+      createSignedEntraSessionCookie({
+        personId: adminPerson.id,
+        tenantId: 'not-a-law-firm',
+        oid:
+          adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: adminPerson.id,
+        email:
+          adminPerson.emails[0]?.address ?? 'aldous.vane@notalawfirm.example',
+        displayName: `${adminPerson.firstName} ${adminPerson.surname}`,
+        entraRoles: ['managing_partner', 'admin'],
+        mappedRoles: ['managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    )!;
 
-      // 1. requireApproval: true -> audits "Document Template Submitted for Approval ..." with newValue: "Submitted"
-      setActiveTenantConfigForTesting({
-        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
-        documentGeneration: {
-          approval: {
-            requireApproval: true,
-            allowSelfApproval: false,
-          },
+    // 1. requireApproval: true -> audits "Document Template Submitted for Approval ..." with newValue: "Submitted"
+    setActiveTenantConfigForTesting({
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      documentGeneration: {
+        approval: {
+          requireApproval: true,
+          allowSelfApproval: false,
         },
-      });
+      },
+    });
 
-      const draftReq = await uploadTemplateDraftService(
-        {
-          code: 'TPL-SVC-REQ',
-          name: 'Service Submitted Template',
-          description: 'Template requiring approval',
-          category: 'General',
-          outputDocumentType: 'Letter',
-          filenamePattern: '{matter.reference}-svc-req',
-          availabilityRules: { sourceContexts: ['matter'] },
-          fileName: 'svc-req.docx',
-          docxBase64,
-        },
-        'P-000001',
-        sessionPayload,
-      );
-      const submitReq = await submitTemplateVersionService(
-        draftReq.version.id,
-        'Ready for review',
-        'P-000001',
-        sessionPayload,
-      );
-      expect(submitReq.version.status).toBe('Submitted');
-      const submittedAudit = (
-        await auditEntriesForRecord('matter', draftReq.template.id, templateAuditMark)
-      ).find(
-        (a) =>
-          a.recordId === draftReq.template.id &&
-          a.field === 'Document Template Submitted for Approval (TPL-SVC-REQ v1)',
-      );
-      expect(submittedAudit).toBeDefined();
-      expect(submittedAudit?.oldValue).toBe('Draft');
-      expect(submittedAudit?.newValue).toBe('Submitted');
+    const draftReq = await uploadTemplateDraftService(
+      {
+        code: 'TPL-SVC-REQ',
+        name: 'Service Submitted Template',
+        description: 'Template requiring approval',
+        category: 'General',
+        outputDocumentType: 'Letter',
+        filenamePattern: '{matter.reference}-svc-req',
+        availabilityRules: { sourceContexts: ['matter'] },
+        fileName: 'svc-req.docx',
+        docxBase64,
+      },
+      'P-000001',
+      sessionPayload,
+    );
+    const submitReq = await submitTemplateVersionService(
+      draftReq.version.id,
+      'Ready for review',
+      'P-000001',
+      sessionPayload,
+    );
+    expect(submitReq.version.status).toBe('Submitted');
+    const submittedAudit = (
+      await auditEntriesForRecord('matter', draftReq.template.id, templateAuditMark)
+    ).find(
+      (a) =>
+        a.recordId === draftReq.template.id &&
+        a.field === 'Document Template Submitted for Approval (TPL-SVC-REQ v1)',
+    );
+    expect(submittedAudit).toBeDefined();
+    expect(submittedAudit?.oldValue).toBe('Draft');
+    expect(submittedAudit?.newValue).toBe('Submitted');
 
-      // 2. requireApproval: false -> audits "Document Template Activated (approval not required) ..." with newValue: "Active"
-      setActiveTenantConfigForTesting({
-        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
-        documentGeneration: {
-          approval: {
-            requireApproval: false,
-            allowSelfApproval: false,
-          },
+    // 2. requireApproval: false -> audits "Document Template Activated (approval not required) ..." with newValue: "Active"
+    setActiveTenantConfigForTesting({
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      documentGeneration: {
+        approval: {
+          requireApproval: false,
+          allowSelfApproval: false,
         },
-      });
+      },
+    });
 
-      const draftAuto = await uploadTemplateDraftService(
-        {
-          code: 'TPL-SVC-AUTO',
-          name: 'Service Auto-Activated Template',
-          description: 'Template activated directly on submit',
-          category: 'General',
-          outputDocumentType: 'Letter',
-          filenamePattern: '{matter.reference}-svc-auto',
-          availabilityRules: { sourceContexts: ['matter'] },
-          fileName: 'svc-auto.docx',
-          docxBase64,
-        },
-        'P-000001',
-        sessionPayload,
-      );
-      const submitAuto = await submitTemplateVersionService(
-        draftAuto.version.id,
-        'Activate directly',
-        'P-000001',
-        sessionPayload,
-      );
-      expect(submitAuto.version.status).toBe('Active');
-      const activatedAudit = (
-        await auditEntriesForRecord('matter', draftAuto.template.id, templateAuditMark)
-      ).find(
-        (a) =>
-          a.recordId === draftAuto.template.id &&
-          a.field ===
-            'Document Template Activated (approval not required) (TPL-SVC-AUTO v1)',
-      );
-      expect(activatedAudit).toBeDefined();
-      expect(activatedAudit?.oldValue).toBe('Draft');
-      expect(activatedAudit?.newValue).toBe('Active');
-    } finally {
-      saveStore(snapshot);
-    }
+    const draftAuto = await uploadTemplateDraftService(
+      {
+        code: 'TPL-SVC-AUTO',
+        name: 'Service Auto-Activated Template',
+        description: 'Template activated directly on submit',
+        category: 'General',
+        outputDocumentType: 'Letter',
+        filenamePattern: '{matter.reference}-svc-auto',
+        availabilityRules: { sourceContexts: ['matter'] },
+        fileName: 'svc-auto.docx',
+        docxBase64,
+      },
+      'P-000001',
+      sessionPayload,
+    );
+    const submitAuto = await submitTemplateVersionService(
+      draftAuto.version.id,
+      'Activate directly',
+      'P-000001',
+      sessionPayload,
+    );
+    expect(submitAuto.version.status).toBe('Active');
+    const activatedAudit = (
+      await auditEntriesForRecord('matter', draftAuto.template.id, templateAuditMark)
+    ).find(
+      (a) =>
+        a.recordId === draftAuto.template.id &&
+        a.field ===
+          'Document Template Activated (approval not required) (TPL-SVC-AUTO v1)',
+    );
+    expect(activatedAudit).toBeDefined();
+    expect(activatedAudit?.oldValue).toBe('Draft');
+    expect(activatedAudit?.newValue).toBe('Active');
   });
 
   it('enforces server-side reviewedBy and reviewedOn from the authenticated actor and rejects invalid reviewStatus in saveKeyDatesConfigRecord (R284, R295)', async () => {
-    const store = getStore();
-    const snapshot = structuredClone(store);
+    const store = loadCommittedSeedStore();
     const kdRepo = getKeyDateRepository();
     const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000004'));
     try {
@@ -1275,14 +1264,12 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         ).toBeUndefined();
       });
     } finally {
-      saveStore(snapshot);
       await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000004'), originalOverride);
     }
   });
 
   it('returns structured ActionDenied (without throwing) when allowManualEntry is false on manual creation, supersede, or spoofed system source (R285, R294)', async () => {
-    const store = getStore();
-    const snapshot = structuredClone(store);
+    const store = loadCommittedSeedStore();
     const kdRepo = getKeyDateRepository();
     const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000001'));
     try {
@@ -1388,7 +1375,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         await kdRepo.putKeyDate(testTenantCtx('P-000001'), createdKd);
 
         // R294: Superseding into a manual date on a type with allowManualEntry: false is denied with ActionDenied
-        const configWithoutRuleSets = structuredClone(await getKeyDatesConfig(getStore()));
+        const configWithoutRuleSets = structuredClone(await getKeyDatesConfig(store));
         configWithoutRuleSets.limitationRuleSets = [];
         await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000001'), configWithoutRuleSets);
 
@@ -1438,7 +1425,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         }
 
         // R306: The same supersede on a type that allows manual entry succeeds and stores source: 'manual'
-        const configAllowingManual = structuredClone(await getKeyDatesConfig(getStore()));
+        const configAllowingManual = structuredClone(await getKeyDatesConfig(store));
         configAllowingManual.keyDateTypes![0] = {
           ...configAllowingManual.keyDateTypes![0]!,
           allowManualEntry: true,
@@ -1461,7 +1448,6 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         );
       });
     } finally {
-      saveStore(snapshot);
       await kdRepo.putKeyDatesTenantConfig(testTenantCtx('P-000001'), originalOverride);
     }
   });

@@ -108,14 +108,5 @@ describe('S0-13b: Standalone Dockerfile, .dockerignore, and bundled dist/jobs en
     );
     expect(unknownRes.status).toBe(1);
     expect(unknownRes.stderr).toContain('JOB_RUNNER_UNKNOWN_JOB');
-
-    const bundledImportPath = path.join(REPO_ROOT, 'dist', 'jobs', 'import-store.mjs');
-    expect(fs.existsSync(bundledImportPath)).toBe(true);
-    const importHelpRes = spawnSync(process.execPath, [bundledImportPath, '--help'], {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-    });
-    expect(importHelpRes.status).toBe(0);
-    expect(importHelpRes.stdout).toContain('Usage: import-store');
   });
 });

@@ -55,9 +55,6 @@ param enablePdfConverterContainerApp bool = false
 @description('Container image reference for the internal PDF converter Container App (used when enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
 
-@description('Whether to deploy the manual store-import Container Apps job used during S0-14..S0-18 cut-overs (retired in S0-20)')
-param enableStoreImportJob bool = true
-
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
 param enableSchedulerJobs bool = true
 
@@ -149,7 +146,6 @@ var containerAppsEnvName = take('cae-${resourceSuffix}', 60)
 var webContainerAppName = take('ca-web-${resourceSuffix}', 32)
 var pdfConverterAppName = take('ca-pdf-${resourceSuffix}', 32)
 var migrateJobName = take('caj-migrate-${environment}', 32)
-var storeImportJobName = take('caj-import-${environment}', 32)
 var keyDateRemindersJobName = take('caj-kd-rem-${environment}', 32)
 var usagePurgeJobName = take('caj-doc-prg-${environment}', 32)
 var enquiryAnonymiseJobName = take('caj-enq-anon-${environment}', 32)
@@ -310,7 +306,7 @@ resource blobPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLin
 
 // ---------------------------------------------------------------------------
 // 2. Two Least-Privilege User-Assigned Managed Identities (R402, ADR 0024 §3)
-//    - runtimeIdentity: web, store-import & scheduled jobs (NOINHERIT login, never DB admin)
+//    - runtimeIdentity: web & scheduled jobs (NOINHERIT login, never DB admin)
 //    - migrateIdentity: PostgreSQL Entra administrator, attached ONLY to migrate job
 // ---------------------------------------------------------------------------
 
@@ -1017,62 +1013,7 @@ resource migrateJob 'Microsoft.App/jobs@2025-07-01' = {
   ]
 }
 
-// Manual cut-over store-import job: uses runtimeIdentity on PgBouncer port 6432 (R404, R407; retired in S0-20)
-resource storeImportJob 'Microsoft.App/jobs@2025-07-01' = if (enableStoreImportJob) {
-  name: storeImportJobName
-  location: location
-  tags: platformTags
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${runtimeIdentity.id}': {}
-    }
-  }
-  properties: {
-    environmentId: containerAppsEnv.id
-    workloadProfileName: 'Consumption'
-    configuration: {
-      triggerType: 'Manual'
-      replicaTimeout: 1800
-      replicaRetryLimit: 0
-      manualTriggerConfig: {
-        parallelism: 1
-        replicaCompletionCount: 1
-      }
-      registries: [
-        {
-          server: acrLoginServer
-          identity: runtimeIdentity.id
-        }
-      ]
-    }
-    template: {
-      containers: [
-        {
-          name: 'store-import'
-          image: appContainerImage
-          command: [
-            'node'
-            'dist/jobs/import-store.mjs'
-          ]
-          env: runtimeCommonEnv
-          resources: {
-            cpu: json('0.5')
-            memory: '1Gi'
-          }
-        }
-      ]
-    }
-  }
-  dependsOn: [
-    runtimePlatformKvSecretsUserRole
-    runtimeAcrPullRole
-    runtimeAppInsightsMetricsPublisherRole
-    pgBouncerPoolMode
-  ]
-}
-
-// Hourly scheduled Container Apps jobs (disabled by default until S0-19 and S0-19b; ADR 0030, R404)
+// Hourly scheduled Container Apps jobs (ADR 0030, R404)
 resource keyDateRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (enableSchedulerJobs && enableKeyDateRemindersJob) {
   name: keyDateRemindersJobName
   location: location
@@ -1268,4 +1209,4 @@ output jobFailureAlertRuleName string = jobFailureAlertRule.name
 output sharedPostgresServerName string = sharedPostgresServer.name
 output sharedPostgresServerFqdn string = sharedPostgresServer.properties.fullyQualifiedDomainName
 output migrateJobName string = migrateJob.name
-output storeImportJobName string = enableStoreImportJob ? storeImportJob.name : ''
+

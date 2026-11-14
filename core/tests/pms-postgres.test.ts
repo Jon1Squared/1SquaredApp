@@ -55,7 +55,7 @@ import {
   syncMatterCostsRatesFromPms,
   unlinkPmsRecord,
 } from '@/server/services';
-import { clearStoreMemoryCache, resetStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
@@ -563,7 +563,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     const pmsRepo = getPmsRepository();
 
     // Seed base store into both tenant-a and tenant-b, then customize each tenant's PMS extract and links
-    const baseStore = resetStore();
+    const baseStore = loadCommittedSeedStore();
     const matterId = baseStore.matters[0]!.id;
     const orgId = baseStore.organisations[0]!.id;
     const feeEarnerPersonId = 'P-000001';
@@ -866,7 +866,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
   it('commits recordInvoiceCreditControlAction and executeMerge PMS link repointing atomically in PostgreSQL and rolls back on failure', async () => {
     const { ctx, actorSession } = makeHostActorAndContext('P-000001');
     await runWithActiveActorSession(actorSession, async () => {
-      const store = resetStore();
+      const store = loadCommittedSeedStore();
       await importFirmStoreModulesToPostgres({
         ctx,
         store,
@@ -999,7 +999,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       expect(repointedLink?.onesquaredId).toBe(survivorOrgRes.organisation.id);
       void partyRepo;
 
-      const cleanStore = resetStore();
+      const cleanStore = loadCommittedSeedStore();
       await importFirmStoreModulesToPostgres({
         ctx,
         store: cleanStore,
@@ -1011,7 +1011,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
   it('enforces R465, R466, R468, and R470: cold-start and two-replica visibility without runtime-store.json or process-level PMS snapshot caches, and zero getStore/saveStore in runtime src/ files', async () => {
     const { ctx, actorSession } = makeHostActorAndContext('P-000001');
     await runWithActiveActorSession(actorSession, async () => {
-      const seedStore = resetStore();
+      const seedStore = loadCommittedSeedStore();
       await importFirmStoreModulesToPostgres({
         ctx,
         store: seedStore,
@@ -1028,14 +1028,13 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
         clearFirst: true,
       });
 
-      // Cold-start simulation (R465, R468): clear in-memory JSON store cache and point ONESQUARED_RUNTIME_STORE_PATH at an empty directory in NODE_ENV=production
+      // Cold-start simulation (R465, R468): point ONESQUARED_RUNTIME_STORE_PATH at an empty directory in NODE_ENV=production
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 's018-r465-cold-'));
       const nonExistentStorePath = path.join(tmpDir, 'runtime-store.json');
       const prevStorePath = process.env.ONESQUARED_RUNTIME_STORE_PATH;
       const prevNodeEnv = process.env.NODE_ENV;
       process.env.ONESQUARED_RUNTIME_STORE_PATH = nonExistentStorePath;
       (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
-      clearStoreMemoryCache();
 
       const poolMgrB = new TenantPostgresPoolManager({ maxConnectionsPerTenant: 1 });
       const replicaBPmsRepo = new TenantPmsRepository({ poolManager: poolMgrB });
@@ -1120,11 +1119,9 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     expect(pmsSourceSrc).not.toContain('export function getPmsSource');
     expect(pmsSourceSrc).not.toContain('getCachedTenantPmsSnapshot');
 
-    const storeSrc = fs.readFileSync(
-      path.join(REPO_ROOT, 'src/server/store.ts'),
-      'utf8',
-    );
-    expect(storeSrc).toContain("'pmsLinks'");
+    expect(
+      fs.existsSync(path.join(REPO_ROOT, 'src/server/store.ts')),
+    ).toBe(false);
 
     // 5. R470: Walk all runtime .ts/.tsx files under src/ and assert zero getStore(, saveStore(, getSynchronizedTenantStoreSnapshot, resolveSynchronizedTenantPmsLinks, or __oneSquaredStore
     function collectRuntimeFiles(dirPath: string): string[] {
@@ -1148,7 +1145,6 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
           /\.(ts|tsx)$/.test(entry.name) &&
           !entry.name.endsWith('.test.ts') &&
           !entry.name.endsWith('.test.tsx') &&
-          relPath !== 'src/server/store.ts' &&
           relPath !== 'src/server/storePostgresImport.ts'
         ) {
           results.push(relPath);
@@ -1191,7 +1187,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
 
     try {
       await runWithActiveActorSession(actorSession, async () => {
-        const seedStore = resetStore();
+        const seedStore = loadCommittedSeedStore();
         await importFirmStoreModulesToPostgres({
           ctx,
           store: seedStore,

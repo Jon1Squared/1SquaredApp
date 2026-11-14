@@ -1,16 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loadAndValidateTenantConfig } from '@platform/core';
+import {
+  loadAndValidateTenantConfig,
+  TenantCatalogueRepository,
+  TenantPartyRepository,
+} from '@platform/core';
 import type { PlatformEnvironment } from '@platform/core-api';
 import { isPrivilegedPersonForEmailLinking } from '../src/domain/rbac';
 import {
   applyEntraObjectIdMapToStore,
   loadCommittedSeedStore,
-  resolveRuntimeStorePath,
   writeCommittedSeedStoreSnapshot,
 } from '../src/seed/seedSnapshot';
-import { createSeedStore, type FirmStore } from '../src/server/store';
+import { createSeedStore, type FirmStore } from '../src/seed/seedStoreBuilder';
 import '../core/src/tenancy/pgNodePreload';
 import { importFirmStoreModulesToPostgres } from '../src/server/storePostgresImport';
 import { buildSystemJobTenantContext } from './lib/systemJobTenantContext';
@@ -19,7 +22,6 @@ export interface SeedDemoTenantOptions {
   args?: string[];
   env?: Record<string, string | undefined>;
   rootDir?: string;
-  runtimeStorePath?: string;
   logger?: (jsonLine: string) => void;
   warnLogger?: (jsonLine: string) => void;
 }
@@ -43,19 +45,6 @@ export interface SeedDemoTenantResult {
   };
 }
 
-function isStoreNonEmpty(store: Partial<FirmStore> | null | undefined): boolean {
-  if (!store || typeof store !== 'object') return false;
-  if (store.isCleanDeployment === false) return true;
-  return (
-    (Array.isArray(store.people) && store.people.length > 0) ||
-    (Array.isArray(store.organisations) && store.organisations.length > 0) ||
-    (Array.isArray(store.matters) && store.matters.length > 0) ||
-    (Array.isArray(store.enquiries) && store.enquiries.length > 0) ||
-    (Array.isArray(store.quotes) && store.quotes.length > 0) ||
-    (Array.isArray(store.tasks) && store.tasks.length > 0)
-  );
-}
-
 function summarizeCounts(store: FirmStore): SeedDemoTenantResult['counts'] {
   return {
     people: store.people?.length ?? 0,
@@ -72,10 +61,7 @@ function summarizeCounts(store: FirmStore): SeedDemoTenantResult['counts'] {
 
 export async function runSeedDemoTenant(
   options: SeedDemoTenantOptions = {},
-
 ): Promise<SeedDemoTenantResult> {
-
-
   const args = options.args ?? process.argv.slice(2);
   const env = options.env ?? process.env;
   const rootDir = options.rootDir ?? process.cwd();
@@ -168,25 +154,18 @@ export async function runSeedDemoTenant(
     return result;
   }
 
-  const targetStorePath =
-    options.runtimeStorePath ?? resolveRuntimeStorePath(rootDir, env);
-
-  if (fs.existsSync(targetStorePath)) {
-    let existingStore: Partial<FirmStore> | null = null;
-    let parseFailed = false;
-    try {
-      existingStore = JSON.parse(
-        fs.readFileSync(targetStorePath, 'utf8'),
-      ) as Partial<FirmStore>;
-    } catch {
-      parseFailed = true;
-    }
-    if ((parseFailed || isStoreNonEmpty(existingStore)) && !force) {
-      throw new Error(
-        parseFailed
-          ? 'Refusing to overwrite an unparseable store file without --force.'
-          : 'Refusing to overwrite a non-empty store without --force.',
-      );
+  const ctx = buildSystemJobTenantContext({ tenantConfig, jobKey: 'seed-demo' });
+  if (!force) {
+    const [existingPartyCounts, existingProfile] = await Promise.all([
+      new TenantPartyRepository().countAllTenantPartyRows(ctx),
+      new TenantCatalogueRepository().getFirmProfile(ctx),
+    ]);
+    const isNonEmpty =
+      existingProfile?.isCleanDeployment === false ||
+      existingPartyCounts.people > 0 ||
+      existingPartyCounts.organisations > 0;
+    if (isNonEmpty) {
+      throw new Error('Refusing to overwrite a non-empty store without --force.');
     }
   }
 
@@ -227,27 +206,11 @@ export async function runSeedDemoTenant(
       }),
   ).length;
 
-  const targetDir = path.dirname(targetStorePath);
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
-  }
-  const tmpStorePath = `${targetStorePath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmpStorePath, JSON.stringify(seedStore, null, 2), 'utf8');
-    fs.renameSync(tmpStorePath, targetStorePath);
-  } catch (writeErr) {
-    try {
-      if (fs.existsSync(tmpStorePath)) fs.unlinkSync(tmpStorePath);
-    } catch {
-      // ignore cleanup errors
-    }
-    throw writeErr;
-  }
-
   await importFirmStoreModulesToPostgres({
-    ctx: buildSystemJobTenantContext({ tenantConfig, jobKey: 'seed-demo' }),
+    ctx,
     store: seedStore,
     clearFirst: true,
+    tenantConfig,
   });
 
   if (unboundPrivilegedPersonas > 0) {

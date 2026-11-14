@@ -136,7 +136,7 @@ import {
   updateMatterConflictRecord,
 } from '@/server/services';
 import { testDataResetContext } from '@/test/testTenantContexts';
-import { getStore, saveStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   auditEntriesForRecord,
   getKeyDateRepository,
@@ -1848,7 +1848,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
       expect(violations).toEqual([]);
     });
 
-    function registerStoreEmployeeSessionsForTest(store: ReturnType<typeof getStore>) {
+    function registerStoreEmployeeSessionsForTest(store: ReturnType<typeof loadCommittedSeedStore>) {
       const cfg = getActiveTenantConfiguration();
       const sessions = new Map<string, VerifiedEntraSessionPayload>();
       for (const emp of store.people) {
@@ -1934,7 +1934,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
     }
 
     it('enforces R2: all 8 admin document store functions reject non-admin and non-MFA callers with access_denied', async () => {
-      const { asEmployee } = registerStoreEmployeeSessionsForTest(getStore());
+      const { asEmployee } = registerStoreEmployeeSessionsForTest(loadCommittedSeedStore());
       try {
         await asEmployee('P-000002', async () => {
           // P-000002 is a fee earner without admin permissions
@@ -2033,23 +2033,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
     });
 
     it('enforces R3, R4, R5, R8, R9, R12, R13, R14, R19, R21: cross-matter isolation, pre-provisioning RBAC, lifecycle sync on matter update, append-only audit persistence, and per-tenant hydration', async () => {
-      const store = getStore();
-      const snapshotMatters = structuredClone(store.matters);
-      const snapshotPeople = structuredClone(store.people);
-      const snapshotLocations = structuredClone(
-        store.matterDocumentLocations ?? [],
-      );
-      const snapshotScopes = structuredClone(
-        store.documentStoreFolderScopes ?? [],
-      );
-      const snapshotJobs = structuredClone(await getRepositorySingleton().listLifecycleJobs(makeTenantContext({ tenantId: 'not-a-law-firm' })));
-      const snapshotFindings = structuredClone(
-        store.documentReconciliationFindings ?? [],
-      );
-      const snapshotAudits = structuredClone(
-        store.documentStoreAuditEvents ?? [],
-      );
-
+      const store = loadCommittedSeedStore();
       try {
         resetDocumentStoreSingletonsForTesting();
         const { sessions, asEmployee } = registerStoreEmployeeSessionsForTest(store);
@@ -3428,14 +3412,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         expect(typeof MockSharePointGraphBackend).toBe('function');
       } finally {
         setTestEntraSessionOverride(undefined);
-        store.matters = snapshotMatters;
-        store.people = snapshotPeople;
-        store.matterDocumentLocations = snapshotLocations;
-        store.documentStoreFolderScopes = snapshotScopes;
-        store.documentLifecycleJobs = snapshotJobs;
-        store.documentReconciliationFindings = snapshotFindings;
-        store.documentStoreAuditEvents = snapshotAudits;
-        saveStore(store);
         await resetAllDemoData('P-000001', testDataResetContext());
         resetDocumentStoreSingletonsForTesting();
       }
@@ -3507,9 +3483,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
     });
 
     it('enforces R77, R112, R125, R126, R127, R128: token-derived actorGroups, synchronous lifecycle throw persistence, multi-team org assignment, basePath prefix protection, multi-library resolution, and test hook guard', async () => {
-      const store = getStore();
-      const snapshotMatters = structuredClone(store.matters);
-      const snapshotPeople = structuredClone(store.people);
+      const store = loadCommittedSeedStore();
       try {
         resetDocumentStoreSingletonsForTesting();
         const cfg = getActiveTenantConfiguration();
@@ -3575,16 +3549,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           }),
         ).toThrow(/ENTRA_CLAIM_ERROR/);
 
-        // R112: Calling saveMatterRecord when syncMatterLifecycleOnSaveSync throws synchronously still returns normally without error, persists the updated matter to data/runtime-store.json matching getStore(), and logs a JSON error containing both tenantId and correlationId
+        // R112: Calling saveMatterRecord when syncMatterLifecycleOnSaveSync throws synchronously still returns normally without error, persists the updated matter in PostgreSQL, and logs a JSON error containing both tenantId and correlationId
         const syncErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-        const runtimeStorePath = path.resolve(
-          __dirname,
-          '../../data/runtime-store.json',
-        );
-        const runtimeExistedBefore = fs.existsSync(runtimeStorePath);
-        const runtimeContentBefore = runtimeExistedBefore
-          ? fs.readFileSync(runtimeStorePath, 'utf8')
-          : null;
         const prevVitest = process.env.VITEST;
         const prevNodeEnvForR112 = process.env.NODE_ENV;
         const prevTenantPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
@@ -3608,7 +3574,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             'development';
           (process.env as Record<string, string | undefined>).PLATFORM_TENANT_PACKAGE_DIR =
             'client-not-a-law-firm';
-          saveStore(store);
           let saveRes: Awaited<ReturnType<typeof saveMatterRecord>>;
           try {
             saveRes = await asEmployee('P-000001', async () =>
@@ -3656,11 +3621,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           } else {
             (process.env as Record<string, string | undefined>).PLATFORM_TENANT_PACKAGE_DIR =
               prevTenantPkgDir;
-          }
-          if (runtimeExistedBefore && runtimeContentBefore !== null) {
-            fs.writeFileSync(runtimeStorePath, runtimeContentBefore, 'utf8');
-          } else if (!runtimeExistedBefore && fs.existsSync(runtimeStorePath)) {
-            fs.unlinkSync(runtimeStorePath);
           }
           syncErrSpy.mockRestore();
         }
@@ -4270,9 +4230,6 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         );
         expect(newBarrierRes.matter?.hasEthicalWall).toBe(true);
       } finally {
-        store.matters = snapshotMatters;
-        store.people = snapshotPeople;
-        saveStore(store);
         await resetAllDemoData('P-000001', testDataResetContext());
         resetDocumentStoreSingletonsForTesting();
       }
@@ -4844,7 +4801,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
     });
 
     it('R203: requires mfaVerified === true and writes a config:stores:updated audit entry when changing delegatedPermissionScope', async () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const prevOverride = store.documentStoreConfigOverride;
       try {
         const cfg = getActiveTenantConfiguration();

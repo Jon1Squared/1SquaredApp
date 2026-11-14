@@ -23,11 +23,11 @@ import {
   saveMatterRecord,
 } from '@/server/services';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
-import { getStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { testDataResetContext } from '@/test/testTenantContexts';
 
 function buildVerifiedActorSession(personId = 'P-000001') {
-  const store = getStore();
+  const store = loadCommittedSeedStore();
   const person = store.people.find((p) => p.id === personId)!;
   const expiresAt = new Date(Date.now() + 3600_000).toISOString();
   const prevSecret = process.env.ENTRA_SESSION_SIGNING_SECRET;
@@ -67,7 +67,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
   });
 
   it('1. New matter: stores entered questionnaire answers and sets overallRisk and riskRatingId from server scoring (ignoring client riskRatingId and forged snapshot fields)', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
     const { id: _omittedId, ...matterTemplate } = baseMatter;
     void _omittedId;
@@ -133,7 +133,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
   });
 
   it('2. Edit: changing an answer on an existing matter replaces the stored snapshot and updates riskRatingId; saving without answers keeps the existing snapshot', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
     const { id: _omittedId, ...matterTemplate } = baseMatter;
     void _omittedId;
@@ -276,7 +276,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
     }
 
     // Service-level enforcement in saveMatterRecord
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
     const { id: _omittedId, ...matterTemplate } = baseMatter;
     void _omittedId;
@@ -445,7 +445,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
   });
 
   it('5. R242: a new matter saved without answers and an enquiry conversion have no invented answers, no risk rating, and are not marked complete', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
     const {
       id: _omittedId,
@@ -531,7 +531,7 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
   });
 
   it('6. R248: an empty (not_started) risk assessment shows Not assessed / Unanswered with neutral pills and never shows Low for any section or question', () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const unassessedMatter = {
       ...store.matters.find((m) => m.id === 'M-000001')!,
       fieldValues: {},

@@ -1901,6 +1901,44 @@ DROP TABLE IF EXISTS public.job_runs;
 `.trim(),
 };
 
+export const TRANSITIONAL_BRIDGES_CONTRACT_MIGRATION_0015: TenantMigrationDefinition = {
+  version: '0015',
+  name: '0015_transitional_bridges_contract',
+  description:
+    'Drops transitional people.employment_json column and matter_restriction_metadata table after S0-16 and S0-17b cut-overs (ADR 0028, R408).',
+  tablesChanged: ['people', 'matter_restriction_metadata'],
+  dependsOn: ['0014'],
+  upSql: `
+ALTER TABLE people DROP COLUMN IF EXISTS employment_json;
+DROP TABLE IF EXISTS matter_restriction_metadata;
+`.trim(),
+  downSql: `
+CREATE TABLE IF NOT EXISTS matter_restriction_metadata (
+  tenant_id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  is_restricted BOOLEAN NOT NULL DEFAULT FALSE,
+  restricted_access_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, matter_id)
+);
+
+INSERT INTO matter_restriction_metadata (tenant_id, matter_id, is_restricted, restricted_access_user_ids, updated_at)
+SELECT tenant_id, id, (is_staff_matter OR has_ethical_wall), restricted_access_user_ids_json, updated_at
+FROM matters
+ON CONFLICT (tenant_id, matter_id) DO UPDATE SET
+  is_restricted = EXCLUDED.is_restricted,
+  restricted_access_user_ids = EXCLUDED.restricted_access_user_ids,
+  updated_at = EXCLUDED.updated_at;
+
+ALTER TABLE people ADD COLUMN IF NOT EXISTS employment_json JSONB NULL;
+
+UPDATE people p
+SET employment_json = e.employment_json
+FROM employee_employment_records e
+WHERE p.tenant_id = e.tenant_id AND p.id = e.person_id;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1916,6 +1954,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   CATALOGUES_AND_CONFIG_MIGRATION_0012,
   PMS_PER_TENANT_MIGRATION_0013,
   SCHEDULER_JOB_RUNS_MIGRATION_0014,
+  TRANSITIONAL_BRIDGES_CONTRACT_MIGRATION_0015,
 ];
 
 export function validateMigrationCatalogueOrder(
@@ -2224,6 +2263,37 @@ export class TenantMigrationRunner {
         }
 
         await client.query(definition.downSql);
+
+        const tenantRoleName = resolveTenantPostgresRoleName(ctx);
+        const tenantRoleIdent = quotePgIdentifier(tenantRoleName);
+        const runtimeUser =
+          process.env.PLATFORM_POSTGRES_RUNTIME_USER?.trim() || 'runtime_login';
+        const runtimeIdent = quotePgIdentifier(runtimeUser);
+        for (const tableName of definition.tablesChanged) {
+          const tableIdent = quotePgIdentifier(tableName);
+          const tableExists = await client.query(
+            `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+            [tableName],
+          );
+          if (tableExists.rowCount && tableExists.rowCount > 0) {
+            await client.query(
+              `REVOKE ALL ON TABLE ${tableIdent} FROM PUBLIC, ${runtimeIdent}`,
+            );
+            if (tableName === 'audit_entries') {
+              await client.query(
+                `REVOKE ALL ON TABLE ${tableIdent} FROM ${tenantRoleIdent}`,
+              );
+              await client.query(
+                `GRANT SELECT, INSERT ON TABLE ${tableIdent} TO ${tenantRoleIdent}`,
+              );
+            } else {
+              await client.query(
+                `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${tableIdent} TO ${tenantRoleIdent}`,
+              );
+            }
+          }
+        }
+
         await client.query(
           'DELETE FROM tenant_schema_migrations WHERE tenant_id = $1 AND version = $2',
           [ctx.tenantId, targetVersion],

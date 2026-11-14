@@ -3,6 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  loadAndValidateTenantConfig,
+} from '@platform/core';
+import {
   computeMatterOpeningChecklistProgress,
   isMatterConflictCheckAwaitingDecision,
   isMatterOpeningInProgress,
@@ -10,6 +13,7 @@ import {
 import { isPrivilegedPersonForEmailLinking } from '@/domain/rbac';
 import { isComplianceOrOnboardingTask } from '@/domain/tasks';
 import {
+  createVerifiedTenantContext,
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
   isNonLiveDemoEnvironment,
@@ -20,26 +24,48 @@ import {
   loadCommittedSeedStore,
   loadCommittedSeedStoreRaw,
 } from '@/seed/seedSnapshot';
+import { createCleanDeploymentStore } from '@/seed/seedStoreBuilder';
 import {
   clearAllDataToCleanDeployment,
+  getCatalogueRepository,
+  getKeyDateRepository,
+  getMatterRepository,
   getPartyRepository,
   isDataResetAllowedEnvironment,
   isDemoModeEnabled,
   resetAllDemoData,
 } from '@/server/services';
 import {
-  clearStoreMemoryCache,
-  getStore,
-  saveStore,
-} from '@/server/store';
+  clearMigratedPostgresModulesForTenant,
+  importFirmStoreModulesToPostgres,
+} from '@/server/storePostgresImport';
 import { runSeedDemoTenant } from '../../../scripts/seed-demo-tenant';
 import { testDataResetContext } from '@/test/testTenantContexts';
+
+function makeDemoEnvTenantCtx() {
+  const cfg = getActiveTenantConfiguration();
+  return createVerifiedTenantContext(
+    {
+      sub: 'system:seed-demo',
+      tenantId: 'not-a-law-firm',
+      name: 'System Seed Demo',
+      email: 'seed-demo@notalawfirm.example',
+      roles: ['admin'],
+      mfaVerified: true,
+      correlationId: 'corr-demo-tenant-test',
+    },
+    {
+      ...cfg,
+      tenantId: 'not-a-law-firm',
+      hostingMode: 'multi_tenant',
+      environment: 'demo',
+    },
+  );
+}
 
 describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo command', () => {
   afterEach(() => {
     setActiveTenantConfigForTesting(null);
-    delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
-    saveStore(loadCommittedSeedStore());
   });
 
   it('1. enables demo mode in NODE_ENV=production when environment is demo and enableDemoMode is true, and never in live or when enableDemoMode is false', () => {
@@ -117,42 +143,27 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('2. getStore() with no runtime file returns a clean deployment store and never back-fills demo data into an existing store', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-clean-store-'));
-    const missingStorePath = path.join(tmpDir, 'non-existent-store.json');
+  it('2. createCleanDeploymentStore and clearAllDataToCleanDeployment produce a clean deployment with zero operational rows in PostgreSQL', async () => {
+    const ctx = testDataResetContext();
     try {
-      process.env.ONESQUARED_RUNTIME_STORE_PATH = missingStorePath;
-      clearStoreMemoryCache();
+      const cleanTemplate = createCleanDeploymentStore();
+      expect(cleanTemplate.isCleanDeployment).toBe(true);
+      expect(cleanTemplate.people).toHaveLength(0);
+      expect(cleanTemplate.organisations).toHaveLength(0);
+      expect(cleanTemplate.matters).toHaveLength(0);
+      expect(cleanTemplate.enquiries).toHaveLength(0);
+      expect(cleanTemplate.quotes).toHaveLength(0);
+      expect(cleanTemplate.tasks).toHaveLength(0);
+      expect(cleanTemplate.keyDates).toHaveLength(0);
 
-      const store = getStore();
-      expect(store.isCleanDeployment).toBe(true);
-      expect(store.people).toHaveLength(0);
-      expect(store.organisations).toHaveLength(0);
-      expect(store.matters).toHaveLength(0);
-      expect(store.enquiries).toHaveLength(0);
-      expect(store.quotes).toHaveLength(0);
-      expect(store.tasks).toHaveLength(0);
-      expect(store.keyDates).toHaveLength(0);
-      expect(fs.existsSync(missingStorePath)).toBe(true);
-
-      // Even if isCleanDeployment is false on disk with empty arrays, getStore() does not back-fill from buildDemoData
-      const rawDisk = JSON.parse(fs.readFileSync(missingStorePath, 'utf8'));
-      rawDisk.isCleanDeployment = false;
-      rawDisk.matters = [];
-      rawDisk.people = [];
-      rawDisk.organisations = [];
-      delete rawDisk.keyDates;
-      fs.writeFileSync(missingStorePath, JSON.stringify(rawDisk, null, 2), 'utf8');
-
-      clearStoreMemoryCache();
-      const reloaded = getStore();
-      expect(reloaded.matters).toHaveLength(0);
-      expect(reloaded.people).toHaveLength(0);
-      expect(reloaded.organisations).toHaveLength(0);
-      expect(reloaded.keyDates).toEqual([]);
+      await clearAllDataToCleanDeployment('P-000001', ctx);
+      const profile = await getCatalogueRepository().getFirmProfile(ctx);
+      expect(profile?.isCleanDeployment).toBe(true);
+      expect(await getPartyRepository().listAllPeople(ctx)).toHaveLength(0);
+      expect(await getPartyRepository().listAllOrganisations(ctx)).toHaveLength(0);
+      expect(await getMatterRepository().listAllMattersUnfiltered(ctx)).toHaveLength(0);
     } finally {
-      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      await resetAllDemoData('P-000001', ctx);
     }
   });
 
@@ -172,82 +183,63 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
   });
 
   it('4. seed:demo refuses a non-empty store without --force, succeeds with --force, and logs only counts, tenantId and environment', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-seed-cmd-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
+    const demoCtx = makeDemoEnvTenantCtx();
     const logs: string[] = [];
 
-    try {
-      // First seed into an empty/non-existent path succeeds
-      const firstResult = await runSeedDemoTenant({
+    await clearMigratedPostgresModulesForTenant({ ctx: demoCtx });
+
+    // First seed into an empty tenant database succeeds
+    const firstResult = await runSeedDemoTenant({
+      args: [],
+      env: {
+        ...process.env,
+        PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+        PLATFORM_ENVIRONMENT: 'demo',
+      },
+      logger: (line) => logs.push(line),
+    });
+
+    expect(firstResult.event).toBe('seed.demo_tenant_completed');
+    expect(firstResult.tenantId).toBe('not-a-law-firm');
+    expect(firstResult.environment).toBe('demo');
+    expect(firstResult.counts.people).toBeGreaterThan(0);
+    expect(firstResult.counts.matters).toBeGreaterThan(0);
+    expect(firstResult.counts.keyDates).toBe(5);
+
+    // Output log contains no person or client names
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).not.toContain('Rhian');
+    expect(logs[0]).not.toContain('Dafydd');
+    expect(logs[0]).not.toContain('Penarth');
+
+    // Second seed without --force refuses to overwrite non-empty store
+    await expect(runSeedDemoTenant({
         args: [],
         env: {
           ...process.env,
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'demo',
         },
-        runtimeStorePath: storePath,
-        logger: (line) => logs.push(line),
-      });
-
-      expect(firstResult.event).toBe('seed.demo_tenant_completed');
-      expect(firstResult.tenantId).toBe('not-a-law-firm');
-      expect(firstResult.environment).toBe('demo');
-      expect(firstResult.counts.people).toBeGreaterThan(0);
-      expect(firstResult.counts.matters).toBeGreaterThan(0);
-      expect(firstResult.counts.keyDates).toBe(5);
-
-      // Output log contains no person or client names
-      expect(logs).toHaveLength(1);
-      expect(logs[0]).not.toContain('Rhian');
-      expect(logs[0]).not.toContain('Dafydd');
-      expect(logs[0]).not.toContain('Penarth');
-
-      // Second seed without --force refuses to overwrite non-empty store
-      await expect(runSeedDemoTenant({
-          args: [],
-          env: {
-            ...process.env,
-            PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
-            PLATFORM_ENVIRONMENT: 'demo',
-          },
-          runtimeStorePath: storePath,
-          logger: () => {},
-        })).rejects.toThrow(/Refusing to overwrite a non-empty store without --force/);
-
-      // Second seed with --force succeeds
-      const forcedResult = await runSeedDemoTenant({
-        args: ['--force'],
-        env: {
-          ...process.env,
-          PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
-          PLATFORM_ENVIRONMENT: 'demo',
-        },
-        runtimeStorePath: storePath,
         logger: () => {},
-      });
-      expect(forcedResult.event).toBe('seed.demo_tenant_completed');
+      })).rejects.toThrow(/Refusing to overwrite a non-empty store without --force/);
 
-      // R335: Unparseable store file is refused without --force
-      fs.writeFileSync(storePath, '{ not valid json', 'utf8');
-      await expect(runSeedDemoTenant({
-          args: [],
-          env: {
-            ...process.env,
-            PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
-            PLATFORM_ENVIRONMENT: 'demo',
-          },
-          runtimeStorePath: storePath,
-          logger: () => {},
-        })).rejects.toThrow(/Refusing to overwrite an unparseable store file without --force/);
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
+    // Second seed with --force succeeds
+    const forcedResult = await runSeedDemoTenant({
+      args: ['--force'],
+      env: {
+        ...process.env,
+        PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
+        PLATFORM_ENVIRONMENT: 'demo',
+      },
+      logger: () => {},
+    });
+    expect(forcedResult.event).toBe('seed.demo_tenant_completed');
   });
 
   it('5. seed:demo --entra-map sets entraObjectId on the mapped persons only', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-entra-map-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
     const mapPath = path.join(tmpDir, 'entra-map.local.json');
+    const demoCtx = makeDemoEnvTenantCtx();
 
     try {
       fs.writeFileSync(
@@ -264,24 +256,23 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       );
 
       const res = await runSeedDemoTenant({
-        args: ['--entra-map', mapPath],
+        args: ['--force', '--entra-map', mapPath],
         env: {
           ...process.env,
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'demo',
         },
-        runtimeStorePath: storePath,
         logger: () => {},
       });
 
       expect(res.mappedEntraPersonas).toBe(2);
 
-      const writtenStore = JSON.parse(fs.readFileSync(storePath, 'utf8'));
-      const p1 = writtenStore.people.find((p: { id: string }) => p.id === 'P-000001');
-      const p4 = writtenStore.people.find((p: { id: string }) => p.id === 'P-000004');
-      const p2 = writtenStore.people.find((p: { id: string }) => p.id === 'P-000002');
-      const unmappedWithOid = writtenStore.people.filter(
-        (p: { id: string; entraObjectId?: string }) =>
+      const seededPeople = await getPartyRepository().listAllPeople(demoCtx);
+      const p1 = seededPeople.find((p) => p.id === 'P-000001');
+      const p4 = seededPeople.find((p) => p.id === 'P-000004');
+      const p2 = seededPeople.find((p) => p.id === 'P-000002');
+      const unmappedWithOid = seededPeople.filter(
+        (p) =>
           p.id !== 'P-000001' &&
           p.id !== 'P-000004' &&
           p.entraObjectId !== undefined,
@@ -306,47 +297,54 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     );
   });
 
-  it('7. getStore() in training environment with enableDemoMode=true preserves a custom firm.name instead of overwriting with Not A Law Firm LLP (R313)', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r313-branding-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
+  it('7. PostgreSQL catalogue import in training environment with enableDemoMode=true preserves a custom firm.name instead of overwriting with Not A Law Firm LLP (R313)', async () => {
     const baseCfg = getActiveTenantRawBaseConfig();
+    const trainingTenantConfig = loadAndValidateTenantConfig(
+      baseCfg,
+      {
+        environment: 'training',
+        featureFlags: { enableDemoMode: true },
+      },
+      'training',
+      'multi_tenant',
+    );
+    const trainingCtx = createVerifiedTenantContext(
+      {
+        sub: 'system:seed-training',
+        tenantId: 'not-a-law-firm',
+        name: 'System Seed Training',
+        email: 'seed-training@notalawfirm.example',
+        roles: ['admin'],
+        mfaVerified: true,
+        correlationId: 'corr-r313-training',
+      },
+      trainingTenantConfig,
+    );
 
-    try {
-      setActiveTenantConfigForTesting(
-        {
-          ...baseCfg,
-          environment: 'training',
-        },
-        {
-          environment: 'training',
-          featureFlags: { enableDemoMode: true },
-        },
-      );
-      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
+    const customStore = loadCommittedSeedStore();
+    customStore.isCleanDeployment = false;
+    customStore.firm = {
+      name: 'Invented Other LLP',
+      shortName: 'Invented Other',
+      offices: ['Cardiff'],
+    };
+    await importFirmStoreModulesToPostgres({
+      ctx: trainingCtx,
+      store: customStore,
+      modules: ['catalogues'],
+      clearFirst: true,
+      tenantConfig: trainingTenantConfig,
+    });
 
-      const customStore = loadCommittedSeedStore();
-      customStore.isCleanDeployment = false;
-      customStore.firm = {
-        name: 'Invented Other LLP',
-        shortName: 'Invented Other',
-        offices: ['Cardiff'],
-      };
-      fs.writeFileSync(storePath, JSON.stringify(customStore, null, 2), 'utf8');
-
-      clearStoreMemoryCache();
-      const loaded = getStore();
-      expect(loaded.firm.name).toBe('Invented Other LLP');
-      expect(loaded.firm.shortName).toBe('Invented Other');
-    } finally {
-      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
+    const loadedProfile = await getCatalogueRepository().getFirmProfile<{ name: string; shortName: string }>(trainingCtx);
+    expect(loadedProfile?.firm.name).toBe('Invented Other LLP');
+    expect(loadedProfile?.firm.shortName).toBe('Invented Other');
   });
 
   it('8. resetAllDemoData preserves mapped entraObjectId bindings from the pre-reset store (R326)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r326-reset-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
     const mapPath = path.join(tmpDir, 'entra-map.local.json');
+    const demoCtx = makeDemoEnvTenantCtx();
 
     try {
       fs.writeFileSync(
@@ -363,22 +361,18 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       );
 
       await runSeedDemoTenant({
-        args: ['--entra-map', mapPath],
+        args: ['--force', '--entra-map', mapPath],
         env: {
           ...process.env,
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'demo',
         },
-        runtimeStorePath: storePath,
         logger: () => {},
       });
 
-      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
       vi.stubEnv('PLATFORM_ENVIRONMENT', 'demo');
       setActiveTenantConfigForTesting(null);
-      clearStoreMemoryCache();
 
-      const demoCtx = testDataResetContext();
       await resetAllDemoData('P-000004', demoCtx);
 
       const peopleAfterReset = await getPartyRepository().listAllPeople(demoCtx);
@@ -391,41 +385,38 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     } finally {
       vi.unstubAllEnvs();
       setActiveTenantConfigForTesting(null);
-      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
   it('9. seed:demo with a faked clock produces key dates in the future and no synthetic entraObjectId values when --entra-map is omitted (R328)', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r328-clock-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
+    const demoCtx = makeDemoEnvTenantCtx();
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2027-06-15T10:00:00Z'));
     try {
       await runSeedDemoTenant({
-        args: [],
+        args: ['--force'],
         env: {
           ...process.env,
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'demo',
         },
-        runtimeStorePath: storePath,
         logger: () => {},
       });
 
-      const seeded = JSON.parse(fs.readFileSync(storePath, 'utf8'));
-      expect(seeded.keyDates.length).toBeGreaterThan(0);
-      for (const kd of seeded.keyDates) {
+      const seededKeyDates = await getKeyDateRepository().listAllVisibleKeyDates(demoCtx);
+      expect(seededKeyDates.length).toBeGreaterThan(0);
+      for (const kd of seededKeyDates) {
         expect(kd.dueDate > '2027-06-15').toBe(true);
       }
-      const peopleWithOids = seeded.people.filter(
-        (p: { entraObjectId?: string }) => p.entraObjectId !== undefined,
+      const seededPeople = await getPartyRepository().listAllPeople(demoCtx);
+      const peopleWithOids = seededPeople.filter(
+        (p) => p.entraObjectId !== undefined,
       );
       expect(peopleWithOids).toHaveLength(0);
     } finally {
       vi.useRealTimers();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
@@ -441,74 +432,68 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
   });
 
   it('11. clearAllDataToCleanDeployment followed by provisioning a user as P-000004 and resetAllDemoData does not bind that user to the seeded admin persona or leave 00000000- object IDs (R336)', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r336-reset-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
+    const demoCtx = makeDemoEnvTenantCtx();
 
     vi.stubEnv('PLATFORM_ENVIRONMENT', 'demo');
+    setActiveTenantConfigForTesting(null);
     try {
-      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
-      saveStore(loadCommittedSeedStore());
-      clearStoreMemoryCache();
-
       // Step 1: Clear all data to a clean deployment
-      await clearAllDataToCleanDeployment('P-000004', testDataResetContext());
-      const cleared = getStore();
-      expect(cleared.isCleanDeployment).toBe(true);
-      expect(cleared.people).toHaveLength(0);
+      await clearAllDataToCleanDeployment('P-000004', demoCtx);
+      const clearedProfile = await getCatalogueRepository().getFirmProfile(demoCtx);
+      expect(clearedProfile?.isCleanDeployment).toBe(true);
+      expect(await getPartyRepository().listAllPeople(demoCtx)).toHaveLength(0);
 
       // Step 2: Provision a real Entra user who happens to receive ID P-000004 in the clean deployment
-      cleared.people.push({
-        id: 'P-000004',
-        recordType: 'person',
-        createdAt: '2026-10-16T09:00:00Z',
-        createdById: 'P-000004',
-        updatedAt: '2026-10-16T09:00:00Z',
-        updatedById: 'P-000004',
-        tags: [],
-        firstName: 'Provisioned',
-        surname: 'Visitor',
-        emails: [
-          {
-            id: 'EM-PROV-1',
-            address: 'provisioned.visitor@notalawfirm.co.uk',
-            typeId: null,
-            isPrimary: true,
-          },
-        ],
-        phones: [],
-        addresses: [],
-        personTypeIds: [],
-        isStaff: true,
-        entraObjectId: '99999999-8888-4777-8666-555555555504',
-        entraUpn: 'provisioned.visitor@notalawfirm.co.uk',
-      } as unknown as (typeof cleared.people)[number]);
-      saveStore(cleared);
-      clearStoreMemoryCache();
+      await getPartyRepository().putPeople(demoCtx, [
+        {
+          id: 'P-000004',
+          recordType: 'person',
+          createdAt: '2026-10-16T09:00:00Z',
+          createdById: 'P-000004',
+          updatedAt: '2026-10-16T09:00:00Z',
+          updatedById: 'P-000004',
+          tags: [],
+          firstName: 'Provisioned',
+          surname: 'Visitor',
+          emails: [
+            {
+              id: 'EM-PROV-1',
+              address: 'provisioned.visitor@notalawfirm.co.uk',
+              typeId: null,
+              isPrimary: true,
+            },
+          ],
+          phones: [],
+          addresses: [],
+          personTypeIds: [],
+          isStaff: true,
+          entraObjectId: '99999999-8888-4777-8666-555555555504',
+          entraUpn: 'provisioned.visitor@notalawfirm.co.uk',
+        } as unknown as ReturnType<typeof loadCommittedSeedStore>['people'][number],
+      ]);
 
-      // Step 3: Also test when isCleanDeployment was flipped to false but P-000004 is still a different person (different email)
-      await resetAllDemoData('P-000004', testDataResetContext());
+      // Step 3: Reset demo data and verify P-000004 did not keep the visitor's OID
+      await resetAllDemoData('P-000004', demoCtx);
 
-      const afterReset = getStore();
-      const p4 = afterReset.people.find((p) => p.id === 'P-000004');
+      const afterReset = await getPartyRepository().listAllPeople(demoCtx);
+      const p4 = afterReset.find((p) => p.id === 'P-000004');
       expect(p4).toBeDefined();
       expect(p4?.firstName).toBe('Huw');
       expect(p4?.surname).toBe('Pritchard');
       expect(p4?.entraObjectId).toBeUndefined();
 
-      // Ensure no person received the provisioned user's object ID or any synthetic 00000000- object ID
-      const withProvisionedOid = afterReset.people.filter(
+      const withProvisionedOid = afterReset.filter(
         (p) => p.entraObjectId === '99999999-8888-4777-8666-555555555504',
       );
       expect(withProvisionedOid).toHaveLength(0);
 
-      const withSyntheticOid = afterReset.people.filter((p) =>
+      const withSyntheticOid = afterReset.filter((p) =>
         p.entraObjectId?.startsWith('00000000-'),
       );
       expect(withSyntheticOid).toHaveLength(0);
 
       // Step 4: Even in a non-clean store (!isCleanDeployment), an OID on P-000004 with a non-matching email is never copied onto Huw Pritchard
-      const nonCleanMutated = getStore();
-      const targetP4 = nonCleanMutated.people.find((p) => p.id === 'P-000004')!;
+      const targetP4 = structuredClone(p4!);
       targetP4.emails = [
         {
           id: 'EM-PROV-2',
@@ -518,16 +503,14 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
         },
       ];
       targetP4.entraObjectId = '88888888-7777-4666-8555-444444444404';
-      saveStore(nonCleanMutated);
-      clearStoreMemoryCache();
+      await getPartyRepository().putPerson(demoCtx, targetP4);
 
-      await resetAllDemoData('P-000004', testDataResetContext());
-      const afterSecondReset = getStore();
-      expect(afterSecondReset.people.find((p) => p.id === 'P-000004')?.entraObjectId).toBeUndefined();
+      await resetAllDemoData('P-000004', demoCtx);
+      const afterSecondReset = await getPartyRepository().listAllPeople(demoCtx);
+      expect(afterSecondReset.find((p) => p.id === 'P-000004')?.entraObjectId).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
-      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      setActiveTenantConfigForTesting(null);
     }
   });
 
@@ -723,54 +706,32 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     }
   });
 
-  it('15. getStore() and runSeedDemoTenant refuse corrupted JSON files without echoing file content in the error message (R357, R368, R379, R380)', async () => {
+  it('15. runSeedDemoTenant refuses corrupted JSON files without echoing file content in the error message (R357, R368, R379, R380)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-r357-corrupt-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
     const entraMapPath = path.join(tmpDir, 'entra-map.local.json');
-    // In V8, JSON.parse('{"name": JaneSecret}') throws:
-    //   Unexpected token 'J', "{"name": JaneSecret}" is not valid JSON
-    // which echoes the unquoted token in error.message unless redacted.
-    const corruptedPayload = '{"name": JaneSecret}';
-    const corruptedEntraMapPayload = '{"email": rhian.morgan@notalawfirm.co.uk}';
+    const corruptedEntraMapPayload = 'rhian.morgan';
 
     try {
       // Confirm V8's native JSON.parse error message does contain the token so this test would fail on unredacted error.message
       let rawParseMessage = '';
       try {
-        JSON.parse(corruptedPayload);
+        JSON.parse(corruptedEntraMapPayload);
       } catch (parseErr) {
         rawParseMessage = parseErr instanceof Error ? parseErr.message : String(parseErr);
       }
-      expect(rawParseMessage).toContain('JaneSecret');
+      expect(rawParseMessage).toContain('rhian.morgan');
 
-      fs.writeFileSync(storePath, corruptedPayload, 'utf8');
-      process.env.ONESQUARED_RUNTIME_STORE_PATH = storePath;
-      clearStoreMemoryCache();
-
-      let thrownMessage = '';
-      try {
-        getStore();
-      } catch (err) {
-        thrownMessage = err instanceof Error ? err.message : String(err);
-      }
-      expect(thrownMessage).toMatch(
-        /Refusing to load corrupted runtime store file.*not valid JSON/,
-      );
-      expect(thrownMessage).not.toContain('JaneSecret');
-      expect(fs.readFileSync(storePath, 'utf8')).toBe(corruptedPayload);
-
-      // Also verify runSeedDemoTenant with a malformed --entra-map file reports a fixed message without echoing file content (R379)
+      // Verify runSeedDemoTenant with a malformed --entra-map file reports a fixed message without echoing file content (R379)
       fs.writeFileSync(entraMapPath, corruptedEntraMapPayload, 'utf8');
-      const seedTargetPath = path.join(tmpDir, 'seeded-store.json');
       let thrownEntraMapMessage = '';
       try {
         await runSeedDemoTenant({
-          args: ['--entra-map', entraMapPath],
+          args: ['--force', '--entra-map', entraMapPath],
           env: {
+            ...process.env,
             PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
             PLATFORM_ENVIRONMENT: 'demo',
           },
-          runtimeStorePath: seedTargetPath,
           logger: () => {},
         });
       } catch (err) {
@@ -779,32 +740,29 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       expect(thrownEntraMapMessage).toBe('Entra map file is not valid JSON.');
       expect(thrownEntraMapMessage).not.toContain('rhian.morgan');
     } finally {
-      delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
   it('16. seed:demo without --entra-map prints a warning stating how many privileged personas remain unbound, with no email address in the output (S0-30, R381, R392)', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onesquared-s030-seed-warn-'));
-    const storePath = path.join(tmpDir, 'runtime-store.json');
     const fullMapPath = path.join(tmpDir, 'entra-map.local.json');
     const stdoutLogs: string[] = [];
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
       const unmappedRes = await runSeedDemoTenant({
-        args: [],
+        args: ['--force'],
         env: {
           ...process.env,
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'demo',
         },
-        runtimeStorePath: storePath,
         logger: (line) => stdoutLogs.push(line),
       });
 
       const activeTenantCfg = getActiveTenantConfiguration();
-      const writtenStore = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+      const writtenStore = loadCommittedSeedStore();
       const privilegedSeededPeople = writtenStore.people.filter(
         (person: (typeof writtenStore.people)[number]) =>
           person.isEmployee &&
@@ -877,7 +835,6 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
           PLATFORM_TENANT_PACKAGE_DIR: 'client-not-a-law-firm',
           PLATFORM_ENVIRONMENT: 'demo',
         },
-        runtimeStorePath: storePath,
         logger: () => {},
       });
       expect(mappedRes.unboundPrivilegedPersonas).toBe(0);
