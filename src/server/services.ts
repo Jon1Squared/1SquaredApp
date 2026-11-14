@@ -916,7 +916,11 @@ async function loadEffectiveTenantRbacConfig(
   ctx: TenantContext,
   preloadedOverride?: Partial<RbacConfiguration> | null,
 ): Promise<RbacConfiguration> {
-  const base = getDefaultTenantRbacConfig(ctx.tenantId);
+  const activeCfg = getActiveTenantConfiguration();
+  const base =
+    ctx.tenantId === activeCfg.tenantId
+      ? getDefaultTenantRbacConfig(ctx.tenantId)
+      : activeCfg.rbac;
   const override =
     preloadedOverride !== undefined
       ? preloadedOverride
@@ -11010,65 +11014,233 @@ async function finalizeEnquiryConversionToMatter(
   }
 }
 
-/** Anonymise unconverted closed enquiries past the firm's retention period (or a specific enquiry). */
-export async function anonymiseExpiredEnquiries(byId: string, specificEnquiryId?: string): Promise<number> {
-  return runWithAuditStagingScope(async () => {
-  const enqCtx = resolveDefaultServiceTenantContext(null, byId);
-  const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, enquiries, teams] = await Promise.all([
-    loadTenantCatalogueStoreView(enqCtx),
-    getPartyRepository().listAllPeople<Person>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-  });
-  requirePermission(permSet, 'enquiry:anonymise');
+export interface EnquiryRetentionAnonymisationJobSummary {
+  readonly evaluatedCount: number;
+  readonly anonymisedCount: number;
+  readonly retentionMonths: number;
+  readonly scope: 'single' | 'bulk';
+  readonly [key: string]: number | 'single' | 'bulk';
+}
+
+export interface RunEnquiryRetentionAnonymisationForTenantOptions {
+  readonly triggerSource: 'scheduled' | 'manual';
+  readonly actorId: string;
+  readonly specificEnquiryId?: string;
+  readonly timeZone?: string;
+  readonly defaultRunHourLocal?: number;
+  readonly statementTimeoutMs?: number;
+}
+
+/**
+ * Single-transaction per-tenant enquiry retention anonymisation helper shared by
+ * scheduled hourly ticks (`system:enquiry-retention-anonymise`) and manual UI actions
+ * (`actor.personId`) (ADR 0030 §§4–6 / Slice S0-19b / Lessons 1–3, R412, R419, B3).
+ *
+ * Inside one `withTenantTransaction` (`SET LOCAL ROLE` first):
+ * 1. Acquires `pg_try_advisory_xact_lock(hashtext('onesquared_job:enquiry-retention-anonymise:' || tenantId))`.
+ * 2. Checks `job_runs` on the same transaction client for scheduled runs (`localHour >= 02:00` and no bulk `status = 'succeeded'` row for `local_date`).
+ * 3. Reads all inputs (`people`, `teams`, `rbacOverride`, `enquiry_settings` / `retentionMonths`, and `enquiries`) inside the transaction.
+ * 4. Unconditionally enforces `isReadyForRetentionAnonymisation(enq, retentionMonths, now)` (`B3`) on every candidate row.
+ * 5. Updates eligible `enquiries` rows and inserts per-enquiry `audit_entries` (zero personal data) on the same transaction client.
+ * 6. Inserts the `status = 'succeeded'` row in `job_runs` before `COMMIT` releases the advisory lock atomically.
+ */
+export async function runEnquiryRetentionAnonymisationForTenant(
+  ctx: TenantContext,
+  opts: RunEnquiryRetentionAnonymisationForTenantOptions,
+): Promise<
+  ControlledJobRunOutcome<{
+    readonly evaluatedCount: number;
+    readonly anonymisedCount: number;
+    readonly retentionMonths: number;
+    readonly scope: 'single' | 'bulk';
+    readonly anonymisedIds: readonly string[];
+  }>
+> {
+  const tenantConfig = getActiveTenantConfiguration();
+  const effectiveTimeZone =
+    opts.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const now = new Date();
   const nowIso = now.toISOString();
-  const months = store.enquirySettings.retentionMonths || 12;
-  let count = 0;
+  const actorId =
+    opts.triggerSource === 'scheduled'
+      ? 'system:enquiry-retention-anonymise'
+      : opts.actorId.trim();
 
-  await intakeRepo.withTenantTransaction(enqCtx, async () => {
-    for (const enq of enquiries) {
-      const matchTarget = specificEnquiryId
-        ? enq.id === specificEnquiryId && isReadyForRetentionAnonymisation(enq, months, now)
-        : isReadyForRetentionAnonymisation(enq, months, now);
-      if (!matchTarget || enq.anonymisedAt) continue;
-
-      enq.firstName = 'Anonymised';
-      enq.lastName = 'Enquirer';
-      enq.callingOnBehalfOf = '';
-      enq.email = '';
-      enq.phone = '';
-      enq.address = null;
-      enq.otherPartiesNamed = '';
-      enq.notes = '[Personal details removed under the firm data retention policy. Practice area, channel, dates and outcome retained for reporting.]';
-      enq.anonymisedAt = nowIso;
-      enq.updatedAt = nowIso;
-      enq.updatedById = byId;
-      count++;
-      await intakeRepo.putEnquiry(enqCtx, enq);
-
-      writeAudit(store, {
-        recordType: 'enquiry',
-        recordId: enq.id,
-        action: 'update',
-        field: 'Privacy retention anonymisation',
-        oldValue: 'Personal details stored',
-        newValue: 'Personal details removed; practice area, channel, dates and outcome kept',
-        byId,
-        at: nowIso,
+  if (opts.triggerSource === 'scheduled') {
+    if (
+      ctx.actorId !== 'system:enquiry-retention-anonymise' ||
+      !ctx.jobPermissions?.includes('enquiry:run_retention_anonymise')
+    ) {
+      throw new AuthorisationError({
+        code: 'FORBIDDEN',
+        message:
+          'Forbidden: Scheduled enquiry retention anonymisation requires system:enquiry-retention-anonymise with job-only permission enquiry:run_retention_anonymise.',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        actorUserId: ctx.actorId,
+        requiredPermission: 'enquiry:run_retention_anonymise',
       });
     }
-    await flushStagedAuditEntries(enqCtx);
-  });
+  }
 
-  return count;
+  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+    jobKey: 'enquiry-retention-anonymise',
+    triggerSource: opts.triggerSource,
+    triggeredById: actorId,
+    timeZone: effectiveTimeZone,
+    targetLocalHour: opts.defaultRunHourLocal ?? 2,
+    now,
+    statementTimeoutMs: opts.statementTimeoutMs,
+    work: async () => {
+      if (opts.triggerSource === 'scheduled') {
+        if (
+          ctx.actorId !== 'system:enquiry-retention-anonymise' ||
+          !ctx.jobPermissions?.includes('enquiry:run_retention_anonymise')
+        ) {
+          throw new AuthorisationError({
+            code: 'FORBIDDEN',
+            message:
+              'Forbidden: Scheduled enquiry retention anonymisation requires system:enquiry-retention-anonymise with job-only permission enquiry:run_retention_anonymise.',
+            tenantId: ctx.tenantId,
+            correlationId: ctx.correlationId,
+            actorUserId: ctx.actorId,
+            requiredPermission: 'enquiry:run_retention_anonymise',
+          });
+        }
+      } else {
+        const partyRepo = getPartyRepository();
+        const hrRepo = getHrAndRbacRepository();
+        const [people, teams, rbacOverride] = await Promise.all([
+          partyRepo.listAllPeople<Person>(ctx),
+          hrRepo.listAllTeams<Team>(ctx),
+          hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
+        ]);
+        const effectiveRbac = await loadEffectiveTenantRbacConfig(
+          ctx,
+          rbacOverride,
+        );
+        const actor = people.find((p) => p.id === actorId) ?? null;
+        const permSet = resolvePersonPermissionSet(actor, {
+          tenantId: ctx.tenantId,
+          context: ctx,
+          allPeople: people,
+          teams,
+          config: { rbac: effectiveRbac },
+          tokenRoles: ctx.actorRoles,
+        });
+        requirePermission(permSet, 'enquiry:anonymise');
+      }
+
+      const catalogueRepo = getCatalogueRepository();
+      const intakeRepo = getIntakeQuoteRepository();
+      const [enquirySettings, allEnquiries] = await Promise.all([
+        catalogueRepo.getEnquirySettingsConfig<EnquirySettings>(ctx),
+        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+      ]);
+      const retentionMonths = Math.max(
+        1,
+        Math.floor(Number(enquirySettings?.retentionMonths) || 12),
+      );
+      const trimmedSpecificId = opts.specificEnquiryId?.trim() || undefined;
+      const candidates = trimmedSpecificId
+        ? allEnquiries.filter((e) => e.id === trimmedSpecificId)
+        : allEnquiries;
+      const evaluatedCount = candidates.length;
+      const retentionNote =
+        '[Personal details removed under the firm data retention policy. Practice area, channel, dates and outcome retained for reporting.]';
+      const anonymisedIds: string[] = [];
+      const auditEntries: FirmAuditEntryInput[] = [];
+
+      for (const enq of candidates) {
+        if (
+          !isReadyForRetentionAnonymisation(enq, retentionMonths, now) ||
+          Boolean(enq.anonymisedAt)
+        ) {
+          continue;
+        }
+        const scrubbed: Enquiry = {
+          ...enq,
+          firstName: 'Anonymised',
+          lastName: 'Enquirer',
+          callingOnBehalfOf: '',
+          email: '',
+          phone: '',
+          address: null,
+          otherPartiesNamed: '',
+          notes: retentionNote,
+          closeNotes: '',
+          linkedPersonId: null,
+          linkedOrganisationId: null,
+          conflictSnapshot: null,
+          contactLog: (enq.contactLog ?? []).map((entry) => ({
+            ...entry,
+            note: '',
+          })),
+          anonymisedAt: nowIso,
+          updatedAt: nowIso,
+          updatedById: actorId,
+        };
+        await intakeRepo.putEnquiry(ctx, scrubbed);
+        anonymisedIds.push(scrubbed.id);
+        auditEntries.push({
+          recordType: 'enquiry',
+          recordId: scrubbed.id,
+          action: 'update',
+          field: 'Privacy retention anonymisation',
+          oldValue: 'Personal details stored',
+          newValue:
+            'Personal details removed; practice area, channel, dates and outcome kept',
+          byId: actorId,
+          at: nowIso,
+        });
+      }
+
+      if (auditEntries.length > 0) {
+        await appendTenantAuditEntries(ctx, auditEntries);
+      }
+
+      const scope: 'single' | 'bulk' = trimmedSpecificId ? 'single' : 'bulk';
+      const summary: EnquiryRetentionAnonymisationJobSummary = {
+        evaluatedCount,
+        anonymisedCount: anonymisedIds.length,
+        retentionMonths,
+        scope,
+      };
+
+      return {
+        result: {
+          evaluatedCount,
+          anonymisedCount: anonymisedIds.length,
+          retentionMonths,
+          scope,
+          anonymisedIds,
+        },
+        summary,
+      };
+    },
   });
+}
+
+/** Anonymise unconverted closed enquiries past the firm's retention period (or a specific enquiry). */
+export async function anonymiseExpiredEnquiries(
+  byId: string,
+  specificEnquiryId?: string,
+  options?: {
+    tenantCtx?: TenantContext | null;
+  },
+): Promise<number> {
+  const enqCtx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: options?.tenantCtx,
+  });
+  const outcome = await runEnquiryRetentionAnonymisationForTenant(enqCtx, {
+    triggerSource: 'manual',
+    actorId: byId,
+    specificEnquiryId,
+  });
+  if (outcome.outcome === 'executed') {
+    return outcome.result.anonymisedCount;
+  }
+  return 0;
 }
 
 // ============================================================================
@@ -17280,6 +17452,74 @@ export async function executeUsageRetentionPurgeForTenant(
       };
     },
   });
+}
+
+export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) {
+      continue;
+    }
+    try {
+      const outcome = await guardedJob(
+        'enquiry-retention-anonymise',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs }) =>
+          runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            actorId: 'system:enquiry-retention-anonymise',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
+            statementTimeoutMs: timeoutMs,
+          }),
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status:
+            outcome.outcome === 'already_running'
+              ? 'already_running'
+              : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
 }
 
 export interface ScheduledTenantJobSweepSummary {

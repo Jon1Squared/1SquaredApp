@@ -57,7 +57,8 @@ export * from './keyDates.types';
 export type JobOnlyPermissionKey =
   | 'tenant:migrate'
   | 'keydate:run_reminders'
-  | 'document_generation:purge_usage';
+  | 'document_generation:purge_usage'
+  | 'enquiry:run_retention_anonymise';
 
 export type PermissionKey =
   | EmployeePermission

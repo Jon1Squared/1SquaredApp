@@ -70,6 +70,8 @@ import {
 import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
+  getAuditRepository,
+  getCatalogueRepository,
   getExtensionHostLoadErrors,
   getJobRunRepository,
   getPlatformExtensionHost,
@@ -108,7 +110,9 @@ import {
   requestMatterBill,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
+  runEnquiryRetentionAnonymisationForTenant,
   runMatterConflictSearchRecord,
+  runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
   saveMatterRecord,
   savePersonRecord,
@@ -9506,5 +9510,411 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     const bravoEventsAfter = await docRepo.listUsageEvents(ctxBravo);
     expect(bravoEventsAfter.some((e) => e.id === 'UE-ISO-BRAVO-RECENT')).toBe(true);
     expect(alphaRuns.some((r) => r.id === bravoRuns[0]!.id)).toBe(false);
+  });
+
+  it('S0-19b: enforces two-tenant PgBouncer isolation for enquiry-retention-anonymise (retentionMonths: 6 in tenant-alpha vs retentionMonths: 24 in tenant-bravo, tampered specificEnquiryId, and unregistered/forged tenant claims)', async () => {
+    const host = process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1';
+    const makeEntry = (tenantId: string, slug: string, enabled = true) => ({
+      tenantId,
+      slug,
+      environment: 'test' as const,
+      postgresHost: host,
+      postgresDatabaseName: `pg_tenant_${slug}_test`,
+      postgresRoleName: `role_tenant_${slug}_test`,
+      keyVaultUri: `https://kv-${slug.replace(/_/g, '')}-test.vault.azure.net/`,
+      packageDir: 'client-not-a-law-firm',
+      timeZone: 'Europe/London',
+      enabled,
+    });
+
+    const registry = {
+      schemaVersion: '1.0.0' as const,
+      environment: 'test' as const,
+      hostingMode: 'multi_tenant' as const,
+      tenants: [
+        makeEntry('tenant-alpha', 'tenant_alpha', true),
+        makeEntry('tenant-bravo', 'tenant_bravo', true),
+        makeEntry('tenant-disabled-test', 'tenant_disabled_test', false),
+      ],
+    };
+
+    // Attack 1: Unregistered or disabled tenant in guardedJob('enquiry-retention-anonymise', ...) is rejected with TENANCY_UNREGISTERED_JOB_TENANT
+    await expect(
+      guardedJob(
+        'enquiry-retention-anonymise',
+        'unregistered-evil-tenant',
+        async () => 'should-not-run',
+        { registry },
+      ),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_UNREGISTERED_JOB_TENANT',
+    });
+
+    await expect(
+      guardedJob(
+        'enquiry-retention-anonymise',
+        'tenant-disabled-test',
+        async () => 'should-not-run',
+        { registry },
+      ),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_UNREGISTERED_JOB_TENANT',
+    });
+
+    // Attack 2: Forged OIDC claim with untrusted request tenant override is rejected
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-000001',
+          tenantId: 'tenant-alpha',
+          email: 'admin@alpha.example',
+          name: 'Alpha Admin',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        untrustedRequestTenantOverride: 'tenant-bravo',
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-forged-enq-anon',
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'tenant-alpha',
+        email: 'admin@alpha.example',
+        name: 'Alpha Admin',
+        roles: ['admin', 'risk_compliance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-iso-enq-anon-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'tenant-bravo',
+        email: 'admin@bravo.example',
+        name: 'Bravo Admin',
+        roles: ['admin', 'risk_compliance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-iso-enq-anon-bravo',
+    });
+
+    const jobRunRepo = getJobRunRepository();
+    const intakeRepo = getIntakeQuoteRepository();
+    const catalogueRepo = getCatalogueRepository();
+    const auditRepo = getAuditRepository();
+    const partyRepo = getPartyRepository();
+
+    await jobRunRepo.clearTenantJobRuns(ctxAlpha);
+    await jobRunRepo.clearTenantJobRuns(ctxBravo);
+
+    // Ensure actor P-000001 exists in both tenant databases with risk_compliance & admin roles
+    for (const [ctx, domain] of [
+      [ctxAlpha, 'alpha.example'],
+      [ctxBravo, 'bravo.example'],
+    ] as const) {
+      const existingActor = await partyRepo.getPersonById(ctx, 'P-000001');
+      if (!existingActor) {
+        await partyRepo.putPerson(ctx, {
+          id: 'P-000001',
+          recordType: 'person',
+          recordOwnerId: 'P-000001',
+          recordStatusId: 'person_record_status.active',
+          createdById: 'P-000001',
+          createdAt: '2025-01-01T00:00:00.000Z',
+          updatedById: 'P-000001',
+          updatedAt: '2025-01-01T00:00:00.000Z',
+          sourceId: 'data_source.manual_entry',
+          lastVerifiedAt: '2025-01-01',
+          tags: [],
+          duplicateStatusId: 'duplicate_status.none',
+          notDuplicateOf: [],
+          possibleMatchIds: [],
+          mergedIntoId: null,
+          lastInteractionAt: null,
+          customFields: {},
+          titleId: null,
+          firstName: 'Tenant',
+          middleNames: '',
+          surname: 'Admin',
+          preferredName: '',
+          otherNames: [],
+          jobTitle: 'Managing Partner',
+          emails: [
+            {
+              id: 'em-admin',
+              typeId: null,
+              address: `admin@${domain}`,
+              isPrimary: true,
+            },
+          ],
+          phones: [],
+          preferredContactMethodId: null,
+          preferredLanguageId: null,
+          addresses: [],
+          website: '',
+          relationshipOwnerId: null,
+          relationshipStatusId: null,
+          relationshipStandingId: null,
+          relationshipRoleIds: [],
+          originId: null,
+          firstKnownAt: null,
+          engagementLevelId: null,
+          interests: '',
+          relationshipNotes: '',
+          marketingConsentId: null,
+          consentRecord: '',
+          verificationStatusId: null,
+          verifiedAt: null,
+          verificationMethodId: null,
+          verificationReviewerId: null,
+          riskReferences: '',
+          isEmployee: true,
+          employeeRoleId: 'employee_role.managing_partner',
+          departmentId: null,
+          roles: ['admin', 'managing_partner', 'risk_compliance'],
+        });
+      }
+    }
+
+    // Configure Tenant Alpha with retentionMonths: 6 and Tenant Bravo with retentionMonths: 24
+    await catalogueRepo.putEnquirySettingsConfig(
+      ctxAlpha,
+      {
+        defaultSlaHoursByUrgency: {},
+        routingTeamByPracticeArea: {},
+        fallbackIntakeTeamId: null,
+        retentionMonths: 6,
+      },
+      'P-000001',
+    );
+    await catalogueRepo.putEnquirySettingsConfig(
+      ctxBravo,
+      {
+        defaultSlaHoursByUrgency: {},
+        routingTeamByPracticeArea: {},
+        fallbackIntakeTeamId: null,
+        retentionMonths: 24,
+      },
+      'P-000001',
+    );
+
+    await intakeRepo.clearTenantData(ctxAlpha, {
+      includeEnquiries: true,
+      includeQuotes: false,
+    });
+    await intakeRepo.clearTenantData(ctxBravo, {
+      includeEnquiries: true,
+      includeQuotes: false,
+    });
+
+    // Seed a 12-month-old closed unconverted enquiry in each tenant (receivedAt = 2025-06-01, sweepNowIso = 2026-06-15)
+    const sweepNowIso = '2026-06-15T02:15:00.000Z';
+    const baseEnq = {
+      receivedAt: '2025-06-01T10:00:00.000Z',
+      takenById: 'P-000001',
+      channelId: 'enquiry_channel.phone',
+      callingOnBehalfOf: 'Invented Holdings',
+      linkedOrganisationId: null,
+      preferredContactMethodId: null,
+      bestTimeToCall: '',
+      address: null,
+      practiceAreaId: 'work_type.commercial_property',
+      workTypeSubcategoryId: null,
+      summary: 'Commercial lease enquiry',
+      otherPartiesNamed: '',
+      urgencyId: 'enquiry_urgency.standard',
+      keyDate: null,
+      keyDateLabel: '',
+      sourceId: 'origin.website',
+      referrerPersonId: null,
+      privacyNoticeGiven: true,
+      linkedPersonId: null,
+      assignedTeamId: null,
+      assignedToId: 'P-000001',
+      status: 'Declined' as const,
+      firstContactDueAt: null,
+      nextActionDate: null,
+      closeReasonId: 'enquiry_close_reason.declined_capacity',
+      referredToOrganisationId: null,
+      convertedMatterId: null,
+      contactLog: [],
+      anonymisedAt: null,
+      createdById: 'P-000001',
+      createdAt: '2025-06-01T10:00:00.000Z',
+      updatedById: 'P-000001',
+      updatedAt: '2025-06-02T10:00:00.000Z',
+    };
+
+    const runSuffix = crypto.randomUUID().slice(0, 8);
+    const alphaEnqId = `ENQ-ALPHA-12M-${runSuffix}`;
+    const bravoEnqId = `ENQ-BRAVO-12M-${runSuffix}`;
+    const bravo30mId = `ENQ-BRAVO-30M-${runSuffix}`;
+
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      ...baseEnq,
+      id: alphaEnqId,
+      reference: alphaEnqId,
+      firstName: 'AlphaProspect',
+      lastName: 'TwelveMonths',
+      email: 'alpha12m@invented.example',
+      phone: '07700 900111',
+      notes: 'Alpha 12m prospect notes',
+    });
+    await intakeRepo.putEnquiry(ctxBravo, {
+      ...baseEnq,
+      id: bravoEnqId,
+      reference: bravoEnqId,
+      firstName: 'BravoProspect',
+      lastName: 'TwelveMonths',
+      email: 'bravo12m@invented.example',
+      phone: '07700 900222',
+      notes: 'Bravo 12m prospect notes',
+    });
+    // Also seed a 30-month-old closed unconverted enquiry in Tenant Bravo to test tampered cross-tenant specificEnquiryId
+    await intakeRepo.putEnquiry(ctxBravo, {
+      ...baseEnq,
+      id: bravo30mId,
+      reference: bravo30mId,
+      receivedAt: '2023-11-01T10:00:00.000Z',
+      firstName: 'BravoExpiredProspect',
+      lastName: 'ThirtyMonths',
+      email: 'bravo30m@invented.example',
+      phone: '07700 900333',
+      notes: 'Bravo 30m prospect notes',
+    });
+
+    // Attack 3: Tampered specificEnquiryId from Tenant Alpha targeting Tenant Bravo's expired enquiry touches 0 rows in Tenant Bravo
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-06-15T01:30:00.000Z'));
+    let tamperedAlphaOutcome;
+    try {
+      tamperedAlphaOutcome = await runEnquiryRetentionAnonymisationForTenant(
+        ctxAlpha,
+        {
+          triggerSource: 'manual',
+          actorId: 'P-000001',
+          specificEnquiryId: bravo30mId,
+        },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(tamperedAlphaOutcome.outcome).toBe('executed');
+    if (tamperedAlphaOutcome.outcome === 'executed') {
+      expect(tamperedAlphaOutcome.result.evaluatedCount).toBe(0);
+      expect(tamperedAlphaOutcome.result.anonymisedCount).toBe(0);
+      expect(tamperedAlphaOutcome.result.scope).toBe('single');
+    }
+
+    const bravo30mAfterTamper = await intakeRepo.getEnquiryById(
+      ctxBravo,
+      bravo30mId,
+      { includeRestricted: true },
+    );
+    expect(bravo30mAfterTamper?.firstName).toBe('BravoExpiredProspect');
+    expect(bravo30mAfterTamper?.anonymisedAt).toBeNull();
+
+    // Remove the 30m enquiry before running the 12-month comparison sweep across Tenant Alpha (retentionMonths: 6) and Tenant Bravo (retentionMonths: 24)
+    await intakeRepo.deleteEnquiryById(ctxBravo, bravo30mId);
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(sweepNowIso));
+    let sweepSummary;
+    try {
+      sweepSummary = await runScheduledEnquiryRetentionAnonymisationJobSweep({
+        registry,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(sweepSummary.exitCode).toBe(0);
+    expect(sweepSummary.succeededTenants).toEqual([
+      'tenant-alpha',
+      'tenant-bravo',
+    ]);
+
+    // Tenant Alpha (retentionMonths: 6): 12-month-old enquiry IS anonymised (1) and audited in pg_tenant_alpha_test
+    const alphaEnqAfter = (await intakeRepo.getEnquiryById(
+      ctxAlpha,
+      alphaEnqId,
+      { includeRestricted: true },
+    ))!;
+    expect(alphaEnqAfter.anonymisedAt).toBe(sweepNowIso);
+    expect(alphaEnqAfter.firstName).toBe('Anonymised');
+    expect(alphaEnqAfter.lastName).toBe('Enquirer');
+    expect(alphaEnqAfter.email).toBe('');
+
+    const alphaAudits = await auditRepo.listAuditEntriesForRecord(
+      ctxAlpha,
+      'enquiry',
+      alphaEnqId,
+    );
+    expect(
+      alphaAudits.filter((a) => a.field === 'Privacy retention anonymisation'),
+    ).toHaveLength(1);
+    expect(alphaAudits[0]!.byId).toBe('system:enquiry-retention-anonymise');
+
+    // Tenant Bravo (retentionMonths: 24): 12-month-old enquiry is INTACT (0 anonymised) in pg_tenant_bravo_test
+    const bravoEnqAfter = (await intakeRepo.getEnquiryById(
+      ctxBravo,
+      bravoEnqId,
+      { includeRestricted: true },
+    ))!;
+    expect(bravoEnqAfter.anonymisedAt).toBeNull();
+    expect(bravoEnqAfter.firstName).toBe('BravoProspect');
+    expect(bravoEnqAfter.lastName).toBe('TwelveMonths');
+    expect(bravoEnqAfter.email).toBe('bravo12m@invented.example');
+
+    const bravoAudits = await auditRepo.listAuditEntriesForRecord(
+      ctxBravo,
+      'enquiry',
+      bravoEnqId,
+    );
+    expect(
+      bravoAudits.filter((a) => a.field === 'Privacy retention anonymisation'),
+    ).toHaveLength(0);
+
+    // Verify job_runs rows are isolated per tenant database
+    const alphaJobRuns = await jobRunRepo.listJobRuns(ctxAlpha, {
+      jobKey: 'enquiry-retention-anonymise',
+    });
+    const bravoJobRuns = await jobRunRepo.listJobRuns(ctxBravo, {
+      jobKey: 'enquiry-retention-anonymise',
+    });
+    const alphaScheduledRun = alphaJobRuns.find(
+      (r) => r.triggerSource === 'scheduled',
+    )!;
+    const bravoScheduledRun = bravoJobRuns.find(
+      (r) => r.triggerSource === 'scheduled',
+    )!;
+    expect(alphaScheduledRun.tenantId).toBe('tenant-alpha');
+    expect(alphaScheduledRun.summary).toEqual({
+      evaluatedCount: 1,
+      anonymisedCount: 1,
+      retentionMonths: 6,
+      scope: 'bulk',
+    });
+    expect(bravoScheduledRun.tenantId).toBe('tenant-bravo');
+    expect(bravoScheduledRun.summary).toEqual({
+      evaluatedCount: 1,
+      anonymisedCount: 0,
+      retentionMonths: 24,
+      scope: 'bulk',
+    });
+    expect(alphaScheduledRun.correlationId).not.toBe(
+      bravoScheduledRun.correlationId,
+    );
+    expect(alphaJobRuns.some((r) => r.id === bravoScheduledRun.id)).toBe(false);
   });
 });

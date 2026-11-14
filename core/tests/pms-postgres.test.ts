@@ -1518,13 +1518,13 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       ).toBe(false);
     }
 
-    // Verify all 112 writeAudit occurrences (1 definition + 111 call sites) in src/server/services.ts
+    // Verify all 111 writeAudit occurrences (1 definition + 110 call sites; S0-19b moved enquiry anonymisation to appendTenantAuditEntries) in src/server/services.ts
     const servicesSrc = fs.readFileSync(
       path.join(REPO_ROOT, 'src/server/services.ts'),
       'utf8',
     );
     const writeAuditMatches = servicesSrc.match(/\bwriteAudit\s*\(/g) ?? [];
-    expect(writeAuditMatches.length).toBe(112);
+    expect(writeAuditMatches.length).toBe(111);
     const flushMatches = servicesSrc.match(/\bflushStagedAuditEntries\s*\(/g) ?? [];
     expect(flushMatches.length).toBeGreaterThanOrEqual(45);
   });

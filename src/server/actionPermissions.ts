@@ -730,6 +730,15 @@ export const JOB_PERMISSIONS = {
     description:
       'Purge expired document generation usage events and daily summaries per tenant.',
   },
+  'enquiry-retention-anonymise': {
+    kind: 'job',
+    permission: 'enquiry:run_retention_anonymise',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 2,
+    description:
+      'Anonymise closed unconverted enquiries past the tenant retention period once per local day.',
+  },
 } as const satisfies Record<string, JobPolicy>;
 
 export type RegisteredJobName = keyof typeof JOB_PERMISSIONS;

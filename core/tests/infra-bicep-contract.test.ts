@@ -199,7 +199,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain('param enableSchedulerJobs bool = true');
     expect(platformBicep).toContain('param enableKeyDateRemindersJob bool = true');
     expect(platformBicep).toContain('param enableUsageRetentionPurgeJob bool = true');
-    expect(platformBicep).toContain('param enableEnquiryAnonymisationJob bool = false');
+    expect(platformBicep).toContain('param enableEnquiryAnonymisationJob bool = true');
     expect(platformBicep).toContain("cronExpression: '0 * * * *'");
 
     // Internal-only PDF converter Container App

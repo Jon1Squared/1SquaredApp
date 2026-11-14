@@ -24,6 +24,7 @@ import {
 } from '@platform/core';
 import { guardedJob, type GuardedJobOptions } from '../src/server/authorize';
 import {
+  runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledKeyDateRemindersJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
 } from '../src/server/services';
@@ -54,6 +55,13 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
       name: 'usage-retention-purge',
       description:
         'Purge expired document generation usage events and daily summaries per tenant once per local day at 02:00 local time',
+      mode: 'scheduled',
+      schedule: '0 * * * *',
+    },
+    {
+      name: 'enquiry-retention-anonymise',
+      description:
+        'Anonymise closed unconverted enquiries past the tenant retention period once per local day at 02:00 local time',
       mode: 'scheduled',
       schedule: '0 * * * *',
     },
@@ -214,6 +222,19 @@ export async function executeCliJobRunner(
     writeOut(
       `${JSON.stringify({
         event: 'job.usage-retention-purge.completed',
+        succeededCount: summary.succeededTenants.length,
+        skippedCount: summary.skippedTenants.length,
+        failedCount: summary.failedTenants.length,
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
+  if (jobName === 'enquiry-retention-anonymise') {
+    const summary = await runScheduledEnquiryRetentionAnonymisationJobSweep();
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.enquiry-retention-anonymise.completed',
         succeededCount: summary.succeededTenants.length,
         skippedCount: summary.skippedTenants.length,
         failedCount: summary.failedTenants.length,

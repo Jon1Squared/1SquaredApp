@@ -1555,7 +1555,12 @@ export function isReadyForRetentionAnonymisation(
   retentionMonths: number,
   now: Date = new Date(),
 ): boolean {
-  if (enquiry.status === 'Converted' || isEnquiryOpen(enquiry) || enquiry.anonymisedAt) {
+  if (
+    enquiry.status === 'Converted' ||
+    Boolean(enquiry.convertedMatterId) ||
+    isEnquiryOpen(enquiry) ||
+    Boolean(enquiry.anonymisedAt)
+  ) {
     return false;
   }
   const cutoff = addMonths(now, -Math.max(1, retentionMonths));

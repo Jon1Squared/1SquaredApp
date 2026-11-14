@@ -641,6 +641,17 @@ export const PERMISSION_REGISTRY: Readonly<
     jobOnly: true,
     sinceVersion: '1.1.0',
   },
+  'enquiry:run_retention_anonymise': {
+    key: 'enquiry:run_retention_anonymise',
+    domain: 'enquiry',
+    module: 'enquiries',
+    description:
+      'Execute the scheduled daily enquiry retention anonymisation job across provisioned tenants (ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(
