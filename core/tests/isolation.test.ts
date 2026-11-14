@@ -9795,13 +9795,21 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     });
 
     // Attack 3: Tampered specificEnquiryId from Tenant Alpha targeting Tenant Bravo's expired enquiry touches 0 rows in Tenant Bravo
-    const tamperedAlphaOutcome =
-      await runEnquiryRetentionAnonymisationForTenant(ctxAlpha, {
-        triggerSource: 'manual',
-        actorId: 'P-000001',
-        specificEnquiryId: bravo30mId,
-        nowIso: '2026-06-15T01:30:00.000Z',
-      });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-06-15T01:30:00.000Z'));
+    let tamperedAlphaOutcome;
+    try {
+      tamperedAlphaOutcome = await runEnquiryRetentionAnonymisationForTenant(
+        ctxAlpha,
+        {
+          triggerSource: 'manual',
+          actorId: 'P-000001',
+          specificEnquiryId: bravo30mId,
+        },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
     expect(tamperedAlphaOutcome.outcome).toBe('executed');
     if (tamperedAlphaOutcome.outcome === 'executed') {
       expect(tamperedAlphaOutcome.result.evaluatedCount).toBe(0);
@@ -9820,11 +9828,16 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     // Remove the 30m enquiry before running the 12-month comparison sweep across Tenant Alpha (retentionMonths: 6) and Tenant Bravo (retentionMonths: 24)
     await intakeRepo.deleteEnquiryById(ctxBravo, bravo30mId);
 
-    const sweepSummary =
-      await runScheduledEnquiryRetentionAnonymisationJobSweep({
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(sweepNowIso));
+    let sweepSummary;
+    try {
+      sweepSummary = await runScheduledEnquiryRetentionAnonymisationJobSweep({
         registry,
-        nowIso: sweepNowIso,
       });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(sweepSummary.exitCode).toBe(0);
     expect(sweepSummary.succeededTenants).toEqual([
       'tenant-alpha',

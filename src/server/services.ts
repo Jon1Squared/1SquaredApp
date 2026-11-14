@@ -11066,6 +11066,23 @@ export async function runEnquiryRetentionAnonymisationForTenant(
       ? 'system:enquiry-retention-anonymise'
       : opts.actorId.trim();
 
+  if (opts.triggerSource === 'scheduled') {
+    if (
+      ctx.actorId !== 'system:enquiry-retention-anonymise' ||
+      !ctx.jobPermissions?.includes('enquiry:run_retention_anonymise')
+    ) {
+      throw new AuthorisationError({
+        code: 'FORBIDDEN',
+        message:
+          'Forbidden: Scheduled enquiry retention anonymisation requires system:enquiry-retention-anonymise with job-only permission enquiry:run_retention_anonymise.',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        actorUserId: ctx.actorId,
+        requiredPermission: 'enquiry:run_retention_anonymise',
+      });
+    }
+  }
+
   return getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'enquiry-retention-anonymise',
     triggerSource: opts.triggerSource,

@@ -34,11 +34,25 @@ import { anonymiseExpiredEnquiriesAction } from '../../src/app/actions';
 import { executeCliJobRunner } from '../../scripts/run-job';
 import {
   runAsTestActor,
+  setJobRunBeforeCommitHookForTesting,
   setTestActorSession,
   testTenantCtx,
 } from '../../src/server/testSupport/auditTestSupport';
 import { isActionDenied } from '../../src/domain/actionResult';
 import type { Enquiry, EnquirySettings } from '../../src/domain/types';
+
+async function withFakeClock<T>(
+  iso: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(iso));
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 function makeTestRegistryEntry(
   tenantId = 'not-a-law-firm',
@@ -390,7 +404,6 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
         runEnquiryRetentionAnonymisationForTenant(ctx, {
           triggerSource: 'scheduled',
           actorId: 'P-000001',
-          nowIso: '2026-07-10T01:15:00.000Z',
         }),
       ).rejects.toThrow(AuthorisationError);
 
@@ -531,11 +544,11 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
           tenants: [makeTestRegistryEntry()],
         };
 
-        const sweepSummary =
-          await runScheduledEnquiryRetentionAnonymisationJobSweep({
+        const sweepSummary = await withFakeClock(nowIso, () =>
+          runScheduledEnquiryRetentionAnonymisationJobSweep({
             registry,
-            nowIso,
-          });
+          }),
+        );
         expect(sweepSummary.exitCode).toBe(0);
         expect(sweepSummary.succeededTenants).toEqual(['not-a-law-firm']);
 
@@ -641,11 +654,12 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
           manualCases.caseDOpen.id,
           manualCases.caseEAlreadyAnon.id,
         ]) {
-          const singleRes = await runActionAsTestActor(
-            'P-000003',
-            async () =>
-              anonymiseExpiredEnquiriesAction(ineligibleId, { nowIso }),
-            { roles: ['risk_compliance'], mfaVerified: true },
+          const singleRes = await withFakeClock(nowIso, () =>
+            runActionAsTestActor(
+              'P-000003',
+              async () => anonymiseExpiredEnquiriesAction(ineligibleId),
+              { roles: ['risk_compliance'], mfaVerified: true },
+            ),
           );
           expect(isActionDenied(singleRes)).toBe(false);
           if (!isActionDenied(singleRes)) {
@@ -653,11 +667,41 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
           }
         }
 
+        // R480: Passing extra arguments (such as { nowIso: '2099-01-01T00:00:00.000Z', timeZone: 'Pacific/Kiritimati' }) to anonymiseExpiredEnquiriesAction is ignored; server clock governs
+        const forgedClockRes = await withFakeClock(nowIso, () =>
+          runActionAsTestActor(
+            'P-000003',
+            async () =>
+              (
+                anonymiseExpiredEnquiriesAction as unknown as (
+                  ...args: unknown[]
+                ) => Promise<{ count: number }>
+              )(manualCases.caseBInsideCutoff.id, {
+                nowIso: '2099-01-01T00:00:00.000Z',
+                timeZone: 'Pacific/Kiritimati',
+              }),
+            { roles: ['risk_compliance'], mfaVerified: true },
+          ),
+        );
+        expect(isActionDenied(forgedClockRes)).toBe(false);
+        if (!isActionDenied(forgedClockRes)) {
+          expect(forgedClockRes.count).toBe(0);
+        }
+        const caseBAfterForgedClock = (await intakeRepo.getEnquiryById<Enquiry>(
+          ctx,
+          manualCases.caseBInsideCutoff.id,
+          { includeRestricted: true },
+        ))!;
+        expect(caseBAfterForgedClock.anonymisedAt).toBeNull();
+        expect(caseBAfterForgedClock.firstName).toBe('Cordelia');
+
         // Bulk manual run anonymises ONLY Case (a) and leaves (b), (c), (d), (e) untouched/skipped
-        const bulkRes = await runActionAsTestActor(
-          'P-000003',
-          async () => anonymiseExpiredEnquiriesAction(undefined, { nowIso }),
-          { roles: ['risk_compliance'], mfaVerified: true },
+        const bulkRes = await withFakeClock(nowIso, () =>
+          runActionAsTestActor(
+            'P-000003',
+            async () => anonymiseExpiredEnquiriesAction(),
+            { roles: ['risk_compliance'], mfaVerified: true },
+          ),
         );
         expect(isActionDenied(bulkRes)).toBe(false);
         if (!isActionDenied(bulkRes)) {
@@ -782,13 +826,12 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
 
         // 2. Single-enquiry manual run on 2026-07-10 anonymises exp1 and writes trigger_source = 'manual', scope = 'single'
         const day1ManualNowIso = '2026-07-10T01:15:00.000Z'; // 02:15 BST -> local_date 2026-07-10
-        const singleRes = await runActionAsTestActor(
-          'P-000003',
-          async () =>
-            anonymiseExpiredEnquiriesAction(exp1.id, {
-              nowIso: day1ManualNowIso,
-            }),
-          { roles: ['risk_compliance'], mfaVerified: true },
+        const singleRes = await withFakeClock(day1ManualNowIso, () =>
+          runActionAsTestActor(
+            'P-000003',
+            async () => anonymiseExpiredEnquiriesAction(exp1.id),
+            { roles: ['risk_compliance'], mfaVerified: true },
+          ),
         );
         expect(isActionDenied(singleRes)).toBe(false);
         if (!isActionDenied(singleRes)) {
@@ -818,11 +861,11 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
           tenants: [makeTestRegistryEntry()],
         };
         const day1ScheduledNowIso = '2026-07-10T02:15:00.000Z'; // 03:15 BST -> local_date 2026-07-10
-        const sweepDay1 =
-          await runScheduledEnquiryRetentionAnonymisationJobSweep({
+        const sweepDay1 = await withFakeClock(day1ScheduledNowIso, () =>
+          runScheduledEnquiryRetentionAnonymisationJobSweep({
             registry,
-            nowIso: day1ScheduledNowIso,
-          });
+          }),
+        );
         expect(sweepDay1.exitCode).toBe(0);
         expect(sweepDay1.succeededTenants).toEqual(['not-a-law-firm']);
 
@@ -858,13 +901,12 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
         await intakeRepo.putEnquiry(ctx, exp3);
 
         const day2ManualBulkNowIso = '2026-07-11T01:10:00.000Z'; // 02:10 BST -> local_date 2026-07-11
-        const bulkRes = await runActionAsTestActor(
-          'P-000003',
-          async () =>
-            anonymiseExpiredEnquiriesAction(undefined, {
-              nowIso: day2ManualBulkNowIso,
-            }),
-          { roles: ['risk_compliance'], mfaVerified: true },
+        const bulkRes = await withFakeClock(day2ManualBulkNowIso, () =>
+          runActionAsTestActor(
+            'P-000003',
+            async () => anonymiseExpiredEnquiriesAction(),
+            { roles: ['risk_compliance'], mfaVerified: true },
+          ),
         );
         expect(isActionDenied(bulkRes)).toBe(false);
         if (!isActionDenied(bulkRes)) {
@@ -872,11 +914,11 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
         }
 
         const day2ScheduledNowIso = '2026-07-11T02:10:00.000Z'; // 03:10 BST -> local_date 2026-07-11
-        const sweepDay2 =
-          await runScheduledEnquiryRetentionAnonymisationJobSweep({
+        const sweepDay2 = await withFakeClock(day2ScheduledNowIso, () =>
+          runScheduledEnquiryRetentionAnonymisationJobSweep({
             registry,
-            nowIso: day2ScheduledNowIso,
-          });
+          }),
+        );
         expect(sweepDay2.exitCode).toBe(0);
         expect(sweepDay2.skippedTenants).toEqual([
           {
@@ -888,11 +930,11 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
 
         // Also verify before_target_hour on local_date 2026-07-12 before 02:00 local time
         const day3Before2amIso = '2026-07-12T00:15:00.000Z'; // 01:15 BST (< 02:00 local)
-        const sweepDay3Early =
-          await runScheduledEnquiryRetentionAnonymisationJobSweep({
+        const sweepDay3Early = await withFakeClock(day3Before2amIso, () =>
+          runScheduledEnquiryRetentionAnonymisationJobSweep({
             registry,
-            nowIso: day3Before2amIso,
-          });
+          }),
+        );
         expect(sweepDay3Early.exitCode).toBe(0);
         expect(sweepDay3Early.skippedTenants).toEqual([
           {
@@ -982,43 +1024,49 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
           tenants: [makeTestRegistryEntry()],
         };
 
-        const scheduledPromise = guardedJob(
-          'enquiry-retention-anonymise',
-          'not-a-law-firm',
-          async ({ tenantContext }) =>
-            runEnquiryRetentionAnonymisationForTenant(tenantContext, {
-              triggerSource: 'scheduled',
-              actorId: 'system:enquiry-retention-anonymise',
-              nowIso,
-              onAfterWorkBeforeCommit: async () => {
-                enteredScheduledTx();
-                await holdPromise;
-              },
-            }),
-          { registry },
-        );
-
-        await enteredScheduledPromise;
-
-        // Start manual bulk anonymiseExpiredEnquiriesAction while scheduled run holds pg_try_advisory_xact_lock
-        const manualPromise = runActionAsTestActor(
-          'P-000003',
+        const [scheduledOutcome, manualRes] = await withFakeClock(
+          nowIso,
           async () => {
+            let hookUsed = false;
+            setJobRunBeforeCommitHookForTesting(async () => {
+              if (hookUsed) return;
+              hookUsed = true;
+              enteredScheduledTx();
+              await holdPromise;
+            });
             try {
-              return await anonymiseExpiredEnquiriesAction(undefined, {
-                nowIso,
-              });
+              const scheduledPromise = guardedJob(
+                'enquiry-retention-anonymise',
+                'not-a-law-firm',
+                async ({ tenantContext }) =>
+                  runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+                    triggerSource: 'scheduled',
+                    actorId: 'system:enquiry-retention-anonymise',
+                  }),
+                { registry },
+              );
+
+              await enteredScheduledPromise;
+
+              // Start manual bulk anonymiseExpiredEnquiriesAction while scheduled run holds pg_try_advisory_xact_lock
+              const manualPromise = runActionAsTestActor(
+                'P-000003',
+                async () => {
+                  try {
+                    return await anonymiseExpiredEnquiriesAction();
+                  } finally {
+                    releaseHold();
+                  }
+                },
+                { roles: ['risk_compliance'], mfaVerified: true },
+              );
+
+              return await Promise.all([scheduledPromise, manualPromise]);
             } finally {
-              releaseHold();
+              setJobRunBeforeCommitHookForTesting(null);
             }
           },
-          { roles: ['risk_compliance'], mfaVerified: true },
         );
-
-        const [scheduledOutcome, manualRes] = await Promise.all([
-          scheduledPromise,
-          manualPromise,
-        ]);
 
         expect(scheduledOutcome.outcome).toBe('executed');
         expect(isActionDenied(manualRes)).toBe(false);
@@ -1111,6 +1159,9 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
 
         const modA = await import('../../src/server/services');
         const authA = await import('../../src/server/authorize');
+        const supportA = await import(
+          '../../src/server/testSupport/auditTestSupport'
+        );
         vi.resetModules();
         const modB = await import('../../src/server/services');
         const authB = await import('../../src/server/authorize');
@@ -1135,62 +1186,65 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
           tenants: [makeTestRegistryEntry()],
         };
 
-        // Process A starts and holds the transaction advisory lock in PostgreSQL
-        const runAPromise = authA.guardedJob(
-          'enquiry-retention-anonymise',
-          'not-a-law-firm',
-          async ({ tenantContext }) =>
-            modA.runEnquiryRetentionAnonymisationForTenant(tenantContext, {
-              triggerSource: 'scheduled',
-              actorId: 'system:enquiry-retention-anonymise',
-              nowIso,
-              onAfterWorkBeforeCommit: async () => {
-                enteredWorkA();
-                await holdPromiseA;
-              },
-            }),
-          { registry },
-        );
-
-        try {
-          await enteredPromiseA;
-
-          // Process B (isolated module graph) runs while Process A holds the PostgreSQL lock -> returns already_running
-          const outBWhileRunning = await authB.guardedJob(
+        await withFakeClock(nowIso, async () => {
+          let hookUsed = false;
+          supportA.setJobRunBeforeCommitHookForTesting(async () => {
+            if (hookUsed) return;
+            hookUsed = true;
+            enteredWorkA();
+            await holdPromiseA;
+          });
+          // Process A starts and holds the transaction advisory lock in PostgreSQL
+          const runAPromise = authA.guardedJob(
             'enquiry-retention-anonymise',
             'not-a-law-firm',
             async ({ tenantContext }) =>
-              modB.runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+              modA.runEnquiryRetentionAnonymisationForTenant(tenantContext, {
                 triggerSource: 'scheduled',
                 actorId: 'system:enquiry-retention-anonymise',
-                nowIso,
               }),
             { registry },
           );
-          expect(outBWhileRunning.outcome).toBe('already_running');
 
-          // Release Process A so it commits enquiries + audit_entries + job_runs together
-          releaseHoldA();
-          const outA = await runAPromise;
-          expect(outA.outcome).toBe('executed');
+          try {
+            await enteredPromiseA;
 
-          // Process B runs again after Process A commits -> sees job_runs succeeded row in PostgreSQL and skips (already_succeeded_today)
-          const outBAfterCommit = await authB.guardedJob(
-            'enquiry-retention-anonymise',
-            'not-a-law-firm',
-            async ({ tenantContext }) =>
-              modB.runEnquiryRetentionAnonymisationForTenant(tenantContext, {
-                triggerSource: 'scheduled',
-                actorId: 'system:enquiry-retention-anonymise',
-                nowIso,
-              }),
-            { registry },
-          );
-          expect(outBAfterCommit.outcome).toBe('already_succeeded_today');
-        } finally {
-          releaseHoldA();
-          await runAPromise.catch(() => {});
-        }
+            // Process B (isolated module graph) runs while Process A holds the PostgreSQL lock -> returns already_running
+            const outBWhileRunning = await authB.guardedJob(
+              'enquiry-retention-anonymise',
+              'not-a-law-firm',
+              async ({ tenantContext }) =>
+                modB.runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+                  triggerSource: 'scheduled',
+                  actorId: 'system:enquiry-retention-anonymise',
+                }),
+              { registry },
+            );
+            expect(outBWhileRunning.outcome).toBe('already_running');
+
+            // Release Process A so it commits enquiries + audit_entries + job_runs together
+            releaseHoldA();
+            const outA = await runAPromise;
+            expect(outA.outcome).toBe('executed');
+
+            // Process B runs again after Process A commits -> sees job_runs succeeded row in PostgreSQL and skips (already_succeeded_today)
+            const outBAfterCommit = await authB.guardedJob(
+              'enquiry-retention-anonymise',
+              'not-a-law-firm',
+              async ({ tenantContext }) =>
+                modB.runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+                  triggerSource: 'scheduled',
+                  actorId: 'system:enquiry-retention-anonymise',
+                }),
+              { registry },
+            );
+            expect(outBAfterCommit.outcome).toBe('already_succeeded_today');
+          } finally {
+            supportA.setJobRunBeforeCommitHookForTesting(null);
+            releaseHoldA();
+            await runAPromise.catch(() => {});
+          }
+        });
 
         const runs = await jobRunRepo.listJobRuns(ctx, {
           jobKey: 'enquiry-retention-anonymise',
@@ -1278,27 +1332,32 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
         };
         const tick1NowIso = '2026-09-10T01:15:00.000Z'; // 02:15 BST on 2026-09-10
 
-        // 1. Force a failure AFTER enquiries update and audit_entries insert inside the transaction
-        await expect(
-          guardedJob(
-            'enquiry-retention-anonymise',
-            'not-a-law-firm',
-            async ({ tenantContext }) =>
-              runEnquiryRetentionAnonymisationForTenant(tenantContext, {
-                triggerSource: 'scheduled',
-                actorId: 'system:enquiry-retention-anonymise',
-                nowIso: tick1NowIso,
-                onAfterWorkBeforeCommit: async () => {
-                  const err = new Error(
-                    'Simulated database failure for <secret.prospect@invented-domain.example>',
-                  ) as Error & { code?: string };
-                  err.code = 'SIMULATED_ANONYMISE_TX_FAILURE';
-                  throw err;
-                },
-              }),
-            { registry },
-          ),
-        ).rejects.toThrow(/Simulated database failure/);
+        // 1. Force a failure AFTER enquiries update and audit_entries insert inside the transaction (R482: via test-only repository hook, zero production hook surface)
+        await withFakeClock(tick1NowIso, async () => {
+          setJobRunBeforeCommitHookForTesting(async () => {
+            const err = new Error(
+              'Simulated database failure for <secret.prospect@invented-domain.example>',
+            ) as Error & { code?: string };
+            err.code = 'SIMULATED_ANONYMISE_TX_FAILURE';
+            throw err;
+          });
+          try {
+            await expect(
+              guardedJob(
+                'enquiry-retention-anonymise',
+                'not-a-law-firm',
+                async ({ tenantContext }) =>
+                  runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+                    triggerSource: 'scheduled',
+                    actorId: 'system:enquiry-retention-anonymise',
+                  }),
+                { registry },
+              ),
+            ).rejects.toThrow(/Simulated database failure/);
+          } finally {
+            setJobRunBeforeCommitHookForTesting(null);
+          }
+        });
 
         // Verify BOTH the enquiry update AND the audit_entries insert rolled back!
         const enqAfterRollback = (await intakeRepo.getEnquiryById<Enquiry>(
@@ -1336,10 +1395,9 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
         );
         expect(JSON.stringify(runs[0])).not.toContain('7700 999888');
 
-        // 2. Next hourly tick on the SAME local_date retries via CLI runner and succeeds!
-        const stdoutLines: string[] = [];
-        const stderrLines: string[] = [];
-        const exitCode = await executeCliJobRunner(
+        // R481: Verify CLI runner rejects --now or any extra arguments with JOB_RUNNER_USAGE_ERROR and exit code 1
+        const errUsageLines: string[] = [];
+        const usageExitCode = await executeCliJobRunner(
           [
             'node',
             'dist/jobs/run-job.mjs',
@@ -1348,9 +1406,27 @@ describe('S0-19b: Automated enquiry retention anonymisation job (ADR 0030, B3, R
             '2026-09-10T02:15:00.000Z',
           ],
           {
-            stdout: (line) => stdoutLines.push(line),
-            stderr: (line) => stderrLines.push(line),
+            stdout: () => {},
+            stderr: (line) => errUsageLines.push(line),
           },
+        );
+        expect(usageExitCode).toBe(1);
+        expect(errUsageLines).toHaveLength(1);
+        expect(errUsageLines[0]).toContain('JOB_RUNNER_USAGE_ERROR');
+
+        // 2. Next hourly tick on the SAME local_date retries via CLI runner and succeeds!
+        const stdoutLines: string[] = [];
+        const stderrLines: string[] = [];
+        const exitCode = await withFakeClock(
+          '2026-09-10T02:15:00.000Z',
+          () =>
+            executeCliJobRunner(
+              ['node', 'dist/jobs/run-job.mjs', 'enquiry-retention-anonymise'],
+              {
+                stdout: (line) => stdoutLines.push(line),
+                stderr: (line) => stderrLines.push(line),
+              },
+            ),
         );
         expect(exitCode).toBe(0);
         expect(stderrLines).toHaveLength(0);
