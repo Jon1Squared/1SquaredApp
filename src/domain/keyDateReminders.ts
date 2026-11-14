@@ -25,6 +25,7 @@ import type {
   IsoDateTime,
   KeyDate,
   KeyDateId,
+  KeyDateNotApplicable,
   KeyDateReminderState,
   KeyDatesConfig,
   PersonId,
@@ -537,6 +538,7 @@ export interface RunTenantKeyDateReminderJobInput {
   config: KeyDatesConfig;
   keyDates: KeyDate[];
   reminderStates: KeyDateReminderState[];
+  notApplicable?: readonly KeyDateNotApplicable[];
   tasks: Task[];
   matters?: readonly Matter[];
   teams?: readonly Team[];
@@ -589,6 +591,7 @@ export function runTenantKeyDateReminderJob(
     config,
     keyDates,
     reminderStates,
+    notApplicable = [],
     tasks,
     matters = [],
     teams = [],
@@ -611,6 +614,12 @@ export function runTenantKeyDateReminderJob(
     };
   }
 
+  const notApplicablePairs = new Set(
+    notApplicable
+      .filter((na) => na.reason && na.reason.trim().length > 0)
+      .map((na) => `${na.matterId}::${na.keyDateTypeId}`),
+  );
+
   let evaluatedCount = 0;
   let stagesAdvancedCount = 0;
   let escalationsTriggeredCount = 0;
@@ -618,6 +627,13 @@ export function runTenantKeyDateReminderJob(
 
   for (const keyDate of keyDates) {
     if (keyDate.status !== 'confirmed') {
+      continue;
+    }
+    if (
+      keyDate.matterId &&
+      keyDate.keyDateTypeId &&
+      notApplicablePairs.has(`${keyDate.matterId}::${keyDate.keyDateTypeId}`)
+    ) {
       continue;
     }
 

@@ -373,6 +373,11 @@ export function computeKeyDateExceptions(
   for (const cs of calendarSyncs) {
     syncByKeyDateId.set(cs.keyDateId, cs);
   }
+  const notApplicablePairs = new Set(
+    notApplicable
+      .filter((na) => na.reason && na.reason.trim().length > 0)
+      .map((na) => `${na.matterId}::${na.keyDateTypeId}`),
+  );
 
   const exceptions: KeyDateException[] = [];
   const pushException = (ex: KeyDateException) => {
@@ -418,7 +423,15 @@ export function computeKeyDateExceptions(
     }
 
     if (isMatterInClosedStatus(matter, values)) {
-      const openDates = matterKeyDates.filter((kd) => isKeyDateOpen(kd.status));
+      const openDates = matterKeyDates.filter(
+        (kd) =>
+          isKeyDateOpen(kd.status) &&
+          !(
+            kd.matterId &&
+            kd.keyDateTypeId &&
+            notApplicablePairs.has(`${kd.matterId}::${kd.keyDateTypeId}`)
+          ),
+      );
       for (const kd of openDates) {
         pushException({
           kind: 'closed_matter_open_dates',
@@ -435,6 +448,13 @@ export function computeKeyDateExceptions(
   // 2, 3, 5, 6, 7, 8. Key-date-level checks
   for (const kd of keyDates) {
     if (kd.status === 'superseded') continue;
+    if (
+      kd.matterId &&
+      kd.keyDateTypeId &&
+      notApplicablePairs.has(`${kd.matterId}::${kd.keyDateTypeId}`)
+    ) {
+      continue;
+    }
 
     const matter = kd.matterId ? matterById.get(kd.matterId) : undefined;
     // Enforce restricted (staff) matter and missing matter omission in the data layer (R82, R115, R129)

@@ -251,6 +251,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import {
+  buildKeyDateReminderIdempotencyKey,
   carryEnquiryKeyDatesToMatter,
   createOrProposeKeyDate,
   evaluateMatterKeyDateClosureGate,
@@ -15559,6 +15560,7 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   keyDatesToUpsert?: readonly KeyDate[];
   notApplicableToUpsert?: readonly KeyDateNotApplicable[];
   reminderStatesToUpsert?: KeyDateReminderState[];
+  reminderStatesToDeleteKeyDateIds?: readonly string[];
   calendarSyncsToUpsert?: readonly KeyDateCalendarSync[];
   tasksToUpsert?: Task[];
   tasksToDeleteIds?: readonly string[];
@@ -15569,6 +15571,9 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   const keyDateRepo = getKeyDateRepository();
   const taskRepo = getTaskWorkflowRepository();
   await keyDateRepo.withTenantTransaction(params.ctx, async (tx) => {
+    for (const deletedKdId of params.reminderStatesToDeleteKeyDateIds ?? []) {
+      await keyDateRepo.removeReminderState(params.ctx, deletedKdId);
+    }
     for (const deletedId of params.tasksToDeleteIds ?? []) {
       await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
         params.ctx.tenantId,
@@ -15885,33 +15890,41 @@ export async function createOrProposeKeyDateRecord(
     let deletedTaskIds: string[] = [];
 
     if (kd.status === 'confirmed') {
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      const existingNaForMatter = kd.matterId
+        ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
+        : [];
+      const isMarkedNotApplicable = existingNaForMatter.some(
+        (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
       );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: actor.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      });
-      changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
+      if (!isMarkedNotApplicable) {
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+      }
     }
 
     await syncKeyDateToOutlookCalendar({
@@ -16003,33 +16016,41 @@ export async function proposeProvisionalKeyDateRecord(
     let changedTasks: Task[] = [];
     let deletedTaskIds: string[] = [];
     if (kd.status === 'confirmed') {
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      const existingNaForMatter = kd.matterId
+        ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
+        : [];
+      const isMarkedNotApplicable = existingNaForMatter.some(
+        (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
       );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: actor.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      });
-      changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
+      if (!isMarkedNotApplicable) {
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+      }
     }
 
     await syncKeyDateToOutlookCalendar({
@@ -16161,23 +16182,31 @@ export async function verifyProposedKeyDateRecord(
     const beforeTaskJsonById = new Map(
       storeTasks.map((t) => [t.id, JSON.stringify(t)]),
     );
+    const existingNaForMatter = kd.matterId
+      ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, verifier.id)
+      : [];
+    const isMarkedNotApplicable = existingNaForMatter.some(
+      (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
+    );
     let pendingTaskIdx = 0;
-    syncReminderForConfirmedKeyDate({
-      keyDate: kd,
-      config,
-      tasks: storeTasks,
-      reminderStates: reminderStatesWorking,
-      matters: matter ? [matter] : [],
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      todayIso,
-      nowIso,
-      actorId: verifier.id,
-      tenantId: ctx.tenantId,
-      nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      transferredFromKeyDateId: kd.supersedesKeyDateId,
-    });
+    if (!isMarkedNotApplicable) {
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
+        people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        todayIso,
+        nowIso,
+        actorId: verifier.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        transferredFromKeyDateId: kd.supersedesKeyDateId,
+      });
+    }
 
     await syncKeyDateToOutlookCalendar({
       keyDate: kd,
@@ -16745,9 +16774,35 @@ export async function recordKeyDateNotApplicableRecord(
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
 
+    const matterKeyDates = await keyDateRepo.listKeyDatesForMatter(
+      ctx,
+      matter.id,
+      actor.id,
+    );
+    const matchingKeyDateIds = matterKeyDates
+      .filter((kd) => kd.keyDateTypeId === input.keyDateTypeId)
+      .map((kd) => kd.id);
+    const deletedTaskIds: string[] = [];
+    if (matchingKeyDateIds.length > 0) {
+      const taskRepo = getTaskWorkflowRepository();
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const idempotencyKeys = new Set(
+        matchingKeyDateIds.map((kdId) =>
+          buildKeyDateReminderIdempotencyKey(ctx.tenantId, kdId),
+        ),
+      );
+      for (const t of storeTasks) {
+        if (t.idempotencyKey && idempotencyKeys.has(t.idempotencyKey)) {
+          deletedTaskIds.push(t.id);
+        }
+      }
+    }
+
     await commitKeyDateDomainWritesInPostgres({
       ctx,
       notApplicableToUpsert: [rec],
+      reminderStatesToDeleteKeyDateIds: matchingKeyDateIds,
+      tasksToDeleteIds: deletedTaskIds,
       auditEntries: stagedAudit,
     });
 
@@ -16979,8 +17034,8 @@ export async function executeKeyDateRemindersForTenant(
         getKeyDatesConfig({ ctx, userId: options.triggeredById }),
         keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
         keyDateRepo.listAllReminderStatesUnfilteredForScheduler(ctx),
-        keyDateRepo.listAllVisibleNotApplicable(ctx, options.triggeredById),
-        keyDateRepo.listAllVisibleCalendarSyncs(ctx, options.triggeredById),
+        keyDateRepo.listAllNotApplicableUnfilteredForScheduler(ctx),
+        keyDateRepo.listAllCalendarSyncsUnfilteredForScheduler(ctx),
       ]);
 
       if (options.triggerSource === 'manual') {
@@ -17040,6 +17095,7 @@ export async function executeKeyDateRemindersForTenant(
             config,
             keyDates: keyDatesWorking,
             reminderStates: reminderStatesWorking,
+            notApplicable: notApplicableWorking,
             tasks: storeTasks,
             matters,
             teams,
