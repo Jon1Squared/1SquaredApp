@@ -1,7 +1,9 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import {
   ALL_BUILTIN_ROLE_KEYS,
+  ALL_JOB_ONLY_PERMISSION_KEYS,
   ALL_PERMISSION_KEYS,
+  ALL_USER_PERMISSION_KEYS,
   AuthorisationError,
   approveTemplateVersion,
   canAccessMatter,
@@ -303,8 +305,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 60 canonical permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(60);
+    it('defines all 60 canonical user permissions plus 3 job-only permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(63);
+      expect(ALL_USER_PERMISSION_KEYS.length).toBe(60);
+      expect(ALL_JOB_ONLY_PERMISSION_KEYS).toEqual([
+        'tenant:migrate',
+        'keydate:run_reminders',
+        'document_generation:purge_usage',
+      ]);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];
         expect(entry).toBeDefined();
@@ -314,7 +322,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           entry.sensitivity,
         );
         expect(typeof entry.requiresMfa).toBe('boolean');
-        expect(['1.0.0', '1.1.0']).toContain(entry.sinceVersion);
+        expect(['1.0.0', '1.1.0', '1.2.0']).toContain(entry.sinceVersion);
       }
 
       // Critical / administrative permissions require MFA
@@ -325,6 +333,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(PERMISSION_REGISTRY['rbac:manage_user_overrides'].requiresMfa).toBe(true);
       expect(PERMISSION_REGISTRY['matter:restriction:lift'].requiresMfa).toBe(true);
       expect(PERMISSION_REGISTRY['admin:data_reset'].requiresMfa).toBe(true);
+
+      // S0-19: No role (admin included) holds any jobOnly permission
+      for (const roleKey of ALL_BUILTIN_ROLE_KEYS) {
+        for (const jobPerm of ALL_JOB_ONLY_PERMISSION_KEYS) {
+          expect(DEFAULT_RBAC_ROLES[roleKey].permissions).not.toContain(jobPerm);
+        }
+      }
     });
 
     it('enforces CI contract: every Field Catalogue entry references a registered PermissionKey', () => {
@@ -373,9 +388,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }),
       ).toThrow(/RBAC_TENANT_REQUIRED/);
 
-      // Admin holds all 25 permissions
+      // Admin holds all user permissions (and zero job-only permissions)
       const adminPerms = resolveForRole('admin');
-      expect(adminPerms.permissionList.length).toBe(ALL_PERMISSION_KEYS.length);
+      expect(adminPerms.permissionList.length).toBe(ALL_USER_PERMISSION_KEYS.length);
+      for (const jobPerm of ALL_JOB_ONLY_PERMISSION_KEYS) {
+        expect(adminPerms.has(jobPerm)).toBe(false);
+      }
 
       // Managing partner holds HR, payroll, sensitive, finance, risk, matter:restricted:access, template build/approve
       const mpPerms = resolveForRole('managing_partner');

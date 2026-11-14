@@ -53,6 +53,12 @@
       "default": "dev",
       "description": "Target deployment environment"
     },
+    "timeZone": {
+      "type": "string",
+      "minLength": 1,
+      "default": "Europe/London",
+      "description": "IANA time zone identifier used by the tenant-aware scheduler to evaluate local calendar dates and run hours (ADR 0030)"
+    },
     "branding": {
       "type": "object",
       "additionalProperties": false,
@@ -551,10 +557,7 @@
               "minimum": 1,
               "maximum": 120,
               "default": 24,
-              "x-reserved": {
-                "for": "S0-19",
-                "reason": "Reserved for S0-19 (Tenant-aware scheduler running executeUsageRetentionPurgeJob)."
-              }
+              "description": "Number of months to retain template usage events and daily summaries before the scheduled usage-retention-purge job removes older buckets (ADR 0030)"
             },
             "lowUseThreshold": {
               "type": "integer",

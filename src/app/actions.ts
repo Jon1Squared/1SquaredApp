@@ -1594,19 +1594,17 @@ export async function runKeyDateReminderSchedulerAction() {
 
 export async function queryKeyDatesTeamDiaryAction(
   query: TeamDiaryQuery,
-  todayIso?: string,
 ) {
   return guardedAction('queryKeyDatesTeamDiaryAction', async ({ personId: byId }) =>
-    queryKeyDatesTeamDiaryRecord(query, byId, todayIso),
+    queryKeyDatesTeamDiaryRecord(query, byId),
   );
 }
 
 export async function getKeyDateExceptionsReportAction(
   filter: { teamIds?: string[]; kinds?: KeyDateExceptionKind[] } = {},
-  todayIso?: string,
 ) {
   return guardedAction('getKeyDateExceptionsReportAction', async ({ personId: byId }) =>
-    getKeyDateExceptionsReportRecord(filter, byId, todayIso),
+    getKeyDateExceptionsReportRecord(filter, byId),
   );
 }
 
@@ -1616,10 +1614,9 @@ export async function exportKeyDateExceptionsReportAction(
     kinds?: KeyDateExceptionKind[];
     format?: 'csv' | 'json';
   } = {},
-  todayIso?: string,
 ) {
   return guardedAction('exportKeyDateExceptionsReportAction', async ({ personId: byId }) => {
-    const res = await exportKeyDateExceptionsReportRecord(filter, byId, todayIso);
+    const res = await exportKeyDateExceptionsReportRecord(filter, byId);
     revalidateAll();
     return res;
   });

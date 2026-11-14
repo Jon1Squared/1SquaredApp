@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-11',
+  updated: '2026-11-13',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -23,6 +23,7 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`displayName\` | Required | Active | Tenant display name shown across the workspace and generated documents |
 | \`hostingMode\` | \`"multi_tenant"\` | Active | \`single_tenant\` (Model A) or \`multi_tenant\` (Model B) |
 | \`environment\` | \`"dev"\` | Active | \`dev\`, \`test\`, \`training\`, \`demo\`, or \`live\` |
+| \`timeZone\` | \`"Europe/London"\` | Active | IANA time zone identifier validated via \`Intl.DateTimeFormat\` (ADR 0030); governs the \`02:00\` local-time window and \`local_date\` (\`YYYY-MM-DD\`) in \`public.job_runs\` for daily scheduled jobs across GMT/BST transitions |
 | \`branding.primaryDomain\` | Required | Active | Verified primary email/UPN domain for the tenant |
 | \`branding.accentColorHex\` | \`"#1f6feb"\` | Reserved (backlog, F21) | Reserved for tenant branding theme rendering; the demo tenant uses the standard platform theme |
 | \`branding.logoAssetKey\` | \`"default-logo.svg"\` | Reserved (backlog, F21) | Reserved for tenant firm logo rendering; the demo tenant uses the standard platform logo |
@@ -76,7 +77,7 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`customFields\` | \`[]\` | Active | Declarative custom field definitions in \`base.json\` merged at runtime with administrator-managed custom fields persisted in \`public.custom_field_definitions\` (\`TenantCatalogueRepository\`, \`S0-17c\`); administrator definitions with the same \`id\` take precedence over declarative entries |
 | \`enabledExtensions\` | \`[]\` | Active | Registered extension IDs active for the tenant |
 | \`documentGeneration.*\` | Enabled | Active | Document template limits, output format, approval rules (\`requireApproval\` controls whether \`submitTemplateVersionForApproval\` requires a separate approval step or activates clean template versions directly on submit without a separate approver check, recording \`Document Template Activated (approval not required)\` in the audit trail; \`allowSelfApproval\` controls whether a builder may approve their own submitted version), and usage reporting |
-| \`documentGeneration.usage.retentionMonths\` | \`24\` | Reserved (S0-19) | Reserved for automated document usage event retention pruning |
+| \`documentGeneration.usage.retentionMonths\` | \`24\` | Active | Retention window (in months) for document generation usage events (\`public.document_usage_events\`); expired events are purged daily at or after \`02:00\` in the tenant's \`timeZone\` by the \`usage-retention-purge\` scheduled job (\`executeUsageRetentionPurgeForTenant\`, \`S0-19\`) |
 | \`documentGeneration.customDocumentTypes\` | \`[]\` | Reserved (backlog, F20) | Reserved for tenant-configured custom document classification types in document generation |
 | \`rbac.*\` | Built-in roles | Active | Role definitions, department grants, relationship grants, and Entra ID identity mapping (\`authorityMode\`, \`entraGroupToRoleKey\`, \`entraAppRoleToRoleKey\`, \`defaultRoleKeys\`, \`allowAcrsC1AsMfa\`, and \`emailLinking\`), with runtime tenant overrides persisted in \`public.tenant_rbac_configs\` via \`TenantHrAndRbacRepository\` (\`S0-17b\`) |
 | \`rbac.identityMapping.emailLinking.enabled\` | \`true\` | Active | Controls whether first-time Entra sign-in can link an unbound non-privileged employee record by verified domain email; when \`false\`, only explicit \`entraObjectId\` (\`oid\`) bindings are used |

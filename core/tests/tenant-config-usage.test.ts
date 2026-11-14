@@ -624,7 +624,6 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       'integrations.pmsSync.clientCodeAllocation': 'backlog',
       'integrations.pmsSync.pollIntervalMinutes': 'backlog',
       'integrations.pmsSync.fieldMappings': 'backlog',
-      'documentGeneration.usage.retentionMonths': 'S0-19',
       'documentGeneration.customDocumentTypes': 'backlog',
       'documentAccess.autoRemediateDrift': 'S0-25',
       'keyDates.defaults.teamAssignment': 'backlog',
@@ -1543,5 +1542,43 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     expect(dedicatedCfg.database?.dedicatedServerHost).toBe(
       'psql-notalawfirm-cmk-test.postgres.database.azure.com',
     );
+  });
+
+  it('validates top-level timeZone (default Europe/London, valid IANA timezone) and activates documentGeneration.usage.retentionMonths (S0-19)', () => {
+    const defaultCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {},
+      'test',
+      'multi_tenant',
+    );
+    expect(defaultCfg.timeZone).toBe('Europe/London');
+    expect(
+      RESERVED_TENANT_CONFIG_SETTINGS.some(
+        (s) => s.path === 'documentGeneration.usage.retentionMonths',
+      ),
+    ).toBe(false);
+
+    const customTzCfg = loadAndValidateTenantConfig(
+      {
+        ...notALawFirmBaseConfig,
+        timeZone: 'America/New_York',
+      },
+      {},
+      'test',
+      'multi_tenant',
+    );
+    expect(customTzCfg.timeZone).toBe('America/New_York');
+
+    expect(() =>
+      loadAndValidateTenantConfig(
+        {
+          ...notALawFirmBaseConfig,
+          timeZone: 'Invalid/Not_A_TimeZone',
+        },
+        {},
+        'test',
+        'multi_tenant',
+      ),
+    ).toThrow(/Invalid IANA timeZone identifier/);
   });
 });

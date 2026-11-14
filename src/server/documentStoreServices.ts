@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import {
-  ALL_PERMISSION_KEYS,
+  ALL_USER_PERMISSION_KEYS,
   canActorAccessMatterRecord,
   DocumentStoreProviderRegistry,
   TenantDocumentStoreRepository,
@@ -322,7 +322,7 @@ export async function buildTenantContextForUser(
 
   const grantedPermissions: PermissionKey[] =
     user.appRole === 'admin' || roles.includes('admin')
-      ? [...ALL_PERMISSION_KEYS]
+      ? [...ALL_USER_PERMISSION_KEYS]
       : resolvedPerms;
 
   if (!verifiedSession) {

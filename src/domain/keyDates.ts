@@ -228,7 +228,12 @@ export function resolveKeyDatePermissions(
         }
       : DEFAULT_KEY_DATE_ROLE_GRANTS;
 
-  const roleKeys = resolveUserRoleKeysForKeyDates(user, teams);
+  const roleKeys = Array.from(
+    new Set([
+      ...resolveUserRoleKeysForKeyDates(user, teams),
+      ...(opts.rbac?.tokenRoles ?? []).filter(Boolean),
+    ]),
+  );
   const granted = new Set<KeyDatePermission>();
 
   for (const roleKey of roleKeys) {

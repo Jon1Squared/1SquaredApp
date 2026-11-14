@@ -9,6 +9,8 @@
  */
 import {
   TenantAuditRepository,
+  TenantJobRunRepository,
+  type ControlledJobRunOutcome,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
   type TenantContext,
@@ -18,8 +20,10 @@ import { personDisplayName } from '../../domain/names';
 import {
   getActiveTenantConfiguration,
   getAuditRepository,
+  getJobRunRepository,
   resolveCurrentTenantContext,
   setAuditRepositoryOverrideForTesting,
+  setJobRunRepositoryOverrideForTesting,
 } from '../../platform/tenantRuntime';
 import { runWithActiveActorSession } from '../rbacRuntime';
 import {
@@ -112,6 +116,61 @@ export function setAuditAdapterFailureHookForTesting(
     return delegate.appendAuditEntry(ctx, entry);
   };
   setAuditRepositoryOverrideForTesting(stub);
+}
+
+export type JobRunBeforeCommitTestHook = (params: {
+  ctx: TenantContext;
+  jobKey: string;
+  triggerSource: 'scheduled' | 'manual';
+  localDate: string;
+}) => Promise<void> | void;
+
+let baseJobRunRepoBeforeTestStub: TenantJobRunRepository | null = null;
+
+/**
+ * Test-only helper (`R450`, `R482`) that wraps `getJobRunRepository().executeControlledTenantJobRun`
+ * so tests can inject a mid-transaction failure or lock-contention barrier after domain and audit
+ * writes inside `work` but before `job_runs` insert and `COMMIT`, without adding test hooks to
+ * production job functions.
+ */
+export function setJobRunBeforeCommitHookForTesting(
+  hook: JobRunBeforeCommitTestHook | null,
+): void {
+  assertTestEnvironment('setJobRunBeforeCommitHookForTesting');
+  if (!hook) {
+    if (baseJobRunRepoBeforeTestStub) {
+      setJobRunRepositoryOverrideForTesting(null);
+      baseJobRunRepoBeforeTestStub = null;
+    }
+    return;
+  }
+  const delegate =
+    baseJobRunRepoBeforeTestStub ?? getJobRunRepository();
+  baseJobRunRepoBeforeTestStub = delegate;
+
+  const stub = Object.create(delegate) as TenantJobRunRepository;
+  stub.executeControlledTenantJobRun = async <TResult>(
+    ctx: TenantContext,
+    params: Parameters<TenantJobRunRepository['executeControlledTenantJobRun']>[1],
+  ): Promise<ControlledJobRunOutcome<TResult>> => {
+    return delegate.executeControlledTenantJobRun<TResult>(ctx, {
+      ...params,
+      work: async (info) => {
+        const workResult = (await params.work(info)) as {
+          readonly result: TResult;
+          readonly summary: Record<string, number>;
+        };
+        await hook({
+          ctx,
+          jobKey: params.jobKey,
+          triggerSource: params.triggerSource,
+          localDate: info.localDate,
+        });
+        return workResult;
+      },
+    });
+  };
+  setJobRunRepositoryOverrideForTesting(stub);
 }
 
 export interface TestActorSessionOptions {

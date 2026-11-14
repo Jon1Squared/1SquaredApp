@@ -672,6 +672,21 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  public async listAllKeyDatesUnfilteredForScheduler(
+    ctx: TenantContext,
+  ): Promise<KeyDate[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbKeyDateRow>(
+        'SELECT * FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
+        [ctx.tenantId],
+      );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'KeyDate');
+        return mapKeyDateRow(r);
+      });
+    });
+  }
+
   public async listAllVisibleKeyDates(
     ctx: TenantContext,
     viewerId: string = ctx.actorId,
@@ -868,6 +883,33 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  /**
+   * Used ONLY by the tenant-scoped reminder scheduler, which must inspect
+   * not-applicable records across all matters in the tenant (including staff
+   * matters and ethical-wall matters) so that key dates marked not applicable
+   * are skipped regardless of the triggering actor's matter visibility.
+   */
+  public async listAllNotApplicableUnfilteredForScheduler(
+    ctx: TenantContext,
+  ): Promise<KeyDateNotApplicable[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbNotApplicableRow>(
+        'SELECT * FROM key_date_not_applicable WHERE tenant_id = $1 ORDER BY matter_id ASC, key_date_type_id ASC',
+        [ctx.tenantId],
+      );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'KeyDateNotApplicable');
+        return {
+          matterId: r.matter_id,
+          keyDateTypeId: r.key_date_type_id,
+          reason: r.reason,
+          recordedById: r.recorded_by_id,
+          recordedAt: toIsoString(r.recorded_at),
+        };
+      });
+    });
+  }
+
   // ============================================================================
   // Reminder States (1 per confirmed key date)
   // ============================================================================
@@ -875,6 +917,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   public async putReminderState(
     ctx: TenantContext,
     state: KeyDateReminderState,
+    options?: { allowSystemSchedulerWrite?: boolean },
   ): Promise<KeyDateReminderState> {
     if (
       state.lastSkippedReason !== undefined &&
@@ -885,6 +928,10 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         `KEY_DATE_VALIDATION_ERROR: Invalid lastSkippedReason "${String(state.lastSkippedReason)}"; expected 'no_permitted_assignees' or 'missing_matter'.`,
       );
     }
+
+    const bypassMatterCheck =
+      options?.allowSystemSchedulerWrite === true ||
+      Boolean(ctx.jobPermissions?.includes('keydate:run_reminders'));
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const kdRes = await tx.query<DbKeyDateRow>(
@@ -899,6 +946,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       }
       this.assertRowTenant(ctx, kdRow.tenant_id, 'KeyDate');
       if (
+        !bypassMatterCheck &&
         kdRow.matter_id &&
         !(await this.checkMatterVisibleInTx(
           tx,
@@ -1003,6 +1051,21 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     viewerId: string = ctx.actorId,
   ): Promise<KeyDateReminderState[]> {
     return this.listReminderStates(ctx, viewerId);
+  }
+
+  public async listAllReminderStatesUnfilteredForScheduler(
+    ctx: TenantContext,
+  ): Promise<KeyDateReminderState[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbReminderStateRow>(
+        'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 ORDER BY key_date_id ASC',
+        [ctx.tenantId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'KeyDateReminderState');
+        return mapReminderStateRow(row);
+      });
+    });
   }
 
   public async removeReminderState(
@@ -1156,6 +1219,36 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         }
       }
       return out;
+    });
+  }
+
+  /**
+   * Used ONLY by the tenant-scoped reminder scheduler, which inspects calendar
+   * sync records across all key dates in the tenant when building its run summary.
+   */
+  public async listAllCalendarSyncsUnfilteredForScheduler(
+    ctx: TenantContext,
+  ): Promise<KeyDateCalendarSync[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbCalendarSyncRow>(
+        'SELECT * FROM key_date_calendar_syncs WHERE tenant_id = $1 ORDER BY key_date_id ASC',
+        [ctx.tenantId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'KeyDateCalendarSync');
+        return {
+          keyDateId: row.key_date_id,
+          state: row.state,
+          externalEvents: Array.isArray(row.external_events_json)
+            ? row.external_events_json.map((e) => ({ ...e }))
+            : [],
+          ...(row.last_synced_at !== null
+            ? { lastSyncedAt: toIsoString(row.last_synced_at) }
+            : {}),
+          ...(row.last_error !== null ? { lastError: row.last_error } : {}),
+          attempts: Number(row.attempts),
+        };
+      });
     });
   }
 

@@ -17,16 +17,22 @@ import {
   emitTenantTelemetryEvent,
   emitTenantTelemetryException,
   loadActiveTenantRegistry,
-  resolveTenantFromVerifiedToken,
+  sanitizeJobErrorCode,
   TenantMigrationRunner,
   type TenantMigrationDefinition,
   type TenantRegistry,
 } from '@platform/core';
+import { guardedJob, type GuardedJobOptions } from '../src/server/authorize';
+import {
+  runScheduledKeyDateRemindersJobSweep,
+  runScheduledUsageRetentionPurgeJobSweep,
+} from '../src/server/services';
 
 export interface RegisteredCliJobDescriptor {
   readonly name: string;
   readonly description: string;
   readonly mode: 'manual' | 'scheduled';
+  readonly schedule?: string;
 }
 
 export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
@@ -36,6 +42,20 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
       description:
         'Apply pending per-tenant PostgreSQL expand/contract migrations across active registry tenants on direct port 5432',
       mode: 'manual',
+    },
+    {
+      name: 'key-date-reminders',
+      description:
+        'Evaluate due key date reminders, follow-up tasks, and overdue escalations per tenant once per local day at 02:00 local time',
+      mode: 'scheduled',
+      schedule: '0 * * * *',
+    },
+    {
+      name: 'usage-retention-purge',
+      description:
+        'Purge expired document generation usage events and daily summaries per tenant once per local day at 02:00 local time',
+      mode: 'scheduled',
+      schedule: '0 * * * *',
     },
   ]);
 
@@ -51,6 +71,8 @@ export async function runMigrateJobSweep(options?: {
     Record<string, readonly TenantMigrationDefinition[]>
   >;
   runner?: TenantMigrationRunner;
+  timeoutMs?: number;
+  guardedJobOptions?: GuardedJobOptions;
 }): Promise<MigrateJobRunSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const runner = options?.runner ?? new TenantMigrationRunner();
@@ -62,63 +84,42 @@ export async function runMigrateJobSweep(options?: {
       continue;
     }
     const correlationId = `job-migrate-${entry.slug}-${randomUUID()}`;
-    const ctx = resolveTenantFromVerifiedToken({
-      verifiedToken: {
-        __verifiedByOidcMiddleware: true,
-        sub: 'system:job:migrate',
-        tenantId: entry.tenantId,
-        name: 'Platform Migration Job',
-        email: 'migrate-job@platform.example',
-        roles: ['admin'],
-        mfaVerified: true,
-      },
-      hostingMode: registry.hostingMode,
-      environment: entry.environment,
-      correlationId,
-      configuredPostgresHost: entry.postgresHost,
-      configuredKeyVault: {
-        vaultUri: entry.keyVaultUri,
-      },
-    });
-
-    // R440: refuse to migrate a database other than the one derived from the tenant ID.
-    if (entry.postgresDatabaseName !== ctx.postgresDatabaseName) {
-      failedTenants.push({
-        tenantId: entry.tenantId,
-        errorCode: 'TENANT_REGISTRY_DATABASE_MISMATCH',
-      });
-      emitTenantTelemetryException({
-        eventName: 'job.migrate.tenant_failed',
-        tenantId: entry.tenantId,
-        correlationId,
-        error: new Error(
-          'TENANT_REGISTRY_DATABASE_MISMATCH: Registry postgresDatabaseName does not match the database derived from the tenant ID.',
-        ),
-        properties: { databaseName: entry.postgresDatabaseName },
-      });
-      continue;
-    }
-
     const tenantMigrations =
       options?.migrationsByTenant?.[entry.tenantId] ?? CORE_TENANT_MIGRATIONS;
 
     try {
-      const applied = await runner.applyUp(ctx, tenantMigrations);
-      succeededTenants.push(entry.tenantId);
-      emitTenantTelemetryEvent({
-        eventName: 'job.migrate.tenant_succeeded',
-        tenantId: entry.tenantId,
-        correlationId,
-        properties: {
-          appliedCount: applied.length,
-          databaseName: entry.postgresDatabaseName,
+      await guardedJob(
+        'migrate',
+        entry,
+        async ({ tenantContext }) => {
+          const applied = await runner.applyUp(tenantContext, tenantMigrations);
+          succeededTenants.push(entry.tenantId);
+          emitTenantTelemetryEvent({
+            eventName: 'job.migrate.tenant_succeeded',
+            tenantId: entry.tenantId,
+            correlationId: tenantContext.correlationId,
+            properties: {
+              appliedCount: applied.length,
+              databaseName: entry.postgresDatabaseName,
+            },
+          });
+          return {
+            status: 'succeeded',
+            summary: { appliedCount: applied.length },
+          };
         },
-      });
+        {
+          registry,
+          correlationId,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
     } catch (err) {
       const errorCode =
         typeof (err as { code?: unknown })?.code === 'string'
           ? String((err as { code?: unknown }).code)
-          : undefined;
+          : sanitizeJobErrorCode(err);
       failedTenants.push({ tenantId: entry.tenantId, errorCode });
       emitTenantTelemetryException({
         eventName: 'job.migrate.tenant_failed',
@@ -150,7 +151,7 @@ export async function executeCliJobRunner(
   const writeErr = io.stderr ?? ((msg: string) => process.stderr.write(msg));
 
   const args = argv.slice(2);
-  if (args.includes('--list')) {
+  if (args.length === 1 && args[0] === '--list') {
     writeOut(
       `${JSON.stringify({
         runner: 'onesquared-job-runner',
@@ -164,6 +165,13 @@ export async function executeCliJobRunner(
   if (!jobName) {
     writeErr(
       'JOB_RUNNER_USAGE_ERROR: Expected `--list` or a registered `<job-name>`.\n',
+    );
+    return 1;
+  }
+
+  if (args.length > 1) {
+    writeErr(
+      'JOB_RUNNER_USAGE_ERROR: Unexpected CLI arguments or flags. Scheduled jobs accept only `--list` or `<job-name>`.\n',
     );
     return 1;
   }
@@ -182,6 +190,32 @@ export async function executeCliJobRunner(
       `${JSON.stringify({
         event: 'job.migrate.completed',
         succeededCount: summary.succeededTenants.length,
+        failedCount: summary.failedTenants.length,
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
+  if (jobName === 'key-date-reminders') {
+    const summary = await runScheduledKeyDateRemindersJobSweep();
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.key-date-reminders.completed',
+        succeededCount: summary.succeededTenants.length,
+        skippedCount: summary.skippedTenants.length,
+        failedCount: summary.failedTenants.length,
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
+  if (jobName === 'usage-retention-purge') {
+    const summary = await runScheduledUsageRetentionPurgeJobSweep();
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.usage-retention-purge.completed',
+        succeededCount: summary.succeededTenants.length,
+        skippedCount: summary.skippedTenants.length,
         failedCount: summary.failedTenants.length,
       })}\n`,
     );

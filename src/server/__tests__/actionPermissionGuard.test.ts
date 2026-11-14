@@ -1,13 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isRegisteredPermissionKey } from '@platform/core';
+import {
+  isRegisteredPermissionKey,
+  PERMISSION_REGISTRY,
+} from '@platform/core';
 import {
   ACTION_PERMISSIONS,
+  JOB_PERMISSIONS,
   MAX_KNOWN_GAPS,
   ROUTE_PERMISSIONS,
   type ActionPolicy,
 } from '../actionPermissions';
+import { REGISTERED_CLI_JOBS } from '../../../scripts/run-job';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const ACTIONS_FILE = path.join(REPO_ROOT, 'src', 'app', 'actions.ts');
@@ -372,6 +377,50 @@ describe('S0-02: server action and API route permission guard (ADR 0025)', () =>
 
     expect(gapEntries.length).toBe(MAX_KNOWN_GAPS);
     expect(MAX_KNOWN_GAPS).toBe(0);
+  });
+
+  it('validates that every registered CLI job in scripts/run-job.ts has a jobOnly policy in JOB_PERMISSIONS and guardedJob is never called in src/app/ or src/components/ (ADR 0030 §3 / S0-19)', () => {
+    const cliJobNames = REGISTERED_CLI_JOBS.map((j) => j.name).sort();
+    const policyJobNames = Object.keys(JOB_PERMISSIONS).sort();
+    expect(cliJobNames).toEqual(policyJobNames);
+
+    for (const [jobName, policy] of Object.entries(JOB_PERMISSIONS)) {
+      expect(policy.kind, `job ${jobName} kind`).toBe('job');
+      expect(policy.jobOnly, `job ${jobName} jobOnly`).toBe(true);
+      expect(
+        isRegisteredPermissionKey(policy.permission),
+        `job ${jobName} permission ${policy.permission} registered`,
+      ).toBe(true);
+      expect(
+        PERMISSION_REGISTRY[policy.permission].jobOnly,
+        `job ${jobName} permission ${policy.permission} marked jobOnly in PERMISSION_REGISTRY`,
+      ).toBe(true);
+    }
+
+    const collectSourceFiles = (dir: string): string[] => {
+      if (!fs.existsSync(dir)) return [];
+      const out: string[] = [];
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          out.push(...collectSourceFiles(full));
+        } else if (/\.(ts|tsx)$/.test(entry.name)) {
+          out.push(full);
+        }
+      }
+      return out;
+    };
+
+    const webUiAndRouteFiles = [
+      ...collectSourceFiles(path.join(REPO_ROOT, 'src', 'app')),
+      ...collectSourceFiles(path.join(REPO_ROOT, 'src', 'components')),
+    ];
+    for (const file of webUiAndRouteFiles) {
+      const src = fs.readFileSync(file, 'utf8');
+      expect(src, `${path.relative(REPO_ROOT, file)} must not reference guardedJob`).not.toMatch(
+        /\bguardedJob\b/,
+      );
+    }
   });
 
   it('catches an unlisted action, a mismatched guardedAction name, a 3rd policyOverride argument, an unregistered permission key, a missing reason, or a gap count breach on fixture strings', () => {

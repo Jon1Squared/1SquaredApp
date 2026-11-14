@@ -21,6 +21,7 @@ import {
   TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
+  TenantJobRunRepository,
   TenantMatterRepository,
   TenantPartyRepository,
   TenantPmsRepository,
@@ -29,6 +30,7 @@ import {
   type ExtensionManifest,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
+  type PermissionKey,
   type TenantConfiguration,
   type TenantContext,
 } from '@platform/core';
@@ -731,6 +733,38 @@ export function resolveCurrentTenantContext(
   });
 }
 
+export function resolveJobTenantContext(params: {
+  actorSub: string;
+  jobKey: string;
+  tenantId: string;
+  hostingMode: 'single_tenant' | 'multi_tenant';
+  environment: 'dev' | 'test' | 'training' | 'demo' | 'live';
+  correlationId: string;
+  postgresHost?: string;
+  keyVaultUri?: string;
+  jobPermissions: readonly PermissionKey[];
+}): TenantContext {
+  return resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: params.actorSub,
+      tenantId: params.tenantId,
+      name: `Platform job ${params.jobKey}`,
+      email: `${params.jobKey}@platform.example`,
+      roles: [],
+      mfaVerified: true,
+    },
+    hostingMode: params.hostingMode,
+    environment: params.environment,
+    correlationId: params.correlationId,
+    configuredPostgresHost: params.postgresHost,
+    configuredKeyVault: params.keyVaultUri
+      ? { vaultUri: params.keyVaultUri }
+      : undefined,
+    jobPermissions: params.jobPermissions,
+  });
+}
+
 const partyRepositoryInstance = new TenantPartyRepository();
 const matterRepositoryInstance = new TenantMatterRepository();
 const intakeQuoteRepositoryInstance = new TenantIntakeQuoteRepository();
@@ -738,8 +772,10 @@ const taskWorkflowRepositoryInstance = new TenantTaskWorkflowRepository();
 const hrAndRbacRepositoryInstance = new TenantHrAndRbacRepository();
 const catalogueRepositoryInstance = new TenantCatalogueRepository();
 const pmsRepositoryInstance = new TenantPmsRepository();
+const jobRunRepositoryInstance = new TenantJobRunRepository();
 const auditRepositoryInstance = new TenantAuditRepository();
 let auditRepositoryOverrideForTesting: TenantAuditRepository | null = null;
+let jobRunRepositoryOverrideForTesting: TenantJobRunRepository | null = null;
 
 export function getPartyRepository(): TenantPartyRepository {
   return partyRepositoryInstance;
@@ -767,6 +803,21 @@ export function getCatalogueRepository(): TenantCatalogueRepository {
 
 export function getPmsRepository(): TenantPmsRepository {
   return pmsRepositoryInstance;
+}
+
+export function getJobRunRepository(): TenantJobRunRepository {
+  return jobRunRepositoryOverrideForTesting ?? jobRunRepositoryInstance;
+}
+
+export function setJobRunRepositoryOverrideForTesting(
+  override: TenantJobRunRepository | null,
+): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: setJobRunRepositoryOverrideForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  jobRunRepositoryOverrideForTesting = override;
 }
 
 export function getAuditRepository(): TenantAuditRepository {
@@ -1003,6 +1054,7 @@ export {
   TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
+  TenantJobRunRepository,
   TenantMatterRepository,
   TenantPartyRepository,
   TenantPmsRepository,

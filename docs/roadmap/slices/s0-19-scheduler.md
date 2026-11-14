@@ -46,7 +46,7 @@ Follows ADR 0030 §§1–8 verbatim (`R401`, `R403`, `R404`, `R412`, `R413`):
      - Enforces `policy.permission` against `jobPermissions`, applies a per-tenant timeout (default `120s` via `AbortController` + `SET LOCAL statement_timeout`), emits PII-free telemetry (`job.tenant.started`, `job.tenant.succeeded`, `job.tenant.failed` — feeding S0-13's `Microsoft.Insights/scheduledQueryRules` alert rule, `R412`), and isolates per-tenant failures so remaining tenants continue before exiting non-zero.
    - Wrap `S0-14`'s `migrate` runner per tenant inside `guardedJob('migrate', ...)` (`R403`, `R412`).
 4. **`job_runs` migration, single-transaction `pg_try_advisory_xact_lock` scope, and manual-run recording (`core/src/tenancy/migrations/index.ts`, `core/src/tenancy/jobRunRepository.ts`, `R401`, `R412`, `R419`):**
-   - Add expand migration **`0013_scheduler_job_runs_expand`** (`kind: 'expand'`, `requiresAppliedVersion: '0012'`, `CORE_REQUIRED_SCHEMA_VERSION = '0013'`, reversible `DROP TABLE IF EXISTS job_runs;`):
+   - Add expand migration **`0014_scheduler_job_runs_expand`** (`kind: 'expand'`, `requiresAppliedVersion: '0013'`, `CORE_REQUIRED_SCHEMA_VERSION = '0014'`, reversible `DROP INDEX IF EXISTS ...; DROP TABLE IF EXISTS job_runs;`):
      - `job_runs`: `tenant_id TEXT NOT NULL`, `id TEXT NOT NULL`, `job_key TEXT NOT NULL`, `local_date TEXT NOT NULL` (`YYYY-MM-DD` in `tenantConfig.timeZone`), `trigger_source TEXT NOT NULL CHECK (trigger_source IN ('scheduled', 'manual'))`, `triggered_by_id TEXT NOT NULL` (`'system:' || job_key` or `actor.personId`), `status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed'))`, `started_at TIMESTAMPTZ NOT NULL`, `finished_at TIMESTAMPTZ NULL`, `correlation_id TEXT NOT NULL`, `error_code TEXT NULL`, `summary_json JSONB NOT NULL DEFAULT '{}'::jsonb` (counts only — zero PII), `PRIMARY KEY (tenant_id, id)`, partial unique index `idx_job_runs_scheduled_once_per_day ON job_runs (tenant_id, job_key, local_date) WHERE status = 'succeeded' AND trigger_source = 'scheduled'`, and lookup index on `(tenant_id, job_key, local_date, status)`.
    - **Single-transaction lock coverage & local-day idempotency (`R401`, `R419`, ADR 0030 §4):**
      - **Each tenant's entire job body runs in the one `withTenantTransaction` (`SET LOCAL ROLE` first) that acquires `pg_try_advisory_xact_lock(hashtext('onesquared_job:' || jobKey || ':' || tenantId))`** (`R401`, `R419` — never splitting lock acquisition and work across separate transactions): that single transaction covers (1) acquiring `pg_try_advisory_xact_lock` (returning `'already_running'` immediately if `false`), (2) the `job_runs` check on the same transaction client (`status = 'succeeded'` for `(tenant_id, job_key, local_date)` in `tenantConfig.timeZone`, default `'Europe/London'` at `02:00`), (3) all of that tenant's reminder/purge work and `audit_entries` writes on the **same transaction client**, and (4) inserting the `status = 'succeeded'` row in `job_runs` before `COMMIT` releases the lock atomically (if step 3 throws, that transaction rolls back and a short follow-up transaction writes `status = 'failed'` so failure history is kept without blocking retry on the next hourly tick).
@@ -64,7 +64,7 @@ Follows ADR 0030 §§1–8 verbatim (`R401`, `R403`, `R404`, `R412`, `R413`):
   - Assert scheduled audit entries and `job_runs.triggered_by_id` record **`system:key-date-reminders` / `system:usage-retention-purge`** (`R412`).
   - **Manual button -> `job_runs` & concurrent scheduled + manual lock test (`R412`, `R419`):** (a) invoking `runKeyDateReminderSchedulerAction` (`keydate:configure`) executes the shared job logic, writes `trigger_source: 'manual'`, `status: 'succeeded'` in `job_runs`, and causes a subsequent scheduled hourly tick on the same `local_date` to skip cleanly; (b) **starting a scheduled `key-date-reminders` run and a manual `runKeyDateReminderSchedulerAction` together (`Promise.all`) for one tenant creates each due reminder, task, notification, and audit entry once** (`R419`).
   - **`job_runs` idempotency, retry after failure, GMT/BST (`02:00` local hour across `2026-03-29` & `2026-10-25`), `pg_try_advisory_xact_lock` over PgBouncer (`R401`), per-tenant timeout isolation, zero-PII telemetry, and Bicep alert rule contract test (`R412`).**
-- **Contract, two-tenant isolation & E2E tests:** `0013` `upSql` -> `downSql` -> `upSql`; `tenant-config-usage.test.ts` covers `timeZone` and `documentGeneration.usage.retentionMonths`; two-tenant PgBouncer job isolation (`core/tests/isolation.test.ts`) across `[tenant-a, tenant-b]` + unregistered/forged tenant rejection; `docker run --rm <image> node dist/jobs/run-job.mjs --list` (`R404`); `npm run e2e` passes.
+- **Contract, two-tenant isolation & E2E tests:** `0014` `upSql` -> `downSql` -> `upSql`; `tenant-config-usage.test.ts` covers `timeZone` and `documentGeneration.usage.retentionMonths`; two-tenant PgBouncer job isolation (`core/tests/isolation.test.ts`) across `[tenant-a, tenant-b]` + unregistered/forged tenant rejection; `docker run --rm <image> node dist/jobs/run-job.mjs --list` (`R404`); `npm run e2e` passes.
 
 ## Help and documentation (rule 11)
 
@@ -73,7 +73,7 @@ Follows ADR 0030 §§1–8 verbatim (`R401`, `R403`, `R404`, `R412`, `R413`):
 
 ## Acceptance criteria
 
-- `guardedJob` (`system:<jobKey>`), `JOB_PERMISSIONS` (`MAX_KNOWN_GAPS = 0`), job-only permissions (`tenant:migrate`, `keydate:run_reminders`, `document_generation:purge_usage` — granted to no role), `job_runs` (`0013`) with `pg_try_advisory_xact_lock`, manual-run `job_runs` recording, `timeZone`, `usage-retention-purge`, bundled `dist/jobs/run-job.mjs`, and Bicep job failure alerts are all live and tested (`npm run ci`).
+- `guardedJob` (`system:<jobKey>`), `JOB_PERMISSIONS` (`MAX_KNOWN_GAPS = 0`), job-only permissions (`tenant:migrate`, `keydate:run_reminders`, `document_generation:purge_usage` — granted to no role), `job_runs` (`0014`) with `pg_try_advisory_xact_lock`, manual-run `job_runs` recording, `timeZone`, `usage-retention-purge`, bundled `dist/jobs/run-job.mjs`, and Bicep job failure alerts are all live and tested (`npm run ci`).
 
 ## Manual blockers
 
@@ -81,11 +81,11 @@ Follows ADR 0030 §§1–8 verbatim (`R401`, `R403`, `R404`, `R412`, `R413`):
 
 ## Rollback
 
-- Disable the Container Apps job schedule (or revert `s0-19-scheduler`) and run `downSql` for `0013_scheduler_job_runs_expand` if rolling back schema; remove `timeZone` from tenant configs first if set.
+- Disable the Container Apps job schedule (or revert `s0-19-scheduler`) and run `downSql` for `0014_scheduler_job_runs_expand` if rolling back schema; remove `timeZone` from tenant configs first if set.
 
 ## Pull request description must state
 
 - **Change class:** Core scheduler (`guardedJob`, `job_runs`, `dist/jobs/run-job.mjs`), RBAC job-only permissions (`tenant:migrate`, `keydate:run_reminders`, `document_generation:purge_usage`), and additive `timeZone` config.
 - **Justified scope beyond the stage-plan summary row (`R413`):** Explicitly notes (1) additive `timeZone` tenant configuration (required by ADR 0030 §§2, 4 `:44, :81-84` for DST-safe local-day scheduling) and (2) wiring `usage-retention-purge` (activating `documentGeneration.usage.retentionMonths`, reserved for `S0-19` in `S0-12`).
 - **Recorded exception to Rule 4 (ADR 0030 §3):** Confined strictly to `scripts/run-job.ts` (`dist/jobs/run-job.mjs`) and `guardedJob`; every downstream repository call still requires a valid `TenantContext` and runs `SET LOCAL ROLE`.
-- **Both hosting models & rollback:** Identical bundled job image runs in Model A and Model B over PgBouncer (`6432`, `migrate` on `5432`); reversible via `downSql` (`0013`) and schedule toggle.
+- **Both hosting models & rollback:** Identical bundled job image runs in Model A and Model B over PgBouncer (`6432`, `migrate` on `5432`); reversible via `downSql` (`0014`) and schedule toggle.

@@ -90,7 +90,18 @@ const TenantRegistryEntrySchema = z
         /^https:\/\/[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]\.vault\.azure\.net\/?$/i,
       ),
     packageDir: z.string().min(1),
-    timeZone: z.string().min(1).default('Europe/London'),
+    timeZone: z
+      .string()
+      .min(1)
+      .default('Europe/London')
+      .refine((tz) => {
+        try {
+          new Intl.DateTimeFormat(undefined, { timeZone: tz });
+          return true;
+        } catch {
+          return false;
+        }
+      }, 'Invalid IANA timeZone identifier.'),
     enabled: z.boolean(),
   })
   .strict();
@@ -293,6 +304,12 @@ export function loadActiveTenantRegistry(options?: {
   ).trim();
   const postgresHost =
     dedicatedHost || requireRegistryEnv('PLATFORM_POSTGRES_HOST');
+  const rawTimeZone =
+    typeof overlayJson.timeZone === 'string' && overlayJson.timeZone.trim()
+      ? overlayJson.timeZone.trim()
+      : typeof baseJson.timeZone === 'string' && baseJson.timeZone.trim()
+        ? baseJson.timeZone.trim()
+        : 'Europe/London';
 
   return validateTenantRegistry({
     schemaVersion: '1.0.0',
@@ -313,7 +330,7 @@ export function loadActiveTenantRegistry(options?: {
           environment,
         ),
         packageDir,
-        timeZone: 'Europe/London',
+        timeZone: rawTimeZone,
         enabled: true,
       },
     ],

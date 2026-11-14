@@ -26,7 +26,9 @@ import {
   createDefaultRbacConfig,
   DEFAULT_RBAC_ROLES,
   getPermissionRegistryEntry,
+  isJobOnlyPermissionKey,
   isRegisteredPermissionKey,
+  isUserAssignablePermissionKey,
 } from './registry';
 
 export interface MatterAccessRecord {
@@ -179,7 +181,7 @@ function resolveEffectiveRbacConfig(
       mergedRoles[roleKey] = {
         ...roleDef,
         permissions: (roleDef.permissions ?? []).filter(
-          isRegisteredPermissionKey,
+          isUserAssignablePermissionKey,
         ),
       };
     }
@@ -189,15 +191,23 @@ function resolveEffectiveRbacConfig(
       rbac.departmentGrants ?? {},
     )) {
       mergedDeptGrants[deptId] = (perms ?? []).filter(
-        isRegisteredPermissionKey,
+        isUserAssignablePermissionKey,
       );
     }
+
+    const mergedRelGrants = (
+      rbac.relationshipGrants ?? base.relationshipGrants
+    ).map((rule) => ({
+      ...rule,
+      permissions: (rule.permissions ?? []).filter(
+        isUserAssignablePermissionKey,
+      ),
+    }));
 
     return {
       roles: mergedRoles,
       departmentGrants: mergedDeptGrants,
-      relationshipGrants:
-        rbac.relationshipGrants ?? base.relationshipGrants,
+      relationshipGrants: mergedRelGrants,
       identityMapping: rbac.identityMapping ?? base.identityMapping,
     };
   }
@@ -334,7 +344,9 @@ export function migrateLegacyPersonOverrides(params: {
   legacyDocumentPermissions?: readonly DocumentPermission[] | null;
 }): PersonPermissionOverrides {
   const grant = new Set<PermissionKey>(
-    (params.existingOverrides?.grant ?? []).filter(isRegisteredPermissionKey),
+    (params.existingOverrides?.grant ?? []).filter(
+      isUserAssignablePermissionKey,
+    ),
   );
   const revoke = new Set<PermissionKey>(
     (params.existingOverrides?.revoke ?? []).filter(isRegisteredPermissionKey),
@@ -342,7 +354,7 @@ export function migrateLegacyPersonOverrides(params: {
 
   if (Array.isArray(params.legacyDocumentPermissions)) {
     for (const perm of params.legacyDocumentPermissions) {
-      if (isRegisteredPermissionKey(perm)) {
+      if (isUserAssignablePermissionKey(perm)) {
         grant.add(perm);
         revoke.delete(perm);
       }
@@ -422,7 +434,7 @@ export function resolvePermissions(
     input.context?.actorGroups,
   );
 
-  // 1. Role grants
+  // 1. Role grants (jobOnly permissions are never granted to any role or user — ADR 0030 §3)
   const baseGranted = new Set<PermissionKey>();
   for (const roleKey of authoritativeRoles) {
     const roleDef =
@@ -430,7 +442,7 @@ export function resolvePermissions(
       DEFAULT_RBAC_ROLES[roleKey as keyof typeof DEFAULT_RBAC_ROLES];
     if (roleDef?.permissions) {
       for (const perm of roleDef.permissions) {
-        if (isRegisteredPermissionKey(perm)) {
+        if (isUserAssignablePermissionKey(perm)) {
           baseGranted.add(perm);
         }
       }
@@ -445,7 +457,7 @@ export function resolvePermissions(
     const deptPerms = rbacConfig.departmentGrants[deptId];
     if (deptPerms?.length) {
       for (const perm of deptPerms) {
-        if (isRegisteredPermissionKey(perm)) {
+        if (isUserAssignablePermissionKey(perm)) {
           baseGranted.add(perm);
         }
       }
@@ -467,7 +479,7 @@ export function resolvePermissions(
           rel.isSupportingTargetFeeEarner);
       if (matches) {
         for (const perm of rule.permissions) {
-          if (isRegisteredPermissionKey(perm)) {
+          if (isUserAssignablePermissionKey(perm)) {
             baseGranted.add(perm);
           }
         }
@@ -485,7 +497,7 @@ export function resolvePermissions(
 
   const finalPermissions = new Set<PermissionKey>(baseGranted);
   for (const g of effectiveOverrides.grant) {
-    if (isRegisteredPermissionKey(g)) {
+    if (isUserAssignablePermissionKey(g)) {
       finalPermissions.add(g);
     }
   }
@@ -707,6 +719,16 @@ export function validateUserOverrideOrRoleMutation(params: {
   }
 
   for (const perm of params.addedPermissions ?? []) {
+    if (isJobOnlyPermissionKey(perm)) {
+      throw new AuthorisationError({
+        code: 'FORBIDDEN',
+        message: `Permission '${perm}' is reserved for scheduled background jobs (jobOnly) and cannot be granted to any user or role.`,
+        tenantId: actorPermissions.tenantId,
+        correlationId: actorPermissions.correlationId,
+        actorUserId: actorPermissions.actorUserId,
+        requiredPermission: perm,
+      });
+    }
     if (!actorPermissions.has(perm)) {
       throw new AuthorisationError({
         code: 'PRIVILEGE_ESCALATION_FORBIDDEN',
@@ -725,6 +747,16 @@ export function validateUserOverrideOrRoleMutation(params: {
       const roleDef = rolesMap[roleKey as keyof typeof rolesMap];
       if (!roleDef) continue;
       for (const perm of roleDef.permissions) {
+        if (isJobOnlyPermissionKey(perm)) {
+          throw new AuthorisationError({
+            code: 'FORBIDDEN',
+            message: `Cannot assign role '${roleKey}' because it contains jobOnly permission '${perm}'.`,
+            tenantId: actorPermissions.tenantId,
+            correlationId: actorPermissions.correlationId,
+            actorUserId: actorPermissions.actorUserId,
+            requiredPermission: perm,
+          });
+        }
         if (!actorPermissions.has(perm)) {
           throw new AuthorisationError({
             code: 'PRIVILEGE_ESCALATION_FORBIDDEN',

@@ -71,6 +71,7 @@ import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
   getExtensionHostLoadErrors,
+  getJobRunRepository,
   getPlatformExtensionHost,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
@@ -108,12 +109,14 @@ import {
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
   runMatterConflictSearchRecord,
+  runScheduledUsageRetentionPurgeJobSweep,
   saveMatterRecord,
   savePersonRecord,
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
   updatePersonPermissionOverrides,
 } from '../../src/server/services';
+import { guardedJob } from '../../src/server/authorize';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import {
   getFirmFinance,
@@ -9339,5 +9342,169 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     });
     expect(typeof tokenB).toBe('string');
     expect(tokenB).not.toBe(tokenA);
+  });
+
+  it('enforces two-tenant scheduled job isolation (tenant-alpha and tenant-bravo through PgBouncer) and rejects unregistered or disabled tenants (S0-19, ADR 0030, Rule 4 & Rule 9)', async () => {
+    const host = process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1';
+    const makeEntry = (tenantId: string, slug: string, enabled = true) => ({
+      tenantId,
+      slug,
+      environment: 'test' as const,
+      postgresHost: host,
+      postgresDatabaseName: `pg_tenant_${slug}_test`,
+      postgresRoleName: `role_tenant_${slug}_test`,
+      keyVaultUri: `https://kv-${slug.replace(/_/g, '')}-test.vault.azure.net/`,
+      packageDir: 'client-not-a-law-firm',
+      timeZone: 'Europe/London',
+      enabled,
+    });
+
+    const registry = {
+      schemaVersion: '1.0.0' as const,
+      environment: 'test' as const,
+      hostingMode: 'multi_tenant' as const,
+      tenants: [
+        makeEntry('tenant-alpha', 'tenant_alpha', true),
+        makeEntry('tenant-bravo', 'tenant_bravo', true),
+        makeEntry('tenant-disabled-test', 'tenant_disabled_test', false),
+      ],
+    };
+
+    // Attack 1: Unregistered tenant or empty tenant ID is refused by guardedJob with TENANCY_UNREGISTERED_JOB_TENANT
+    await expect(
+      guardedJob('key-date-reminders', '', async () => 'should-not-run', {
+        registry,
+      }),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_UNREGISTERED_JOB_TENANT',
+    });
+
+    await expect(
+      guardedJob(
+        'key-date-reminders',
+        'unregistered-evil-tenant',
+        async () => 'should-not-run',
+        { registry },
+      ),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_UNREGISTERED_JOB_TENANT',
+    });
+
+    // Attack 2: Disabled tenant in registry is refused by guardedJob
+    await expect(
+      guardedJob(
+        'key-date-reminders',
+        'tenant-disabled-test',
+        async () => 'should-not-run',
+        { registry },
+      ),
+    ).rejects.toMatchObject({
+      code: 'TENANCY_UNREGISTERED_JOB_TENANT',
+    });
+
+    // Build tenant contexts for tenant-alpha and tenant-bravo
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'tenant-alpha',
+        email: 'admin@alpha.example',
+        name: 'Alpha Admin',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-iso-job-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'tenant-bravo',
+        email: 'admin@bravo.example',
+        name: 'Bravo Admin',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-iso-job-bravo',
+    });
+
+    const jobRunRepo = getJobRunRepository();
+    const docRepo = getDocumentRepository();
+    await jobRunRepo.clearTenantJobRuns(ctxAlpha);
+    await jobRunRepo.clearTenantJobRuns(ctxBravo);
+
+    // Seed an expired usage event in tenant-alpha and a fresh usage event in tenant-bravo
+    const sweepNowIso = '2026-06-15T02:05:00.000Z';
+    await docRepo.putUsageEvent(ctxAlpha, {
+      id: 'UE-ISO-ALPHA-OLD',
+      tenantId: 'tenant-alpha',
+      templateId: 'TPL-ALPHA-1',
+      templateVersionId: 'TPLV-ALPHA-1',
+      versionNumber: 1,
+      eventType: 'generated',
+      occurredAt: '2020-01-10T10:00:00.000Z',
+      actorUserId: 'P-000001',
+      actorRoleKey: 'partner',
+      sourceEntityType: 'matter',
+      outputFormat: 'docx',
+      missingFieldKeys: [],
+      durationMs: 12,
+      correlationId: 'corr-ue-alpha-old',
+    });
+    await docRepo.putUsageEvent(ctxBravo, {
+      id: 'UE-ISO-BRAVO-RECENT',
+      tenantId: 'tenant-bravo',
+      templateId: 'TPL-BRAVO-1',
+      templateVersionId: 'TPLV-BRAVO-1',
+      versionNumber: 1,
+      eventType: 'generated',
+      occurredAt: '2026-06-14T10:00:00.000Z',
+      actorUserId: 'P-000001',
+      actorRoleKey: 'partner',
+      sourceEntityType: 'matter',
+      outputFormat: 'docx',
+      missingFieldKeys: [],
+      durationMs: 15,
+      correlationId: 'corr-ue-bravo-recent',
+    });
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(sweepNowIso));
+    let purgeSummary;
+    try {
+      purgeSummary = await runScheduledUsageRetentionPurgeJobSweep({
+        registry,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(purgeSummary.exitCode).toBe(0);
+    expect(purgeSummary.succeededTenants).toEqual(['tenant-alpha', 'tenant-bravo']);
+
+    const alphaRuns = await jobRunRepo.listJobRuns(ctxAlpha, {
+      jobKey: 'usage-retention-purge',
+    });
+    const bravoRuns = await jobRunRepo.listJobRuns(ctxBravo, {
+      jobKey: 'usage-retention-purge',
+    });
+    expect(alphaRuns).toHaveLength(1);
+    expect(alphaRuns[0]!.tenantId).toBe('tenant-alpha');
+    expect(alphaRuns[0]!.triggeredById).toBe('system:usage-retention-purge');
+    expect(alphaRuns[0]!.summary.purgedEventsCount).toBeGreaterThanOrEqual(1);
+
+    expect(bravoRuns).toHaveLength(1);
+    expect(bravoRuns[0]!.tenantId).toBe('tenant-bravo');
+    expect(bravoRuns[0]!.triggeredById).toBe('system:usage-retention-purge');
+    expect(bravoRuns[0]!.summary.purgedEventsCount).toBe(0);
+    expect(alphaRuns[0]!.correlationId).not.toBe(bravoRuns[0]!.correlationId);
+
+    // Tenant Bravo's recent usage event remains untouched in Tenant Bravo's database, and Tenant Alpha cannot see Bravo's job_runs
+    const bravoEventsAfter = await docRepo.listUsageEvents(ctxBravo);
+    expect(bravoEventsAfter.some((e) => e.id === 'UE-ISO-BRAVO-RECENT')).toBe(true);
+    expect(alphaRuns.some((r) => r.id === bravoRuns[0]!.id)).toBe(false);
   });
 });

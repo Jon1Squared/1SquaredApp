@@ -285,10 +285,16 @@ export type KeyDatePermissionKey =
   | 'keydate:waive'
   | 'keydate:configure';
 
+export type JobOnlyPermissionKey =
+  | 'tenant:migrate'
+  | 'keydate:run_reminders'
+  | 'document_generation:purge_usage';
+
 export type PermissionKey =
   | EmployeePermission
   | DocumentPermission
   | KeyDatePermissionKey
+  | JobOnlyPermissionKey
   | 'finance:view_matter'
   | 'finance:credit_control'
   | 'finance:manage_links'

@@ -608,18 +608,79 @@ export const PERMISSION_REGISTRY: Readonly<
     requiresMfa: true,
     sinceVersion: '1.1.0',
   },
+  'tenant:migrate': {
+    key: 'tenant:migrate',
+    domain: 'tenancy',
+    module: 'tenancy',
+    description:
+      'Execute per-tenant PostgreSQL schema migrations inside the guardedJob migration runner (ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
+  'keydate:run_reminders': {
+    key: 'keydate:run_reminders',
+    domain: 'keydate',
+    module: 'key_dates',
+    description:
+      'Execute the scheduled daily key-date reminder and escalation job across provisioned tenants (ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
+  'document_generation:purge_usage': {
+    key: 'document_generation:purge_usage',
+    domain: 'document_template',
+    module: 'document_generation',
+    description:
+      'Execute the scheduled document template usage retention purge job across provisioned tenants (ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(
   Object.keys(PERMISSION_REGISTRY) as PermissionKey[],
 );
 
+export const ALL_USER_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(
+  Object.values(PERMISSION_REGISTRY)
+    .filter((entry) => !entry.jobOnly)
+    .map((entry) => entry.key),
+);
+
+export const ALL_JOB_ONLY_PERMISSION_KEYS: readonly PermissionKey[] =
+  Object.freeze(
+    Object.values(PERMISSION_REGISTRY)
+      .filter((entry) => entry.jobOnly === true)
+      .map((entry) => entry.key),
+  );
+
 const PERMISSION_KEY_SET = new Set<string>(ALL_PERMISSION_KEYS);
+const JOB_ONLY_PERMISSION_KEY_SET = new Set<string>(
+  ALL_JOB_ONLY_PERMISSION_KEYS,
+);
 
 export function isRegisteredPermissionKey(
   value: string,
 ): value is PermissionKey {
   return PERMISSION_KEY_SET.has(value);
+}
+
+export function isJobOnlyPermissionKey(
+  value: string,
+): value is PermissionKey {
+  return JOB_ONLY_PERMISSION_KEY_SET.has(value);
+}
+
+export function isUserAssignablePermissionKey(
+  value: string,
+): value is PermissionKey {
+  return PERMISSION_KEY_SET.has(value) && !JOB_ONLY_PERMISSION_KEY_SET.has(value);
 }
 
 export function getPermissionRegistryEntry(
@@ -638,7 +699,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
     description:
       'Full platform, configuration, RBAC, and operational administration.',
     isBuiltIn: true,
-    permissions: [...ALL_PERMISSION_KEYS],
+    permissions: [...ALL_USER_PERMISSION_KEYS],
   },
   managing_partner: {
     key: 'managing_partner',
