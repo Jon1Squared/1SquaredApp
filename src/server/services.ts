@@ -251,6 +251,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import {
+  buildKeyDateReminderIdempotencyKey,
   carryEnquiryKeyDatesToMatter,
   createOrProposeKeyDate,
   evaluateMatterKeyDateClosureGate,
@@ -11025,14 +11026,9 @@ export interface RunEnquiryRetentionAnonymisationForTenantOptions {
   readonly triggerSource: 'scheduled' | 'manual';
   readonly actorId: string;
   readonly specificEnquiryId?: string;
-  readonly now?: Date;
-  readonly nowIso?: string;
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
   readonly statementTimeoutMs?: number;
-  readonly onAfterWorkBeforeCommit?: (
-    ctx: TenantContext,
-  ) => Promise<void> | void;
 }
 
 /**
@@ -11063,13 +11059,29 @@ export async function runEnquiryRetentionAnonymisationForTenant(
   const tenantConfig = getActiveTenantConfiguration();
   const effectiveTimeZone =
     opts.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
-  const now =
-    opts.now ?? (opts.nowIso ? new Date(opts.nowIso) : new Date());
+  const now = new Date();
   const nowIso = now.toISOString();
   const actorId =
     opts.triggerSource === 'scheduled'
       ? 'system:enquiry-retention-anonymise'
       : opts.actorId.trim();
+
+  if (opts.triggerSource === 'scheduled') {
+    if (
+      ctx.actorId !== 'system:enquiry-retention-anonymise' ||
+      !ctx.jobPermissions?.includes('enquiry:run_retention_anonymise')
+    ) {
+      throw new AuthorisationError({
+        code: 'FORBIDDEN',
+        message:
+          'Forbidden: Scheduled enquiry retention anonymisation requires system:enquiry-retention-anonymise with job-only permission enquiry:run_retention_anonymise.',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        actorUserId: ctx.actorId,
+        requiredPermission: 'enquiry:run_retention_anonymise',
+      });
+    }
+  }
 
   return getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'enquiry-retention-anonymise',
@@ -11187,10 +11199,6 @@ export async function runEnquiryRetentionAnonymisationForTenant(
         await appendTenantAuditEntries(ctx, auditEntries);
       }
 
-      if (opts.onAfterWorkBeforeCommit) {
-        await opts.onAfterWorkBeforeCommit(ctx);
-      }
-
       const scope: 'single' | 'bulk' = trimmedSpecificId ? 'single' : 'bulk';
       const summary: EnquiryRetentionAnonymisationJobSummary = {
         evaluatedCount,
@@ -11218,11 +11226,7 @@ export async function anonymiseExpiredEnquiries(
   byId: string,
   specificEnquiryId?: string,
   options?: {
-    now?: Date;
-    nowIso?: string;
-    timeZone?: string;
     tenantCtx?: TenantContext | null;
-    onAfterWorkBeforeCommit?: (ctx: TenantContext) => Promise<void> | void;
   },
 ): Promise<number> {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId, {
@@ -11232,10 +11236,6 @@ export async function anonymiseExpiredEnquiries(
     triggerSource: 'manual',
     actorId: byId,
     specificEnquiryId,
-    now: options?.now,
-    nowIso: options?.nowIso,
-    timeZone: options?.timeZone,
-    onAfterWorkBeforeCommit: options?.onAfterWorkBeforeCommit,
   });
   if (outcome.outcome === 'executed') {
     return outcome.result.anonymisedCount;
@@ -15732,6 +15732,7 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   keyDatesToUpsert?: readonly KeyDate[];
   notApplicableToUpsert?: readonly KeyDateNotApplicable[];
   reminderStatesToUpsert?: KeyDateReminderState[];
+  reminderStatesToDeleteKeyDateIds?: readonly string[];
   calendarSyncsToUpsert?: readonly KeyDateCalendarSync[];
   tasksToUpsert?: Task[];
   tasksToDeleteIds?: readonly string[];
@@ -15742,6 +15743,9 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   const keyDateRepo = getKeyDateRepository();
   const taskRepo = getTaskWorkflowRepository();
   await keyDateRepo.withTenantTransaction(params.ctx, async (tx) => {
+    for (const deletedKdId of params.reminderStatesToDeleteKeyDateIds ?? []) {
+      await keyDateRepo.removeReminderState(params.ctx, deletedKdId);
+    }
     for (const deletedId of params.tasksToDeleteIds ?? []) {
       await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
         params.ctx.tenantId,
@@ -16058,33 +16062,41 @@ export async function createOrProposeKeyDateRecord(
     let deletedTaskIds: string[] = [];
 
     if (kd.status === 'confirmed') {
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      const existingNaForMatter = kd.matterId
+        ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
+        : [];
+      const isMarkedNotApplicable = existingNaForMatter.some(
+        (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
       );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: actor.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      });
-      changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
+      if (!isMarkedNotApplicable) {
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+      }
     }
 
     await syncKeyDateToOutlookCalendar({
@@ -16176,33 +16188,41 @@ export async function proposeProvisionalKeyDateRecord(
     let changedTasks: Task[] = [];
     let deletedTaskIds: string[] = [];
     if (kd.status === 'confirmed') {
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+      const existingNaForMatter = kd.matterId
+        ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
+        : [];
+      const isMarkedNotApplicable = existingNaForMatter.some(
+        (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
       );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: actor.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      });
-      changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
+      if (!isMarkedNotApplicable) {
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+      }
     }
 
     await syncKeyDateToOutlookCalendar({
@@ -16334,23 +16354,31 @@ export async function verifyProposedKeyDateRecord(
     const beforeTaskJsonById = new Map(
       storeTasks.map((t) => [t.id, JSON.stringify(t)]),
     );
+    const existingNaForMatter = kd.matterId
+      ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, verifier.id)
+      : [];
+    const isMarkedNotApplicable = existingNaForMatter.some(
+      (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
+    );
     let pendingTaskIdx = 0;
-    syncReminderForConfirmedKeyDate({
-      keyDate: kd,
-      config,
-      tasks: storeTasks,
-      reminderStates: reminderStatesWorking,
-      matters: matter ? [matter] : [],
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      todayIso,
-      nowIso,
-      actorId: verifier.id,
-      tenantId: ctx.tenantId,
-      nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      transferredFromKeyDateId: kd.supersedesKeyDateId,
-    });
+    if (!isMarkedNotApplicable) {
+      syncReminderForConfirmedKeyDate({
+        keyDate: kd,
+        config,
+        tasks: storeTasks,
+        reminderStates: reminderStatesWorking,
+        matters: matter ? [matter] : [],
+        people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        todayIso,
+        nowIso,
+        actorId: verifier.id,
+        tenantId: ctx.tenantId,
+        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        transferredFromKeyDateId: kd.supersedesKeyDateId,
+      });
+    }
 
     await syncKeyDateToOutlookCalendar({
       keyDate: kd,
@@ -16918,9 +16946,35 @@ export async function recordKeyDateNotApplicableRecord(
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
 
+    const matterKeyDates = await keyDateRepo.listKeyDatesForMatter(
+      ctx,
+      matter.id,
+      actor.id,
+    );
+    const matchingKeyDateIds = matterKeyDates
+      .filter((kd) => kd.keyDateTypeId === input.keyDateTypeId)
+      .map((kd) => kd.id);
+    const deletedTaskIds: string[] = [];
+    if (matchingKeyDateIds.length > 0) {
+      const taskRepo = getTaskWorkflowRepository();
+      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+      const idempotencyKeys = new Set(
+        matchingKeyDateIds.map((kdId) =>
+          buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId),
+        ),
+      );
+      for (const t of storeTasks) {
+        if (t.idempotencyKey && idempotencyKeys.has(t.idempotencyKey)) {
+          deletedTaskIds.push(t.id);
+        }
+      }
+    }
+
     await commitKeyDateDomainWritesInPostgres({
       ctx,
       notApplicableToUpsert: [rec],
+      reminderStatesToDeleteKeyDateIds: matchingKeyDateIds,
+      tasksToDeleteIds: deletedTaskIds,
       auditEntries: stagedAudit,
     });
 
@@ -17083,11 +17137,7 @@ export interface ExecuteKeyDateRemindersForTenantOptions {
   readonly triggeredById: string;
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
-  readonly nowIso?: string;
   readonly statementTimeoutMs?: number;
-  readonly onAfterWorkBeforeCommit?: (
-    ctx: TenantContext,
-  ) => Promise<void> | void;
 }
 
 /**
@@ -17114,7 +17164,8 @@ export async function executeKeyDateRemindersForTenant(
   const tenantConfig = getActiveTenantConfiguration();
   const effectiveTimeZone =
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
-  const nowIso = options.nowIso ?? new Date().toISOString();
+  const now = new Date();
+  const nowIso = now.toISOString();
 
   return getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'key-date-reminders',
@@ -17122,7 +17173,7 @@ export async function executeKeyDateRemindersForTenant(
     triggeredById: options.triggeredById,
     timeZone: effectiveTimeZone,
     targetLocalHour: options.defaultRunHourLocal ?? 2,
-    now: new Date(nowIso),
+    now,
     statementTimeoutMs: options.statementTimeoutMs,
     work: async ({ localDate }) => {
       const keyDateRepo = getKeyDateRepository();
@@ -17152,8 +17203,8 @@ export async function executeKeyDateRemindersForTenant(
         getKeyDatesConfig({ ctx, userId: options.triggeredById }),
         keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
         keyDateRepo.listAllReminderStatesUnfilteredForScheduler(ctx),
-        keyDateRepo.listAllVisibleNotApplicable(ctx, options.triggeredById),
-        keyDateRepo.listAllVisibleCalendarSyncs(ctx, options.triggeredById),
+        keyDateRepo.listAllNotApplicableUnfilteredForScheduler(ctx),
+        keyDateRepo.listAllCalendarSyncsUnfilteredForScheduler(ctx),
       ]);
 
       if (options.triggerSource === 'manual') {
@@ -17213,6 +17264,7 @@ export async function executeKeyDateRemindersForTenant(
             config,
             keyDates: keyDatesWorking,
             reminderStates: reminderStatesWorking,
+            notApplicable: notApplicableWorking,
             tasks: storeTasks,
             matters,
             teams,
@@ -17295,10 +17347,6 @@ export async function executeKeyDateRemindersForTenant(
         values,
       });
 
-      if (options.onAfterWorkBeforeCommit) {
-        await options.onAfterWorkBeforeCommit(ctx);
-      }
-
       const summary: KeyDateRemindersJobSummary = {
         evaluatedCount: result.evaluatedCount,
         stagesAdvancedCount: result.stagesAdvancedCount,
@@ -17328,11 +17376,7 @@ export interface ExecuteUsageRetentionPurgeForTenantOptions {
   readonly triggeredById?: string;
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
-  readonly nowIso?: string;
   readonly statementTimeoutMs?: number;
-  readonly onAfterWorkBeforeCommit?: (
-    ctx: TenantContext,
-  ) => Promise<void> | void;
 }
 
 /**
@@ -17354,7 +17398,8 @@ export async function executeUsageRetentionPurgeForTenant(
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const triggeredById =
     options.triggeredById?.trim() || 'system:usage-retention-purge';
-  const nowIso = options.nowIso ?? new Date().toISOString();
+  const now = new Date();
+  const nowIso = now.toISOString();
 
   return getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'usage-retention-purge',
@@ -17362,7 +17407,7 @@ export async function executeUsageRetentionPurgeForTenant(
     triggeredById,
     timeZone: effectiveTimeZone,
     targetLocalHour: options.defaultRunHourLocal ?? 2,
-    now: new Date(nowIso),
+    now,
     statementTimeoutMs: options.statementTimeoutMs,
     work: async ({ localDate }) => {
       const docRepo = getDocumentRepository();
@@ -17395,10 +17440,6 @@ export async function executeUsageRetentionPurgeForTenant(
         },
       ]);
 
-      if (options.onAfterWorkBeforeCommit) {
-        await options.onAfterWorkBeforeCommit(ctx);
-      }
-
       const summary: UsageRetentionPurgeJobSummary = {
         purgedEventsCount: purged.purgedEventsCount,
         purgedSummaryBucketsCount: purged.purgedSummaryBucketsCount,
@@ -17415,13 +17456,9 @@ export async function executeUsageRetentionPurgeForTenant(
 
 export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?: {
   readonly registry?: TenantRegistry;
-  readonly nowIso?: string;
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
-  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
-    Record<string, (ctx: TenantContext) => Promise<void> | void>
-  >;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -17449,10 +17486,7 @@ export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?
             actorId: 'system:enquiry-retention-anonymise',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
-            nowIso: options?.nowIso,
             statementTimeoutMs: timeoutMs,
-            onAfterWorkBeforeCommit:
-              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
           }),
         {
           registry,
@@ -17504,13 +17538,9 @@ export interface ScheduledTenantJobSweepSummary {
 
 export async function runScheduledKeyDateRemindersJobSweep(options?: {
   readonly registry?: TenantRegistry;
-  readonly nowIso?: string;
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
-  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
-    Record<string, (ctx: TenantContext) => Promise<void> | void>
-  >;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -17538,10 +17568,7 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
             triggeredById: 'system:key-date-reminders',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
-            nowIso: options?.nowIso,
             statementTimeoutMs: timeoutMs,
-            onAfterWorkBeforeCommit:
-              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
           }),
         {
           registry,
@@ -17576,13 +17603,9 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
 
 export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
   readonly registry?: TenantRegistry;
-  readonly nowIso?: string;
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
-  readonly onAfterWorkBeforeCommitByTenant?: Readonly<
-    Record<string, (ctx: TenantContext) => Promise<void> | void>
-  >;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -17610,10 +17633,7 @@ export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
             triggeredById: 'system:usage-retention-purge',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
-            nowIso: options?.nowIso,
             statementTimeoutMs: timeoutMs,
-            onAfterWorkBeforeCommit:
-              options?.onAfterWorkBeforeCommitByTenant?.[entry.tenantId],
           }),
         {
           registry,
@@ -17652,8 +17672,6 @@ export async function runKeyDateReminderSchedulerRecord(
     session?: VerifiedEntraSessionPayload | null;
     byId: string;
     mfaVerified?: boolean;
-    nowIso?: string;
-    timeZone?: string;
   } | null,
 ): Promise<{
   ok: boolean;
@@ -17787,8 +17805,6 @@ export async function runKeyDateReminderSchedulerRecord(
     const outcome = await executeKeyDateRemindersForTenant(effectiveTenantCtx!, {
       triggerSource: 'manual',
       triggeredById: actor.id,
-      nowIso: options?.nowIso,
-      timeZone: options?.timeZone,
     });
 
     if (outcome.outcome === 'executed') {
