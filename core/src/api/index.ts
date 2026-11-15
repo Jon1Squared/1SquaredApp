@@ -840,6 +840,7 @@ export interface TenantConfiguration {
     rateSourceMode: 'application_table' | 'pms_when_linked';
     allowMatterRateOverrides: boolean;
     partnerSignOffThresholdGbp: number;
+    vatRatePercent: number;
     rateCards: RateCardConfigEntry[];
     disbursementPresets: DisbursementPresetConfigEntry[];
   };
@@ -1798,4 +1799,6 @@ export interface FirmAuditPageResult {
   entries: FirmAuditEntryRecord[];
   nextBeforeSeq: number | null;
 }
+
+export * from '../domain/money/index';
 

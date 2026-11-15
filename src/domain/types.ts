@@ -1247,6 +1247,8 @@ export interface QuoteDisbursement {
   description: string;
   amountExVat: number;
   vatApplicable: boolean;
+  vatAmount?: number;
+  vatOverridden?: boolean;
 }
 
 export interface QuoteFollowUpEntry {
@@ -1264,7 +1266,9 @@ export interface QuoteVersionSnapshot {
   feeBasis: QuoteFeeBasis;
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
+  vatRatePercent?: number;
   vatAmount: number;
+  vatOverridden?: boolean;
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
   scope: string;
@@ -1273,6 +1277,7 @@ export interface QuoteVersionSnapshot {
   createdAt: string;
   sentAt: string | null;
   supersededAt: string;
+  capturedAt?: string;
   byId: string;
   revisionNote?: string;
 }
@@ -1315,10 +1320,12 @@ export interface Quote {
   feeBasis: QuoteFeeBasis;
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
+  vatRatePercent?: number;
   vatAmount: number;
   vatOverridden?: boolean;
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
+  capturedAt?: string;
   feeEarnerId: string; // P-xxxxxx
   assignedTeamId: string | null; // TM-xxxxxx
   validUntil: string; // YYYY-MM-DD
@@ -1697,6 +1704,8 @@ export interface MatterDisbursementEntry {
   description: string;
   amountGbp: number;
   vatApplicable?: boolean;
+  vatAmountGbp?: number;
+  vatOverridden?: boolean;
 }
 
 export interface MatterCostsSnapshot {
@@ -1710,12 +1719,18 @@ export interface MatterCostsSnapshot {
   customGrades?: CustomGradeRateRow[];
   totalEstimateGbp: number | null;
   agreedCapGbp?: number | null;
+  vatRatePercent?: number;
   disbursements: MatterDisbursementEntry[];
   disbursementsTotalGbp: number;
+  disbursementsVatGbp?: number;
+  disbursementsTotalIncVatGbp?: number;
+  estimatedFeeVatGbp?: number | null;
+  totalIncVatGbp?: number | null;
   paymentOnAccountRequired: 'Yes' | 'No' | '';
   paymentOnAccountAmountGbp: number | null;
   notes?: string;
   updatedAt?: string;
+  capturedAt?: string;
 }
 
 /**
@@ -1731,6 +1746,8 @@ export interface MatterCostsConfig {
   pmsLinkActive: boolean; // Whether a live/imported PMS rate link is enabled
   pmsLastSyncedAt?: string | null;
   allowMatterRateOverrides: boolean; // Whether fee earners can override looked-up rates on a matter
+  partnerSignOffThresholdGbp: number; // Fee estimate or agreed cap threshold requiring Partner sign-off
+  vatRatePercent: number; // Standard UK VAT percentage (0..100, default 20)
   defaultPaymentOnAccount: 'Yes' | 'No' | '';
   defaultPaymentOnAccountAmountGbp?: number;
   rateCards: RateCardEntry[];

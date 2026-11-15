@@ -1013,32 +1013,40 @@ export const TenantConfigurationSchema = z
           .enum(['application_table', 'pms_when_linked'])
           .default('pms_when_linked')
           .describe(
-            '[x-reserved:S0-23] Source of default fee-earner hourly rates (reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23)',
+            'Source of default fee-earner hourly rates for new and refreshed matter costs snapshots',
           ),
         allowMatterRateOverrides: z
           .boolean()
           .default(true)
           .describe(
-            '[x-reserved:S0-23] Whether fee earners can override standard rates on a matter (reserved for S0-23)',
+            'Whether fee earners can override standard rates on an individual matter',
           ),
         partnerSignOffThresholdGbp: z
           .number()
           .nonnegative()
           .default(25000)
           .describe(
-            '[x-reserved:S0-23] Fee estimate or cap threshold in GBP requiring Partner cost sign-off (reserved for S0-23)',
+            'Fee estimate or cap threshold in GBP requiring Partner cost sign-off',
+          ),
+        vatRatePercent: z
+          .number()
+          .min(0)
+          .max(100)
+          .default(20)
+          .describe(
+            'Standard UK VAT percentage applied to legal fees and taxable disbursements unless overridden on a line',
           ),
         rateCards: z
           .array(RateCardEntrySchema)
           .default([])
           .describe(
-            '[x-reserved:S0-23] Tenant-level rate cards (reserved for S0-23)',
+            'Default tenant-level rate cards when no runtime module configuration override is stored',
           ),
         disbursementPresets: z
           .array(DisbursementPresetSchema)
           .default([])
           .describe(
-            '[x-reserved:S0-23] Tenant-level disbursement presets (reserved for S0-23)',
+            'Default tenant-level disbursement presets when no runtime module configuration override is stored',
           ),
       })
       .strict(),
@@ -1534,7 +1542,7 @@ export const TenantConfigurationSchema = z
           .default(false)
           .optional()
           .describe(
-            '[x-reserved:S0-25] Whether scheduled permission reconciliation automatically remediates detected drift (default: false; reserved for S0-25)',
+            '[x-reserved:backlog] Whether scheduled permission reconciliation automatically remediates detected drift (default: false; reserved for backlog)',
           ),
         defaultPolicy: z
           .object({

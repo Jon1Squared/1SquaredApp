@@ -72,7 +72,12 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import type { WorkTypesConfiguration } from '@platform/core-api';
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type WorkTypesConfiguration,
+} from '@platform/core-api';
 import {
   isWorkTypeChoiceActive,
   resolveDepartmentForPracticeArea,
@@ -84,6 +89,8 @@ import {
 } from '@/domain/workTypeConfig';
 import {
   calculateDisbursementsTotal,
+  calculateMatterDisbursementsBreakdown,
+  calculateMatterSnapshotTotals,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
   mapWorkBasisToBillingBasisId,
@@ -1096,6 +1103,12 @@ export function MatterFormClient({
   });
 
   // 2 · MATTER COSTS state (initialised from existing matter, quote, or client-customised rate card)
+  const hasExistingMatterCostsSnapshot = Boolean(
+    existing?.fieldValues?.['matterCosts'] &&
+      typeof existing.fieldValues['matterCosts'] === 'object' &&
+      (existing.fieldValues['matterCosts'] as Partial<MatterCostsSnapshot>).workBasis,
+  );
+
   const initialMatterCosts = useMemo(
     () =>
       resolveMatterCostsSnapshot({
@@ -1108,6 +1121,12 @@ export function MatterFormClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
+
+  const [matterVatRatePercent, setMatterVatRatePercent] = useState<number>(
+    () => initialMatterCosts.vatRatePercent ?? costsConfig.vatRatePercent ?? 20,
+  );
+  const [refreshCostsRates, setRefreshCostsRates] = useState<boolean>(false);
+  const [refreshCostsVatRate, setRefreshCostsVatRate] = useState<boolean>(false);
 
   const [costWorkBasis, setCostWorkBasis] = useState<MatterCostWorkBasis>(
     initialMatterCosts.workBasis,
@@ -1166,6 +1185,7 @@ export function MatterFormClient({
       activeRateCards.find((rc) => rc.id === cardId) ??
       activeRateCards[0];
     if (!card) return;
+    setRefreshCostsRates(true);
     setCostRateCardId(card.id);
     const usePms =
       preferSource === 'pms' ||
@@ -1210,7 +1230,7 @@ export function MatterFormClient({
   useEffect(() => {
     if (prevCostPracticeAreaRef.current === practiceAreaId) return;
     prevCostPracticeAreaRef.current = practiceAreaId;
-    if (costRateSource === 'custom_override') return;
+    if (hasExistingMatterCostsSnapshot || costRateSource === 'custom_override') return;
     const lookedUp = lookupRatesForMatter({
       config: costsConfig,
       practiceAreaId,
@@ -1304,6 +1324,31 @@ export function MatterFormClient({
     return Number.isFinite(n) && n > 0 ? n : null;
   }, [feeEstimateGbp]);
 
+  const matterCostsTotals = useMemo(() => {
+    const disbBreakdown = calculateMatterDisbursementsBreakdown(
+      costDisbursements,
+      matterVatRatePercent,
+    );
+    const snapTotals = calculateMatterSnapshotTotals({
+      totalEstimateGbp: numericFeeEstimateGbp,
+      disbursements: costDisbursements,
+      vatRatePercent: matterVatRatePercent,
+    });
+    const feeMinor = poundsToMinorUnits((numericFeeEstimateGbp ?? 0).toFixed(2));
+    const disbMinor = poundsToMinorUnits(disbBreakdown.netGbp.toFixed(2));
+    const feeVatMinor = poundsToMinorUnits((snapTotals.estimatedFeeVatGbp ?? 0).toFixed(2));
+    const disbVatMinor = poundsToMinorUnits(snapTotals.disbursementsVatGbp.toFixed(2));
+    const combinedExVatGbp = minorUnitsToPounds(sumMinorUnits([feeMinor, disbMinor]));
+    const combinedVatGbp = minorUnitsToPounds(sumMinorUnits([feeVatMinor, disbVatMinor]));
+    return {
+      ...snapTotals,
+      combinedExVatGbp,
+      combinedVatGbp,
+      combinedIncVatGbp:
+        snapTotals.totalIncVatGbp ?? minorUnitsToPounds(sumMinorUnits([feeMinor, disbMinor, feeVatMinor, disbVatMinor])),
+    };
+  }, [costDisbursements, matterVatRatePercent, numericFeeEstimateGbp]);
+
   const numericAgreedCapGbp = useMemo(() => {
     const n = Number(String(agreedFeeCapGbp).replace(/[£,\s]/g, ''));
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -1336,7 +1381,10 @@ export function MatterFormClient({
     paymentOnAccountRequired,
   ]);
 
-  function buildMatterCostsSnapshotPayload(): MatterCostsSnapshot {
+  function buildMatterCostsSnapshotPayload(): MatterCostsSnapshot & {
+    refreshRates?: boolean;
+    refreshVatRate?: boolean;
+  } {
     const finalDisbursements = [...costDisbursements];
     if (newDisbursementDescription.trim()) {
       const pendingAmt = Number(newDisbursementAmount);
@@ -1347,7 +1395,11 @@ export function MatterFormClient({
         vatApplicable: newDisbursementVat,
       });
     }
-    const disbTotal = calculateDisbursementsTotal(finalDisbursements);
+    const snapTotals = calculateMatterSnapshotTotals({
+      totalEstimateGbp: numericFeeEstimateGbp,
+      disbursements: finalDisbursements,
+      vatRatePercent: matterVatRatePercent,
+    });
     return {
       workBasis: costWorkBasis,
       rateCardId: selectedRateCard?.id ?? costRateCardId ?? 'RC-DEFAULT',
@@ -1359,13 +1411,21 @@ export function MatterFormClient({
       customGrades: customGradeRates,
       totalEstimateGbp: numericFeeEstimateGbp,
       agreedCapGbp: costWorkBasis === 'capped' ? numericAgreedCapGbp : null,
+      vatRatePercent: matterVatRatePercent,
       disbursements: finalDisbursements,
-      disbursementsTotalGbp: disbTotal,
+      disbursementsTotalGbp: snapTotals.disbursementsTotalGbp,
+      disbursementsVatGbp: snapTotals.disbursementsVatGbp,
+      disbursementsTotalIncVatGbp: snapTotals.disbursementsTotalIncVatGbp,
+      estimatedFeeVatGbp: snapTotals.estimatedFeeVatGbp,
+      totalIncVatGbp: snapTotals.totalIncVatGbp,
       paymentOnAccountRequired,
       paymentOnAccountAmountGbp:
         paymentOnAccountRequired === 'Yes' ? numericPoaAmountGbp : null,
       notes: costNotes.trim() || undefined,
+      capturedAt: initialMatterCosts.capturedAt,
       updatedAt: new Date().toISOString(),
+      ...(refreshCostsRates ? { refreshRates: true } : {}),
+      ...(refreshCostsVatRate ? { refreshVatRate: true } : {}),
     };
   }
 
@@ -7127,6 +7187,11 @@ export function MatterFormClient({
                           }}
                         >
                           Rates are looked up automatically for the selected Department from the Application Rates Table or PMS Rate Table (when linked).
+                          {!costsConfig.allowMatterRateOverrides ? (
+                            <span style={{ display: 'block', marginTop: 2, fontWeight: 600 }}>
+                              Matter-level hourly rate overrides are locked by firm configuration.
+                            </span>
+                          ) : null}
                         </div>
                       </div>
 
@@ -7254,22 +7319,40 @@ export function MatterFormClient({
                         </select>
                       </div>
 
-                      <StatusPill
-                        label={
-                          costRateSource === 'pms'
-                            ? 'Source: PMS Fee Earner Rates'
-                            : costRateSource === 'custom_override'
-                              ? 'Source: Matter Custom Rate Override'
-                              : 'Source: Application Rates Table'
-                        }
-                        tone={
-                          costRateSource === 'pms'
-                            ? 'positive'
-                            : costRateSource === 'custom_override'
-                              ? 'warning'
-                              : 'neutral'
-                        }
-                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <StatusPill
+                          label={
+                            costRateSource === 'pms'
+                              ? 'Source: PMS Fee Earner Rates'
+                              : costRateSource === 'custom_override'
+                                ? 'Source: Matter Custom Rate Override'
+                                : 'Source: Application Rates Table'
+                          }
+                          tone={
+                            costRateSource === 'pms'
+                              ? 'positive'
+                              : costRateSource === 'custom_override'
+                                ? 'warning'
+                                : 'neutral'
+                          }
+                        />
+                        {hasExistingMatterCostsSnapshot && !isReadOnlyFeeEarner ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            style={{ borderRadius: 999, height: 28, fontSize: 12 }}
+                            onClick={() =>
+                              applyRateCardToState(
+                                selectedRateCard?.id ?? costRateCardId,
+                                costRateSource === 'pms' ? 'pms' : 'app_table',
+                              )
+                            }
+                          >
+                            <RefreshCw size={12} />
+                            <span>Refresh rates from card</span>
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
 
                     {/* Partner / Associate / Trainee Hourly Rates Table */}
@@ -7807,7 +7890,7 @@ export function MatterFormClient({
                                 })
                               }
                             />
-                            <span>+ VAT</span>
+                            <span>+ {matterVatRatePercent}% VAT</span>
                           </label>
                           {!isReadOnlyFeeEarner ? (
                             <button
@@ -7880,7 +7963,7 @@ export function MatterFormClient({
                           checked={newDisbursementVat}
                           onChange={(e) => setNewDisbursementVat(e.target.checked)}
                         />
-                        <span>+ VAT</span>
+                        <span>+ {matterVatRatePercent}% VAT</span>
                       </label>
                       <button
                         type="button"
@@ -7908,7 +7991,7 @@ export function MatterFormClient({
                       fontSize: 12.5,
                     }}
                   >
-                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span style={{ color: 'var(--text-secondary)' }}>
                         Professional fees estimate:{' '}
                         <strong style={{ color: 'var(--text-primary)' }}>
@@ -7923,17 +8006,49 @@ export function MatterFormClient({
                           {formatGbp(disbursementsTotalGbp)}
                         </strong>
                       </span>
+                      <span style={{ color: 'var(--text-secondary)' }}>
+                        VAT (@ {matterVatRatePercent}%):{' '}
+                        <strong style={{ color: 'var(--text-primary)' }}>
+                          {formatGbp(matterCostsTotals.combinedVatGbp, true)}
+                        </strong>
+                      </span>
+                      {hasExistingMatterCostsSnapshot &&
+                      !isReadOnlyFeeEarner &&
+                      matterVatRatePercent !== costsConfig.vatRatePercent ? (
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          style={{ fontSize: 11.5, padding: '2px 8px', height: 24 }}
+                          onClick={() => {
+                            setMatterVatRatePercent(costsConfig.vatRatePercent);
+                            setRefreshCostsVatRate(true);
+                          }}
+                        >
+                          Update VAT to {costsConfig.vatRatePercent}%
+                        </button>
+                      ) : null}
                     </div>
-                    <span
-                      style={{
-                        fontWeight: 700,
-                        fontSize: 13.5,
-                        color: 'var(--text-primary)',
-                      }}
-                    >
-                      Combined total estimate (ex VAT):{' '}
-                      {formatGbp((numericFeeEstimateGbp ?? 0) + disbursementsTotalGbp)}
-                    </span>
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 13,
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        Ex VAT: {formatGbp(matterCostsTotals.combinedExVatGbp, true)}
+                      </span>
+                      <span
+                        style={{
+                          fontWeight: 700,
+                          fontSize: 13.5,
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        Combined total estimate (inc VAT):{' '}
+                        {formatGbp(matterCostsTotals.combinedIncVatGbp, true)}
+                      </span>
+                    </div>
                   </div>
                 </div>
 

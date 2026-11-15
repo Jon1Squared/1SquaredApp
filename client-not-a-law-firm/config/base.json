@@ -26,6 +26,7 @@
     "rateSourceMode": "pms_when_linked",
     "allowMatterRateOverrides": true,
     "partnerSignOffThresholdGbp": 25000,
+    "vatRatePercent": 20,
     "rateCards": [
       {
         "id": "RC-DEFAULT",

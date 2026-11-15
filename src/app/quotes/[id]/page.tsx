@@ -36,6 +36,7 @@ export default async function QuoteDetailPage({
         orgStructure={snap.orgStructure}
         currentUserId={snap.currentUserId}
         tenantId={snap.tenantId}
+        tenantVatRatePercent={snap.matterCostsConfig.vatRatePercent}
         initialAction={sp.action ?? null}
       />
     );

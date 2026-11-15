@@ -156,6 +156,14 @@ export function MatterCostsAdminSection({
   }
 
   function handleSaveConfig() {
+    if (!Number.isFinite(config.vatRatePercent) || config.vatRatePercent < 0 || config.vatRatePercent > 100) {
+      showToast('Standard VAT rate must be a percentage between 0 and 100.');
+      return;
+    }
+    if (!Number.isFinite(config.partnerSignOffThresholdGbp) || config.partnerSignOffThresholdGbp < 0) {
+      showToast('Partner cost sign-off threshold must be £0 or greater.');
+      return;
+    }
     startTransition(async () => {
       const saved = await saveMatterCostsConfigAction(config);
       if (isActionDenied(saved)) { showToast(saved.message); return; }
@@ -443,6 +451,57 @@ export function MatterCostsAdminSection({
                 </span>
               </label>
             </div>
+          </div>
+
+          <div className="field-group">
+            <label className="field-label" htmlFor="mc-vat-rate-percent">
+              Standard VAT rate (%)
+            </label>
+            <input
+              id="mc-vat-rate-percent"
+              type="number"
+              className="field-input"
+              min={0}
+              max={100}
+              step={0.5}
+              value={config.vatRatePercent}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const parsed = raw === '' ? 0 : Number(raw);
+                setConfig((prev) => ({
+                  ...prev,
+                  vatRatePercent: Number.isFinite(parsed) ? parsed : 0,
+                }));
+              }}
+            />
+            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+              Applied to new quotes and matter cost snapshots unless overridden on a line. Existing quotes and signed-off matters keep their captured VAT rate.
+            </span>
+          </div>
+
+          <div className="field-group">
+            <label className="field-label" htmlFor="mc-partner-signoff-threshold">
+              Partner cost sign-off threshold (£)
+            </label>
+            <input
+              id="mc-partner-signoff-threshold"
+              type="number"
+              className="field-input"
+              min={0}
+              step={500}
+              value={config.partnerSignOffThresholdGbp}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const parsed = raw === '' ? 0 : Number(raw);
+                setConfig((prev) => ({
+                  ...prev,
+                  partnerSignOffThresholdGbp: Number.isFinite(parsed) ? parsed : 0,
+                }));
+              }}
+            />
+            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+              Estimated fees or total matter costs at or above this figure require partner cost sign-off before opening.
+            </span>
           </div>
         </div>
       </div>
