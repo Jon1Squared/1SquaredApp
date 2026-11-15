@@ -1,7 +1,7 @@
 # ADR 0034: Fee Arrangements, Negotiated Rate Precedence, CFA/DBA Caps and Money Handling
 
 - **Date:** 2026-11-15
-- **Status:** Proposed
+- **Status:** Accepted
 - **Roadmap:** Stage 0 decision D10, slices S0-23 and S0-28 (`docs/roadmap/stage-0-plan.md`); backlog item 30
 - **Builds on:** [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases and repositories), S0-17c (catalogue and costs configuration in PostgreSQL), S0-22 (work-type configuration)
 
@@ -16,7 +16,7 @@ Backlog item 30 (*Rates and charging arrangements*) requires:
 At commit `6940cdc` on `develop`:
 - `src/domain/matterCosts.ts:21-49, 318-380` supports only three work bases (`'hourly_rates' | 'fixed_fee' | 'capped'`) and looks up rates only from `MatterCostsConfig.rateCards` by practice area (`RC-DEFAULT`, `RC-CORP`, `RC-PROP`, `RC-EMP`, `RC-LIT`, `RC-PC`).
 - Quotes (`src/domain/quotes.ts` and `src/domain/types.ts:1228-1336`) hard-code VAT at 20% (`0.2`) using floating-point arithmetic and support only `'Fixed fee' | 'Estimate' | 'Capped fee' | 'Hourly rate with estimate'`.
-- `matterCosts.rateCards`, `matterCosts.disbursementPresets`, `matterCosts.rateSourceMode`, `matterCosts.allowMatterRateOverrides`, and `matterCosts.defaultPaymentOnAccount` in `core/schemas/tenant-config.schema.json` are marked `[x-reserved:S0-23]`.
+- `matterCosts.rateCards`, `matterCosts.disbursementPresets`, `matterCosts.rateSourceMode`, `matterCosts.allowMatterRateOverrides`, and `matterCosts.partnerSignOffThresholdGbp` in `core/schemas/tenant-config.schema.json` are marked `[x-reserved:S0-23]`.
 
 On 12 November 2026, the product owner confirmed the CFA and DBA cap values and rules (`WP5-owner-decisions.md`), closing the stage plan §8 manual task *"Confirm the CFA and DBA cap values to use as configuration defaults"*.
 

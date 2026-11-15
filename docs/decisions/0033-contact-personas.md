@@ -1,7 +1,7 @@
 # ADR 0033: Contact Personas Across Organisations and Matters
 
 - **Date:** 2026-11-15
-- **Status:** Proposed
+- **Status:** Accepted
 - **Roadmap:** Stage 0 decision D8, slice S0-21 (`docs/roadmap/stage-0-plan.md`); backlog items 28, Q1
 - **Builds on:** [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases and repositories), S0-07 (conflict search, B7), S0-09 and S0-16 (record merge, B4)
 
@@ -18,15 +18,15 @@ In legal practice, the same natural person frequently interacts with the firm in
 
 Creating separate `Person` records per persona would split the person's identity verification (CDD/AML), contact details, marketing consent, and matter history across duplicates, and would weaken conflict checking.
 
-At commit `6940cdc` on `develop`, the data model already supports a single `Person` record (`public.people`), linked to organisations via `public.person_organisation_links` (`contactRoleIds`, `isPrimaryContact`, `isCurrent`) and to matters via `matters.client_id`, `matters.additional_client_ids_json`, `matters.instructing_contact_id`, `matters.billing_contact_id`, `matters.referrer_contact_id`, and `public.matter_parties` (`relationshipCode` across 8 relationships `CL`, `JC`, `CC`, `OP`, `CP`, `CO`, `TP`, `NO` and `capacityCodes` across 70 capacities in `MatterPartyTaxonomy`, `src/domain/matterParties.ts:41-350`). However, `Q1` remains marked `Open` until the persona rules, conflict-search traversal across all capacities, restricted-matter redaction on party links, and merge behaviour across multiple capacities are formally specified and tested end to end.
+At commit `6940cdc` on `develop`, the data model already supports a single `Person` record (`public.people`), linked to organisations via `public.person_organisation_links` (`contactRoleIds`, `isPrimaryContact`, `isCurrent`) and to matters via `matters.client_id`, `matters.additional_client_ids_json`, `matters.instructing_contact_id`, `matters.billing_contact_id`, `matters.referrer_contact_id`, and `public.matter_parties` (`relationshipCode` across 8 relationships `CL`, `JC`, `CC`, `OP`, `CP`, `CO`, `TP`, `NO` and 70 capacities in `MatterPartyTaxonomy`, `src/domain/matterParties.ts:41-635`). However, `Q1` remains marked `Open` until the persona rules, conflict-search traversal across all capacities, restricted-matter redaction on party links, and merge behaviour across multiple capacities are formally specified and tested end to end.
 
 ## Decision
 
 ### 1. One person record, linked in different capacities
 - **Single `Person` identity per natural person (`public.people`):**
   - Every individual known to the tenant is represented by a single `Person` record (`P-xxxxxx`), regardless of how many capacities they hold across organisations and matters.
-  - Firm-level relationship roles (`Person.relationshipRoleIds` from the `person_relationship_role` choice list, such as `Client (individual)`, `Client contact`, `Referrer / introducer`, `Professional adviser`, `Opposite party`) are multi-valued (`allowMultiple: true`) and summarise the person's relationship standing with the firm.
-  - When a person who is already recorded as an organisation contact (`person_organisation_links`) instructs the firm as an individual client (`matters.client_id = person.id` or `additionalClientIds` includes `person.id` or `matter_parties` with `relationshipCode` `'CL'` or `'JC'`), the existing `Person` record is reused and `person_relationship_role.client_individual` is added to `Person.relationshipRoleIds` in the same transaction without removing their `Client contact` role or organisation links.
+  - Firm-level relationship roles (`Person.relationshipRoleIds` from the `'person_role'` choice list, `src/seed/lists.ts:50-67`, such as `'person_role.private_client'` / `Private client`, `Client contact`, `Referrer`, `Professional adviser`, `Opposing party`) are multi-valued (`allowMultiple: true`) and summarise the person's relationship standing with the firm.
+  - When a person who is already recorded as an organisation contact (`person_organisation_links`) instructs the firm as an individual client (`matters.client_id = person.id` or `additionalClientIds` includes `person.id` or `matter_parties` with `relationshipCode` `'CL'` or `'JC'`), the existing `Person` record is reused and `'person_role.private_client'` is added to `Person.relationshipRoleIds` in the same transaction without removing their `Client contact` role or organisation links.
 
 ### 2. Capacity is chosen on each matter and organisation link
 - **Per-matter capacity (`Matter` and `MatterParty`):**

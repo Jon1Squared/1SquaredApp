@@ -1,7 +1,7 @@
 # ADR 0032: Configuration-Driven Registers, Approvals and Reminders Engine
 
 - **Date:** 2026-11-15
-- **Status:** Proposed
+- **Status:** Accepted
 - **Roadmap:** Stage 0 decision D7, slice S0-24 (`docs/roadmap/stage-0-plan.md`); backlog item 31 (and foundation for items 12, 15, 17, 18, 19, 20, 24)
 - **Builds on:** [ADR 0025](./0025-permission-enforcement-pattern.md) (permission enforcement), [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases and repositories), [ADR 0030](./0030-tenant-aware-scheduler.md) (tenant-aware scheduler)
 
@@ -10,8 +10,8 @@
 Backlog item 31 requires a single reusable core engine for compliance and operational registers — records that have a configured lifecycle, an owner, due dates, approval rules, scheduled reminders/escalations, extension hooks, and an immutable audit trail.
 
 At commit `6940cdc` on `develop`, three separate mechanisms exist:
-1. **Sign-offs (`public.sign_offs` in `core/src/tenancy/taskWorkflowRepository.ts:96-113, 1214-1415` and `src/server/services.ts:12996-13195`):**
-   - Supports three hard-coded kinds (`'write_off' | 'matter_opening' | 'undertaking'`, `src/domain/types.ts:1634`) and three hard-coded statuses (`'Pending' | 'Approved' | 'Discussing'`).
+1. **Sign-offs (`public.sign_offs` in `core/src/tenancy/taskWorkflowRepository.ts:96-113, 1214-1415` and `src/server/services.ts:12993-13195`):**
+   - Currently supports three hard-coded kinds (`'write_off' | 'matter_opening' | 'undertaking'`, `src/domain/types.ts:1634`) and three hard-coded statuses (`'Pending' | 'Approved' | 'Discussing'`). Per the product owner's decision (15 November 2026), undertakings do not require two-person partner approval, so `'undertaking'` is removed from two-person `sign_off` approvals in `S0-24`.
    - Enforces `signoff:approve`, matter visibility (`canPersonAccessMatter` / `SIGN_OFF_VISIBLE_SQL_PREDICATE`), assigned-partner matching (`assignedPartnerId`), and no self-approval (`requestedById !== byId`) in `approveSignOff` and `discussSignOff`, but has no configurable fields, reminder schedule, or extension hooks.
 2. **Document template approval (`core/src/tenancy/documentRepository.ts` and `src/server/documentGenerationServices.ts`):**
    - Specific to template versions (`Draft` → `Submitted` → `Active` / `Rejected` / `Retired`).
@@ -42,12 +42,12 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
 
 ### 2. Record lifecycle and states
 - Every register record (`RegisterRecord` in `@platform/core-api`) holds:
-  - `id` (allocated from per-tenant sequence), `tenantId`, `registerTypeKey`, `reference`, `kind` (subtype key within the register, e.g. `'write_off' | 'matter_opening' | 'undertaking'` for `sign_off`), `status` (state key), `title`, `subtitle`, `summary`.
+  - `id` (allocated from per-tenant sequence), `tenantId`, `registerTypeKey`, `reference`, `kind` (subtype key within the register, e.g. `'write_off' | 'matter_opening'` for `sign_off`), `status` (state key), `title`, `subtitle`, `summary`.
   - Optional linked scope: `matterId`, `matterNumber`, `personId`, `organisationId`, `enquiryId`.
   - Actors and timestamps: `requestedById`, `requestedAt`, `ownerId`, `assignedApproverId`, `decidedById`, `decidedAt`, `dueAt`, `closedAt`, `updatedAt`, `rowVersion`.
   - Structured values: `amountMinorUnits` (`bigint` / integer pence, with compatibility getter for `amountGbp` on `sign_off`), `discussionNote`, and `fieldValues: Record<string, unknown>` validated against the register type's `fields` definition.
 - **Lifecycle enforcement in core (`core/src/domain/registers/`):**
-  - Creating a record places it in the register type's initial state and validates all required initial fields.
+  - Creating a record places it in the register type's configured initial state (`'pending_approval'` for `sign_off`, or `'open'` directly without an approval gate for register types whose `approvalRules` is `null`, such as undertakings) and validates all required initial fields.
   - Every state change executes a named transition from `transitions`. Transitions not permitted from the current `status`, or missing required state fields or notes (`requiresNote: true`), fail closed with `REGISTER_INVALID_TRANSITION` or `REGISTER_VALIDATION_ERROR`.
 
 ### 3. Approvals: no self-approval, and permission keys (never labels)
@@ -55,15 +55,14 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
   - Any transition of kind `'approve'`, `'discuss'`, or `'reject'` (or any transition governed by `approvalRules`) rejects when `actorId === record.requestedById` (or `actorId === record.createdById` when `requestedById` is unset) with stable error code `REGISTER_SELF_APPROVAL_FORBIDDEN`.
   - Tenants cannot disable the self-approval guard on register approvals.
 - **Approver rules use stable `PermissionKey` values and relationship keys, never display labels (Architecture Standard §9, CLAUDE.md):**
-  - Each register type (and optional `kind` override) declares `approvalRules`:
-    - `requiredPermission`: a registered `PermissionKey` (e.g. `'signoff:approve'` for `'write_off'` and `'matter_opening'` sign-offs, `'undertaking:manage'` for undertakings, `'register:approve'` for general registers).
+  - Each register type (and optional `kind` override) declares `approvalRules` (or `null` when creation does not require two-person approval):
+    - `requiredPermission`: a registered `PermissionKey` (e.g. `'signoff:approve'` for `'write_off'` and `'matter_opening'` sign-offs, `'register:approve'` for general registers requiring approval).
     - `requireMfa`: boolean (defaults to the permission's `requiresMfa` in `PERMISSION_REGISTRY`).
     - `allowedApproverScopes`: array of `'assigned_approver' | 'matter_supervising_partner' | 'matter_responsible_partner' | 'team_lead' | 'any_with_permission'`.
   - When `record.assignedApproverId` is set and `allowedApproverScopes` restricts approval to `'assigned_approver'`, only that person (holding `requiredPermission` and not being `requestedById`) may approve or discuss (`REGISTER_APPROVER_MISMATCH`).
-- **Undertakings permission rule (Owner decision, 15 November 2026):**
-  - **Any fee earner may give or discharge an undertaking — not only a partner.** Nothing in the Stage 0 build (including the existing `'undertaking'` kind on `sign_off`) or the future Stage 2 `undertaking` register type restricts undertakings to partners.
-  - A dedicated user permission `'undertaking:manage'` (domain `'undertaking'`, sensitivity `'standard'`, `requiresMfa: false`) is registered in `PERMISSION_REGISTRY` and granted by default in `DEFAULT_RBAC_ROLES` to every fee-earner role identified by its **stable `HomeRoleKey`** (`'fee_earner'`, `'supervisor'`, `'partner'`, `'managing_partner'`, and `'admin'`) — never by display label.
-  - On `sign_off`, `kind: 'undertaking'` declares a per-`kind` `approvalRules` override with `requiredPermission: 'undertaking:manage'` (while `'write_off'` and `'matter_opening'` retain `'signoff:approve'`). Giving and discharging on the future `undertaking` register type also use `'undertaking:manage'` (plus `canPersonAccessMatter` and the unconditional no-self-approval check when approving).
+- **Undertakings rules (Owner decisions, 15 November 2026):**
+  - **Fee-earner roles only (`'undertaking:manage'` excludes `'admin'`):** A dedicated user permission `'undertaking:manage'` (domain `'undertaking'`, sensitivity `'standard'`, `requiresMfa: false`) is registered in `PERMISSION_REGISTRY` and granted by default in `DEFAULT_RBAC_ROLES` **only** to the four fee-earner roles identified by their **stable `HomeRoleKey`** (`'fee_earner'`, `'supervisor'`, `'partner'`, `'managing_partner'`) — never to `'admin'` (`DEFAULT_RBAC_ROLES.admin.permissions` filters out `'undertaking:manage'` from `ALL_USER_PERMISSION_KEYS`, `src/server/documentStoreServices.ts:323-326` uses resolved permissions rather than spreading `ALL_USER_PERMISSION_KEYS`, legacy `appRole === 'admin'` fallback expansion in `src/domain/rbac.ts:172-183` and `src/server/services.ts:8494-8504` does not bypass role exclusions, and `validateUserOverrideOrRoleMutation` in `core/src/domain/rbac/resolver.ts:746-774` allows an MFA-verified administrator holding both `'rbac:manage_user_overrides'` and `'rbac:manage_config'` to assign configured roles to other employees while blocking self-assignment and direct grant of unheld permissions).
+  - **No two-person approval for undertakings:** **Any fee earner (`'undertaking:manage'`) may create/give (and in Stage 2 item 12 discharge) an undertaking directly without a partner or two-person approval step** (subject to `canPersonAccessMatter` when linked to a matter). Register types without an approval gate declare `approvalRules: null` and enter `'open'` directly on creation. Accordingly, `'undertaking'` is removed from two-person `sign_off` approvals in `S0-24`: `SignOffKind` (`src/domain/types.ts:1634`) narrows to `'write_off' | 'matter_opening'`, `approveSignOffAction` and `discussSignOffAction` remain governed solely by `'signoff:approve'`, and the seeded pending undertaking sign-off `SO-000003` (`src/seed/demo.ts:4022-4032`) is removed from `signOffs`.
 - **Matter visibility and ethical walls (Rule 9, B12):**
   - When `record.matterId` is set, both the SQL repository (`REGISTER_RECORD_VISIBLE_SQL_PREDICATE` checking `matters.is_staff_matter`, `matters.has_ethical_wall`, and `matters.restricted_access_user_ids_json`) and the service layer verify `canPersonAccessMatter` before returning or mutating the record.
 
@@ -110,8 +109,8 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
   - `public.register_reminder_states`: `(tenant_id, register_record_id, schedule_id, last_stage_days_before, escalated_at, acknowledged_at, acknowledged_by_id, updated_at, PRIMARY KEY (tenant_id, register_record_id))`.
   - `GRANT SELECT, INSERT, UPDATE, DELETE` on these tables to the tenant role.
 - **Data migration in `upSql`:**
-  - Copies all existing rows from `public.sign_offs` into `public.register_records` with `register_type_key = 'sign_off'`, `reference = id`, `amount_minor_units = ROUND(amount_gbp * 100)::bigint`, preserving all IDs (`SO-xxxxxx`), timestamps, `assigned_approver_id`, `decided_by_id`, `discussion_note`, and `payload_json` (`ON CONFLICT (tenant_id, id) DO NOTHING`).
-  - `TenantTaskWorkflowRepository` sign-off methods (`getSignOffById`, `listVisibleSignOffs`, `putSignOff`, `upsertSignOffInTx`) delegate to or read/write `public.register_records` (`register_type_key = 'sign_off'`) so `approveSignOffAction`, `discussSignOffAction`, `flagMatterWriteOffAction`, and `AppSnapshot.signOffs` preserve their exact public contract and audit behaviour while running on the registers engine (with `kind: 'undertaking'` enforcing `'undertaking:manage'`).
+  - Copies all two-person partner sign-off rows (`WHERE kind IN ('write_off', 'matter_opening')`) from `public.sign_offs` into `public.register_records` with `register_type_key = 'sign_off'`, `reference = id`, `amount_minor_units = ROUND(amount_gbp * 100)::bigint`, preserving all IDs (`SO-xxxxxx`), timestamps, `assigned_approver_id`, `decided_by_id`, `discussion_note`, and `payload_json` (`ON CONFLICT (tenant_id, id) DO NOTHING`).
+  - `TenantTaskWorkflowRepository` sign-off methods (`getSignOffById`, `listVisibleSignOffs`, `putSignOff`, `upsertSignOffInTx`) delegate to or read/write `public.register_records` (`register_type_key = 'sign_off'`) so `approveSignOffAction`, `discussSignOffAction`, `flagMatterWriteOffAction`, and `AppSnapshot.signOffs` preserve their exact public contract (`'signoff:approve'`), no-self-approval checks, and audit behaviour for `'write_off'` and `'matter_opening'` while running on the registers engine.
   - Because migrations are expand-then-contract (Rule 8), `public.sign_offs` is retained in the expand migration (synced or backfilled on `downSql` from `register_records WHERE register_type_key = 'sign_off'`) before dropping the register tables in `downSql`, guaranteeing a lossless `up -> down -> up` round-trip.
 
 ## Alternatives Considered
@@ -123,5 +122,5 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
 ## Consequences
 
 - `core/src/tenancy/registerRepository.ts` (`TenantRegisterRepository`) and `core/src/domain/registers/` become the single core implementation for register records, state transitions, approval checks, and reminder scheduling, reading runtime admin register configuration solely from `public.tenant_module_configs['registers']` via `resolveEffectiveRegisterTypes`.
-- New permissions `'register:view'`, `'register:create'`, `'register:edit'`, `'register:approve'`, `'register:configure'`, `'undertaking:manage'` (granted to every fee-earner role by `HomeRoleKey`: `'fee_earner'`, `'supervisor'`, `'partner'`, `'managing_partner'`, `'admin'`), and `'register:run_reminders'` (`jobOnly: true`) are registered in `PERMISSION_REGISTRY`. On `sign_off`, `'signoff:approve'` continues to govern `'write_off'` and `'matter_opening'`, while `'undertaking:manage'` governs `'undertaking'` (`approveSignOffAction` and `discussSignOffAction` accept `anyOf: ['signoff:approve', 'undertaking:manage']` with kind-specific enforcement in the service).
+- New permissions `'register:view'`, `'register:create'`, `'register:edit'`, `'register:approve'`, `'register:configure'`, `'undertaking:manage'` (granted **only** to the four fee-earner roles by `HomeRoleKey`: `'fee_earner'`, `'supervisor'`, `'partner'`, `'managing_partner'`, excluding `'admin'`), and `'register:run_reminders'` (`jobOnly: true`) are registered in `PERMISSION_REGISTRY`. On `sign_off`, `'signoff:approve'` continues to govern `'write_off'` and `'matter_opening'`, while undertakings have no two-person approval step (`SignOffKind = 'write_off' | 'matter_opening'`).
 - Two-tenant isolation tests in `core/tests/isolation.test.ts` (including forged tenant claims and tampered `SO-xxxxxx` / `REG-xxxxxx` IDs) and extension hook contract tests cover the engine end to end.

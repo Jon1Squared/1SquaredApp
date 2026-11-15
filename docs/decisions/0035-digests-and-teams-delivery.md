@@ -1,7 +1,7 @@
 # ADR 0035: Notification Digests, Per-User Channel Preferences and Microsoft Teams Activity Feed Delivery
 
 - **Date:** 2026-11-15
-- **Status:** Proposed
+- **Status:** Accepted
 - **Roadmap:** Stage 0 decision D11, slice S0-29 (`docs/roadmap/stage-0-plan.md`); backlog item 32 (*Search and notifications*)
 - **Amends:** [ADR 0027](./0027-email-sender-interface.md), point 5 ("Teams delivery comes later")
 - **Related:** [ADR 0018](./0018-two-identity-authentication-model.md) (per-capability app registrations), [ADR 0027](./0027-email-sender-interface.md) (one `EmailSender` interface with per-tenant adapters), [ADR 0030](./0030-tenant-aware-scheduler.md) (tenant-aware scheduler)
@@ -25,7 +25,7 @@ Under the Platform Architecture Standard:
 
 A forward + down per-tenant migration adds `public.user_notification_preferences`:
 
-- **Primary key:** `(tenant_id, person_id, notification_kind)` where `notification_kind` is a validated `NotificationKind` key (`'task_assigned'`, `'task_due_soon'`, `'task_overdue'`, `'approval_requested'`, `'approval_decided'`, `'key_date_approaching'`, `'credit_control_escalation'`, `'register_review_assigned'`, `'general'`).
+- **Primary key:** `(tenant_id, person_id, notification_kind)` where `notification_kind` is a validated `NotificationKind` key (`'task_assigned'`, `'team_task_arrived'`, `'task_comment'`, `'enquiry_assigned'`, `'task_due_soon'`, `'task_overdue'`, `'approval_requested'`, `'approval_decided'`, `'key_date_approaching'`, `'credit_control_escalation'`, `'register_review_assigned'`, `'general'`, preserving all 5 existing live kinds alongside the 7 new kinds).
 - **Columns:**
   - `in_app_enabled BOOLEAN NOT NULL DEFAULT TRUE`
   - `email_frequency TEXT NOT NULL DEFAULT 'daily_digest'` (`'off' | 'immediate' | 'daily_digest' | 'weekly_digest'`)
@@ -42,8 +42,8 @@ A forward + down per-tenant migration adds `public.user_notification_preferences
 Following [ADR 0030](./0030-tenant-aware-scheduler.md):
 
 1. **Job guard and job-only permission:**
-   - The job runs through `guardedJob('notification-digests', handler)` with `JOB_POLICIES['notification-digests'] = { permission: 'notification:send_digests' }`.
-   - `'notification:send_digests'` is registered in `core/src/rbac/permissions.ts` with `jobOnly: true`. It is granted to **no role** in `DEFAULT_ROLE_PERMISSIONS` (including `'admin'`), and `resolvePersonPermissionSet`, `updatePersonPermissionOverrides`, and `updateTenantRbacConfig` reject any `jobOnly` permission so no interactive user can ever acquire or invoke it.
+   - The job runs through `guardedJob('notification-digests', handler)` with `JOB_PERMISSIONS['notification-digests']` (`src/server/actionPermissions.ts:706-768`) requiring `'notification:send_digests'`.
+   - `'notification:send_digests'` is registered in `PERMISSION_REGISTRY` (`core/src/domain/rbac/registry.ts`) with `jobOnly: true`. It is granted to **no role** in `DEFAULT_RBAC_ROLES` (including `'admin'`), and `resolvePersonPermissionSet`, `updatePersonPermissionOverrides`, and `updateTenantRbacConfig` reject any `jobOnly` permission so no interactive user can ever acquire or invoke it.
    - `guardedJob` builds a synthetic `TenantContext` with `sub: 'system:notification-digests'`, `roles: []`, and `mfaVerified: false`.
 2. **Time-zone-aware schedule and idempotency (`public.job_runs`):**
    - In Azure Container Apps, `caj-ntf-dig-<env>` runs on an hourly cron (`0 * * * *`) and evaluates `tenantConfig.timeZone` (default `'Europe/London'`).

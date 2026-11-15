@@ -58,9 +58,9 @@ Demos need real email now. Hosted and client-hosted installations need different
 
 5. **Teams delivery comes later,** through the same notification service rather than through `EmailSender` (now specified in [ADR 0035](./0035-digests-and-teams-delivery.md)).
 
-## Proposed Amendment (2026-11-15 — WP5 Phase 0, slice S0-26)
+## Amendment (2026-11-15 — WP5 Phase 0, slice S0-26)
 
-- **Status of amendment:** Proposed
+- **Status of amendment:** Accepted
 
 ### 6. Transactional outbox (`public.email_outbox`) and delivery mechanism
 
@@ -78,7 +78,7 @@ Email must never be sent over the network from inside an open PostgreSQL transac
      - `subject TEXT NULL` (non-null until `content_scrubbed_at IS NOT NULL`)
      - `html_body TEXT NULL` (non-null until `content_scrubbed_at IS NOT NULL`)
      - `text_body TEXT NULL` (non-null until `content_scrubbed_at IS NOT NULL`)
-     - `attachments_json JSONB NOT NULL DEFAULT '[]'::jsonb` (tenant blob storage keys + metadata, resolved via `TenantBlobStorage.getReadStream` at send time after `assertTenantOwnsBlobKey`)
+     - `attachments_json JSONB NOT NULL DEFAULT '[]'::jsonb` (tenant blob storage keys + metadata, resolved via `DocumentStorageProvider.getObjectBytes` after `assertBlobKeyBelongsToTenant` / `assertTenantOwnsBlobKey` in `core/src/tenancy/blobStorage.ts` at send time)
      - `status TEXT NOT NULL DEFAULT 'pending'` (`'pending' | 'sending' | 'sent' | 'dropped_allowlist' | 'failed_permanent'`)
      - `attempt_count INTEGER NOT NULL DEFAULT 0`
      - `next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
@@ -124,7 +124,7 @@ Email must never be sent over the network from inside an open PostgreSQL transac
    - `certificateVaultRef` is validated by `assertTenantOwnsKeyVaultSecretRef(ctx, ref, tenantConfig)` before any Key Vault access so Tenant A can never reference a secret belonging to Tenant B.
 2. **Key Vault retrieval, JWT client assertion (`RS256`), and explicit credential caching policy (`R493`):**
    - When a certificate is imported into Azure Key Vault (`az keyvault certificate import`), Key Vault exposes the certificate bundle (private key + X.509 certificate in PEM/PKCS#12 form) as a Key Vault **secret** with the same name (`kv://<vault-name>/<cert-name>`).
-   - At token acquisition time, `GraphAppTokenProvider` fetches the secret value via `@azure/keyvault-secrets` (`SecretClient` authenticated with `DefaultAzureCredential` / managed identity `runtimeIdentity`), parses the private key using Node's built-in `node:crypto` (`createPrivateKey`), verifies that the certificate's SHA-1 thumbprint matches `certificateThumbprint`, signs a short-lived RFC 7523 `client_assertion` JWT (`alg: 'RS256'`, `x5t` header derived from `certificateThumbprint`, `aud: 'https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token'`, `iss: clientId`, `sub: clientId`, 5-minute lifetime, unique `jti`), and **immediately discards the private key and certificate bundle**.
+   - At token acquisition time, `GraphAppTokenProvider` fetches the secret value via `@azure/identity` (`DefaultAzureCredential` / `ManagedIdentityCredential` against the Key Vault Secrets REST API `api-version=7.4`, avoiding an extra `@azure/keyvault-secrets` dependency, or via an injected `KeyVaultSecretReader` interface), parses the private key using Node's built-in `node:crypto` (`createPrivateKey`), verifies that the certificate's SHA-1 thumbprint matches `certificateThumbprint`, signs a short-lived RFC 7523 `client_assertion` JWT (`alg: 'RS256'`, `x5t` header derived from `certificateThumbprint`, `aud: 'https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token'`, `iss: clientId`, `sub: clientId`, 5-minute lifetime, unique `jti`), and **immediately discards the private key and certificate bundle**.
    - It exchanges the `client_assertion` for an app-only Graph access token (`scope = 'https://graph.microsoft.com/.default'`) and calls `POST https://graph.microsoft.com/v1.0/users/{encodeURIComponent(senderAddress)}/sendMail` with `saveToSentItems: false`.
    - **Named exception — access-token-only cache (never private keys):**
      - **Private keys and Key Vault certificate secrets are NEVER cached in memory** across drain batches or requests.
