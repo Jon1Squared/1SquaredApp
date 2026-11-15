@@ -138,6 +138,22 @@ S0-24 (the registers engine) can start once S0-17a and S0-19 are done, and can r
 | S0-28 | Negotiated rates and CFA/DBA (D10): client- and matter-level rate overrides with effective dates and precedence; rate lookup uses them in quotes, matter costs and the costs snapshot; CFA and DBA fee bases with configurable, validated terms; tests for every precedence path and fee basis; two-tenant test; help. | 30 | L | S0-23 |
 | S0-29 | Teams delivery and digests (D11): digest job on the scheduler, per-user preferences, digest email through `EmailSender`; Teams activity-feed adapter behind a per-tenant setting (default off); tests, including that a non-live tenant never sends outside its allow-list; help. | 32 | M | S0-26, S0-19 |
 
+> **[Proposed WP5 Phase 1 changes — awaiting owner approval]**
+>
+> Detailed slice plans written under Phase 1 (`WP5a` -> `WP5b` -> `WP5c`):
+> - **`WP5a`:** [S0-21](slices/s0-21-clients-contacts-and-parties.md) -> [S0-22](slices/s0-22-departments-and-work-types.md) -> [S0-23](slices/s0-23-rates-and-charging.md)
+> - **`WP5b`:** [S0-28](slices/s0-28-negotiated-rates-and-cfa-dba.md) -> [S0-24](slices/s0-24-registers-engine.md) -> [S0-25](slices/s0-25-server-side-search.md)
+> - **`WP5c`:** [S0-26](slices/s0-26-email-and-notifications.md) -> [S0-29](slices/s0-29-teams-delivery-and-digests.md)
+>
+> Proposed adjustments for owner review (existing rows/sizes above are left unchanged until approved):
+> 1. **Split `S0-28` (`L`) into `S0-28a` (`M`) + `S0-28b` (`M`):** `S0-28a` delivers negotiated rate overrides (`public.client_rate_overrides`, `public.matter_rate_overrides`, 4-tier `resolveApplicableRates`, migration `0016`); `S0-28b` delivers CFA/DBA fee bases, `statutory-fee-caps.json`, work-type overrides (`R486`) and fail-closed cap validation. Both scopes are detailed cleanly inside [s0-28-negotiated-rates-and-cfa-dba.md](slices/s0-28-negotiated-rates-and-cfa-dba.md).
+> 2. **Resize `S0-26` from `M` to `L`:** reflects the Accepted ADR 0027 Outbox Amendment (`public.email_outbox`, `public.user_notification_preferences`, `outbox-drain` scheduler job + `caj-outbox-drain-<env>` Bicep resource, `GraphAppTokenProvider` RS256 + encrypted token cache, all-adapter allow-list tests, and certificate provisioning runbook).
+> 3. **Sequential per-tenant migration chain (`0016`–`0020`, starting from `0015` on `develop`):** `0016_negotiated_rates_expand` (`S0-28`) -> `0017_registers_engine_expand` (`S0-24`) -> `0018_tenant_search_indexes_expand` (`S0-25`) -> `0019_email_outbox_and_preferences_expand` (`S0-26`) -> `0020_teams_outbox_and_digests_expand` (`S0-29`). `S0-21`, `S0-22` and `S0-23` require no database migrations.
+> 4. **Backlog alignment & scope notes (Section 5a & `feature-list.md`):**
+>    - `S0-21` closes `28` + `Q1`; `S0-22` closes `29` (explicitly builds **no** deletion job, setting `matters.destruction_date` only) and advances `4`, `9`, `21`, `23` and `P13`; `S0-23` advances `30` (kept `Partly built` until `S0-28`), `3`, `7`, `44` and retires `[x-reserved:S0-23]` (`P7`).
+>    - `S0-28` completes `30` and advances `3`, `F1`; `S0-24` closes `31` (`Built differently` -> `Completed`), advances `20` and `E8`, and removes demo sign-off `'SO-000003'`; `S0-25` advances `32` (`Partly built` until `S0-29`) and proposes re-tagging `documentAccess.autoRemediateDrift` from `[x-reserved:S0-25]` to `backlog`.
+>    - `S0-26` advances `32` (`Partly built`) and `P6`; `S0-29` completes `32` and advances `P9`. Live Graph mail (`S0-26`) and live Graph Teams (`S0-29`) remain gated on Section 8 manual tasks while all mocked/dev-catcher/two-tenant CI tests run unblocked.
+
 **Exit review:** re-run the status review against section 2 of this plan. Stage 1 planning starts when every exit criterion is met.
 
 ## 5a. Coverage of the stage 0 backlog
