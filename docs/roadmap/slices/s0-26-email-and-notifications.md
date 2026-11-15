@@ -4,10 +4,10 @@
 |---|---|
 | Slice | `S0-26` |
 | Stage / Work package | Stage 0C — Make it shared (`WP5c`) |
-| Status | Planned (awaiting build after `WP5b`; proposed resize `M -> L` in stage plan callout) |
+| Status | Planned (awaiting build after `WP5b`; resized `M -> L` per owner approval 15 Nov 2026) |
 | Branch | `s0-26-email-and-notifications` (target `develop`) |
 | Depends on | `S0-19` (on `develop`; stacked on `0018` in `WP5c` -> adds `0019`) |
-| Size | `M` in existing plan (recommended resize **`M -> L`** in stage plan callout) |
+| Size | `L` (resized from `M` per owner approval 15 Nov 2026) |
 | Backlog IDs | `32` (remains `Partly built` until `S0-29` completes digests + Teams; advances `P6`; cross-cutting `P10`, `P11`) |
 | Decision record(s) | `D9` — [ADR 0027](../decisions/0027-email-sender-interface.md) (`Accepted` + Accepted Outbox Amendment) |
 | Spec / standards references | Architecture Standard sections 4, 5, 6, 8, 10, 12; [ADR 0018](../decisions/0018-two-identity-authentication-model.md); [ADR 0030](../decisions/0030-tenant-aware-scheduler.md) |
