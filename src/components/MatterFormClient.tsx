@@ -101,7 +101,6 @@ import {
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
-  MATTER_RISK_SECTIONS,
   resolveMatterRiskSections,
   summarizeMatterRiskAssessment,
   type CustomKeyDateEntry,

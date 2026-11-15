@@ -80,7 +80,6 @@ import {
   resolveMatterConflictCheckRecord,
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
-  resolveMatterRiskSections,
   resolveRiskRatingIdForLevel,
   validateMatterRiskAssessmentInput,
   type CustomKeyDateEntry,
@@ -158,14 +157,12 @@ import {
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveDepartmentForPracticeArea,
   resolveOrgDepartment,
-  resolvePracticeAreasForDepartment,
 } from '@/domain/orgStructure';
 import {
   isClosedMatterStatus,
   isClosedOrArchivedMatterStatus,
   resolveEffectiveWorkTypesConfig,
   resolveWorkTypeRiskQuestions,
-  resolveWorkTypeRetention,
 } from '@/domain/workTypeConfig';
 import {
   computeServerWorkTypeRetentionState,
@@ -19118,7 +19115,6 @@ export async function updateMatterLifecycleStatusRecord(
   };
 
   let saved!: Matter;
-  const taskRepo = getTaskWorkflowRepository();
   try {
     await runWithAuditStagingScope(() =>
       matterRepo.withTenantTransaction(ctx, async () => {
