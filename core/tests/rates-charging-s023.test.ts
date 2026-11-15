@@ -268,6 +268,9 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
       disbursementsTotalIncVatGbp: 518.11,
       estimatedFeeVatGbp: 50,
       totalIncVatGbp: 1568.11,
+      combinedExVatGbp: 1515.1,
+      combinedVatGbp: 53.01,
+      combinedIncVatGbp: 1568.11,
     });
 
     // Rate lookup respects rateSourceMode & PMS vs App table preference
@@ -1142,5 +1145,74 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
     await expect(freshCatRepo.getMatterCostsConfig(forgedCtx)).rejects.toThrow();
 
     expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0015');
+  });
+
+  it('7. S2: sums matter snapshot fee, multi-disbursement net, VAT, and combined totals strictly in integer minor units without float round-trips', () => {
+    const multiDisbursements = [
+      // 17.5% of £1.00 = £0.175 -> 18p per line; float hazards 0.1 + 0.2
+      { id: 's2-d1', description: 'Search A', amountGbp: 1.0, vatApplicable: true },
+      { id: 's2-d2', description: 'Search B', amountGbp: 1.0, vatApplicable: true },
+      { id: 's2-d3', description: 'Copy A', amountGbp: 0.1, vatApplicable: true },
+      { id: 's2-d4', description: 'Copy B', amountGbp: 0.2, vatApplicable: true },
+    ];
+
+    const breakdown = calculateMatterDisbursementsBreakdown(multiDisbursements, 17.5);
+    expect(breakdown.netMinor).toBe(230); // 100 + 100 + 10 + 20 pence
+    expect(breakdown.vatMinor).toBe(42); // 18 + 18 + 2 (1.75p->2p) + 4 (3.5p->4p)
+    expect(breakdown.totalIncVatMinor).toBe(272);
+    expect(breakdown.netGbp).toBe(2.3);
+    expect(breakdown.vatGbp).toBe(0.42);
+    expect(breakdown.totalIncVatGbp).toBe(2.72);
+
+    // Fee £10.10 at 17.5% = 176.75p -> 177p (£1.77)
+    const totalsWithFee = calculateMatterSnapshotTotals({
+      totalEstimateGbp: 10.1,
+      disbursements: multiDisbursements,
+      vatRatePercent: 17.5,
+    });
+    expect(totalsWithFee).toEqual({
+      disbursementsTotalGbp: 2.3,
+      disbursementsVatGbp: 0.42,
+      disbursementsTotalIncVatGbp: 2.72,
+      estimatedFeeVatGbp: 1.77,
+      totalIncVatGbp: 14.59,
+      combinedExVatGbp: 12.4, // 1010p + 230p = 1240p
+      combinedVatGbp: 2.19, // 177p + 42p = 219p
+      combinedIncVatGbp: 14.59,
+    });
+
+    // When fee estimate is null, disbursements drive combined totals directly in minor units
+    const totalsWithoutFee = calculateMatterSnapshotTotals({
+      totalEstimateGbp: null,
+      disbursements: multiDisbursements,
+      vatRatePercent: 17.5,
+    });
+    expect(totalsWithoutFee).toEqual({
+      disbursementsTotalGbp: 2.3,
+      disbursementsVatGbp: 0.42,
+      disbursementsTotalIncVatGbp: 2.72,
+      estimatedFeeVatGbp: null,
+      totalIncVatGbp: 2.72,
+      combinedExVatGbp: 2.3,
+      combinedVatGbp: 0.42,
+      combinedIncVatGbp: 2.72,
+    });
+
+    // Empty disbursements and null fee estimate produce zero combined totals and null totalIncVatGbp
+    const emptyTotals = calculateMatterSnapshotTotals({
+      totalEstimateGbp: null,
+      disbursements: [],
+      vatRatePercent: 20,
+    });
+    expect(emptyTotals).toEqual({
+      disbursementsTotalGbp: 0,
+      disbursementsVatGbp: 0,
+      disbursementsTotalIncVatGbp: 0,
+      estimatedFeeVatGbp: null,
+      totalIncVatGbp: null,
+      combinedExVatGbp: 0,
+      combinedVatGbp: 0,
+      combinedIncVatGbp: 0,
+    });
   });
 });

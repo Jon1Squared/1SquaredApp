@@ -569,6 +569,9 @@ export interface MatterDisbursementsBreakdown {
   netGbp: number;
   vatGbp: number;
   totalIncVatGbp: number;
+  netMinor: number;
+  vatMinor: number;
+  totalIncVatMinor: number;
   vatRatePercent: number;
 }
 
@@ -626,6 +629,9 @@ export function calculateMatterDisbursementsBreakdown(
     netGbp: minorUnitsToPounds(netMinorTotal),
     vatGbp: minorUnitsToPounds(vatMinorTotal),
     totalIncVatGbp: minorUnitsToPounds(incVatMinorTotal),
+    netMinor: netMinorTotal,
+    vatMinor: vatMinorTotal,
+    totalIncVatMinor: incVatMinorTotal,
     vatRatePercent: safeVatRate,
   };
 }
@@ -640,6 +646,9 @@ export function calculateMatterSnapshotTotals(params: {
   disbursementsTotalIncVatGbp: number;
   estimatedFeeVatGbp: number | null;
   totalIncVatGbp: number | null;
+  combinedExVatGbp: number;
+  combinedVatGbp: number;
+  combinedIncVatGbp: number;
 } {
   const safeVatRate =
     typeof params.vatRatePercent === 'number' &&
@@ -657,16 +666,18 @@ export function calculateMatterSnapshotTotals(params: {
   ) {
     const feeNetMinor = toNonNegativeMinorUnitsSafe(params.totalEstimateGbp);
     const feeVatMinor = calculateVatMinorUnits(feeNetMinor, vatBasisPoints);
-    const disbNetMinor = toNonNegativeMinorUnitsSafe(disbBreakdown.netGbp);
-    const disbVatMinor = toNonNegativeMinorUnitsSafe(disbBreakdown.vatGbp);
+    const combinedExVatMinor = sumMinorUnits([feeNetMinor, disbBreakdown.netMinor]);
+    const combinedVatMinor = sumMinorUnits([feeVatMinor, disbBreakdown.vatMinor]);
+    const combinedIncVatMinor = sumMinorUnits([combinedExVatMinor, combinedVatMinor]);
     return {
       disbursementsTotalGbp: disbBreakdown.netGbp,
       disbursementsVatGbp: disbBreakdown.vatGbp,
       disbursementsTotalIncVatGbp: disbBreakdown.totalIncVatGbp,
       estimatedFeeVatGbp: minorUnitsToPounds(feeVatMinor),
-      totalIncVatGbp: minorUnitsToPounds(
-        sumMinorUnits([feeNetMinor, feeVatMinor, disbNetMinor, disbVatMinor]),
-      ),
+      totalIncVatGbp: minorUnitsToPounds(combinedIncVatMinor),
+      combinedExVatGbp: minorUnitsToPounds(combinedExVatMinor),
+      combinedVatGbp: minorUnitsToPounds(combinedVatMinor),
+      combinedIncVatGbp: minorUnitsToPounds(combinedIncVatMinor),
     };
   }
 
@@ -676,6 +687,9 @@ export function calculateMatterSnapshotTotals(params: {
     disbursementsTotalIncVatGbp: disbBreakdown.totalIncVatGbp,
     estimatedFeeVatGbp: null,
     totalIncVatGbp: params.disbursements.length > 0 ? disbBreakdown.totalIncVatGbp : null,
+    combinedExVatGbp: disbBreakdown.netGbp,
+    combinedVatGbp: disbBreakdown.vatGbp,
+    combinedIncVatGbp: disbBreakdown.totalIncVatGbp,
   };
 }
 

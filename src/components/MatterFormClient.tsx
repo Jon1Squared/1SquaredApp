@@ -72,12 +72,7 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import {
-  minorUnitsToPounds,
-  poundsToMinorUnits,
-  sumMinorUnits,
-  type WorkTypesConfiguration,
-} from '@platform/core-api';
+import type { WorkTypesConfiguration } from '@platform/core-api';
 import {
   isWorkTypeChoiceActive,
   resolveDepartmentForPracticeArea,
@@ -89,7 +84,6 @@ import {
 } from '@/domain/workTypeConfig';
 import {
   calculateDisbursementsTotal,
-  calculateMatterDisbursementsBreakdown,
   calculateMatterSnapshotTotals,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
@@ -1324,30 +1318,15 @@ export function MatterFormClient({
     return Number.isFinite(n) && n > 0 ? n : null;
   }, [feeEstimateGbp]);
 
-  const matterCostsTotals = useMemo(() => {
-    const disbBreakdown = calculateMatterDisbursementsBreakdown(
-      costDisbursements,
-      matterVatRatePercent,
-    );
-    const snapTotals = calculateMatterSnapshotTotals({
-      totalEstimateGbp: numericFeeEstimateGbp,
-      disbursements: costDisbursements,
-      vatRatePercent: matterVatRatePercent,
-    });
-    const feeMinor = poundsToMinorUnits((numericFeeEstimateGbp ?? 0).toFixed(2));
-    const disbMinor = poundsToMinorUnits(disbBreakdown.netGbp.toFixed(2));
-    const feeVatMinor = poundsToMinorUnits((snapTotals.estimatedFeeVatGbp ?? 0).toFixed(2));
-    const disbVatMinor = poundsToMinorUnits(snapTotals.disbursementsVatGbp.toFixed(2));
-    const combinedExVatGbp = minorUnitsToPounds(sumMinorUnits([feeMinor, disbMinor]));
-    const combinedVatGbp = minorUnitsToPounds(sumMinorUnits([feeVatMinor, disbVatMinor]));
-    return {
-      ...snapTotals,
-      combinedExVatGbp,
-      combinedVatGbp,
-      combinedIncVatGbp:
-        snapTotals.totalIncVatGbp ?? minorUnitsToPounds(sumMinorUnits([feeMinor, disbMinor, feeVatMinor, disbVatMinor])),
-    };
-  }, [costDisbursements, matterVatRatePercent, numericFeeEstimateGbp]);
+  const matterCostsTotals = useMemo(
+    () =>
+      calculateMatterSnapshotTotals({
+        totalEstimateGbp: numericFeeEstimateGbp,
+        disbursements: costDisbursements,
+        vatRatePercent: matterVatRatePercent,
+      }),
+    [costDisbursements, matterVatRatePercent, numericFeeEstimateGbp],
+  );
 
   const numericAgreedCapGbp = useMemo(() => {
     const n = Number(String(agreedFeeCapGbp).replace(/[£,\s]/g, ''));
