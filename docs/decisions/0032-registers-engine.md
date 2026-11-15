@@ -22,9 +22,14 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
 
 ## Decision
 
-### 1. Register types as schema-validated configuration
-- **Core configuration and JSON schema:**
-  - Register type definitions live in tenant configuration under `registers` (validated by `core/schemas/registers.config.schema.json`, referenced from `core/schemas/tenant-config.schema.json` and `core/src/config-engine/index.ts`), with built-in core register types (`sign_off` in Stage 0; `undertaking`, `complaint`, `breach`, `data_request`, `file_review`, `safe_custody` in Stages 2–4) merged with additive tenant overrides.
+### 1. Register types as schema-validated configuration (single source of truth)
+- **Authoritative configuration model (`public.tenant_module_configs['registers']`):**
+  - Register type definitions follow the same single-source-of-truth pattern as `S0-17c` (`TenantCatalogueRepository` in `core/src/tenancy/catalogueRepository.ts`): runtime administrator-managed register configuration is persisted solely in `public.tenant_module_configs` under `config_key = 'registers'` (`'registers'` added to `TenantModuleConfigKey`), schema-validated against `core/schemas/registers.config.schema.json` on read and write (`admin:access` + MFA, audited in the same transaction).
+  - Effective register types are resolved inside the transaction by `resolveEffectiveRegisterTypes` in three deterministic layers:
+    1. **Core built-in defaults (`CORE_REGISTER_TYPES`):** shipped in core (`sign_off` in Stage 0; `undertaking`, `complaint`, `breach`, `data_request`, `file_review`, `safe_custody` in Stages 2–4), including core-locked invariants that tenant configuration cannot weaken.
+    2. **Declarative tenant package baseline (`tenantConfig.registers`):** optional version-controlled baseline in `client-<slug>/config/`, validated by `core/schemas/tenant-config.schema.json` and `core/src/config-engine/index.ts`.
+    3. **Authoritative runtime admin configuration (`public.tenant_module_configs['registers']`):** authoritative when present for a `registerTypeKey`, overriding `tenantConfig.registers` and merging additively over `CORE_REGISTER_TYPES` (allowing custom fields, tenant-defined register types, and reminder schedules while preserving core-locked states, self-approval prohibition, and permission-key rules).
+  - There is no separate `public.register_configs` table.
   - Each `RegisterTypeDefinition` specifies:
     - `key`: stable identifier (`^[a-z][a-z0-9_]{1,63}$`, e.g. `'sign_off'`).
     - `label`, `description`, `referencePrefix` (e.g. `'SO'` for `sign_off`, `'REG'` default) and `active: boolean`.
@@ -51,10 +56,14 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
   - Tenants cannot disable the self-approval guard on register approvals.
 - **Approver rules use stable `PermissionKey` values and relationship keys, never display labels (Architecture Standard §9, CLAUDE.md):**
   - Each register type (and optional `kind` override) declares `approvalRules`:
-    - `requiredPermission`: a registered `PermissionKey` (e.g. `'signoff:approve'` for `sign_off`, `'register:approve'` for general registers).
+    - `requiredPermission`: a registered `PermissionKey` (e.g. `'signoff:approve'` for `'write_off'` and `'matter_opening'` sign-offs, `'undertaking:manage'` for undertakings, `'register:approve'` for general registers).
     - `requireMfa`: boolean (defaults to the permission's `requiresMfa` in `PERMISSION_REGISTRY`).
     - `allowedApproverScopes`: array of `'assigned_approver' | 'matter_supervising_partner' | 'matter_responsible_partner' | 'team_lead' | 'any_with_permission'`.
   - When `record.assignedApproverId` is set and `allowedApproverScopes` restricts approval to `'assigned_approver'`, only that person (holding `requiredPermission` and not being `requestedById`) may approve or discuss (`REGISTER_APPROVER_MISMATCH`).
+- **Undertakings permission rule (Owner decision, 15 November 2026):**
+  - **Any fee earner may give or discharge an undertaking — not only a partner.** Nothing in the Stage 0 build (including the existing `'undertaking'` kind on `sign_off`) or the future Stage 2 `undertaking` register type restricts undertakings to partners.
+  - A dedicated user permission `'undertaking:manage'` (domain `'undertaking'`, sensitivity `'standard'`, `requiresMfa: false`) is registered in `PERMISSION_REGISTRY` and granted by default in `DEFAULT_RBAC_ROLES` to every fee-earner role identified by its **stable `HomeRoleKey`** (`'fee_earner'`, `'supervisor'`, `'partner'`, `'managing_partner'`, and `'admin'`) — never by display label.
+  - On `sign_off`, `kind: 'undertaking'` declares a per-`kind` `approvalRules` override with `requiredPermission: 'undertaking:manage'` (while `'write_off'` and `'matter_opening'` retain `'signoff:approve'`). Giving and discharging on the future `undertaking` register type also use `'undertaking:manage'` (plus `canPersonAccessMatter` and the unconditional no-self-approval check when approving).
 - **Matter visibility and ethical walls (Rule 9, B12):**
   - When `record.matterId` is set, both the SQL repository (`REGISTER_RECORD_VISIBLE_SQL_PREDICATE` checking `matters.is_staff_matter`, `matters.has_ethical_wall`, and `matters.restricted_access_user_ids_json`) and the service layer verify `canPersonAccessMatter` before returning or mutating the record.
 
@@ -67,37 +76,42 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
   - Advances per-record reminder state in `public.register_reminder_states`, creates in-app `public.notifications` (and email outbox entries once S0-26 lands), and writes `public.audit_entries` in the same transaction.
 - **Key dates stay separate:** Key dates (`ADR 0022`) retain their existing tables, limitation calculator, and `key-date-reminders` job.
 
-### 5. Same-transaction audit and side effects
-- Every register create, field update, state transition, approval, discussion, and reminder runs inside a single PostgreSQL transaction (`withTenantTransaction` over `SET LOCAL ROLE` on `TenantRegisterRepository`):
+### 5. Same-transaction audit, side effects, and pre-/post-transaction boundaries
+- **Pre-hooks (`beforeCreate`, `beforeTransition`):** Run **before** `withTenantTransaction` opens, with **no** PostgreSQL connection or transaction lock held (`R490`).
+- **Single atomic transaction (`withTenantTransaction` over `SET LOCAL ROLE` on `TenantRegisterRepository`):** Every register create, field update, state transition, approval, discussion, and reminder runs inside one PostgreSQL transaction:
+  - Inside the transaction, the core **re-reads and re-validates** everything used to decide the operation (`R478`, `R479`): the current `public.register_records` row and `row_version`, linked matter access metadata (`is_staff_matter`, `has_ethical_wall`, `restricted_access_user_ids_json`), people, teams, RBAC configuration, effective register configuration resolved from `public.tenant_module_configs['registers']`, and any `fieldValues` enriched or returned by a `beforeCreate` / `beforeTransition` hook.
   - Writes `public.register_records` and appends an immutable row to `public.register_transitions`.
   - Writes any follow-up task (such as the discussion follow-up task on `discussSignOff`) to `public.tasks` / `public.task_linked_records` using the same `tx` client.
   - Appends the `public.audit_entries` row(s) in the same transaction.
-  - Uses zero compensation or "undo" logic. All inputs used to decide the transition (current register record, matter access metadata, people, teams, RBAC config, and register configuration) are read inside the transaction.
+  - Uses zero compensation or "undo" logic.
+- **Post-hooks (`afterTransition`):** Run **only after `withTenantTransaction` commits** (`R490`). An `afterTransition` error or timeout never rolls back or alters the committed record, transitions, follow-up tasks, or `audit_entries`.
 
 ### 6. Extension points and their contract
 - Three generic register extension hooks are added to `PlatformExtension['hooks']` in `@platform/core-api` and `ExtensionHost` (`core/src/extension-host/index.ts`):
   1. `'register.beforeCreate'`: `(ctx: ExtensionExecutionContext, input: RegisterBeforeCreateHookInput) => Promise<RegisterBeforeCreateHookResult> | RegisterBeforeCreateHookResult`
      - Requires extension manifest permission `'register:write'`.
-     - May enrich allowed `fieldValues` or veto creation (`allowProceed: false`, `rejectionReason`).
-     - **Fail-closed:** if an enabled extension throws or exceeds `hookTimeoutMs` (default `2000ms`), `ExtensionHost` catches the error, isolates it, and returns `allowProceed: false` so unvalidated records are never created.
+     - Executes **before** `withTenantTransaction` opens (with no database connection held) under `hookTimeoutMs` (default `2000ms`).
+     - May enrich allowed `fieldValues` (which the core re-validates inside the subsequent transaction against `registers.config.schema.json`) or veto creation (`allowProceed: false`, `rejectionReason`).
+     - **Fail-closed:** if an enabled extension throws or exceeds `hookTimeoutMs`, `ExtensionHost` catches the error, isolates it, and returns `allowProceed: false` so unvalidated records are never created and no transaction is opened.
   2. `'register.beforeTransition'`: `(ctx: ExtensionExecutionContext, input: RegisterBeforeTransitionHookInput) => Promise<RegisterBeforeTransitionHookResult> | RegisterBeforeTransitionHookResult`
      - Requires `'register:write'`.
+     - Executes **before** `withTenantTransaction` opens (with no database connection held) under `hookTimeoutMs` (default `2000ms`), after which the core re-reads the current record and re-validates transition preconditions and returned `fieldValues` inside the transaction (`R478`, `R479`).
      - **Fail-closed:** timeout or thrown error blocks the transition (`allowProceed: false`).
   3. `'register.afterTransition'`: `(ctx: ExtensionExecutionContext, input: RegisterAfterTransitionHookInput) => Promise<void> | void`
      - Requires `'register:read'` or `'register:write'`.
-     - **Fail-safe advisory:** timeout or thrown error is isolated and logged with `tenantId` and `correlationId` (no personal data) without aborting the completed transition.
-- Extensions receive only the frozen `ExtensionExecutionContext` (`tenant` + `config`), never a database client or another tenant's data.
+     - Executes **only after `withTenantTransaction` commits** under `hookTimeoutMs` (default `2000ms`).
+     - **Fail-safe advisory:** timeout or thrown error is isolated and logged with `tenantId` and `correlationId` (no personal data) without affecting the committed record or aborting the caller's response.
+- Extensions receive only the frozen `ExtensionExecutionContext` (`tenant` + `config`), never a database client or another tenant's data. Contract tests in `S0-24` verify all three transaction boundaries (no DB connection held during `before*`, in-transaction re-read and re-validation, and post-commit failure isolation on `afterTransition`).
 
-### 7. Migrating sign-offs onto the engine (`0016` expand migration and rollback)
-- **Tables (`0016` expand migration):**
-  - `public.register_configs`: `(tenant_id, register_type_key, config_json, updated_by_id, updated_at, PRIMARY KEY (tenant_id, register_type_key))`.
+### 7. Migrating sign-offs onto the engine (expand migration and rollback)
+- **Tables (expand migration, numbered in build order in the `S0-24` slice plan):**
   - `public.register_records`: `(tenant_id, id, register_type_key, reference, kind, status, matter_id, matter_number, person_id, organisation_id, enquiry_id, title, subtitle, summary, requested_by_id, owner_id, assigned_approver_id, decided_by_id, amount_minor_units, amount_gbp, requested_at, due_at, decided_at, closed_at, discussion_note, field_values_json, payload_json, row_version, updated_at, PRIMARY KEY (tenant_id, id))` with indexes on `(tenant_id, register_type_key, status, requested_at DESC)` and `(tenant_id, matter_id)`.
   - `public.register_transitions`: `(tenant_id, id, register_record_id, register_type_key, transition_key, from_status, to_status, actor_id, note, occurred_at, metadata_json, PRIMARY KEY (tenant_id, id))`.
   - `public.register_reminder_states`: `(tenant_id, register_record_id, schedule_id, last_stage_days_before, escalated_at, acknowledged_at, acknowledged_by_id, updated_at, PRIMARY KEY (tenant_id, register_record_id))`.
   - `GRANT SELECT, INSERT, UPDATE, DELETE` on these tables to the tenant role.
 - **Data migration in `upSql`:**
   - Copies all existing rows from `public.sign_offs` into `public.register_records` with `register_type_key = 'sign_off'`, `reference = id`, `amount_minor_units = ROUND(amount_gbp * 100)::bigint`, preserving all IDs (`SO-xxxxxx`), timestamps, `assigned_approver_id`, `decided_by_id`, `discussion_note`, and `payload_json` (`ON CONFLICT (tenant_id, id) DO NOTHING`).
-  - `TenantTaskWorkflowRepository` sign-off methods (`getSignOffById`, `listVisibleSignOffs`, `putSignOff`, `upsertSignOffInTx`) delegate to or read/write `public.register_records` (`register_type_key = 'sign_off'`) so `approveSignOffAction`, `discussSignOffAction`, `flagMatterWriteOffAction`, and `AppSnapshot.signOffs` preserve their exact public contract and audit behaviour while running on the registers engine.
+  - `TenantTaskWorkflowRepository` sign-off methods (`getSignOffById`, `listVisibleSignOffs`, `putSignOff`, `upsertSignOffInTx`) delegate to or read/write `public.register_records` (`register_type_key = 'sign_off'`) so `approveSignOffAction`, `discussSignOffAction`, `flagMatterWriteOffAction`, and `AppSnapshot.signOffs` preserve their exact public contract and audit behaviour while running on the registers engine (with `kind: 'undertaking'` enforcing `'undertaking:manage'`).
   - Because migrations are expand-then-contract (Rule 8), `public.sign_offs` is retained in the expand migration (synced or backfilled on `downSql` from `register_records WHERE register_type_key = 'sign_off'`) before dropping the register tables in `downSql`, guaranteeing a lossless `up -> down -> up` round-trip.
 
 ## Alternatives Considered
@@ -108,6 +122,6 @@ Later MVP stages require central registers for Undertakings (item 12), File revi
 
 ## Consequences
 
-- `core/src/tenancy/registerRepository.ts` (`TenantRegisterRepository`) and `core/src/domain/registers/` become the single core implementation for register records, state transitions, approval checks, and reminder scheduling.
-- New permissions `'register:view'`, `'register:create'`, `'register:edit'`, `'register:approve'`, `'register:configure'` (user permissions) and `'register:run_reminders'` (`jobOnly: true`) are registered in `PERMISSION_REGISTRY`, while `'signoff:approve'` continues to govern `sign_off` approvals.
+- `core/src/tenancy/registerRepository.ts` (`TenantRegisterRepository`) and `core/src/domain/registers/` become the single core implementation for register records, state transitions, approval checks, and reminder scheduling, reading runtime admin register configuration solely from `public.tenant_module_configs['registers']` via `resolveEffectiveRegisterTypes`.
+- New permissions `'register:view'`, `'register:create'`, `'register:edit'`, `'register:approve'`, `'register:configure'`, `'undertaking:manage'` (granted to every fee-earner role by `HomeRoleKey`: `'fee_earner'`, `'supervisor'`, `'partner'`, `'managing_partner'`, `'admin'`), and `'register:run_reminders'` (`jobOnly: true`) are registered in `PERMISSION_REGISTRY`. On `sign_off`, `'signoff:approve'` continues to govern `'write_off'` and `'matter_opening'`, while `'undertaking:manage'` governs `'undertaking'` (`approveSignOffAction` and `discussSignOffAction` accept `anyOf: ['signoff:approve', 'undertaking:manage']` with kind-specific enforcement in the service).
 - Two-tenant isolation tests in `core/tests/isolation.test.ts` (including forged tenant claims and tampered `SO-xxxxxx` / `REG-xxxxxx` IDs) and extension hook contract tests cover the engine end to end.

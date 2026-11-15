@@ -25,10 +25,12 @@ On 12 November 2026, the product owner confirmed the CFA and DBA cap values and 
 ### 1. Money handling and VAT configuration (`S0-23` and `S0-28`)
 - **Integer minor units (pence), never floating-point arithmetic:**
   - All monetary calculations (hourly rate multiplication, disbursement sums, VAT calculation, fee caps, CFA uplift calculations, and DBA damages shares) execute in integer minor units (pence, `1 GBP = 100 pence`) inside a single shared pure module (`core/src/domain/money/index.ts`, re-exported from `@platform/core-api` and consumed by `src/domain/matterCosts.ts` and `src/domain/quotes.ts`).
-  - Conversion from GBP inputs (`poundsToMinorUnits`) parses fixed-decimal strings or finite numbers to integer pence using commercial half-up rounding (`Math.sign(x) * Math.floor(Math.abs(x) * 100 + 0.5 + 1e-9)`), and `minorUnitsToPounds` formats back to two decimal places (`number` / `string` for display and JSON serialization) only at the boundary.
-- **Single rounding rule in one place:**
-  - Percentage calculations (VAT, CFA success fee uplift, DBA payment share) multiply integer minor units by integer basis points (`1% = 100 bps`, e.g. `20% = 2000 bps`) and round to the nearest penny using **commercial half-up rounding** (`roundHalfUpFromBasisPoints(amountMinorUnits, basisPoints)`):
-    $$\text{resultMinorUnits} = \left\lfloor \frac{\text{amountMinorUnits} \times \text{basisPoints} + 5000}{10000} \right\rfloor$$
+  - Conversion from GBP inputs (`poundsToMinorUnits(input: string | number): number`) normalises finite inputs to a canonical decimal string matching `/^[-+]?\d+(?:\.\d+)?$/` (rejecting `NaN`, `Infinity`, and exponential notation), splits on `'.'` into whole pounds, two pence digits (right-padded with `'0'`), and any remaining fractional digits, and computes integer pence using pure integer arithmetic (`whole * 100 + pence`, rounding half away from zero if the third fractional digit is `'5'`–`'9'`) — **zero IEEE 754 floating-point multiplication**.
+  - Formatting back (`minorUnitsToPoundsString(minorUnits: number): string`) uses integer division and modulo (`Math.trunc(abs / 100)` and `abs % 100`) only at display and serialisation boundaries.
+- **Single rounding rule in one place (`roundHalfAwayFromZeroFromBasisPoints`):**
+  - Percentage calculations (VAT, CFA success fee uplift, DBA payment share) multiply integer minor units by non-negative integer basis points (`1% = 100 bps`, e.g. `20% = 2000 bps`) in `BigInt` ($p = \text{amountMinorUnits} \times \text{basisPoints}$, requiring integer inputs and $\text{basisPoints} \ge 0$) and round to the nearest penny using **symmetric commercial half-up (round half away from zero)**:
+    $$\text{resultMinorUnits} = \begin{cases} 0 & \text{if } p = 0 \\ \operatorname{sign}(p) \times \left\lfloor \dfrac{|p| + 5000}{10000} \right\rfloor & \text{if } p \neq 0 \end{cases}$$
+  - Unit tests in `S0-23` cover positive, zero, negative (credits, adjustments, and write-offs), exact half-penny boundary (`+0.5p` $\to$ `+1p`, `-0.5p` $\to$ `-1p`), and large-value inputs.
   - Line-item VAT is rounded per taxable line item (legal fee ex-VAT and each VAT-applicable disbursement), and `totalIncVatMinorUnits = subtotalExVatMinorUnits + totalVatMinorUnits`.
 - **Configurable VAT rate (`matterCosts.vatRatePercent`):**
   - `matterCosts.vatRatePercent` is added to `core/schemas/tenant-config.schema.json` and `MatterCostsConfig` with `type: 'number'`, `minimum: 0`, `maximum: 100`, `default: 20`, and description `'Standard UK VAT percentage applied to legal fees and taxable disbursements unless overridden on a line'`.
@@ -62,9 +64,9 @@ On 12 November 2026, the product owner confirmed the CFA and DBA cap values and 
   | `'dba_personal_injury'` | `'damages_based_agreement'` | Personal injury | `25%` | `'general_damages_and_past_losses_inc_vat'` — *"25% of general damages plus past losses, including VAT"* | `25%` |
 
 - **How caps are structured and enforced:**
-  1. **Statutory maximums are core data (`CORE_STATUTORY_FEE_CAPS` in `core/src/domain/costs/statutoryCaps.ts`), not tenant configuration:**
-     - Held as a versioned, effective-dated table (`rowId`, `capCategoryKey`, `feeBasis`, `maxPercent`, `capBaseKey`, `capBaseDescription`, `effectiveFrom: string`, `effectiveTo: string | null`, `legislationRef`).
-     - A change in the law is a data row addition with a new `effectiveFrom` date (or seeded into a read-only core reference table), requiring no change to validation logic.
+  1. **Statutory maximums are a single core data file (`core/src/domain/costs/statutory-fee-caps.json`), not tenant configuration:**
+     - Held in one authoritative, versioned, schema-validated core data file (`core/src/domain/costs/statutory-fee-caps.json`, validated against `core/schemas/statutory-fee-caps.schema.json` and queried by `core/src/domain/costs/statutoryCaps.ts`) with one effective-from date per row (`rowId`, `capCategoryKey`, `feeBasis`, `maxPercent`, `capBaseKey`, `capBaseDescription`, `effectiveFrom: string`, `effectiveTo: string | null`, `legislationRef`).
+     - A change in the law is a reviewed data change adding a new effective-dated row to `statutory-fee-caps.json`, requiring no change to validation logic.
      - **The base is always stored with the percentage** (`capBaseKey` + `capBaseDescription`) on the statutory row, firm configuration, work-type override, quote, and matter costs snapshot. A bare percentage without its base is rejected.
      - Tenants cannot raise or override statutory maximums.
   2. **Firm caps are tenant configuration (`matterCosts.feeArrangementCaps`):**
@@ -72,14 +74,18 @@ On 12 November 2026, the product owner confirmed the CFA and DBA cap values and 
      - Each of the five categories (`cfa_general_civil`, `cfa_personal_injury`, `dba_general_civil`, `dba_employment`, `dba_personal_injury`) has a schema entry with `maxPercent` (`0` up to the statutory maximum for that category) and `capBaseKey` (locked to the statutory base for that category).
      - **Defaults equal the statutory maximums (`100%`, `25%`, `50%`, `35%`, `25%`)** — there is no lower house limit out of the box (Decision 1).
      - Schema and service validation reject any firm cap above the statutory maximum (`FEE_CAP_CONFIG_EXCEEDS_STATUTORY`).
-  3. **Work-type cap overrides (`workTypes.items[].feeArrangementCapOverrides` / `MatterCostsConfig.workTypeCapOverrides`):**
+  3. **Mapping a matter or quote to `capCategoryKey` via its work type (fail closed):**
+     - Each work type (`S0-22` work-type configuration) carries an optional `feeArrangementCapCategories` mapping per CFA/DBA fee basis (`conditional_fee_agreement?: 'cfa_general_civil' | 'cfa_personal_injury'`, `damages_based_agreement?: 'dba_general_civil' | 'dba_employment' | 'dba_personal_injury'`).
+     - When CFA or DBA terms are created or updated on a matter, quote, or costs snapshot, the server reads the matter's or quote's `workTypeId` and that work type's configuration **inside the same PostgreSQL transaction** (`R478`, `R479`), selecting the `capCategoryKey` from the work type.
+     - **Fail closed:** If a matter or quote has no `workTypeId`, or its work type has no `capCategoryKey` configured for that `feeBasis`, setting CFA or DBA terms is rejected server-side with stable error code `'FEE_CAP_CATEGORY_UNMAPPED'` (and `'FEE_CAP_BASE_MISMATCH'` if the submitted `capBaseKey` does not match that category's statutory base). The code never guesses `"general civil"`.
+  4. **Work-type cap overrides (`workTypes.items[].feeArrangementCapOverrides` / `MatterCostsConfig.workTypeCapOverrides`):**
      - Building on S0-22's work-type configuration, a firm can set an optional cap override per work type (`workTypeId`, `capCategoryKey`, `maxPercent`, `capBaseKey`) (Decision 2).
-     - **Cap resolution precedence:**
+     - **Owner decision (15 November 2026, `R486`):** A work type's cap override may be higher or lower than the firm's general cap, up to the statutory maximum:
        $$\text{applicableCap} = \text{workTypeCap} \;\text{??}\; \text{firmCap} \;\text{??}\; \text{statutoryMax}$$
-       and in all cases capped by $\min(\text{resolved}, \text{statutoryMax})$.
-     - Validation at configuration save time rejects any work-type cap override above the statutory maximum (`FEE_CAP_CONFIG_EXCEEDS_STATUTORY`) or above the firm cap (`FEE_CAP_CONFIG_EXCEEDS_FIRM`).
-  4. **Server-side enforcement with no override path (Decision 3):**
-     - Wherever CFA or DBA terms are created or updated — on a **matter** (`saveMatterRecord`), a **quote** (`saveQuoteRecord`), or a **matter costs snapshot / sign-off** (`signOffMatterCosts`) — the server resolves the applicable cap inside the PostgreSQL transaction (reading work-type settings, firm caps, and statutory caps inside the transaction) and validates the proposed percentage and base.
+       bounded above by `statutoryMax`.
+     - Validation at configuration save time validates work-type cap overrides against the **statutory maximum only** (`FEE_CAP_CONFIG_EXCEEDS_STATUTORY`); work-type caps above the firm's general cap are accepted as long as they do not exceed the statutory maximum. (`S0-28` includes a dedicated test where a work-type cap above the firm cap is accepted at configuration time and applied to a matter and quote of that work type.)
+  5. **Server-side enforcement with no override path (Decision 3):**
+     - Wherever CFA or DBA terms are created or updated — on a **matter** (`saveMatterRecord`), a **quote** (`saveQuoteRecord`), or a **matter costs snapshot / sign-off** (`signOffMatterCosts`) — the server resolves the applicable cap inside the PostgreSQL transaction (reading work-type category mappings, work-type caps, firm caps, and statutory caps inside the transaction) and validates the proposed percentage and base.
      - Any value above the applicable cap is **blocked with no override path** (no Risk & Compliance sign-off override exists).
      - The server returns a stable error code (`'FEE_CAP_EXCEEDED_WORK_TYPE'`, `'FEE_CAP_EXCEEDED_FIRM'`, or `'FEE_CAP_EXCEEDED_STATUTORY'`) and a message stating the submitted percentage, the applicable cap percentage, the cap level (`work type`, `firm`, or `statutory`), and the defined base.
 
@@ -100,5 +106,5 @@ On 12 November 2026, the product owner confirmed the CFA and DBA cap values and 
 ## Consequences
 
 - `S0-23` unreserves the five `[x-reserved:S0-23]` `matterCosts.*` keys in `core/schemas/tenant-config.schema.json`, adds `matterCosts.vatRatePercent`, introduces `core/src/domain/money/index.ts`, and locks immutable costs snapshots.
-- `S0-28` adds migration `0017_negotiated_rates_and_fee_arrangements_expand` (`public.client_rate_overrides`, `public.matter_rate_overrides`), `CORE_STATUTORY_FEE_CAPS`, firm and work-type cap configuration, CFA/DBA support on matters and quotes, two-tenant isolation tests, and Help articles (`rates-and-charging`, `matter-opening-and-risk`).
+- `S0-28` adds an expand migration (numbered in build order in the `S0-28` slice plan) adding `public.client_rate_overrides` and `public.matter_rate_overrides`, `core/src/domain/costs/statutory-fee-caps.json`, firm and work-type cap configuration, CFA/DBA support on matters and quotes, two-tenant isolation tests, and Help articles (`rates-and-charging`, `matter-opening-and-risk`).
 - Stage plan §8 row *"Confirm the CFA and DBA cap values to use as configuration defaults"* is marked **Done (12 November 2026)**.
