@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CORE_REQUIRED_SCHEMA_VERSION,
   HomeRoleKey,
@@ -18,6 +18,7 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import { createDirectMigrationClient } from '../src/tenancy/postgresPoolManager';
 import {
+  saveMatterAction,
   saveWorkTypesConfigAction,
   updateMatterLifecycleStatusAction,
 } from '@/app/actions';
@@ -32,7 +33,7 @@ import {
   isWorkTypeChoiceActive,
   resolveActiveWorkTypeHierarchy,
 } from '@/domain/orgStructure';
-import type { Matter, Task } from '@/domain/types';
+import type { ChoiceValue, Matter, Task } from '@/domain/types';
 import {
   calculateDestructionDate,
   formatRetentionPeriodLabel,
@@ -40,11 +41,14 @@ import {
   resolveWorkTypeRiskQuestions,
 } from '@/domain/workTypeConfig';
 import {
+  flushStagedAuditEntries,
   getActiveTenantRawBaseConfig,
   getCatalogueRepository,
   getMatterRepository,
   getTaskWorkflowRepository,
+  runWithAuditStagingScope,
   setActiveTenantConfigForTesting,
+  stageAuditEntry,
 } from '@/platform/tenantRuntime';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
@@ -53,6 +57,7 @@ import {
 } from '@/seed/seedStoreBuilder';
 import {
   getAppSnapshot,
+  getKeyDateRepository,
   prepareEnquiryConversion,
   resetAllDemoData,
   saveMatterRecord,
@@ -763,7 +768,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         {
           ...matterTemplate,
           matterNumber: 'DRAFT',
-          openedAt: null,
+          openedAt: '2024-02-01',
           title: 'S0-22 Commercial Lease For Retention Closure',
           practiceAreaId: 'work_type.real_estate_and_property',
           workTypeSubcategoryId: 'work_type.real_estate_and_property_commercial_property',
@@ -1268,7 +1273,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
           {
             ...m4Template,
             matterNumber: 'DRAFT',
-            openedAt: null,
+            openedAt: '2026-11-01',
             title: 'Alpha Isolated M&A Deal',
             practiceAreaId: 'work_type.corporate_and_commercial',
             workTypeSubcategoryId:
@@ -1382,5 +1387,629 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
 
     expect(runner).toBeDefined();
     expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0015');
+  });
+
+  it('10. R495: ignores client destructionDueAt and retentionPeriod on create and update, rejects non-closing/future/pre-open closedAt with code and message, and audits old/new values', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const seed = loadCommittedSeedStore();
+    const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    void _ignoredId;
+
+    setTestActorSession('P-000001', { mfaVerified: true });
+    await runAsTestActor('P-000001', async () => {
+      // 1. Create with forged destructionDueAt, retentionPeriod, and non-closing closedAt -> rejected for closedAt
+      const badCreateClosed = await saveMatterAction(
+        {
+          ...matterTemplate,
+          matterNumber: 'DRAFT',
+          openedAt: '2026-06-15',
+          closedAt: '2026-06-20',
+          destructionDueAt: '2027-01-01',
+          retentionPeriod: '1 year',
+          title: 'R495 Create Reject Non-Closing ClosedAt',
+          practiceAreaId: 'work_type.real_estate_and_property',
+          workTypeSubcategoryId:
+            'work_type.real_estate_and_property_commercial_property',
+          agreedFeeCapGbp: 5000,
+          feeEstimateGbp: 5000,
+          fieldValues: {
+            riskAssessment: {
+              answers: {
+                ...BASE_LOW_RISK_ANSWERS,
+                propertyDevelopmentEnvironmental: 'standard_occupied_title',
+              },
+            },
+          },
+        },
+        { saveMode: 'submit_cleared' },
+      );
+      expect(badCreateClosed.matter).toBeNull();
+      expect(badCreateClosed.code).toBe('INVALID_CLOSURE_DATE');
+      expect(badCreateClosed.message).toContain('INVALID_CLOSURE_DATE');
+
+      // 2. Create with forged destructionDueAt and retentionPeriod (no closedAt) -> client values ignored; server sets 12 years and null destructionDueAt
+      const createAuditMark = await markAuditPosition();
+      const createdRes = await saveMatterAction(
+        {
+          ...matterTemplate,
+          matterNumber: 'DRAFT',
+          openedAt: '2026-06-15',
+          closedAt: null,
+          destructionDueAt: '2027-01-01',
+          retentionPeriod: '1 year',
+          title: 'R495 Server Owned Retention Matter',
+          practiceAreaId: 'work_type.real_estate_and_property',
+          workTypeSubcategoryId:
+            'work_type.real_estate_and_property_commercial_property',
+          agreedFeeCapGbp: 5000,
+          feeEstimateGbp: 5000,
+          fieldValues: {
+            riskAssessment: {
+              answers: {
+                ...BASE_LOW_RISK_ANSWERS,
+                propertyDevelopmentEnvironmental: 'standard_occupied_title',
+              },
+            },
+          },
+        },
+        { saveMode: 'submit_cleared' },
+      );
+      expect(createdRes.errors).toBeUndefined();
+      const created = createdRes.matter!;
+      expect(created.retentionPeriod).toBe('12 years');
+      expect(created.destructionDueAt).toBeNull();
+      expect(created.closedAt).toBeNull();
+
+      const pgAfterCreate = await queryDirectSql<{
+        retention_period: string | null;
+        destruction_date: string | null;
+        closed_on: string | null;
+      }>(
+        ctx,
+        `SELECT milestones_json->>'retentionPeriod' AS retention_period,
+                destruction_date::text,
+                closed_on::text
+           FROM public.matters WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, created.id],
+      );
+      expect(pgAfterCreate[0].retention_period).toBe('12 years');
+      expect(pgAfterCreate[0].destruction_date).toBeNull();
+      expect(pgAfterCreate[0].closed_on).toBeNull();
+
+      const createAudits = await auditEntriesSince(createAuditMark);
+      expect(
+        createAudits.some(
+          (a) =>
+            a.recordId === created.id &&
+            a.field === 'Matter closure & retention' &&
+            a.oldValue === null &&
+            a.newValue?.includes('12 years'),
+        ),
+      ).toBe(true);
+
+      // 3. Update with forged destructionDueAt, retentionPeriod, and non-closing closedAt -> rejected
+      const badUpdateClosedAt = await saveMatterAction(
+        {
+          ...created,
+          closedAt: '2026-06-20',
+          destructionDueAt: '2027-01-01',
+          retentionPeriod: '1 year',
+        },
+        { id: created.id, expectedRowVersion: created.rowVersion ?? 1 },
+      );
+      expect(badUpdateClosedAt.matter).toBeNull();
+      expect(badUpdateClosedAt.code).toBe('INVALID_CLOSURE_DATE');
+      expect(badUpdateClosedAt.message).toContain('INVALID_CLOSURE_DATE');
+
+      // 4. Update with forged destructionDueAt and retentionPeriod -> ignored on update, server keeps 12 years & null destruction_date
+      const updateIgnoredRes = await saveMatterAction(
+        {
+          ...created,
+          title: 'R495 Server Owned Retention Matter Updated',
+          closedAt: null,
+          destructionDueAt: '2027-01-01',
+          retentionPeriod: '1 year',
+        },
+        { id: created.id, expectedRowVersion: created.rowVersion ?? 1 },
+      );
+      expect(updateIgnoredRes.errors).toBeUndefined();
+      const updated = updateIgnoredRes.matter!;
+      expect(updated.retentionPeriod).toBe('12 years');
+      expect(updated.destructionDueAt).toBeNull();
+      const pgAfterUpdate = await queryDirectSql<{
+        status_id: string;
+        retention_period: string | null;
+        destruction_date: string | null;
+      }>(
+        ctx,
+        `SELECT status_id, milestones_json->>'retentionPeriod' AS retention_period, destruction_date::text
+           FROM public.matters WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, updated.id],
+      );
+      expect(pgAfterUpdate[0].status_id).toBe('matter_status.active');
+      expect(pgAfterUpdate[0].retention_period).toBe('12 years');
+      expect(pgAfterUpdate[0].destruction_date).toBeNull();
+
+      // 5. Future closedAt rejected in both updateMatterLifecycleStatusAction and saveMatterAction
+      const futureLifecycle = await updateMatterLifecycleStatusAction(
+        updated.id,
+        'close',
+        { closedAt: '2099-01-01', expectedRowVersion: updated.rowVersion ?? 1 },
+      );
+      expect(futureLifecycle.matter).toBeNull();
+      expect(futureLifecycle.code).toBe('INVALID_CLOSURE_DATE');
+      expect(futureLifecycle.message).toContain('cannot be in the future');
+
+      const futureSave = await saveMatterAction(
+        {
+          ...updated,
+          matterStatusId: 'matter_status.closed',
+          closedAt: '2099-01-01',
+          destructionDueAt: '2027-01-01',
+          retentionPeriod: '1 year',
+        },
+        { id: updated.id, expectedRowVersion: updated.rowVersion ?? 1 },
+      );
+      expect(futureSave.matter).toBeNull();
+      expect(futureSave.code).toBe('INVALID_CLOSURE_DATE');
+      expect(futureSave.message).toContain('cannot be in the future');
+
+      // 6. closedAt before openedAt rejected in both actions, DB stays active & unscheduled
+      const preOpenLifecycle = await updateMatterLifecycleStatusAction(
+        updated.id,
+        'close',
+        { closedAt: '2026-06-14', expectedRowVersion: updated.rowVersion ?? 1 },
+      );
+      expect(preOpenLifecycle.matter).toBeNull();
+      expect(preOpenLifecycle.code).toBe('INVALID_CLOSURE_DATE');
+      expect(preOpenLifecycle.message).toContain('earlier than the matter opened date');
+
+      const preOpenSave = await saveMatterAction(
+        {
+          ...updated,
+          matterStatusId: 'matter_status.closed',
+          closedAt: '2026-06-14',
+        },
+        { id: updated.id, expectedRowVersion: updated.rowVersion ?? 1 },
+      );
+      expect(preOpenSave.matter).toBeNull();
+      expect(preOpenSave.code).toBe('INVALID_CLOSURE_DATE');
+      expect(preOpenSave.message).toContain('earlier than the matter opened date');
+
+      const pgStillOpen = await queryDirectSql<{
+        status_id: string;
+        closed_on: string | null;
+        destruction_date: string | null;
+      }>(
+        ctx,
+        `SELECT status_id, closed_on::text, destruction_date::text
+           FROM public.matters WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, updated.id],
+      );
+      expect(pgStillOpen[0].status_id).toBe('matter_status.active');
+      expect(pgStillOpen[0].closed_on).toBeNull();
+      expect(pgStillOpen[0].destruction_date).toBeNull();
+
+      // 7. Valid close audits old/new values and rejects non-closing closedAt on reopen
+      const closeAuditMark = await markAuditPosition();
+      const validClose = await updateMatterLifecycleStatusAction(
+        updated.id,
+        'close',
+        { closedAt: '2026-07-01', expectedRowVersion: updated.rowVersion ?? 1 },
+      );
+      expect(validClose.errors).toBeUndefined();
+      expect(validClose.matter?.destructionDueAt).toBe('2038-07-01');
+      expect(validClose.matter?.retentionPeriod).toBe('12 years');
+
+      const closeAudits = await auditEntriesSince(closeAuditMark);
+      expect(
+        closeAudits.some(
+          (a) =>
+            a.recordId === updated.id &&
+            a.oldValue?.includes('Retention: 12 years') &&
+            a.oldValue?.includes('Destruction due: None') &&
+            a.newValue?.includes('Closed: 2026-07-01') &&
+            a.newValue?.includes('Destruction due: 2038-07-01'),
+        ),
+      ).toBe(true);
+
+      const badReopenWithDate = await updateMatterLifecycleStatusAction(
+        updated.id,
+        'reopen',
+        {
+          closedAt: '2026-07-02',
+          expectedRowVersion: validClose.matter!.rowVersion ?? 1,
+        },
+      );
+      expect(badReopenWithDate.matter).toBeNull();
+      expect(badReopenWithDate.code).toBe('INVALID_CLOSURE_DATE');
+      expect(badReopenWithDate.message).toContain('only be supplied when closing');
+    });
+  });
+
+  it('11. R496: resolves closure and active statuses strictly by systemKey when display labels differ and fails closed with MATTER_STATUS_NOT_CONFIGURED when absent', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const seed = loadCommittedSeedStore();
+    const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    void _ignoredId;
+    const catRepo = getCatalogueRepository();
+
+    setTestActorSession('P-000001', { mfaVerified: true });
+    await runAsTestActor('P-000001', async () => {
+      const openRes = await saveMatterAction(
+        {
+          ...matterTemplate,
+          matterNumber: 'DRAFT',
+          openedAt: '2026-06-01',
+          title: 'R496 SystemKey Status Matter',
+          agreedFeeCapGbp: 5000,
+          feeEstimateGbp: 5000,
+          fieldValues: {
+            riskAssessment: { answers: { ...BASE_LOW_RISK_ANSWERS } },
+          },
+        },
+        { saveMode: 'submit_cleared' },
+      );
+      expect(openRes.errors).toBeUndefined();
+      let currentMatter = openRes.matter!;
+
+      // Rename Active -> 'Open – live' and Closed -> 'Closed – archived' while keeping systemKey
+      const statuses = await catRepo.listChoiceValuesForList<ChoiceValue>(
+        ctx,
+        'matter_status',
+      );
+      const activeVal = statuses.find((v) => v.systemKey === 'active')!;
+      const closedVal = statuses.find((v) => v.systemKey === 'closed')!;
+      await catRepo.putChoiceValue(ctx, { ...activeVal, label: 'Open – live' });
+      await catRepo.putChoiceValue(ctx, { ...closedVal, label: 'Closed – archived' });
+
+      const closedRenamed = await updateMatterLifecycleStatusAction(
+        currentMatter.id,
+        'close',
+        { closedAt: '2026-08-01', expectedRowVersion: currentMatter.rowVersion ?? 1 },
+      );
+      expect(closedRenamed.errors).toBeUndefined();
+      expect(closedRenamed.matter?.matterStatusId).toBe(closedVal.id);
+      currentMatter = closedRenamed.matter!;
+
+      const reopenedRenamed = await updateMatterLifecycleStatusAction(
+        currentMatter.id,
+        'reopen',
+        { expectedRowVersion: currentMatter.rowVersion ?? 1 },
+      );
+      expect(reopenedRenamed.errors).toBeUndefined();
+      expect(reopenedRenamed.matter?.matterStatusId).toBe(activeVal.id);
+      currentMatter = reopenedRenamed.matter!;
+
+      // Replace default closed row with a custom ID holding systemKey: 'closed'
+      const customClosed: ChoiceValue = {
+        id: 'matter_status.custom_archived_closure',
+        listKey: 'matter_status',
+        label: 'Archived File',
+        sortOrder: 99,
+        active: true,
+        systemKey: 'closed',
+      };
+      await catRepo.putChoiceValue(ctx, { ...closedVal, active: false });
+      await catRepo.putChoiceValue(ctx, customClosed);
+
+      const closedCustom = await updateMatterLifecycleStatusAction(
+        currentMatter.id,
+        'close',
+        { closedAt: '2026-08-02', expectedRowVersion: currentMatter.rowVersion ?? 1 },
+      );
+      expect(closedCustom.errors).toBeUndefined();
+      expect(closedCustom.matter?.matterStatusId).toBe(customClosed.id);
+      currentMatter = closedCustom.matter!;
+
+      const reopenedFromCustom = await updateMatterLifecycleStatusAction(
+        currentMatter.id,
+        'reopen',
+        { expectedRowVersion: currentMatter.rowVersion ?? 1 },
+      );
+      expect(reopenedFromCustom.errors).toBeUndefined();
+      expect(reopenedFromCustom.matter?.matterStatusId).toBe(activeVal.id);
+      currentMatter = reopenedFromCustom.matter!;
+
+      // Remove/deactivate all 'closed' statuses -> fail closed with MATTER_STATUS_NOT_CONFIGURED
+      await catRepo.putChoiceValue(ctx, { ...customClosed, active: false });
+      const missingStatusClose = await updateMatterLifecycleStatusAction(
+        currentMatter.id,
+        'close',
+        { closedAt: '2026-08-03', expectedRowVersion: currentMatter.rowVersion ?? 1 },
+      );
+      expect(missingStatusClose.matter).toBeNull();
+      expect(missingStatusClose.code).toBe('MATTER_STATUS_NOT_CONFIGURED');
+      expect(missingStatusClose.message).toContain('MATTER_STATUS_NOT_CONFIGURED');
+
+      const pgUnchanged = await queryDirectSql<{ status_id: string }>(
+        ctx,
+        'SELECT status_id FROM public.matters WHERE tenant_id = $1 AND id = $2',
+        [ctx.tenantId, currentMatter.id],
+      );
+      expect(pgUnchanged[0].status_id).toBe(activeVal.id);
+    });
+  });
+
+  it('12. R497: in-transaction reads block closure when an open key date commits after close begins and observe concurrent retention updates', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const seed = loadCommittedSeedStore();
+    const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    void _ignoredId;
+    const kdRepo = getKeyDateRepository();
+    const catRepo = getCatalogueRepository();
+
+    setTestActorSession('P-000001', { mfaVerified: true });
+    await runAsTestActor('P-000001', async () => {
+      const openRes = await saveMatterAction(
+        {
+          ...matterTemplate,
+          matterNumber: 'DRAFT',
+          openedAt: '2026-06-01',
+          title: 'R497 In-Tx KeyDate & Retention Race Matter',
+          practiceAreaId: 'work_type.real_estate_and_property',
+          workTypeSubcategoryId:
+            'work_type.real_estate_and_property_commercial_property',
+          agreedFeeCapGbp: 5000,
+          feeEstimateGbp: 5000,
+          fieldValues: {
+            riskAssessment: {
+              answers: {
+                ...BASE_LOW_RISK_ANSWERS,
+                propertyDevelopmentEnvironmental: 'standard_occupied_title',
+              },
+            },
+          },
+        },
+        { saveMode: 'submit_cleared' },
+      );
+      expect(openRes.errors).toBeUndefined();
+      const targetMatter = openRes.matter!;
+
+      // Part A: Key date commits on an autonomous connection after close check starts
+      const origGetKdConfig = kdRepo.getKeyDatesTenantConfig.bind(kdRepo);
+      let injectedKeyDate = false;
+      const kdSpy = vi
+        .spyOn(kdRepo, 'getKeyDatesTenantConfig')
+        .mockImplementation(async (callCtx: TenantContext) => {
+          const cfg = await origGetKdConfig(callCtx);
+          if (!injectedKeyDate) {
+            injectedKeyDate = true;
+            const nowIso = new Date().toISOString();
+            await kdRepo.withAutonomousTenantTransaction(ctx, async () => {
+              await kdRepo.putKeyDate(ctx, {
+                id: 'KD-R497-CONCURRENT-01',
+                matterId: targetMatter.id,
+                keyDateTypeId: 'kd-type-limitation',
+                category: 'limitation',
+                title: 'R497 Concurrent Open Key Date',
+                dueDate: '2027-07-01',
+                isCritical: true,
+                status: 'confirmed',
+                source: 'manual',
+                teamId: 'TM-000001',
+                responsiblePersonIds: ['P-000001'],
+                verification: {
+                  required: true,
+                  proposedById: 'P-000001',
+                  proposedAt: nowIso,
+                  verifiedById: 'P-000001',
+                  verifiedAt: nowIso,
+                },
+                createdById: 'P-000001',
+                createdAt: nowIso,
+                updatedById: 'P-000001',
+                updatedAt: nowIso,
+                version: 1,
+              });
+            });
+          }
+          return cfg;
+        });
+
+      let raceCloseRes: Awaited<ReturnType<typeof updateMatterLifecycleStatusAction>>;
+      try {
+        raceCloseRes = await updateMatterLifecycleStatusAction(
+          targetMatter.id,
+          'close',
+          { closedAt: '2026-11-10', expectedRowVersion: targetMatter.rowVersion ?? 1 },
+        );
+      } finally {
+        kdSpy.mockRestore();
+      }
+
+      expect(injectedKeyDate).toBe(true);
+      expect(raceCloseRes!.matter).toBeNull();
+      expect(raceCloseRes!.code).toBe('OPEN_KEY_DATES_BLOCK_CLOSURE');
+      expect(raceCloseRes!.message).toContain('OPEN_KEY_DATES_BLOCK_CLOSURE');
+
+      const pgAfterKdRace = await queryDirectSql<{
+        status_id: string;
+        closed_on: string | null;
+        destruction_date: string | null;
+      }>(
+        ctx,
+        `SELECT status_id, closed_on::text, destruction_date::text
+           FROM public.matters WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, targetMatter.id],
+      );
+      expect(pgAfterKdRace[0].status_id).toBe('matter_status.active');
+      expect(pgAfterKdRace[0].closed_on).toBeNull();
+      expect(pgAfterKdRace[0].destruction_date).toBeNull();
+
+      // Mark the injected key date met, then simulate concurrent retention update after close transaction begins
+      const injectedKd = (
+        await kdRepo.listKeyDatesForMatter(ctx, targetMatter.id, 'P-000001')
+      ).find((d) => d.id === 'KD-R497-CONCURRENT-01')!;
+      await kdRepo.putKeyDate(ctx, { ...injectedKd, status: 'met' });
+
+      const updatedWorkTypes = cloneBaseWorkTypesConfig();
+      const cpItem = updatedWorkTypes.items.find(
+        (i) =>
+          i.workTypeId ===
+          'work_type.real_estate_and_property_commercial_property',
+      )!;
+      cpItem.retention = {
+        ...cpItem.retention,
+        retentionYears: 20,
+        baseline: 'closed_on',
+      };
+
+      const origListChoices = catRepo.listAllChoiceValues.bind(catRepo);
+      let updatedRetentionConcurrently = false;
+      const catSpy = vi
+        .spyOn(catRepo, 'listAllChoiceValues')
+        .mockImplementation(async (callCtx: TenantContext) => {
+          const vals = await origListChoices(callCtx);
+          if (!updatedRetentionConcurrently) {
+            updatedRetentionConcurrently = true;
+            await catRepo.withAutonomousTenantTransaction(ctx, async () => {
+              await catRepo.putWorkTypeConfigs(ctx, updatedWorkTypes, 'P-000001');
+            });
+          }
+          return vals;
+        });
+
+      let closeWithUpdatedRetention: Awaited<
+        ReturnType<typeof updateMatterLifecycleStatusAction>
+      >;
+      try {
+        closeWithUpdatedRetention = await updateMatterLifecycleStatusAction(
+          targetMatter.id,
+          'close',
+          { closedAt: '2026-11-10', expectedRowVersion: targetMatter.rowVersion ?? 1 },
+        );
+      } finally {
+        catSpy.mockRestore();
+      }
+
+      expect(updatedRetentionConcurrently).toBe(true);
+      expect(closeWithUpdatedRetention!.errors).toBeUndefined();
+      expect(closeWithUpdatedRetention!.matter?.retentionPeriod).toBe('20 years');
+      expect(closeWithUpdatedRetention!.matter?.destructionDueAt).toBe('2046-11-10');
+    });
+  });
+
+  it('13. S1: discards staged audit entries on non-concurrency transaction failure so the same audit scope stays clean for subsequent saves', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const seed = loadCommittedSeedStore();
+    const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    void _ignoredId;
+
+    setTestActorSession('P-000001', { mfaVerified: true });
+    await runAsTestActor('P-000001', async () => {
+      const migClient = await createDirectMigrationClient({ ctx });
+      let secondSaveMatterId = '';
+      const beforeS1Mark = await markAuditPosition();
+
+      try {
+        await migClient.query(`
+          CREATE OR REPLACE FUNCTION public.s022_fail_s1_task_insert()
+          RETURNS trigger AS $$
+          BEGIN
+            IF NEW.description LIKE '%S022_S1_TRIGGER_FAIL%' THEN
+              RAISE EXCEPTION 'PG_TEST_FORCED_S1_FAILURE';
+            END IF;
+            RETURN NEW;
+          END;
+          $$ LANGUAGE plpgsql;
+        `);
+        await migClient.query(`
+          DROP TRIGGER IF EXISTS trg_s022_fail_s1_task ON public.tasks;
+          CREATE TRIGGER trg_s022_fail_s1_task
+          BEFORE INSERT ON public.tasks
+          FOR EACH ROW EXECUTE FUNCTION public.s022_fail_s1_task_insert();
+        `);
+
+        await expect(
+          runWithAuditStagingScope(async () => {
+            await expect(
+              saveMatterRecord(
+                {
+                  ...matterTemplate,
+                  matterNumber: 'DRAFT',
+                  openedAt: '2026-06-01',
+                  title: 'S022_S1_TRIGGER_FAIL Rollback Matter',
+                  agreedFeeCapGbp: 5000,
+                  feeEstimateGbp: 5000,
+                  fieldValues: {
+                    riskAssessment: { answers: { ...BASE_LOW_RISK_ANSWERS } },
+                  },
+                },
+                { byId: 'P-000001', saveMode: 'draft' },
+              ),
+            ).rejects.toThrow(/(?:TENANCY_DATABASE_ERROR.*P0001|PG_TEST_FORCED_S1_FAILURE)/i);
+
+            // Flush an outer staged entry inside the SAME staging scope;
+            // without S1 cleanup, the rolled-back save's staged entries would leak here.
+            await getMatterRepository().withTenantTransaction(ctx, async () => {
+              stageAuditEntry({
+                recordType: 'matter',
+                recordId: 'M-S022-S1-OUTER',
+                action: 'update',
+                field: 'S1 outer staging scope verification',
+                oldValue: null,
+                newValue: 'S022_S1_OUTER_FLUSH_CLEAN',
+                byId: 'P-000001',
+              });
+              await flushStagedAuditEntries(ctx);
+            });
+          }),
+        ).resolves.toBeUndefined();
+
+        const secondRes = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            openedAt: '2026-06-01',
+            title: 'S022_S1_CLEAN_SECOND_SAVE',
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            fieldValues: {
+              riskAssessment: { answers: { ...BASE_LOW_RISK_ANSWERS } },
+            },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(secondRes.errors).toBeUndefined();
+        expect(secondRes.matter?.title).toBe('S022_S1_CLEAN_SECOND_SAVE');
+        secondSaveMatterId = secondRes.matter!.id;
+      } finally {
+        await migClient.query(
+          'DROP TRIGGER IF EXISTS trg_s022_fail_s1_task ON public.tasks;',
+        );
+        await migClient.query(
+          'DROP FUNCTION IF EXISTS public.s022_fail_s1_task_insert();',
+        );
+        await migClient.end();
+      }
+
+      const entriesAfterS1 = await auditEntriesSince(beforeS1Mark);
+      expect(
+        entriesAfterS1.some((e) =>
+          String(e.newValue ?? '').includes('S022_S1_TRIGGER_FAIL'),
+        ),
+      ).toBe(false);
+      expect(
+        entriesAfterS1.some((e) =>
+          String(e.newValue ?? '').includes('S022_S1_OUTER_FLUSH_CLEAN'),
+        ),
+      ).toBe(true);
+      expect(
+        entriesAfterS1.some(
+          (e) =>
+            e.recordId === secondSaveMatterId &&
+            String(e.newValue ?? '').includes('S022_S1_CLEAN_SECOND_SAVE'),
+        ),
+      ).toBe(true);
+    });
   });
 });

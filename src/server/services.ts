@@ -159,10 +159,11 @@ import {
   resolveOrgDepartment,
 } from '@/domain/orgStructure';
 import {
-  isClosedMatterStatus,
   isClosedOrArchivedMatterStatus,
   resolveEffectiveWorkTypesConfig,
+  resolveMatterLifecycleTargetStatusId,
   resolveWorkTypeRiskQuestions,
+  validateMatterClosureDate,
 } from '@/domain/workTypeConfig';
 import {
   computeServerWorkTypeRetentionState,
@@ -238,6 +239,7 @@ import {
   loadActiveTenantRegistry,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
   TenantKeyDateRepository,
@@ -4983,7 +4985,10 @@ export async function saveMatterRecord(
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
   const now = nextMonotonicIsoTimestamp(existing?.updatedAt);
-  const today = toIsoDate(new Date());
+  const today = resolveTenantLocalDateAndHour(
+    new Date(),
+    tenantCfg.timeZone || 'Europe/London',
+  ).localDate;
   if (!activeVerifiedSession) {
     return {
       matter: null,
@@ -5217,38 +5222,6 @@ export async function saveMatterRecord(
   }
 
   resolvedMatterCtx = extensionCtx;
-  // Enforce Key Dates closure gate (§1; opening gate runs via runMatterOpeningGate)
-  const kdConfig = await getKeyDatesConfig({ ctx: extensionCtx });
-  if (kdConfig.enabled && !isDraftSave) {
-    const targetMatterId = existing?.id;
-    const targetMatterTypeId =
-      input.matterTypeId ||
-      existing?.matterTypeId ||
-      input.practiceAreaId ||
-      existing?.practiceAreaId;
-    const nextStatusId = input.matterStatusId ?? existing?.matterStatusId ?? '';
-    const nextStatusLabel = resolveLabel(store.values, nextStatusId) || nextStatusId;
-    const isClosing =
-      isClosedMatterStatus(nextStatusId, store.values) ||
-      nextStatusLabel.toLowerCase() === 'archived';
-
-    if (targetMatterId && isClosing) {
-      const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
-        extensionCtx,
-        targetMatterId,
-        extensionCtx.actorId,
-      );
-      const closeGate = evaluateMatterKeyDateClosureGate(
-        kdConfig,
-        targetMatterTypeId,
-        matterKds,
-      );
-      if (!closeGate.canClose) {
-        errors.keyDates = `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`;
-      }
-    }
-  }
-
   if (Object.keys(errors).length > 0) {
     return { matter: null, errors };
   }
@@ -6089,7 +6062,15 @@ export async function saveMatterRecord(
     milestoneId: input.milestoneId !== undefined ? input.milestoneId : existing?.milestoneId ?? null,
     enquiryReceivedAt:
       input.enquiryReceivedAt !== undefined ? input.enquiryReceivedAt : existing?.enquiryReceivedAt ?? today,
-    openedAt: input.openedAt !== undefined ? input.openedAt : existing?.openedAt ?? today,
+    openedAt: (() => {
+      const rawOpened =
+        input.openedAt !== undefined ? input.openedAt : existing?.openedAt ?? null;
+      const trimmedOpened = typeof rawOpened === 'string' ? rawOpened.trim() : '';
+      if (!trimmedOpened && nextStatusId !== prospectiveStatus && !isDraftSave) {
+        return today;
+      }
+      return rawOpened ?? null;
+    })(),
     targetCompletionAt:
       input.targetCompletionAt !== undefined ? input.targetCompletionAt : existing?.targetCompletionAt ?? null,
     completedAt: input.completedAt !== undefined ? input.completedAt : existing?.completedAt ?? null,
@@ -6161,20 +6142,8 @@ export async function saveMatterRecord(
         );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
   matter.fieldValues['__riskAssessmentSnapshot'] = fullRiskAssessment;
-  const retentionOutcome = computeServerWorkTypeRetentionState({
-    prevMatter: existing,
-    nextStatusId: matter.matterStatusId,
-    closedAtInput: input.closedAt,
-    destructionDueAtInput: input.destructionDueAt,
-    workTypeSubcategoryId: matter.workTypeSubcategoryId,
-    practiceAreaId: matter.practiceAreaId,
-    workTypesConfig: workTypesConfigForMatter,
-    values: store.values,
-    todayIso: today,
-  });
-  matter.closedAt = retentionOutcome.closedAt;
-  matter.destructionDueAt = retentionOutcome.destructionDueAt;
-  matter.retentionPeriod = input.retentionPeriod?.trim() || retentionOutcome.retentionPeriod;
+  // R495/R497: Server-owned closure date validation, retentionPeriod and destructionDueAt
+  // are computed authoritatively inside withTenantTransaction below.
   matter.riskRatingId = fullRiskAssessment.overallRisk
     ? resolveRiskRatingIdForLevel(
         store.values,
@@ -6270,64 +6239,220 @@ export async function saveMatterRecord(
     matter.fieldValues['matterOpeningGate'] = draftGateRecord;
   }
 
-  if (!existing) {
-    matter.id = await matterRepo.allocateNextMatterId(extensionCtx);
-  }
-
-  if (!existingHasOpened) {
-    // Re-build fresh snapshot until the matter has actually opened (non-prospective status)
-    const cleanFieldVals = { ...matter.fieldValues };
-    delete cleanFieldVals['matterOpeningSnapshot'];
-    const openingSnapshot = resolveMatterOpeningSnapshot(
-      { ...matter, fieldValues: cleanFieldVals },
-      allPeopleWithPending,
-      allOrganisationsWithPending,
-      store.values,
-      enquiries,
-      quotes,
-      { riskAssessment: fullRiskAssessment },
-    );
-    openingSnapshot.saveMode = isDraftSave
-      ? 'draft'
-      : opts.saveMode ?? 'opened';
-    openingSnapshot.capturedAt = now;
-    openingSnapshot.capturedAtDisplay = formatDateTime(now) || now;
-    matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
-  } else if (!existingSnapshot) {
-    const cleanFieldVals = { ...matter.fieldValues };
-    delete cleanFieldVals['matterOpeningSnapshot'];
-    const backfilledSnapshot = resolveMatterOpeningSnapshot(
-      {
-        ...matter,
-        conflictCheckRecord: storedConflictRecord ?? matter.conflictCheckRecord,
-        conflictCheckStatus:
-          existing?.conflictCheckStatus ?? matter.conflictCheckStatus,
-        fieldValues: cleanFieldVals,
-      },
-      allPeopleWithPending,
-      allOrganisationsWithPending,
-      store.values,
-      enquiries,
-      quotes,
-    );
-    backfilledSnapshot.saveMode = 'backfilled';
-    backfilledSnapshot.capturedAt = now;
-    backfilledSnapshot.capturedAtDisplay = formatDateTime(now) || now;
-    backfilledSnapshot.capturedById = opts.byId;
-    backfilledSnapshot.capturedByName = actorDisplayName;
-    backfilledSnapshot.captureNote =
-      'Recorded after opening: matter opened before opening snapshots were captured.';
-    matter.fieldValues['matterOpeningSnapshot'] = backfilledSnapshot;
-  }
-
-  const previousMatterSnapshot: Matter | undefined = existing ?? undefined;
   const expectedRowVersionForPut = existing
     ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
     : undefined;
+  let previousMatterSnapshot: Matter | undefined = existing ?? undefined;
   const stagedAuditMark = getStagedAuditWatermark();
   let auditFlushed = false;
+  let txResult: {
+    matter: null;
+    code?: string;
+    message?: string;
+    errors: Record<string, string>;
+  } | null = null;
   try {
-    await matterRepo.withTenantTransaction(extensionCtx, async () => {
+    txResult = await matterRepo.withTenantTransaction(
+      extensionCtx,
+      async (
+        tx,
+      ): Promise<{
+        matter: null;
+        code?: string;
+        message?: string;
+        errors: Record<string, string>;
+      } | null> => {
+      const catRepo = getCatalogueRepository();
+      let inTxExisting: Matter | null = null;
+      if (existing) {
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [extensionCtx.tenantId, existing.id],
+        );
+        inTxExisting = await matterRepo.getMatterById<Matter>(
+          extensionCtx,
+          existing.id,
+          { includeRestricted: true },
+        );
+        if (!inTxExisting) {
+          return {
+            matter: null,
+            code: 'NOT_FOUND',
+            message: 'NOT_FOUND: Matter not found or restricted.',
+            errors: { access: 'Matter not found or restricted.' },
+          };
+        }
+        previousMatterSnapshot = inTxExisting;
+      }
+
+      const inTxDbValues =
+        await catRepo.listAllChoiceValues<ChoiceValue>(extensionCtx);
+      const inTxTenantTodayIso = resolveTenantLocalDateAndHour(
+        new Date(),
+        tenantCfg.timeZone || 'Europe/London',
+      ).localDate;
+
+      const wasClosedOrArchived = inTxExisting
+        ? isClosedOrArchivedMatterStatus(inTxExisting.matterStatusId, inTxDbValues)
+        : false;
+      const isClosedOrArchivedNow = isClosedOrArchivedMatterStatus(
+        matter.matterStatusId,
+        inTxDbValues,
+      );
+      const isClosingTransition = !wasClosedOrArchived && isClosedOrArchivedNow;
+
+      // R497: Enforce Key Dates closure gate inside the active transaction
+      if (inTxExisting && !isDraftSave && isClosedOrArchivedNow) {
+        const inTxKdConfig = await getKeyDatesConfig({ ctx: extensionCtx });
+        if (inTxKdConfig.enabled) {
+          const targetMatterTypeId =
+            matter.matterTypeId || matter.practiceAreaId;
+          const inTxMatterKds =
+            await getKeyDateRepository().listKeyDatesForMatter(
+              extensionCtx,
+              inTxExisting.id,
+              extensionCtx.actorId,
+            );
+          const closeGate = evaluateMatterKeyDateClosureGate(
+            inTxKdConfig,
+            targetMatterTypeId,
+            inTxMatterKds,
+          );
+          if (!closeGate.canClose) {
+            const msg = `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`;
+            return {
+              matter: null,
+              code: 'OPEN_KEY_DATES_BLOCK_CLOSURE',
+              message: `OPEN_KEY_DATES_BLOCK_CLOSURE: ${msg}`,
+              errors: { keyDates: msg },
+            };
+          }
+        }
+      }
+
+      // R495: Validate closedAt bounds and reject non-closing closedAt; ignore client retentionPeriod / destructionDueAt
+      const rawInputClosedAt = input.closedAt;
+      const trimmedInputClosedAt =
+        typeof rawInputClosedAt === 'string' ? rawInputClosedAt.trim() : '';
+      let validatedClosedAtInput: string | undefined;
+      if (isClosingTransition) {
+        const dateCheck = validateMatterClosureDate({
+          rawClosedAt: rawInputClosedAt,
+          openedAt: inTxExisting?.openedAt || matter.openedAt,
+          tenantTodayIso: inTxTenantTodayIso,
+          timeZone: tenantCfg.timeZone || 'Europe/London',
+        });
+        if (!dateCheck.ok) {
+          return {
+            matter: null,
+            code: dateCheck.code,
+            message: dateCheck.message,
+            errors: { closedAt: dateCheck.message },
+          };
+        }
+        validatedClosedAtInput = dateCheck.closedAt;
+      } else if (!isClosedOrArchivedNow) {
+        if (trimmedInputClosedAt) {
+          const msg =
+            'INVALID_CLOSURE_DATE: Closure date may only be supplied when closing a matter.';
+          return {
+            matter: null,
+            code: 'INVALID_CLOSURE_DATE',
+            message: msg,
+            errors: { closedAt: msg },
+          };
+        }
+      } else {
+        const existingClosedIso = (inTxExisting?.closedAt ?? '')
+          .trim()
+          .slice(0, 10);
+        if (
+          trimmedInputClosedAt &&
+          trimmedInputClosedAt.slice(0, 10) !== existingClosedIso
+        ) {
+          const msg =
+            'INVALID_CLOSURE_DATE: Cannot change the closure date of an already-closed matter; reopen it first.';
+          return {
+            matter: null,
+            code: 'INVALID_CLOSURE_DATE',
+            message: msg,
+            errors: { closedAt: msg },
+          };
+        }
+      }
+
+      const inTxWorkTypesOverride =
+        await catRepo.getWorkTypeConfigs<WorkTypesConfiguration>(extensionCtx);
+      const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        inTxWorkTypesOverride ?? null,
+      );
+
+      const inTxRetentionOutcome = computeServerWorkTypeRetentionState({
+        prevMatter: inTxExisting,
+        nextStatusId: matter.matterStatusId,
+        closedAtInput: validatedClosedAtInput,
+        workTypeSubcategoryId: matter.workTypeSubcategoryId,
+        practiceAreaId: matter.practiceAreaId,
+        workTypesConfig: inTxWorkTypesConfig,
+        values: inTxDbValues,
+        todayIso: inTxTenantTodayIso,
+      });
+      matter.closedAt = inTxRetentionOutcome.closedAt;
+      matter.destructionDueAt = inTxRetentionOutcome.destructionDueAt;
+      matter.retentionPeriod = inTxRetentionOutcome.retentionPeriod;
+
+      if (!inTxExisting) {
+        matter.id = await matterRepo.allocateNextMatterId(extensionCtx);
+      }
+
+      if (!existingHasOpened) {
+        // Re-build fresh snapshot until the matter has actually opened (non-prospective status)
+        const cleanFieldVals = { ...matter.fieldValues };
+        delete cleanFieldVals['matterOpeningSnapshot'];
+        const openingSnapshot = resolveMatterOpeningSnapshot(
+          { ...matter, fieldValues: cleanFieldVals },
+          allPeopleWithPending,
+          allOrganisationsWithPending,
+          inTxDbValues,
+          enquiries,
+          quotes,
+          { riskAssessment: fullRiskAssessment },
+        );
+        openingSnapshot.saveMode = isDraftSave
+          ? 'draft'
+          : opts.saveMode ?? 'opened';
+        openingSnapshot.capturedAt = now;
+        openingSnapshot.capturedAtDisplay = formatDateTime(now) || now;
+        matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+      } else if (!existingSnapshot) {
+        const cleanFieldVals = { ...matter.fieldValues };
+        delete cleanFieldVals['matterOpeningSnapshot'];
+        const backfilledSnapshot = resolveMatterOpeningSnapshot(
+          {
+            ...matter,
+            conflictCheckRecord:
+              storedConflictRecord ?? matter.conflictCheckRecord,
+            conflictCheckStatus:
+              inTxExisting?.conflictCheckStatus ?? matter.conflictCheckStatus,
+            fieldValues: cleanFieldVals,
+          },
+          allPeopleWithPending,
+          allOrganisationsWithPending,
+          inTxDbValues,
+          enquiries,
+          quotes,
+        );
+        backfilledSnapshot.saveMode = 'backfilled';
+        backfilledSnapshot.capturedAt = now;
+        backfilledSnapshot.capturedAtDisplay = formatDateTime(now) || now;
+        backfilledSnapshot.capturedById = opts.byId;
+        backfilledSnapshot.capturedByName = actorDisplayName;
+        backfilledSnapshot.captureNote =
+          'Recorded after opening: matter opened before opening snapshots were captured.';
+        matter.fieldValues['matterOpeningSnapshot'] = backfilledSnapshot;
+      }
+
       for (const person of pendingPeople) {
         await partyRepo.putPerson(extensionCtx, person);
       }
@@ -6609,8 +6734,8 @@ export async function saveMatterRecord(
           people: allPeopleWithPending,
           teams,
           existingTasks: currentTasks,
-          workTypesConfig: workTypesConfigForMatter,
-          values: store.values,
+          workTypesConfig: inTxWorkTypesConfig,
+          values: inTxDbValues,
           workingHoursConfig: workingHoursConfigFromStore(store),
           trigger: 'matter_open',
           byId: opts.byId,
@@ -6621,19 +6746,24 @@ export async function saveMatterRecord(
         });
       }
 
-      if (
-        (retentionOutcome.isClosingTransition || retentionOutcome.isReopeningTransition) &&
-        !isPmsImport
-      ) {
+      const retentionOrClosureChanged =
+        !previousMatterSnapshot ||
+        inTxRetentionOutcome.isClosingTransition ||
+        inTxRetentionOutcome.isReopeningTransition ||
+        (previousMatterSnapshot.closedAt ?? null) !== (matter.closedAt ?? null) ||
+        (previousMatterSnapshot.retentionPeriod ?? '') !== matter.retentionPeriod ||
+        (previousMatterSnapshot.destructionDueAt ?? null) !==
+          (matter.destructionDueAt ?? null);
+      if (retentionOrClosureChanged && !isPmsImport) {
         writeAudit(store, {
           recordType: 'matter',
           recordId: matter.id,
-          action: 'update',
+          action: previousMatterSnapshot ? 'update' : 'create',
           field: 'Matter closure & retention',
-          oldValue: existing
-            ? `${resolveLabel(store.values, existing.matterStatusId)} (Destruction due: ${existing.destructionDueAt ?? 'None'})`
+          oldValue: previousMatterSnapshot
+            ? `${resolveLabel(inTxDbValues, previousMatterSnapshot.matterStatusId)} (Retention: ${previousMatterSnapshot.retentionPeriod || 'None'}; Closed: ${previousMatterSnapshot.closedAt ?? 'None'}; Destruction due: ${previousMatterSnapshot.destructionDueAt ?? 'None'})`
             : null,
-          newValue: `${resolveLabel(store.values, matter.matterStatusId)} (Retention: ${matter.retentionPeriod}; Destruction due: ${matter.destructionDueAt ?? 'Cleared'})`,
+          newValue: `${resolveLabel(inTxDbValues, matter.matterStatusId)} (Retention: ${matter.retentionPeriod}; Closed: ${matter.closedAt ?? 'Cleared'}; Destruction due: ${matter.destructionDueAt ?? 'Cleared'})`,
           byId: opts.byId,
           at: now,
         });
@@ -6641,10 +6771,10 @@ export async function saveMatterRecord(
 
       await flushStagedAuditEntries(extensionCtx);
       auditFlushed = true;
+      return null;
     });
   } catch (err) {
     if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
-      discardStagedAuditEntriesSince(stagedAuditMark);
       return {
         matter: null,
         code: MATTER_CONCURRENCY_CONFLICT_CODE,
@@ -6659,6 +6789,10 @@ export async function saveMatterRecord(
     if (!auditFlushed) {
       discardStagedAuditEntriesSince(stagedAuditMark);
     }
+  }
+
+  if (txResult) {
+    return txResult;
   }
 
   if (previousMatterSnapshot) {
@@ -7368,6 +7502,12 @@ export async function updateMatterConflictRecord(
         const activeStatusId = vid('matter_status', 'Active');
         matter.matterStatusId = activeStatusId;
         matter.recordStatusId = activeStatusId;
+        if (!matter.openedAt?.trim()) {
+          matter.openedAt = resolveTenantLocalDateAndHour(
+            new Date(),
+            getActiveTenantConfiguration().timeZone || 'Europe/London',
+          ).localDate;
+        }
         const cleanFieldVals = { ...(matter.fieldValues ?? {}) };
         delete cleanFieldVals['matterOpeningSnapshot'];
         const openingSnapshot = resolveMatterOpeningSnapshot(
@@ -18951,6 +19091,7 @@ export async function updateMatterLifecycleStatusRecord(
     return {
       matter: null,
       code: 'UNAUTHENTICATED',
+      message: 'UNAUTHENTICATED: Verified session is required.',
       errors: { permission: 'Unauthenticated: Verified session is required.' },
     };
   }
@@ -18959,170 +19100,243 @@ export async function updateMatterLifecycleStatusRecord(
   const matterRepo = getMatterRepository();
   const partyRepo = getPartyRepository();
   const hrRepo = getHrAndRbacRepository();
-  const [store, people, teams, rbacConfig, existing] = await Promise.all([
-    loadTenantCatalogueStoreView(ctx),
-    partyRepo.listAllPeople<Person>(ctx),
-    hrRepo.listAllTeams<Team>(ctx),
-    loadEffectiveTenantRbacConfig(ctx),
-    matterRepo.getMatterById<Matter>(ctx, matterId),
-  ]);
+  const catalogueRepo = getCatalogueRepository();
+  const tenantCfg = getActiveTenantConfiguration();
 
-  const actingUser = people.find((p) => p.id === actorId) ?? null;
-  if (
-    !existing ||
-    !actingUser ||
-    !actingUser.isEmployee ||
-    !canPersonAccessMatter(existing, actingUser.id, actingUser, {
-      allPeople: people,
-      teams,
-    })
-  ) {
-    return {
-      matter: null,
-      errors: { access: 'Matter not found or restricted.' },
-    };
-  }
-
-  if (
-    !hasPersonPermission(actingUser, 'matter:edit', {
-      allPeople: people,
-      teams,
-      config: { rbac: rbacConfig },
-    })
-  ) {
-    return {
-      matter: null,
-      code: 'FORBIDDEN',
-      errors: {
-        permission: 'You do not have permission (matter:edit) to update matter status.',
-      },
-    };
-  }
-
-  const existingRowVersion = (existing as Matter & { rowVersion?: number }).rowVersion ?? 1;
-  if (
-    opts.expectedRowVersion !== undefined &&
-    opts.expectedRowVersion !== null &&
-    (typeof opts.expectedRowVersion !== 'number' ||
-      !Number.isInteger(opts.expectedRowVersion) ||
-      opts.expectedRowVersion < 1 ||
-      opts.expectedRowVersion !== existingRowVersion)
-  ) {
-    return {
-      matter: null,
-      code: MATTER_CONCURRENCY_CONFLICT_CODE,
-      message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-      errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
-    };
-  }
-
-  if (action === 'close' && opts.closedAt !== undefined && opts.closedAt !== null) {
-    const trimmed = opts.closedAt.trim();
-    if (trimmed) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-        return {
-          matter: null,
-          errors: { closedAt: 'Closure date must be formatted as YYYY-MM-DD.' },
-        };
-      }
-      const [y, m, d] = trimmed.split('-').map(Number);
-      const parsed = new Date(Date.UTC(y, m - 1, d));
-      if (
-        parsed.getUTCFullYear() !== y ||
-        parsed.getUTCMonth() + 1 !== m ||
-        parsed.getUTCDate() !== d
-      ) {
-        return {
-          matter: null,
-          errors: { closedAt: 'Closure date must be a valid calendar date.' },
-        };
-      }
-    }
-  }
-
-  const workTypesConfig =
-    store.workTypesConfig ??
-    resolveEffectiveWorkTypesConfig(
-      getActiveTenantConfiguration(),
-      store.workTypeConfigsOverride ?? null,
-    );
-  const now = new Date().toISOString();
-  const todayIso = toIsoDate(new Date());
-
-  let nextStatusId: string;
-  if (action === 'close') {
-    const kdConfig = await getKeyDatesConfig({ ctx });
-    if (kdConfig.enabled) {
-      const targetMatterTypeId = existing.matterTypeId || existing.practiceAreaId;
-      const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
+  return runWithAuditStagingScope(async () => {
+    const stagedAuditMark = getStagedAuditWatermark();
+    let auditFlushed = false;
+    try {
+      return await matterRepo.withTenantTransaction(
         ctx,
-        existing.id,
-        actorId,
-      );
-      const closeGate = evaluateMatterKeyDateClosureGate(
-        kdConfig,
-        targetMatterTypeId,
-        matterKds,
-      );
-      if (!closeGate.canClose) {
-        return {
-          matter: null,
-          errors: {
-            keyDates: `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`,
-          },
-        };
-      }
-    }
-    nextStatusId =
-      store.values.find(
-        (v) => v.listKey === 'matter_status' && v.label.toLowerCase() === 'closed',
-      )?.id ?? 'matter_status.closed';
-  } else {
-    if (!isClosedOrArchivedMatterStatus(existing.matterStatusId, store.values)) {
-      return {
-        matter: null,
-        errors: {
-          matterStatusId: 'Only closed or archived matters can be reopened.',
-        },
-      };
-    }
-    nextStatusId =
-      store.values.find(
-        (v) => v.listKey === 'matter_status' && v.label.toLowerCase() === 'active',
-      )?.id ?? 'matter_status.active';
-  }
+        async (
+          tx,
+        ): Promise<{
+          matter: Matter | null;
+          errors?: Record<string, string>;
+          code?: string;
+          message?: string;
+        }> => {
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, matterId],
+        );
 
-  const retentionOutcome = computeServerWorkTypeRetentionState({
-    prevMatter: existing,
-    nextStatusId,
-    closedAtInput: action === 'close' ? opts.closedAt : undefined,
-    workTypeSubcategoryId: existing.workTypeSubcategoryId,
-    practiceAreaId: existing.practiceAreaId,
-    workTypesConfig,
-    values: store.values,
-    todayIso,
-  });
-
-  const updatedMatter: Matter = {
-    ...existing,
-    matterStatusId: nextStatusId,
-    recordStatusId: nextStatusId,
-    closedAt: retentionOutcome.closedAt,
-    destructionDueAt: retentionOutcome.destructionDueAt,
-    retentionPeriod: retentionOutcome.retentionPeriod,
-    updatedById: actorId,
-    updatedAt: now,
-  };
-
-  let saved!: Matter;
-  try {
-    await runWithAuditStagingScope(() =>
-      matterRepo.withTenantTransaction(ctx, async () => {
-        saved = await putMatterWithInTxRestrictions(ctx, updatedMatter, {
-          expectedRowVersion:
-            opts.expectedRowVersion !== undefined ? opts.expectedRowVersion : null,
+        const existing = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+          includeRestricted: true,
         });
-        writeAudit(store, {
+        const people = await partyRepo.listAllPeople<Person>(ctx);
+        const teams = await hrRepo.listAllTeams<Team>(ctx);
+        const rbacConfig = await loadEffectiveTenantRbacConfig(ctx);
+        const dbMatterStatusValues =
+          await catalogueRepo.listChoiceValuesForList<ChoiceValue>(
+            ctx,
+            'matter_status',
+          );
+        const allDbValues =
+          await catalogueRepo.listAllChoiceValues<ChoiceValue>(ctx);
+
+        const actingUser = people.find((p) => p.id === actorId) ?? null;
+        if (
+          !existing ||
+          !actingUser ||
+          !actingUser.isEmployee ||
+          !canPersonAccessMatter(existing, actingUser.id, actingUser, {
+            allPeople: people,
+            teams,
+            config: { rbac: rbacConfig },
+          })
+        ) {
+          return {
+            matter: null,
+            code: 'NOT_FOUND',
+            message: 'NOT_FOUND: Matter not found or restricted.',
+            errors: { access: 'Matter not found or restricted.' },
+          };
+        }
+
+        if (
+          !hasPersonPermission(actingUser, 'matter:edit', {
+            allPeople: people,
+            teams,
+            config: { rbac: rbacConfig },
+          })
+        ) {
+          return {
+            matter: null,
+            code: 'FORBIDDEN',
+            message:
+              'FORBIDDEN: You do not have permission (matter:edit) to update matter status.',
+            errors: {
+              permission:
+                'You do not have permission (matter:edit) to update matter status.',
+            },
+          };
+        }
+
+        const existingRowVersion =
+          (existing as Matter & { rowVersion?: number }).rowVersion ?? 1;
+        if (
+          opts.expectedRowVersion !== undefined &&
+          opts.expectedRowVersion !== null &&
+          (typeof opts.expectedRowVersion !== 'number' ||
+            !Number.isInteger(opts.expectedRowVersion) ||
+            opts.expectedRowVersion < 1 ||
+            opts.expectedRowVersion !== existingRowVersion)
+        ) {
+          return {
+            matter: null,
+            code: MATTER_CONCURRENCY_CONFLICT_CODE,
+            message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+            errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
+          };
+        }
+
+        const trimmedSuppliedClosedAt =
+          typeof opts.closedAt === 'string' ? opts.closedAt.trim() : '';
+        const currentlyClosedOrArchived = isClosedOrArchivedMatterStatus(
+          existing.matterStatusId,
+          dbMatterStatusValues,
+        );
+
+        if (action === 'reopen') {
+          if (trimmedSuppliedClosedAt) {
+            const msg =
+              'INVALID_CLOSURE_DATE: Closure date may only be supplied when closing a matter.';
+            return {
+              matter: null,
+              code: 'INVALID_CLOSURE_DATE',
+              message: msg,
+              errors: { closedAt: msg },
+            };
+          }
+          if (!currentlyClosedOrArchived) {
+            const msg =
+              'MATTER_NOT_CLOSED: Only closed or archived matters can be reopened.';
+            return {
+              matter: null,
+              code: 'MATTER_NOT_CLOSED',
+              message: msg,
+              errors: { matterStatusId: msg },
+            };
+          }
+        } else if (currentlyClosedOrArchived) {
+          const msg =
+            'MATTER_ALREADY_CLOSED: Matter is already closed; reopen it before recording a new closure date.';
+          return {
+            matter: null,
+            code: 'MATTER_ALREADY_CLOSED',
+            message: msg,
+            errors: { matterStatusId: msg },
+          };
+        }
+
+        // R496: Resolve target status strictly by systemKey / canonical ID, never display label; fail closed if absent/inactive
+        const targetSystemKey = action === 'close' ? 'closed' : 'active';
+        const nextStatusId = resolveMatterLifecycleTargetStatusId(
+          dbMatterStatusValues,
+          targetSystemKey,
+        );
+        if (!nextStatusId) {
+          const msg = `MATTER_STATUS_NOT_CONFIGURED: Tenant has no active "${targetSystemKey}" matter status configured.`;
+          return {
+            matter: null,
+            code: 'MATTER_STATUS_NOT_CONFIGURED',
+            message: msg,
+            errors: { matterStatusId: msg },
+          };
+        }
+
+        const todayIso = resolveTenantLocalDateAndHour(
+          new Date(),
+          tenantCfg.timeZone || 'Europe/London',
+        ).localDate;
+
+        // R495: Validate closure date bounds against openedAt and today in the tenant time zone
+        let validatedClosedAt: string | undefined;
+        if (action === 'close') {
+          const dateCheck = validateMatterClosureDate({
+            rawClosedAt: opts.closedAt,
+            openedAt: existing.openedAt,
+            tenantTodayIso: todayIso,
+            timeZone: tenantCfg.timeZone || 'Europe/London',
+          });
+          if (!dateCheck.ok) {
+            return {
+              matter: null,
+              code: dateCheck.code,
+              message: dateCheck.message,
+              errors: { closedAt: dateCheck.message },
+            };
+          }
+          validatedClosedAt = dateCheck.closedAt;
+
+          // R497: Enforce Key Dates closure gate inside the active transaction
+          const kdConfig = await getKeyDatesConfig({ ctx });
+          if (kdConfig.enabled) {
+            const targetMatterTypeId =
+              existing.matterTypeId || existing.practiceAreaId;
+            const matterKds =
+              await getKeyDateRepository().listKeyDatesForMatter(
+                ctx,
+                existing.id,
+                actorId,
+              );
+            const closeGate = evaluateMatterKeyDateClosureGate(
+              kdConfig,
+              targetMatterTypeId,
+              matterKds,
+            );
+            if (!closeGate.canClose) {
+              const msg = `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`;
+              return {
+                matter: null,
+                code: 'OPEN_KEY_DATES_BLOCK_CLOSURE',
+                message: `OPEN_KEY_DATES_BLOCK_CLOSURE: ${msg}`,
+                errors: { keyDates: msg },
+              };
+            }
+          }
+        }
+
+        const workTypeConfigsOverride =
+          await catalogueRepo.getWorkTypeConfigs<WorkTypesConfiguration>(ctx);
+        const workTypesConfig = resolveEffectiveWorkTypesConfig(
+          tenantCfg,
+          workTypeConfigsOverride ?? null,
+        );
+        const now = nextMonotonicIsoTimestamp(existing.updatedAt);
+
+        const retentionOutcome = computeServerWorkTypeRetentionState({
+          prevMatter: existing,
+          nextStatusId,
+          closedAtInput: action === 'close' ? validatedClosedAt : undefined,
+          workTypeSubcategoryId: existing.workTypeSubcategoryId,
+          practiceAreaId: existing.practiceAreaId,
+          workTypesConfig,
+          values: allDbValues,
+          todayIso,
+        });
+
+        const updatedMatter: Matter = {
+          ...existing,
+          matterStatusId: nextStatusId,
+          recordStatusId: nextStatusId,
+          closedAt: retentionOutcome.closedAt,
+          destructionDueAt: retentionOutcome.destructionDueAt,
+          retentionPeriod: retentionOutcome.retentionPeriod,
+          updatedById: actorId,
+          updatedAt: now,
+        };
+
+        const saved = await putMatterWithInTxRestrictions(ctx, updatedMatter, {
+          expectedRowVersion:
+            opts.expectedRowVersion !== undefined
+              ? opts.expectedRowVersion
+              : null,
+        });
+
+        writeAudit(null, {
           recordType: 'matter',
           recordId: saved.id,
           action: 'update',
@@ -19130,26 +19344,32 @@ export async function updateMatterLifecycleStatusRecord(
             action === 'close'
               ? 'Matter closed & retention scheduled'
               : 'Matter reopened & destruction date cleared',
-          oldValue: `${resolveLabel(store.values, existing.matterStatusId)} (Closed: ${existing.closedAt ?? 'None'}; Destruction due: ${existing.destructionDueAt ?? 'None'})`,
-          newValue: `${resolveLabel(store.values, saved.matterStatusId)} (Retention: ${saved.retentionPeriod}; Closed: ${saved.closedAt ?? 'Cleared'}; Destruction due: ${saved.destructionDueAt ?? 'Cleared'})`,
+          oldValue: `${resolveLabel(allDbValues, existing.matterStatusId)} (Retention: ${existing.retentionPeriod || 'None'}; Closed: ${existing.closedAt ?? 'None'}; Destruction due: ${existing.destructionDueAt ?? 'None'})`,
+          newValue: `${resolveLabel(allDbValues, saved.matterStatusId)} (Retention: ${saved.retentionPeriod}; Closed: ${saved.closedAt ?? 'Cleared'}; Destruction due: ${saved.destructionDueAt ?? 'Cleared'})`,
           byId: actorId,
           at: now,
           ...(opts.reason?.trim() ? { reason: opts.reason.trim() } : {}),
         });
         await flushStagedAuditEntries(ctx);
-      }),
-    );
-  } catch (err) {
-    if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
-      return {
-        matter: null,
-        code: MATTER_CONCURRENCY_CONFLICT_CODE,
-        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-        errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
-      };
+        auditFlushed = true;
+        return { matter: saved };
+      });
+    } catch (err) {
+      if (
+        (err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE
+      ) {
+        return {
+          matter: null,
+          code: MATTER_CONCURRENCY_CONFLICT_CODE,
+          message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+          errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
+        };
+      }
+      throw err;
+    } finally {
+      if (!auditFlushed) {
+        discardStagedAuditEntriesSince(stagedAuditMark);
+      }
     }
-    throw err;
-  }
-
-  return { matter: saved };
+  });
 }

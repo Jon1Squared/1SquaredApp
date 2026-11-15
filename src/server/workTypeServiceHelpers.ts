@@ -28,7 +28,7 @@ import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import {
   calculateDestructionDate,
   formatRetentionPeriodLabel,
-  isClosedMatterStatus,
+  isClosedOrArchivedMatterStatus,
   resolveWorkTypeAutoTaskTemplates,
   resolveWorkTypeRetention,
 } from '@/domain/workTypeConfig';
@@ -349,7 +349,6 @@ export function computeServerWorkTypeRetentionState(params: {
   prevMatter: Matter | null | undefined;
   nextStatusId: string;
   closedAtInput?: string | null;
-  destructionDueAtInput?: string | null;
   workTypeSubcategoryId?: string | null;
   practiceAreaId?: string | null;
   workTypesConfig: WorkTypesConfiguration;
@@ -360,7 +359,6 @@ export function computeServerWorkTypeRetentionState(params: {
     prevMatter,
     nextStatusId,
     closedAtInput,
-    destructionDueAtInput,
     workTypeSubcategoryId,
     practiceAreaId,
     workTypesConfig,
@@ -369,9 +367,9 @@ export function computeServerWorkTypeRetentionState(params: {
   } = params;
 
   const wasClosed = prevMatter
-    ? isClosedMatterStatus(prevMatter.matterStatusId, values)
+    ? isClosedOrArchivedMatterStatus(prevMatter.matterStatusId, values)
     : false;
-  const isClosedNow = isClosedMatterStatus(nextStatusId, values);
+  const isClosedNow = isClosedOrArchivedMatterStatus(nextStatusId, values);
   const isClosingTransition = isClosedNow && !wasClosed;
   const isReopeningTransition = wasClosed && !isClosedNow;
 
@@ -388,23 +386,10 @@ export function computeServerWorkTypeRetentionState(params: {
       todayIso;
     const closedAt = rawClosedAt.slice(0, 10) || todayIso;
 
-    const workTypeChanged =
-      Boolean(prevMatter) &&
-      ((workTypeSubcategoryId ?? '') !== (prevMatter?.workTypeSubcategoryId ?? '') ||
-        (practiceAreaId ?? '') !== (prevMatter?.practiceAreaId ?? ''));
-    const closedDateChanged =
-      Boolean(closedAtInput && closedAtInput.trim()) &&
-      closedAt !== (prevMatter?.closedAt ?? '').slice(0, 10);
-
-    const shouldRecomputeDestruction =
-      isClosingTransition ||
-      closedDateChanged ||
-      workTypeChanged ||
-      !prevMatter?.destructionDueAt;
-
-    const destructionDueAt = shouldRecomputeDestruction
-      ? calculateDestructionDate(closedAt, retention.retentionYears)
-      : prevMatter!.destructionDueAt;
+    const destructionDueAt = calculateDestructionDate(
+      closedAt,
+      retention.retentionYears,
+    );
 
     return {
       isClosingTransition,
@@ -418,30 +403,13 @@ export function computeServerWorkTypeRetentionState(params: {
     };
   }
 
-  if (isReopeningTransition) {
-    return {
-      isClosingTransition: false,
-      isReopeningTransition: true,
-      isClosedNow: false,
-      closedAt: null,
-      destructionDueAt: null,
-      retentionPeriod: retentionLabel,
-      retentionYears: retention.retentionYears,
-      source: retention.source,
-    };
-  }
-
   return {
     isClosingTransition: false,
-    isReopeningTransition: false,
+    isReopeningTransition,
     isClosedNow: false,
-    closedAt:
-      closedAtInput !== undefined ? closedAtInput : (prevMatter?.closedAt ?? null),
-    destructionDueAt:
-      destructionDueAtInput !== undefined
-        ? destructionDueAtInput
-        : (prevMatter?.destructionDueAt ?? null),
-    retentionPeriod: prevMatter?.retentionPeriod || retentionLabel,
+    closedAt: null,
+    destructionDueAt: null,
+    retentionPeriod: retentionLabel,
     retentionYears: retention.retentionYears,
     source: retention.source,
   };

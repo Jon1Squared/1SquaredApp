@@ -388,21 +388,111 @@ export function formatRetentionPeriodLabel(retentionYears: number): string {
 
 export function isClosedMatterStatus(
   statusId: string | null | undefined,
-  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'label'>[] = [],
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[] = [],
 ): boolean {
   if (!statusId) return false;
-  if (statusId === 'matter_status.closed') return true;
-  const cv = values.find((v) => v.id === statusId);
-  return (cv?.label ?? '').trim().toLowerCase() === 'closed';
+  const cv =
+    values.find((v) => v.listKey === 'matter_status' && v.id === statusId) ??
+    values.find((v) => v.id === statusId);
+  if (cv) {
+    return cv.systemKey ? cv.systemKey === 'closed' : cv.id === 'matter_status.closed';
+  }
+  return statusId === 'matter_status.closed';
 }
 
 export function isClosedOrArchivedMatterStatus(
   statusId: string | null | undefined,
-  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'label'>[] = [],
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[] = [],
 ): boolean {
   if (!statusId) return false;
   if (isClosedMatterStatus(statusId, values)) return true;
-  if (statusId === 'matter_status.archived') return true;
-  const cv = values.find((v) => v.id === statusId);
-  return (cv?.label ?? '').trim().toLowerCase() === 'archived';
+  const cv =
+    values.find((v) => v.listKey === 'matter_status' && v.id === statusId) ??
+    values.find((v) => v.id === statusId);
+  if (cv) {
+    return cv.systemKey ? cv.systemKey === 'archived' : cv.id === 'matter_status.archived';
+  }
+  return statusId === 'matter_status.archived';
+}
+
+/**
+ * Resolves a tenant's active matter status by stable `systemKey` (or canonical ID
+ * when `systemKey` is absent). Never matches display labels and never falls back to a
+ * hard-coded ID when absent or deactivated.
+ */
+export function resolveMatterLifecycleTargetStatusId(
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey' | 'active'>[],
+  targetSystemKey: 'closed' | 'active',
+): string | null {
+  const activeStatuses = values.filter(
+    (v) => v.listKey === 'matter_status' && v.active !== false,
+  );
+  const bySystemKey = activeStatuses.find((v) => v.systemKey === targetSystemKey);
+  if (bySystemKey) return bySystemKey.id;
+  const canonicalId = `matter_status.${targetSystemKey}`;
+  const byCanonicalId = activeStatuses.find(
+    (v) => !v.systemKey && v.id === canonicalId,
+  );
+  return byCanonicalId?.id ?? null;
+}
+
+/**
+ * Validates a matter closure date (`YYYY-MM-DD`) against real calendar validity,
+ * the matter's opened date (`openedAt <= closedAt`), and the tenant's local today
+ * (`closedAt <= tenantTodayIso`).
+ */
+export function validateMatterClosureDate(params: {
+  rawClosedAt?: string | null;
+  openedAt?: string | null;
+  tenantTodayIso: string;
+  timeZone?: string;
+}):
+  | { ok: true; closedAt: string }
+  | { ok: false; code: 'INVALID_CLOSURE_DATE'; message: string } {
+  const trimmed = (params.rawClosedAt ?? '').trim();
+  const candidate = trimmed || params.tenantTodayIso;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate)) {
+    return {
+      ok: false,
+      code: 'INVALID_CLOSURE_DATE',
+      message: 'INVALID_CLOSURE_DATE: Closure date must be formatted as YYYY-MM-DD.',
+    };
+  }
+  const [year, month, day] = candidate.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() + 1 !== month ||
+    parsed.getUTCDate() !== day
+  ) {
+    return {
+      ok: false,
+      code: 'INVALID_CLOSURE_DATE',
+      message: 'INVALID_CLOSURE_DATE: Closure date must be a valid calendar date.',
+    };
+  }
+  if (candidate > params.tenantTodayIso) {
+    return {
+      ok: false,
+      code: 'INVALID_CLOSURE_DATE',
+      message: `INVALID_CLOSURE_DATE: Closure date (${candidate}) cannot be in the future (today in ${params.timeZone || 'Europe/London'} is ${params.tenantTodayIso}).`,
+    };
+  }
+  const openedDateIso = (params.openedAt ?? '').trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(openedDateIso)) {
+    return {
+      ok: false,
+      code: 'INVALID_CLOSURE_DATE',
+      message:
+        'INVALID_CLOSURE_DATE: Cannot close a matter before it has a valid opened date.',
+    };
+  }
+  if (candidate < openedDateIso) {
+    return {
+      ok: false,
+      code: 'INVALID_CLOSURE_DATE',
+      message: `INVALID_CLOSURE_DATE: Closure date (${candidate}) cannot be earlier than the matter opened date (${openedDateIso}).`,
+    };
+  }
+  return { ok: true, closedAt: candidate };
 }
