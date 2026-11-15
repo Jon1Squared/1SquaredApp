@@ -35,6 +35,7 @@ import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import { personDisplayName } from '@/domain/names';
+import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
 import type {
   Address,
   AuditEntry,
@@ -44,6 +45,7 @@ import type {
   Enquiry,
   EnquirySettings,
   Matter,
+  OrgStructureCatalogue,
   Organisation,
   Person,
   Task,
@@ -62,6 +64,7 @@ interface Props {
   organisations: Organisation[];
   matters: Matter[];
   values: ChoiceValue[];
+  orgStructure?: OrgStructureCatalogue;
   enquirySettings: EnquirySettings;
   audit: AuditEntry[];
   currentUserId: string;
@@ -79,6 +82,7 @@ export function EnquiryProfileClient({
   organisations,
   matters,
   values,
+  orgStructure,
   enquirySettings,
   audit,
   currentUserId,
@@ -179,12 +183,24 @@ export function EnquiryProfileClient({
   const [editCountryId, setEditCountryId] = useState(enquiry.address?.countryId ?? null);
 
   const practiceAreas = useMemo(
-    () => valuesForList(values, 'work_type').filter((v) => !v.parentId && v.active),
-    [values],
+    () =>
+      valuesForList(values, 'work_type').filter(
+        (v) =>
+          !v.parentId &&
+          (isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+            v.id === enquiry.practiceAreaId),
+      ),
+    [values, orgStructure, enquiry.practiceAreaId],
   );
   const allWorkTypes = useMemo(
-    () => valuesForList(values, 'work_type').filter((v) => v.active),
-    [values],
+    () =>
+      valuesForList(values, 'work_type').filter(
+        (v) =>
+          isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+          v.id === enquiry.practiceAreaId ||
+          v.id === enquiry.workTypeSubcategoryId,
+      ),
+    [values, orgStructure, enquiry.practiceAreaId, enquiry.workTypeSubcategoryId],
   );
   const urgencies = useMemo(
     () => valuesForList(values, 'enquiry_urgency').filter((v) => v.active),

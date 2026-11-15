@@ -5,6 +5,7 @@
  * Department -> Cost Centre & Profit Centre
  */
 import type {
+  ChoiceValue,
   EmployeeRoleType,
   EngagementType,
   OrgCostCentre,
@@ -17,7 +18,22 @@ import type {
   OrgTeamOrPracticeGroup,
 } from './types';
 
-export const DEFAULT_LEGAL_ENTITY_ID = 'LE-PV-LLP';
+export const DEFAULT_LEGAL_ENTITY_ID = 'LE-PRIMARY';
+
+export const DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP: Readonly<
+  Record<string, string>
+> = {
+  'work_type.real_estate_and_property': 'DEPT-RE',
+  'work_type.corporate_and_commercial': 'DEPT-CORP',
+  'work_type.finance_and_banking': 'DEPT-CORP',
+  'work_type.intellectual_property': 'DEPT-CORP',
+  'work_type.technology_and_digital': 'DEPT-CORP',
+  'work_type.dispute_resolution': 'DEPT-DR',
+  'work_type.private_client': 'DEPT-PC',
+  'work_type.family': 'DEPT-PC',
+  'work_type.employment_and_hr': 'DEPT-EMP',
+  'work_type.regulatory_and_compliance': 'DEPT-RISK',
+};
 
 export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
   {
@@ -28,6 +44,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-RE',
     defaultProfitCentreId: 'PC-RE',
     legacyChoiceValueId: 'department.real_estate',
+    practiceAreaIds: ['work_type.real_estate_and_property'],
     active: true,
   },
   {
@@ -38,6 +55,12 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-CORP',
     defaultProfitCentreId: 'PC-CORP',
     legacyChoiceValueId: 'department.corporate_and_commercial',
+    practiceAreaIds: [
+      'work_type.corporate_and_commercial',
+      'work_type.finance_and_banking',
+      'work_type.intellectual_property',
+      'work_type.technology_and_digital',
+    ],
     active: true,
   },
   {
@@ -48,6 +71,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-DR',
     defaultProfitCentreId: 'PC-DR',
     legacyChoiceValueId: 'department.dispute_resolution',
+    practiceAreaIds: ['work_type.dispute_resolution'],
     active: true,
   },
   {
@@ -58,6 +82,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-PC',
     defaultProfitCentreId: 'PC-PC',
     legacyChoiceValueId: 'department.private_client',
+    practiceAreaIds: ['work_type.private_client', 'work_type.family'],
     active: true,
   },
   {
@@ -68,6 +93,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-EMP',
     defaultProfitCentreId: 'PC-EMP',
     legacyChoiceValueId: 'department.employment',
+    practiceAreaIds: ['work_type.employment_and_hr'],
     active: true,
   },
   {
@@ -78,6 +104,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-RISK',
     defaultProfitCentreId: 'PC-CENTRAL',
     legacyChoiceValueId: 'department.risk_and_compliance',
+    practiceAreaIds: ['work_type.regulatory_and_compliance'],
     active: true,
   },
   {
@@ -88,6 +115,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-FIN',
     defaultProfitCentreId: 'PC-CENTRAL',
     legacyChoiceValueId: 'department.finance',
+    practiceAreaIds: [],
     active: true,
   },
   {
@@ -98,6 +126,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-BD',
     defaultProfitCentreId: 'PC-CENTRAL',
     legacyChoiceValueId: 'department.business_development',
+    practiceAreaIds: [],
     active: true,
   },
   {
@@ -108,6 +137,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-OPS',
     defaultProfitCentreId: 'PC-CENTRAL',
     legacyChoiceValueId: 'department.operations',
+    practiceAreaIds: [],
     active: true,
   },
   {
@@ -118,6 +148,7 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-IT',
     defaultProfitCentreId: 'PC-CENTRAL',
     legacyChoiceValueId: 'department.it_and_systems',
+    practiceAreaIds: [],
     active: true,
   },
   {
@@ -128,63 +159,16 @@ export const DEFAULT_ORG_DEPARTMENTS: OrgDepartment[] = [
     defaultCostCentreId: 'CC-HR',
     defaultProfitCentreId: 'PC-CENTRAL',
     legacyChoiceValueId: null,
+    practiceAreaIds: [],
     active: true,
   },
 ];
 
-export const DEFAULT_ORG_OFFICES: OrgOffice[] = [
-  {
-    id: 'OFF-CDF',
-    name: 'Cardiff',
-    code: 'CDF',
-    parentLegalEntityId: 'LE-PV-LLP',
-    address: {
-      id: 'addr-off-cdf',
-      typeId: 'address_type.work',
-      line1: '3 Bute Dock Chambers, Mount Stuart Square',
-      line2: '',
-      town: 'Cardiff',
-      county: 'South Glamorgan',
-      postcode: 'CF10 5FQ',
-      countryId: 'country.united_kingdom',
-    },
-    active: true,
-  },
-  {
-    id: 'OFF-BRI',
-    name: 'Bristol',
-    code: 'BRI',
-    parentLegalEntityId: 'LE-PV-LLP',
-    address: {
-      id: 'addr-off-bri',
-      typeId: 'address_type.work',
-      line1: '21 Redcliffe Quay',
-      line2: '',
-      town: 'Bristol',
-      county: 'Bristol',
-      postcode: 'BS1 6HU',
-      countryId: 'country.united_kingdom',
-    },
-    active: true,
-  },
-  {
-    id: 'OFF-LON',
-    name: 'London',
-    code: 'LON',
-    parentLegalEntityId: 'LE-PV-LLP',
-    address: {
-      id: 'addr-off-lon',
-      typeId: 'address_type.work',
-      line1: '9 Temple Row Chambers, Fleet Street',
-      line2: '',
-      town: 'London',
-      county: 'Greater London',
-      postcode: 'EC4Y 1AA',
-      countryId: 'country.united_kingdom',
-    },
-    active: true,
-  },
-];
+/**
+ * Neutral default offices array (empty until configured per tenant or populated
+ * by tenant seed data; prevents demo office names leaking into clean builds).
+ */
+export const DEFAULT_ORG_OFFICES: OrgOffice[] = [];
 
 export const DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS: OrgTeamOrPracticeGroup[] = [
   {
@@ -304,6 +288,12 @@ export const DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS: OrgTeamOrPracticeGroup[] = [
 export function buildDefaultOrgStructure(options: {
   legalName: string;
   shortCode?: string;
+  legalEntityIds?: {
+    primary?: string;
+    services?: string;
+    trust?: string;
+  };
+  offices?: OrgOffice[];
 }): OrgStructureCatalogue {
   const legalName = options?.legalName?.trim();
   if (!legalName) {
@@ -318,23 +308,27 @@ export function buildDefaultOrgStructure(options: {
     baseName.replace(/[^A-Za-z0-9]/g, '').toUpperCase() ||
     'FIRM'
   ).slice(0, 4);
+  const primaryId = options.legalEntityIds?.primary?.trim() || DEFAULT_LEGAL_ENTITY_ID;
+  const servicesId = options.legalEntityIds?.services?.trim() || 'LE-SERV';
+  const trustId = options.legalEntityIds?.trust?.trim() || 'LE-TRUST';
+
   const legalEntities: OrgLegalEntity[] = [
     {
-      id: 'LE-PV-LLP',
+      id: primaryId,
       name: legalName,
       code: `${codePrefix}LLP`,
       isDefault: true,
       active: true,
     },
     {
-      id: 'LE-PV-SERV',
+      id: servicesId,
       name: `${baseName} Services Ltd`,
       code: `${codePrefix}SRV`,
       isDefault: false,
       active: true,
     },
     {
-      id: 'LE-PV-TRUST',
+      id: trustId,
       name: `${baseName} Trustees Ltd`,
       code: `${codePrefix}TRU`,
       isDefault: false,
@@ -347,27 +341,33 @@ export function buildDefaultOrgStructure(options: {
       id: 'DIV-LEGAL',
       name: 'Legal Practice',
       code: 'LEG',
-      parentLegalEntityId: 'LE-PV-LLP',
+      parentLegalEntityId: primaryId,
       active: true,
     },
     {
       id: 'DIV-BS',
       name: 'Business Services',
       code: 'BSV',
-      parentLegalEntityId: 'LE-PV-LLP',
+      parentLegalEntityId: primaryId,
       active: true,
     },
   ];
 
-  const departments: OrgDepartment[] = DEFAULT_ORG_DEPARTMENTS.map((dept) => ({ ...dept }));
+  const departments: OrgDepartment[] = DEFAULT_ORG_DEPARTMENTS.map((dept) => ({
+    ...dept,
+    practiceAreaIds: dept.practiceAreaIds ? [...dept.practiceAreaIds] : [],
+  }));
 
   const teamsOrPracticeGroups: OrgTeamOrPracticeGroup[] =
     DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS.map((tpg) => ({ ...tpg }));
 
-  const offices: OrgOffice[] = DEFAULT_ORG_OFFICES.map((office) => ({
-    ...office,
-    address: { ...office.address },
-  }));
+  const offices: OrgOffice[] = (options.offices ?? DEFAULT_ORG_OFFICES).map(
+    (office) => ({
+      ...office,
+      parentLegalEntityId: office.parentLegalEntityId || primaryId,
+      address: { ...office.address },
+    }),
+  );
 
   const costCentres: OrgCostCentre[] = [
     { id: 'CC-RE', code: 'CC-101', name: '101 · Real Estate', parentDepartmentId: 'DEPT-RE', active: true },
@@ -529,4 +529,195 @@ export function resolveOrgOffice(
         o.code.toLowerCase() === trimmed.toLowerCase(),
     ) ?? null
   );
+}
+
+/**
+ * Resolves the owning `OrgDepartment` for a `work_type` top-level practice area.
+ * Checks ChoiceValue `meta.departmentId`, then `OrgDepartment.practiceAreaIds`,
+ * then canonical default mapping (`DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP`),
+ * then label/legacyChoiceValueId fallback.
+ */
+export function resolveDepartmentForPracticeArea(
+  practiceAreaId: string | null | undefined,
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'label' | 'meta' | 'active'>[] = [],
+  options?: { includeInactive?: boolean },
+): OrgDepartment | null {
+  if (!practiceAreaId) return null;
+  const trimmed = practiceAreaId.trim();
+  const allDepartments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
+  const departments = options?.includeInactive
+    ? allDepartments
+    : allDepartments.filter((d) => d.active);
+
+  const paVal = values.find((v) => v.listKey === 'work_type' && v.id === trimmed);
+  const explicitDeptId = paVal?.meta?.departmentId?.trim();
+  if (explicitDeptId) {
+    const matched = departments.find((d) => d.id === explicitDeptId);
+    if (matched) return matched;
+    if (!options?.includeInactive) {
+      const existsInactive = allDepartments.find((d) => d.id === explicitDeptId);
+      if (existsInactive) return null;
+    }
+  }
+
+  const byPracticeAreaArray = departments.find((d) =>
+    (d.practiceAreaIds ?? []).includes(trimmed),
+  );
+  if (byPracticeAreaArray) return byPracticeAreaArray;
+
+  if (!options?.includeInactive) {
+    const inactiveWithMapping = allDepartments.find(
+      (d) => !d.active && (d.practiceAreaIds ?? []).includes(trimmed),
+    );
+    if (inactiveWithMapping) return null;
+  }
+
+  const canonicalDeptId = DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP[trimmed];
+  if (canonicalDeptId) {
+    const byCanonical = departments.find((d) => d.id === canonicalDeptId);
+    if (byCanonical) return byCanonical;
+  }
+
+  if (paVal) {
+    const labelLower = paVal.label.trim().toLowerCase();
+    const byName = departments.find(
+      (d) => d.name.trim().toLowerCase() === labelLower,
+    );
+    if (byName) return byName;
+  }
+
+  return null;
+}
+
+/**
+ * Returns top-level `work_type` practice areas mapped to the given `OrgDepartment.id`.
+ */
+export function resolvePracticeAreasForDepartment(
+  departmentId: string | null | undefined,
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'label' | 'parentId' | 'sortOrder' | 'active' | 'meta'>[],
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
+  options?: { includeInactive?: boolean },
+): ChoiceValue[] {
+  if (!departmentId) return [];
+  const allDepartments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
+  const targetDept = allDepartments.find((d) => d.id === departmentId);
+  if (targetDept && !targetDept.active && !options?.includeInactive) {
+    return [];
+  }
+
+  return (values as ChoiceValue[])
+    .filter((v) => {
+      if (v.listKey !== 'work_type' || v.parentId) return false;
+      if (!options?.includeInactive && !v.active) return false;
+      const resolved = resolveDepartmentForPracticeArea(
+        v.id,
+        orgStructure,
+        values,
+        { includeInactive: options?.includeInactive },
+      );
+      return resolved?.id === departmentId;
+    })
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+}
+
+/**
+ * Returns true when a `work_type` practice area or subcategory is active AND
+ * (if mapped to an OrgDepartment) its mapped department is active (P13).
+ */
+export function isWorkTypeChoiceActive(
+  workTypeChoiceId: string | null | undefined,
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'label' | 'parentId' | 'active' | 'meta'>[],
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments'>,
+): boolean {
+  if (!workTypeChoiceId) return false;
+  const val = values.find((v) => v.listKey === 'work_type' && v.id === workTypeChoiceId);
+  if (!val || !val.active) return false;
+
+  const paId = val.parentId || val.id;
+  const paVal = val.parentId
+    ? values.find((v) => v.listKey === 'work_type' && v.id === val.parentId)
+    : val;
+  if (!paVal || !paVal.active) return false;
+
+  const allDepartments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
+  const explicitDeptId =
+    paVal.meta?.departmentId?.trim() ||
+    allDepartments.find((d) => (d.practiceAreaIds ?? []).includes(paId))?.id ||
+    DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP[paId];
+  if (explicitDeptId) {
+    const dept = allDepartments.find((d) => d.id === explicitDeptId);
+    if (dept && !dept.active) return false;
+  }
+  return true;
+}
+
+/**
+ * Resolves synchronised active departments, active practice areas, and active
+ * work-type subcategories across Admin, Intake, Quotes, and Matters (P13).
+ */
+export function resolveActiveWorkTypeHierarchy(
+  values: readonly ChoiceValue[],
+  orgStructure?: Pick<OrgStructureCatalogue, 'departments' | 'teamsOrPracticeGroups'>,
+): {
+  activeDepartments: OrgDepartment[];
+  activePracticeAreas: ChoiceValue[];
+  activeWorkTypesByPracticeArea: Record<string, ChoiceValue[]>;
+  departmentByPracticeAreaId: Record<string, OrgDepartment>;
+  defaultTeamIdByDepartmentId: Record<string, string>;
+} {
+  const departments = orgStructure?.departments ?? DEFAULT_ORG_DEPARTMENTS;
+  const teams =
+    orgStructure?.teamsOrPracticeGroups ?? DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS;
+  const activeDepartments = departments.filter((d) => d.active);
+  const departmentByPracticeAreaId: Record<string, OrgDepartment> = {};
+  const activePracticeAreas = values
+    .filter((v) => {
+      if (v.listKey !== 'work_type' || v.parentId) return false;
+      return isWorkTypeChoiceActive(v.id, values, orgStructure);
+    })
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+
+  for (const pa of activePracticeAreas) {
+    const dept = resolveDepartmentForPracticeArea(pa.id, orgStructure, values);
+    if (dept) {
+      departmentByPracticeAreaId[pa.id] = dept;
+    }
+  }
+
+  const activePaIds = new Set(activePracticeAreas.map((pa) => pa.id));
+  const activeWorkTypesByPracticeArea: Record<string, ChoiceValue[]> = {};
+  for (const wt of values
+    .filter(
+      (v) =>
+        v.listKey === 'work_type' &&
+        Boolean(v.parentId) &&
+        activePaIds.has(v.parentId!) &&
+        v.active,
+    )
+    .sort((a, b) => a.sortOrder - b.sortOrder)) {
+    const pid = wt.parentId!;
+    if (!activeWorkTypesByPracticeArea[pid]) {
+      activeWorkTypesByPracticeArea[pid] = [];
+    }
+    activeWorkTypesByPracticeArea[pid]!.push(wt);
+  }
+
+  const defaultTeamIdByDepartmentId: Record<string, string> = {};
+  for (const dept of activeDepartments) {
+    const firstTeam = teams.find(
+      (t) => t.active && t.parentDepartmentId === dept.id,
+    );
+    if (firstTeam) {
+      defaultTeamIdByDepartmentId[dept.id] = firstTeam.id;
+    }
+  }
+
+  return {
+    activeDepartments,
+    activePracticeAreas,
+    activeWorkTypesByPracticeArea,
+    departmentByPracticeAreaId,
+    defaultTeamIdByDepartmentId,
+  };
 }

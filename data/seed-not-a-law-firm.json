@@ -3779,7 +3779,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "true",
-        "clientMoneyThresholdGbp": "250000"
+        "clientMoneyThresholdGbp": "250000",
+        "departmentId": "DEPT-CORP"
       }
     },
     {
@@ -3895,7 +3896,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "true",
-        "clientMoneyThresholdGbp": "250000"
+        "clientMoneyThresholdGbp": "250000",
+        "departmentId": "DEPT-RE"
       }
     },
     {
@@ -3998,7 +4000,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "false",
-        "clientMoneyThresholdGbp": "25000"
+        "clientMoneyThresholdGbp": "25000",
+        "departmentId": "DEPT-EMP"
       }
     },
     {
@@ -4114,7 +4117,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "false",
-        "clientMoneyThresholdGbp": "25000"
+        "clientMoneyThresholdGbp": "25000",
+        "departmentId": "DEPT-DR"
       }
     },
     {
@@ -4217,7 +4221,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "true",
-        "clientMoneyThresholdGbp": "250000"
+        "clientMoneyThresholdGbp": "250000",
+        "departmentId": "DEPT-CORP"
       }
     },
     {
@@ -4307,7 +4312,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "true",
-        "clientMoneyThresholdGbp": "100000"
+        "clientMoneyThresholdGbp": "100000",
+        "departmentId": "DEPT-PC"
       }
     },
     {
@@ -4397,7 +4403,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "true",
-        "clientMoneyThresholdGbp": "250000"
+        "clientMoneyThresholdGbp": "250000",
+        "departmentId": "DEPT-CORP"
       }
     },
     {
@@ -4487,7 +4494,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "false",
-        "clientMoneyThresholdGbp": "25000"
+        "clientMoneyThresholdGbp": "25000",
+        "departmentId": "DEPT-RISK"
       }
     },
     {
@@ -4577,7 +4585,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "false",
-        "clientMoneyThresholdGbp": "25000"
+        "clientMoneyThresholdGbp": "25000",
+        "departmentId": "DEPT-CORP"
       }
     },
     {
@@ -4667,7 +4676,8 @@
       "parentId": null,
       "meta": {
         "amlInScope": "false",
-        "clientMoneyThresholdGbp": "25000"
+        "clientMoneyThresholdGbp": "25000",
+        "departmentId": "DEPT-PC"
       }
     },
     {
@@ -7839,6 +7849,9 @@
         "defaultCostCentreId": "CC-RE",
         "defaultProfitCentreId": "PC-RE",
         "legacyChoiceValueId": "department.real_estate",
+        "practiceAreaIds": [
+          "work_type.real_estate_and_property"
+        ],
         "active": true
       },
       {
@@ -7849,6 +7862,12 @@
         "defaultCostCentreId": "CC-CORP",
         "defaultProfitCentreId": "PC-CORP",
         "legacyChoiceValueId": "department.corporate_and_commercial",
+        "practiceAreaIds": [
+          "work_type.corporate_and_commercial",
+          "work_type.finance_and_banking",
+          "work_type.intellectual_property",
+          "work_type.technology_and_digital"
+        ],
         "active": true
       },
       {
@@ -7859,6 +7878,9 @@
         "defaultCostCentreId": "CC-DR",
         "defaultProfitCentreId": "PC-DR",
         "legacyChoiceValueId": "department.dispute_resolution",
+        "practiceAreaIds": [
+          "work_type.dispute_resolution"
+        ],
         "active": true
       },
       {
@@ -7869,6 +7891,10 @@
         "defaultCostCentreId": "CC-PC",
         "defaultProfitCentreId": "PC-PC",
         "legacyChoiceValueId": "department.private_client",
+        "practiceAreaIds": [
+          "work_type.private_client",
+          "work_type.family"
+        ],
         "active": true
       },
       {
@@ -7879,6 +7905,9 @@
         "defaultCostCentreId": "CC-EMP",
         "defaultProfitCentreId": "PC-EMP",
         "legacyChoiceValueId": "department.employment",
+        "practiceAreaIds": [
+          "work_type.employment_and_hr"
+        ],
         "active": true
       },
       {
@@ -7889,6 +7918,9 @@
         "defaultCostCentreId": "CC-RISK",
         "defaultProfitCentreId": "PC-CENTRAL",
         "legacyChoiceValueId": "department.risk_and_compliance",
+        "practiceAreaIds": [
+          "work_type.regulatory_and_compliance"
+        ],
         "active": true
       },
       {
@@ -7899,6 +7931,7 @@
         "defaultCostCentreId": "CC-FIN",
         "defaultProfitCentreId": "PC-CENTRAL",
         "legacyChoiceValueId": "department.finance",
+        "practiceAreaIds": [],
         "active": true
       },
       {
@@ -7909,6 +7942,7 @@
         "defaultCostCentreId": "CC-BD",
         "defaultProfitCentreId": "PC-CENTRAL",
         "legacyChoiceValueId": "department.business_development",
+        "practiceAreaIds": [],
         "active": true
       },
       {
@@ -7919,6 +7953,7 @@
         "defaultCostCentreId": "CC-OPS",
         "defaultProfitCentreId": "PC-CENTRAL",
         "legacyChoiceValueId": "department.operations",
+        "practiceAreaIds": [],
         "active": true
       },
       {
@@ -7929,6 +7964,7 @@
         "defaultCostCentreId": "CC-IT",
         "defaultProfitCentreId": "PC-CENTRAL",
         "legacyChoiceValueId": "department.it_and_systems",
+        "practiceAreaIds": [],
         "active": true
       },
       {
@@ -7939,6 +7975,7 @@
         "defaultCostCentreId": "CC-HR",
         "defaultProfitCentreId": "PC-CENTRAL",
         "legacyChoiceValueId": null,
+        "practiceAreaIds": [],
         "active": true
       }
     ],
@@ -18848,6 +18885,8 @@
       "matterStatusId": "matter_status.active",
       "practiceAreaId": "work_type.private_client",
       "workTypeSubcategoryId": "work_type.private_client_wills_and_codicils",
+      "owningDepartmentId": "DEPT-PC",
+      "owningTeamId": "TPG-PC-WILLS",
       "typeBadge": "Wills",
       "matterTypeId": "matter_type.drafting_documentation",
       "clientTierId": "client_tier.private_client",
@@ -18961,6 +19000,8 @@
       "matterStatusId": "matter_status.active",
       "practiceAreaId": "work_type.dispute_resolution",
       "workTypeSubcategoryId": "work_type.dispute_resolution_court_pleadings",
+      "owningDepartmentId": "DEPT-DR",
+      "owningTeamId": "TPG-DR-COM",
       "typeBadge": "Litigation",
       "matterTypeId": "matter_type.contentious",
       "clientTierId": "client_tier.platinum",
@@ -19633,6 +19674,8 @@
       "matterStatusId": "matter_status.active",
       "practiceAreaId": "work_type.private_client",
       "workTypeSubcategoryId": "work_type.private_client_estate_administration",
+      "owningDepartmentId": "DEPT-PC",
+      "owningTeamId": "TPG-PC-WILLS",
       "typeBadge": "Probate",
       "matterTypeId": "matter_type.advisory",
       "clientTierId": "client_tier.private_client",
@@ -20003,8 +20046,8 @@
       "targetCompletionAt": "2026-12-08",
       "completedAt": "2026-09-06",
       "closedAt": "2026-09-06",
-      "retentionPeriod": "6 years",
-      "destructionDueAt": null,
+      "retentionPeriod": "12 years",
+      "destructionDueAt": "2038-09-06",
       "fieldValues": {
         "clientCapacityCodes": [
           "CAP_BUYER_ACQUIRER"
@@ -20215,7 +20258,7 @@
       "completedAt": "2026-07-05",
       "closedAt": "2026-07-05",
       "retentionPeriod": "6 years",
-      "destructionDueAt": null,
+      "destructionDueAt": "2032-07-05",
       "fieldValues": {
         "clientCapacityCodes": [
           "CAP_LANDLORD"
@@ -20254,6 +20297,8 @@
       "matterStatusId": "matter_status.active",
       "practiceAreaId": "work_type.dispute_resolution",
       "workTypeSubcategoryId": "work_type.dispute_resolution_court_pleadings",
+      "owningDepartmentId": "DEPT-DR",
+      "owningTeamId": "TPG-DR-COM",
       "typeBadge": "Disputes",
       "matterTypeId": "matter_type.contentious",
       "clientTierId": "client_tier.gold",
@@ -25555,5 +25600,201 @@
   ],
   "keyDateNotApplicable": [],
   "keyDateReminderStates": [],
-  "keyDateCalendarSyncs": []
+  "keyDateCalendarSyncs": [],
+  "workTypesConfig": {
+    "defaults": {
+      "autoTaskTemplates": [
+        {
+          "id": "firm-opening-file-setup",
+          "title": "Complete initial matter file setup and client care check",
+          "trigger": "matter_open",
+          "dueWorkingDaysOffset": 3,
+          "priorityId": "task_priority.normal",
+          "ownerRoleKey": "fee_earner"
+        }
+      ],
+      "riskQuestions": [],
+      "retention": {
+        "retentionYears": 6,
+        "baseline": "closed_on",
+        "allowMatterOverride": false,
+        "statutoryNote": "Firm standard six-year civil limitation file retention policy"
+      }
+    },
+    "items": [
+      {
+        "workTypeId": "work_type.corporate_and_commercial_mergers_and_acquisitions",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "ma-due-diligence-pack",
+            "title": "Assemble M&A legal due diligence request list and data room index",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          },
+          {
+            "id": "ma-partner-risk-signoff",
+            "title": "Review target corporate structure and sanction screening",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 1,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "partner"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "maCrossBorderComplexity",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Does the transaction involve multi-jurisdictional corporate groups or regulated assets?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "domestic_standard",
+                "label": "Domestic UK entities only",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "multi_jurisdiction_regulated",
+                "label": "Multi-jurisdictional group or regulated assets",
+                "score": 5,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 7,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Corporate transaction closing bible seven-year retention policy"
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_commercial_property",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "cp-title-and-searches",
+            "title": "Order official Land Registry copies and pre-contract property searches",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          },
+          {
+            "id": "cp-source-of-funds",
+            "title": "Verify completion funding trail and SDLT compliance pack",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 3,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "risk_compliance"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "propertyDevelopmentEnvironmental",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Does the property transaction carry environmental contamination or development funding risk?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "standard_occupied_title",
+                "label": "Standard commercial title with clear searches",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "development_or_contamination",
+                "label": "Brownfield / development or high-value offshore funding",
+                "score": 4,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 12,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Limitation Act 1980 twelve-year specialty / deed retention policy"
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_residential_conveyancing",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "res-convey-protocol-pack",
+            "title": "Issue protocol property information forms and source-of-funds pack",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "residentialSourceOfFundsSource",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Are purchase funds arriving from third-party gifts or non-UK accounts?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "uk_mortgage_and_savings",
+                "label": "Standard UK high-street lender and verified domestic savings",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "gifted_or_overseas_funds",
+                "label": "Gifted deposit or overseas/complex funding origin",
+                "score": 4,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 15,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Residential conveyancing mortgage-lender & latent-damage 15-year file policy"
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_tribunal_claims",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "emp-acas-limitation-diary",
+            "title": "Verify ACAS early conciliation dates and tribunal response deadline",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 1,
+            "priorityId": "task_priority.urgent",
+            "ownerRoleKey": "supervisor"
+          }
+        ],
+        "riskQuestions": [],
+        "retention": {
+          "retentionYears": 6,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Employment tribunal and statutory claims six-year file retention policy"
+        }
+      }
+    ]
+  }
 }

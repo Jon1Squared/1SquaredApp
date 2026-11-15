@@ -80,6 +80,7 @@ import {
   resolveMatterConflictCheckRecord,
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
+  resolveMatterRiskSections,
   resolveRiskRatingIdForLevel,
   validateMatterRiskAssessmentInput,
   type CustomKeyDateEntry,
@@ -155,8 +156,23 @@ import {
   buildDefaultOrgStructure,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
+  resolveDepartmentForPracticeArea,
   resolveOrgDepartment,
+  resolvePracticeAreasForDepartment,
 } from '@/domain/orgStructure';
+import {
+  isClosedMatterStatus,
+  isClosedOrArchivedMatterStatus,
+  resolveEffectiveWorkTypesConfig,
+  resolveWorkTypeRiskQuestions,
+  resolveWorkTypeRetention,
+} from '@/domain/workTypeConfig';
+import {
+  computeServerWorkTypeRetentionState,
+  instantiateWorkTypeAutoTasksInTx,
+  syncOrgDepartmentsForPracticeAreaValue,
+  syncPracticeAreasFromOrgStructure,
+} from './workTypeServiceHelpers';
 import {
   buildDefaultMatterPartyTaxonomy,
   computeMatterPartyUsageCounts,
@@ -230,6 +246,7 @@ import {
   TenantKeyDateRepository,
   validateKeyDatesConfig,
   validateRbacConfig,
+  validateWorkTypesConfig,
   type ControlledJobRunOutcome,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
@@ -237,6 +254,7 @@ import {
   type KeyDatesConfiguration,
   type TenantContext,
   type TenantRegistry,
+  type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
   CalculationResult,
@@ -784,7 +802,8 @@ async function loadTenantCatalogueStoreView(
     } else if (v.listKey === 'work_type' && v.meta) {
       if (
         existingVal.meta?.amlInScope === undefined ||
-        existingVal.meta?.clientMoneyThresholdGbp === undefined
+        existingVal.meta?.clientMoneyThresholdGbp === undefined ||
+        (v.meta.departmentId !== undefined && existingVal.meta?.departmentId === undefined)
       ) {
         existingVal.meta = {
           ...v.meta,
@@ -799,6 +818,14 @@ async function loadTenantCatalogueStoreView(
     buildDefaultOrgStructure({
       legalName: activeTenantConfig.displayName,
     });
+  for (const v of values) {
+    if (v.listKey === 'work_type' && !v.parentId && !v.meta?.departmentId) {
+      const resolvedDept = resolveDepartmentForPracticeArea(v.id, orgStructure, values);
+      if (resolvedDept) {
+        v.meta = { ...(v.meta ?? {}), departmentId: resolvedDept.id };
+      }
+    }
+  }
 
   const matterPartyTaxonomy =
     (catSnap.moduleConfigs.matter_party_taxonomy as MatterPartyTaxonomy | undefined) ??
@@ -911,6 +938,13 @@ async function loadTenantCatalogueStoreView(
     keyDateNotApplicable: [],
     keyDateReminderStates: [],
     keyDateCalendarSyncs: [],
+    workTypesConfig: resolveEffectiveWorkTypesConfig(
+      activeTenantConfig,
+      (catSnap.moduleConfigs.work_type_configs as WorkTypesConfiguration | undefined) ?? null,
+    ),
+    workTypeConfigsOverride:
+      (catSnap.moduleConfigs.work_type_configs as WorkTypesConfiguration | undefined) ??
+      undefined,
   };
 }
 
@@ -2115,6 +2149,9 @@ async function getAppSnapshotInScope(
         displayName: activeTenantCfg.displayName,
         primaryDomain: activeTenantCfg.branding.primaryDomain,
       }),
+    workTypesConfig:
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(activeTenantCfg, store.workTypeConfigsOverride ?? null),
     taskBadgeCount,
     notes: visibleNotes,
     audit: visibleAudit,
@@ -5090,9 +5127,30 @@ export async function saveMatterRecord(
     : Array.isArray(existing?.fieldValues?.['customKeyDates'])
       ? (existing.fieldValues['customKeyDates'] as CustomKeyDateEntry[])
       : [];
+  const workTypesConfigForMatter =
+    store.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      getActiveTenantConfiguration(),
+      store.workTypeConfigsOverride ?? null,
+    );
+  const workTypeRiskQuestionsForMatter = resolveWorkTypeRiskQuestions(
+    workTypesConfigForMatter,
+    {
+      workTypeSubcategoryId:
+        input.workTypeSubcategoryId !== undefined
+          ? input.workTypeSubcategoryId
+          : existing?.workTypeSubcategoryId,
+      practiceAreaId:
+        input.practiceAreaId !== undefined
+          ? input.practiceAreaId
+          : existing?.practiceAreaId,
+    },
+  );
   const validatedRiskAssessment = validateMatterRiskAssessmentInput(
     rawRiskAssessmentInput,
     incomingCustomKeyDates,
+    workTypeRiskQuestionsForMatter,
+    { requireRequiredWorkTypeQuestions: !isDraftSave },
   );
   if (!validatedRiskAssessment.ok) {
     errors.riskAssessment = validatedRiskAssessment.error;
@@ -5174,9 +5232,8 @@ export async function saveMatterRecord(
     const nextStatusId = input.matterStatusId ?? existing?.matterStatusId ?? '';
     const nextStatusLabel = resolveLabel(store.values, nextStatusId) || nextStatusId;
     const isClosing =
-      nextStatusLabel.toLowerCase() === 'closed' ||
-      nextStatusLabel.toLowerCase() === 'archived' ||
-      nextStatusId === 'matter_status.closed';
+      isClosedMatterStatus(nextStatusId, store.values) ||
+      nextStatusLabel.toLowerCase() === 'archived';
 
     if (targetMatterId && isClosing) {
       const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
@@ -6039,10 +6096,9 @@ export async function saveMatterRecord(
     targetCompletionAt:
       input.targetCompletionAt !== undefined ? input.targetCompletionAt : existing?.targetCompletionAt ?? null,
     completedAt: input.completedAt !== undefined ? input.completedAt : existing?.completedAt ?? null,
-    closedAt: input.closedAt !== undefined ? input.closedAt : existing?.closedAt ?? null,
-    retentionPeriod: input.retentionPeriod ?? existing?.retentionPeriod ?? '6 years',
-    destructionDueAt:
-      input.destructionDueAt !== undefined ? input.destructionDueAt : existing?.destructionDueAt ?? null,
+    closedAt: null,
+    retentionPeriod: '6 years',
+    destructionDueAt: null,
     fieldValues: {
       ...(existing?.fieldValues ?? {}),
       ...stripServerOwnedFieldValues(input.fieldValues),
@@ -6097,13 +6153,31 @@ export async function saveMatterRecord(
             ? personDisplayName(leadFeeEarnerPerson)
             : leadFeeEarnerPersonId,
           completedAt: now,
+          extraRiskQuestions: workTypeRiskQuestionsForMatter,
+          workTypeSubcategoryId: matter.workTypeSubcategoryId || null,
         })
       : resolveMatterRiskAssessment(
           matter,
           allPeopleWithPending,
           store.values,
+          workTypeRiskQuestionsForMatter,
         );
   matter.fieldValues['riskAssessment'] = fullRiskAssessment;
+  matter.fieldValues['__riskAssessmentSnapshot'] = fullRiskAssessment;
+  const retentionOutcome = computeServerWorkTypeRetentionState({
+    prevMatter: existing,
+    nextStatusId: matter.matterStatusId,
+    closedAtInput: input.closedAt,
+    destructionDueAtInput: input.destructionDueAt,
+    workTypeSubcategoryId: matter.workTypeSubcategoryId,
+    practiceAreaId: matter.practiceAreaId,
+    workTypesConfig: workTypesConfigForMatter,
+    values: store.values,
+    todayIso: today,
+  });
+  matter.closedAt = retentionOutcome.closedAt;
+  matter.destructionDueAt = retentionOutcome.destructionDueAt;
+  matter.retentionPeriod = input.retentionPeriod?.trim() || retentionOutcome.retentionPeriod;
   matter.riskRatingId = fullRiskAssessment.overallRisk
     ? resolveRiskRatingIdForLevel(
         store.values,
@@ -6529,11 +6603,51 @@ export async function saveMatterRecord(
         }
       }
 
+      const workTypeTaskRepo = getTaskWorkflowRepository();
+      if (willOpen && !isDraftSave && !isPmsImport) {
+        const currentTasks = await workTypeTaskRepo.listAllTasksUnfiltered<Task>(extensionCtx);
+        await instantiateWorkTypeAutoTasksInTx({
+          ctx: extensionCtx,
+          matter,
+          people: allPeopleWithPending,
+          teams,
+          existingTasks: currentTasks,
+          workTypesConfig: workTypesConfigForMatter,
+          values: store.values,
+          workingHoursConfig: workingHoursConfigFromStore(store),
+          trigger: 'matter_open',
+          byId: opts.byId,
+          nowIso: now,
+          taskRepo: workTypeTaskRepo,
+          writeAuditFn: (entry) => writeAudit(store, entry),
+          pushNotificationFn: pushNotification,
+        });
+      }
+
+      if (
+        (retentionOutcome.isClosingTransition || retentionOutcome.isReopeningTransition) &&
+        !isPmsImport
+      ) {
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'update',
+          field: 'Matter closure & retention',
+          oldValue: existing
+            ? `${resolveLabel(store.values, existing.matterStatusId)} (Destruction due: ${existing.destructionDueAt ?? 'None'})`
+            : null,
+          newValue: `${resolveLabel(store.values, matter.matterStatusId)} (Retention: ${matter.retentionPeriod}; Destruction due: ${matter.destructionDueAt ?? 'Cleared'})`,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+
       await flushStagedAuditEntries(extensionCtx);
       auditFlushed = true;
     });
   } catch (err) {
     if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
+      discardStagedAuditEntriesSince(stagedAuditMark);
       return {
         matter: null,
         code: MATTER_CONCURRENCY_CONFLICT_CODE,
@@ -7210,6 +7324,7 @@ export async function updateMatterConflictRecord(
     | MatterOpeningGateRecord
     | undefined;
 
+  let transitionedToOpenOnConflictApproval = false;
   const warnings: string[] = [];
   matter.conflictCheckStatus = legacyConflictStatusFromRecord(sanitisedRecord);
   if (sanitisedRecord.status === 'Approved' || sanitisedRecord.status === 'Cleared') {
@@ -7252,6 +7367,7 @@ export async function updateMatterConflictRecord(
         gate?.allowProceed === true &&
         keyDatesOpenGate.canOpen;
       if (hasPassedOpeningGate) {
+        transitionedToOpenOnConflictApproval = true;
         const activeStatusId = vid('matter_status', 'Active');
         matter.matterStatusId = activeStatusId;
         matter.recordStatusId = activeStatusId;
@@ -7280,6 +7396,13 @@ export async function updateMatterConflictRecord(
   }
 
   let saved!: Matter;
+  const workTypesConfigForConflict =
+    store.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      getActiveTenantConfiguration(),
+      store.workTypeConfigsOverride ?? null,
+    );
+  const taskRepo = getTaskWorkflowRepository();
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(conflictCtx, async () => {
       saved = await putMatterWithInTxRestrictions(conflictCtx, matter, {
@@ -7295,6 +7418,25 @@ export async function updateMatterConflictRecord(
         byId,
         at: now,
       });
+      if (transitionedToOpenOnConflictApproval) {
+        const existingTasksForOpen = await taskRepo.listAllTasksUnfiltered<Task>(conflictCtx);
+        await instantiateWorkTypeAutoTasksInTx({
+          ctx: conflictCtx,
+          matter: saved,
+          people,
+          teams,
+          existingTasks: existingTasksForOpen,
+          workTypesConfig: workTypesConfigForConflict,
+          values: store.values,
+          workingHoursConfig: workingHoursConfigFromStore(store),
+          trigger: 'matter_open',
+          byId,
+          nowIso: now,
+          taskRepo,
+          writeAuditFn: (entry) => writeAudit(store, entry),
+          pushNotificationFn: pushNotification,
+        });
+      }
       await flushStagedAuditEntries(conflictCtx);
     }),
   );
@@ -7359,6 +7501,9 @@ export async function signOffMatterCostsRecord(
     getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
   const matter = matters.find((m) => m.id === matterId) ?? null;
+  const wasProspectiveBeforeSignOff = Boolean(
+    matter && matter.matterStatusId === resolveProspectiveStatusId(store),
+  );
   const actingUser = people.find((p) => p.id === byId) ?? null;
   const visibility = buildRecordVisibility(store, actingUser, {
     people,
@@ -7502,6 +7647,15 @@ export async function signOffMatterCostsRecord(
   }
 
   let saved!: Matter;
+  const workTypesConfigForSignOff =
+    store.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      tenantCfg,
+      store.workTypeConfigsOverride ?? null,
+    );
+  const taskRepoForSignOff = getTaskWorkflowRepository();
+  const openedBySignOff =
+    wasProspectiveBeforeSignOff && matter.matterStatusId !== prospectiveStatusId;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(extensionCtx, async () => {
       saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
@@ -7517,6 +7671,26 @@ export async function signOffMatterCostsRecord(
         byId,
         at: now,
       });
+      if (openedBySignOff) {
+        const existingTasksForSignOff =
+          await taskRepoForSignOff.listAllTasksUnfiltered<Task>(extensionCtx);
+        await instantiateWorkTypeAutoTasksInTx({
+          ctx: extensionCtx,
+          matter: saved,
+          people,
+          teams,
+          existingTasks: existingTasksForSignOff,
+          workTypesConfig: workTypesConfigForSignOff,
+          values: store.values,
+          workingHoursConfig: workingHoursConfigFromStore(store),
+          trigger: 'matter_open',
+          byId,
+          nowIso: now,
+          taskRepo: taskRepoForSignOff,
+          writeAuditFn: (entry) => writeAudit(store, entry),
+          pushNotificationFn: pushNotification,
+        });
+      }
       await flushStagedAuditEntries(extensionCtx);
     }),
   );
@@ -8228,6 +8402,11 @@ export async function addChoiceValue(
             : undefined,
       };
       await catalogueRepo.putChoiceValue(ctx, val);
+      if (val.listKey === 'work_type' && !val.parentId && val.meta?.departmentId) {
+        if (syncOrgDepartmentsForPracticeAreaValue(store.orgStructure, val)) {
+          await catalogueRepo.putOrgStructureConfig(ctx, store.orgStructure, byId);
+        }
+      }
       if (input.listKey === 'employee_role' && store.homePagesConfig) {
         const nextValues = [...store.values, val];
         const nextHomePages: HomePagesConfig = {
@@ -8301,6 +8480,11 @@ export async function updateChoiceValue(
         val.meta = { ...(val.meta ?? {}), ...patch.meta };
       }
       await catalogueRepo.putChoiceValue(ctx, val);
+      if (val.listKey === 'work_type' && !val.parentId && patch.meta !== undefined) {
+        if (syncOrgDepartmentsForPracticeAreaValue(store.orgStructure, val)) {
+          await catalogueRepo.putOrgStructureConfig(ctx, store.orgStructure, byId);
+        }
+      }
       if (val.listKey === 'employee_role' && store.homePagesConfig) {
         const nextHomePages: HomePagesConfig = {
           ...store.homePagesConfig,
@@ -11455,6 +11639,37 @@ async function finalizeEnquiryConversionToMatter(
       },
     );
   }
+
+  // Schema-driven work-type automatic opening tasks (idempotent; skips if already raised)
+  if (matter.matterNumber !== 'DRAFT' && matter.matterStatusId !== resolveProspectiveStatusId(store)) {
+    const [latestTasks, convPeople, convTeams] = await Promise.all([
+      taskRepo.listAllTasksUnfiltered<Task>(ctx),
+      getPartyRepository().listAllPeople<Person>(ctx),
+      getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    ]);
+    const workTypesCfgForConv =
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(
+        getActiveTenantConfiguration(),
+        store.workTypeConfigsOverride ?? null,
+      );
+    await instantiateWorkTypeAutoTasksInTx({
+      ctx,
+      matter,
+      people: convPeople,
+      teams: convTeams,
+      existingTasks: latestTasks,
+      workTypesConfig: workTypesCfgForConv,
+      values: store.values,
+      workingHoursConfig: workingHoursConfigFromStore(store),
+      trigger: 'matter_open',
+      byId,
+      nowIso: now,
+      taskRepo,
+      writeAuditFn: (entry) => writeAudit(store, entry),
+      pushNotificationFn: pushNotification,
+    });
+  }
 }
 
 export interface EnquiryRetentionAnonymisationJobSummary {
@@ -12379,7 +12594,7 @@ export async function createRecordFromPms(
               typeId: vid('address_type', 'Billing'),
               line1: client.billing_address,
               line2: '',
-              town: 'Cardiff',
+              town: '',
               county: '',
               postcode: client.postcode ?? '',
               countryId: vid('country', 'United Kingdom'),
@@ -12443,7 +12658,7 @@ export async function createRecordFromPms(
                 typeId: vid('address_type', 'Home'),
                 line1: client.billing_address,
                 line2: '',
-                town: 'Cardiff',
+                town: '',
                 county: '',
                 postcode: client.postcode ?? '',
                 countryId: vid('country', 'United Kingdom'),
@@ -14030,7 +14245,15 @@ export async function saveOrgStructure(
   const catalogueRepo = getCatalogueRepository();
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
+      const store = await loadTenantCatalogueStoreView(ctx);
       await catalogueRepo.putOrgStructureConfig(ctx, nextCatalogue, byId);
+      const syncedPracticeAreas = syncPracticeAreasFromOrgStructure(
+        nextCatalogue,
+        store.values,
+      );
+      for (const paVal of syncedPracticeAreas) {
+        await catalogueRepo.putChoiceValue(ctx, paVal);
+      }
       writeAudit(null, {
         recordType: 'system',
         recordId: 'ORG-STRUCTURE',
@@ -18599,4 +18822,338 @@ export async function saveKeyDatesConfigRecord(
           : 'Invalid Key Dates configuration.',
     };
   }
+}
+
+export async function saveWorkTypesConfigRecord(
+  newConfigInput: WorkTypesConfiguration,
+  reason: string,
+  byId?: string,
+  options?: { mfaVerified?: boolean } | boolean,
+): Promise<{
+  ok: boolean;
+  config?: WorkTypesConfiguration;
+  error?: string;
+  code?: 'FORBIDDEN' | 'MFA_REQUIRED' | 'VALIDATION_ERROR';
+}> {
+  let ctx: TenantContext;
+  try {
+    ctx = resolveDefaultServiceTenantContext(null, byId);
+  } catch {
+    return {
+      ok: false,
+      code: 'FORBIDDEN',
+      error: 'Unauthenticated: Signed-in session is required to modify work-type configuration.',
+    };
+  }
+
+  const effectiveActorId = byId || ctx.actorId;
+  const sessionActor = getActiveActorSession();
+  const explicitMfa = typeof options === 'boolean' ? options : options?.mfaVerified;
+  const mfaVerified =
+    explicitMfa !== undefined ? explicitMfa === true : sessionActor?.mfaVerified === true;
+
+  const [store, people, teams, rbacConfig] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx),
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actor =
+    people.find((p) => p.id === effectiveActorId || p.id === ctx.actorId) ?? null;
+
+  if (
+    !actor ||
+    !actor.isEmployee ||
+    !hasPersonPermission(actor, 'admin:access', {
+      allPeople: people,
+      teams,
+      mfaVerified: true,
+      config: { rbac: rbacConfig },
+    })
+  ) {
+    return {
+      ok: false,
+      code: 'FORBIDDEN',
+      error: 'Forbidden: admin:access permission is required to modify work-type configuration.',
+    };
+  }
+
+  if (mfaVerified !== true) {
+    return {
+      ok: false,
+      code: 'MFA_REQUIRED',
+      error: 'MFA_REQUIRED: Multi-factor authentication is required to modify work-type configuration.',
+    };
+  }
+
+  let validated: WorkTypesConfiguration;
+  try {
+    validated = validateWorkTypesConfig(newConfigInput);
+  } catch (err) {
+    return {
+      ok: false,
+      code: 'VALIDATION_ERROR',
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Invalid work-type configuration.',
+    };
+  }
+
+  const activeTenantCfg = getActiveTenantConfiguration();
+  const previousEffective =
+    store.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(activeTenantCfg, store.workTypeConfigsOverride ?? null);
+  const nextEffective = resolveEffectiveWorkTypesConfig(activeTenantCfg, validated);
+  const catalogueRepo = getCatalogueRepository();
+  const nowIso = new Date().toISOString();
+
+  await catalogueRepo.withTenantTransaction(ctx, async () => {
+    await catalogueRepo.putWorkTypeConfigs(ctx, validated, actor.id);
+    await appendTenantAuditEntries(ctx, [
+      {
+        recordType: 'system',
+        recordId: 'FIRM-WORK-TYPES-CONFIG',
+        action: 'update',
+        field: 'workTypes',
+        oldValue: `defaultsRetention=${previousEffective.defaults?.retention?.retentionYears ?? 6}; items=${previousEffective.items?.length ?? 0}`,
+        newValue: `defaultsRetention=${nextEffective.defaults?.retention?.retentionYears ?? 6}; items=${nextEffective.items?.length ?? 0}`,
+        byId: actor.id,
+        at: nowIso,
+        reason: reason?.trim() || 'Updated work-type configuration in Admin',
+        snapshot: {
+          before: store.workTypeConfigsOverride ?? null,
+          after: validated,
+        },
+      },
+    ]);
+  });
+
+  return { ok: true, config: nextEffective };
+}
+
+export async function updateMatterLifecycleStatusRecord(
+  matterId: string,
+  action: 'close' | 'reopen',
+  opts: {
+    closedAt?: string | null;
+    reason?: string;
+    expectedRowVersion?: number | null;
+  } = {},
+  byId?: string,
+): Promise<{
+  matter: Matter | null;
+  errors?: Record<string, string>;
+  code?: string;
+  message?: string;
+}> {
+  let ctx: TenantContext;
+  try {
+    ctx = resolveDefaultServiceTenantContext(null, byId);
+  } catch {
+    return {
+      matter: null,
+      code: 'UNAUTHENTICATED',
+      errors: { permission: 'Unauthenticated: Verified session is required.' },
+    };
+  }
+
+  const actorId = byId || ctx.actorId;
+  const matterRepo = getMatterRepository();
+  const partyRepo = getPartyRepository();
+  const hrRepo = getHrAndRbacRepository();
+  const [store, people, teams, rbacConfig, existing] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx),
+    partyRepo.listAllPeople<Person>(ctx),
+    hrRepo.listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+    matterRepo.getMatterById<Matter>(ctx, matterId),
+  ]);
+
+  const actingUser = people.find((p) => p.id === actorId) ?? null;
+  if (
+    !existing ||
+    !actingUser ||
+    !actingUser.isEmployee ||
+    !canPersonAccessMatter(existing, actingUser.id, actingUser, {
+      allPeople: people,
+      teams,
+    })
+  ) {
+    return {
+      matter: null,
+      errors: { access: 'Matter not found or restricted.' },
+    };
+  }
+
+  if (
+    !hasPersonPermission(actingUser, 'matter:edit', {
+      allPeople: people,
+      teams,
+      config: { rbac: rbacConfig },
+    })
+  ) {
+    return {
+      matter: null,
+      code: 'FORBIDDEN',
+      errors: {
+        permission: 'You do not have permission (matter:edit) to update matter status.',
+      },
+    };
+  }
+
+  const existingRowVersion = (existing as Matter & { rowVersion?: number }).rowVersion ?? 1;
+  if (
+    opts.expectedRowVersion !== undefined &&
+    opts.expectedRowVersion !== null &&
+    (typeof opts.expectedRowVersion !== 'number' ||
+      !Number.isInteger(opts.expectedRowVersion) ||
+      opts.expectedRowVersion < 1 ||
+      opts.expectedRowVersion !== existingRowVersion)
+  ) {
+    return {
+      matter: null,
+      code: MATTER_CONCURRENCY_CONFLICT_CODE,
+      message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+      errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
+    };
+  }
+
+  if (action === 'close' && opts.closedAt !== undefined && opts.closedAt !== null) {
+    const trimmed = opts.closedAt.trim();
+    if (trimmed) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return {
+          matter: null,
+          errors: { closedAt: 'Closure date must be formatted as YYYY-MM-DD.' },
+        };
+      }
+      const [y, m, d] = trimmed.split('-').map(Number);
+      const parsed = new Date(Date.UTC(y, m - 1, d));
+      if (
+        parsed.getUTCFullYear() !== y ||
+        parsed.getUTCMonth() + 1 !== m ||
+        parsed.getUTCDate() !== d
+      ) {
+        return {
+          matter: null,
+          errors: { closedAt: 'Closure date must be a valid calendar date.' },
+        };
+      }
+    }
+  }
+
+  const workTypesConfig =
+    store.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      getActiveTenantConfiguration(),
+      store.workTypeConfigsOverride ?? null,
+    );
+  const now = new Date().toISOString();
+  const todayIso = toIsoDate(new Date());
+
+  let nextStatusId: string;
+  if (action === 'close') {
+    const kdConfig = await getKeyDatesConfig({ ctx });
+    if (kdConfig.enabled) {
+      const targetMatterTypeId = existing.matterTypeId || existing.practiceAreaId;
+      const matterKds = await getKeyDateRepository().listKeyDatesForMatter(
+        ctx,
+        existing.id,
+        actorId,
+      );
+      const closeGate = evaluateMatterKeyDateClosureGate(
+        kdConfig,
+        targetMatterTypeId,
+        matterKds,
+      );
+      if (!closeGate.canClose) {
+        return {
+          matter: null,
+          errors: {
+            keyDates: `Cannot close matter while ${closeGate.openKeyDates.length} key date(s) remain open (${closeGate.openKeyDates.map((d) => `${d.title} [${d.status}]`).join(', ')}). Resolve them as met, missed, or waived first.`,
+          },
+        };
+      }
+    }
+    nextStatusId =
+      store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label.toLowerCase() === 'closed',
+      )?.id ?? 'matter_status.closed';
+  } else {
+    if (!isClosedOrArchivedMatterStatus(existing.matterStatusId, store.values)) {
+      return {
+        matter: null,
+        errors: {
+          matterStatusId: 'Only closed or archived matters can be reopened.',
+        },
+      };
+    }
+    nextStatusId =
+      store.values.find(
+        (v) => v.listKey === 'matter_status' && v.label.toLowerCase() === 'active',
+      )?.id ?? 'matter_status.active';
+  }
+
+  const retentionOutcome = computeServerWorkTypeRetentionState({
+    prevMatter: existing,
+    nextStatusId,
+    closedAtInput: action === 'close' ? opts.closedAt : undefined,
+    workTypeSubcategoryId: existing.workTypeSubcategoryId,
+    practiceAreaId: existing.practiceAreaId,
+    workTypesConfig,
+    values: store.values,
+    todayIso,
+  });
+
+  const updatedMatter: Matter = {
+    ...existing,
+    matterStatusId: nextStatusId,
+    recordStatusId: nextStatusId,
+    closedAt: retentionOutcome.closedAt,
+    destructionDueAt: retentionOutcome.destructionDueAt,
+    retentionPeriod: retentionOutcome.retentionPeriod,
+    updatedById: actorId,
+    updatedAt: now,
+  };
+
+  let saved!: Matter;
+  const taskRepo = getTaskWorkflowRepository();
+  try {
+    await runWithAuditStagingScope(() =>
+      matterRepo.withTenantTransaction(ctx, async () => {
+        saved = await putMatterWithInTxRestrictions(ctx, updatedMatter, {
+          expectedRowVersion:
+            opts.expectedRowVersion !== undefined ? opts.expectedRowVersion : null,
+        });
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: saved.id,
+          action: 'update',
+          field:
+            action === 'close'
+              ? 'Matter closed & retention scheduled'
+              : 'Matter reopened & destruction date cleared',
+          oldValue: `${resolveLabel(store.values, existing.matterStatusId)} (Closed: ${existing.closedAt ?? 'None'}; Destruction due: ${existing.destructionDueAt ?? 'None'})`,
+          newValue: `${resolveLabel(store.values, saved.matterStatusId)} (Retention: ${saved.retentionPeriod}; Closed: ${saved.closedAt ?? 'Cleared'}; Destruction due: ${saved.destructionDueAt ?? 'Cleared'})`,
+          byId: actorId,
+          at: now,
+          ...(opts.reason?.trim() ? { reason: opts.reason.trim() } : {}),
+        });
+        await flushStagedAuditEntries(ctx);
+      }),
+    );
+  } catch (err) {
+    if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
+      return {
+        matter: null,
+        code: MATTER_CONCURRENCY_CONFLICT_CODE,
+        message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+        errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
+      };
+    }
+    throw err;
+  }
+
+  return { matter: saved };
 }

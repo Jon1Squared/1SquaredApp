@@ -152,6 +152,309 @@ const HomeRoleKeySchema = z.enum([
   'admin',
 ]);
 
+const WorkTypeAutoTaskTemplateSchema = z
+  .object({
+    id: z
+      .string()
+      .trim()
+      .min(1, 'Task template id must not be empty')
+      .describe('Unique stable identifier for this task template'),
+    title: z
+      .string()
+      .trim()
+      .min(1, 'Task template title must not be empty')
+      .describe('Task title created when the template triggers'),
+    trigger: z
+      .enum(['matter_open'])
+      .default('matter_open')
+      .describe('Matter lifecycle trigger event for this task template'),
+    dueWorkingDaysOffset: z
+      .number()
+      .int('dueWorkingDaysOffset must be a whole integer')
+      .min(0, 'dueWorkingDaysOffset cannot be negative')
+      .max(365, 'dueWorkingDaysOffset cannot exceed 365 working days')
+      .default(5)
+      .describe('Working-day offset from trigger date for the task due date'),
+    priorityId: z
+      .enum([
+        'task_priority.low',
+        'task_priority.normal',
+        'task_priority.high',
+        'task_priority.urgent',
+      ])
+      .default('task_priority.normal')
+      .describe('Task priority choice value ID assigned to generated tasks'),
+    ownerRoleKey: HomeRoleKeySchema.default('fee_earner').describe(
+      'Stable HomeRoleKey used to resolve the initial task assignee',
+    ),
+  })
+  .strict();
+
+const WorkTypeRiskQuestionOptionSchema = z
+  .object({
+    value: z
+      .string()
+      .trim()
+      .min(1, 'Risk question option value must not be empty')
+      .describe('Machine option code stored in the risk answer payload'),
+    label: z
+      .string()
+      .trim()
+      .min(1, 'Risk question option label must not be empty')
+      .describe('Human-readable option text rendered in the UI'),
+    score: z
+      .number()
+      .int('Risk option score must be an integer')
+      .min(0, 'Risk option score cannot be negative')
+      .max(100, 'Risk option score cannot exceed 100')
+      .default(0)
+      .describe('Base numeric score before question weight multiplier'),
+    riskLevel: z
+      .enum(['low', 'medium', 'high'])
+      .default('low')
+      .describe('Risk classification tier implied by selecting this option'),
+  })
+  .strict();
+
+const WorkTypeRiskQuestionSchema = z
+  .object({
+    id: z
+      .string()
+      .trim()
+      .min(1, 'Risk question id must not be empty')
+      .describe('Unique question identifier stored with the risk snapshot'),
+    sectionKey: z
+      .enum(['client', 'matter', 'jurisdiction', 'delivery', 'work_type'])
+      .default('work_type')
+      .describe('Risk assessment section key where the question renders'),
+    sectionTitle: z
+      .string()
+      .trim()
+      .min(1)
+      .default('Work-type risk factors')
+      .describe('Heading used for the dynamic work-type risk section'),
+    prompt: z
+      .string()
+      .trim()
+      .min(1, 'Risk question prompt must not be empty')
+      .describe('Question prompt shown to the fee earner in the opening wizard'),
+    weight: z
+      .number()
+      .int('Risk question weight must be an integer')
+      .min(1, 'Risk question weight must be at least 1')
+      .max(10, 'Risk question weight cannot exceed 10')
+      .default(1)
+      .describe('Server-side score multiplier applied to the chosen option score'),
+    required: z
+      .boolean()
+      .default(true)
+      .describe('Whether an answer is mandatory on matter opening submission'),
+    options: z
+      .array(WorkTypeRiskQuestionOptionSchema)
+      .min(2, 'Risk questions must define at least 2 answer options')
+      .describe('Selectable risk answer options with score and band'),
+  })
+  .strict();
+
+const WorkTypeRetentionSchema = z
+  .object({
+    retentionYears: z
+      .number()
+      .int('retentionYears must be a whole integer')
+      .min(1, 'retentionYears must be at least 1 year')
+      .max(100, 'retentionYears cannot exceed 100 years')
+      .default(6)
+      .describe('Whole years after closure before matter destruction due date'),
+    baseline: z
+      .enum(['closed_on'])
+      .default('closed_on')
+      .describe('Anchor date field used when calculating destruction_date'),
+    allowMatterOverride: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Whether an individual matter may record an exception retention note or override',
+      ),
+    statutoryNote: z
+      .string()
+      .default('Firm standard limitation and file retention policy')
+      .describe(
+        'Regulatory or statutory justification for this retention rule',
+      ),
+  })
+  .strict();
+
+const WorkTypeFeeCapOverrideReservedSchema = z
+  .object({
+    capCategoryKey: z.string().trim().min(1),
+    maxPercent: z.number().min(0).max(100),
+    capBaseKey: z.string().trim().min(1),
+  })
+  .strict();
+
+const DEFAULT_WORK_TYPE_RETENTION = {
+  retentionYears: 6,
+  baseline: 'closed_on' as const,
+  allowMatterOverride: false,
+  statutoryNote: 'Firm standard limitation and file retention policy',
+};
+
+const WorkTypeDefaultsSchema = z
+  .object({
+    autoTaskTemplates: z
+      .array(WorkTypeAutoTaskTemplateSchema)
+      .default([])
+      .describe(
+        'Firm-wide fallback automatic task templates instantiated on matter opening',
+      ),
+    riskQuestions: z
+      .array(WorkTypeRiskQuestionSchema)
+      .default([])
+      .describe(
+        'Additional firm-wide risk assessment questions combined with the standard S0-08 sections',
+      ),
+    retention: WorkTypeRetentionSchema.default(() => ({
+      ...DEFAULT_WORK_TYPE_RETENTION,
+    })).describe(
+      'Firm-wide fallback retention rule used to calculate destruction_date upon matter closure',
+    ),
+  })
+  .strict();
+
+const WorkTypeConfigItemSchema = z
+  .object({
+    workTypeId: z
+      .string()
+      .trim()
+      .min(1, 'workTypeId must not be empty')
+      .describe('Target work-type subcategory ID or parent practice area ID'),
+    practiceAreaId: z
+      .string()
+      .default('')
+      .describe(
+        'Optional parent practice area ID used for grouping and reporting',
+      ),
+    active: z
+      .boolean()
+      .default(true)
+      .describe('Whether this per-work-type configuration rule is active'),
+    autoTaskTemplates: z
+      .array(WorkTypeAutoTaskTemplateSchema)
+      .default([])
+      .describe('Automatic task templates for matters of this work type'),
+    riskQuestions: z
+      .array(WorkTypeRiskQuestionSchema)
+      .default([])
+      .describe('Work-type-specific risk assessment questions'),
+    retention: WorkTypeRetentionSchema.optional().describe(
+      'Retention rule overriding firm defaults for this work type',
+    ),
+    workTypeCapOverrides: z
+      .array(WorkTypeFeeCapOverrideReservedSchema)
+      .optional()
+      .describe(
+        'Reserved for S0-28b: per-work-type CFA/DBA statutory fee cap overrides',
+      ),
+  })
+  .strict();
+
+export const WorkTypesConfigSchema = z
+  .object({
+    defaults: WorkTypeDefaultsSchema.default(() => ({
+      autoTaskTemplates: [],
+      riskQuestions: [],
+      retention: { ...DEFAULT_WORK_TYPE_RETENTION },
+    })).describe(
+      'Firm-wide fallback templates, risk questions and retention period',
+    ),
+    items: z
+      .array(WorkTypeConfigItemSchema)
+      .default([])
+      .describe('Per-work-type or practice-area rules keyed by workTypeId'),
+  })
+  .strict()
+  .superRefine((workTypes, ctx) => {
+    const validateTemplateIds = (
+      templates: Array<{ id: string }>,
+      basePath: Array<string | number>,
+    ) => {
+      const seen = new Set<string>();
+      for (let i = 0; i < templates.length; i++) {
+        const id = templates[i]!.id;
+        if (seen.has(id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...basePath, i, 'id'],
+            message: `Duplicate auto-task template id "${id}".`,
+          });
+        }
+        seen.add(id);
+      }
+    };
+
+    const validateRiskQuestions = (
+      questions: Array<{ id: string; options: Array<{ value: string }> }>,
+      basePath: Array<string | number>,
+    ) => {
+      const seenQ = new Set<string>();
+      for (let qi = 0; qi < questions.length; qi++) {
+        const q = questions[qi]!;
+        if (seenQ.has(q.id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...basePath, qi, 'id'],
+            message: `Duplicate risk question id "${q.id}".`,
+          });
+        }
+        seenQ.add(q.id);
+        const seenOpt = new Set<string>();
+        for (let oi = 0; oi < q.options.length; oi++) {
+          const val = q.options[oi]!.value;
+          if (seenOpt.has(val)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [...basePath, qi, 'options', oi, 'value'],
+              message: `Duplicate option value "${val}" on risk question "${q.id}".`,
+            });
+          }
+          seenOpt.add(val);
+        }
+      }
+    };
+
+    validateTemplateIds(workTypes.defaults.autoTaskTemplates, [
+      'defaults',
+      'autoTaskTemplates',
+    ]);
+    validateRiskQuestions(workTypes.defaults.riskQuestions, [
+      'defaults',
+      'riskQuestions',
+    ]);
+
+    const seenWorkTypes = new Set<string>();
+    for (let idx = 0; idx < workTypes.items.length; idx++) {
+      const item = workTypes.items[idx]!;
+      if (seenWorkTypes.has(item.workTypeId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', idx, 'workTypeId'],
+          message: `Duplicate workTypes.items entry for workTypeId "${item.workTypeId}".`,
+        });
+      }
+      seenWorkTypes.add(item.workTypeId);
+      validateTemplateIds(item.autoTaskTemplates, [
+        'items',
+        idx,
+        'autoTaskTemplates',
+      ]);
+      validateRiskQuestions(item.riskQuestions, [
+        'items',
+        idx,
+        'riskQuestions',
+      ]);
+    }
+  });
+
 export const PermissionKeySchema = z.enum(
   ALL_PERMISSION_KEYS as unknown as [PermissionKey, ...PermissionKey[]],
 );
@@ -1979,6 +2282,18 @@ export const TenantConfigurationSchema = z
       .describe(
         'Optional per-tenant PostgreSQL server routing configuration (ADR 0028 Decision 1)',
       ),
+    workTypes: WorkTypesConfigSchema.optional()
+      .default(() => ({
+        defaults: {
+          autoTaskTemplates: [],
+          riskQuestions: [],
+          retention: { ...DEFAULT_WORK_TYPE_RETENTION },
+        },
+        items: [],
+      }))
+      .describe(
+        'Work-type defaults and per-work-type overrides driving automatic opening tasks, risk questionnaire items and closure retention dates (S0-22)',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -2794,6 +3109,158 @@ export function loadAndValidateTenantConfig(
     };
   }
 
+  const baseWorkTypes = baseConfig.workTypes as
+    | Record<string, unknown>
+    | undefined;
+  const overlayWorkTypes = environmentOverlay.workTypes as
+    | Record<string, unknown>
+    | undefined;
+  if (baseWorkTypes || overlayWorkTypes) {
+    const baseDefaults =
+      baseWorkTypes?.defaults &&
+      typeof baseWorkTypes.defaults === 'object' &&
+      !Array.isArray(baseWorkTypes.defaults)
+        ? (baseWorkTypes.defaults as Record<string, unknown>)
+        : undefined;
+    const overlayDefaults =
+      overlayWorkTypes?.defaults &&
+      typeof overlayWorkTypes.defaults === 'object' &&
+      !Array.isArray(overlayWorkTypes.defaults)
+        ? (overlayWorkTypes.defaults as Record<string, unknown>)
+        : undefined;
+    const baseRetention =
+      baseDefaults?.retention &&
+      typeof baseDefaults.retention === 'object' &&
+      !Array.isArray(baseDefaults.retention)
+        ? (baseDefaults.retention as Record<string, unknown>)
+        : undefined;
+    const overlayRetention =
+      overlayDefaults?.retention &&
+      typeof overlayDefaults.retention === 'object' &&
+      !Array.isArray(overlayDefaults.retention)
+        ? (overlayDefaults.retention as Record<string, unknown>)
+        : undefined;
+
+    const mergedDefaults =
+      overlayWorkTypes?.defaults !== undefined && !overlayDefaults
+        ? overlayWorkTypes.defaults
+        : {
+            ...(baseDefaults ?? {}),
+            ...(overlayDefaults ?? {}),
+            ...(baseRetention || overlayRetention
+              ? {
+                  retention:
+                    overlayDefaults?.retention !== undefined && !overlayRetention
+                      ? overlayDefaults.retention
+                      : {
+                          ...(baseRetention ?? {}),
+                          ...(overlayRetention ?? {}),
+                        },
+                }
+              : {}),
+          };
+
+    let mergedItems: unknown = [];
+    if (
+      overlayWorkTypes &&
+      'items' in overlayWorkTypes &&
+      !Array.isArray(overlayWorkTypes.items)
+    ) {
+      mergedItems = overlayWorkTypes.items;
+    } else if (
+      baseWorkTypes &&
+      'items' in baseWorkTypes &&
+      !Array.isArray(baseWorkTypes.items)
+    ) {
+      mergedItems = baseWorkTypes.items;
+    } else {
+      const baseItems = Array.isArray(baseWorkTypes?.items)
+        ? baseWorkTypes.items
+        : [];
+      const overlayItems = Array.isArray(overlayWorkTypes?.items)
+        ? overlayWorkTypes.items
+        : [];
+      const combinedItems: unknown[] = [];
+      const indexByWorkTypeId = new Map<string, number>();
+      for (const rawItem of baseItems) {
+        if (
+          rawItem &&
+          typeof rawItem === 'object' &&
+          !Array.isArray(rawItem) &&
+          typeof (rawItem as Record<string, unknown>).workTypeId === 'string' &&
+          ((rawItem as Record<string, unknown>).workTypeId as string).trim().length >
+            0
+        ) {
+          const wtId = (rawItem as Record<string, unknown>).workTypeId as string;
+          indexByWorkTypeId.set(wtId, combinedItems.length);
+        }
+        combinedItems.push(rawItem);
+      }
+      for (const rawItem of overlayItems) {
+        if (
+          rawItem &&
+          typeof rawItem === 'object' &&
+          !Array.isArray(rawItem) &&
+          typeof (rawItem as Record<string, unknown>).workTypeId === 'string' &&
+          ((rawItem as Record<string, unknown>).workTypeId as string).trim().length >
+            0
+        ) {
+          const itemObj = rawItem as Record<string, unknown>;
+          const wtId = itemObj.workTypeId as string;
+          const existingIdx = indexByWorkTypeId.get(wtId);
+          if (existingIdx !== undefined) {
+            const existingObj = combinedItems[existingIdx] as Record<
+              string,
+              unknown
+            >;
+            const baseRet =
+              existingObj.retention &&
+              typeof existingObj.retention === 'object' &&
+              !Array.isArray(existingObj.retention)
+                ? (existingObj.retention as Record<string, unknown>)
+                : undefined;
+            const overRet =
+              itemObj.retention &&
+              typeof itemObj.retention === 'object' &&
+              !Array.isArray(itemObj.retention)
+                ? (itemObj.retention as Record<string, unknown>)
+                : undefined;
+            combinedItems[existingIdx] = {
+              ...existingObj,
+              ...itemObj,
+              ...(baseRet || overRet
+                ? {
+                    retention:
+                      itemObj.retention !== undefined && !overRet
+                        ? itemObj.retention
+                        : { ...(baseRet ?? {}), ...(overRet ?? {}) },
+                  }
+                : {}),
+            };
+          } else {
+            indexByWorkTypeId.set(wtId, combinedItems.length);
+            combinedItems.push(rawItem);
+          }
+        } else {
+          combinedItems.push(rawItem);
+        }
+      }
+      mergedItems = combinedItems;
+    }
+
+    merged.workTypes = {
+      ...(baseWorkTypes ?? {}),
+      ...(overlayWorkTypes ?? {}),
+      ...(baseDefaults || overlayDefaults || overlayWorkTypes?.defaults !== undefined
+        ? { defaults: mergedDefaults }
+        : {}),
+      ...(baseWorkTypes?.items !== undefined ||
+      overlayWorkTypes?.items !== undefined
+        ? { items: mergedItems }
+        : {}),
+    };
+  }
+
   return TenantConfigurationSchema.parse(merged);
 }
 
@@ -2802,8 +3269,13 @@ export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;
 export const FirmConfigSubSchema = TenantConfigurationSchema.shape.firm;
+export const WorkTypesConfigSubSchema = WorkTypesConfigSchema;
 export const DocumentStoreConfigSubSchema =
   TenantConfigurationSchema.shape.documentStores.unwrap().element;
+
+export function validateWorkTypesConfig(raw: unknown) {
+  return WorkTypesConfigSchema.parse(raw);
+}
 
 /**
  * Validates a standalone `DocumentStoreConfig` entry against `DocumentStoreConfigSubSchema`

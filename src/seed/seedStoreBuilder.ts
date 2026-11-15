@@ -16,8 +16,10 @@ import {
   migrateMatterPartiesToTwoFieldModel,
 } from '@/domain/matterParties';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
+import { resolveEffectiveWorkTypesConfig } from '@/domain/workTypeConfig';
 import { computeAutomaticPmsLinks } from '@/domain/pms';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import type { WorkTypesConfiguration } from '@platform/core';
 import type { KeyDate } from '@/domain/keyDates.types';
 import type {
   AuditEntry,
@@ -55,6 +57,8 @@ import {
   DEFAULT_ENQUIRY_SETTINGS,
   DEFAULT_TASK_SETTINGS,
   DEFAULT_USER_ID,
+  DEMO_ORG_LEGAL_ENTITY_IDS,
+  DEMO_ORG_OFFICES,
   FIRM,
 } from '@/seed/demo';
 
@@ -114,6 +118,8 @@ export interface FirmStore {
   keyDateReminderStates?: import('@/domain/keyDates.types').KeyDateReminderState[];
   keyDateCalendarSyncs?: import('@/domain/keyDates.types').KeyDateCalendarSync[];
   keyDatesConfigOverride?: import('@/domain/keyDates.types').KeyDatesConfig;
+  workTypesConfig?: WorkTypesConfiguration;
+  workTypeConfigsOverride?: WorkTypesConfiguration;
 }
 
 function resolveActiveFirmId(): string {
@@ -239,6 +245,8 @@ export function createSeedStore(
   const tenantCfg = getActiveTenantConfiguration();
   const orgStructure = buildDefaultOrgStructure({
     legalName: tenantCfg.displayName,
+    legalEntityIds: DEMO_ORG_LEGAL_ENTITY_IDS,
+    offices: DEMO_ORG_OFFICES,
   });
   const rawValues = [...seedLists.values, ...demo.customValues];
   const empMigration = migrateEmployeesToEmploymentRecords(
@@ -303,6 +311,7 @@ export function createSeedStore(
     keyDateNotApplicable: [],
     keyDateReminderStates: [],
     keyDateCalendarSyncs: [],
+    workTypesConfig: resolveEffectiveWorkTypesConfig(tenantCfg, null),
   };
   syncStoreFirmIdAndHomeRoles(store);
   return store;
@@ -595,6 +604,7 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
     keyDateNotApplicable: [],
     keyDateReminderStates: [],
     keyDateCalendarSyncs: [],
+    workTypesConfig: resolveEffectiveWorkTypesConfig(tenantCfg, null),
   };
 }
 

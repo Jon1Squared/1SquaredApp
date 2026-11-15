@@ -6,7 +6,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How non-live demo data reset and clean-deployment clear operations are protected by admin-only MFA permissions and audited, and how scheduled and manual unconverted enquiry retention anonymisation is enforced.',
-  updated: '2026-11-13',
+  updated: '2026-11-15',
   body: `
 1Squared separates destructive environment data administration from routine firm configuration and enforces strict retention eligibility rules before personal data on closed enquiries can be anonymised.
 
@@ -45,5 +45,12 @@ All administrative configuration mutations in the \`/admin\` console require mul
 - **Written with the change it describes**: An audit entry is saved in the same transaction as the change it records (for example key-date and Document Generation changes). If either fails, neither is saved.
 - **Scoped views**: The **Firm audit log** section in **Admin** requires \`admin:access\` and shows up to 250 visible entries per page in reverse sequence order, with a **Next** cursor link (\`?auditBeforeSeq=…\`) to page through older entries. Entries about restricted staff matters and sensitive or payroll HR records are filtered out before filling each page for viewers without access.
 - **Demo reset**: Loading the demo dataset reloads the audit log from the demo data, so audit reference numbers (\`AU-…\`) start again from the demo sequence.
+
+## Matter closure retention and destruction due dates
+
+- **Work-type retention rules**: Each tenant configures default and per-work-type file retention periods (in whole years from \`1\` to \`100\`, with a \`6\`-year firm fallback) under **Admin → Work types** (stored in \`public.tenant_module_configs\` as \`work_type_configs\`, requiring \`admin:access\` and verified MFA).
+- **Closure calculation**: When a matter moves to **Closed** via the Close panel on the Matter profile (\`updateMatterLifecycleStatusAction\`) or when saving a closed matter, the server verifies optimistic concurrency (\`row_version\`) and the Key Dates closure gate (\`blockClosureWithOpenDates\`), resolves the retention period (\`workTypeId\` → \`practiceAreaId\` → firm \`defaults\`), adds whole UTC calendar years to the closure date (clamping \`29 February\` closures to \`28 February\` in non-leap target years), saves \`closed_on\` and \`destruction_date\` atomically, and writes a same-transaction audit entry.
+- **Reopening a closed matter**: Reopening a matter through the lifecycle control restores active status, clears \`closedAt\` and \`destructionDueAt\` (\`destruction_date = NULL\`), and records an audit entry in the same PostgreSQL transaction.
+- **No automated matter purge**: Setting \`destruction_date\` records the scheduled review date only; no background deletion or purge job removes matters automatically.
 `,
 };

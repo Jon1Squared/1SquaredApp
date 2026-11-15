@@ -681,7 +681,8 @@ export async function importFirmStoreModulesToPostgres(
         | 'matter_costs'
         | 'enquiry_settings'
         | 'task_settings'
-        | 'counters';
+        | 'counters'
+        | 'work_type_configs';
       value: unknown;
     }> = [];
     if (store.orgStructure !== undefined) {
@@ -733,6 +734,12 @@ export async function importFirmStoreModulesToPostgres(
       moduleConfigEntries.push({
         key: 'counters',
         value: store.counters,
+      });
+    }
+    if (store.workTypeConfigsOverride !== undefined) {
+      moduleConfigEntries.push({
+        key: 'work_type_configs',
+        value: store.workTypeConfigsOverride,
       });
     }
 

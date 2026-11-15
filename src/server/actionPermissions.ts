@@ -120,6 +120,11 @@ export const ACTION_PERMISSIONS = {
     key: 'matter:edit',
     enforcedBy: 'service',
   },
+  updateMatterLifecycleStatusAction: {
+    kind: 'permission',
+    key: 'matter:edit',
+    enforcedBy: 'service',
+  },
 
   // Tasks — claiming a task checks canUserTakeTask / task:claim_any (1)
   takeTaskAction: {
@@ -443,6 +448,11 @@ export const ACTION_PERMISSIONS = {
     enforcedBy: 'action',
   },
   updateWorkTypeProfilesAction: {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'action',
+  },
+  saveWorkTypesConfigAction: {
     kind: 'permission',
     key: 'admin:access',
     enforcedBy: 'action',
