@@ -176,14 +176,51 @@ $REDIRECT_URI = "https://$WEB_FQDN/api/auth/callback/microsoft-entra-id"
 
 **Expected output:** Prints `ca-web-platform-demo`, its public HTTPS `<fqdn>`, and the job names `caj-provision-demo`, `caj-migrate-demo`, and `caj-seed-demo-demo`.
 
-### Step 6: Configure the Entra ID Redirect URI and update `ENTRA_REDIRECT_URI` on the Web App
+### Step 6: Configure the Entra ID Redirect URI, Optional `amr` Claim, and `ENTRA_REDIRECT_URI` on the Web App
 
-Add `$REDIRECT_URI` (`https://<fqdn>/api/auth/callback/microsoft-entra-id`) to the **1Squared Demo** (`0a1a7a83-367f-426b-aaa3-70c288541d1d`) Web redirect URIs and update the web Container App's `ENTRA_REDIRECT_URI` environment variable:
+Add `$REDIRECT_URI` (`https://<fqdn>/api/auth/callback/microsoft-entra-id`) and the `amr` (*Authentication Methods References*) optional claim to the **1Squared Demo** (`0a1a7a83-367f-426b-aaa3-70c288541d1d`) App Registration, assign Entra's built-in `Billing Administrator` directory role (`b0f54661-2d74-4c50-afa3-1ec803f12efe`) to the two demo System Administrator personas (`P-000004` and `P-000051`) so Entra Security Defaults always requires MFA on their logins, and update the web Container App's `ENTRA_REDIRECT_URI` environment variable:
 
 ```powershell
+$ClaimsFile = Join-Path $env:TEMP 'entra-optional-claims.json'
+@'
+{
+  "idToken": [
+    { "name": "amr", "essential": false }
+  ],
+  "accessToken": [
+    { "name": "amr", "essential": false }
+  ]
+}
+'@ | Set-Content -Path $ClaimsFile -Encoding utf8
+
 az ad app update `
   --id "0a1a7a83-367f-426b-aaa3-70c288541d1d" `
-  --web-redirect-uris "http://localhost:3000/api/auth/callback/microsoft-entra-id" $REDIRECT_URI
+  --web-redirect-uris "http://localhost:3000/api/auth/callback/microsoft-entra-id" $REDIRECT_URI `
+  --optional-claims "@$ClaimsFile"
+Remove-Item $ClaimsFile -Force
+
+$Map = Get-Content -Raw -Path 'data/entra-map.local.json' | ConvertFrom-Json
+$BillingAdminRoleTemplateId = 'b0f54661-2d74-4c50-afa3-1ec803f12efe'
+foreach ($PersonaId in @('P-000004', 'P-000051')) {
+  $PrincipalId = $Map.$PersonaId
+  if (-not $PrincipalId) { continue }
+  $BodyFile = Join-Path $env:TEMP "role-assign-$PersonaId.json"
+  @{
+    '@odata.type'    = '#microsoft.graph.unifiedRoleAssignment'
+    roleDefinitionId = $BillingAdminRoleTemplateId
+    principalId      = $PrincipalId
+    directoryScopeId = '/'
+  } | ConvertTo-Json | Set-Content -Path $BodyFile -Encoding utf8
+  try {
+    az rest --method POST `
+      --url 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments' `
+      --headers 'Content-Type=application/json' `
+      --body "@$BodyFile" `
+      --output none 2>$null
+  } catch {} finally {
+    if (Test-Path $BodyFile) { Remove-Item $BodyFile -Force }
+  }
+}
 
 az containerapp update `
   --name $WEB_APP_NAME `
