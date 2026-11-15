@@ -6372,17 +6372,128 @@ export async function saveMatterRecord(
       )
     : existing?.riskRatingId ?? '';
 
-  // R108 & R131 & R173 & R178 & R179 & R181 & R495-R497 & S1: Lock row, compute server retention/closure, validate matter costs, run extension hooks, stage & flush audit inside one transaction
-  let previousMatterSnapshot: Matter | undefined = existing ?? undefined;
-  const expectedRowVersionForPut = existing
-    ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
-    : undefined;
+  // R108 & R131 & R144 & R173 & R178 & R179 & R181 & R495-R497 & S1:
+  // Run matter costs validation and extension hooks (beforeMatterCostsCalculate, beforeMatterOpen)
+  // BEFORE opening the write transaction so no DB connection or lock is held across async hooks.
+  const catRepo = getCatalogueRepository();
+  const liveDbCostsOverride =
+    await catRepo.getMatterCostsConfig<MatterCostsConfig>(extensionCtx);
+  const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+    tenantCfg,
+    liveDbCostsOverride ?? store.matterCostsConfig,
+    {
+      values: store.values,
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    },
+  );
+  const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+    tenantCfg,
+    effectiveCostsConfig,
+  );
+
   const rawSubmittedMatterCosts = input.fieldValues?.['matterCosts'] as
     | (Partial<MatterCostsSnapshot> & {
         refreshRates?: boolean;
         refreshVatRate?: boolean;
       })
     | undefined;
+  if (
+    rawSubmittedMatterCosts &&
+    typeof rawSubmittedMatterCosts === 'object'
+  ) {
+    const existingMatterCosts = existing?.fieldValues?.['matterCosts'] as
+      | Partial<MatterCostsSnapshot>
+      | undefined;
+    const costsValidation = sanitizeAndValidateSubmittedMatterCosts({
+      submitted: rawSubmittedMatterCosts,
+      existingSnapshot: existingMatterCosts,
+      effectiveCostsConfig,
+      practiceAreaId: matter.practiceAreaId,
+      nowIso: now,
+    });
+    if (!costsValidation.snapshot) {
+      return {
+        matter: null,
+        errors: {
+          matterCosts:
+            costsValidation.error ?? 'Invalid matter costs configuration.',
+        },
+      };
+    }
+    matter.fieldValues['matterCosts'] = costsValidation.snapshot;
+  }
+
+  const host = getPlatformExtensionHost();
+  const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
+    store,
+    effectiveTenantCfg,
+    matter,
+    effectiveCostsConfig,
+  );
+  const storedSignOff = matter.fieldValues['partnerCostSignOff'] as
+    | PartnerCostSignOffRecord
+    | undefined;
+  if (
+    matter.fieldValues['partnerCostSignOffCompleted'] &&
+    (!storedSignOff || storedSignOff.signedOffEstimateGbp !== estimatedFeeGbp)
+  ) {
+    matter.fieldValues['partnerCostSignOffCompleted'] = false;
+    delete matter.fieldValues['partnerCostSignOff'];
+  }
+  const partnerSignOffCompleted = Boolean(
+    matter.fieldValues['partnerCostSignOffCompleted'],
+  );
+  const costsHookInput = {
+    matterId: matter.id,
+    workBasis: resolvedCosts.workBasis,
+    estimatedFeeGbp,
+    disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+    partnerSignOffCompleted,
+  };
+  const calcGovernance = effectiveTenantCfg.featureFlags?.enableMatterCostsGovernance
+    ? await host.executeMatterCostsHook(
+        'beforeMatterCostsCalculate',
+        extensionCtx,
+        effectiveTenantCfg,
+        costsHookInput,
+      )
+    : {
+        allowProceed: true,
+        requiresPartnerSignOff: false,
+        governanceWarnings: [],
+        appliedTransformations: [],
+      };
+  const gateResult =
+    !isDraftSave && !existingHasOpened && !isPmsImport
+      ? await runMatterOpeningGate({
+          store,
+          matter,
+          isNewMatter: !existing,
+          extensionCtx,
+          tenantCfg: effectiveTenantCfg,
+          effectiveCostsConfig,
+          costsHookInput,
+          now,
+        })
+      : null;
+
+  const shouldEnforceOpeningGate =
+    !existingHasOpened &&
+    (willOpen || opts.saveMode === 'submit_referred') &&
+    !isPmsImport;
+  if (shouldEnforceOpeningGate && gateResult && !gateResult.allowProceed) {
+    return {
+      matter: null,
+      errors: gateResult.errors,
+    };
+  }
+
+  let previousMatterSnapshot: Matter | undefined = existing ?? undefined;
+  const expectedRowVersionForPut = existing
+    ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
+    : undefined;
   const stagedAuditMark = getStagedAuditWatermark();
   let auditFlushed = false;
   let txResult: {
@@ -6402,7 +6513,7 @@ export async function saveMatterRecord(
         message?: string;
         errors: Record<string, string>;
       } | null> => {
-      const catRepo = getCatalogueRepository();
+      // Acquire FOR UPDATE row lock first inside TX, verify optimistic version, enforce Key Dates/closure bounds, and compute retention
       let inTxExisting: Matter | null = null;
       if (existing) {
         await tx.query(
@@ -6420,6 +6531,20 @@ export async function saveMatterRecord(
             code: 'NOT_FOUND',
             message: 'NOT_FOUND: Matter not found or restricted.',
             errors: { access: 'Matter not found or restricted.' },
+          };
+        }
+        const inTxRowVersion =
+          (inTxExisting as Matter & { rowVersion?: number }).rowVersion ?? 1;
+        if (
+          expectedRowVersionForPut !== undefined &&
+          expectedRowVersionForPut !== null &&
+          inTxRowVersion !== expectedRowVersionForPut
+        ) {
+          return {
+            matter: null,
+            code: MATTER_CONCURRENCY_CONFLICT_CODE,
+            message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+            errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
           };
         }
         previousMatterSnapshot = inTxExisting;
@@ -6541,116 +6666,6 @@ export async function saveMatterRecord(
       matter.closedAt = inTxRetentionOutcome.closedAt;
       matter.destructionDueAt = inTxRetentionOutcome.destructionDueAt;
       matter.retentionPeriod = inTxRetentionOutcome.retentionPeriod;
-
-      // S0-23: Read live matter costs config inside the transaction and validate submitted costs
-      const liveDbCostsOverride =
-        await catRepo.getMatterCostsConfig<MatterCostsConfig>(extensionCtx);
-      const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-        tenantCfg,
-        liveDbCostsOverride ?? store.matterCostsConfig,
-        {
-          values: inTxDbValues,
-          clientProfileCode: tenantCfg.tenantId,
-          displayName: tenantCfg.displayName,
-          primaryDomain: tenantCfg.branding.primaryDomain,
-        },
-      );
-      const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
-        tenantCfg,
-        effectiveCostsConfig,
-      );
-
-      if (
-        rawSubmittedMatterCosts &&
-        typeof rawSubmittedMatterCosts === 'object'
-      ) {
-        const existingMatterCosts = (inTxExisting?.fieldValues?.['matterCosts'] ??
-          existing?.fieldValues?.['matterCosts']) as
-          | Partial<MatterCostsSnapshot>
-          | undefined;
-        const costsValidation = sanitizeAndValidateSubmittedMatterCosts({
-          submitted: rawSubmittedMatterCosts,
-          existingSnapshot: existingMatterCosts,
-          effectiveCostsConfig,
-          practiceAreaId: matter.practiceAreaId,
-          nowIso: now,
-        });
-        if (!costsValidation.snapshot) {
-          return {
-            matter: null,
-            errors: {
-              matterCosts:
-                costsValidation.error ?? 'Invalid matter costs configuration.',
-            },
-          };
-        }
-        matter.fieldValues['matterCosts'] = costsValidation.snapshot;
-      }
-
-      const host = getPlatformExtensionHost();
-      const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
-        store,
-        effectiveTenantCfg,
-        matter,
-        effectiveCostsConfig,
-      );
-      const storedSignOff = matter.fieldValues['partnerCostSignOff'] as
-        | PartnerCostSignOffRecord
-        | undefined;
-      if (
-        matter.fieldValues['partnerCostSignOffCompleted'] &&
-        (!storedSignOff || storedSignOff.signedOffEstimateGbp !== estimatedFeeGbp)
-      ) {
-        matter.fieldValues['partnerCostSignOffCompleted'] = false;
-        delete matter.fieldValues['partnerCostSignOff'];
-      }
-      const partnerSignOffCompleted = Boolean(
-        matter.fieldValues['partnerCostSignOffCompleted'],
-      );
-      const costsHookInput = {
-        matterId: matter.id,
-        workBasis: resolvedCosts.workBasis,
-        estimatedFeeGbp,
-        disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
-        partnerSignOffCompleted,
-      };
-      const calcGovernance = effectiveTenantCfg.featureFlags?.enableMatterCostsGovernance
-        ? await host.executeMatterCostsHook(
-            'beforeMatterCostsCalculate',
-            extensionCtx,
-            effectiveTenantCfg,
-            costsHookInput,
-          )
-        : {
-            allowProceed: true,
-            requiresPartnerSignOff: false,
-            governanceWarnings: [],
-            appliedTransformations: [],
-          };
-      const gateResult =
-        !isDraftSave && !existingHasOpened && !isPmsImport
-          ? await runMatterOpeningGate({
-              store,
-              matter,
-              isNewMatter: !inTxExisting,
-              extensionCtx,
-              tenantCfg: effectiveTenantCfg,
-              effectiveCostsConfig,
-              costsHookInput,
-              now,
-            })
-          : null;
-
-      const shouldEnforceOpeningGate =
-        !existingHasOpened &&
-        (willOpen || opts.saveMode === 'submit_referred') &&
-        !isPmsImport;
-      if (shouldEnforceOpeningGate && gateResult && !gateResult.allowProceed) {
-        return {
-          matter: null,
-          errors: gateResult.errors,
-        };
-      }
 
       if (!inTxExisting) {
         matter.id = await matterRepo.allocateNextMatterId(extensionCtx);
@@ -7991,87 +8006,88 @@ export async function signOffMatterCostsRecord(
     );
   const taskRepoForSignOff = getTaskWorkflowRepository();
 
+  const liveDbCostsOverride =
+    await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+      extensionCtx,
+    );
+  const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+    tenantCfg,
+    liveDbCostsOverride ?? store.matterCostsConfig,
+    {
+      values: store.values,
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    },
+  );
+  const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+    tenantCfg,
+    effectiveCostsConfig,
+  );
+  const existingSavedCosts = matter.fieldValues?.['matterCosts'] as
+    | Partial<MatterCostsSnapshot>
+    | undefined;
+  const { resolvedCosts, estimatedFeeGbp: signedOffEstimateGbp } =
+    resolveMatterSignOffEstimateGbp(
+      store,
+      effectiveTenantCfg,
+      matter,
+      effectiveCostsConfig,
+    );
+  const frozenSnapshot: MatterCostsSnapshot = {
+    ...resolvedCosts,
+    vatRatePercent:
+      typeof resolvedCosts.vatRatePercent === 'number' &&
+      Number.isFinite(resolvedCosts.vatRatePercent)
+        ? resolvedCosts.vatRatePercent
+        : effectiveCostsConfig.vatRatePercent,
+    capturedAt: existingSavedCosts?.capturedAt ?? resolvedCosts.capturedAt ?? now,
+    updatedAt: existingSavedCosts?.updatedAt ?? now,
+  };
+  const signOffRecord: PartnerCostSignOffRecord = {
+    byId,
+    byName: personDisplayName(actingUser),
+    at: now,
+    note: (note ?? '').trim(),
+    signedOffEstimateGbp,
+  };
+  matter.fieldValues = {
+    ...(matter.fieldValues ?? {}),
+    matterCosts: frozenSnapshot,
+    partnerCostSignOffCompleted: true,
+    partnerCostSignOff: signOffRecord,
+  };
+
+  const host = getPlatformExtensionHost();
+  const hookInput = {
+    matterId: matter.id,
+    workBasis: frozenSnapshot.workBasis,
+    estimatedFeeGbp: signedOffEstimateGbp,
+    disbursementsTotalGbp: frozenSnapshot.disbursementsTotalGbp,
+    partnerSignOffCompleted: true,
+  };
+  const calcGovernance = await host.executeMatterCostsHook(
+    'beforeMatterCostsCalculate',
+    extensionCtx,
+    effectiveTenantCfg,
+    hookInput,
+  );
+  const gateResult = await runMatterOpeningGate({
+    store,
+    matter,
+    isNewMatter: false,
+    extensionCtx,
+    tenantCfg: effectiveTenantCfg,
+    effectiveCostsConfig,
+    costsHookInput: hookInput,
+    now,
+  });
+  matter.fieldValues['matterCostsGovernance'] =
+    gateResult.governance ?? calcGovernance;
+  matter.fieldValues['matterOpeningGate'] = gateResult.record;
+
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(extensionCtx, async () => {
-      const liveDbCostsOverride =
-        await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
-          extensionCtx,
-        );
-      const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-        tenantCfg,
-        liveDbCostsOverride ?? store.matterCostsConfig,
-        {
-          values: store.values,
-          clientProfileCode: tenantCfg.tenantId,
-          displayName: tenantCfg.displayName,
-          primaryDomain: tenantCfg.branding.primaryDomain,
-        },
-      );
-      const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
-        tenantCfg,
-        effectiveCostsConfig,
-      );
-      const existingSavedCosts = matter.fieldValues?.['matterCosts'] as
-        | Partial<MatterCostsSnapshot>
-        | undefined;
-      const { resolvedCosts, estimatedFeeGbp: signedOffEstimateGbp } =
-        resolveMatterSignOffEstimateGbp(
-          store,
-          effectiveTenantCfg,
-          matter,
-          effectiveCostsConfig,
-        );
-      const frozenSnapshot: MatterCostsSnapshot = {
-        ...resolvedCosts,
-        vatRatePercent:
-          typeof resolvedCosts.vatRatePercent === 'number' &&
-          Number.isFinite(resolvedCosts.vatRatePercent)
-            ? resolvedCosts.vatRatePercent
-            : effectiveCostsConfig.vatRatePercent,
-        capturedAt: existingSavedCosts?.capturedAt ?? resolvedCosts.capturedAt ?? now,
-        updatedAt: existingSavedCosts?.updatedAt ?? now,
-      };
-      const signOffRecord: PartnerCostSignOffRecord = {
-        byId,
-        byName: personDisplayName(actingUser),
-        at: now,
-        note: (note ?? '').trim(),
-        signedOffEstimateGbp,
-      };
-      matter.fieldValues = {
-        ...(matter.fieldValues ?? {}),
-        matterCosts: frozenSnapshot,
-        partnerCostSignOffCompleted: true,
-        partnerCostSignOff: signOffRecord,
-      };
-
-      const host = getPlatformExtensionHost();
-      const hookInput = {
-        matterId: matter.id,
-        workBasis: frozenSnapshot.workBasis,
-        estimatedFeeGbp: signedOffEstimateGbp,
-        disbursementsTotalGbp: frozenSnapshot.disbursementsTotalGbp,
-        partnerSignOffCompleted: true,
-      };
-      const calcGovernance = await host.executeMatterCostsHook(
-        'beforeMatterCostsCalculate',
-        extensionCtx,
-        effectiveTenantCfg,
-        hookInput,
-      );
-      const gateResult = await runMatterOpeningGate({
-        store,
-        matter,
-        isNewMatter: false,
-        extensionCtx,
-        tenantCfg: effectiveTenantCfg,
-        effectiveCostsConfig,
-        costsHookInput: hookInput,
-        now,
-      });
-      matter.fieldValues['matterCostsGovernance'] =
-        gateResult.governance ?? calcGovernance;
-      matter.fieldValues['matterOpeningGate'] = gateResult.record;
 
       if (
         matter.matterNumber !== 'DRAFT' &&
