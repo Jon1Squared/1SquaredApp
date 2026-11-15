@@ -17,7 +17,15 @@
 
 import type { PlatformEnvironment } from '../api/index';
 import { loadPgModule } from './pgDriver';
-import { quotePgIdentifier } from './postgresPoolManager';
+import {
+  acquireEntraManagedIdentityPostgresToken,
+  quotePgIdentifier,
+  resolvePostgresMigrateUser,
+  resolvePostgresRuntimeUser,
+} from './postgresPoolManager';
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ProvisionPostgresClusterOptions {
   readonly tenants: ReadonlyArray<{
@@ -44,9 +52,181 @@ function requireBootstrapEnv(name: string): string {
   return value;
 }
 
+export async function provisionEntraPostgresClusterRolesAndDatabases(
+  options: ProvisionPostgresClusterOptions,
+): Promise<{ databasesProvisioned: string[] }> {
+  const pg = await loadPgModule();
+  const host =
+    process.env.PLATFORM_POSTGRES_MIGRATE_HOST?.trim() ||
+    requireBootstrapEnv('PLATFORM_POSTGRES_HOST');
+  const port = Number(process.env.PLATFORM_POSTGRES_MIGRATE_PORT || 5432);
+  const migrateUser = resolvePostgresMigrateUser();
+  const runtimeUser = resolvePostgresRuntimeUser();
+  const runtimePrincipalId =
+    process.env.PLATFORM_POSTGRES_RUNTIME_PRINCIPAL_ID?.trim();
+
+  if (runtimeUser === migrateUser) {
+    const err = new Error(
+      'TENANCY_DB_CONFIG_ERROR: PLATFORM_POSTGRES_RUNTIME_USER and PLATFORM_POSTGRES_MIGRATE_USER must be distinct principals (R402).',
+    ) as Error & { code: string };
+    err.code = 'TENANCY_DB_CONFIG_ERROR';
+    throw err;
+  }
+
+  const migrateClientId =
+    process.env.AZURE_MIGRATE_CLIENT_ID?.trim() ||
+    process.env.PLATFORM_POSTGRES_CLIENT_ID?.trim() ||
+    process.env.AZURE_CLIENT_ID?.trim() ||
+    undefined;
+  const token = await acquireEntraManagedIdentityPostgresToken(migrateClientId);
+  const useTls = process.env.PLATFORM_POSTGRES_SSL !== 'false';
+
+  const migrateIdent = quotePgIdentifier(migrateUser);
+  const runtimeIdent = quotePgIdentifier(runtimeUser);
+
+  const adminClient = new pg.Client({
+    host,
+    port,
+    database: 'postgres',
+    user: migrateUser,
+    password: token,
+    ssl: useTls ? { rejectUnauthorized: true } : false,
+    connectionTimeoutMillis: 15_000,
+  });
+  await adminClient.connect();
+
+  const databasesProvisioned: string[] = [];
+  try {
+    // 1. Ensure Entra principal exists for runtimeIdentity and enforce NOINHERIT (R402)
+    const runExists = await adminClient.query(
+      'SELECT 1 FROM pg_roles WHERE rolname = $1',
+      [runtimeUser],
+    );
+    if (runExists.rowCount === 0) {
+      if (runtimePrincipalId && UUID_PATTERN.test(runtimePrincipalId)) {
+        await adminClient.query(
+          'SELECT * FROM pgaadauth_create_principal_with_oid($1, $2, $3, false, false)',
+          [runtimeUser, runtimePrincipalId, 'service'],
+        );
+      } else {
+        await adminClient.query(
+          'SELECT * FROM pgaadauth_create_principal($1, false, false)',
+          [runtimeUser],
+        );
+      }
+    }
+    try {
+      await adminClient.query(
+        `ALTER ROLE ${runtimeIdent} WITH LOGIN NOINHERIT NOCREATEDB NOCREATEROLE`,
+      );
+    } catch {
+      try {
+        await adminClient.query(`ALTER ROLE ${runtimeIdent} WITH NOINHERIT`);
+      } catch {
+        // On Azure Flexible Server where pgaadauth owns the Entra principal, membership-level
+        // WITH INHERIT FALSE below still enforces non-inheritance for tenant roles.
+      }
+    }
+
+    // 2. Provision per-tenant NOLOGIN roles and isolated databases
+    for (const t of options.tenants) {
+      const slug = t.tenantId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      const dbName = `pg_tenant_${slug}_${t.environment}`;
+      const roleName = `role_tenant_${slug}_${t.environment}`;
+      const dbIdent = quotePgIdentifier(dbName);
+      const roleIdent = quotePgIdentifier(roleName);
+
+      const roleExists = await adminClient.query(
+        'SELECT 1 FROM pg_roles WHERE rolname = $1',
+        [roleName],
+      );
+      if (roleExists.rowCount === 0) {
+        await adminClient.query(
+          `CREATE ROLE ${roleIdent} WITH NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE`,
+        );
+      } else {
+        await adminClient.query(
+          `ALTER ROLE ${roleIdent} WITH NOLOGIN NOINHERIT NOCREATEDB NOCREATEROLE`,
+        );
+      }
+      try {
+        await adminClient.query(
+          `GRANT ${roleIdent} TO ${runtimeIdent} WITH INHERIT FALSE, SET TRUE`,
+        );
+      } catch {
+        await adminClient.query(`GRANT ${roleIdent} TO ${runtimeIdent}`);
+      }
+      await adminClient.query(`GRANT ${roleIdent} TO ${migrateIdent}`);
+
+      const dbExists = await adminClient.query(
+        'SELECT 1 FROM pg_database WHERE datname = $1',
+        [dbName],
+      );
+      if (dbExists.rowCount === 0) {
+        await adminClient.query(
+          `CREATE DATABASE ${dbIdent} OWNER ${migrateIdent}`,
+        );
+      }
+      await adminClient.query(`REVOKE ALL ON DATABASE ${dbIdent} FROM PUBLIC`);
+      await adminClient.query(
+        `GRANT CONNECT ON DATABASE ${dbIdent} TO ${migrateIdent}, ${runtimeIdent}, ${roleIdent}`,
+      );
+      databasesProvisioned.push(dbName);
+    }
+  } finally {
+    await adminClient.end();
+  }
+
+  // 3. Apply per-database public schema lockdown and default privileges (R402)
+  for (const t of options.tenants) {
+    const slug = t.tenantId.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    const dbName = `pg_tenant_${slug}_${t.environment}`;
+    const roleName = `role_tenant_${slug}_${t.environment}`;
+    const roleIdent = quotePgIdentifier(roleName);
+
+    const dbClient = new pg.Client({
+      host,
+      port,
+      database: dbName,
+      user: migrateUser,
+      password: token,
+      ssl: useTls ? { rejectUnauthorized: true } : false,
+      connectionTimeoutMillis: 15_000,
+    });
+    await dbClient.connect();
+    try {
+      await dbClient.query(`REVOKE CREATE, USAGE ON SCHEMA public FROM PUBLIC`);
+      await dbClient.query(`REVOKE ALL ON SCHEMA public FROM ${runtimeIdent}`);
+      await dbClient.query(
+        `GRANT USAGE, CREATE ON SCHEMA public TO ${migrateIdent}`,
+      );
+      await dbClient.query(`GRANT USAGE ON SCHEMA public TO ${roleIdent}`);
+      await dbClient.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${roleIdent}`,
+      );
+      await dbClient.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC, ${runtimeIdent}, ${roleIdent}`,
+      );
+      await dbClient.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrateIdent} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${roleIdent}`,
+      );
+    } finally {
+      await dbClient.end();
+    }
+  }
+
+  return { databasesProvisioned };
+}
+
 export async function provisionPostgresClusterRolesAndDatabases(
   options: ProvisionPostgresClusterOptions,
 ): Promise<{ databasesProvisioned: string[] }> {
+  if (
+    process.env.PLATFORM_POSTGRES_AUTH_MODE?.trim() === 'entra_managed_identity'
+  ) {
+    return provisionEntraPostgresClusterRolesAndDatabases(options);
+  }
+
   const pg = await loadPgModule();
   const host =
     process.env.PLATFORM_POSTGRES_MIGRATE_HOST?.trim() ||

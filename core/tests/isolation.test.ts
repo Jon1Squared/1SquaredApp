@@ -168,12 +168,8 @@ import {
   updateChoiceValueAction,
 } from '../../src/app/actions';
 import { isActionDenied } from '../../src/domain/actionResult';
-import {
-  clearStoreMemoryCache,
-  createSeedStore,
-  getStore,
-  saveStore,
-} from '../../src/server/store';
+import { createSeedStore } from '../../src/seed/seedStoreBuilder';
+import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
 import { auditEntriesForRecord, auditEntriesSince, getKeyDateRepository, markAuditPosition, runAsTestActor, testTenantCtx } from '../../src/server/testSupport/auditTestSupport';
 
@@ -777,7 +773,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     // R108 & R131: saveMatterRecord requires an authenticated request session, awaits beforeMatterOpen, blocks opening when allowProceed === false, and rolls back inline parties when vetoed
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
 
       // (a) Outside a signed-in request scope, saveMatterRecord refuses with UNAUTHENTICATED and runs no extension hooks
@@ -1019,7 +1015,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
     // R108 (5): When an enabled extension declaring beforeMatterOpen fails to load, saveMatterRecord refuses to open the matter
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
       const nowIso = new Date().toISOString();
@@ -1166,7 +1162,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
 
     // R106: Domain helpers (syncHomeRolesWithEmployeeRoles, createDefaultMatterCostsConfig) succeed in browser window mode without reading tenant configuration
-    const storeValues = getStore().values;
+    const storeValues = loadCommittedSeedStore().values;
     const prevWindow = (globalThis as Record<string, unknown>).window;
     const savedPkgDir = process.env.PLATFORM_TENANT_PACKAGE_DIR;
     try {
@@ -1353,7 +1349,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R144: async saveMatterRecord never reissues IDs on veto and serialises concurrent matter saves without losing either write', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const targetMatter = store.matters.find((m) => m.id === 'M-000008')!;
       const nowIso = new Date().toISOString();
@@ -1598,7 +1594,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R147: referred conflict reviews route via conflictReview config, stay unassigned when unconfigured, and never assign or leak staff matter titles outside restrictedAccessUserIds', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
       const nowIso = new Date().toISOString();
@@ -1734,7 +1730,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R152: getAppSnapshot and server endpoints filter out staff and ethical-wall matters, linked tasks, links, notes, audit, and PMS rows for non-participants and block tampered matter IDs', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const outsiderFeeEarner = store.people.find(
         (p) =>
@@ -1985,7 +1981,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R144: hiring a matter client via savePersonRecord while beforeMatterOpen is awaiting serialises concurrent matter saves without losing either write', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const externalClient = store.people.find(
         (p) => !p.isEmployee && !p.employment,
@@ -2131,7 +2127,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('rejects a save based on a stale row_version (S0-16)', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
       const nowIso = new Date().toISOString();
@@ -2220,7 +2216,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R153: updateMatterConflictRecord enforces risk:view, never opens a draft matter, never satisfies partnerSignOffCompleted via Cleared, and preserves stored comments and server timestamps', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find(
         (p) =>
@@ -2488,7 +2484,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R159: lifting staff_matter restriction persists across subsequent saveMatterRecord calls and re-applies when a new working employee participant is added', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const empClient1 = store.people.find(
         (p) => p.isEmployee && p.id !== carys.id,
@@ -2584,7 +2580,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R108: bad manifest JSON or unregistered enabled extensions record declaredHooks: null and block submit_cleared', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const baseMatter = store.matters.find((m) => m.id === 'M-000008')!;
       const nowIso = new Date().toISOString();
@@ -2685,15 +2681,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('R155: getStore preserves multi-role assignments in order for risk and compliance officers', async () => {
+  it('R155: PostgreSQL party repository preserves multi-role assignments in order for risk and compliance officers', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const multiRolePerson = store.people.find((p) => p.id === 'P-000009')!;
       multiRolePerson.roles = ['risk_compliance', 'partner', 'fee_earner'];
-      const reloadedStore = getStore();
-      const reloadedPerson = reloadedStore.people.find(
-        (p) => p.id === 'P-000009',
-      )!;
+      await getPartyRepository().putPerson(
+        testTenantCtx('P-000001'),
+        multiRolePerson,
+      );
+      const reloadedPerson = (await getPartyRepository().getPersonById<typeof multiRolePerson>(
+        testTenantCtx('P-000001'),
+        'P-000009',
+      ))!;
       expect(reloadedPerson.roles).toEqual([
         'risk_compliance',
         'partner',
@@ -2849,7 +2849,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R162: conflict search returns a redacted match on restricted matters and saveMatterRecord refuses submit_cleared', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find(
         (p) =>
@@ -3159,7 +3159,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: null,
         },
       });
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const riskTeam = store.teams.find((t) => t.id === 'TM-000009');
       if (riskTeam) {
         riskTeam.name = 'RiskComplianceDisplayName';
@@ -3257,7 +3257,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     await resetAllDemoData('P-000001', testDataResetContext());
     const prevDemoMode = process.env.ONESQUARED_DEMO_MODE;
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const targetMatter = store.matters.find((m) => m.id === 'M-000013')!;
       targetMatter.leadFeeEarnerId = null;
       targetMatter.responsiblePartnerId = null;
@@ -3322,11 +3322,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(ccTask?.assignedPersonId).toBeNull();
       }
 
-      // Verify getStore() does not overwrite store.firm with demo FIRM when demo mode is disabled
-      store.firm.name = 'Custom Non-Demo Firm Name LLP';
+      // Verify firm profile in PostgreSQL is not overwritten with demo FIRM when demo mode is disabled
+      await getCatalogueRepository().putFirmProfile(testTenantCtx('P-000001'), {
+        firmId: store.firmId,
+        isCleanDeployment: false,
+        firm: {
+          ...store.firm,
+          name: 'Custom Non-Demo Firm Name LLP',
+        },
+      });
       process.env.ONESQUARED_DEMO_MODE = 'false';
-      const reloadedStore = getStore();
-      expect(reloadedStore.firm.name).toBe('Custom Non-Demo Firm Name LLP');
+      const reloadedProfile = await getCatalogueRepository().getFirmProfile(
+        testTenantCtx('P-000001'),
+      );
+      expect(reloadedProfile?.firm.name).toBe('Custom Non-Demo Firm Name LLP');
     } finally {
       if (prevDemoMode === undefined) {
         delete process.env.ONESQUARED_DEMO_MODE;
@@ -3357,7 +3366,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(fromShortCode.legalEntities[0]?.code).toBe('ACMLLP');
     expect(fromShortCode.legalEntities[1]?.code).toBe('ACMSRV');
 
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
     expect(snap.suggestedMatterGovernanceAssignees).toBeDefined();
     expect(snap.suggestedMatterGovernanceAssignees.riskReviewerId).toBeTruthy();
@@ -3386,7 +3395,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     await resetAllDemoData('P-000001', testDataResetContext());
     const r169AuditMark = await markAuditPosition();
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find(
         (p) =>
@@ -3648,7 +3657,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R170: searchMatterConflicts redacts matches on restricted enquiries (converted to a staff matter or another user personal Draft)', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find(
         (p) =>
@@ -3765,7 +3774,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R172: runMatterConflictSearchRecord logs count-only restricted conflict match audit entries and structured logs with no party or record names', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find(
         (p) =>
@@ -3872,7 +3881,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R173: saveMatterRecord runs beforeMatterOpen on every non-draft save until the matter has opened, and updateMatterConflictRecord keeps referred matters Prospective until partner cost sign-off', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const riskOfficer = store.people.find((p) =>
         (p.roles ?? []).includes('risk_compliance'),
@@ -4071,7 +4080,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     await resetAllDemoData('P-000001', testDataResetContext());
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const nonRiskEmployee = store.people.find(
         (p) =>
@@ -4177,7 +4186,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     await resetAllDemoData('P-000001', testDataResetContext());
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const customReviewer = store.people.find(
         (p) =>
@@ -4384,7 +4393,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R176: saveMatterRecord builds ConflictCheckRecord on the server, preserving stored comments and runs and rejecting forged risk approvals', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const riskOfficer = store.people.find((p) =>
         (p.roles ?? []).includes('risk_compliance'),
@@ -4559,7 +4568,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(reconciled[0]?.whereFound).toBe('Restricted enquiry: refer to Risk');
     expect(reconciled[0]?.matchedOn).toBe('Restricted enquiry: refer to Risk');
 
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const baseMatter = structuredClone(store.matters[0]!);
     delete baseMatter.conflictCheckRecord;
     baseMatter.conflictCheckDate = null;
@@ -4578,7 +4587,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     await resetAllDemoData('P-000001', testDataResetContext());
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const riskOfficer = store.people.find((p) =>
         (p.roles ?? []).includes('risk_compliance'),
@@ -4824,7 +4833,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R179: saveMatterRecord, updateMatterConflictRecord, and signOffMatterCostsRecord enforce evaluateMatterKeyDateOpeningGate when requiredKeyDateTypeIds are configured', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const riskOfficer = store.people.find((p) =>
         (p.roles ?? []).includes('risk_compliance'),
@@ -5019,7 +5028,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R181: saveMatterRecord enforces conflict-decision and opening gate on status transition out of Prospective, allows stage edits while Prospective, and saveMatterAction filters opts', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find(
         (p) =>
@@ -5289,7 +5298,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R183: existing open matters without an opening snapshot can be edited and closed without triggering the opening gate, and backfill matterOpeningSnapshot with saveMode backfilled', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const activeStatusId = store.values.find(
         (v) => v.listKey === 'matter_status' && v.label === 'Active',
@@ -5438,7 +5447,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('R184: legacy escalated conflict status maps to Referred with no fabricated approver, and once referred only Risk & Compliance can clear or approve a matter', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
       const riskOfficer = store.people.find((p) =>
@@ -5529,7 +5538,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         /cannot open until its conflict check is cleared or approved by Risk/i,
       );
       expect(
-        getStore().matters.find((m) => m.id === fixtureM6.id)?.matterStatusId,
+        loadCommittedSeedStore().matters.find((m) => m.id === fixtureM6.id)?.matterStatusId,
       ).toBe(prospectiveStatusId);
 
       // 3. Refer a new matter as feeEarner, then attempt submit_cleared with status: 'Cleared' as feeEarner -> refused with errors.conflict and stays Referred & Prospective
@@ -5684,7 +5693,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ).toBe(c.status);
       }
 
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const partner = store.people.find((p) => p.id === 'P-000001')!;
       const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
       const riskOfficer = store.people.find(
@@ -5972,7 +5981,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R186: an open matter cannot be moved back to Prospective or saved as a draft, and submit_referred + Risk approval preserve open status and matterOpeningSnapshot', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     const riskOfficer = store.people.find(
       (p) => p.isEmployee && (p.roles ?? []).includes('risk_compliance'),
@@ -6035,7 +6044,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       // 1. Existing open matters M-000003 and M-000001 straight from the fixture
       for (const openMatterId of ['M-000003', 'M-000001'] as const) {
         const fixtureOpen = structuredClone(
-          getStore().matters.find((m) => m.id === openMatterId)!,
+          loadCommittedSeedStore().matters.find((m) => m.id === openMatterId)!,
         );
         expect(fixtureOpen).toBeDefined();
         expect(fixtureOpen.matterStatusId).toBe(activeStatusId);
@@ -6058,7 +6067,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(draftSaveRes.errors?.form).toMatch(
           /opened, so it can no longer be saved as a draft/i,
         );
-        const afterDraftAttempt = getStore().matters.find(
+        const afterDraftAttempt = loadCommittedSeedStore().matters.find(
           (m) => m.id === openMatterId,
         )!;
         expect(afterDraftAttempt.matterStatusId).toBe(activeStatusId);
@@ -6083,7 +6092,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(prospectiveSaveRes.errors?.matterStatusId).toMatch(
           /open matter cannot be moved back to Prospective/i,
         );
-        const afterProspectiveAttempt = getStore().matters.find(
+        const afterProspectiveAttempt = loadCommittedSeedStore().matters.find(
           (m) => m.id === openMatterId,
         )!;
         expect(afterProspectiveAttempt.matterStatusId).toBe(activeStatusId);
@@ -6145,7 +6154,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       }
 
       // 2. Newly created and opened matter also refuses draft and Prospective saves and preserves status/snapshot on referral + Risk approval
-      const templateOpen = getStore().matters.find(
+      const templateOpen = loadCommittedSeedStore().matters.find(
         (m) => m.id === 'M-000001',
       )!;
       const newOpenedRes = await runWithActiveActorSession(
@@ -6247,7 +6256,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R187: a fee earner cannot set an open matter conflict check back to In progress or Not started via saveMatterRecord or updateMatterConflictRecord, while submit_referred still records Referred and keeps the matter Active', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     expect(feeEarner).toBeDefined();
 
@@ -6284,7 +6293,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     try {
       for (const openMatterId of ['M-000005', 'M-000003'] as const) {
         const fixtureOpen = structuredClone(
-          getStore().matters.find((m) => m.id === openMatterId)!,
+          loadCommittedSeedStore().matters.find((m) => m.id === openMatterId)!,
         );
         expect(fixtureOpen).toBeDefined();
         expect(fixtureOpen.matterStatusId).toBe(activeStatusId);
@@ -6429,7 +6438,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('R189: buildServerConflictCheckRecord derives outcomeLabel from the final status for fee earners without risk:view', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
     const templateMatter = store.matters.find((m) => m.id === 'M-000001')!;
     expect(feeEarner).toBeDefined();
@@ -6729,7 +6738,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
   it('S0-03 (B12, B11, B3): empty-allowlist ethical-wall matter is hidden from snapshots, search, and reports for non-participants (partner, fee earner, admin without matter:restricted:access), and blocks tampered matter/sign-off/person IDs and cross-tenant claims', async () => {
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const namedPartner = store.people.find((p) => p.id === 'P-000005')!;
       const unnamedPartner = store.people.find((p) => p.id === 'P-000001')!;
       const unnamedFeeEarner = store.people.find((p) => p.id === 'P-000002')!;
@@ -6923,7 +6932,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('S0-04: an admin of tenant B cannot change tenant A lists, custom fields, teams, or PMS links via forged tenant claims or tampered record IDs', async () => {
     try {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const firstValue = structuredClone(store.values[0]!);
       const firstTeam = structuredClone(store.teams[0]!);
       const nowIso = new Date().toISOString();
@@ -7053,7 +7062,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('S0-05: rejects forged tenant claims and tampered record IDs across all 20 S0-05 record actions (with positive Tenant A controls and data-layer cluster checks)', async () => {
     try {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
 
@@ -7888,7 +7897,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('S0-07: rejects forged tenant claims and tampered IDs on conflict search and conversion actions (with positive Tenant A controls and data-layer cluster checks)', async () => {
     try {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const ctxA = resolveTenantFromVerifiedToken({
         verifiedToken: tenantAToken,
         hostingMode: 'multi_tenant',
@@ -8531,7 +8540,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(tamperedRows.code).toBe('FORBIDDEN');
         expect(tamperedRows.message).toBe('Matter not found or access denied.');
       }
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const restrictedStaffMatter = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
         testTenantCtx('P-000004'),
         'M-000014',
@@ -8803,10 +8812,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
   it('S0-30 (B13): rejects forged tenant claims on savePersonAction and Entra JWT sign-in verification, and rejects tampered person IDs on savePersonAction, savePersonRecord, and updatePersonPermissionOverrides, with positive Tenant A controls', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const targetEmployeeA = store.people.find((p) => p.id === 'P-000002')!;
       delete targetEmployeeA.entraObjectId;
-      saveStore(store);
       await getPartyRepository().putPerson(testTenantCtx('P-000004'), targetEmployeeA);
       const originalEmailsJson = JSON.stringify(targetEmployeeA.emails);
       const tamperedPersonId = 'P-TENANT-B-EMP-99';
@@ -8920,8 +8928,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Microsoft Entra ID token tenant (tid) is missing or does not match ENTRA_TENANT_ID.',
       );
 
-      // Clear in-memory store cache and reload from disk to confirm nothing was written under forged tenant claims
-      clearStoreMemoryCache();
+      // Reload from PostgreSQL to confirm nothing was written under forged tenant claims
       const reloadedEmployeeA = (await getPartyRepository().getPersonById(
         testTenantCtx('P-000004'),
         targetEmployeeA.id,
@@ -9047,7 +9054,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         { id: targetEmployeeA.id },
       );
       expect(isActionDenied(validEmailUpdate)).toBe(false);
-      clearStoreMemoryCache();
       expect(
         (
           await getPartyRepository().getPersonById(
@@ -9083,7 +9089,6 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(validSignInBind.person.entraObjectId).toBe(
         '33333333-0000-4000-8000-000000000002',
       );
-      clearStoreMemoryCache();
       expect(
         (
           await getPartyRepository().getPersonById(

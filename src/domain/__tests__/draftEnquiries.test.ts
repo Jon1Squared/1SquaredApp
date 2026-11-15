@@ -27,7 +27,7 @@ import {
   saveCustomFieldDefinition,
   saveEnquiryRecord,
 } from '@/server/services';
-import { createSeedStore, getStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   auditEntriesForRecord,
   markAuditPosition,
@@ -40,7 +40,6 @@ import type { Person } from '../types';
 describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   beforeEach(() => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
-    global.__oneSquaredStore = createSeedStore(new Date('2026-10-18T09:00:00Z'));
     setTestActorSession('P-000018');
   });
 
@@ -49,12 +48,8 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     vi.restoreAllMocks();
   });
 
-  afterAll(() => {
-    global.__oneSquaredStore = undefined;
-  });
-
   it('1. Save as draft sets status Draft and creates no task, no queue routing and no SLA target', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const ctx = testTenantCtx('P-000018');
     const initialTaskCount = (
       await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)
@@ -115,7 +110,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     try {
       // Create draft at 10:00 on Sunday 18 Oct 2026
       vi.setSystemTime(new Date('2026-10-18T10:00:00.000Z'));
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const channelId =
         store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
       const practiceArea =
@@ -197,7 +192,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('3. Save and route on an incomplete draft does not save, and returns the list of missing fields', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
 
@@ -283,7 +278,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('4. Reopening a draft loads every field correctly, including How they heard about us and Privacy notice given', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Email')?.id ?? '';
     const practiceAreaId =
@@ -373,7 +368,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('5. Editing a field in a draft re-runs the conflict check and shows "Unsaved changes"', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
 
@@ -482,7 +477,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('6. Take / Assign / Convert to matter are not available on a Draft', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
 
@@ -518,7 +513,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('7. Drafts do not appear in team queues but do appear in "My drafts"', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
@@ -555,7 +550,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('8. The conflict alert shows each record ID once', () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const oppStatusId =
       store.values.find(
         (v) => v.listKey === 'relationship_status' && v.label === 'Opposite Party',
@@ -605,7 +600,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('9. Enquiry-stage people appear in the people list, convert to a Person on matter conversion, and are removed on Declined / Referred out / No response', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
@@ -778,7 +773,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('9. People details saved in enquiries are included in person lookups, duplicate checks, and quick/full conflict checks', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =
@@ -867,7 +862,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   });
 
   it('11. Client-configured custom fields on the Enquiry screen support screen locations and mandatory validation', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const channelId =
       store.values.find((v) => v.listKey === 'enquiry_channel' && v.label === 'Phone')?.id ?? '';
     const practiceAreaId =

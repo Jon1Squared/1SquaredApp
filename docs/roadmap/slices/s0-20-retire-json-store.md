@@ -6,7 +6,7 @@
 | Decision | [ADR 0028: Tenant Databases and Repositories](../../decisions/0028-tenant-database-and-repositories.md) (D3, supersedes [ADR 0001](../../decisions/0001-shared-repo-and-transitional-store.md)); [ADR 0026: Separate Demo Tenant](../../decisions/0026-demo-tenant.md) (D5, seed-only builders) |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0B (WP4 Checkpoint 4c + Checkpoint B) |
 | Branch | `s0-20-retire-json-store`, from `s0-19b-anonymisation-job`, targeting `develop` |
-| Change class | Core cleanup, contract migration (`0014`), dependency removal, ADR 0001 supersession, and Checkpoint B verification (`core/src/tenancy/`, `src/server/`, `src/seed/`, `core/infra/modules/platform.bicep`, `package.json`, `eslint.config.mjs`, `docs/decisions/0001-shared-repo-and-transitional-store.md`, `docs/roadmap/feature-list.md`). |
+| Change class | Core cleanup, contract migration (`0015`), dependency removal, ADR 0001 supersession, and Checkpoint B verification (`core/src/tenancy/`, `src/server/`, `src/seed/`, `core/infra/modules/platform.bicep`, `package.json`, `eslint.config.mjs`, `docs/decisions/0001-shared-repo-and-transitional-store.md`, `docs/roadmap/feature-list.md`). |
 | Size | S |
 | Depends on | S0-15, S0-16, S0-17a, S0-17b, S0-17c, S0-18, S0-19, S0-19b (every runtime module and scheduled job running on per-tenant PostgreSQL). |
 | Blocking manual tasks | Owner decision at Checkpoint 4c on `CLAUDE.md` / `AGENTS.md` wording (`R415`). Azure subscription access (`stage-0-plan.md` §8) remains a manual blocker only for cloud deployment/drills, noted honestly in `P12` / `P6`. |
@@ -25,11 +25,11 @@ Checked against `develop` (`52390b9`):
 
 ## Files and changes
 
-1. **Contract migration `0014_transitional_bridges_contract` (`core/src/tenancy/migrations/index.ts`, `R408`, `R417`, Rule 8):**
-   - Now that `S0-16` (`matters`) and `S0-17b` (`employee_employment_records`) already stopped all runtime reads and writes of `matter_restriction_metadata` and `people.employment_json` (`R417`), the running `S0-19b` revision never references either structure while `0014` executes (`CORE_REQUIRED_SCHEMA_VERSION = '0014'`):
+1. **Contract migration `0015_transitional_bridges_contract` (`core/src/tenancy/migrations/index.ts`, `R408`, `R417`, Rule 8):**
+   - Now that `S0-16` (`matters`) and `S0-17b` (`employee_employment_records`) already stopped all runtime reads and writes of `matter_restriction_metadata` and `people.employment_json` (`R417`), and `0014_enquiry_retention_anonymised_at` (`S0-19b`) is applied (`requiresAppliedVersion: '0014'`), the running `S0-19b` revision never references either structure while `0015` executes (`CORE_REQUIRED_SCHEMA_VERSION = '0015'`):
      - **`upSql`:** drops `ALTER TABLE people DROP COLUMN IF EXISTS employment_json;` and `DROP TABLE IF EXISTS matter_restriction_metadata;` (with zero fallback-read code left to remove in `S0-20`, `R417`).
      - **`downSql` (fully reversible):**
-       1. Recreates `matter_restriction_metadata` (`tenant_id`, `matter_id`, `is_restricted`, `restricted_access_user_ids`, `updated_at`, `PRIMARY KEY (tenant_id, matter_id)`, granting `SELECT, INSERT, UPDATE, DELETE` to `role_tenant_<slug>_<env>`) and repopulates it from `matters` (`INSERT INTO matter_restriction_metadata SELECT tenant_id, id, (is_staff_matter OR has_ethical_wall), restricted_access_user_ids_json, updated_at FROM matters ON CONFLICT DO NOTHING;`).
+       1. Recreates `matter_restriction_metadata` (`tenant_id`, `matter_id`, `is_restricted`, `restricted_access_user_ids`, `updated_at`, `PRIMARY KEY (tenant_id, matter_id)`, granting `SELECT, INSERT, UPDATE, DELETE` to `role_tenant_<slug>_<env>`) and repopulates it from `matters` (`INSERT INTO matter_restriction_metadata (tenant_id, matter_id, is_restricted, restricted_access_user_ids, updated_at) SELECT tenant_id, id, (is_staff_matter OR has_ethical_wall), restricted_access_user_ids_json, updated_at FROM matters ON CONFLICT (tenant_id, matter_id) DO UPDATE SET is_restricted = EXCLUDED.is_restricted, restricted_access_user_ids = EXCLUDED.restricted_access_user_ids, updated_at = EXCLUDED.updated_at;`).
        2. Re-adds `ALTER TABLE people ADD COLUMN IF NOT EXISTS employment_json JSONB NULL;` and repopulates it from `employee_employment_records` (`UPDATE people p SET employment_json = e.employment_json FROM employee_employment_records e WHERE p.tenant_id = e.tenant_id AND p.id = e.person_id;`).
 2. **Delete runtime JSON persistence, `storeLock.ts`, `DemoDbPmsSource` & Firestore sync (`src/server/store.ts` -> seed-only `src/seed/seedStoreBuilder.ts`, `src/server/storeLock.ts`, `package.json`, `core/infra/modules/platform.bicep`, `R406`, `R407`, `R414`):**
    - Delete `src/server/store.ts` (`trySyncToFirestore` `:643-676`, `getStore` `:722`, `saveStore` `:1073`, `resetStore` `:1108`, `clearStoreToCleanDeployment` `:1116`, `nextId` `:1122`, `nextQuoteReference` `:1131`, global caches `:217-233`) and delete **`src/server/storeLock.ts`** (`R406`).
@@ -48,18 +48,18 @@ Checked against `develop` (`52390b9`):
 ## Tests
 
 - **Contract & migration tests (`core/tests/no-runtime-json-store.test.ts` — new, `core/tests/migrations-postgres.test.ts`):**
-  - **`0014_transitional_bridges_contract` round-trip (`R408`):** seed `matters` (with restrictions) and `employee_employment_records`, apply `0014` `upSql` (asserting `matter_restriction_metadata` table and `people.employment_json` column no longer exist), run `0014` `downSql` (asserting both are recreated and accurately back-populated from `matters` and `employee_employment_records`), and re-apply `upSql`.
+  - **`0015_transitional_bridges_contract` round-trip (`R408`):** seed `matters` (with restrictions) and `employee_employment_records`, apply `0015` `upSql` (asserting `matter_restriction_metadata` table and `people.employment_json` column no longer exist), run `0015` `downSql` (asserting both are recreated and accurately back-populated from `matters` and `employee_employment_records`), and re-apply `upSql`.
   - Assert `src/server/store.ts`, `src/server/storeLock.ts`, `src/server/auditAdapter.ts`, `data/pms/pms-demo.sqlite`, and `firebase-admin` (`package.json`) are gone, and `data/runtime-store.json` is never read or written during `npm test` or `npm run e2e`.
 - **Seed, Checkpoint B two-tenant isolation & full CI:** `demoTenant.test.ts`, `npx vitest run isolation` over PgBouncer (`SET LOCAL ROLE`), and full `npm run ci` (`MAX_KNOWN_GAPS = 0`, 9 Playwright journeys) pass.
 
 ## Help and documentation (rule 11)
 
 - **`src/docs/articles/development-process.ts`, `src/docs/articles/deployment-and-security.ts`, `src/docs/articles/demo-environment.ts`, and `src/docs/articles/data-administration-and-retention.ts`:** Remove remaining `src/server/store.ts` / `getStore()` / `runtime-store.json` / Firestore references (`demo-environment.ts:19`, `development-process.ts:49`), documenting `src/seed/seedStoreBuilder.ts` as seed-only.
-- **`docs/decisions/0001-shared-repo-and-transitional-store.md`, `docs/release-notes.md`, and `docs/roadmap/feature-list.md`:** Supersede ADR 0001, record `S0-20` + `0014`, and complete Checkpoint B (`P2` -> `Completed`).
+- **`docs/decisions/0001-shared-repo-and-transitional-store.md`, `docs/release-notes.md`, and `docs/roadmap/feature-list.md`:** Supersede ADR 0001, record `S0-20` + `0015`, and complete Checkpoint B (`P2` -> `Completed`).
 
 ## Acceptance criteria
 
-- `0014_transitional_bridges_contract` cleanly contracts `matter_restriction_metadata` and `people.employment_json` with tested reversible `downSql` (`R408`).
+- `0015_transitional_bridges_contract` cleanly contracts `matter_restriction_metadata` and `people.employment_json` with tested reversible `downSql` (`R408`).
 - `src/server/store.ts`, `src/server/storeLock.ts`, `firebase-admin`, and `data/pms/pms-demo.sqlite` are removed; ESLint and contract tests forbid runtime JSON store imports; ADR 0001 is marked `Superseded`.
 - `CLAUDE.md` / `AGENTS.md` remain untouched until owner confirmation at Checkpoint 4c (`R415`).
 - Checkpoint B's full two-tenant isolation suite passes across every module and job, `P2` moves to `Completed`, and `npm run ci` passes.
@@ -71,10 +71,10 @@ Checked against `develop` (`52390b9`):
 
 ## Rollback (`R408`)
 
-- Because `S0-20` includes contract migration **`0014_transitional_bridges_contract`**, rolling back `S0-20` **first runs `downSql` for `0014`** via the `migrate` job (recreating `matter_restriction_metadata` from `matters` and re-adding/back-populating `people.employment_json` from `employee_employment_records`), and **then** reverts the `s0-20-retire-json-store` revision so prior code revisions have both transitional structures intact without data loss.
+- Because `S0-20` includes contract migration **`0015_transitional_bridges_contract`**, rolling back `S0-20` **first runs `downSql` for `0015`** via the `migrate` job (recreating `matter_restriction_metadata` from `matters` and re-adding/back-populating `people.employment_json` from `employee_employment_records`), and **then** reverts the `s0-20-retire-json-store` revision so prior code revisions have both transitional structures intact without data loss.
 
 ## Pull request description must state
 
-- **Change class:** Core transitional-store retirement, contract migration `0014_transitional_bridges_contract`, `firebase-admin` removal, ADR 0001 supersession, and Checkpoint B verification.
+- **Change class:** Core transitional-store retirement, contract migration `0015_transitional_bridges_contract`, `firebase-admin` removal, ADR 0001 supersession, and Checkpoint B verification.
 - **Both hosting models:** Model A and Model B run 100% of application state and scheduled jobs against per-tenant PostgreSQL databases (`TenantScopedRepository` + `SET LOCAL ROLE` over PgBouncer), with zero local JSON, SQLite, or Firestore runtime paths.
-- **Migration and rollback (`R408`):** Runs `0014_transitional_bridges_contract` via `migrate` before routing traffic; rollback runs `0014` `downSql` (re-populating `matter_restriction_metadata` and `people.employment_json`) before reverting the code revision.
+- **Migration and rollback (`R408`):** Runs `0015_transitional_bridges_contract` via `migrate` before routing traffic; rollback runs `0015` `downSql` (re-populating `matter_restriction_metadata` and `people.employment_json`) before reverting the code revision.

@@ -39,7 +39,8 @@ import {
   saveTeamRecord,
   updateTenantRbacConfig,
 } from '@/server/services';
-import { createSeedStore, getStore, resetStore, saveStore } from '@/server/store';
+import { createSeedStore } from '@/seed/seedStoreBuilder';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import type { EmployeeSensitiveRecord, EmploymentRecord, Person } from '@/domain/types';
 
@@ -466,7 +467,7 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
   it('maintains firmWorkEmail in person_emails (source = firm_work_email) on employment updates and imports post-S0-16 live people.employment_json edits on --modules hr (R410, R421)', async () => {
     const { ctx, actorSession } = makeHostActorAndContext('P-000001');
     await runWithActiveActorSession(actorSession, async () => {
-      const store = resetStore();
+      const store = loadCommittedSeedStore();
       await importFirmStoreModulesToPostgres({
         ctx,
         store,
@@ -531,10 +532,10 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
           },
         ]);
 
-        // 2. R421: Simulate a post-S0-16 live edit stored in PostgreSQL people.employment_json
-        // while JSON store.people[].employment still has an older pre-S0-16 value
+        // 2. R421: Simulate a live edit stored in PostgreSQL employee_employment_records / employee_sensitive_records
+        // while an imported seed store.people[].employment still has an older pre-cut-over value
         const savedEmp = saveRes.person.employment!;
-        const livePostS016Employment: EmploymentRecord = {
+        const { payroll: livePayroll, ...liveEmpWithoutPayroll } = {
           ...savedEmp,
           jobTitle: 'Post-S016 Live Promoted Partner',
           updatedAt: '2099-01-01T00:00:00.000Z',
@@ -568,10 +569,18 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
           },
         };
         await directClient.query(
-          `UPDATE public.people
-              SET employment_json = $3::jsonb
-            WHERE tenant_id = $1 AND id = $2`,
-          [ctx.tenantId, 'P-000002', JSON.stringify(livePostS016Employment)],
+          `UPDATE public.employee_employment_records
+              SET employment_json = $3::jsonb,
+                  updated_at = '2099-01-01T00:00:00.000Z'::timestamptz
+            WHERE tenant_id = $1 AND person_id = $2`,
+          [ctx.tenantId, 'P-000002', JSON.stringify(liveEmpWithoutPayroll)],
+        );
+        await directClient.query(
+          `UPDATE public.employee_sensitive_records
+              SET payroll_json = $3::jsonb,
+                  updated_at = '2099-01-01T00:00:00.000Z'::timestamptz
+            WHERE tenant_id = $1 AND person_id = $2`,
+          [ctx.tenantId, 'P-000002', JSON.stringify(livePayroll)],
         );
       } finally {
         await directClient.end();
@@ -634,7 +643,7 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
     });
   });
 
-  it('proves zero runtime dependency on people.employment_json by dropping the column during runtime reads and writes (R408, R417)', async () => {
+  it('proves zero runtime dependency on people.employment_json with the column permanently dropped by migration 0015 (R408, R417)', async () => {
     const ctx = makeTenantContext('tenant-a');
     const poolMgr = new TenantPostgresPoolManager();
     const partyRepo = new TenantPartyRepository({ poolManager: poolMgr });
@@ -645,10 +654,11 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
       await partyRepo.clearTenantData(ctx);
       await hrRepo.clearTenantData(ctx);
 
-      // Temporarily drop people.employment_json on tenant-a to prove zero runtime SQL reads or writes touch it (R417)
-      await directClient.query(
-        'ALTER TABLE public.people DROP COLUMN IF EXISTS employment_json;',
+      // Verify migration 0015 has permanently dropped people.employment_json on tenant-a (R408, R417)
+      const colCheck = await directClient.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'people' AND column_name = 'employment_json'`,
       );
+      expect(colCheck.rowCount).toBe(0);
 
       const person = makeSamplePerson('P-NO-EMPJSON-1', 'no-empjson@tenant-a.example');
       person.employment = {
@@ -681,9 +691,6 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
       );
       expect(byEmail.map((p) => p.id)).toEqual(['P-NO-EMPJSON-1']);
     } finally {
-      await directClient.query(
-        'ALTER TABLE public.people ADD COLUMN IF NOT EXISTS employment_json JSONB;',
-      );
       await directClient.end();
       await poolMgr.closeAllPools();
     }
@@ -692,7 +699,7 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
   it('commits HR sensitive/payroll reads and writes and their audit_entries in one PostgreSQL transaction and rolls back both on forced failure (Carry-forward item 3)', async () => {
     const { ctx, actorSession } = makeHostActorAndContext('P-000001');
     await runWithActiveActorSession(actorSession, async () => {
-      const store = resetStore();
+      const store = loadCommittedSeedStore();
       await importFirmStoreModulesToPostgres({
         ctx,
         store,
@@ -927,44 +934,8 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
         );
         expect(saveRes.errors).toBeUndefined();
 
-        // Trigger a saveStore() to disk
-        saveStore(getStore());
-
-        expect(fs.existsSync(runtimeStorePath)).toBe(true);
-        const rawDiskJson = fs.readFileSync(runtimeStorePath, 'utf8');
-        const parsedDisk = JSON.parse(rawDiskJson) as Record<string, unknown>;
-
-        // Assert zero moved collections appear in runtime-store.json
-        for (const movedKey of [
-          'people',
-          'organisations',
-          'links',
-          'notes',
-          'mergeHistory',
-          'matters',
-          'enquiries',
-          'quotes',
-          'tasks',
-          'notifications',
-          'signOffs',
-          'recentlyViewed',
-          'teams',
-          'employeeSensitiveRecords',
-          'employeeMigrationReport',
-          'rbacConfigOverride',
-        ]) {
-          expect(parsedDisk).not.toHaveProperty(movedKey);
-        }
-
-        // Assert zero payroll or sensitive HR values appear anywhere in runtime-store.json
-        expect(rawDiskJson).not.toContain(secretNi);
-        expect(rawDiskJson).not.toContain(secretBankAcct);
-        expect(rawDiskJson).not.toContain(secretSortCode);
-        expect(rawDiskJson).not.toContain(secretPayrollRef);
-        expect(rawDiskJson).not.toContain(secretSensitiveAdjustment);
-        expect(rawDiskJson).not.toContain('Dafydd R468 Secret Account');
-        expect(rawDiskJson).not.toContain('nationalInsuranceNumber');
-        expect(rawDiskJson).not.toContain('reasonableAdjustmentsNeeded');
+        // Runtime JSON store is retired (S0-20): no runtime-store.json file is ever written to disk
+        expect(fs.existsSync(runtimeStorePath)).toBe(false);
       });
     } finally {
       (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;

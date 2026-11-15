@@ -286,7 +286,9 @@ export type KeyDatePermissionKey =
   | 'keydate:configure';
 
 export type JobOnlyPermissionKey =
+  | 'tenant:provision'
   | 'tenant:migrate'
+  | 'tenant:seed_demo'
   | 'keydate:run_reminders'
   | 'document_generation:purge_usage'
   | 'enquiry:run_retention_anonymise';
@@ -1812,6 +1814,21 @@ export interface AppSnapshot {
   attention: AttentionItem[];
   recentIds: string[];
 }
+
+export function slug(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+
+export function vid(listKey: string, label: string): string {
+  return `${listKey}.${slug(label)}`;
+}
+
 
 
 

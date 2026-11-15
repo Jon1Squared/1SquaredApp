@@ -15,7 +15,7 @@
       "displayName": "Not A Law Firm SharePoint DMS",
       "providerType": "sharepoint",
       "isDefault": true,
-      "enabled": true,
+      "enabled": false,
       "auth": {
         "entraTenantId": "11111111-2222-3333-4444-555555555555",
         "credentialMode": "client_certificate",

@@ -178,8 +178,10 @@ function resolveEffectiveRbacConfig(
       ...base.roles,
     };
     for (const [roleKey, roleDef] of Object.entries(rbac.roles ?? {})) {
+      const existingBuiltIn = base.roles[roleKey]?.isBuiltIn;
       mergedRoles[roleKey] = {
         ...roleDef,
+        isBuiltIn: existingBuiltIn ?? Boolean(roleDef.isBuiltIn),
         permissions: (roleDef.permissions ?? []).filter(
           isUserAssignablePermissionKey,
         ),

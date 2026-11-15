@@ -15,7 +15,16 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import { AuthorisationError } from '@/domain/rbac';
-import type { ChoiceValue, Enquiry, Matter, Organisation, Person, PersonOrganisationLink, Team } from '@/domain/types';
+import {
+  vid,
+  type ChoiceValue,
+  type Enquiry,
+  type Matter,
+  type Organisation,
+  type Person,
+  type PersonOrganisationLink,
+  type Team,
+} from '@/domain/types';
 import {
   getActiveTenantConfiguration,
   getCatalogueRepository,
@@ -24,7 +33,6 @@ import {
   getMatterRepository,
   getPartyRepository,
 } from '@/platform/tenantRuntime';
-import { vid } from '@/seed/lists';
 import { guardedRoute } from '@/server/authorize';
 import { hasPersonPermission } from '@/server/rbacRuntime';
 import {

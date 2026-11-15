@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
+import zlib from 'node:zlib';
 
 const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/g;
 const MATTER_CODE_RE = /\b(?<!#)[A-Z]{3}\d{3}-\d{4}\b/g;
@@ -11,26 +11,46 @@ const FAKE_SANCTIONS_CLEAR_RE =
   /(?:Sanctions\s*(?:&(?:amp;)?|and|\/|\+)\s*PEP|PEP\s*(?:&(?:amp;)?|and|\/|\+)\s*Sanctions)[\s\S]{0,160}?['"`>:\u2013\u2014-](?:[\s\u00A0]|&nbsp;)*(?:all(?:[\s\u00A0]|&nbsp;)+)?clear(?:ed)?\b(?:(?:[\s\u00A0]|&nbsp;)*['"`<])?/gi;
 
 /**
- * Loads PMS client codes and fee-earner codes from `data/pms/pms-demo.sqlite`.
+ * Loads PMS client codes and fee-earner codes from `data/pms/1Squared_PMS_Demo_Data.xlsx`.
  */
 export function loadPmsDemoCodes(rootDir = process.cwd()) {
   const codes = new Set();
-  const sqlitePath = path.resolve(rootDir, 'data/pms/pms-demo.sqlite');
-  if (fs.existsSync(sqlitePath)) {
-    const db = new DatabaseSync(sqlitePath, { readOnly: true });
-    try {
-      for (const row of db.prepare('SELECT client_code FROM clients').all()) {
-        if (typeof row.client_code === 'string' && row.client_code.trim()) {
-          codes.add(row.client_code.trim());
+  const workbookPath = path.resolve(rootDir, 'data/pms/1Squared_PMS_Demo_Data.xlsx');
+  if (fs.existsSync(workbookPath)) {
+    const buf = fs.readFileSync(workbookPath);
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+      if (buf.readUInt32LE(i) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    if (eocd !== -1) {
+      const total = buf.readUInt16LE(eocd + 10);
+      let ptr = buf.readUInt32LE(eocd + 16);
+      for (let i = 0; i < total; i++) {
+        const method = buf.readUInt16LE(ptr + 10);
+        const compSize = buf.readUInt32LE(ptr + 20);
+        const nameLen = buf.readUInt16LE(ptr + 28);
+        const extraLen = buf.readUInt16LE(ptr + 30);
+        const commentLen = buf.readUInt16LE(ptr + 32);
+        const lh = buf.readUInt32LE(ptr + 42);
+        const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
+        ptr += 46 + nameLen + extraLen + commentLen;
+        if (name === 'xl/sharedStrings.xml') {
+          const lhName = buf.readUInt16LE(lh + 26);
+          const lhExtra = buf.readUInt16LE(lh + 28);
+          const slice = buf.subarray(
+            lh + 30 + lhName + lhExtra,
+            lh + 30 + lhName + lhExtra + compSize,
+          );
+          const xml = (method === 8 ? zlib.inflateRawSync(slice) : slice).toString('utf8');
+          for (const m of xml.matchAll(/<t(?:\s+[^>]*)?>((?:FE\d{3}|[A-Z]{3}\d{3}))<\/t>/g)) {
+            if (m[1]) codes.add(m[1]);
+          }
+          break;
         }
       }
-      for (const row of db.prepare('SELECT fee_earner_id FROM fee_earners').all()) {
-        if (typeof row.fee_earner_id === 'string' && row.fee_earner_id.trim()) {
-          codes.add(row.fee_earner_id.trim());
-        }
-      }
-    } finally {
-      db.close();
     }
   }
   return codes;
@@ -38,7 +58,7 @@ export function loadPmsDemoCodes(rootDir = process.cwd()) {
 
 /**
  * Builds the regex matching PMS demo client and fee-earner codes from the prefixes
- * loaded from `data/pms/pms-demo.sqlite` (`loadPmsDemoCodes()`), without a hand-written prefix list (R375).
+ * loaded from `data/pms/1Squared_PMS_Demo_Data.xlsx` (`loadPmsDemoCodes()`), without a hand-written prefix list (R375).
  */
 export function buildPmsCodeRegex(pmsCodes = loadPmsDemoCodes()) {
   const clientPrefixes = new Set();
@@ -68,7 +88,7 @@ export function buildPmsCodeRegex(pmsCodes = loadPmsDemoCodes()) {
 }
 
 /**
- * Builds the deny list of demo literals from `data/seed-not-a-law-firm.json`, `src/seed/demo.ts`, and `data/pms/pms-demo.sqlite`.
+ * Builds the deny list of demo literals from `data/seed-not-a-law-firm.json`, `src/seed/demo.ts`, and `data/pms/1Squared_PMS_Demo_Data.xlsx`.
  */
 export function buildDemoLiteralsDenyList(rootDir = process.cwd()) {
   const literals = new Set([

@@ -54,12 +54,8 @@ import { buildValidDocxArchive } from '@platform/core';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import { importFirmStoreModulesToPostgres } from '../../src/server/storePostgresImport';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
-import {
-  clearStoreMemoryCache,
-  createSeedStore,
-  getStore,
-  saveStore,
-} from '../../src/server/store';
+import { createSeedStore } from '../../src/seed/seedStoreBuilder';
+import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import { canUserTakeTask } from '../../src/server/rbacRuntime';
 import { runWithActiveActorSession } from '../../src/domain/rbac';
 import { resolveEmployeeRoles } from '../../src/domain/homeConfig';
@@ -81,7 +77,7 @@ import {
 } from '../../src/server/testSupport/auditTestSupport';
 
 function runAsTestEmployee<T>(personId: string, fn: () => T): T {
-  const store = getStore();
+  const store = loadCommittedSeedStore();
   const tenantId = getActiveTenantConfiguration().tenantId;
   const emp =
     store.people.find((p) => p.id === personId) ??
@@ -336,7 +332,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   it('R413: scoped service queries redact staff-matter and HR rows for unauthorised viewers, and getAppSnapshot returns audit = []', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const staffMatter = store.matters.find((m) => m.id === 'M-000014')!;
       staffMatter.isStaffMatter = true;
       staffMatter.responsiblePartnerId = 'P-000004';
@@ -344,7 +340,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       staffMatter.leadFeeEarnerId = 'P-000004';
       staffMatter.teamMemberIds = ['P-000004'];
       staffMatter.restrictedAccessUserIds = ['P-000004'];
-      saveStore(store);
       await getMatterRepository().putMatter(
         testTenantCtx('P-000004'),
         staffMatter,
@@ -408,7 +403,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     const originalOverride = await kdRepo.getKeyDatesTenantConfig(testTenantCtx('P-000004'));
     try {
       const current = structuredClone(
-        await runAsTestEmployee('P-000004', () => getKeyDatesConfig(getStore())),
+        await runAsTestEmployee('P-000004', () => getKeyDatesConfig(loadCommittedSeedStore())),
       );
       expect((current.limitationRuleSets ?? []).length).toBeGreaterThan(0);
       const next = structuredClone(current);
@@ -501,7 +496,12 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const startedAt = Date.now();
-      const beforeA = structuredClone(getStore().people.find((p) => p.id === 'P-000002')!);
+      const beforeA = structuredClone(
+        (await getPartyRepository().getPersonById<import('@/domain/types').Person>(
+          testTenantCtx('P-000004'),
+          'P-000002',
+        ))!,
+      );
       setAuditAdapterFailureHookForTesting(({ entries }) => {
         if (entries.some((e) => e.recordId === 'P-000002')) {
           throw new Error('SIMULATED_AUDIT_FAILURE_OP_A');
@@ -533,7 +533,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       if (opB.status === 'fulfilled') expect(opB.value.ok).toBe(true);
 
       // Re-read from PostgreSQL party repository
-      clearStoreMemoryCache();
       const reloadedPeople = await getPartyRepository().listAllPeople<import('@/domain/types').Person>(
         testTenantCtx('P-000004'),
       );
@@ -556,7 +555,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   it('R418: nested locked calls (takeTaskRecord -> saveTaskRecord, nested runUnmigratedJsonMutationWithAudit) complete under 2s and roll back cleanly on forced failure', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const ctx = testTenantCtx('P-000004');
       const [allTasks, allPeople] = await Promise.all([
         getTaskWorkflowRepository().listAllTasksUnfiltered(ctx),
@@ -590,7 +589,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
         ),
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_NESTED/);
       setAuditAdapterFailureHookForTesting(null);
-      clearStoreMemoryCache();
       expect(
         (
           await getTaskWorkflowRepository().getTaskById(ctx, taskId, {
@@ -610,7 +608,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       // (c) Real saveMatterRecord (with sourceEnquiryId) -> finalizeEnquiryConversionToMatter -> raiseAutomaticTask
       //     nested chain (R418, R456): on a forced PostgreSQL audit failure, neither the matter nor the automatic
-      //     task nor the enquiry status change survives clearStoreMemoryCache(), and no audit rows exist on a fresh connection.
+      //     task nor the enquiry status change survives in PostgreSQL, and no audit rows exist on a fresh connection.
       const openEnquiry = (
         await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx)
       ).find((e) => e.status !== 'Converted' && e.status !== 'No response')!;
@@ -668,7 +666,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_ENQUIRY_CONVERSION/);
       setAuditAdapterFailureHookForTesting(null);
 
-      clearStoreMemoryCache();
       const reloadedMatters = await getMatterRepository().listAllMattersUnfiltered(
         testTenantCtx('P-000004'),
       );
@@ -729,7 +726,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(positiveSaveRes.matter).not.toBeNull();
       expect(positiveSaveRes.matter!.matterNumber).not.toBe('DRAFT');
 
-      clearStoreMemoryCache();
       const afterPositiveTasks =
         await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
       expect(afterPositiveTasks.length).toBe(prePositiveTasksCount + 1);
@@ -793,13 +789,15 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     }
   });
 
-  it('R442: forced PostgreSQL audit failure during savePersonRecord (sensitive HR update) and updateTenantRbacConfig reverts employeeSensitiveRecords and rbacConfigOverride after clearStoreMemoryCache()', async () => {
+  it('R442: forced PostgreSQL audit failure during savePersonRecord (sensitive HR update) and updateTenantRbacConfig reverts employeeSensitiveRecords and rbacConfigOverride in PostgreSQL', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
       const targetEmployeeId = 'P-000002';
-      const initialStore = getStore();
       const targetPerson = structuredClone(
-        initialStore.people.find((p) => p.id === targetEmployeeId)!,
+        (await getPartyRepository().getPersonById<import('@/domain/types').Person>(
+          testTenantCtx('P-000004'),
+          targetEmployeeId,
+        ))!,
       );
       const beforeSensitive = structuredClone(
         await getHrAndRbacRepository().getSensitiveRecord<
@@ -838,7 +836,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_SENSITIVE_HR/);
       setAuditAdapterFailureHookForTesting(null);
 
-      clearStoreMemoryCache();
       expect(
         await getHrAndRbacRepository().getSensitiveRecord(
           testDataResetContext(),
@@ -876,7 +873,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       ).rejects.toThrow(/SIMULATED_AUDIT_FAILURE_RBAC_OVERRIDE/);
       setAuditAdapterFailureHookForTesting(null);
 
-      clearStoreMemoryCache();
       expect(
         await getHrAndRbacRepository().getRbacConfigOverride(testDataResetContext()),
       ).toEqual(beforeRbacOverride);
@@ -916,7 +912,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
           enableDemoMode: true,
         },
       });
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const adminPerson = store.people.find((p) => p.id === 'P-000001')!;
       const targetDemoPerson = store.people.find(
         (p) => p.isEmployee && p.demo && p.id !== 'P-000001' && !p.mergedIntoId,
@@ -1096,7 +1092,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       const first = await importFirmStoreModulesToPostgres({
         ctx,
-        store: getStore(),
+        store: loadCommittedSeedStore(),
         modules: ['key-dates', 'audit'],
       });
       const auditCountAfterFirst = await auditRepo.countAuditEntries(ctx);
@@ -1104,7 +1100,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       const second = await importFirmStoreModulesToPostgres({
         ctx,
-        store: getStore(),
+        store: loadCommittedSeedStore(),
         modules: ['key-dates', 'audit'],
       });
       const auditCountAfterSecond = await auditRepo.countAuditEntries(ctx);
@@ -1121,7 +1117,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       // AU- sequence continues beyond every imported ID (no reuse after re-import)
       const importedMax = Math.max(
         0,
-        ...(getStore().audit ?? []).map((a) => Number.parseInt(a.id.replace(/^AU-/, ''), 10) || 0),
+        ...(loadCommittedSeedStore().audit ?? []).map((a) => Number.parseInt(a.id.replace(/^AU-/, ''), 10) || 0),
       );
       const appended = await auditRepo.appendAuditEntry(ctx, {
         recordType: 'matter',
@@ -1201,7 +1197,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
   it('R443: executeMerge reverts only its own per-record deltas on failure without wiping a concurrent unrelated save', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const carys = store.people.find((p) => p.id === 'P-000001')!;
     const unrelatedPerson = store.people.find(
       (p) => !p.isEmployee && !p.mergedIntoId && p.id !== 'P-000001',
@@ -1274,7 +1270,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       expect(mergeOutcome.status).toBe('rejected');
 
       setAuditAdapterFailureHookForTesting(null);
-      clearStoreMemoryCache();
       const reloadedPeople = await getPartyRepository().listAllPeople(
         testTenantCtx('P-000001'),
       );
@@ -1304,7 +1299,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   it('R452: listFirmAuditEntriesPage keeps fetching until 250 visible rows are collected when 300 rows include 100 restricted rows, and AdminCatchAllPage renders the Firm audit log section with Next link', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       // Admin viewer P-000004 has admin:access without matter:restricted:access and is NOT on restrictedAccessUserIds for staff matter M-000014
       const adminViewer = store.people.find((p) => p.id === 'P-000004')!;
       adminViewer.permissionOverrides = {
@@ -1321,7 +1316,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       const visibleMatter = store.matters.find(
         (m) => m.id !== 'M-000014' && !m.isStaffMatter && !m.hasEthicalWall,
       )!;
-      saveStore(store);
       await getPartyRepository().putPerson(
         testTenantCtx('P-000001'),
         adminViewer,
@@ -1412,7 +1406,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
   it('R457: listFirmAuditEntriesPage returns FORBIDDEN for non-admins, honours active session tokenRoles, and hides staff-matter rows from non-restricted viewers while showing them to an authorised admin control', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     try {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const nonRestrictedAdmin = store.people.find((p) => p.id === 'P-000004')!;
       nonRestrictedAdmin.permissionOverrides = {
         grant: ['admin:access'],
@@ -1425,7 +1419,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       staffMatter.leadFeeEarnerId = 'P-000001';
       staffMatter.teamMemberIds = ['P-000001'];
       staffMatter.restrictedAccessUserIds = ['P-000001'];
-      saveStore(store);
       await getPartyRepository().putPerson(
         testTenantCtx('P-000001'),
         nonRestrictedAdmin,
@@ -1540,7 +1533,7 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
     });
 
     const targetPerson = structuredClone(
-      getStore().people.find((p) => !p.isEmployee && !p.mergedIntoId)!,
+      loadCommittedSeedStore().people.find((p) => !p.isEmployee && !p.mergedIntoId)!,
     );
     await expect(
       savePersonRecord(

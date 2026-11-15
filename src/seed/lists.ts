@@ -3,21 +3,16 @@
  * Ids are stable (`listKey.slug`) so demo data can reference them.
  */
 import taxonomy from './data/taxonomy.json';
-import type { ChoiceList, ChoiceValue, ListGroup, RecordType } from '@/domain/types';
+import {
+  slug,
+  vid,
+  type ChoiceList,
+  type ChoiceValue,
+  type ListGroup,
+  type RecordType,
+} from '@/domain/types';
 
-export function slug(s: string): string {
-  return s
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/&/g, 'and')
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_|_$/g, '');
-}
-
-export function vid(listKey: string, label: string): string {
-  return `${listKey}.${slug(label)}`;
-}
+export { slug, vid };
 
 type Seed = string | { label: string; description?: string; guidance?: string; systemKey?: string; meta?: Record<string, string> };
 

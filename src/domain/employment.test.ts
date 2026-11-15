@@ -32,7 +32,7 @@ import {
   mapLegacyEmployeeRoleToRoleType,
   resolveOrgDepartment,
 } from './orgStructure';
-import { getStore, resetStore } from '../server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   getAppSnapshot,
   getEmployeeDetailsForUser,
@@ -87,7 +87,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('enforces mandatory DOB, job title, department, unique employee number, unique timekeeper code, line manager, and conditional role/contract fields', () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const existingEmpPerson = store.people.find((p) => p.employment)!;
       const existingEmpNumber = existingEmpPerson.employment!.employeeNumber;
       const existingTkCode =
@@ -209,7 +209,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(resolvedRealEstate?.parentDivisionId).toBe('DIV-LEGAL');
       expect(resolvedRealEstate?.defaultCostCentreId).toBe('CC-RE');
 
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       // Add an employee with an unmapped legacy role & department to verify migration reporting
       const customPerson: Person = {
         ...store.people[0],
@@ -245,7 +245,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
   describe('3. Effective dating (movers & rate changes)', () => {
     it('preserves history with effectiveFrom and effectiveTo when department, job title, grade, office, line manager, FTE or charge-out rate changes', () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const empPerson = store.people.find((p) => p.id === 'P-000002')!;
       const prevEmp = empPerson.employment!;
 
@@ -288,7 +288,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
   describe('4. Four conversion paths & single Person record rule', () => {
     it('Path A & B (Contact / Client -> Employee): keeps single person record, preserves external contact jobTitle, detects open matter party conflict, and flags to Risk for an information barrier', async () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       // Find a non-employee person who is a party or instructing contact on an open matter
       const nonEmployeeParty = store.people.find(
         (p) =>
@@ -394,7 +394,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('Path C (Employee -> Client): marks matter as staff matter with restricted access and shows Right-to-Work evidence on file without auto-completing Client ID verification', async () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const employeeClient = store.people.find((p) => p.id === 'P-000002')!;
       const initialVerificationStatus = employeeClient.verificationStatusId;
 
@@ -471,8 +471,13 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
     it('Path D (Employee -> Leaver -> Contact): sets status to Leaver, deactivates firm-issued email/extension, keeps personal contact details & marketing consent, hides from employee selectors, and supports reassigning owned records', async () => {
       await runAsTestActor('P-000004', async () => {
-        const store = getStore();
-        const target = store.people.find((p) => p.id === 'P-000005')!;
+        const store = loadCommittedSeedStore();
+        const target = (
+          await getPartyRepository().getPersonById<Person>(
+            testDataResetContext(),
+            'P-000005',
+          )
+        )!;
         const personalEmail = {
           id: 'em-personal-5',
           address: 'personal.contact@example.com',
@@ -627,7 +632,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
   describe('5. API & UI permissions and audit logging', () => {
     it('enforces employee:view_core, employee:edit_core, employee:hr_restricted, employee:payroll, and employee:sensitive at the API level and logs views/updates', async () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       // P-000004 is System Administrator / HR Admin (all 5 permissions)
       const adminUser = store.people.find((p) => p.id === 'P-000004')!;
       // Create a basic employee with only employee:view_core
@@ -702,8 +707,12 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
     it('preserves existing employeeSensitiveRecords[id] when saving a person without sensitiveSubmitted (R76)', async () => {
       await runAsTestActor('P-000004', async () => {
-        const store = getStore();
-        const target = store.people.find((p) => p.id === 'P-000002')!;
+        const target = (
+          await getPartyRepository().getPersonById<Person>(
+            testDataResetContext(),
+            'P-000002',
+          )
+        )!;
 
         // First save a sensitive record on P-000002 as HR Admin P-000004
         await savePersonRecord(

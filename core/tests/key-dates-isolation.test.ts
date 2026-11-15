@@ -23,7 +23,7 @@ import {
   computeKeyDateExceptions,
   queryTeamDiaryEntries,
 } from '../../src/domain/keyDateDiary';
-import { getStore, resetStore } from '../../src/server/store';
+import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import {
   getKeyDateRepository,
   runAsTestActor,
@@ -411,8 +411,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
   });
 
   it('rejects unpermitted callers across verify, resolve, reassign, acknowledge, and supersede services on a staff-matter key date with no state change (R30, R82)', async () => {
-    resetStore();
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const staffPartner = store.people.find(
       (p) => p.isEmployee && p.roles?.includes('managing_partner'),
     )!;

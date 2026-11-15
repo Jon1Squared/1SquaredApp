@@ -296,6 +296,8 @@ resource dedicatedPostgresEntraAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/
   }
 }
 
+var enableDedicatedPgBouncer = deployDedicatedPostgresServer && dedicatedPostgresSkuTier != 'Burstable'
+
 resource dedicatedPgRequireSecureTransport 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (deployDedicatedPostgresServer) {
   parent: dedicatedPostgresServer
   name: 'require_secure_transport'
@@ -303,6 +305,9 @@ resource dedicatedPgRequireSecureTransport 'Microsoft.DBforPostgreSQL/flexibleSe
     value: 'ON'
     source: 'user-override'
   }
+  dependsOn: [
+    dedicatedPostgresEntraAdmin
+  ]
 }
 
 resource dedicatedPgMinTlsVersion 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (deployDedicatedPostgresServer) {
@@ -317,7 +322,7 @@ resource dedicatedPgMinTlsVersion 'Microsoft.DBforPostgreSQL/flexibleServers/con
   ]
 }
 
-resource dedicatedPgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (deployDedicatedPostgresServer) {
+resource dedicatedPgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (enableDedicatedPgBouncer) {
   parent: dedicatedPostgresServer
   name: 'pgbouncer.enabled'
   properties: {
@@ -329,7 +334,7 @@ resource dedicatedPgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/co
   ]
 }
 
-resource dedicatedPgBouncerPoolMode 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (deployDedicatedPostgresServer) {
+resource dedicatedPgBouncerPoolMode 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (enableDedicatedPgBouncer) {
   parent: dedicatedPostgresServer
   name: 'pgbouncer.pool_mode'
   properties: {
@@ -359,6 +364,7 @@ resource dedicatedTenantDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/data
   }
   dependsOn: [
     dedicatedPostgresEntraAdmin
+    dedicatedPgMinTlsVersion
     dedicatedPgBouncerPoolMode
   ]
 }

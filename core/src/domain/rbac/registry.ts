@@ -608,12 +608,34 @@ export const PERMISSION_REGISTRY: Readonly<
     requiresMfa: true,
     sinceVersion: '1.1.0',
   },
+  'tenant:provision': {
+    key: 'tenant:provision',
+    domain: 'tenancy',
+    module: 'tenancy',
+    description:
+      'Provision per-tenant PostgreSQL databases, NOLOGIN roles, NOINHERIT runtime Entra principal, and schema baseline privileges inside the guardedJob provision runner (ADR 0028, ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
   'tenant:migrate': {
     key: 'tenant:migrate',
     domain: 'tenancy',
     module: 'tenancy',
     description:
       'Execute per-tenant PostgreSQL schema migrations inside the guardedJob migration runner (ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
+  'tenant:seed_demo': {
+    key: 'tenant:seed_demo',
+    domain: 'tenancy',
+    module: 'tenancy',
+    description:
+      'Seed non-live demo tenant databases and blob storage inside the guardedJob seed-demo runner (ADR 0026, ADR 0030; job-only, never granted to any user role).',
     sensitivity: 'critical',
     requiresMfa: false,
     jobOnly: true,

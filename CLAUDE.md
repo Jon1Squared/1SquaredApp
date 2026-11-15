@@ -43,7 +43,7 @@ Rules:
 - Classify the change: core feature, core extension point, configuration option, client extension, client configuration or infrastructure.
 - Choose the least invasive mechanism: existing configuration, then a core feature behind a flag or option, then a client extension on a published extension point. If the core lacks the extension point you need, propose a generic one as a separate core change. Never reach into core internals.
 - If the change is structural or needs an exception to the standard, draft an architecture decision record in `docs/decisions/` first.
-- See `docs/decisions/0001-shared-repo-and-transitional-store.md` for the approved early-stage coexistence of the Next.js host (`src/`), transitional local JSON store (`src/server/store.ts`), and invented test fixtures (`Not A Law Firm LLP` / `Pembroke Vaughan`).
+- See `docs/decisions/0001-shared-repo-and-transitional-store.md` (superseded for runtime persistence by [ADR 0028](docs/decisions/0028-tenant-database-and-repositories.md) and for demo seeding by [ADR 0026](docs/decisions/0026-demo-tenant.md)) for the shared repository layout (`core/`, `client-not-a-law-firm/`, `src/`) and invented test fixtures (`Not A Law Firm LLP` / `Pembroke Vaughan`).
 
 ## While you write code
 
@@ -98,15 +98,15 @@ Rules:
   - `core/tests/`: core unit, RBAC, isolation and integration tests.
   - `core/docs/`: core documentation.
 - `client-not-a-law-firm/`: invented test client, with `config/` (for example `base.json`) and `extensions/`.
-- `src/`: Next.js host application (transitional, see ADR 0001).
+- `src/`: Next.js host application (see ADR 0001 and ADR 0028).
   - `src/app/`: routes and server actions (`actions.ts`).
   - `src/components/`: React components.
   - `src/domain/`: host domain logic and tests (`*.test.ts`, `__tests__/`).
   - `src/docs/`: in-app Help & documentation (`articles/`, `registry.ts`). Rule 11 changes go here.
   - `src/platform/`: tenant runtime (`tenantRuntime.ts`).
-  - `src/server/`: services and the transitional JSON store (`store.ts`).
-  - `src/pms/`, `src/seed/`: PMS integration and seed data.
-- `data/`: invented local data (`pembroke-vaughan.json`, `pms/pms-demo.sqlite`, `storage/`).
+  - `src/server/`: server services, RBAC runtime, action guards and PostgreSQL seed importer (`services.ts`, `storePostgresImport.ts`).
+  - `src/pms/`, `src/seed/`: PMS workbook parser (`importPms.ts`) and seed-only store builders (`seedStoreBuilder.ts`, `seedSnapshot.ts`).
+- `data/`: committed invented seed data (`seed-not-a-law-firm.json`, `pms/1Squared_PMS_Demo_Data.xlsx`) and local git-ignored blob storage (`storage/`).
 - `schemas/`: key dates configuration schema and example (also present in `core/schemas/`).
 - `scripts/`: one-off scripts (`import-pms.ts`).
 - `docs/`: the standard, RBAC reference, ADRs (`decisions/`), guides, runbooks and `release-notes.md`.
@@ -114,7 +114,7 @@ Rules:
 
 ## Commands
 
-Node.js 24 is required (`node:sqlite`). Run everything from the repo root. Tests use Vitest (`vitest.config.ts`) and pick up `src/**/*.test.ts` and `core/tests/**/*.test.ts`.
+Node.js 24 is required. Run everything from the repo root. Tests use Vitest (`vitest.config.ts`) and pick up `src/**/*.test.ts` and `core/tests/**/*.test.ts`.
 
 - Install: `npm ci`
 - Dev server: `npm run dev`

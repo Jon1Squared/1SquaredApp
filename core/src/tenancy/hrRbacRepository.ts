@@ -1523,118 +1523,57 @@ export class TenantHrAndRbacRepository extends TenantScopedRepository {
   // ============================================================================
 
   /**
-   * Reads post-`S0-16` live employment records from `public.people.employment_json` (if the
-   * column exists) and `public.employee_employment_records` solely for `--modules hr` cut-over
-   * import (`R421`). Uses a savepoint so if `people.employment_json` has been dropped (`S0-20`
-   * or `R417` verification test), it falls back cleanly to `employee_employment_records`.
+   * Reads authoritative live employment records from `public.employee_employment_records` and
+   * `public.employee_sensitive_records` for cut-over/seed import (`R421`).
    */
   public async readAuthoritativePeopleEmploymentForImport(
     ctx: TenantContext,
   ): Promise<AuthoritativePersonEmploymentImportRow[]> {
-    return this.withTenantTransaction(ctx, async (tx) => {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
       const out: AuthoritativePersonEmploymentImportRow[] = [];
-      await tx.query('SAVEPOINT sp_read_legacy_emp_json');
-      try {
-        const res = await tx.query<{
-          tenant_id: string;
-          id: string;
-          merged_into_id: string | null;
-          legacy_emp_json: Record<string, unknown> | null;
-          current_emp_json: Record<string, unknown> | null;
-          current_payroll_json: Record<string, unknown> | null;
-        }>(
-          `SELECT
-             p.tenant_id,
-             p.id,
-             p.merged_into_id,
-             p.employment_json AS legacy_emp_json,
-             eer.employment_json AS current_emp_json,
-             esr.payroll_json AS current_payroll_json
-           FROM public.people p
-           LEFT JOIN public.employee_employment_records eer
-             ON eer.tenant_id = p.tenant_id AND eer.person_id = p.id
-           LEFT JOIN public.employee_sensitive_records esr
-             ON esr.tenant_id = p.tenant_id AND esr.person_id = p.id
-           WHERE p.tenant_id = $1
-           ORDER BY p.id ASC`,
-          [ctx.tenantId],
+      const res = await tx.query<{
+        tenant_id: string;
+        id: string;
+        merged_into_id: string | null;
+        employment_json: Record<string, unknown> | null;
+        payroll_json: Record<string, unknown> | null;
+      }>(
+        `SELECT
+           p.tenant_id,
+           p.id,
+           p.merged_into_id,
+           eer.employment_json,
+           esr.payroll_json
+         FROM public.people p
+         LEFT JOIN public.employee_employment_records eer
+           ON eer.tenant_id = p.tenant_id AND eer.person_id = p.id
+         LEFT JOIN public.employee_sensitive_records esr
+           ON esr.tenant_id = p.tenant_id AND esr.person_id = p.id
+         WHERE p.tenant_id = $1
+         ORDER BY p.id ASC`,
+        [ctx.tenantId],
+      );
+      for (const row of res.rows) {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'employee_employment_records.hr_import',
         );
-        await tx.query('RELEASE SAVEPOINT sp_read_legacy_emp_json');
-        for (const row of res.rows) {
-          this.assertRowTenant(ctx, row.tenant_id, 'people.hr_import');
-          const leg = row.legacy_emp_json;
-          const cur: Record<string, unknown> | null = row.current_emp_json
-            ? {
-                ...row.current_emp_json,
-                ...(row.current_payroll_json
-                  ? { payroll: row.current_payroll_json }
-                  : {}),
-              }
-            : null;
-          let chosen: Record<string, unknown> | null = null;
-          if (leg && cur) {
-            const legTs = Date.parse(String(leg['updatedAt'] ?? '')) || 0;
-            const curTs = Date.parse(String(cur['updatedAt'] ?? '')) || 0;
-            chosen = structuredClone(legTs >= curTs ? leg : cur);
-          } else if (leg) {
-            chosen = structuredClone(leg);
-          } else if (cur) {
-            chosen = structuredClone(cur);
-          }
-          out.push({
-            personId: row.id,
-            employment: chosen as TenantEmploymentRecord | null,
-            mergedIntoId: row.merged_into_id ?? null,
-          });
-        }
-        return out;
-      } catch {
-        await tx.query('ROLLBACK TO SAVEPOINT sp_read_legacy_emp_json');
-        await tx.query('RELEASE SAVEPOINT sp_read_legacy_emp_json');
-        const res = await tx.query<{
-          tenant_id: string;
-          id: string;
-          merged_into_id: string | null;
-          employment_json: Record<string, unknown> | null;
-          payroll_json: Record<string, unknown> | null;
-        }>(
-          `SELECT
-             p.tenant_id,
-             p.id,
-             p.merged_into_id,
-             eer.employment_json,
-             esr.payroll_json
-           FROM public.people p
-           LEFT JOIN public.employee_employment_records eer
-             ON eer.tenant_id = p.tenant_id AND eer.person_id = p.id
-           LEFT JOIN public.employee_sensitive_records esr
-             ON esr.tenant_id = p.tenant_id AND esr.person_id = p.id
-           WHERE p.tenant_id = $1
-           ORDER BY p.id ASC`,
-          [ctx.tenantId],
-        );
-        for (const row of res.rows) {
-          this.assertRowTenant(
-            ctx,
-            row.tenant_id,
-            'employee_employment_records.hr_import',
-          );
-          const emp = row.employment_json
-            ? ({
-                ...structuredClone(row.employment_json),
-                ...(row.payroll_json
-                  ? { payroll: structuredClone(row.payroll_json) }
-                  : {}),
-              } as TenantEmploymentRecord)
-            : null;
-          out.push({
-            personId: row.id,
-            employment: emp,
-            mergedIntoId: row.merged_into_id ?? null,
-          });
-        }
-        return out;
+        const emp = row.employment_json
+          ? ({
+              ...structuredClone(row.employment_json),
+              ...(row.payroll_json
+                ? { payroll: structuredClone(row.payroll_json) }
+                : {}),
+            } as TenantEmploymentRecord)
+          : null;
+        out.push({
+          personId: row.id,
+          employment: emp,
+          mergedIntoId: row.merged_into_id ?? null,
+        });
       }
+      return out;
     });
   }
 

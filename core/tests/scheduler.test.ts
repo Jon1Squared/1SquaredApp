@@ -110,9 +110,11 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
   });
 
   describe('1. Job-only RBAC permissions & guardedJob enforcement (ADR 0030 §3 / Lesson 4)', () => {
-    it('ensures no role (admin included) holds tenant:migrate, keydate:run_reminders, document_generation:purge_usage, or enquiry:run_retention_anonymise, and rejects attempts to grant them via overrides, RBAC config, or R477 DB rows', async () => {
+    it('ensures no role (admin included) holds tenant:provision, tenant:migrate, tenant:seed_demo, keydate:run_reminders, document_generation:purge_usage, or enquiry:run_retention_anonymise, and rejects attempts to grant them via overrides, RBAC config, or R477 DB rows', async () => {
       expect(ALL_JOB_ONLY_PERMISSION_KEYS).toEqual([
+        'tenant:provision',
         'tenant:migrate',
+        'tenant:seed_demo',
         'keydate:run_reminders',
         'document_generation:purge_usage',
         'enquiry:run_retention_anonymise',
@@ -1053,7 +1055,9 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       expect(listExit).toBe(0);
       const parsedList = JSON.parse(stdoutLines[0]!);
       expect(parsedList.jobs.map((j: { name: string }) => j.name)).toEqual([
+        'provision',
         'migrate',
+        'seed-demo',
         'key-date-reminders',
         'usage-retention-purge',
         'enquiry-retention-anonymise',

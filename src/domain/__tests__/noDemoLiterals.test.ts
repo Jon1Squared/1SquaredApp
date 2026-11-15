@@ -244,7 +244,7 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       ),
     ).toEqual([]);
 
-    // R375: PMS client codes from pms-demo.sqlite such as PUG001, BRI001, and PRI001 are caught dynamically via loadPmsDemoCodes()
+    // R375: PMS client codes from 1Squared_PMS_Demo_Data.xlsx such as PUG001, BRI001, and PRI001 are caught dynamically via loadPmsDemoCodes()
     for (const pmsCode of ['PUG001', 'BRI001', 'PRI001']) {
       const pmsViolations = scanTextForDemoLiterals(
         'src/components/SampleWidget.tsx',

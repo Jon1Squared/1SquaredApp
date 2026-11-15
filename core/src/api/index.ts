@@ -55,7 +55,9 @@ import type {
 export * from './keyDates.types';
 
 export type JobOnlyPermissionKey =
+  | 'tenant:provision'
   | 'tenant:migrate'
+  | 'tenant:seed_demo'
   | 'keydate:run_reminders'
   | 'document_generation:purge_usage'
   | 'enquiry:run_retention_anonymise';

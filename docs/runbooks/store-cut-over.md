@@ -1,8 +1,10 @@
-# Transitional Store to PostgreSQL Release Cut-Over Runbook (S0-14 to S0-18)
+# Transitional Store to PostgreSQL Release Cut-Over Runbook (S0-14 to S0-20)
 
-This runbook defines the mandatory release cut-over and rollback sequence when moving modules from the transitional JSON store (`src/server/store.ts`) to per-tenant PostgreSQL databases (`core/src/tenancy/`), as specified in [ADR 0024](../decisions/0024-azure-container-apps-hosting.md), [ADR 0028 §5](../decisions/0028-tenant-database-and-repositories.md), and slices `S0-14` through `S0-18` (`R407`, `R421`).
+This runbook records the mandatory release cut-over and rollback sequence used when moving modules from the transitional JSON store to per-tenant PostgreSQL databases (`core/src/tenancy/`) across slices `S0-14` through `S0-18`, and the final contract migration (`0015_transitional_bridges_contract`) and transitional store retirement in `S0-20` ([ADR 0024](../decisions/0024-azure-container-apps-hosting.md), [ADR 0028 §5](../decisions/0028-tenant-database-and-repositories.md), `R407`, `R408`, `R421`).
 
-> **Manual blocker (`docs/roadmap/stage-0-plan.md` §8):** Executing this runbook against Azure Container Apps (`ca-web-<env>`, `job-migrate-<env>`, `job-store-import-<env>`) waits on Azure subscription access. Local and CI execution (`npm run job -- migrate` and `npm run db:import`) is active now against PostgreSQL 16 + PgBouncer.
+> **Post-`S0-20` status:** As of `S0-20` (`CORE_REQUIRED_SCHEMA_VERSION = '0015'`), `src/server/store.ts`, `src/server/storeLock.ts`, `scripts/import-store-to-postgres.ts`, `data/pms/pms-demo.sqlite`, and the manual `store-import` Container Apps job have been permanently retired. All runtime reads and writes and all scheduled jobs (`migrate`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`) run against per-tenant PostgreSQL databases over PgBouncer, and non-live demo seeding uses `npm run seed:demo` (`scripts/seed-demo-tenant.ts` + `src/seed/seedStoreBuilder.ts` + `src/server/storePostgresImport.ts`).
+>
+> **Manual blocker (`docs/roadmap/stage-0-plan.md` §8):** Executing `migrate` against Azure Container Apps (`ca-web-<env>`, `caj-migrate-<env>`) waits on Azure subscription access. Local and CI execution (`npm run job -- migrate` and `npm run seed:demo`) is active now against PostgreSQL 16 + PgBouncer.
 
 ---
 
@@ -112,5 +114,6 @@ While there is no live client data in Stage 0 (Owner Decision 9, ADR 0028 §5):
      ```bash
      psql "$TENANT_DIRECT_PG_URL" -c "\copy (SELECT row_to_json(a) FROM public.audit_entries a WHERE tenant_id = '<tenantId>' ORDER BY seq ASC) TO 'audit_entries_backup_<tenantId>.jsonl'"
      ```
-   - If schema rollback is explicitly required after exporting `audit_entries`, run `TenantMigrationRunner.rollbackVersion(ctx, migration)` on port `5432` in reverse order (`0008` down to the target version).
-4. **Re-seed / resume from JSON store:** Because there is no dual-writing, writes made to PostgreSQL after Step 3 of cut-over are not mirrored back into the JSON store. In non-live/demo environments, re-run `npm run seed:demo -- --force` (which resets both the JSON store and migrated PostgreSQL tables cleanly) before scaling `ca-web-<env>` back up.
+   - If schema rollback is explicitly required after exporting `audit_entries`, run `TenantMigrationRunner.rollbackVersion(ctx, migration)` on port `5432` in reverse order (`0015` down to the target version).
+   - **`S0-20` contract migration rollback (`0015_transitional_bridges_contract`, `R408`):** Because `0015` is a contract migration that drops `public.matter_restriction_metadata` and `public.people.employment_json`, rolling back an `S0-20` deployment **must first run `downSql` for `0015`** via `TenantMigrationRunner.rollbackVersion(ctx, '0015')` on direct port `5432` (which recreates `matter_restriction_metadata`, restores `role_tenant_<slug>_<env>` grants, and back-populates both `matter_restriction_metadata` from `matters` and `people.employment_json` from `employee_employment_records`) **before** reverting the container image to a pre-`S0-20` revision.
+4. **Re-seed in non-live environments:** In non-live/demo environments (`dev`, `test`, `demo`, `training`), re-run `npm run seed:demo -- --force` (which seeds all per-tenant PostgreSQL tables cleanly from `src/seed/seedStoreBuilder.ts` via `src/server/storePostgresImport.ts`) before scaling `ca-web-<env>` back up.

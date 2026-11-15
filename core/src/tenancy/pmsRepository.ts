@@ -2,11 +2,10 @@
  * Tenant-Scoped Practice Management System (PMS) Repository (`core/src/tenancy/pmsRepository.ts`).
  *
  * Enforces ADR 0028 & Slice S0-18 (`R401`, `R402`, `R403`, `R460`, `R319`, `R358`):
- * - Replaces the process-global SQLite `DemoDbPmsSource` (`data/pms/pms-demo.sqlite`) and
- *   `FirmStore.pmsLinks` with per-tenant PostgreSQL tables (`pms_links`, `pms_extract_metadata`,
- *   `pms_fee_earners`, `pms_clients`, `pms_matters`, `pms_matter_financials`, `pms_fee_estimates`,
- *   `pms_invoices`, `pms_payments`, `pms_time_entries`, `pms_disbursements`,
- *   `pms_client_account_entries`, and `pms_credit_control_log`).
+ * - Stores all PMS links and read-only PMS financial dataset rows in per-tenant PostgreSQL tables
+ *   (`pms_links`, `pms_extract_metadata`, `pms_fee_earners`, `pms_clients`, `pms_matters`,
+ *   `pms_matter_financials`, `pms_fee_estimates`, `pms_invoices`, `pms_payments`, `pms_time_entries`,
+ *   `pms_disbursements`, `pms_client_account_entries`, and `pms_credit_control_log`).
  * - Every read and write executes inside `withTenantReadTransaction` or `withTenantTransaction`
  *   (`SET LOCAL ROLE`) and verifies `assertRowTenant` on returned rows.
  * - Fails closed when `pms_extract_metadata.as_at_date` is missing or invalid (`R319`, `R358`).

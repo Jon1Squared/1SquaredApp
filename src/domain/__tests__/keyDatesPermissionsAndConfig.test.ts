@@ -34,7 +34,7 @@ import {
   supersedeConfirmedKeyDateRecord,
   verifyProposedKeyDateRecord,
 } from '@/server/services';
-import { getStore, resetStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   getAuditRepository,
   getKeyDateRepository,
@@ -240,8 +240,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       });
       expect(resolveKeyDatePermissions(noRoleUser)).toEqual([]);
 
-      resetStore();
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const auditCountBefore = await getAuditRepository().countAuditEntries(testTenantCtx('P-000004'));
       const res = await createOrProposeKeyDateRecord(
         {
@@ -356,7 +355,6 @@ describe('Key Dates permissions, config schema validation, and extension contrac
     });
 
     it('resolves keyDates from active tenant config and defaults to enabled:false for a tenant without a keyDates block (R33)', async () => {
-      resetStore();
       const secondTenantConfig: Record<string, unknown> = {
         ...(notALawFirmBaseConfig as Record<string, unknown>),
         tenantId: 'second-law-firm',
@@ -364,7 +362,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
       delete secondTenantConfig.keyDates;
       try {
         setActiveTenantConfigForTesting(secondTenantConfig, {});
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         store.keyDatesConfigOverride = undefined;
         const resolved = await runAsTestActor('P-000001', () =>
           getKeyDatesConfig(store),
@@ -376,8 +374,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
     });
 
     it('enforces MFA on saveKeyDatesConfigRecord (R27), refuses mutating services when enabled:false (R35), gates scheduler behind keydate:configure + MFA and runTenantBackgroundJob (R25), and enforces preview/acknowledge guards (R34)', async () => {
-      resetStore();
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const currentConfig = await runAsTestActor('P-000001', () =>
         getKeyDatesConfig(store),
       );

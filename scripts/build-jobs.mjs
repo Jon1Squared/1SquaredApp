@@ -10,11 +10,6 @@ const jobEntries = [
     entryPoint: path.join(rootDir, 'scripts', 'run-job.ts'),
     outfile: path.join(outDir, 'run-job.mjs'),
   },
-  {
-    entryPoint: path.join(rootDir, 'scripts', 'import-store-to-postgres.ts'),
-    outfile: path.join(outDir, 'import-store.mjs'),
-
-  },
 ];
 
 async function bundleJobs() {

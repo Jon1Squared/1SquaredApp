@@ -63,7 +63,7 @@ import {
   resolveUserAppRole,
   runWithActiveActorSession,
 } from '../../src/server/rbacRuntime';
-import { saveStore } from '../../src/server/store';
+import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import { buildDemoData } from '../../src/seed/demo';
 import { NextRequest } from 'next/server';
 import { POST as logoutPost } from '../../src/app/api/auth/logout/route';
@@ -137,7 +137,6 @@ import {
 } from '../../src/domain/pms';
 import { getTenantPmsSource } from '../../src/pms/pmsSource';
 import { attentionList } from '../../src/domain/attention';
-import { clearStoreMemoryCache, getStore, resetStore } from '../../src/server/store';
 import {
   auditEntriesWrittenSince,
   makeVerifiedTestEntraSession,
@@ -305,11 +304,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 60 canonical user permissions plus 4 job-only permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(64);
+    it('defines all 60 canonical user permissions plus 6 job-only permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(66);
       expect(ALL_USER_PERMISSION_KEYS.length).toBe(60);
       expect(ALL_JOB_ONLY_PERMISSION_KEYS).toEqual([
+        'tenant:provision',
         'tenant:migrate',
+        'tenant:seed_demo',
         'keydate:run_reminders',
         'document_generation:purge_usage',
         'enquiry:run_retention_anonymise',
@@ -1359,7 +1360,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('enforces R52, R53, R54, R55, R60, R61, R62, R63, R70 and R71 security invariants', async () => {
-      resetStore();
       await resetAllDemoData('P-000001', testDataResetContext());
 
       // R52: resolveOrProvisionEntraEmployee with roles: [] creates a person without admin and without admin:access
@@ -2145,7 +2145,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces R106, R123, and R130: server-computed snapshot maps (canTakeByTaskId, permissionsByPersonId, firmPrimaryDomain) and audited sensitive employee reads', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const r123Ctx = testDataResetContext();
         const templateTask = (await getTaskWorkflowRepository().listAllTasksUnfiltered(r123Ctx))[0]!;
         const firstMatter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(r123Ctx))[0]!;
@@ -2307,8 +2307,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('enforces explicit config.rbac and tenantId in domain helpers and honours tenant-only departmentGrants/revocations even after saveStore(undefined) (R148)', async () => {
-      const store = getStore();
+    it('enforces explicit config.rbac and tenantId in domain helpers and honours tenant-only departmentGrants/revocations (R148)', async () => {
+      const store = loadCommittedSeedStore();
       const dafydd = store.people.find((p) => p.id === 'P-000002')!;
 
       // Domain functions must fail closed with RBAC_CONFIG_REQUIRED when config.rbac or tenantId is omitted
@@ -2364,8 +2364,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         setActiveTenantConfigForTesting(
           customConfig as unknown as Record<string, unknown>,
         );
-        // Also simulate saveStore when store has no runtime rbac override
-        saveStore(store);
 
         const customItPerson = {
           ...dafydd,
@@ -2505,7 +2503,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
               enableDemoMode: false,
             },
           });
-          await getPartyRepository().putPeople(testDataResetContext(), getStore().people);
+          await getPartyRepository().putPeople(testDataResetContext(), loadCommittedSeedStore().people);
           const liveReset = await resetDemoDataAction();
           expect(isActionDenied(liveReset)).toBe(true);
           if (isActionDenied(liveReset)) {
@@ -2575,7 +2573,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('1b. approveSignOff and discussSignOff enforce signoff:approve, matter access, assignedPartnerId, no self-approval, status checks, and audit discussSignOff', async () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const ctx = testDataResetContext();
       // SO-000001: requestedById P-000002, assignedPartnerId P-000001, matterId M-000002, status Pending
       // 1. Fee earner (P-000002) lacks signoff:approve
@@ -2882,7 +2880,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     });
 
     it('1f (B12). ethical walls fail closed in canAccessMatter and all wrappers even when restrictedAccessUserIds is empty', () => {
-      const store = getStore();
+      const store = loadCommittedSeedStore();
       const emptyWallMatter: Matter = {
         ...store.matters.find((m) => m.id === 'M-000001')!,
         id: 'M-EMPTY-WALL',
@@ -2974,7 +2972,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('denies all 22 S0-04 actions without permission or without MFA, and allows them with MFA', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const orgStructure = store.orgStructure!;
         const taskSettings = store.taskSettings;
         const matterCostsConfig = store.matterCostsConfig!;
@@ -3133,7 +3131,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces employee:edit_core and matter:create on createRecordFromPmsAction and prevents self-escalation into team leadIds', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         const adminPerson = (await getPartyRepository().getPersonById<Person>(ctx, 'P-000004'))!;
 
@@ -3229,7 +3227,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('denies task comment, task save, and task reassign on restricted matters or when not a team lead (B9)', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         // Create an ethical wall matter visible only to P-000001
         const wallMatter = (await getMatterRepository().getMatterById<Matter>(ctx, 'M-000001'))!;
@@ -3322,7 +3320,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       try {
         const ctx = testDataResetContext();
         await resetAllDemoData('P-000001', ctx);
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const allEnquiries = await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx);
         const openEnq = allEnquiries.find((e) => e.status === 'New' || e.status === 'Assigned')!;
 
@@ -3403,7 +3401,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('denies quote viewing and editing for the finance role, and hides quotes linked to hidden enquiries or restricted matters (quote:view, quote:edit, R267)', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const financeUser = store.people.find(
           (p) => p.isEmployee && p.roles?.includes('finance') && !p.roles?.includes('partner'),
         )!;
@@ -3515,7 +3513,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces dual permissions, leaver check, restricted matter allowlist update, SharePoint lifecycle sync, assignedPersonIds, open-only enquiries, and per-record audit on reassignLeaverOwnedRecords (Item 13, R266, R270)', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         const allPeople = await getPartyRepository().listAllPeople<Person>(ctx);
         const allOrgs = await getPartyRepository().listAllOrganisations<import('@/domain/types').Organisation>(ctx);
@@ -3726,7 +3724,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('enforces contact:create, contact:edit, internalSystemStep stripping on saveOrganisationAction (R252), record:merge on duplicates, enquiry permissions, R264 status/assignment lock, and R268 automatic enquiry assignment in saveTaskRecord (R267)', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         const allPeople = await getPartyRepository().listAllPeople<Person>(ctx);
         const allOrgs = await getPartyRepository().listAllOrganisations<import('@/domain/types').Organisation>(ctx);
@@ -4215,7 +4213,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('denies enquiry conversion and quote conversion without matter:create and creates nothing', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         const peopleBefore = (await getPartyRepository().listAllPeople(ctx)).length;
         const orgsBefore = (await getPartyRepository().listAllOrganisations(ctx)).length;
@@ -4274,7 +4272,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('blocks quote conversion on a high-severity conflict hit (creating nothing), and when clear creates records with outcome-derived conflict status, conflictDecision, and audit entry (B5)', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         await runAsTestActor('P-000001', async () => {
           // Find an opposing party on an existing matter to trigger a high-severity hit
@@ -4793,7 +4791,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('finds hits from instructingContactId, billingContactId, additionalClientIds, and person–organisation links in both searches, records searchedSources, and redacts restricted matters in blocked reasons (B7)', async () => {
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
 
         // Create dedicated test records for the 4 new search sources
@@ -5840,7 +5838,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).organisation!;
 
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const resetCtx = testDataResetContext();
         const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(resetCtx))[0]!;
         const tenantCfg = getActiveTenantConfiguration();
@@ -5967,7 +5965,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).organisation!;
 
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         const storeMergedPerson = (await getPartyRepository().getPersonById<Person>(ctx, mergedPerson.id))!;
         storeMergedPerson.createdFromEnquiryId = 'ENQ-ORIGIN-99';
@@ -6038,10 +6036,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('10. Atomic rollback (R272, R282, R296, R406): rolls back both PostgreSQL TenantDocumentRepository and JSON store via RecordDeltaCompensator when saveStore fails after PostgreSQL repointing', async () => {
+    it('10. Atomic rollback (R272, R282, R296, R406): rolls back PostgreSQL TenantDocumentRepository and all entity tables when audit append fails during executeMerge', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       const repo = getDocumentRepository();
-      const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = (await savePersonRecord(
@@ -6053,7 +6050,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).person!;
 
-        const store = getStore();
         const resetCtx = testDataResetContext();
         const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(resetCtx))[0]!;
         matter.instructingContactId = mergedPerson.id;
@@ -6122,23 +6118,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         await repo.putDocument(ctx, doc1);
         await repo.putDocument(ctx, doc2);
         await repo.putDocumentLink(ctx, link1);
-        saveStore(store);
 
-        // R296: clearStoreMemoryCache throws outside test environments
-        const prevVitest = process.env.VITEST;
-        const prevNodeEnv = process.env.NODE_ENV;
-        try {
-          delete process.env.VITEST;
-          (process.env as Record<string, string | undefined>).NODE_ENV = 'production';
-          expect(() => clearStoreMemoryCache()).toThrow(
-            /clearStoreMemoryCache is only permitted in test environments/,
-          );
-        } finally {
-          if (prevVitest !== undefined) process.env.VITEST = prevVitest;
-          (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
-        }
-
-        // Force post-PG audit step to fail AFTER PostgreSQL repointMergedEntityWithDelta and partyRepo merge have committed
+        // Force post-PG audit step to fail AFTER PostgreSQL repointMergedEntityWithDelta and partyRepo merge have run
         const appendAuditSpy = vi
           .spyOn(getAuditRepository(), 'appendAuditEntries')
           .mockRejectedValueOnce(new Error('SIMULATED_POST_PG_SAVE_STORE_FAILURE'));
@@ -6151,7 +6132,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           appendAuditSpy.mockRestore();
         }
 
-        // PostgreSQL documents and links are compensated back to their pre-merge state
+        // PostgreSQL documents and links are rolled back to their pre-merge state
         expect((await repo.getDocumentById(ctx, doc1.id))?.primaryClientId).toBe(mergedPerson.id);
         expect((await repo.getDocumentById(ctx, doc1.id))?.recipientPartyId).toBe(mergedPerson.id);
         expect((await repo.getDocumentById(ctx, doc2.id))?.primaryClientId).toBe(mergedPerson.id);
@@ -6167,11 +6148,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(
           (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
         ).toBe(mergedPerson.id);
-        clearStoreMemoryCache();
-        getStore();
-        expect(
-          (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
-        ).toBe(mergedPerson.id);
         expect(
           (await getIntakeQuoteRepository().getEnquiryById(ctx, enq.id, { includeRestricted: true }))?.linkedPersonId,
         ).toBe(mergedPerson.id);
@@ -6180,17 +6156,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).toBeNull();
         expect(await getPartyRepository().listAllMergeHistory(ctx)).toHaveLength(0);
       } finally {
-        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
-          configurable: true,
-          writable: true,
-          value: savedJsonValue,
-        });
         setTestEntraSessionOverride(undefined);
         await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
 
-    it('10b. Atomic rollback Case 2 (R272, R282, R296): rolls back in-memory and persisted store when PostgreSQL repointMergedEntityWithDelta throws before saveStore', async () => {
+    it('10b. Atomic rollback Case 2 (R272, R282, R296): rolls back PostgreSQL state when repointMergedEntityWithDelta throws', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       const repo = getDocumentRepository();
       const origRepoint = repo.repointMergedEntityWithDelta.bind(repo);
@@ -6205,7 +6176,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).person!;
 
-        const store = getStore();
         const ctx = testDataResetContext();
         const matter = (await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx))[0]!;
         matter.instructingContactId = mergedPerson.id;
@@ -6213,7 +6183,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         const enq = (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx))[0]!;
         enq.linkedPersonId = mergedPerson.id;
         await getIntakeQuoteRepository().putEnquiry(ctx, enq);
-        saveStore(store);
 
         repo.repointMergedEntityWithDelta = async () => {
           throw new Error('SIMULATED_PRE_SAVE_DOC_STEP_FAILURE');
@@ -6223,20 +6192,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         ).rejects.toThrow(/SIMULATED_PRE_SAVE_DOC_STEP_FAILURE/);
         repo.repointMergedEntityWithDelta = origRepoint;
 
-        getStore();
-        expect(
-          (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
-        ).toBe(mergedPerson.id);
-        expect(
-          (await getIntakeQuoteRepository().getEnquiryById(ctx, enq.id, { includeRestricted: true }))?.linkedPersonId,
-        ).toBe(mergedPerson.id);
-        expect(
-          (await getPartyRepository().getPersonById<Person>(ctx, mergedPerson.id))?.mergedIntoId,
-        ).toBeNull();
-        expect(await getPartyRepository().listAllMergeHistory(ctx)).toHaveLength(0);
-
-        clearStoreMemoryCache();
-        getStore();
         expect(
           (await getMatterRepository().getMatterById<Matter>(ctx, matter.id))?.instructingContactId,
         ).toBe(mergedPerson.id);
@@ -6254,10 +6209,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       }
     });
 
-    it('10c. Atomic rollback Case 3 (R309): when both the first saveStore and the rollback saveStore throw, logs rollback failure with correlationId and tenantId only and rethrows the original error', async () => {
+    it('10c. Atomic rollback Case 3 (R309): when appendAuditEntries throws during executeMerge, logs rollback failure with correlationId and tenantId only and rethrows the original error', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-      const savedJsonValue = global.__oneSquaredLastSavedStoreJson;
       try {
         setVerifiedAdminMergeSession();
         const survivorPerson = (await savePersonRecord(
@@ -6269,13 +6223,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           { byId: 'P-000004' },
         )).person!;
 
-        const store = getStore();
         const ctx = testDataResetContext();
         const enq = (await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx))[0]!;
         enq.linkedPersonId = mergedPerson.id;
         await getIntakeQuoteRepository().putEnquiry(ctx, enq);
         await linkPmsRecord('person', mergedPerson.id, 'PMS-R309', 'P-000004');
-        saveStore(store);
 
         let saveAttempts = 0;
         const appendAuditSpy = vi
@@ -6307,11 +6259,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(loggedArg).not.toContain('RollbackMergedCase3');
         expect(loggedArg).not.toContain('SIMULATED_');
       } finally {
-        Object.defineProperty(global, '__oneSquaredLastSavedStoreJson', {
-          configurable: true,
-          writable: true,
-          value: savedJsonValue,
-        });
         errorSpy.mockRestore();
         setTestEntraSessionOverride(undefined);
         await resetAllDemoData('P-000001', testDataResetContext());
@@ -7051,7 +6998,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
     it('5. the three credit-control actions are denied without finance:credit_control, denied on an inaccessible matter, and allowed otherwise', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       try {
-        const store = getStore();
+        const store = loadCommittedSeedStore();
         const ctx = testDataResetContext();
         const partner = (await getPartyRepository().getPersonById<Person>(ctx, 'P-000001'))!;
 
@@ -7570,7 +7517,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(noMfaReplaceRes.message).toBe(
           'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
         );
-        clearStoreMemoryCache();
         expect(
           JSON.stringify((await getPartyRepository().getPersonById<Person>(ctx, targetEmployee.id))!),
         ).toBe(targetBeforeNoMfaJson);
@@ -7603,7 +7549,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(noMfaAddRes)).toBe(true);
         expect(noMfaAddRes.code).toBe('MFA_REQUIRED');
-        clearStoreMemoryCache();
         expect(
           JSON.stringify((await getPartyRepository().getPersonById<Person>(ctx, targetEmployee.id))!),
         ).toBe(targetBeforeNoMfaJson);
@@ -7637,7 +7582,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         );
         expect(isActionDenied(noMfaFirmWorkChangeRes)).toBe(true);
         expect(noMfaFirmWorkChangeRes.code).toBe('MFA_REQUIRED');
-        clearStoreMemoryCache();
         expect(
           JSON.stringify((await getPartyRepository().getPersonById<Person>(ctx, targetEmployee.id))!),
         ).toBe(targetBeforeNoMfaJson);
@@ -7839,7 +7783,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(promoteWithoutMfaRes.message).toBe(
           'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
         );
-        clearStoreMemoryCache();
         expect(
           JSON.stringify(
             (await getPartyRepository().getPersonById<Person>(ctx, nonEmployee.id))!,
@@ -7916,7 +7859,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(promoteNoEmailsWithoutMfaRes.message).toBe(
           'Multi-factor authentication (MFA) is required to change an employee or leaver email address.',
         );
-        clearStoreMemoryCache();
         expect(
           JSON.stringify((await getPartyRepository().getPersonById<Person>(ctx, noEmailContactId))!),
         ).toBe(noEmailContactBeforeJson);
@@ -8272,7 +8214,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           (await getPartyRepository().getPersonById<Person>(ctx, 'P-000010'))?.entraObjectId,
         ).toBeUndefined();
 
-        // 2d. R382 & R396: Sign-in matching a privileged persona (P-000004 System Administrator, and an admin-role persona) by email refuses to link AND refuses to provision a duplicate, leaving store.people.length unchanged, no record with the token's oid, and a persisted entra-link refusal audit entry across clearStoreMemoryCache()
+        // 2d. R382 & R396: Sign-in matching a privileged persona (P-000004 System Administrator, and an admin-role persona) by email refuses to link AND refuses to provision a duplicate, leaving store.people.length unchanged, no record with the token's oid, and a persisted entra-link refusal audit entry in PostgreSQL
         const adminPerson = (await getPartyRepository().getPersonById<Person>(ctx, 'P-000004'))!;
         const adminEmail = adminPerson.emails[0]!.address;
         const peopleCountBeforePrivRefusal = (await getPartyRepository().listAllPeople(ctx)).length;
@@ -8287,7 +8229,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           })).rejects.toThrow('Your account needs to be linked by an administrator.');
-        clearStoreMemoryCache();
         const peopleAfterPrivRefusal = await getPartyRepository().listAllPeople<Person>(ctx);
         expect(peopleAfterPrivRefusal.length).toBe(peopleCountBeforePrivRefusal);
         expect(
@@ -8327,7 +8268,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           })).rejects.toThrow('Your account needs to be linked by an administrator.');
-        clearStoreMemoryCache();
         const peopleAfterMpRefusal = await getPartyRepository().listAllPeople<Person>(ctx);
         expect(peopleAfterMpRefusal.length).toBe(peopleCountBeforePrivRefusal);
         expect(
@@ -8378,7 +8318,6 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           })).rejects.toThrow('Your account needs to be linked by an administrator.');
-        clearStoreMemoryCache();
         const peopleAfterAmbigRefusal = await getPartyRepository().listAllPeople<Person>(ctx);
         expect(peopleAfterAmbigRefusal.length).toBe(peopleCountBeforeAmbigRefusal);
         expect(

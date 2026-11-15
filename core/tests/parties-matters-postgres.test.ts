@@ -15,10 +15,7 @@ import {
   type TenantContext,
 } from '@platform/core';
 import { saveMatterAction } from '@/app/actions';
-import {
-  clearStoreMemoryCache,
-  getStore,
-} from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   getMatterRepository,
   getPartyRepository,
@@ -182,7 +179,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       expect(roleCheckA.role_name).toBe('role_tenant_tenant_alpha_test');
       expect(roleCheckB.role_name).toBe('role_tenant_tenant_bravo_test');
 
-      const seedPerson = structuredClone(getStore().people[0]!);
+      const seedPerson = structuredClone(loadCommittedSeedStore().people[0]!);
       const personA = {
         ...seedPerson,
         id: 'P-ISO-A01',
@@ -198,21 +195,21 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
           },
         ],
       };
-      const seedOrg = structuredClone(getStore().organisations[0]!);
+      const seedOrg = structuredClone(loadCommittedSeedStore().organisations[0]!);
       const orgA = {
         ...seedOrg,
         id: 'O-ISO-A01',
         legalName: 'Alpha Haberdashery Ltd',
         clientReference: 'ALP001',
       };
-      const seedLink = structuredClone(getStore().links[0]!);
+      const seedLink = structuredClone(loadCommittedSeedStore().links[0]!);
       const linkA = {
         ...seedLink,
         id: 'L-ISO-A01',
         personId: personA.id,
         organisationId: orgA.id,
       };
-      const seedNote = structuredClone(getStore().notes[0]!);
+      const seedNote = structuredClone(loadCommittedSeedStore().notes[0]!);
       const noteA = {
         ...seedNote,
         id: 'N-ISO-A01',
@@ -220,7 +217,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         recordId: personA.id,
         text: 'Alpha confidential note',
       };
-      const seedMatter = structuredClone(getStore().matters[0]!);
+      const seedMatter = structuredClone(loadCommittedSeedStore().matters[0]!);
       const matterA = {
         ...seedMatter,
         id: 'M-ISO-A01',
@@ -314,7 +311,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     try {
       await matterRepo.clearTenantData(ctx);
 
-      const base = structuredClone(getStore().matters[0]!);
+      const base = structuredClone(loadCommittedSeedStore().matters[0]!);
       const openMatter = {
         ...base,
         id: 'M-WALL-OPEN',
@@ -455,13 +452,13 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       ]);
 
       // 4. Allocate a number for a seeded prefix (PEN001, seeded max is PEN001-0004), then run resetAllDemoData and verify PEN001 never goes backwards
-      const penBeforeReset = await generateMatterNumber(getStore(), 'O-000001', ctx);
+      const penBeforeReset = await generateMatterNumber(loadCommittedSeedStore(), 'O-000001', ctx);
       const beforeSuffix = Number.parseInt(penBeforeReset.split('-')[1]!, 10);
       expect(beforeSuffix).toBeGreaterThanOrEqual(5);
 
       await resetAllDemoData('P-000001', ctx);
 
-      const penAfterReset = await generateMatterNumber(getStore(), 'O-000001', ctx);
+      const penAfterReset = await generateMatterNumber(loadCommittedSeedStore(), 'O-000001', ctx);
       const afterSuffix = Number.parseInt(penAfterReset.split('-')[1]!, 10);
       expect(afterSuffix).toBe(beforeSuffix + 1);
     } finally {
@@ -479,7 +476,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     try {
       // 1. Repository rejects missing or stale expectedRowVersion with code and message
       const target = structuredClone(
-        getStore().matters.find((m) => m.id === 'M-000011')!,
+        loadCommittedSeedStore().matters.find((m) => m.id === 'M-000011')!,
       );
       await expect(
         freshMatterRepo.updateMatter(ctx, target, undefined),
@@ -527,7 +524,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       const w1 = await runWithActiveActorSession(carysSession, () =>
         saveMatterRecord(
           {
-            ...getStore().matters.find((m) => m.id === 'M-000011')!,
+            ...loadCommittedSeedStore().matters.find((m) => m.id === 'M-000011')!,
             title: 'Writer 1 saveMatterRecord Title',
           },
           { id: 'M-000011', byId: 'P-000001', expectedRowVersion: rv0 },
@@ -664,7 +661,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         ),
       );
       const rvBeforeMerge = w7Prep.matter!.rowVersion!;
-      const survivorPerson = getStore().people.find(
+      const survivorPerson = loadCommittedSeedStore().people.find(
         (p) => !p.isEmployee && !p.employment && p.id !== dupPersonId && !p.mergedIntoId,
       )!;
       await runWithActiveActorSession(carysSession, () =>
@@ -695,7 +692,10 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       );
       const rvBeforeLeaverReassign = w8Prep.matter!.rowVersion!;
       const p10Before = structuredClone(
-        getStore().people.find((p) => p.id === 'P-000010')!,
+        (await getPartyRepository().getPersonById<import('@/domain/types').Person>(
+          ctx,
+          'P-000010',
+        ))!,
       );
       await runWithActiveActorSession(carysSession, () =>
         savePersonRecord(
@@ -783,15 +783,16 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         ),
       ).toEqual([]);
 
-      // 2. R417: Truncate public.matter_restriction_metadata and verify TenantKeyDateRepository still enforces matter restrictions from public.matters
-      await keyDateRepo.withTenantTransaction(ctx, async (tx) => {
-        await tx.query(
-          'DELETE FROM public.matter_restriction_metadata WHERE tenant_id = $1',
-          [ctx.tenantId],
+      // 2. R408 & R417: Verify public.matter_restriction_metadata is permanently dropped by migration 0015 and TenantKeyDateRepository enforces matter restrictions directly from public.matters
+      const bridgeTableCount = await keyDateRepo.withTenantReadTransaction(ctx, async (tx) => {
+        const r = await tx.query<{ cnt: string }>(
+          `SELECT COUNT(*)::text AS cnt FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'matter_restriction_metadata'`,
         );
+        return Number(r.rows[0]?.cnt ?? 0);
       });
+      expect(bridgeTableCount).toBe(0);
 
-      const baseMatter = structuredClone(getStore().matters[0]!);
+      const baseMatter = structuredClone(loadCommittedSeedStore().matters[0]!);
       const staffMatter = {
         ...baseMatter,
         id: 'M-R417-STAFF',
@@ -803,7 +804,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       };
       await getMatterRepository().createMatter(ctx, staffMatter);
       const kdId = await keyDateRepo.allocateNextKeyDateId(ctx);
-      const firstKd = (getStore().keyDates ?? [])[0];
+      const firstKd = (loadCommittedSeedStore().keyDates ?? [])[0];
       if (!firstKd) {
         throw new Error('Expected at least one seeded key date in PostgreSQL');
       }
@@ -816,7 +817,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         title: 'Staff Matter Limitation Date',
       });
 
-      // Outsider P-000008 cannot see the key date on the staff matter even though matter_restriction_metadata is empty
+      // Outsider P-000008 cannot see the key date on the staff matter
       const outsiderKds = await keyDateRepo.listKeyDatesForMatter(
         ctx,
         staffMatter.id,
@@ -832,16 +833,6 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         allowedViewer,
       );
       expect(allowedKds.map((k) => k.id)).toContain(kdId);
-
-      // Verify matter_restriction_metadata still has 0 rows for this tenant
-      const bridgeCount = await keyDateRepo.withTenantTransaction(ctx, async (tx) => {
-        const r = await tx.query<{ cnt: string }>(
-          'SELECT COUNT(*)::text AS cnt FROM public.matter_restriction_metadata WHERE tenant_id = $1',
-          [ctx.tenantId],
-        );
-        return Number(r.rows[0]?.cnt ?? 0);
-      });
-      expect(bridgeCount).toBe(0);
     } finally {
       await resetAllDemoData('P-000001', testDataResetContext());
     }
@@ -921,7 +912,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         ),
       ).rejects.toThrow(/SIMULATED_S016_TX_FAILURE/);
 
-      const templateMatter = structuredClone(getStore().matters[0]!);
+      const templateMatter = structuredClone(loadCommittedSeedStore().matters[0]!);
       const { id: _omittedId, ...newMatterPayload } = templateMatter;
       void _omittedId;
       await expect(
@@ -955,20 +946,6 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       expect(
         recentAudit.entries.filter((e) => !preAuditIds.has(e.id)),
       ).toEqual([]);
-
-      // Verify JSON store on disk is also clean after clearStoreMemoryCache()
-      clearStoreMemoryCache();
-      expect(
-        getStore().people.some((p) => p.firstName === 'RolledBack'),
-      ).toBe(false);
-      expect(
-        getStore().organisations.some(
-          (o) => o.legalName === 'RolledBack Organisation Ltd',
-        ),
-      ).toBe(false);
-      expect(
-        getStore().matters.some((m) => m.title === 'RolledBack Draft Matter'),
-      ).toBe(false);
     } finally {
       setAuditAdapterFailureHookForTesting(null);
       await freshPoolMgr.closeAllPools();
@@ -979,7 +956,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
   it('Import idempotency: importFirmStoreModulesToPostgres([parties, matters]) run twice produces identical row counts and sequences continue past imported high-water marks', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     const ctx = testDataResetContext();
-    const store = getStore();
+    const store = loadCommittedSeedStore();
 
     const run1 = await importFirmStoreModulesToPostgres({
       ctx,
@@ -1385,7 +1362,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       await importFirmStoreModulesToPostgres({
         ctx: ctxA,
         tenantConfig: validatedConfigA,
-        store: getStore(),
+        store: loadCommittedSeedStore(),
         modules: ['parties', 'matters'],
       });
 
@@ -1395,7 +1372,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       await importFirmStoreModulesToPostgres({
         ctx: ctxB,
         tenantConfig: validatedConfigB,
-        store: getStore(),
+        store: loadCommittedSeedStore(),
         modules: ['parties', 'matters'],
       });
 
@@ -1650,7 +1627,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const userUSession = makeActorSession(userU, ['fee_earner']);
 
     const userUTeamId =
-      getStore().teams.find(
+      loadCommittedSeedStore().teams.find(
         (t) =>
           t.active &&
           (t.memberIds.includes(userU) || t.leadIds.includes(userU)),
@@ -1913,7 +1890,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const userUCtx = makeTenantCtx('not-a-law-firm', userU, ['fee_earner']);
 
     const userUTeamId =
-      getStore().teams.find(
+      loadCommittedSeedStore().teams.find(
         (t) =>
           t.active &&
           (t.memberIds.includes(userU) || t.leadIds.includes(userU)),
@@ -2179,7 +2156,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       ),
     );
 
-    const targetTeam = getStore().teams.find((t) => t.id === userUTeamId)!;
+    const targetTeam = loadCommittedSeedStore().teams.find((t) => t.id === userUTeamId)!;
     const originalTeamLeadIds = targetTeam.leadIds.filter((id) => id !== userU);
     const addTeamLeadRes = await runInReplicaA(adminSessionA, () =>
       replicaA.saveTeamRecord(

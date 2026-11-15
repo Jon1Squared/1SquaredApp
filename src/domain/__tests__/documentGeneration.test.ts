@@ -28,7 +28,7 @@ import {
   createSignedEntraSessionCookie,
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
-import { getStore, resetStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import notALawFirmBaseConfig from '../../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../../client-not-a-law-firm/config/environments/dev.json';
 
@@ -54,7 +54,7 @@ describe('Host Document Generation Domain & Server Services', () => {
   });
 
   it('resolves DocumentPermission from full role set and ignores Viewing-as role', () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const managingPartner = store.people.find((p) =>
       p.roles?.includes('managing_partner'),
     );
@@ -102,7 +102,7 @@ describe('Host Document Generation Domain & Server Services', () => {
   });
 
   it('resolves field context, custom fields, and generates both DOCX and PDF documents via server service', async () => {
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const matter = store.matters[0];
     expect(matter).toBeDefined();
 
@@ -213,7 +213,6 @@ describe('Host Document Generation Domain & Server Services', () => {
         expect(usage.csvContent).toContain('Template Code');
       },
     );
-    resetStore();
   });
 
   it('enforces R119 & R122: requires actor.tenantId (rejecting empty or mismatched tenantId) and honours hybrid tokenRoles in resolveDocumentPermissions and canActorAccessGeneratedDocument', () => {
@@ -325,7 +324,7 @@ describe('Host Document Generation Domain & Server Services', () => {
     ).toBe(true);
 
     // R151: buildDocumentActorFromPerson throws RBAC_TENANT_REQUIRED when called with no ctx and no active actor session
-    const samplePerson = getStore().people[0]!;
+    const samplePerson = loadCommittedSeedStore().people[0]!;
     expect(() =>
       runWithActiveActorSession(null, () =>
         buildDocumentActorFromPerson(samplePerson),

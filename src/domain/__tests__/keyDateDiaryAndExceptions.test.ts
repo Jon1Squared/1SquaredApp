@@ -20,7 +20,7 @@ import {
   getKeyDateExceptionsReportRecord,
   verifyProposedKeyDateRecord,
 } from '@/server/services';
-import { getStore, resetStore } from '@/server/store';
+import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   auditEntriesForRecord,
   getKeyDateRepository,
@@ -822,8 +822,7 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     ).toBe(false);
 
     // R41: After exportKeyDateExceptionsReportRecord, an audit entry has action === 'keydate-export'
-    resetStore();
-    const store = getStore();
+    const store = loadCommittedSeedStore();
     const managingPartner = store.people.find(
       (p) => p.isEmployee && p.roles?.includes('managing_partner'),
     )!;

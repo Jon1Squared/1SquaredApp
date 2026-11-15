@@ -42,7 +42,6 @@ import {
   getPartyRepository,
   getTaskWorkflowRepository,
 } from '../services';
-import { getStore } from '../store';
 import { loadCommittedSeedStore } from '../../seed/seedSnapshot';
 import type { Person, Team } from '../../domain/types';
 
@@ -185,7 +184,7 @@ export interface TestActorSessionOptions {
 
 /**
  * Builds a test `EntraSessionPayload` for an explicit `actorId` (`R445`).
- * Roles are resolved from the employee's record in `getStore()` unless explicitly overridden;
+ * Roles are resolved from the employee's record in the committed seed store unless explicitly overridden;
  * unknown actors receive `[]` (never a fallback `['admin']`).
  */
 export function buildTestEntraSessionPayload(
@@ -200,17 +199,11 @@ export function buildTestEntraSessionPayload(
     );
   }
   const tenantConfig = getActiveTenantConfiguration();
-  const store = getStore();
-  const person =
-    store.people.find((p) => p.id === cleanActorId) ??
-    findCommittedSeedPerson(cleanActorId);
+  const person = findCommittedSeedPerson(cleanActorId);
   const roles = options?.roles
     ? [...options.roles]
     : person
-      ? resolveEmployeeRoles(
-          person,
-          store.teams.length > 0 ? store.teams : [...getCommittedSeedTeams()],
-        )
+      ? resolveEmployeeRoles(person, [...getCommittedSeedTeams()])
       : [];
   const email =
     options?.email?.trim() ||

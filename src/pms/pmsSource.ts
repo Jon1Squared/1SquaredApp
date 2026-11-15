@@ -1,9 +1,8 @@
 /**
  * Tenant-Scoped Practice Management System (PMS) Adapter (`src/pms/pmsSource.ts`).
  *
- * Enforces Slice S0-18 & ADR 0028 (`R401`, `R402`, `R403`, `R319`, `R358`):
- * - Replaces the process-global SQLite `DemoDbPmsSource` (`data/pms/pms-demo.sqlite`) and
- *   `getPmsSource()` singleton with `TenantPmsSource` and `getTenantPmsSource(ctx: TenantContext)`.
+ * Enforces Slice S0-18, Slice S0-20 & ADR 0028 (`R401`, `R402`, `R403`, `R319`, `R358`):
+ * - Provides `TenantPmsSource` and `getTenantPmsSource(ctx: TenantContext)` backed by per-tenant PostgreSQL.
  * - Refuses to execute without a verified `TenantContext` (`assertValidPostgresTenantContext`).
  * - Reads exclusively from the tenant's PostgreSQL-backed `TenantPmsRepository` snapshot
  *   keyed by `(postgresDatabaseName, tenantId)`, failing closed with `PMS_AS_AT_UNAVAILABLE_LABEL`
