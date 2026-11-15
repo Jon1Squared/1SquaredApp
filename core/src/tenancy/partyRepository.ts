@@ -28,6 +28,208 @@ import {
   upsertPersonEmploymentAndPayrollInTx,
 } from './hrRbacRepository';
 
+function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
+function replaceRecordIdPathSegment(
+  href: string,
+  mergedId: string,
+  survivorId: string,
+): string {
+  if (!href || !mergedId || mergedId === survivorId) return href;
+  const escaped = mergedId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return href
+    .replace(new RegExp(`(^|\\/)${escaped}(?=$|[/?#])`, 'g'), `$1${survivorId}`)
+    .replace(new RegExp(`(=)${escaped}(?=$|[&#])`, 'g'), `$1${survivorId}`);
+}
+
+const MERGE_REPOINT_ID_KEYS = new Set([
+  'id',
+  'linkedRecordId',
+  'recordId',
+  'matchedId',
+  'matchedRecordId',
+  'sourceRecordId',
+  'entityId',
+  'actingSolicitorId',
+  'actingSolicitorPersonId',
+  'actingSolicitorOrganisationId',
+  'clientId',
+  'clientPersonId',
+  'clientOrganisationId',
+  'instructingContactId',
+  'billingContactId',
+  'referrerContactId',
+  'linkedPersonId',
+  'referrerPersonId',
+  'linkedOrganisationId',
+  'referredToOrganisationId',
+]);
+
+const MERGE_REPOINT_ID_ARRAY_KEYS = new Set([
+  'additionalClientIds',
+]);
+
+function repointJsonIdFieldsInValue(
+  value: unknown,
+  mergedId: string,
+  survivorId: string,
+  options?: { allowDirectIdField?: boolean; extraExcludeClientId?: string },
+): { value: unknown; changed: boolean } {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const mapped = value.map((item) => {
+      const res = repointJsonIdFieldsInValue(item, mergedId, survivorId, options);
+      if (res.changed) changed = true;
+      return res.value;
+    });
+    return { value: changed ? mapped : value, changed };
+  }
+  if (!value || typeof value !== 'object') {
+    return { value, changed: false };
+  }
+  const obj = value as Record<string, unknown>;
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'href' && typeof v === 'string') {
+      const nextHref = replaceRecordIdPathSegment(v, mergedId, survivorId);
+      if (nextHref !== v) changed = true;
+      out[k] = nextHref;
+    } else if (k === 'connectedToPartyId' && v === `client-${mergedId}`) {
+      changed = true;
+      out[k] = `client-${survivorId}`;
+    } else if (MERGE_REPOINT_ID_ARRAY_KEYS.has(k) && Array.isArray(v)) {
+      const nextArr: string[] = [];
+      let arrChanged = false;
+      for (const raw of v) {
+        if (typeof raw !== 'string') continue;
+        const mapped = raw === mergedId ? survivorId : raw;
+        if (raw === mergedId) arrChanged = true;
+        if (options?.extraExcludeClientId && mapped === options.extraExcludeClientId) {
+          arrChanged = true;
+          continue;
+        }
+        if (!nextArr.includes(mapped)) {
+          nextArr.push(mapped);
+        } else {
+          arrChanged = true;
+        }
+      }
+      if (arrChanged || nextArr.length !== v.length) changed = true;
+      out[k] = arrChanged || nextArr.length !== v.length ? nextArr : v;
+    } else if (MERGE_REPOINT_ID_KEYS.has(k) && typeof v === 'string') {
+      if (k === 'id' && options?.allowDirectIdField === false) {
+        if (v === `client-${mergedId}`) {
+          changed = true;
+          out[k] = `client-${survivorId}`;
+        } else {
+          out[k] = v;
+        }
+      } else if (v === mergedId) {
+        changed = true;
+        out[k] = survivorId;
+      } else {
+        out[k] = v;
+      }
+    } else {
+      const nested = repointJsonIdFieldsInValue(v, mergedId, survivorId, options);
+      if (nested.changed) changed = true;
+      out[k] = nested.value;
+    }
+  }
+  return { value: changed ? out : value, changed };
+}
+
+function rewriteConflictSnapshotJson(
+  snap: Record<string, unknown>,
+  recordType: 'person' | 'organisation',
+  mergedId: string,
+  survivorId: string,
+): { next: Record<string, unknown>; changed: boolean } {
+  let snapChanged = false;
+  const clonedSnap = structuredClone(snap) as {
+    conflicts?: Array<Record<string, unknown> & {
+      recordType?: string;
+      recordId?: string;
+      href?: string;
+      reasons?: string[];
+      matchedFields?: string[];
+    }>;
+    knownPeople?: Array<{ id?: string }>;
+    knownOrganisations?: Array<{ id?: string }>;
+    searchedInput?: {
+      knownPeople?: Array<{ id?: string }>;
+      knownOrganisations?: Array<{ id?: string }>;
+    };
+  };
+  if (Array.isArray(clonedSnap.conflicts)) {
+    const byKey = new Map<string, (typeof clonedSnap.conflicts)[number]>();
+    const dedupedConflicts: typeof clonedSnap.conflicts = [];
+    for (const hit of clonedSnap.conflicts) {
+      const nextHit = { ...hit };
+      if (nextHit.recordId === mergedId && (!nextHit.recordType || nextHit.recordType === recordType)) {
+        nextHit.recordId = survivorId;
+        snapChanged = true;
+      }
+      if (typeof nextHit.href === 'string') {
+        const nextHref = replaceRecordIdPathSegment(nextHit.href, mergedId, survivorId);
+        if (nextHref !== nextHit.href) {
+          nextHit.href = nextHref;
+          snapChanged = true;
+        }
+      }
+      const key =
+        typeof nextHit.recordId === 'string' && typeof nextHit.recordType === 'string'
+          ? `${nextHit.recordType}:${nextHit.recordId}`
+          : '';
+      if (key && byKey.has(key)) {
+        const existing = byKey.get(key)!;
+        if (Array.isArray(nextHit.reasons)) {
+          const prevReasons = Array.isArray(existing.reasons) ? existing.reasons : [];
+          existing.reasons = Array.from(new Set([...prevReasons, ...nextHit.reasons]));
+        }
+        if (Array.isArray(nextHit.matchedFields)) {
+          const prevFields = Array.isArray(existing.matchedFields) ? existing.matchedFields : [];
+          existing.matchedFields = Array.from(new Set([...prevFields, ...nextHit.matchedFields]));
+        }
+        snapChanged = true;
+      } else {
+        if (key) byKey.set(key, nextHit);
+        dedupedConflicts.push(nextHit);
+      }
+    }
+    clonedSnap.conflicts = dedupedConflicts;
+  }
+  const remapKnown = (listKey: 'knownPeople' | 'knownOrganisations') => {
+    for (const holder of [clonedSnap, clonedSnap.searchedInput]) {
+      const list = holder?.[listKey];
+      if (holder && Array.isArray(list)) {
+        const seen = new Set<string>();
+        const deduped: Array<{ id?: string }> = [];
+        for (const item of list) {
+          const nextId = item.id === mergedId ? survivorId : item.id;
+          if (item.id === mergedId) snapChanged = true;
+          if (typeof nextId === 'string' && seen.has(nextId)) {
+            snapChanged = true;
+            continue;
+          }
+          if (typeof nextId === 'string') seen.add(nextId);
+          deduped.push({ ...item, id: nextId });
+        }
+        holder[listKey] = deduped;
+      }
+    }
+  };
+  if (recordType === 'person') remapKnown('knownPeople');
+  if (recordType === 'organisation') remapKnown('knownOrganisations');
+  return {
+    next: clonedSnap as unknown as Record<string, unknown>,
+    changed: snapChanged,
+  };
+}
+
 export interface TenantEmailEntry {
   id: string;
   address: string;
@@ -2165,6 +2367,54 @@ export class TenantPartyRepository extends TenantScopedRepository {
     }
 
     await this.withTenantTransaction(ctx, async (tx) => {
+      const targetTable =
+        recordType === 'person' ? 'public.people' : 'public.organisations';
+      const lockIds = [survivorId, mergedId].sort();
+      const lockedTargets = await tx.query<{
+        tenant_id: string;
+        id: string;
+        merged_into_id: string | null;
+        parent_organisation_id?: string | null;
+      }>(
+        recordType === 'organisation'
+          ? `SELECT tenant_id, id, merged_into_id, parent_organisation_id
+             FROM public.organisations
+             WHERE tenant_id = $1 AND id = ANY($2::text[])
+             ORDER BY id ASC
+             FOR UPDATE`
+          : `SELECT tenant_id, id, merged_into_id
+             FROM public.people
+             WHERE tenant_id = $1 AND id = ANY($2::text[])
+             ORDER BY id ASC
+             FOR UPDATE`,
+        [ctx.tenantId, lockIds],
+      );
+      const lockedById = new Map<string, (typeof lockedTargets.rows)[number]>();
+      for (const row of lockedTargets.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, `${targetTable}.executeMergeInTransaction`);
+        lockedById.set(row.id, row);
+        if (row.id === survivorId && row.merged_into_id) {
+          throw new Error(
+            `PARTY_MERGE_VALIDATION_ERROR: Survivor "${survivorId}" is already merged into "${row.merged_into_id}".`,
+          );
+        }
+        if (row.id === mergedId && row.merged_into_id) {
+          throw new Error(
+            `PARTY_MERGE_VALIDATION_ERROR: Record "${mergedId}" is already merged into "${row.merged_into_id}".`,
+          );
+        }
+      }
+      if (!survivorPerson && !survivorOrganisation && !lockedById.has(survivorId)) {
+        throw new Error(
+          `PARTY_MERGE_VALIDATION_ERROR: Survivor "${survivorId}" was not found in tenant.`,
+        );
+      }
+      if (!mergedPerson && !mergedOrganisation && !lockedById.has(mergedId)) {
+        throw new Error(
+          `PARTY_MERGE_VALIDATION_ERROR: Merge target "${mergedId}" was not found in tenant.`,
+        );
+      }
+
       // 1. Update survivor & tombstone merged party
       if (recordType === 'person') {
         if (survivorPerson) {
@@ -2190,8 +2440,24 @@ export class TenantPartyRepository extends TenantScopedRepository {
           );
         }
       } else {
+        const mergedParentBefore =
+          mergedOrganisation?.parentOrganisationId ??
+          lockedById.get(mergedId)?.parent_organisation_id ??
+          null;
+        const safeInheritedParent =
+          mergedParentBefore && mergedParentBefore !== survivorId && mergedParentBefore !== mergedId
+            ? mergedParentBefore
+            : null;
         if (survivorOrganisation) {
-          await this.upsertOrganisationInTx(tx, ctx, survivorOrganisation);
+          const cleanParent =
+            survivorOrganisation.parentOrganisationId === survivorId ||
+            survivorOrganisation.parentOrganisationId === mergedId
+              ? safeInheritedParent
+              : survivorOrganisation.parentOrganisationId;
+          await this.upsertOrganisationInTx(tx, ctx, {
+            ...survivorOrganisation,
+            parentOrganisationId: cleanParent,
+          });
         }
         if (mergedOrganisation) {
           await this.upsertOrganisationInTx(tx, ctx, {
@@ -2208,18 +2474,53 @@ export class TenantPartyRepository extends TenantScopedRepository {
         }
         if (params.repointedSubsidiaries) {
           for (const sub of params.repointedSubsidiaries) {
-            await this.upsertOrganisationInTx(tx, ctx, sub);
+            const subParent =
+              sub.id === survivorId &&
+              (sub.parentOrganisationId === survivorId || sub.parentOrganisationId === mergedId)
+                ? safeInheritedParent
+                : sub.parentOrganisationId === mergedId && sub.id !== survivorId
+                  ? survivorId
+                  : sub.parentOrganisationId;
+            await this.upsertOrganisationInTx(tx, ctx, {
+              ...sub,
+              parentOrganisationId: subParent,
+            });
           }
         } else {
           // Repoint child organisations' parent_organisation_id (avoiding self-parenting)
           await tx.query(
             `UPDATE public.organisations
-             SET parent_organisation_id = CASE WHEN id = $2 THEN NULL ELSE $2 END,
+             SET parent_organisation_id = CASE WHEN id = $2 THEN $4 ELSE $2 END,
+                 profile_json = jsonb_set(
+                   profile_json,
+                   '{parentOrganisationId}',
+                   CASE WHEN id = $2 THEN COALESCE(to_jsonb($4::text), 'null'::jsonb) ELSE to_jsonb($2::text) END,
+                   true
+                 ),
                  updated_at = NOW()
              WHERE tenant_id = $1 AND parent_organisation_id = $3`,
-            [ctx.tenantId, survivorId, mergedId],
+            [ctx.tenantId, survivorId, mergedId, safeInheritedParent],
           );
         }
+        // Final belt-and-braces guard against self-parenting or pointing to tombstone
+        await tx.query(
+          `UPDATE public.organisations
+           SET parent_organisation_id = $4,
+               profile_json = jsonb_set(
+                 profile_json,
+                 '{parentOrganisationId}',
+                 COALESCE(to_jsonb($4::text), 'null'::jsonb),
+                 true
+               ),
+               updated_at = NOW()
+           WHERE tenant_id = $1
+             AND id = $2
+             AND (
+               parent_organisation_id IN ($2, $3)
+               OR profile_json->>'parentOrganisationId' IN ($2, $3)
+             )`,
+          [ctx.tenantId, survivorId, mergedId, safeInheritedParent],
+        );
       }
 
       // 2. Repoint person_organisation_links (deduplicating colliding links)
@@ -2286,6 +2587,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
       }
 
       // 4. Repoint matters & matter_parties
+      const likeMergedPattern = `%${escapeSqlLikePattern(mergedId)}%`;
       await tx.query(
         `UPDATE public.matters
          SET client_id = $2, updated_at = NOW()
@@ -2331,14 +2633,264 @@ export class TenantPartyRepository extends TenantScopedRepository {
           [ctx.tenantId, survivorId, mergedId],
         );
       }
-      await tx.query(
-        `UPDATE public.matter_parties
-         SET entity_id = $2, updated_at = NOW()
-         WHERE tenant_id = $1 AND entity_type = $3 AND entity_id = $4`,
-        [ctx.tenantId, survivorId, recordType, mergedId],
-      );
 
-      // 6. Repoint documents & document_links
+      const matterJsonRows = await tx.query<{
+        tenant_id: string;
+        id: string;
+        client_id: string;
+        additional_client_ids_json: unknown;
+        conflict_check_record_json: Record<string, unknown> | null;
+        opening_record_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, client_id, additional_client_ids_json,
+                conflict_check_record_json, opening_record_json
+         FROM public.matters
+         WHERE tenant_id = $1
+           AND (
+             additional_client_ids_json ? $3
+             OR (client_id = $2 AND additional_client_ids_json ? $2)
+             OR (conflict_check_record_json IS NOT NULL AND conflict_check_record_json::text LIKE $4 ESCAPE '\\')
+             OR (opening_record_json IS NOT NULL AND opening_record_json::text LIKE $4 ESCAPE '\\')
+           )
+         FOR UPDATE`,
+        [ctx.tenantId, survivorId, mergedId, likeMergedPattern],
+      );
+      for (const mRow of matterJsonRows.rows) {
+        this.assertRowTenant(ctx, mRow.tenant_id, 'matters.executeMergeInTransaction');
+        let matterChanged = false;
+        const rawAdditional = Array.isArray(mRow.additional_client_ids_json)
+          ? (mRow.additional_client_ids_json as unknown[])
+          : [];
+        const nextAdditional: string[] = [];
+        for (const entry of rawAdditional) {
+          if (typeof entry !== 'string') continue;
+          const mapped = entry === mergedId ? survivorId : entry;
+          if (entry === mergedId) matterChanged = true;
+          if (mapped === mRow.client_id) {
+            matterChanged = true;
+            continue;
+          }
+          if (!nextAdditional.includes(mapped)) {
+            nextAdditional.push(mapped);
+          } else {
+            matterChanged = true;
+          }
+        }
+
+        let nextConflictCheck = mRow.conflict_check_record_json;
+        if (nextConflictCheck && typeof nextConflictCheck === 'object') {
+          const repointed = repointJsonIdFieldsInValue(
+            nextConflictCheck,
+            mergedId,
+            survivorId,
+            { allowDirectIdField: false, extraExcludeClientId: mRow.client_id },
+          );
+          if (repointed.changed) {
+            nextConflictCheck = repointed.value as Record<string, unknown>;
+            matterChanged = true;
+          }
+        }
+
+        let nextOpeningRecord = mRow.opening_record_json;
+        if (nextOpeningRecord && typeof nextOpeningRecord === 'object') {
+          const repointed = repointJsonIdFieldsInValue(
+            nextOpeningRecord,
+            mergedId,
+            survivorId,
+            { allowDirectIdField: false, extraExcludeClientId: mRow.client_id },
+          );
+          if (repointed.changed) {
+            nextOpeningRecord = repointed.value as Record<string, unknown>;
+            matterChanged = true;
+          }
+        }
+
+        if (matterChanged) {
+          await tx.query(
+            `UPDATE public.matters
+             SET additional_client_ids_json = $3::jsonb,
+                 conflict_check_record_json = $4::jsonb,
+                 opening_record_json = $5::jsonb,
+                 updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $2`,
+            [
+              ctx.tenantId,
+              mRow.id,
+              JSON.stringify(nextAdditional),
+              nextConflictCheck ? JSON.stringify(nextConflictCheck) : null,
+              nextOpeningRecord ? JSON.stringify(nextOpeningRecord) : null,
+            ],
+          );
+        }
+      }
+
+      // Repoint & de-duplicate exact same-matter collisions on matter_parties while preserving distinct roles/capacities
+      const mpRows = await tx.query<{
+        tenant_id: string;
+        id: string;
+        matter_id: string;
+        entity_type: string | null;
+        entity_id: string | null;
+        relationship_id: string | null;
+        capacity_id: string | null;
+        acting_solicitor_person_id: string | null;
+        acting_solicitor_organisation_id: string | null;
+        sort_order: number;
+        metadata_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, matter_id, entity_type, entity_id,
+                relationship_id, capacity_id,
+                acting_solicitor_person_id, acting_solicitor_organisation_id,
+                sort_order, metadata_json
+         FROM public.matter_parties
+         WHERE tenant_id = $1
+           AND matter_id IN (
+             SELECT DISTINCT matter_id
+             FROM public.matter_parties
+             WHERE tenant_id = $1
+               AND (
+                 (entity_type = $2 AND entity_id = $3)
+                 OR acting_solicitor_person_id = $3
+                 OR acting_solicitor_organisation_id = $3
+                 OR metadata_json::text LIKE $4 ESCAPE '\\'
+               )
+           )
+         ORDER BY matter_id ASC, sort_order ASC, id ASC
+         FOR UPDATE`,
+        [ctx.tenantId, recordType, mergedId, likeMergedPattern],
+      );
+      const mpByMatter = new Map<string, (typeof mpRows.rows)[number][]>();
+      for (const mp of mpRows.rows) {
+        this.assertRowTenant(ctx, mp.tenant_id, 'matter_parties.executeMergeInTransaction');
+        const list = mpByMatter.get(mp.matter_id) ?? [];
+        list.push(mp);
+        mpByMatter.set(mp.matter_id, list);
+      }
+      const deletedMatterPartyRowIds: string[] = [];
+      for (const [, rows] of mpByMatter) {
+        const survivingSignatures = new Map<string, string>();
+        const deletedMetaIdToSurvivorMetaId = new Map<string, string>();
+        const prepared: Array<{
+          row: (typeof rows)[number];
+          nextEntityId: string | null;
+          nextMeta: Record<string, unknown>;
+          metaChanged: boolean;
+          entityChanged: boolean;
+        }> = [];
+
+        const makeSignature = (
+          row: (typeof rows)[number],
+          entityId: string | null,
+          meta: Record<string, unknown>,
+        ): string | null => {
+          if (row.entity_type !== recordType || entityId !== survivorId) return null;
+          const relCode =
+            typeof meta.relationshipCode === 'string' && meta.relationshipCode
+              ? meta.relationshipCode
+              : (row.relationship_id ?? '');
+          const capCodes =
+            Array.isArray(meta.capacityCodes) && meta.capacityCodes.length > 0
+              ? [...meta.capacityCodes].map(String).sort().join('|')
+              : (row.capacity_id ?? '');
+          const roleFallback =
+            !meta.relationshipCode && typeof meta.role === 'string'
+              ? meta.role.trim().toLowerCase()
+              : '';
+          return `${row.entity_type}:${entityId}:${relCode}:${capCodes}:${roleFallback}`;
+        };
+
+        // First register already-surviving rows for survivorId so their party IDs win on collision
+        for (const r of rows) {
+          const meta =
+            r.metadata_json && typeof r.metadata_json === 'object'
+              ? (structuredClone(r.metadata_json) as Record<string, unknown>)
+              : {};
+          if (r.entity_type === recordType && r.entity_id === survivorId) {
+            const sig = makeSignature(r, r.entity_id, meta);
+            const metaId = typeof meta.id === 'string' && meta.id ? meta.id : r.id;
+            if (sig && !survivingSignatures.has(sig)) {
+              survivingSignatures.set(sig, metaId);
+            }
+          }
+        }
+
+        for (const r of rows) {
+          let entityChanged = false;
+          let nextEntityId = r.entity_id;
+          if (r.entity_type === recordType && r.entity_id === mergedId) {
+            nextEntityId = survivorId;
+            entityChanged = true;
+          }
+          const baseMeta =
+            r.metadata_json && typeof r.metadata_json === 'object'
+              ? (structuredClone(r.metadata_json) as Record<string, unknown>)
+              : {};
+          const repointedMeta = repointJsonIdFieldsInValue(baseMeta, mergedId, survivorId, {
+            allowDirectIdField: false,
+          });
+          const nextMeta = repointedMeta.value as Record<string, unknown>;
+          const metaChanged = repointedMeta.changed;
+
+          const sig = makeSignature(r, nextEntityId, nextMeta);
+          const metaId = typeof nextMeta.id === 'string' && nextMeta.id ? nextMeta.id : r.id;
+          if (sig) {
+            const existingMetaId = survivingSignatures.get(sig);
+            if (existingMetaId && r.entity_id === mergedId) {
+              deletedMatterPartyRowIds.push(r.id);
+              deletedMetaIdToSurvivorMetaId.set(metaId, existingMetaId);
+              continue;
+            }
+            if (!existingMetaId) {
+              survivingSignatures.set(sig, metaId);
+            }
+          }
+
+          prepared.push({
+            row: r,
+            nextEntityId,
+            nextMeta,
+            metaChanged,
+            entityChanged,
+          });
+        }
+
+        for (const item of prepared) {
+          let finalMetaChanged = item.metaChanged;
+          if (
+            typeof item.nextMeta.connectedToPartyId === 'string' &&
+            deletedMetaIdToSurvivorMetaId.has(item.nextMeta.connectedToPartyId)
+          ) {
+            item.nextMeta.connectedToPartyId = deletedMetaIdToSurvivorMetaId.get(
+              item.nextMeta.connectedToPartyId,
+            );
+            finalMetaChanged = true;
+          }
+          if (item.entityChanged || finalMetaChanged) {
+            await tx.query(
+              `UPDATE public.matter_parties
+               SET entity_id = $3,
+                   metadata_json = $4::jsonb,
+                   updated_at = NOW()
+               WHERE tenant_id = $1 AND id = $2`,
+              [
+                ctx.tenantId,
+                item.row.id,
+                item.nextEntityId,
+                JSON.stringify(item.nextMeta),
+              ],
+            );
+          }
+        }
+      }
+      if (deletedMatterPartyRowIds.length > 0) {
+        await tx.query(
+          `DELETE FROM public.matter_parties
+           WHERE tenant_id = $1 AND id = ANY($2::text[])`,
+          [ctx.tenantId, deletedMatterPartyRowIds],
+        );
+      }
+
+      // 6. Repoint documents & document_links (preserve distinct link_role entries per document)
       await tx.query(
         `UPDATE public.documents
          SET primary_client_id = CASE WHEN primary_client_id = $3 THEN $2 ELSE primary_client_id END,
@@ -2355,7 +2907,8 @@ export class TenantPartyRepository extends TenantScopedRepository {
            AND dl_merged.entity_type = $2
            AND dl_surv.entity_type = $2
            AND dl_merged.entity_id = $3
-           AND dl_surv.entity_id = $4`,
+           AND dl_surv.entity_id = $4
+           AND dl_merged.link_role = dl_surv.link_role`,
         [ctx.tenantId, recordType, mergedId, survivorId],
       );
       await tx.query(
@@ -2365,7 +2918,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
         [ctx.tenantId, survivorId, recordType, mergedId],
       );
 
-      // 7. Repoint enquiries (`S0-17a`)
+      // 7. Repoint enquiries (`S0-17a` + `S0-21` profile_json & snapshot sync)
       if (recordType === 'person') {
         await tx.query(
           `UPDATE public.enquiries
@@ -2389,12 +2942,17 @@ export class TenantPartyRepository extends TenantScopedRepository {
         tenant_id: string;
         id: string;
         conflict_snapshot_json: Record<string, unknown> | null;
+        profile_json: Record<string, unknown> | null;
       }>(
-        `SELECT tenant_id, id, conflict_snapshot_json
+        `SELECT tenant_id, id, conflict_snapshot_json, profile_json
          FROM public.enquiries
-         WHERE tenant_id = $1 AND conflict_snapshot_json IS NOT NULL
+         WHERE tenant_id = $1
+           AND (
+             conflict_snapshot_json IS NOT NULL
+             OR profile_json::text LIKE $2 ESCAPE '\\'
+           )
          FOR UPDATE`,
-        [ctx.tenantId],
+        [ctx.tenantId, likeMergedPattern],
       );
       for (const enqRow of enqSnapRes.rows) {
         this.assertRowTenant(
@@ -2402,90 +2960,79 @@ export class TenantPartyRepository extends TenantScopedRepository {
           enqRow.tenant_id,
           'enquiries.executeMergeInTransaction',
         );
-        const snap = enqRow.conflict_snapshot_json;
-        if (!snap || typeof snap !== 'object') continue;
-        let snapChanged = false;
-        const clonedSnap = structuredClone(snap) as {
-          conflicts?: Array<{
-            recordType?: string;
-            recordId?: string;
-            href?: string;
-          }>;
-          knownPeople?: Array<{ id?: string }>;
-          knownOrganisations?: Array<{ id?: string }>;
-          searchedInput?: {
-            knownPeople?: Array<{ id?: string }>;
-            knownOrganisations?: Array<{ id?: string }>;
-          };
-        };
-        if (Array.isArray(clonedSnap.conflicts)) {
-          for (const hit of clonedSnap.conflicts) {
-            if (hit.recordId === mergedId) {
-              hit.recordId = survivorId;
-              if (typeof hit.href === 'string') {
-                hit.href = hit.href.split(mergedId).join(survivorId);
-              }
-              snapChanged = true;
-            }
+        let rowChanged = false;
+        let nextSnap = enqRow.conflict_snapshot_json;
+        if (nextSnap && typeof nextSnap === 'object') {
+          const snapRes = rewriteConflictSnapshotJson(
+            nextSnap,
+            recordType,
+            mergedId,
+            survivorId,
+          );
+          if (snapRes.changed) {
+            nextSnap = snapRes.next;
+            rowChanged = true;
           }
         }
-        if (recordType === 'person') {
-          for (const holder of [clonedSnap, clonedSnap.searchedInput]) {
-            if (holder && Array.isArray(holder.knownPeople)) {
-              const seen = new Set<string>();
-              const deduped: Array<{ id?: string }> = [];
-              for (const kp of holder.knownPeople) {
-                const nextId = kp.id === mergedId ? survivorId : kp.id;
-                if (kp.id === mergedId) {
-                  snapChanged = true;
-                }
-                if (typeof nextId === 'string' && seen.has(nextId)) {
-                  snapChanged = true;
-                  continue;
-                }
-                if (typeof nextId === 'string') {
-                  seen.add(nextId);
-                }
-                deduped.push({ ...kp, id: nextId });
+
+        let nextProfile = enqRow.profile_json;
+        if (nextProfile && typeof nextProfile === 'object') {
+          const clonedProfile = structuredClone(nextProfile) as Record<string, unknown>;
+          let profChanged = false;
+          if (recordType === 'person') {
+            for (const field of ['linkedPersonId', 'referrerPersonId']) {
+              if (clonedProfile[field] === mergedId) {
+                clonedProfile[field] = survivorId;
+                profChanged = true;
               }
-              holder.knownPeople = deduped;
+            }
+          } else {
+            for (const field of ['linkedOrganisationId', 'referredToOrganisationId']) {
+              if (clonedProfile[field] === mergedId) {
+                clonedProfile[field] = survivorId;
+                profChanged = true;
+              }
             }
           }
-        }
-        if (recordType === 'organisation') {
-          for (const holder of [clonedSnap, clonedSnap.searchedInput]) {
-            if (holder && Array.isArray(holder.knownOrganisations)) {
-              const seen = new Set<string>();
-              const deduped: Array<{ id?: string }> = [];
-              for (const ko of holder.knownOrganisations) {
-                const nextId = ko.id === mergedId ? survivorId : ko.id;
-                if (ko.id === mergedId) {
-                  snapChanged = true;
-                }
-                if (typeof nextId === 'string' && seen.has(nextId)) {
-                  snapChanged = true;
-                  continue;
-                }
-                if (typeof nextId === 'string') {
-                  seen.add(nextId);
-                }
-                deduped.push({ ...ko, id: nextId });
-              }
-              holder.knownOrganisations = deduped;
+          if (
+            clonedProfile.conflictSnapshot &&
+            typeof clonedProfile.conflictSnapshot === 'object'
+          ) {
+            const profSnapRes = rewriteConflictSnapshotJson(
+              clonedProfile.conflictSnapshot as Record<string, unknown>,
+              recordType,
+              mergedId,
+              survivorId,
+            );
+            if (profSnapRes.changed) {
+              clonedProfile.conflictSnapshot = profSnapRes.next;
+              profChanged = true;
             }
           }
+          if (profChanged) {
+            nextProfile = clonedProfile;
+            rowChanged = true;
+          }
         }
-        if (snapChanged) {
+
+        if (rowChanged) {
           await tx.query(
             `UPDATE public.enquiries
-             SET conflict_snapshot_json = $3::jsonb, updated_at = NOW()
+             SET conflict_snapshot_json = $3::jsonb,
+                 profile_json = $4::jsonb,
+                 updated_at = NOW()
              WHERE tenant_id = $1 AND id = $2`,
-            [ctx.tenantId, enqRow.id, JSON.stringify(clonedSnap)],
+            [
+              ctx.tenantId,
+              enqRow.id,
+              nextSnap ? JSON.stringify(nextSnap) : null,
+              JSON.stringify(nextProfile ?? {}),
+            ],
           );
         }
       }
 
-      // 8. Repoint quotes (`S0-17a`)
+      // 8. Repoint quotes (`S0-17a` + `S0-21` profile_json & conflict_decision_json sync)
       if (recordType === 'person') {
         await tx.query(
           `UPDATE public.quotes
@@ -2501,8 +3048,63 @@ export class TenantPartyRepository extends TenantScopedRepository {
           [ctx.tenantId, survivorId, mergedId],
         );
       }
+      const quoteRows = await tx.query<{
+        tenant_id: string;
+        id: string;
+        conflict_decision_json: Record<string, unknown> | null;
+        profile_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, conflict_decision_json, profile_json
+         FROM public.quotes
+         WHERE tenant_id = $1
+           AND (
+             (conflict_decision_json IS NOT NULL AND conflict_decision_json::text LIKE $2 ESCAPE '\\')
+             OR profile_json::text LIKE $2 ESCAPE '\\'
+           )
+         FOR UPDATE`,
+        [ctx.tenantId, likeMergedPattern],
+      );
+      for (const qRow of quoteRows.rows) {
+        this.assertRowTenant(ctx, qRow.tenant_id, 'quotes.executeMergeInTransaction');
+        let qChanged = false;
+        let nextDecision = qRow.conflict_decision_json;
+        if (nextDecision && typeof nextDecision === 'object') {
+          const res = repointJsonIdFieldsInValue(nextDecision, mergedId, survivorId, {
+            allowDirectIdField: false,
+          });
+          if (res.changed) {
+            nextDecision = res.value as Record<string, unknown>;
+            qChanged = true;
+          }
+        }
+        let nextProfile = qRow.profile_json;
+        if (nextProfile && typeof nextProfile === 'object') {
+          const res = repointJsonIdFieldsInValue(nextProfile, mergedId, survivorId, {
+            allowDirectIdField: false,
+          });
+          if (res.changed) {
+            nextProfile = res.value as Record<string, unknown>;
+            qChanged = true;
+          }
+        }
+        if (qChanged) {
+          await tx.query(
+            `UPDATE public.quotes
+             SET conflict_decision_json = $3::jsonb,
+                 profile_json = $4::jsonb,
+                 updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $2`,
+            [
+              ctx.tenantId,
+              qRow.id,
+              nextDecision ? JSON.stringify(nextDecision) : null,
+              JSON.stringify(nextProfile ?? {}),
+            ],
+          );
+        }
+      }
 
-      // 9. Repoint task_linked_records & tasks (`S0-17a`)
+      // 9. Repoint task_linked_records & tasks JSONB (`S0-17a` + `S0-21`)
       await tx.query(
         `DELETE FROM public.task_linked_records tlr_merged
          USING public.task_linked_records tlr_surv
@@ -2521,15 +3123,172 @@ export class TenantPartyRepository extends TenantScopedRepository {
          WHERE tenant_id = $1 AND record_type = $2 AND record_id = $3`,
         [ctx.tenantId, recordType, mergedId, survivorId],
       );
-
-      // 10. Repoint notifications (`S0-17a`)
-      await tx.query(
-        `UPDATE public.notifications
-         SET record_id = $2,
-             href = REPLACE(href, $3, $2)
-         WHERE tenant_id = $1 AND record_id = $3`,
-        [ctx.tenantId, survivorId, mergedId],
+      const taskRows = await tx.query<{
+        tenant_id: string;
+        id: string;
+        linked_records_json: Array<{ recordType?: string; recordId?: string }> | null;
+        profile_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, linked_records_json, profile_json
+         FROM public.tasks
+         WHERE tenant_id = $1
+           AND (
+             linked_records_json::text LIKE $2 ESCAPE '\\'
+             OR profile_json::text LIKE $2 ESCAPE '\\'
+           )
+         FOR UPDATE`,
+        [ctx.tenantId, likeMergedPattern],
       );
+      const remapTaskLinks = (
+        arr: unknown,
+      ): { next: Array<{ recordType: string; recordId: string }>; changed: boolean } => {
+        if (!Array.isArray(arr)) return { next: [], changed: false };
+        let changed = false;
+        const seen = new Set<string>();
+        const out: Array<{ recordType: string; recordId: string }> = [];
+        for (const item of arr) {
+          if (!item || typeof item !== 'object') continue;
+          const rec = item as { recordType?: string; recordId?: string };
+          const rType = typeof rec.recordType === 'string' ? rec.recordType : '';
+          let rId = typeof rec.recordId === 'string' ? rec.recordId : '';
+          if (rType === recordType && rId === mergedId) {
+            rId = survivorId;
+            changed = true;
+          }
+          const key = `${rType}:${rId}`;
+          if (seen.has(key)) {
+            changed = true;
+            continue;
+          }
+          seen.add(key);
+          out.push({ recordType: rType, recordId: rId });
+        }
+        return { next: out, changed };
+      };
+      for (const tRow of taskRows.rows) {
+        this.assertRowTenant(ctx, tRow.tenant_id, 'tasks.executeMergeInTransaction');
+        let taskChanged = false;
+        let nextLinkedJson = tRow.linked_records_json ?? [];
+        if (Array.isArray(tRow.linked_records_json)) {
+          const remapped = remapTaskLinks(tRow.linked_records_json);
+          if (remapped.changed) {
+            nextLinkedJson = remapped.next;
+            taskChanged = true;
+          }
+        }
+        let nextProfile = tRow.profile_json;
+        if (nextProfile && typeof nextProfile === 'object') {
+          const clonedProf = structuredClone(nextProfile) as Record<string, unknown>;
+          let profChanged = false;
+          if (Array.isArray(clonedProf.linkedRecords)) {
+            const remappedProf = remapTaskLinks(clonedProf.linkedRecords);
+            if (remappedProf.changed) {
+              clonedProf.linkedRecords = remappedProf.next;
+              profChanged = true;
+            }
+          }
+          if (profChanged) {
+            nextProfile = clonedProf;
+            taskChanged = true;
+          }
+        }
+        if (taskChanged) {
+          await tx.query(
+            `UPDATE public.tasks
+             SET linked_records_json = $3::jsonb,
+                 profile_json = $4::jsonb,
+                 updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $2`,
+            [
+              ctx.tenantId,
+              tRow.id,
+              JSON.stringify(nextLinkedJson),
+              JSON.stringify(nextProfile ?? {}),
+            ],
+          );
+        }
+      }
+
+      // 10. Repoint notifications (`S0-17a` + `S0-21` path-boundary href & metadata_json sync)
+      const notifRows = await tx.query<{
+        tenant_id: string;
+        id: string;
+        record_id: string;
+        href: string;
+        by_id: string | null;
+        metadata_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, record_id, href, by_id, metadata_json
+         FROM public.notifications
+         WHERE tenant_id = $1
+           AND (
+             record_id = $2
+             OR by_id = $2
+             OR href LIKE $3 ESCAPE '\\'
+             OR metadata_json::text LIKE $3 ESCAPE '\\'
+           )
+         FOR UPDATE`,
+        [ctx.tenantId, mergedId, likeMergedPattern],
+      );
+      for (const nRow of notifRows.rows) {
+        this.assertRowTenant(ctx, nRow.tenant_id, 'notifications.executeMergeInTransaction');
+        const nextRecordId = nRow.record_id === mergedId ? survivorId : nRow.record_id;
+        const nextById = nRow.by_id === mergedId ? survivorId : nRow.by_id;
+        const nextHref =
+          typeof nRow.href === 'string'
+            ? replaceRecordIdPathSegment(nRow.href, mergedId, survivorId)
+            : nRow.href;
+        let metaChanged = false;
+        let nextMeta = nRow.metadata_json;
+        if (nextMeta && typeof nextMeta === 'object') {
+          const clonedMeta = structuredClone(nextMeta) as Record<string, unknown>;
+          if (clonedMeta.recordId === mergedId) {
+            clonedMeta.recordId = survivorId;
+            metaChanged = true;
+          }
+          if (clonedMeta.byId === mergedId) {
+            clonedMeta.byId = survivorId;
+            metaChanged = true;
+          }
+          if (typeof clonedMeta.href === 'string') {
+            const mappedMetaHref = replaceRecordIdPathSegment(
+              clonedMeta.href,
+              mergedId,
+              survivorId,
+            );
+            if (mappedMetaHref !== clonedMeta.href) {
+              clonedMeta.href = mappedMetaHref;
+              metaChanged = true;
+            }
+          }
+          if (metaChanged) {
+            nextMeta = clonedMeta;
+          }
+        }
+        if (
+          nextRecordId !== nRow.record_id ||
+          nextById !== nRow.by_id ||
+          nextHref !== nRow.href ||
+          metaChanged
+        ) {
+          await tx.query(
+            `UPDATE public.notifications
+             SET record_id = $3,
+                 href = $4,
+                 by_id = $5,
+                 metadata_json = $6::jsonb
+             WHERE tenant_id = $1 AND id = $2`,
+            [
+              ctx.tenantId,
+              nRow.id,
+              nextRecordId,
+              nextHref,
+              nextById,
+              JSON.stringify(nextMeta ?? {}),
+            ],
+          );
+        }
+      }
 
       // 11. Repoint recently_viewed (`S0-17a`)
       const rvRes = await tx.query<{

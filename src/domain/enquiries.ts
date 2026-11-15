@@ -12,8 +12,13 @@ import {
   type DuplicateMatch,
   type DuplicateReason,
 } from './duplicates';
-import { resolveLabel } from './lists';
+import {
+  hasChoiceValueKeyOrLabel,
+  resolveLabel,
+  resolveListValueId,
+} from './lists';
 import { CONFLICT_SEARCHED_SOURCES, redactRecordId } from './matterConflicts';
+import { getRelationshipAlignment } from './matterParties';
 import { personDisplayName } from './names';
 import {
   extractEmailDomain,
@@ -42,6 +47,7 @@ import type {
   EnquiryConflictStatus,
   EnquiryStatus,
   Matter,
+  MatterParty,
   Organisation,
   Person,
   PersonOrganisationLink,
@@ -246,6 +252,35 @@ export function namesLikelyMatch(
 }
 
 function isOppositePartyOrg(org: Organisation, values: ChoiceValue[]): boolean {
+  const candidateIds = [
+    org.organisationTypeId,
+    ...org.relationshipTypeIds,
+    (org as unknown as { organisationType?: string }).organisationType,
+  ].filter((v): v is string => Boolean(v));
+
+  if (
+    hasChoiceValueKeyOrLabel(values, candidateIds, {
+      systemKeys: [
+        'organisation_relationship_type.counterparty',
+        'organisation_relationship_type.opposite_party',
+        'organisation_relationship_type.opposing_party',
+      ],
+      fallbackIds: [
+        'organisation_relationship_type.counterparty',
+        'organisation_relationship_type.opposite_party',
+        'organisation_relationship_type.opposing_party',
+      ],
+      fallbackLabels: [
+        'opposite party',
+        'opposing party',
+        'counterparty',
+        'adverse party',
+      ],
+    })
+  ) {
+    return true;
+  }
+
   const labels = [
     org.organisationTypeId ? resolveLabel(values, org.organisationTypeId) : '',
     ...org.relationshipTypeIds.map((id) => resolveLabel(values, id)),
@@ -266,7 +301,28 @@ function isOppositePartyOrg(org: Organisation, values: ChoiceValue[]): boolean {
   );
 }
 
-function isClientOrg(org: Organisation, matters: Matter[], values: ChoiceValue[]): boolean {
+function isClientOrg(org: Organisation, visibleMatters: Matter[], values: ChoiceValue[]): boolean {
+  const candidateIds = [
+    ...org.relationshipTypeIds,
+    (org as unknown as { organisationType?: string }).organisationType,
+  ].filter((v): v is string => Boolean(v));
+
+  if (
+    hasChoiceValueKeyOrLabel(values, candidateIds, {
+      systemKeys: [
+        'organisation_relationship_type.client',
+        'organisation_relationship_type.former_client',
+      ],
+      fallbackIds: [
+        'organisation_relationship_type.client',
+        'organisation_relationship_type.former_client',
+      ],
+      fallbackLabels: ['client', 'former client'],
+    })
+  ) {
+    return true;
+  }
+
   const labels = [
     ...org.relationshipTypeIds.map((id) => resolveLabel(values, id)),
     ...org.relationshipTypeIds,
@@ -284,7 +340,7 @@ function isClientOrg(org: Organisation, matters: Matter[], values: ChoiceValue[]
   ) {
     return true;
   }
-  return matters.some(
+  return visibleMatters.some(
     (m) => m.clientId === org.id || (m.additionalClientIds ?? []).includes(org.id),
   );
 }
@@ -292,6 +348,36 @@ function isClientOrg(org: Organisation, matters: Matter[], values: ChoiceValue[]
 function isOppositePartyPerson(p: Person, values: ChoiceValue[]): boolean {
   const extraContactTypes =
     (p as unknown as { contactTypes?: string[] }).contactTypes ?? [];
+  const candidateIds = [...p.relationshipRoleIds, ...extraContactTypes].filter(
+    (v): v is string => Boolean(v),
+  );
+
+  if (
+    hasChoiceValueKeyOrLabel(values, candidateIds, {
+      systemKeys: [
+        'person_role.other_side_party',
+        'person_role.opposite_party',
+        'person_role.opposing_party',
+        'person_role.opposing_solicitor',
+      ],
+      fallbackIds: [
+        'person_role.other_side_party',
+        'person_role.opposite_party',
+        'person_role.opposing_party',
+        'person_role.opposing_solicitor',
+      ],
+      fallbackLabels: [
+        'other side party',
+        'opposite party',
+        'opposing party',
+        'opposing solicitor',
+        'counterparty',
+      ],
+    })
+  ) {
+    return true;
+  }
+
   const labels = [
     ...p.relationshipRoleIds.map((id) => resolveLabel(values, id)),
     ...p.relationshipRoleIds,
@@ -309,9 +395,39 @@ function isOppositePartyPerson(p: Person, values: ChoiceValue[]): boolean {
   );
 }
 
-function isClientPerson(p: Person, matters: Matter[], values: ChoiceValue[]): boolean {
+function isClientPerson(p: Person, visibleMatters: Matter[], values: ChoiceValue[]): boolean {
   const extraContactTypes =
     (p as unknown as { contactTypes?: string[] }).contactTypes ?? [];
+  const candidateIds = [...p.relationshipRoleIds, ...extraContactTypes].filter(
+    (v): v is string => Boolean(v),
+  );
+
+  if (
+    hasChoiceValueKeyOrLabel(values, candidateIds, {
+      systemKeys: [
+        'person_role.private_client',
+        'person_role.client_contact',
+        'person_role.instructing_contact',
+        'person_role.billing_contact',
+      ],
+      fallbackIds: [
+        'person_role.private_client',
+        'person_role.client_contact',
+        'person_role.instructing_contact',
+        'person_role.billing_contact',
+      ],
+      fallbackLabels: [
+        'private client',
+        'client',
+        'client contact',
+        'instructing contact',
+        'billing contact',
+      ],
+    })
+  ) {
+    return true;
+  }
+
   const labels = [
     ...p.relationshipRoleIds.map((id) => resolveLabel(values, id)),
     ...p.relationshipRoleIds,
@@ -323,7 +439,7 @@ function isClientPerson(p: Person, matters: Matter[], values: ChoiceValue[]): bo
   if (labels.some((l) => l.includes('client') && !l.includes('opposing'))) {
     return true;
   }
-  return matters.some(
+  return visibleMatters.some(
     (m) => m.clientId === p.id || (m.additionalClientIds ?? []).includes(p.id),
   );
 }
@@ -484,23 +600,126 @@ export function runEnquiryConflictSearch(
     excludeEnquiryId,
   );
 
-  // 1. Parse each comma-separated entry in otherPartiesNamed (only entries meeting 3+ char token threshold)
+  const isRestrictedMatter = (m: Matter): boolean =>
+    canViewMatter
+      ? !canViewMatter(m)
+      : Boolean(
+          m.isStaffMatter ||
+            m.hasEthicalWall ||
+            (m.restrictedAccessUserIds?.length ?? 0) > 0,
+        );
+  const visibleMatters = matters.filter((m) => !isRestrictedMatter(m));
+
+  const personById = new Map<string, Person>();
+  for (const p of combinedPeople) {
+    if (!p.mergedIntoId) {
+      personById.set(p.id, p);
+    }
+  }
+  const orgById = new Map<string, Organisation>();
+  const childrenByParentId = new Map<string, Organisation[]>();
+  for (const o of organisations) {
+    if (!o.mergedIntoId) {
+      orgById.set(o.id, o);
+      if (o.parentOrganisationId) {
+        const siblings = childrenByParentId.get(o.parentOrganisationId) ?? [];
+        siblings.push(o);
+        childrenByParentId.set(o.parentOrganisationId, siblings);
+      }
+    }
+  }
+
+  const getCorporateGroupRelatives = (
+    orgId: string,
+  ): Array<{
+    org: Organisation;
+    relation: 'Parent organisation' | 'Subsidiary organisation' | 'Group organisation';
+  }> => {
+    const visited = new Set<string>([orgId]);
+    const out: Array<{
+      org: Organisation;
+      relation: 'Parent organisation' | 'Subsidiary organisation' | 'Group organisation';
+    }> = [];
+    let curr = orgById.get(orgId);
+    let depth = 0;
+    while (curr?.parentOrganisationId && depth < 10) {
+      const parent = orgById.get(curr.parentOrganisationId);
+      if (!parent || visited.has(parent.id)) break;
+      visited.add(parent.id);
+      out.push({
+        org: parent,
+        relation: depth === 0 ? 'Parent organisation' : 'Group organisation',
+      });
+      curr = parent;
+      depth += 1;
+    }
+    const queue: Array<{ id: string; direct: boolean }> = [{ id: orgId, direct: true }];
+    while (queue.length > 0 && out.length < 25) {
+      const next = queue.shift()!;
+      for (const child of childrenByParentId.get(next.id) ?? []) {
+        if (visited.has(child.id)) continue;
+        visited.add(child.id);
+        out.push({
+          org: child,
+          relation: next.direct ? 'Subsidiary organisation' : 'Group organisation',
+        });
+        queue.push({ id: child.id, direct: false });
+      }
+    }
+    return out;
+  };
+
+  const getPersonCandidateNames = (p: Person): string[] =>
+    Array.from(
+      new Set(
+        [
+          personDisplayName(p),
+          `${p.firstName} ${p.surname}`,
+          p.preferredName ? `${p.preferredName} ${p.surname}` : '',
+          ...(p.otherNames ?? []).map((n) => n.name),
+        ]
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    );
+
+  const getPersonCandidateEmails = (p: Person): string[] =>
+    Array.from(
+      new Set((p.emails ?? []).map((e) => normaliseEmail(e.address)).filter(Boolean)),
+    );
+
+  const getOrgCandidateNames = (org: Organisation): string[] =>
+    Array.from(
+      new Set(
+        [org.legalName, ...(org.otherNames ?? []).map((n) => n.name)]
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    );
+
+  const getOrgCandidateEmails = (org: Organisation): string[] =>
+    org.generalEmail ? [normaliseEmail(org.generalEmail)].filter(Boolean) : [];
+
+  // 1. Parse each comma-separated entry in otherPartiesNamed (only entries meeting 3+ char token threshold or valid email)
   const rawOther = (input.otherPartiesNamed ?? '')
     .split(/[,;/\n]+/)
     .map((s) => s.trim())
-    .filter((s) => hasMinThreeCharToken(s));
+    .filter((s) => hasMinThreeCharToken(s) || isValidEmailFormat(s));
 
   for (const otherName of rawOther) {
+    const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
     // 1a. Check existing Organisations against otherName
     for (const org of organisations) {
       if (org.mergedIntoId) continue;
-      const orgNames = [org.legalName, ...org.otherNames.map((n) => n.name)];
-      const exact = orgNames.some((n) => namesLikelyMatch(otherName, n, 'organisation'));
+      const orgNames = getOrgCandidateNames(org);
+      const exactName = orgNames.some((n) => namesLikelyMatch(otherName, n, 'organisation'));
+      const emailHit = Boolean(otherEmail) && getOrgCandidateEmails(org).includes(otherEmail);
+      const exact = exactName || emailHit;
       const loose = exact ? null : firstLoose(orgNames.map((n) => organisationNameLooseMatch(otherName, n)));
       const fuzzy = Boolean(loose);
       if (!exact && !fuzzy) continue;
 
-      const isClient = isClientOrg(org, matters, values);
+      const isClient = isClientOrg(org, visibleMatters, values);
       const isOpposite = isOppositePartyOrg(org, values);
       const isHigh = isClient || isOpposite;
       // Similar spellings are only worth raising when they point at a client or opposite party
@@ -519,7 +738,7 @@ export function runEnquiryConflictSearch(
         queryTerm: otherName,
         href: `/organisations/${org.id}`,
         reason,
-        matchedField: fuzzy ? `other parties (${loose})` : 'other parties',
+        matchedField: fuzzy ? `other parties (${loose})` : emailHit ? 'other parties (email)' : 'other parties',
         severity,
         strength: fuzzy ? 2 : isHigh ? 5 : 3,
         blocking: !fuzzy && isHigh,
@@ -532,19 +751,17 @@ export function runEnquiryConflictSearch(
     for (const p of combinedPeople) {
       if (p.mergedIntoId || p.isEmployee) continue;
       const pName = personDisplayName(p);
-      const pCandidateNames = [
-        pName,
-        `${p.firstName} ${p.surname}`,
-        ...p.otherNames.map((n) => n.name),
-      ].filter(Boolean);
-      const exact = pCandidateNames.some((n) => namesLikelyMatch(otherName, n, 'person'));
+      const pCandidateNames = getPersonCandidateNames(p);
+      const exactName = pCandidateNames.some((n) => namesLikelyMatch(otherName, n, 'person'));
+      const emailHit = Boolean(otherEmail) && getPersonCandidateEmails(p).includes(otherEmail);
+      const exact = exactName || emailHit;
       const loose = exact
         ? null
         : firstLoose(pCandidateNames.map((n) => personNameLooseMatch(otherName, n)));
       const fuzzy = Boolean(loose);
       if (!exact && !fuzzy) continue;
 
-      const isClient = isClientPerson(p, matters, values);
+      const isClient = isClientPerson(p, visibleMatters, values);
       const isOpposite = isOppositePartyPerson(p, values);
       const isHigh = isClient || isOpposite;
       if (fuzzy && !isHigh) continue;
@@ -562,7 +779,7 @@ export function runEnquiryConflictSearch(
         queryTerm: otherName,
         href: `/people/${p.id}`,
         reason,
-        matchedField: fuzzy ? `other parties (${loose})` : 'other parties',
+        matchedField: fuzzy ? `other parties (${loose})` : emailHit ? 'other parties (email)' : 'other parties',
         severity,
         strength: fuzzy ? 2 : isHigh ? 5 : 3,
         blocking: !fuzzy && isHigh,
@@ -573,6 +790,10 @@ export function runEnquiryConflictSearch(
   }
 
   // 2. Check Caller Name & Calling On Behalf Of against known Opposite Party People & Organisations
+  const linkedInputPerson = input.linkedPersonId ? personById.get(input.linkedPersonId) : undefined;
+  const linkedInputOrg = input.linkedOrganisationId
+    ? orgById.get(input.linkedOrganisationId)
+    : undefined;
   const callerFullRaw = [input.firstName?.trim(), input.lastName?.trim()].filter(Boolean).join(' ');
   const hasBothCallerNames = Boolean(
     hasMinThreeCharToken(input.firstName) && hasMinThreeCharToken(input.lastName),
@@ -582,27 +803,42 @@ export function runEnquiryConflictSearch(
     hasMinThreeCharToken(callerFullRaw) &&
     normaliseComparableName(callerFullRaw).includes(' ');
   const canMatchCallerFullName = hasBothCallerNames || singleFieldFullCaller;
+  const callerCandidateNames = Array.from(
+    new Set([
+      ...(canMatchCallerFullName ? [callerFullRaw] : []),
+      ...(linkedInputPerson ? getPersonCandidateNames(linkedInputPerson) : []),
+    ].filter((s) => hasMinThreeCharToken(s))),
+  );
 
-  if (canMatchCallerFullName) {
+  if (callerCandidateNames.length > 0) {
     for (const p of combinedPeople) {
       if (p.mergedIntoId || p.isEmployee) continue;
       if (!isOppositePartyPerson(p, values)) continue;
       const pName = personDisplayName(p);
-      const target = `${p.firstName} ${p.surname}`;
-      const exact = namesLikelyMatch(callerFullRaw, target, 'person');
-      const loose = exact ? null : personNameLooseMatch(callerFullRaw, target);
+      const targets = getPersonCandidateNames(p);
+      const exact = callerCandidateNames.some((cn) =>
+        targets.some((t) => namesLikelyMatch(cn, t, 'person')),
+      );
+      const loose = exact
+        ? null
+        : firstLoose(
+            callerCandidateNames.flatMap((cn) =>
+              targets.map((t) => personNameLooseMatch(cn, t)),
+            ),
+          );
       const fuzzy = Boolean(loose);
       if (!exact && !fuzzy) continue;
+      const queryLabel = callerFullRaw || callerCandidateNames[0] || pName;
       const hitData = {
         recordId: p.id,
         recordType: 'person' as const,
         name: pName,
         recordLabel: `${pName} (${p.id})`,
-        queryTerm: callerFullRaw,
+        queryTerm: queryLabel,
         href: `/people/${p.id}`,
         reason: fuzzy
-          ? `Caller "${callerFullRaw}" ${looseVerb(loose)} known opposite party ${pName} (${p.id}). Check if this is the same person`
-          : `Caller "${callerFullRaw}" matches known opposite party ${pName} (${p.id})`,
+          ? `Caller "${queryLabel}" ${looseVerb(loose)} known opposite party ${pName} (${p.id}). Check if this is the same person`
+          : `Caller "${queryLabel}" matches known opposite party ${pName} (${p.id})`,
         matchedField: fuzzy ? `caller name (${loose})` : 'caller name',
         severity: fuzzy ? ('medium' as const) : ('high' as const),
         strength: fuzzy ? 2 : 5,
@@ -614,25 +850,40 @@ export function runEnquiryConflictSearch(
   }
 
   const behalfRaw = (input.callingOnBehalfOf ?? '').trim();
-  if (hasMinThreeCharToken(behalfRaw)) {
+  const behalfCandidateNames = Array.from(
+    new Set([
+      ...(hasMinThreeCharToken(behalfRaw) ? [behalfRaw] : []),
+      ...(linkedInputOrg ? getOrgCandidateNames(linkedInputOrg) : []),
+    ].filter((s) => hasMinThreeCharToken(s))),
+  );
+  if (behalfCandidateNames.length > 0) {
     for (const org of organisations) {
       if (org.mergedIntoId) continue;
       if (!isOppositePartyOrg(org, values)) continue;
-      const orgNames = [org.legalName, ...org.otherNames.map((n) => n.name)];
-      const exact = orgNames.some((n) => namesLikelyMatch(behalfRaw, n, 'organisation'));
-      const loose = exact ? null : firstLoose(orgNames.map((n) => organisationNameLooseMatch(behalfRaw, n)));
+      const orgNames = getOrgCandidateNames(org);
+      const exact = behalfCandidateNames.some((bn) =>
+        orgNames.some((n) => namesLikelyMatch(bn, n, 'organisation')),
+      );
+      const loose = exact
+        ? null
+        : firstLoose(
+            behalfCandidateNames.flatMap((bn) =>
+              orgNames.map((n) => organisationNameLooseMatch(bn, n)),
+            ),
+          );
       const fuzzy = Boolean(loose);
       if (!exact && !fuzzy) continue;
+      const queryLabel = behalfRaw || behalfCandidateNames[0] || org.legalName;
       const hitData = {
         recordId: org.id,
         recordType: 'organisation' as const,
         name: org.legalName,
         recordLabel: `${org.legalName} (${org.id})`,
-        queryTerm: behalfRaw,
+        queryTerm: queryLabel,
         href: `/organisations/${org.id}`,
         reason: fuzzy
-          ? `Organisation "${behalfRaw}" ${looseVerb(loose)} opposite party ${org.legalName} (${org.id}). Check if this is the same organisation`
-          : `Organisation "${behalfRaw}" matches opposite party ${org.legalName} (${org.id})`,
+          ? `Organisation "${queryLabel}" ${looseVerb(loose)} opposite party ${org.legalName} (${org.id}). Check if this is the same organisation`
+          : `Organisation "${queryLabel}" matches opposite party ${org.legalName} (${org.id})`,
         matchedField: fuzzy ? `organisation (${loose})` : 'organisation',
         severity: fuzzy ? ('medium' as const) : ('high' as const),
         strength: fuzzy ? 2 : 5,
@@ -646,21 +897,30 @@ export function runEnquiryConflictSearch(
       if (p.mergedIntoId || p.isEmployee) continue;
       if (!isOppositePartyPerson(p, values)) continue;
       const pName = personDisplayName(p);
-      const target = `${p.firstName} ${p.surname}`;
-      const exact = namesLikelyMatch(behalfRaw, target, 'person');
-      const loose = exact ? null : personNameLooseMatch(behalfRaw, target);
+      const targets = getPersonCandidateNames(p);
+      const exact = behalfCandidateNames.some((bn) =>
+        targets.some((t) => namesLikelyMatch(bn, t, 'person')),
+      );
+      const loose = exact
+        ? null
+        : firstLoose(
+            behalfCandidateNames.flatMap((bn) =>
+              targets.map((t) => personNameLooseMatch(bn, t)),
+            ),
+          );
       const fuzzy = Boolean(loose);
       if (!exact && !fuzzy) continue;
+      const queryLabel = behalfRaw || behalfCandidateNames[0] || pName;
       const hitData = {
         recordId: p.id,
         recordType: 'person' as const,
         name: pName,
         recordLabel: `${pName} (${p.id})`,
-        queryTerm: behalfRaw,
+        queryTerm: queryLabel,
         href: `/people/${p.id}`,
         reason: fuzzy
-          ? `"${behalfRaw}" ${looseVerb(loose)} opposite party ${pName} (${p.id}). Check if this is the same person`
-          : `"${behalfRaw}" matches opposite party ${pName} (${p.id})`,
+          ? `"${queryLabel}" ${looseVerb(loose)} opposite party ${pName} (${p.id}). Check if this is the same person`
+          : `"${queryLabel}" matches opposite party ${pName} (${p.id})`,
         matchedField: fuzzy ? `organisation (${loose})` : 'organisation',
         severity: fuzzy ? ('medium' as const) : ('high' as const),
         strength: fuzzy ? 2 : 5,
@@ -671,21 +931,27 @@ export function runEnquiryConflictSearch(
     }
   }
 
-  // 2b. Check the caller's email and phone against opposite party People & Organisations.
+  // 2b. Check the caller's email (including secondary emails on linked records) and phone against opposite party People & Organisations.
   // An exact email or phone is as strong as a name match, so it's high severity.
   // A shared (non-free) email domain is weaker, so it's medium.
   const callerEmail = isValidEmailFormat(input.email) ? normaliseEmail(input.email) : '';
-  const callerDomain = callerEmail ? extractEmailDomain(callerEmail) : '';
+  const callerEmailSet = new Set<string>([
+    ...(callerEmail ? [callerEmail] : []),
+    ...(linkedInputPerson ? getPersonCandidateEmails(linkedInputPerson) : []),
+    ...(linkedInputOrg ? getOrgCandidateEmails(linkedInputOrg) : []),
+  ]);
+  const primaryCallerEmail = callerEmail || Array.from(callerEmailSet)[0] || '';
+  const callerDomain = primaryCallerEmail ? extractEmailDomain(primaryCallerEmail) : '';
   const callerDomainUsable = Boolean(callerDomain && !FREE_EMAIL_DOMAINS.has(callerDomain));
   const callerPhone = isValidPhoneForCheck(input.phone) ? normalisePhoneLast9(input.phone) : '';
 
-  if (callerEmail || callerPhone) {
+  if (callerEmailSet.size > 0 || callerPhone) {
     for (const p of combinedPeople) {
       if (p.mergedIntoId || p.isEmployee) continue;
       if (!isOppositePartyPerson(p, values)) continue;
       const pName = personDisplayName(p);
-      const emailHit =
-        Boolean(callerEmail) && p.emails.some((e) => normaliseEmail(e.address) === callerEmail);
+      const matchedPersonEmail = getPersonCandidateEmails(p).find((e) => callerEmailSet.has(e));
+      const emailHit = Boolean(matchedPersonEmail);
       const phoneHit =
         Boolean(callerPhone) && p.phones.some((ph) => normalisePhoneLast9(ph.number) === callerPhone);
       const fields: [boolean, string][] = [
@@ -699,7 +965,7 @@ export function runEnquiryConflictSearch(
           recordType: 'person' as const,
           name: pName,
           recordLabel: `${pName} (${p.id})`,
-          queryTerm: field === 'email' ? callerEmail : String(input.phone ?? ''),
+          queryTerm: field === 'email' ? matchedPersonEmail! : String(input.phone ?? ''),
           href: `/people/${p.id}`,
           reason: `Caller's ${field} matches known opposite party ${pName} (${p.id})`,
           matchedField: field,
@@ -715,7 +981,9 @@ export function runEnquiryConflictSearch(
     for (const org of organisations) {
       if (org.mergedIntoId) continue;
       if (!isOppositePartyOrg(org, values)) continue;
-      const emailHit = Boolean(callerEmail) && normaliseEmail(org.generalEmail) === callerEmail;
+      const orgEmails = getOrgCandidateEmails(org);
+      const matchedOrgEmail = orgEmails.find((e) => callerEmailSet.has(e));
+      const emailHit = Boolean(matchedOrgEmail);
       const phoneHit =
         Boolean(callerPhone) && Boolean(org.mainPhone) && normalisePhoneLast9(org.mainPhone) === callerPhone;
       const orgDomains = [extractEmailDomain(org.generalEmail), websiteDomain(org.website)].filter(
@@ -735,7 +1003,7 @@ export function runEnquiryConflictSearch(
           recordType: 'organisation' as const,
           name: org.legalName,
           recordLabel: `${org.legalName} (${org.id})`,
-          queryTerm: field === 'phone' ? String(input.phone ?? '') : callerEmail,
+          queryTerm: field === 'phone' ? String(input.phone ?? '') : matchedOrgEmail || primaryCallerEmail,
           href: `/organisations/${org.id}`,
           reason:
             field === 'email domain'
@@ -804,26 +1072,160 @@ export function runEnquiryConflictSearch(
     }
   }
 
-  // 3. Check if caller, callingOnBehalfOf, or otherPartiesNamed is an adverse/counterparty or instructing/billing contact on a matter
-  const isRestrictedMatter = (m: Matter): boolean =>
-    canViewMatter ? !canViewMatter(m) : Boolean(m.isStaffMatter || m.hasEthicalWall);
-
-  const personById = new Map<string, Person>();
-  for (const p of combinedPeople) {
-    if (!p.mergedIntoId) {
-      personById.set(p.id, p);
+  // 3. Check if caller, callingOnBehalfOf, or otherPartiesNamed matches matter clients, parties (all 8 codes & 70 capacities), or contacts
+  const resolvePartyTargets = (
+    linkedId: string | null | undefined,
+    fallbackName: string,
+    defaultKind: 'person' | 'organisation',
+  ): { names: string[]; emails: string[]; kind: 'person' | 'organisation' } => {
+    const recPerson = linkedId ? personById.get(linkedId) : undefined;
+    const recOrg = !recPerson && linkedId ? orgById.get(linkedId) : undefined;
+    if (recPerson) {
+      return {
+        names: Array.from(new Set([fallbackName, ...getPersonCandidateNames(recPerson)].filter(Boolean))),
+        emails: getPersonCandidateEmails(recPerson),
+        kind: 'person',
+      };
     }
-  }
-  const orgById = new Map<string, Organisation>();
-  for (const o of organisations) {
-    if (!o.mergedIntoId) {
-      orgById.set(o.id, o);
+    if (recOrg) {
+      return {
+        names: Array.from(new Set([fallbackName, ...getOrgCandidateNames(recOrg)].filter(Boolean))),
+        emails: getOrgCandidateEmails(recOrg),
+        kind: 'organisation',
+      };
     }
-  }
+    return {
+      names: fallbackName ? [fallbackName] : [],
+      emails: [],
+      kind: defaultKind,
+    };
+  };
 
-  const looseForParty = (partyName: string): LooseNameMatch | null =>
-    (canMatchCallerFullName ? personNameLooseMatch(callerFullRaw, partyName) : null) ??
-    (hasMinThreeCharToken(behalfRaw) ? organisationNameLooseMatch(behalfRaw, partyName) : null);
+  const formatMatterPartyLabel = (mp: Pick<MatterParty, 'role' | 'relationshipCode' | 'capacityCodes'>): string => {
+    if (mp.role && mp.role.trim()) return mp.role.trim();
+    const caps = (mp.capacityCodes ?? []).join(', ');
+    if (mp.relationshipCode && caps) return `${mp.relationshipCode} (${caps})`;
+    return mp.relationshipCode || caps || 'Party';
+  };
+
+  const isAdverseMatterRole = (role: string) => {
+    const r = role.toLowerCase();
+    return (
+      r.includes('oppos') ||
+      r.includes('opponent') ||
+      r.includes('counterparty') ||
+      r.includes('other side') ||
+      r.includes('adverse') ||
+      r.includes('defendant') ||
+      r.includes('claimant') ||
+      r.includes('adjoining')
+    );
+  };
+
+  const isAlignedMatterRole = (role: string) => {
+    const r = role.toLowerCase();
+    return (
+      !isAdverseMatterRole(role) &&
+      (r === 'client' ||
+        r.startsWith('client ') ||
+        r.includes('joint client') ||
+        r.includes('client contact'))
+    );
+  };
+
+  const isAdverseMatterParty = (party: Pick<MatterParty, 'relationshipCode' | 'role'>): boolean =>
+    party.relationshipCode
+      ? getRelationshipAlignment(party.relationshipCode) === 'adverse'
+      : isAdverseMatterRole(party.role);
+
+  const isAlignedMatterParty = (party: Pick<MatterParty, 'relationshipCode' | 'role'>): boolean =>
+    party.relationshipCode
+      ? getRelationshipAlignment(party.relationshipCode) === 'aligned'
+      : isAlignedMatterRole(party.role);
+
+  const isDirectClientMatterParty = (party: Pick<MatterParty, 'relationshipCode' | 'role'>): boolean =>
+    party.relationshipCode
+      ? party.relationshipCode === 'CL' || party.relationshipCode === 'JC'
+      : isAlignedMatterRole(party.role);
+
+  const isEntityOnMatter = (
+    m: Matter,
+    entityId: string,
+    candidateNames: string[],
+    candidateEmails: string[],
+  ): boolean => {
+    const allClients = [m.clientId, ...(m.additionalClientIds ?? [])].filter(Boolean);
+    if (
+      allClients.includes(entityId) ||
+      m.instructingContactId === entityId ||
+      m.billingContactId === entityId ||
+      m.referrerContactId === entityId
+    ) {
+      return true;
+    }
+    return m.parties.some((mp) => {
+      if (mp.linkedRecordId && mp.linkedRecordId === entityId) return true;
+      const mpTargets = resolvePartyTargets(
+        mp.linkedRecordId,
+        mp.name,
+        mp.entityType === 'person' ? 'person' : 'organisation',
+      );
+      if (
+        candidateNames.some((cn) =>
+          mpTargets.names.some(
+            (mn) =>
+              namesLikelyMatch(mn, cn, 'person') ||
+              namesLikelyMatch(mn, cn, 'organisation'),
+          ),
+        )
+      ) {
+        return true;
+      }
+      return candidateEmails.some((ce) => mpTargets.emails.includes(ce));
+    });
+  };
+
+  const looseForParty = (partyNames: string[]): LooseNameMatch | null => {
+    for (const partyName of partyNames) {
+      for (const cn of callerCandidateNames) {
+        const hit = personNameLooseMatch(cn, partyName);
+        if (hit) return hit;
+      }
+      for (const bn of behalfCandidateNames) {
+        const hit = organisationNameLooseMatch(bn, partyName);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+
+  const emitRestrictedMatterHit = (
+    targetMap: Map<string, ConflictHit>,
+    matterHitId: string,
+    queryTerm: string,
+    reason: string,
+    matchedField: string,
+    severity: ConflictSeverity = 'high',
+    strength = 5,
+    blocking = true,
+  ) => {
+    const hitData = {
+      recordId: matterHitId,
+      recordType: 'matter' as const,
+      name: 'Restricted matter',
+      recordLabel: 'Restricted matter',
+      queryTerm,
+      href: '',
+      reason,
+      matchedField,
+      severity,
+      strength,
+      blocking,
+    };
+    upsertConflictHit(targetMap, hitData);
+    upsertConflictHit(combinedMap, hitData);
+  };
+
   for (const m of matters) {
     const restricted = isRestrictedMatter(m);
     const matterDisplayLabel = restricted
@@ -831,107 +1233,271 @@ export function runEnquiryConflictSearch(
       : `${m.matterNumber} — ${m.title}`;
     const matterHref = restricted ? '' : `/matters/${m.id}`;
     const matterHitId = restricted ? `restricted-${redactRecordId(tenantId, m.id)}` : m.id;
+    const allMatterClientIds = Array.from(
+      new Set([m.clientId, ...(m.additionalClientIds ?? [])].filter(Boolean)),
+    );
 
-    for (const party of m.parties) {
-      const roleLower = party.role.toLowerCase();
-      const isAdverseRole =
-        roleLower.includes('opposing') ||
-        roleLower.includes('opponent') ||
-        roleLower.includes('other side') ||
-        roleLower.includes('adverse') ||
-        roleLower.includes('counterparty') ||
-        roleLower.includes('defendant') ||
-        roleLower.includes('claimant') ||
-        roleLower.includes('adjoining');
-      if (!isAdverseRole) continue;
+    // 3a-clients. Primary & additional matter clients
+    for (const cid of allMatterClientIds) {
+      const cPerson = personById.get(cid);
+      const cOrg = !cPerson ? orgById.get(cid) : undefined;
+      const clientLabel = cPerson ? personDisplayName(cPerson) : cOrg?.legalName ?? '';
+      const clientTargets = resolvePartyTargets(
+        cid,
+        clientLabel,
+        cPerson ? 'person' : 'organisation',
+      );
+      if (clientTargets.names.length === 0 && clientTargets.emails.length === 0) continue;
 
-      const matchesCaller =
-        (canMatchCallerFullName && namesLikelyMatch(callerFullRaw, party.name, 'person')) ||
-        (hasMinThreeCharToken(behalfRaw) &&
-          namesLikelyMatch(behalfRaw, party.name, 'organisation')) ||
-        Boolean(input.linkedPersonId && party.linkedRecordId === input.linkedPersonId) ||
-        Boolean(input.linkedOrganisationId && party.linkedRecordId === input.linkedOrganisationId);
+      const callerMatchesClient =
+        Boolean(input.linkedPersonId && input.linkedPersonId === cid) ||
+        Boolean(input.linkedOrganisationId && input.linkedOrganisationId === cid) ||
+        callerCandidateNames.some((cn) =>
+          clientTargets.names.some((n) => namesLikelyMatch(cn, n, 'person')),
+        ) ||
+        behalfCandidateNames.some((bn) =>
+          clientTargets.names.some((n) => namesLikelyMatch(bn, n, 'organisation')),
+        ) ||
+        clientTargets.emails.some((e) => callerEmailSet.has(e));
 
-      if (matchesCaller) {
-        const hitData = {
-          recordId: matterHitId,
-          recordType: 'matter' as const,
-          name: matterDisplayLabel,
-          recordLabel: matterDisplayLabel,
-          queryTerm: behalfRaw || callerFullRaw || (restricted ? 'restricted' : party.name),
-          href: matterHref,
-          reason: restricted
-            ? 'Prospective client matches a party on a restricted matter'
-            : `Prospective client matches adverse/other party "${party.name}" (${party.role}) on matter ${m.matterNumber}`,
-          matchedField: behalfRaw ? 'organisation' : 'caller name',
-          severity: 'high' as const,
-          strength: 5,
-          blocking: true,
-        };
-        upsertConflictHit(clientAgainstPartyMap, hitData);
-        upsertConflictHit(combinedMap, hitData);
-      } else if (looseForParty(party.name)) {
-        const loose = looseForParty(party.name);
-        const hitData = {
-          recordId: matterHitId,
-          recordType: 'matter' as const,
-          name: matterDisplayLabel,
-          recordLabel: matterDisplayLabel,
-          queryTerm: behalfRaw || callerFullRaw,
-          href: matterHref,
-          reason: restricted
-            ? `Prospective client ${looseVerb(loose)} a party on a restricted matter. Check if this is the same party`
-            : `Prospective client ${looseVerb(loose)} adverse/other party "${party.name}" (${party.role}) on matter ${m.matterNumber}. Check if this is the same party`,
-          matchedField: `${behalfRaw ? 'organisation' : 'caller name'} (${loose})`,
-          severity: 'medium' as const,
-          strength: 2,
-          blocking: false,
-        };
-        upsertConflictHit(clientAgainstPartyMap, hitData);
-        upsertConflictHit(combinedMap, hitData);
+      if (restricted && callerMatchesClient) {
+        emitRestrictedMatterHit(
+          clientAgainstPartyMap,
+          matterHitId,
+          behalfRaw || callerFullRaw || 'restricted',
+          'Prospective client matches a participant on a restricted matter',
+          behalfRaw ? 'organisation' : 'caller name',
+        );
       }
 
       for (const otherName of rawOther) {
-        if (
-          namesLikelyMatch(otherName, party.name, 'organisation') ||
-          namesLikelyMatch(otherName, party.name, 'person')
-        ) {
-          const hitData = {
-            recordId: matterHitId,
-            recordType: 'matter' as const,
-            name: matterDisplayLabel,
-            recordLabel: matterDisplayLabel,
-            queryTerm: otherName,
-            href: matterHref,
-            reason: restricted
-              ? `Other party "${otherName}" is recorded on a restricted matter`
-              : `Other party "${otherName}" is recorded as "${party.name}" (${party.role}) on matter ${m.matterNumber}`,
-            matchedField: 'other parties',
-            severity: restricted ? ('high' as const) : ('medium' as const),
-            strength: restricted ? 5 : 3,
-            blocking: restricted,
-          };
-          upsertConflictHit(otherPartyMap, hitData);
-          upsertConflictHit(combinedMap, hitData);
+        const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
+        const exact =
+          clientTargets.names.some(
+            (n) =>
+              namesLikelyMatch(otherName, n, clientTargets.kind) ||
+              namesLikelyMatch(otherName, n, 'person'),
+          ) || Boolean(otherEmail && clientTargets.emails.includes(otherEmail));
+        const loose = exact
+          ? null
+          : firstLoose(
+              clientTargets.names.map((n) =>
+                clientTargets.kind === 'organisation'
+                  ? organisationNameLooseMatch(otherName, n)
+                  : personNameLooseMatch(otherName, n),
+              ),
+            );
+        if (!exact && !loose) continue;
+
+        if (restricted) {
+          emitRestrictedMatterHit(
+            otherPartyMap,
+            matterHitId,
+            otherName,
+            `Other party "${otherName}" matches a participant on a restricted matter`,
+            loose ? `other parties (${loose})` : 'other parties',
+            'high',
+            5,
+            true,
+          );
+          continue;
         }
+
+        const hitData = {
+          recordId: cid,
+          recordType: clientTargets.kind,
+          name: clientLabel || cid,
+          recordLabel: `${clientLabel || cid} (${cid})`,
+          queryTerm: otherName,
+          href:
+            clientTargets.kind === 'organisation'
+              ? `/organisations/${cid}`
+              : `/people/${cid}`,
+          reason: loose
+            ? `Other party "${otherName}" ${looseVerb(loose)} client ${clientLabel || cid} on matter ${m.matterNumber}`
+            : `Other party "${otherName}" matches client ${clientLabel || cid} on matter ${m.matterNumber}`,
+          matchedField: loose ? `other parties (${loose})` : 'matter client',
+          severity: exact ? ('high' as const) : ('medium' as const),
+          strength: exact ? 5 : 2,
+          blocking: Boolean(exact),
+        };
+        upsertConflictHit(otherPartyMap, hitData);
+        upsertConflictHit(combinedMap, hitData);
       }
     }
 
-    // 3b. Check matter instructingContactId and billingContactId (B7)
+    // 3a-parties. All matter parties across all 8 relationship codes and 70 capacities
+    for (const party of m.parties) {
+      const partyLabel = formatMatterPartyLabel(party);
+      const adverse = isAdverseMatterParty(party);
+      const aligned = isAlignedMatterParty(party);
+      const directClient = isDirectClientMatterParty(party);
+      const linkedPerson =
+        !restricted && party.linkedRecordId ? personById.get(party.linkedRecordId) : undefined;
+      const linkedOrg =
+        !restricted && party.linkedRecordId && !linkedPerson
+          ? orgById.get(party.linkedRecordId)
+          : undefined;
+      const partyHitRecordId = linkedPerson
+        ? linkedPerson.id
+        : linkedOrg
+          ? linkedOrg.id
+          : matterHitId;
+      const partyHitRecordType: 'person' | 'organisation' | 'matter' = linkedPerson
+        ? 'person'
+        : linkedOrg
+          ? 'organisation'
+          : 'matter';
+      const partyHitName = linkedPerson
+        ? personDisplayName(linkedPerson)
+        : linkedOrg
+          ? linkedOrg.legalName
+          : matterDisplayLabel;
+      const partyHitLabel = linkedPerson
+        ? `${personDisplayName(linkedPerson)} (${linkedPerson.id})`
+        : linkedOrg
+          ? `${linkedOrg.legalName} (${linkedOrg.id})`
+          : matterDisplayLabel;
+      const partyHitHref = linkedPerson
+        ? `/people/${linkedPerson.id}`
+        : linkedOrg
+          ? `/organisations/${linkedOrg.id}`
+          : matterHref;
+      const partyTargets = resolvePartyTargets(
+        party.linkedRecordId,
+        party.name,
+        party.entityType === 'person' ? 'person' : 'organisation',
+      );
+
+      const matchesCaller =
+        Boolean(input.linkedPersonId && party.linkedRecordId === input.linkedPersonId) ||
+        Boolean(input.linkedOrganisationId && party.linkedRecordId === input.linkedOrganisationId) ||
+        callerCandidateNames.some((cn) =>
+          partyTargets.names.some((pn) => namesLikelyMatch(cn, pn, 'person')),
+        ) ||
+        behalfCandidateNames.some((bn) =>
+          partyTargets.names.some((pn) => namesLikelyMatch(bn, pn, 'organisation')),
+        ) ||
+        partyTargets.emails.some((e) => callerEmailSet.has(e));
+      const callerLoose = matchesCaller ? null : looseForParty(partyTargets.names);
+
+      if (matchesCaller || callerLoose) {
+        if (restricted) {
+          emitRestrictedMatterHit(
+            clientAgainstPartyMap,
+            matterHitId,
+            behalfRaw || callerFullRaw || 'restricted',
+            matchesCaller
+              ? 'Prospective client matches a party on a restricted matter'
+              : `Prospective client ${looseVerb(callerLoose)} a party on a restricted matter. Check if this is the same party`,
+            callerLoose
+              ? `${behalfRaw ? 'organisation' : 'caller name'} (${callerLoose})`
+              : behalfRaw
+                ? 'organisation'
+                : 'caller name',
+            matchesCaller ? 'high' : 'medium',
+            matchesCaller ? 5 : 2,
+            Boolean(matchesCaller),
+          );
+        } else if (adverse) {
+          const hitData = {
+            recordId: partyHitRecordId,
+            recordType: partyHitRecordType,
+            name: partyHitName,
+            recordLabel: partyHitLabel,
+            queryTerm: behalfRaw || callerFullRaw || party.name,
+            href: partyHitHref,
+            reason: matchesCaller
+              ? `Prospective client matches adverse/other party "${party.name}" (${partyLabel}) on matter ${m.matterNumber}`
+              : `Prospective client ${looseVerb(callerLoose)} adverse/other party "${party.name}" (${partyLabel}) on matter ${m.matterNumber}. Check if this is the same party`,
+            matchedField: callerLoose
+              ? `${behalfRaw ? 'organisation' : 'caller name'} (${callerLoose})`
+              : behalfRaw
+                ? 'organisation'
+                : 'caller name',
+            severity: matchesCaller ? ('high' as const) : ('medium' as const),
+            strength: matchesCaller ? 5 : 2,
+            blocking: matchesCaller,
+          };
+          upsertConflictHit(clientAgainstPartyMap, hitData);
+          upsertConflictHit(combinedMap, hitData);
+        } else if (!aligned && matchesCaller) {
+          const hitData = {
+            recordId: partyHitRecordId,
+            recordType: partyHitRecordType,
+            name: partyHitName,
+            recordLabel: partyHitLabel,
+            queryTerm: behalfRaw || callerFullRaw || party.name,
+            href: partyHitHref,
+            reason: `Prospective client is recorded as "${party.name}" (${partyLabel}) on matter ${m.matterNumber}`,
+            matchedField: behalfRaw ? 'organisation' : 'caller name',
+            severity: 'medium' as const,
+            strength: 3,
+            blocking: false,
+          };
+          upsertConflictHit(clientAgainstPartyMap, hitData);
+          upsertConflictHit(combinedMap, hitData);
+        }
+      }
+
+      for (const otherName of rawOther) {
+        const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
+        const matchesOther =
+          partyTargets.names.some(
+            (pn) =>
+              namesLikelyMatch(otherName, pn, 'organisation') ||
+              namesLikelyMatch(otherName, pn, 'person'),
+          ) || Boolean(otherEmail && partyTargets.emails.includes(otherEmail));
+        if (!matchesOther) continue;
+
+        if (restricted) {
+          emitRestrictedMatterHit(
+            otherPartyMap,
+            matterHitId,
+            otherName,
+            `Other party "${otherName}" is recorded on a restricted matter`,
+            'other parties',
+          );
+          continue;
+        }
+
+        const hitData = {
+          recordId: partyHitRecordId,
+          recordType: partyHitRecordType,
+          name: partyHitName,
+          recordLabel: partyHitLabel,
+          queryTerm: otherName,
+          href: partyHitHref,
+          reason: `Other party "${otherName}" is recorded as "${party.name}" (${partyLabel}) on matter ${m.matterNumber}`,
+          matchedField: 'other parties',
+          severity: directClient ? ('high' as const) : ('medium' as const),
+          strength: directClient ? 5 : 3,
+          blocking: directClient,
+        };
+        upsertConflictHit(otherPartyMap, hitData);
+        upsertConflictHit(combinedMap, hitData);
+      }
+    }
+
+    // 3b. Check matter instructingContactId, billingContactId, and referrerContactId (B7, ADR 0033 §2)
     const matterContactSlots: Array<{
       id: string | null | undefined;
-      slotLabel: 'instructing contact' | 'billing contact';
+      slotLabel: 'instructing contact' | 'billing contact' | 'referrer contact';
     }> = [
       { id: m.instructingContactId, slotLabel: 'instructing contact' },
       { id: m.billingContactId, slotLabel: 'billing contact' },
+      { id: m.referrerContactId, slotLabel: 'referrer contact' },
     ];
-    const allMatterClientIds = [m.clientId, ...(m.additionalClientIds ?? [])].filter(Boolean);
     const callerOrgMatchesMatterClient =
       Boolean(input.linkedOrganisationId && allMatterClientIds.includes(input.linkedOrganisationId)) ||
-      (hasMinThreeCharToken(behalfRaw) &&
+      (behalfCandidateNames.length > 0 &&
         allMatterClientIds.some((cid) => {
           const cOrg = orgById.get(cid);
-          return Boolean(cOrg && namesLikelyMatch(behalfRaw, cOrg.legalName, 'organisation'));
+          if (!cOrg) return false;
+          const orgNames = getOrgCandidateNames(cOrg);
+          return behalfCandidateNames.some((bn) =>
+            orgNames.some((on) => namesLikelyMatch(bn, on, 'organisation')),
+          );
         }));
 
     for (const slot of matterContactSlots) {
@@ -944,26 +1510,43 @@ export function runEnquiryConflictSearch(
           ? contactOrg.legalName
           : '';
       if (!contactName) continue;
+      const contactNames = contactPerson
+        ? getPersonCandidateNames(contactPerson)
+        : contactOrg
+          ? getOrgCandidateNames(contactOrg)
+          : [contactName];
+      const contactEmails = contactPerson
+        ? getPersonCandidateEmails(contactPerson)
+        : contactOrg
+          ? getOrgCandidateEmails(contactOrg)
+          : [];
 
       for (const otherName of rawOther) {
+        const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
         const exact =
-          namesLikelyMatch(otherName, contactName, contactOrg ? 'organisation' : 'person');
+          contactNames.some((cn) =>
+            namesLikelyMatch(otherName, cn, contactOrg ? 'organisation' : 'person'),
+          ) || Boolean(otherEmail && contactEmails.includes(otherEmail));
         const loose = exact
           ? null
-          : contactOrg
-            ? organisationNameLooseMatch(otherName, contactName)
-            : personNameLooseMatch(otherName, contactName);
+          : firstLoose(
+              contactNames.map((cn) =>
+                contactOrg
+                  ? organisationNameLooseMatch(otherName, cn)
+                  : personNameLooseMatch(otherName, cn),
+              ),
+            );
         if (!exact && !loose) continue;
-        const severity: ConflictSeverity = exact ? 'high' : 'medium';
+        const severity: ConflictSeverity = restricted ? 'high' : exact ? 'high' : 'medium';
         const hitData = {
           recordId: restricted ? matterHitId : slot.id,
           recordType: (restricted ? 'matter' : contactOrg ? 'organisation' : 'person') as
             | 'matter'
             | 'organisation'
             | 'person',
-          name: restricted ? matterDisplayLabel : contactName,
+          name: restricted ? 'Restricted matter' : contactName,
           recordLabel: restricted
-            ? matterDisplayLabel
+            ? 'Restricted matter'
             : `${contactName} (${slot.id})`,
           queryTerm: otherName,
           href: restricted
@@ -978,21 +1561,24 @@ export function runEnquiryConflictSearch(
               : `Other party "${otherName}" matches ${slot.slotLabel} ${contactName} on matter ${m.matterNumber}`,
           matchedField: slot.slotLabel,
           severity,
-          strength: exact ? 5 : 2,
-          blocking: exact,
+          strength: restricted || exact ? 5 : 2,
+          blocking: restricted || Boolean(exact),
         };
         upsertConflictHit(otherPartyMap, hitData);
         upsertConflictHit(combinedMap, hitData);
       }
 
-      if (!callerOrgMatchesMatterClient) {
+      if (!callerOrgMatchesMatterClient || slot.slotLabel === 'referrer contact') {
         const callerMatchesContact =
           Boolean(input.linkedPersonId && input.linkedPersonId === slot.id) ||
           Boolean(input.linkedOrganisationId && input.linkedOrganisationId === slot.id) ||
-          (canMatchCallerFullName &&
-            namesLikelyMatch(callerFullRaw, contactName, 'person')) ||
-          (hasMinThreeCharToken(behalfRaw) &&
-            namesLikelyMatch(behalfRaw, contactName, 'organisation'));
+          callerCandidateNames.some((cn) =>
+            contactNames.some((target) => namesLikelyMatch(cn, target, 'person')),
+          ) ||
+          behalfCandidateNames.some((bn) =>
+            contactNames.some((target) => namesLikelyMatch(bn, target, 'organisation')),
+          ) ||
+          contactEmails.some((e) => callerEmailSet.has(e));
         if (callerMatchesContact) {
           const hitData = {
             recordId: restricted ? matterHitId : slot.id,
@@ -1000,9 +1586,9 @@ export function runEnquiryConflictSearch(
               | 'matter'
               | 'organisation'
               | 'person',
-            name: restricted ? matterDisplayLabel : contactName,
+            name: restricted ? 'Restricted matter' : contactName,
             recordLabel: restricted
-              ? matterDisplayLabel
+              ? 'Restricted matter'
               : `${contactName} (${slot.id})`,
             queryTerm: behalfRaw || callerFullRaw || contactName,
             href: restricted
@@ -1025,55 +1611,60 @@ export function runEnquiryConflictSearch(
     }
   }
 
-  // 3c. Check person–organisation links (B7, R259: pre-indexed maps, name match tested first, status computed lazily only after a hit)
-  const isAdverseMatterRole = (role: string) => {
-    const r = role.toLowerCase();
-    return (
-      r.includes('oppos') ||
-      r.includes('opponent') ||
-      r.includes('counterparty') ||
-      r.includes('other side') ||
-      r.includes('adverse') ||
-      r.includes('defendant') ||
-      r.includes('claimant') ||
-      r.includes('adjoining')
-    );
-  };
-  const orgLinkStatusCache = new Map<string, { isClient: boolean; isOpposite: boolean }>();
-  const getOrgLinkStatus = (org: Organisation, oName: string) => {
+  // 3c. Check person–organisation links, including historical links (B7, R259, ADR 0033 §2)
+  const orgLinkStatusCache = new Map<
+    string,
+    { isClient: boolean; isOpposite: boolean; restrictedMatters: Matter[] }
+  >();
+  const getOrgLinkStatus = (org: Organisation) => {
     let cached = orgLinkStatusCache.get(org.id);
     if (!cached) {
-      const onMatterAdverse = matters.some((m) =>
+      const orgNames = getOrgCandidateNames(org);
+      const orgEmails = getOrgCandidateEmails(org);
+      const onMatterAdverse = visibleMatters.some((m) =>
         m.parties.some(
           (mp) =>
-            isAdverseMatterRole(mp.role) &&
+            isAdverseMatterParty(mp) &&
             ((mp.linkedRecordId && mp.linkedRecordId === org.id) ||
-              namesLikelyMatch(mp.name, oName, 'organisation')),
+              orgNames.some((on) => namesLikelyMatch(mp.name, on, 'organisation'))),
         ),
       );
+      const restrictedMatters = matters.filter(
+        (m) => isRestrictedMatter(m) && isEntityOnMatter(m, org.id, orgNames, orgEmails),
+      );
       cached = {
-        isClient: isClientOrg(org, matters, values),
+        isClient: isClientOrg(org, visibleMatters, values),
         isOpposite: isOppositePartyOrg(org, values) || onMatterAdverse,
+        restrictedMatters,
       };
       orgLinkStatusCache.set(org.id, cached);
     }
     return cached;
   };
-  const personLinkStatusCache = new Map<string, { isClient: boolean; isOpposite: boolean }>();
-  const getPersonLinkStatus = (person: Person, pName: string) => {
+  const personLinkStatusCache = new Map<
+    string,
+    { isClient: boolean; isOpposite: boolean; restrictedMatters: Matter[] }
+  >();
+  const getPersonLinkStatus = (person: Person) => {
     let cached = personLinkStatusCache.get(person.id);
     if (!cached) {
-      const onMatterAdverse = matters.some((m) =>
+      const pNames = getPersonCandidateNames(person);
+      const pEmails = getPersonCandidateEmails(person);
+      const onMatterAdverse = visibleMatters.some((m) =>
         m.parties.some(
           (mp) =>
-            isAdverseMatterRole(mp.role) &&
+            isAdverseMatterParty(mp) &&
             ((mp.linkedRecordId && mp.linkedRecordId === person.id) ||
-              namesLikelyMatch(mp.name, pName, 'person')),
+              pNames.some((pn) => namesLikelyMatch(mp.name, pn, 'person'))),
         ),
       );
+      const restrictedMatters = matters.filter(
+        (m) => isRestrictedMatter(m) && isEntityOnMatter(m, person.id, pNames, pEmails),
+      );
       cached = {
-        isClient: isClientPerson(person, matters, values),
+        isClient: isClientPerson(person, visibleMatters, values),
         isOpposite: isOppositePartyPerson(person, values) || onMatterAdverse,
+        restrictedMatters,
       };
       personLinkStatusCache.set(person.id, cached);
     }
@@ -1081,7 +1672,6 @@ export function runEnquiryConflictSearch(
   };
 
   for (const link of links) {
-    if (link.isCurrent === false) continue;
     const linkPerson = personById.get(link.personId);
     if (!linkPerson || linkPerson.isEmployee) continue;
     const linkOrg = orgById.get(link.organisationId);
@@ -1089,19 +1679,40 @@ export function runEnquiryConflictSearch(
 
     const pName = personDisplayName(linkPerson);
     const oName = linkOrg.legalName;
+    const pNames = getPersonCandidateNames(linkPerson);
+    const pEmails = getPersonCandidateEmails(linkPerson);
+    const oNames = getOrgCandidateNames(linkOrg);
+    const oEmails = getOrgCandidateEmails(linkOrg);
+    const historicalSuffix = link.isCurrent === false ? ' (former link)' : '';
+    const linkMatchedField =
+      link.isCurrent === false
+        ? 'historical person–organisation link'
+        : 'person–organisation link';
 
-    const matchedOtherForPerson = rawOther.filter((otherName) =>
-      namesLikelyMatch(otherName, pName, 'person'),
-    );
-    const matchedOtherForOrg = rawOther.filter((otherName) =>
-      namesLikelyMatch(otherName, oName, 'organisation'),
-    );
+    const matchedOtherForPerson = rawOther.filter((otherName) => {
+      const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
+      return (
+        pNames.some((pn) => namesLikelyMatch(otherName, pn, 'person')) ||
+        Boolean(otherEmail && pEmails.includes(otherEmail))
+      );
+    });
+    const matchedOtherForOrg = rawOther.filter((otherName) => {
+      const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
+      return (
+        oNames.some((on) => namesLikelyMatch(otherName, on, 'organisation')) ||
+        Boolean(otherEmail && oEmails.includes(otherEmail))
+      );
+    });
     const callerMatchesLinkPerson =
       Boolean(input.linkedPersonId && input.linkedPersonId === linkPerson.id) ||
-      (canMatchCallerFullName && namesLikelyMatch(callerFullRaw, pName, 'person'));
+      callerCandidateNames.some((cn) => pNames.some((pn) => namesLikelyMatch(cn, pn, 'person'))) ||
+      pEmails.some((e) => callerEmailSet.has(e));
     const callerMatchesLinkOrg =
       Boolean(input.linkedOrganisationId && input.linkedOrganisationId === linkOrg.id) ||
-      (hasMinThreeCharToken(behalfRaw) && namesLikelyMatch(behalfRaw, oName, 'organisation'));
+      behalfCandidateNames.some((bn) =>
+        oNames.some((on) => namesLikelyMatch(bn, on, 'organisation')),
+      ) ||
+      oEmails.some((e) => callerEmailSet.has(e));
 
     const needsOrgStatus =
       matchedOtherForPerson.length > 0 || (callerMatchesLinkPerson && !callerMatchesLinkOrg);
@@ -1110,7 +1721,20 @@ export function runEnquiryConflictSearch(
     if (!needsOrgStatus && !needsPersonStatus) continue;
 
     for (const otherName of matchedOtherForPerson) {
-      const { isClient: orgIsClient, isOpposite: orgIsOpposite } = getOrgLinkStatus(linkOrg, oName);
+      const {
+        isClient: orgIsClient,
+        isOpposite: orgIsOpposite,
+        restrictedMatters,
+      } = getOrgLinkStatus(linkOrg);
+      for (const rm of restrictedMatters) {
+        emitRestrictedMatterHit(
+          otherPartyMap,
+          `restricted-${redactRecordId(tenantId, rm.id)}`,
+          otherName,
+          `Other party "${otherName}" is linked to a participant on a restricted matter`,
+          linkMatchedField,
+        );
+      }
       const isHigh = orgIsClient || orgIsOpposite;
       const hitData = {
         recordId: linkOrg.id,
@@ -1119,8 +1743,8 @@ export function runEnquiryConflictSearch(
         recordLabel: `${oName} (${linkOrg.id})`,
         queryTerm: otherName,
         href: `/organisations/${linkOrg.id}`,
-        reason: `Other party "${otherName}" is linked to ${orgIsClient ? 'existing client' : orgIsOpposite ? 'opposite party' : 'organisation'} ${oName} (${linkOrg.id})`,
-        matchedField: 'person–organisation link',
+        reason: `Other party "${otherName}" is linked${historicalSuffix} to ${orgIsClient ? 'existing client' : orgIsOpposite ? 'opposite party' : 'organisation'} ${oName} (${linkOrg.id})`,
+        matchedField: linkMatchedField,
         severity: isHigh ? ('high' as const) : ('medium' as const),
         strength: isHigh ? 5 : 3,
         blocking: isHigh,
@@ -1129,10 +1753,20 @@ export function runEnquiryConflictSearch(
       upsertConflictHit(combinedMap, hitData);
     }
     for (const otherName of matchedOtherForOrg) {
-      const { isClient: personIsClient, isOpposite: personIsOpposite } = getPersonLinkStatus(
-        linkPerson,
-        pName,
-      );
+      const {
+        isClient: personIsClient,
+        isOpposite: personIsOpposite,
+        restrictedMatters,
+      } = getPersonLinkStatus(linkPerson);
+      for (const rm of restrictedMatters) {
+        emitRestrictedMatterHit(
+          otherPartyMap,
+          `restricted-${redactRecordId(tenantId, rm.id)}`,
+          otherName,
+          `Other party "${otherName}" is linked to a participant on a restricted matter`,
+          linkMatchedField,
+        );
+      }
       const isHigh = personIsClient || personIsOpposite;
       const hitData = {
         recordId: linkPerson.id,
@@ -1141,8 +1775,8 @@ export function runEnquiryConflictSearch(
         recordLabel: `${pName} (${linkPerson.id})`,
         queryTerm: otherName,
         href: `/people/${linkPerson.id}`,
-        reason: `Other party "${otherName}" is linked to ${personIsClient ? 'existing client' : personIsOpposite ? 'opposite party' : 'person'} ${pName} (${linkPerson.id})`,
-        matchedField: 'person–organisation link',
+        reason: `Other party "${otherName}" is linked${historicalSuffix} to ${personIsClient ? 'existing client' : personIsOpposite ? 'opposite party' : 'person'} ${pName} (${linkPerson.id})`,
+        matchedField: linkMatchedField,
         severity: isHigh ? ('high' as const) : ('medium' as const),
         strength: isHigh ? 5 : 3,
         blocking: isHigh,
@@ -1152,17 +1786,31 @@ export function runEnquiryConflictSearch(
     }
 
     if (callerMatchesLinkPerson && !callerMatchesLinkOrg) {
-      const { isClient: orgIsClient, isOpposite: orgIsOpposite } = getOrgLinkStatus(linkOrg, oName);
+      const {
+        isClient: orgIsClient,
+        isOpposite: orgIsOpposite,
+        restrictedMatters,
+      } = getOrgLinkStatus(linkOrg);
+      const queryLabel = callerFullRaw || pName;
+      for (const rm of restrictedMatters) {
+        emitRestrictedMatterHit(
+          clientAgainstPartyMap,
+          `restricted-${redactRecordId(tenantId, rm.id)}`,
+          queryLabel,
+          'Prospective client is linked to a participant on a restricted matter',
+          linkMatchedField,
+        );
+      }
       const isHigh = orgIsOpposite;
       const hitData = {
         recordId: linkOrg.id,
         recordType: 'organisation' as const,
         name: oName,
         recordLabel: `${oName} (${linkOrg.id})`,
-        queryTerm: callerFullRaw || pName,
+        queryTerm: queryLabel,
         href: `/organisations/${linkOrg.id}`,
-        reason: `Caller "${pName}" is linked to ${orgIsOpposite ? 'opposite party' : orgIsClient ? 'existing client' : 'organisation'} ${oName} (${linkOrg.id})`,
-        matchedField: 'person–organisation link',
+        reason: `Caller "${queryLabel}" is linked${historicalSuffix} to ${orgIsOpposite ? 'opposite party' : orgIsClient ? 'existing client' : 'organisation'} ${oName} (${linkOrg.id})`,
+        matchedField: linkMatchedField,
         severity: isHigh ? ('high' as const) : ('medium' as const),
         strength: isHigh ? 5 : 3,
         blocking: isHigh,
@@ -1172,20 +1820,31 @@ export function runEnquiryConflictSearch(
     }
 
     if (callerMatchesLinkOrg && !callerMatchesLinkPerson) {
-      const { isClient: personIsClient, isOpposite: personIsOpposite } = getPersonLinkStatus(
-        linkPerson,
-        pName,
-      );
+      const {
+        isClient: personIsClient,
+        isOpposite: personIsOpposite,
+        restrictedMatters,
+      } = getPersonLinkStatus(linkPerson);
+      const queryLabel = behalfRaw || oName;
+      for (const rm of restrictedMatters) {
+        emitRestrictedMatterHit(
+          clientAgainstPartyMap,
+          `restricted-${redactRecordId(tenantId, rm.id)}`,
+          queryLabel,
+          'Prospective client organisation is linked to a participant on a restricted matter',
+          linkMatchedField,
+        );
+      }
       const isHigh = personIsOpposite;
       const hitData = {
         recordId: linkPerson.id,
         recordType: 'person' as const,
         name: pName,
         recordLabel: `${pName} (${linkPerson.id})`,
-        queryTerm: behalfRaw || oName,
+        queryTerm: queryLabel,
         href: `/people/${linkPerson.id}`,
-        reason: `Organisation "${oName}" is linked to ${personIsOpposite ? 'opposite party' : personIsClient ? 'existing client' : 'person'} ${pName} (${linkPerson.id})`,
-        matchedField: 'person–organisation link',
+        reason: `Organisation "${queryLabel}" is linked${historicalSuffix} to ${personIsOpposite ? 'opposite party' : personIsClient ? 'existing client' : 'person'} ${pName} (${linkPerson.id})`,
+        matchedField: linkMatchedField,
         severity: isHigh ? ('high' as const) : ('medium' as const),
         strength: isHigh ? 5 : 3,
         blocking: isHigh,
@@ -1195,22 +1854,116 @@ export function runEnquiryConflictSearch(
     }
   }
 
-  // 4. Check Enquiries (caller details, callingOnBehalfOf, and otherPartiesNamed saved in enquiries)
+  // 3d. Check parent / subsidiary corporate group organisations via parentOrganisationId (ADR 0033 §2)
+  for (const org of organisations) {
+    if (org.mergedIntoId) continue;
+    const oNames = getOrgCandidateNames(org);
+    const oEmails = getOrgCandidateEmails(org);
+
+    const matchedOtherTerms = rawOther.filter((otherName) => {
+      const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
+      return (
+        oNames.some((on) => namesLikelyMatch(otherName, on, 'organisation')) ||
+        Boolean(otherEmail && oEmails.includes(otherEmail))
+      );
+    });
+    const callerMatchesOrg =
+      Boolean(input.linkedOrganisationId && input.linkedOrganisationId === org.id) ||
+      behalfCandidateNames.some((bn) =>
+        oNames.some((on) => namesLikelyMatch(bn, on, 'organisation')),
+      ) ||
+      oEmails.some((e) => callerEmailSet.has(e));
+
+    if (matchedOtherTerms.length === 0 && !callerMatchesOrg) continue;
+
+    for (const { org: relatedOrg, relation } of getCorporateGroupRelatives(org.id)) {
+      const {
+        isClient: relIsClient,
+        isOpposite: relIsOpposite,
+        restrictedMatters: relRestrictedMatters,
+      } = getOrgLinkStatus(relatedOrg);
+
+      for (const otherName of matchedOtherTerms) {
+        for (const rm of relRestrictedMatters) {
+          emitRestrictedMatterHit(
+            otherPartyMap,
+            `restricted-${redactRecordId(tenantId, rm.id)}`,
+            otherName,
+            `Other party "${otherName}" is in the corporate group of a participant on a restricted matter`,
+            'parent organisation',
+          );
+        }
+        const isHigh = relIsClient || relIsOpposite;
+        const hitData = {
+          recordId: relatedOrg.id,
+          recordType: 'organisation' as const,
+          name: relatedOrg.legalName,
+          recordLabel: `${relatedOrg.legalName} (${relatedOrg.id})`,
+          queryTerm: otherName,
+          href: `/organisations/${relatedOrg.id}`,
+          reason: `Other party "${otherName}" is linked via ${relation.toLowerCase()} to ${relIsClient ? 'existing client' : relIsOpposite ? 'opposite party' : 'organisation'} ${relatedOrg.legalName} (${relatedOrg.id})`,
+          matchedField: 'parent organisation',
+          severity: isHigh ? ('high' as const) : ('medium' as const),
+          strength: isHigh ? 5 : 3,
+          blocking: isHigh,
+        };
+        upsertConflictHit(otherPartyMap, hitData);
+        upsertConflictHit(combinedMap, hitData);
+      }
+
+      if (callerMatchesOrg) {
+        const queryLabel = behalfRaw || org.legalName;
+        for (const rm of relRestrictedMatters) {
+          emitRestrictedMatterHit(
+            clientAgainstPartyMap,
+            `restricted-${redactRecordId(tenantId, rm.id)}`,
+            queryLabel,
+            'Prospective client is in the corporate group of a participant on a restricted matter',
+            'parent organisation',
+          );
+        }
+        const isHigh = relIsOpposite;
+        const hitData = {
+          recordId: relatedOrg.id,
+          recordType: 'organisation' as const,
+          name: relatedOrg.legalName,
+          recordLabel: `${relatedOrg.legalName} (${relatedOrg.id})`,
+          queryTerm: queryLabel,
+          href: `/organisations/${relatedOrg.id}`,
+          reason: `Organisation "${queryLabel}" has ${relation.toLowerCase()} ${relIsOpposite ? 'opposite party' : relIsClient ? 'existing client' : 'organisation'} ${relatedOrg.legalName} (${relatedOrg.id})`,
+          matchedField: 'parent organisation',
+          severity: isHigh ? ('high' as const) : ('medium' as const),
+          strength: isHigh ? 5 : 3,
+          blocking: isHigh,
+        };
+        upsertConflictHit(clientAgainstPartyMap, hitData);
+        upsertConflictHit(combinedMap, hitData);
+      }
+    }
+  }
+
+  // 4. Check Enquiries (caller details, emails, callingOnBehalfOf, and otherPartiesNamed saved in enquiries)
   for (const enq of enquiries) {
     if (enq.id === excludeEnquiryId || enq.anonymisedAt) continue;
     const enqCallerName = enquiryDisplayName(enq, '').trim();
     const enqBehalf = (enq.callingOnBehalfOf ?? '').trim();
+    const enqEmailNorm = isValidEmailFormat(enq.email) ? normaliseEmail(enq.email) : '';
     const enqOtherEntries = (enq.otherPartiesNamed ?? '')
       .split(/[,;/\n]+/)
       .map((s) => s.trim())
-      .filter((s) => hasMinThreeCharToken(s));
+      .filter((s) => hasMinThreeCharToken(s) || isValidEmailFormat(s));
     const enqIsOpen = isEnquiryOpen(enq);
 
-    // 4a. Other parties entered on this form vs Enquiry Caller / CallingOnBehalfOf / Enquiry Other Parties
+    // 4a. Other parties entered on this form vs Enquiry Caller / Email / CallingOnBehalfOf / Enquiry Other Parties
     for (const otherName of rawOther) {
-      if (enqCallerName && hasMinThreeCharToken(enqCallerName)) {
-        const exact = namesLikelyMatch(otherName, enqCallerName, 'person');
-        const loose = exact ? null : personNameLooseMatch(otherName, enqCallerName);
+      const otherEmail = isValidEmailFormat(otherName) ? normaliseEmail(otherName) : '';
+      const otherCallerEmailHit = Boolean(otherEmail && enqEmailNorm && otherEmail === enqEmailNorm);
+      if ((enqCallerName && hasMinThreeCharToken(enqCallerName)) || otherCallerEmailHit) {
+        const exact =
+          otherCallerEmailHit ||
+          (Boolean(enqCallerName) && namesLikelyMatch(otherName, enqCallerName, 'person'));
+        const loose =
+          exact || !enqCallerName ? null : personNameLooseMatch(otherName, enqCallerName);
         if (exact || loose) {
           const recId = enq.linkedPersonId || enq.id;
           const href = enq.linkedPersonId ? `/people/${enq.linkedPersonId}` : `/enquiries/${enq.id}`;
@@ -1218,14 +1971,18 @@ export function runEnquiryConflictSearch(
           const hitData = {
             recordId: recId,
             recordType: 'person' as const,
-            name: enqCallerName,
-            recordLabel: `${enqCallerName} (${enq.reference})`,
+            name: enqCallerName || enqEmailNorm,
+            recordLabel: `${enqCallerName || enqEmailNorm} (${enq.reference})`,
             queryTerm: otherName,
             href,
             reason: loose
               ? `Other party "${otherName}" ${looseVerb(loose)} enquiry caller ${enqCallerName} on ${enq.reference} (${enq.status}). Check if this is the same person`
-              : `Other party "${otherName}" matches enquiry caller ${enqCallerName} on ${enq.reference} (${enq.status})`,
-            matchedField: loose ? `other parties (${loose})` : 'other parties',
+              : `Other party "${otherName}" matches enquiry caller ${enqCallerName || enqEmailNorm} on ${enq.reference} (${enq.status})`,
+            matchedField: loose
+              ? `other parties (${loose})`
+              : otherCallerEmailHit
+                ? 'other parties (email)'
+                : 'other parties',
             severity,
             strength: exact && enqIsOpen ? 5 : 3,
             blocking: exact && enqIsOpen,
@@ -1267,7 +2024,8 @@ export function runEnquiryConflictSearch(
       for (const enqOther of enqOtherEntries) {
         if (
           namesLikelyMatch(otherName, enqOther, 'person') ||
-          namesLikelyMatch(otherName, enqOther, 'organisation')
+          namesLikelyMatch(otherName, enqOther, 'organisation') ||
+          (otherEmail && isValidEmailFormat(enqOther) && normaliseEmail(enqOther) === otherEmail)
         ) {
           const hitData = {
             recordId: enq.id,
@@ -1288,24 +2046,35 @@ export function runEnquiryConflictSearch(
       }
     }
 
-    // 4b. Caller / Organisation on this form vs Other Parties named on existing enquiries
+    // 4b. Caller / Organisation / Email on this form vs Other Parties named on existing enquiries
     for (const enqOther of enqOtherEntries) {
-      if (canMatchCallerFullName) {
-        const exact = namesLikelyMatch(callerFullRaw, enqOther, 'person');
-        const loose = exact ? null : personNameLooseMatch(callerFullRaw, enqOther);
+      const enqOtherEmail = isValidEmailFormat(enqOther) ? normaliseEmail(enqOther) : '';
+      const callerEmailMatchesEnqOther = Boolean(enqOtherEmail && callerEmailSet.has(enqOtherEmail));
+      if (callerCandidateNames.length > 0 || callerEmailMatchesEnqOther) {
+        const exact =
+          callerEmailMatchesEnqOther ||
+          callerCandidateNames.some((cn) => namesLikelyMatch(cn, enqOther, 'person'));
+        const loose = exact
+          ? null
+          : firstLoose(callerCandidateNames.map((cn) => personNameLooseMatch(cn, enqOther)));
         if (exact || loose) {
           const severity: ConflictSeverity = exact && enqIsOpen ? 'high' : 'medium';
+          const queryLabel = callerFullRaw || callerCandidateNames[0] || enqOther;
           const hitData = {
             recordId: enq.id,
             recordType: 'person' as const,
             name: `${enqOther} (${enq.reference})`,
             recordLabel: `${enqOther} (${enq.reference})`,
-            queryTerm: callerFullRaw,
+            queryTerm: queryLabel,
             href: `/enquiries/${enq.id}`,
             reason: loose
-              ? `Caller "${callerFullRaw}" ${looseVerb(loose)} other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`
-              : `Caller "${callerFullRaw}" matches other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`,
-            matchedField: loose ? `caller name (${loose})` : 'caller name',
+              ? `Caller "${queryLabel}" ${looseVerb(loose)} other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`
+              : `Caller "${queryLabel}" matches other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`,
+            matchedField: loose
+              ? `caller name (${loose})`
+              : callerEmailMatchesEnqOther
+                ? 'email'
+                : 'caller name',
             severity,
             strength: exact && enqIsOpen ? 5 : 2,
             blocking: exact && enqIsOpen,
@@ -1315,23 +2084,30 @@ export function runEnquiryConflictSearch(
         }
       }
 
-      if (hasMinThreeCharToken(behalfRaw)) {
-        const exact =
-          namesLikelyMatch(behalfRaw, enqOther, 'organisation') ||
-          namesLikelyMatch(behalfRaw, enqOther, 'person');
-        const loose = exact ? null : organisationNameLooseMatch(behalfRaw, enqOther);
+      if (behalfCandidateNames.length > 0) {
+        const exact = behalfCandidateNames.some(
+          (bn) =>
+            namesLikelyMatch(bn, enqOther, 'organisation') ||
+            namesLikelyMatch(bn, enqOther, 'person'),
+        );
+        const loose = exact
+          ? null
+          : firstLoose(
+              behalfCandidateNames.map((bn) => organisationNameLooseMatch(bn, enqOther)),
+            );
         if (exact || loose) {
           const severity: ConflictSeverity = exact && enqIsOpen ? 'high' : 'medium';
+          const queryLabel = behalfRaw || behalfCandidateNames[0] || enqOther;
           const hitData = {
             recordId: enq.id,
             recordType: 'organisation' as const,
             name: `${enqOther} (${enq.reference})`,
             recordLabel: `${enqOther} (${enq.reference})`,
-            queryTerm: behalfRaw,
+            queryTerm: queryLabel,
             href: `/enquiries/${enq.id}`,
             reason: loose
-              ? `"${behalfRaw}" ${looseVerb(loose)} other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`
-              : `"${behalfRaw}" matches other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`,
+              ? `"${queryLabel}" ${looseVerb(loose)} other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`
+              : `"${queryLabel}" matches other party "${enqOther}" named on enquiry ${enq.reference} (caller: ${enqCallerName || 'Unknown'})`,
             matchedField: loose ? `organisation (${loose})` : 'organisation',
             severity,
             strength: exact && enqIsOpen ? 5 : 2,
@@ -1974,14 +2750,18 @@ export function getEnquiryStagePeople(
     people.filter((p) => !p.mergedIntoId).map((p) => p.id),
   );
 
-  const clientContactRoleId =
-    values.find(
-      (v) => v.listKey === 'person_role' && v.label.toLowerCase() === 'client contact',
-    )?.id ?? 'person_role.client_contact';
-  const privateClientRoleId =
-    values.find(
-      (v) => v.listKey === 'person_role' && v.label.toLowerCase() === 'private client',
-    )?.id ?? 'person_role.private_client';
+  const clientContactRoleId = resolveListValueId(
+    values,
+    'person_role',
+    'client_contact',
+    'Client contact',
+  );
+  const privateClientRoleId = resolveListValueId(
+    values,
+    'person_role',
+    'private_client',
+    'Private client',
+  );
 
   const openUnlinked = enquiries
     .filter((enq) => {
@@ -2052,18 +2832,24 @@ export function buildEnquiryPersonRecords(
       .filter((id): id is string => Boolean(id)),
   );
 
-  const clientContactRoleId =
-    values.find(
-      (v) => v.listKey === 'person_role' && v.label.toLowerCase() === 'client contact',
-    )?.id ?? 'person_role.client_contact';
-  const privateClientRoleId =
-    values.find(
-      (v) => v.listKey === 'person_role' && v.label.toLowerCase() === 'private client',
-    )?.id ?? 'person_role.private_client';
-  const prospectStatusId =
-    values.find(
-      (v) => v.listKey === 'relationship_status' && v.label.toLowerCase() === 'prospect',
-    )?.id ?? 'relationship_status.prospect';
+  const clientContactRoleId = resolveListValueId(
+    values,
+    'person_role',
+    'client_contact',
+    'Client contact',
+  );
+  const privateClientRoleId = resolveListValueId(
+    values,
+    'person_role',
+    'private_client',
+    'Private client',
+  );
+  const prospectStatusId = resolveListValueId(
+    values,
+    'relationship_status',
+    'prospective',
+    'Prospective',
+  );
 
   const sorted = [...enquiries].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),

@@ -138,12 +138,30 @@ export function planMerge<T extends AnyRecord>(survivor: T, merged: T): MergePla
   }
 
   if (
-    survivor.recordType === 'person' &&
+    (survivor.recordType === 'person' || survivor.recordType === 'organisation') &&
     isEmpty(out.createdFromEnquiryId) &&
     !isEmpty(src.createdFromEnquiryId)
   ) {
     out.createdFromEnquiryId = src.createdFromEnquiryId;
     taken.push('Created from enquiry');
+  }
+
+  // Prevent self-parenting or tombstone-parenting after an organisation merge (ADR 0033 §3).
+  if (survivor.recordType === 'organisation') {
+    const parentId = out.parentOrganisationId;
+    if (parentId === survivor.id || parentId === merged.id) {
+      const fallbackParent =
+        typeof src.parentOrganisationId === 'string' &&
+        src.parentOrganisationId !== survivor.id &&
+        src.parentOrganisationId !== merged.id
+          ? src.parentOrganisationId
+          : null;
+      out.parentOrganisationId = fallbackParent;
+      if (fallbackParent === null) {
+        const idx = taken.indexOf('Parent organisation');
+        if (idx >= 0) taken.splice(idx, 1);
+      }
+    }
   }
 
   // Track history: survivor remembers the merged id so it is no longer flagged as a duplicate.

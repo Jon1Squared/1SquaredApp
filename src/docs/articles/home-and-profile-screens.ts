@@ -6,7 +6,7 @@ export const homeAndProfileScreensArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How role-based Home panels, matter intake and compliance cards, and person and organisation compliance displays derive their values from stored records and show honest empty states when a module or screening integration is not yet connected.',
-  updated: '2026-11-09',
+  updated: '2026-11-15',
   body: `
 1Squared displays only stored, tenant-scoped records and practice management system (PMS) figures on every workspace screen. Product screens never fall back to invented client names, hard-coded figures, or fabricated compliance statuses.
 
@@ -48,7 +48,15 @@ On person and organisation profiles, the **Compliance & verification** card is d
 - **Sanctions & PEP**: always displays **\`Not checked\`** in a neutral badge until an external sanctions and politically exposed person (PEP) screening provider is connected (tracked under roadmap item 34). The application never displays a hard-coded \`Clear\` status when no screening check has been run.
 - **Re-check due**: shows the stored \`reviewDate\` on an organisation, or \`Not set\` when no review date has been scheduled.
 
-## 4. External lookups (Companies House and UK postcodes)
+## 4. Canonical contact personas and matter roles (\`person_role.*\`)
+
+A single canonical **Person** record represents an individual across every context in which the firm deals with them—avoiding duplicate profiles when a commercial contact later instructs the firm personally:
+
+- **Stable persona badges:** Person role badges are stored and matched by immutable \`person_role.*\` keys (\`person_role.client_contact\`, \`person_role.private_client\`, \`person_role.referrer\`, \`person_role.opposing_party\`, etc.) backed by explicit \`systemKey\` metadata across both demo and clean deployments.
+- **Automatic role union on instruction:** Linking an existing Client contact as a direct client on a matter save (\`saveMatterRecord\`), enquiry conversion (\`prepareEnquiryConversion\`), or quote conversion (\`prepareQuoteConversionRecord\`) automatically adds \`person_role.private_client\` in the same PostgreSQL transaction whilst keeping \`person_role.client_contact\` and any organisation links intact.
+- **Per-matter capacities without bleed:** The same Person can act as direct client (\`CL\`) on one matter, opposing party (\`OP\`) on another, and third-party expert witness (\`TP\`) or neutral mediator (\`NO\`) elsewhere; editing their capacity on one matter leaves all other matters untouched.
+
+## 5. External lookups (Companies House and UK postcodes)
 
 - **UK address lookup**: queries the server-side \`/api/address-lookup\` route using the tenant’s configured Ideal Postcodes key. When address lookup is not configured or returns no match, the form displays a clear message prompting the user to enter the address manually, and never fills a fabricated street address.
 - **Companies House lookup**: until the live Companies House API integration is enabled, searching from the organisation form reports *"Companies House lookup isn't set up"* rather than returning demo company records.

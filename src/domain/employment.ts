@@ -27,6 +27,7 @@ import type {
   EmployeeRoleType,
   EmployeeSensitiveRecord,
   EmploymentAssignmentHistoryEntry,
+  EmploymentConflictOnHire,
   EmploymentContractTerms,
   EmploymentFeeEarnerDetails,
   EmploymentPayrollDetails,
@@ -191,6 +192,37 @@ export function hasEmployeePermission(
 }
 
 /**
+ * Redacts restricted/unpermitted open matters from `conflictCheckOnHire` so viewers
+ * lacking matter access cannot discover restricted matter IDs or matter numbers.
+ */
+export function redactConflictCheckOnHire(
+  conflictCheckOnHire: EmploymentConflictOnHire | null | undefined,
+  canViewMatterId: (matterId: string) => boolean,
+  visibleMatterNumberById?: ReadonlyMap<string, string>,
+): EmploymentConflictOnHire | null | undefined {
+  if (!conflictCheckOnHire) return conflictCheckOnHire;
+  const rawIds = conflictCheckOnHire.openMatterIds ?? [];
+  const visibleIds = rawIds.filter((id) => canViewMatterId(id));
+  if (visibleIds.length === rawIds.length) {
+    return conflictCheckOnHire;
+  }
+  const hiddenCount = rawIds.length - visibleIds.length;
+  const visibleRefs = visibleIds
+    .map((id) => visibleMatterNumberById?.get(id))
+    .filter((num): num is string => Boolean(num));
+  const summaryParts = [...visibleRefs, `${hiddenCount} restricted matter(s) redacted`];
+  const riskNotes =
+    visibleIds.length > 0
+      ? `Person is a party on ${rawIds.length} open matter(s) (${summaryParts.join(', ')}). Flagged to Risk & Compliance to consider an information barrier.`
+      : `Person is a party on ${hiddenCount} restricted open matter(s) (details hidden under ethical wall / staff-matter restriction). Flagged to Risk & Compliance to consider an information barrier.`;
+  return {
+    ...conflictCheckOnHire,
+    openMatterIds: visibleIds,
+    riskNotes,
+  };
+}
+
+/**
  * Strips restricted sections from an EmploymentRecord at the API/service boundary
  * based on the requesting user's permissions and firm configuration.
  */
@@ -201,6 +233,10 @@ export function filterEmploymentForUser(
   teams: Team[] = [],
   orgStructure?: OrgStructureCatalogue,
   rbacOptions?: ResolvePersonPermissionsOptions,
+  matterVisibility?: {
+    canViewMatterId: (matterId: string) => boolean;
+    visibleMatterNumberById?: ReadonlyMap<string, string>;
+  },
 ): EmploymentRecord | null {
   if (!employment) return null;
   const perms = new Set(
@@ -233,6 +269,14 @@ export function filterEmploymentForUser(
       pensionAutoEnrolmentStatus: '',
       pensionOptOutDate: null,
     };
+  }
+
+  if (matterVisibility && copy.conflictCheckOnHire) {
+    copy.conflictCheckOnHire = redactConflictCheckOnHire(
+      copy.conflictCheckOnHire,
+      matterVisibility.canViewMatterId,
+      matterVisibility.visibleMatterNumberById,
+    );
   }
 
   return copy;
@@ -726,6 +770,7 @@ export function findOpenMattersWherePersonIsParty(
     'matter_status.closed',
     'matter_status.archived',
     'matter_status.aborted',
+    'matter_status.aborted_lost',
     'matter_status.completed',
   ]);
   return matters.filter((m) => {
