@@ -1,3 +1,4 @@
+import type { WorkTypeRiskQuestionConfig } from '@platform/core-api';
 import { formatDate, formatDateTime } from './dates';
 import { resolveLabel, valueBySystemKey } from './lists';
 import { personDisplayName } from './names';
@@ -16,6 +17,8 @@ export type RiskLevel = 'Low' | 'Medium' | 'High';
 
 export interface RiskQuestionOption {
   label: string;
+  value?: string;
+  score?: number;
   risk: RiskLevel;
   triggersFollowUp?: boolean;
 }
@@ -24,6 +27,8 @@ export interface RiskQuestionDef {
   id: string;
   question: string;
   amlOnly?: boolean;
+  weight?: number;
+  required?: boolean;
   options: RiskQuestionOption[];
   followUpLabel?: string;
   followUpType?: 'text' | 'key_dates';
@@ -320,6 +325,8 @@ export interface MatterRiskQuestionSnapshotItem {
   question: string;
   answer: string;
   risk: RiskLevel | null;
+  weight?: number;
+  score?: number;
   followUpLabel?: string;
   followUp?: string;
 }
@@ -344,6 +351,8 @@ export interface MatterRiskAssessmentSnapshot {
   leadFeeEarnerId?: string | null;
   leadFeeEarnerName?: string | null;
   overallRisk: RiskLevel | null;
+  totalScore?: number;
+  workTypeSubcategoryId?: string | null;
   completedQuestions: number;
   totalQuestions: number;
   isMlrInScope: boolean;
@@ -418,10 +427,84 @@ export interface MatterOpeningSnapshot {
   optionalFields: { id: string; label: string; value: string }[];
 }
 
+const WORK_TYPE_RISK_SECTION_ID_BY_KEY: Record<
+  WorkTypeRiskQuestionConfig['sectionKey'],
+  string
+> = {
+  matter: 'about_instruction',
+  client: 'client_relationship',
+  jurisdiction: 'jurisdictions',
+  delivery: 'how_instruction_dealt_with',
+  work_type: 'work_type_risk_factors',
+};
+
+function toRiskLevelTitleCase(
+  level: WorkTypeRiskQuestionConfig['options'][number]['riskLevel'],
+): RiskLevel {
+  if (level === 'high') return 'High';
+  if (level === 'medium') return 'Medium';
+  return 'Low';
+}
+
+export function resolveMatterRiskSections(
+  extraRiskQuestions: readonly WorkTypeRiskQuestionConfig[] = [],
+): RiskSectionDef[] {
+  const sections: RiskSectionDef[] = MATTER_RISK_SECTIONS.map((sec) => ({
+    ...sec,
+    questions: sec.questions.map((q) => ({
+      ...q,
+      options: q.options.map((opt) => ({ ...opt })),
+    })),
+  }));
+
+  if (!extraRiskQuestions || extraRiskQuestions.length === 0) {
+    return sections;
+  }
+
+  for (const wq of extraRiskQuestions) {
+    const mappedDef: RiskQuestionDef = {
+      id: wq.id,
+      question: wq.prompt,
+      weight: wq.weight,
+      required: wq.required !== false,
+      options: wq.options.map((opt) => ({
+        label: opt.label,
+        value: opt.value,
+        score: opt.score,
+        risk: toRiskLevelTitleCase(opt.riskLevel),
+      })),
+    };
+
+    const targetId =
+      WORK_TYPE_RISK_SECTION_ID_BY_KEY[wq.sectionKey] ??
+      'work_type_risk_factors';
+    let targetSection = sections.find((s) => s.id === targetId);
+    if (!targetSection) {
+      targetSection = {
+        id: targetId,
+        number: sections.length + 1,
+        title: (wq.sectionTitle ?? '').trim() || 'Work-type risk factors',
+        questions: [],
+      };
+      sections.push(targetSection);
+    }
+    const existingIdx = targetSection.questions.findIndex((q) => q.id === wq.id);
+    if (existingIdx >= 0) {
+      targetSection.questions[existingIdx] = mappedDef;
+    } else {
+      targetSection.questions.push(mappedDef);
+    }
+  }
+
+  return sections;
+}
+
 export function buildMatterRiskAssessmentSnapshot(params: {
   answers: Record<string, string>;
   followUps: Record<string, string>;
   customKeyDates?: CustomKeyDateEntry[];
+  extraRiskQuestions?: readonly WorkTypeRiskQuestionConfig[];
+  workTypeSubcategoryId?: string | null;
   completedById?: string | null;
   completedByName?: string | null;
   leadFeeEarnerId?: string | null;
@@ -433,6 +516,8 @@ export function buildMatterRiskAssessmentSnapshot(params: {
     answers,
     followUps,
     customKeyDates = [],
+    extraRiskQuestions = [],
+    workTypeSubcategoryId = null,
     completedById = null,
     completedByName = null,
     leadFeeEarnerId = null,
@@ -441,13 +526,16 @@ export function buildMatterRiskAssessmentSnapshot(params: {
     fallbackOverallRisk = null,
   } = params;
 
+  const activeSections = resolveMatterRiskSections(extraRiskQuestions);
   const isMlrInScope = answers.inScopeMlr !== 'No, out of scope';
-  const visibleSections = MATTER_RISK_SECTIONS.filter(
+  const visibleSections = activeSections.filter(
     (sec) => !sec.amlOnly || isMlrInScope,
   );
 
   let totalQuestions = 0;
   let completedQuestions = 0;
+  let totalScore = 0;
+  let hasScoredQuestion = false;
   let highestRisk: RiskLevel | null = null;
 
   const elevateRisk = (current: RiskLevel | null, candidate: RiskLevel): RiskLevel => {
@@ -463,13 +551,24 @@ export function buildMatterRiskAssessmentSnapshot(params: {
 
     const qSnapshots: MatterRiskQuestionSnapshotItem[] = visibleQs.map((q) => {
       totalQuestions++;
-      const selectedLabel = answers[q.id] ?? '';
-      const matchedOpt = q.options.find((o) => o.label === selectedLabel) ?? null;
+      const selectedAnswer = answers[q.id] ?? '';
+      const matchedOpt =
+        q.options.find(
+          (o) =>
+            o.label === selectedAnswer ||
+            (o.value !== undefined && o.value === selectedAnswer),
+        ) ?? null;
       const followUpVal = (followUps[q.id] ?? '').trim();
+      let questionScore: number | undefined;
 
       if (matchedOpt) {
         secRisk = elevateRisk(secRisk, matchedOpt.risk);
         highestRisk = elevateRisk(highestRisk, matchedOpt.risk);
+        if (typeof matchedOpt.score === 'number') {
+          hasScoredQuestion = true;
+          questionScore = matchedOpt.score * (q.weight ?? 1);
+          totalScore += questionScore;
+        }
         const followUpDone =
           !matchedOpt.triggersFollowUp ||
           (q.followUpType === 'key_dates'
@@ -484,8 +583,10 @@ export function buildMatterRiskAssessmentSnapshot(params: {
       return {
         id: q.id,
         question: q.question,
-        answer: selectedLabel || 'Not recorded',
+        answer: matchedOpt?.label || selectedAnswer || 'Not recorded',
         risk: matchedOpt?.risk ?? null,
+        ...(q.weight !== undefined ? { weight: q.weight } : {}),
+        ...(questionScore !== undefined ? { score: questionScore } : {}),
         followUpLabel: q.followUpLabel,
         followUp:
           q.followUpType === 'key_dates' && customKeyDates.length > 0
@@ -524,6 +625,8 @@ export function buildMatterRiskAssessmentSnapshot(params: {
     leadFeeEarnerId,
     leadFeeEarnerName,
     overallRisk: highestRisk ?? fallbackOverallRisk,
+    ...(hasScoredQuestion ? { totalScore } : {}),
+    ...(workTypeSubcategoryId ? { workTypeSubcategoryId } : {}),
     completedQuestions,
     totalQuestions,
     isMlrInScope,
@@ -539,10 +642,6 @@ export interface MatterRiskAssessmentInput {
   followUps?: Record<string, string>;
   customKeyDates?: CustomKeyDateEntry[];
 }
-
-const MATTER_RISK_QUESTION_BY_ID: ReadonlyMap<string, RiskQuestionDef> = new Map(
-  MATTER_RISK_SECTIONS.flatMap((sec) => sec.questions.map((q) => [q.id, q])),
-);
 
 export type ValidatedMatterRiskAssessmentInput =
   | {
@@ -570,8 +669,25 @@ export const MAX_RISK_FOLLOW_UP_LENGTH = 2000;
 export function validateMatterRiskAssessmentInput(
   rawInput: unknown,
   fallbackCustomKeyDates: CustomKeyDateEntry[] = [],
+  extraRiskQuestions: readonly WorkTypeRiskQuestionConfig[] = [],
+  options?: { requireRequiredWorkTypeQuestions?: boolean },
 ): ValidatedMatterRiskAssessmentInput {
+  const effectiveSections = resolveMatterRiskSections(extraRiskQuestions);
+  const questionById = new Map<string, RiskQuestionDef>(
+    effectiveSections.flatMap((sec) => sec.questions.map((q) => [q.id, q])),
+  );
+
   if (rawInput === undefined || rawInput === null) {
+    if (
+      options?.requireRequiredWorkTypeQuestions &&
+      extraRiskQuestions.some((q) => q.required !== false)
+    ) {
+      const missing = extraRiskQuestions.find((q) => q.required !== false)!;
+      return {
+        ok: false,
+        error: `Required work-type risk question "${missing.prompt}" must be answered before opening.`,
+      };
+    }
     return { ok: true, hasAnswers: false };
   }
   if (typeof rawInput !== 'object' || Array.isArray(rawInput)) {
@@ -583,6 +699,16 @@ export function validateMatterRiskAssessmentInput(
   const rawFollowUps = candidate.followUps;
 
   if (rawAnswers === undefined && rawFollowUps === undefined) {
+    if (
+      options?.requireRequiredWorkTypeQuestions &&
+      extraRiskQuestions.some((q) => q.required !== false)
+    ) {
+      const missing = extraRiskQuestions.find((q) => q.required !== false)!;
+      return {
+        ok: false,
+        error: `Required work-type risk question "${missing.prompt}" must be answered before opening.`,
+      };
+    }
     return { ok: true, hasAnswers: false };
   }
 
@@ -592,7 +718,7 @@ export function validateMatterRiskAssessmentInput(
       return { ok: false, error: 'Risk assessment answers must be a key-value map.' };
     }
     for (const [questionId, rawVal] of Object.entries(rawAnswers as Record<string, unknown>)) {
-      const qDef = MATTER_RISK_QUESTION_BY_ID.get(questionId);
+      const qDef = questionById.get(questionId);
       if (!qDef) {
         return {
           ok: false,
@@ -606,14 +732,18 @@ export function validateMatterRiskAssessmentInput(
         };
       }
       if (rawVal !== '') {
-        const isAllowedOption = qDef.options.some((opt) => opt.label === rawVal);
-        if (!isAllowedOption) {
+        const matchedOption = qDef.options.find(
+          (opt) =>
+            opt.label === rawVal ||
+            (opt.value !== undefined && opt.value === rawVal),
+        );
+        if (!matchedOption) {
           return {
             ok: false,
             error: `Invalid answer "${rawVal}" for risk assessment question "${questionId}".`,
           };
         }
-        cleanedAnswers[questionId] = rawVal;
+        cleanedAnswers[questionId] = matchedOption.label;
       }
     }
   }
@@ -626,7 +756,7 @@ export function validateMatterRiskAssessmentInput(
     for (const [questionId, rawFollowUp] of Object.entries(
       rawFollowUps as Record<string, unknown>,
     )) {
-      const qDef = MATTER_RISK_QUESTION_BY_ID.get(questionId);
+      const qDef = questionById.get(questionId);
       if (!qDef) {
         return {
           ok: false,
@@ -646,6 +776,17 @@ export function validateMatterRiskAssessmentInput(
         };
       }
       cleanedFollowUps[questionId] = rawFollowUp;
+    }
+  }
+
+  if (options?.requireRequiredWorkTypeQuestions) {
+    for (const wq of extraRiskQuestions) {
+      if (wq.required !== false && !cleanedAnswers[wq.id]) {
+        return {
+          ok: false,
+          error: `Required work-type risk question "${wq.prompt}" must be answered before opening.`,
+        };
+      }
     }
   }
 
@@ -842,16 +983,23 @@ export function summarizeMatterRiskAssessment(params: {
   answers: Record<string, string>;
   followUps: Record<string, string>;
   customKeyDates?: CustomKeyDateEntry[];
+  extraRiskQuestions?: readonly WorkTypeRiskQuestionConfig[];
+  workTypeSubcategoryId?: string | null;
   completedById?: string | null;
   completedByName?: string | null;
   leadFeeEarnerId?: string | null;
   leadFeeEarnerName?: string | null;
   completedAt?: string | null;
 }): MatterRiskAssessmentSummary {
+  const effectiveSections = resolveMatterRiskSections(
+    params.extraRiskQuestions ?? [],
+  );
   const snapshot = buildMatterRiskAssessmentSnapshot({
     answers: params.answers,
     followUps: params.followUps,
     customKeyDates: params.customKeyDates ?? [],
+    extraRiskQuestions: params.extraRiskQuestions ?? [],
+    workTypeSubcategoryId: params.workTypeSubcategoryId ?? null,
     completedById: params.completedById ?? null,
     completedByName: params.completedByName ?? null,
     leadFeeEarnerId: params.leadFeeEarnerId ?? null,
@@ -861,7 +1009,7 @@ export function summarizeMatterRiskAssessment(params: {
   });
 
   const visibleSections: MatterRiskSectionSummaryItem[] = snapshot.sections.map((secSnap) => {
-    const def = MATTER_RISK_SECTIONS.find((s) => s.id === secSnap.id)!;
+    const def = effectiveSections.find((s) => s.id === secSnap.id)!;
     const visibleQuestions = def.questions.filter(
       (q) => !q.amlOnly || snapshot.isMlrInScope,
     );
@@ -924,6 +1072,7 @@ export function resolveMatterRiskAssessment(
   matter: Matter,
   people: Person[],
   _values: ChoiceValue[],
+  extraRiskQuestions: readonly WorkTypeRiskQuestionConfig[] = [],
 ): MatterRiskAssessmentSnapshot {
   const nameOf = (id: string | null | undefined) => {
     if (!id) return null;
@@ -980,6 +1129,10 @@ export function resolveMatterRiskAssessment(
       leadFeeEarnerId,
       leadFeeEarnerName,
       overallRisk: hasAssessmentActivity ? (saved.overallRisk ?? null) : null,
+      ...(typeof saved.totalScore === 'number' ? { totalScore: saved.totalScore } : {}),
+      ...(saved.workTypeSubcategoryId
+        ? { workTypeSubcategoryId: saved.workTypeSubcategoryId }
+        : {}),
       completedQuestions,
       totalQuestions,
       isMlrInScope: saved.isMlrInScope ?? true,
@@ -994,6 +1147,8 @@ export function resolveMatterRiskAssessment(
     answers: hasSavedAnswers ? saved!.answers! : {},
     followUps: hasSavedAnswers ? (saved?.followUps ?? {}) : {},
     customKeyDates: saved?.customKeyDates ?? savedKeyDates,
+    extraRiskQuestions,
+    workTypeSubcategoryId: matter.workTypeSubcategoryId || null,
     completedById: hasSavedAnswers
       ? saved?.completedById || matter.createdById || null
       : null,

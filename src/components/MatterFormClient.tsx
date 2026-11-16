@@ -72,7 +72,16 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import { resolveOrgDepartment } from '@/domain/orgStructure';
+import type { WorkTypesConfiguration } from '@platform/core-api';
+import {
+  isWorkTypeChoiceActive,
+  resolveDepartmentForPracticeArea,
+  resolveOrgDepartment,
+} from '@/domain/orgStructure';
+import {
+  DEFAULT_WORK_TYPES_CONFIG,
+  resolveWorkTypeRiskQuestions,
+} from '@/domain/workTypeConfig';
 import {
   calculateDisbursementsTotal,
   lookupRatesForMatter,
@@ -92,7 +101,7 @@ import {
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
-  MATTER_RISK_SECTIONS,
+  resolveMatterRiskSections,
   summarizeMatterRiskAssessment,
   type CustomKeyDateEntry,
 } from '@/domain/matterOpeningRecord';
@@ -168,6 +177,7 @@ interface MatterFormClientProps {
   employees: Person[];
   currentUser: Person;
   orgStructure: OrgStructureCatalogue;
+  workTypesConfig?: WorkTypesConfiguration;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterCostsConfig: MatterCostsConfig;
   canReassignOwnership?: boolean;
@@ -270,6 +280,7 @@ export function MatterFormClient({
   employees: initialEmployees,
   currentUser,
   orgStructure,
+  workTypesConfig,
   matterPartyTaxonomy,
   matterCostsConfig,
   canReassignOwnership = false,
@@ -345,12 +356,31 @@ export function MatterFormClient({
   const card4Ref = useRef<HTMLElement | null>(null);
   const card5Ref = useRef<HTMLElement | null>(null);
 
+  const effectiveWorkTypesConfig = useMemo(
+    () => workTypesConfig ?? DEFAULT_WORK_TYPES_CONFIG,
+    [workTypesConfig],
+  );
+
   const practiceAreas = useMemo(
     () =>
       values
-        .filter((v) => v.listKey === 'work_type' && !v.parentId && v.active)
+        .filter(
+          (v) =>
+            v.listKey === 'work_type' &&
+            !v.parentId &&
+            (isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+              v.id === existing?.practiceAreaId ||
+              v.id === initialQuote?.practiceAreaId ||
+              v.id === initialEnquiry?.practiceAreaId),
+        )
         .sort((a, b) => a.sortOrder - b.sortOrder),
-    [values],
+    [
+      values,
+      orgStructure,
+      existing?.practiceAreaId,
+      initialQuote?.practiceAreaId,
+      initialEnquiry?.practiceAreaId,
+    ],
   );
 
   const isEditingExistingMatter = Boolean(
@@ -1380,6 +1410,7 @@ export function MatterFormClient({
   });
   const [expandedRiskSectionIds, setExpandedRiskSectionIds] = useState<string[]>([
     'about_instruction',
+    'work_type_risk_factors',
   ]);
   const [riskListView, setRiskListView] = useState<boolean>(false);
   const [customKeyDates, setCustomKeyDates] = useState<CustomKeyDateEntry[]>(() => {
@@ -1630,6 +1661,15 @@ export function MatterFormClient({
     });
   }, [clientIds, derivedClientRelationshipCdd.option]);
 
+  const workTypeRiskQuestions = useMemo(
+    () =>
+      resolveWorkTypeRiskQuestions(effectiveWorkTypesConfig, {
+        workTypeSubcategoryId,
+        practiceAreaId,
+      }),
+    [effectiveWorkTypesConfig, workTypeSubcategoryId, practiceAreaId],
+  );
+
   // Compute active risk sections, per-section completion counts, per-section risk, and overall risk via shared builder
   const riskAssessmentSummary = useMemo(
     () =>
@@ -1637,6 +1677,8 @@ export function MatterFormClient({
         answers: riskAnswers,
         followUps: riskFollowUps,
         customKeyDates,
+        extraRiskQuestions: workTypeRiskQuestions,
+        workTypeSubcategoryId: workTypeSubcategoryId || null,
         completedById: currentUser.id,
         completedByName: personDisplayName(currentUser),
         leadFeeEarnerId: leadFeeEarnerId || null,
@@ -1646,7 +1688,16 @@ export function MatterFormClient({
             : leadFeeEarnerId
           : null,
       }),
-    [riskAnswers, riskFollowUps, customKeyDates, leadFeeEarnerId, currentUser, people],
+    [
+      riskAnswers,
+      riskFollowUps,
+      customKeyDates,
+      workTypeRiskQuestions,
+      workTypeSubcategoryId,
+      leadFeeEarnerId,
+      currentUser,
+      people,
+    ],
   );
 
   // Sync calculated overall risk level to riskRatingId
@@ -2057,7 +2108,9 @@ export function MatterFormClient({
       queueMicrotask(() => {
         setRiskAnswers(nextAnswers);
         setRiskFollowUps(nextFollowUps);
-        setExpandedRiskSectionIds(MATTER_RISK_SECTIONS.map((sec) => sec.id));
+        setExpandedRiskSectionIds(
+          resolveMatterRiskSections(workTypeRiskQuestions).map((sec) => sec.id),
+        );
       });
     }
 
@@ -2974,9 +3027,26 @@ export function MatterFormClient({
   const subcategoriesForPractice = useMemo(
     () =>
       values
-        .filter((v) => v.listKey === 'work_type' && v.parentId === practiceAreaId && v.active)
+        .filter(
+          (v) =>
+            v.listKey === 'work_type' &&
+            v.parentId === practiceAreaId &&
+            (isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+              v.id === existing?.workTypeSubcategoryId ||
+              v.id === initialQuote?.workTypeSubcategoryId ||
+              v.id === initialEnquiry?.workTypeSubcategoryId ||
+              v.id === workTypeSubcategoryId),
+        )
         .sort((a, b) => a.sortOrder - b.sortOrder),
-    [values, practiceAreaId],
+    [
+      values,
+      practiceAreaId,
+      orgStructure,
+      existing?.workTypeSubcategoryId,
+      initialQuote?.workTypeSubcategoryId,
+      initialEnquiry?.workTypeSubcategoryId,
+      workTypeSubcategoryId,
+    ],
   );
 
   // Fixed client parties + user-added parties (Part 2.1 & 2.6)
@@ -6353,7 +6423,11 @@ export function MatterFormClient({
                       !owningDepartmentExplicitlyChosen &&
                       !owningTeamId
                     ) {
-                      const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
+                      const nextOrgDept = resolveDepartmentForPracticeArea(
+                        nextPa,
+                        orgStructure,
+                        values,
+                      );
                       const nextOwningDeptId = nextOrgDept?.id ?? '';
                       setOwningDepartmentId(nextOwningDeptId);
                     }
@@ -6362,7 +6436,7 @@ export function MatterFormClient({
                         (v) =>
                           v.listKey === 'work_type' &&
                           v.parentId === nextPa &&
-                          v.active,
+                          isWorkTypeChoiceActive(v.id, values, orgStructure),
                       )
                       .sort((a, b) => a.sortOrder - b.sortOrder)[0];
                     setWorkTypeSubcategoryId(
@@ -8415,7 +8489,9 @@ export function MatterFormClient({
                       {sec.visibleQuestions.map((q, qIdx) => {
                         const selectedVal = riskAnswers[q.id] ?? '';
                         const selectedOpt = q.options.find(
-                          (o) => o.label === selectedVal,
+                          (o) =>
+                            o.label === selectedVal ||
+                            (Boolean(o.value) && o.value === selectedVal),
                         );
                         const showFollowUp = Boolean(selectedOpt?.triggersFollowUp);
                         const isLastInSec = qIdx === sec.visibleQuestions.length - 1;
@@ -8552,7 +8628,9 @@ export function MatterFormClient({
                                 aria-label={q.question}
                               >
                                 {q.options.map((opt) => {
-                                  const isSelected = selectedVal === opt.label;
+                                  const isSelected =
+                                    selectedVal === opt.label ||
+                                    (Boolean(opt.value) && selectedVal === opt.value);
                                   return (
                                     <button
                                       key={opt.label}
@@ -8871,7 +8949,9 @@ export function MatterFormClient({
                         {sec.visibleQuestions.map((q) => {
                           const selectedVal = riskAnswers[q.id] ?? '';
                           const selectedOpt = q.options.find(
-                            (o) => o.label === selectedVal,
+                            (o) =>
+                              o.label === selectedVal ||
+                              (Boolean(o.value) && o.value === selectedVal),
                           );
                           const showFollowUp = Boolean(selectedOpt?.triggersFollowUp);
 
@@ -8990,7 +9070,9 @@ export function MatterFormClient({
                                 aria-label={q.question}
                               >
                                 {q.options.map((opt) => {
-                                  const isSelected = selectedVal === opt.label;
+                                  const isSelected =
+                                    selectedVal === opt.label ||
+                                    (Boolean(opt.value) && selectedVal === opt.value);
                                   return (
                                     <button
                                       key={opt.label}

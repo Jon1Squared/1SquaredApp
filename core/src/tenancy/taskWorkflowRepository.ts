@@ -73,7 +73,12 @@ export interface TenantTaskRecord {
   completedAt: string | null;
   comments: TenantTaskCommentRecord[];
   checklist?: TenantTaskChecklistItemRecord[];
-  autoTrigger?: 'enquiry_contact' | 'non_engagement_letter' | 'complete_matter_opening' | null;
+  autoTrigger?:
+    | 'enquiry_contact'
+    | 'non_engagement_letter'
+    | 'complete_matter_opening'
+    | 'work_type_auto_task'
+    | null;
   linkedKeyDateId?: string | null;
   idempotencyKey?: string | null;
   systemKey?: string | null;

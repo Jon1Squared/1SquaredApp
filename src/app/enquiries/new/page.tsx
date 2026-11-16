@@ -15,6 +15,7 @@ export default async function NewEnquiryPage() {
         enquiries={snap.enquiries}
         teams={snap.teams}
         values={snap.values}
+        orgStructure={snap.orgStructure}
         customFields={snap.customFields}
         currentUserId={snap.currentUserId}
         firmName={snap.firm.name}

@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-13',
+  updated: '2026-11-15',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -99,5 +99,8 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`keyVault.vaultName\` | Optional | Active | Deployed per-tenant Azure Key Vault name (3–24 characters, populated from \`keyVaultName\` output of \`core/infra/modules/tenant.bicep\`); enforced by \`assertTenantOwnsKeyVaultSecretRef\` against every \`kv://\` secret reference |
 | \`keyVault.vaultUri\` | Optional | Active | Deployed per-tenant Azure Key Vault URI (\`https://<vault>.vault.azure.net/\`, populated from \`keyVaultUri\` output of \`core/infra/modules/tenant.bicep\`); validated alongside \`keyVault.vaultName\` |
 | \`database.dedicatedServerHost\` | Optional | Active | Hostname of a dedicated Azure Database for PostgreSQL Flexible Server (\`psql-<slug>-<env>.postgres.database.azure.com\`) for Model B hosted tenants requiring their own server or a Customer-Managed Key (ADR 0028 Decision 1) |
+| \`workTypes.defaults.*\` | 6 years retention | Active | Firm-wide fallback automatic opening task templates (\`matter_open\`), work-type risk questions, and closure retention period (\`1\`–\`100\` years) |
+| \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator edits in \`public.tenant_module_configs\` (\`work_type_configs\`, gated by \`admin:access\` + MFA) |
+| \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Reserved (S0-28b) | Reserved for per-work-type CFA/DBA statutory fee cap overrides |
 `.trim(),
 };

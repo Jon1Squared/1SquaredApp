@@ -32,6 +32,7 @@ import type {
   ContactLogMethod,
   Enquiry,
   Matter,
+  OrgStructureCatalogue,
   Organisation,
   Person,
   PersonOrganisationLink,
@@ -50,6 +51,7 @@ interface Props {
   organisations: Organisation[];
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
+  orgStructure?: OrgStructureCatalogue;
   currentUserId: string;
   tenantId: string;
   initialAction?: string | null;
@@ -63,6 +65,7 @@ export function QuoteDetailClient({
   organisations,
   links = [],
   values,
+  orgStructure,
   currentUserId,
   tenantId,
   initialAction = null,
@@ -227,6 +230,7 @@ export function QuoteDetailClient({
         organisations={organisations}
         links={links}
         values={values}
+        orgStructure={orgStructure}
         currentUserId={currentUserId}
         tenantId={tenantId}
         onCancelOverride={() => setViewMode('detail')}

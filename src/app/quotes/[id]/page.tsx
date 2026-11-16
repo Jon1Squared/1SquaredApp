@@ -33,6 +33,7 @@ export default async function QuoteDetailPage({
         organisations={snap.organisations}
         links={snap.links}
         values={snap.values}
+        orgStructure={snap.orgStructure}
         currentUserId={snap.currentUserId}
         tenantId={snap.tenantId}
         initialAction={sp.action ?? null}

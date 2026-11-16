@@ -71,6 +71,7 @@ export default async function AdminCatchAllPage({
               first === 'rates-and-costs' ||
               first === 'document-templates' ||
               first === 'key-dates' ||
+          first === 'work-types' ||
               first === 'custom-fields' ||
               first === 'enquiry-settings' ||
               first === 'task-settings' ||
@@ -114,6 +115,8 @@ export default async function AdminCatchAllPage({
         rbacConfig={snap.rbacConfig}
         keyDatesConfig={snap.keyDatesConfig}
         currentUserKeyDatePermissions={snap.currentUserKeyDatePermissions}
+        workTypesConfig={snap.workTypesConfig}
+        hasMfaVerified={actor.mfaVerified}
         entraSession={actor.session}
         entraEnvStatus={entraEnvStatus}
         firmAuditPage={firmAuditPage}

@@ -57,6 +57,7 @@ export default async function NewMatterPage({
         employees={snap.employees}
         currentUser={snap.currentUser}
         orgStructure={snap.orgStructure}
+        workTypesConfig={snap.workTypesConfig}
         matterPartyTaxonomy={snap.matterPartyTaxonomy}
         matterCostsConfig={snap.matterCostsConfig}
         canReassignOwnership={snap.currentUserPermissions.includes('matter:reassign_ownership')}

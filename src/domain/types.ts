@@ -167,6 +167,7 @@ export interface OrgDepartment {
   defaultCostCentreId: string;
   defaultProfitCentreId: string;
   legacyChoiceValueId?: string | null;
+  practiceAreaIds?: string[];
   active: boolean;
 }
 
@@ -179,8 +180,8 @@ export interface OrgTeamOrPracticeGroup {
 }
 
 export interface OrgOffice {
-  id: string; // e.g. 'OFF-CDF'
-  name: string; // e.g. 'Cardiff'
+  id: string; // e.g. 'OFF-MAIN'
+  name: string; // e.g. 'Head Office'
   code: string;
   parentLegalEntityId: string;
   address: Address;
@@ -487,7 +488,7 @@ export interface EmploymentRecord {
   engagementType: EngagementType;
   status: EmploymentStatus;
   employeeNumber: string; // unique
-  employingEntityId: string; // defaults to 'LE-PV-LLP'
+  employingEntityId: string; // defaults to 'LE-PRIMARY'
   jobTitle: string; // Firm job title (distinct from contact jobTitle)
   gradeOrBand: string;
   roleType: EmployeeRoleType;
@@ -1073,9 +1074,10 @@ export interface Task {
   completedById: string | null;
   completedAt: string | null;
   comments: TaskComment[];
-  autoTrigger?: AutoTaskTrigger | null;
+  autoTrigger?: AutoTaskTrigger | 'work_type_auto_task' | null;
   linkedKeyDateId?: string | null;
   idempotencyKey?: string | null;
+  systemKey?: string | null;
 }
 
 // ------------------------------------------------------------------ Enquiries
@@ -1808,6 +1810,7 @@ export interface AppSnapshot {
   enquirySettings: EnquirySettings;
   taskSettings: TaskSettings;
   matterCostsConfig: MatterCostsConfig;
+  workTypesConfig?: import('@platform/core-api').WorkTypesConfiguration;
   taskBadgeCount: number;
   notes: Note[];
   audit: AuditEntry[];

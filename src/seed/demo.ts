@@ -6,6 +6,10 @@
 import { calculateFirstContactDue, DEFAULT_WORKING_HOURS } from '@/domain/dates';
 import { createDefaultHomePagesConfig } from '@/domain/homeConfig';
 import {
+  calculateDestructionDate,
+  formatRetentionPeriodLabel,
+} from '@/domain/workTypeConfig';
+import {
   getActiveTenantConfiguration,
   isNonLiveDemoEnvironment,
 } from '@/platform/tenantRuntime';
@@ -22,6 +26,7 @@ import type {
   Matter,
   Note,
   NotificationItem,
+  OrgOffice,
   Organisation,
   OtherName,
   Person,
@@ -38,6 +43,66 @@ import { buildSeedLists, vid } from './lists';
 
 export const FIRM = { name: 'Not A Law Firm LLP', shortName: 'Not A Law Firm', offices: ['Cardiff', 'Bristol', 'London'] };
 export const DEFAULT_USER_ID = 'P-000001';
+
+export const DEMO_ORG_LEGAL_ENTITY_IDS = {
+  primary: 'LE-PV-LLP',
+  services: 'LE-PV-SERV',
+  trust: 'LE-PV-TRUST',
+} as const;
+
+export const DEMO_ORG_OFFICES: OrgOffice[] = [
+  {
+    id: 'OFF-CDF',
+    name: 'Cardiff',
+    code: 'CDF',
+    parentLegalEntityId: DEMO_ORG_LEGAL_ENTITY_IDS.primary,
+    address: {
+      id: 'addr-off-cdf',
+      typeId: 'address_type.work',
+      line1: '3 Bute Dock Chambers, Mount Stuart Square',
+      line2: '',
+      town: 'Cardiff',
+      county: 'South Glamorgan',
+      postcode: 'CF10 5FQ',
+      countryId: 'country.united_kingdom',
+    },
+    active: true,
+  },
+  {
+    id: 'OFF-BRI',
+    name: 'Bristol',
+    code: 'BRI',
+    parentLegalEntityId: DEMO_ORG_LEGAL_ENTITY_IDS.primary,
+    address: {
+      id: 'addr-off-bri',
+      typeId: 'address_type.work',
+      line1: '21 Redcliffe Quay',
+      line2: '',
+      town: 'Bristol',
+      county: 'Bristol',
+      postcode: 'BS1 6HU',
+      countryId: 'country.united_kingdom',
+    },
+    active: true,
+  },
+  {
+    id: 'OFF-LON',
+    name: 'London',
+    code: 'LON',
+    parentLegalEntityId: DEMO_ORG_LEGAL_ENTITY_IDS.primary,
+    address: {
+      id: 'addr-off-lon',
+      typeId: 'address_type.work',
+      line1: '9 Temple Row Chambers, Fleet Street',
+      line2: '',
+      town: 'London',
+      county: 'Greater London',
+      postcode: 'EC4Y 1AA',
+      countryId: 'country.united_kingdom',
+    },
+    active: true,
+  },
+];
 
 export const DEFAULT_ENQUIRY_SETTINGS: EnquirySettings = {
   emergencyHours: 2,
@@ -1112,15 +1177,27 @@ export function buildDemoData(
       owningDepartmentId: 'DEPT-CORP',
       owningTeamId: 'TPG-CORP-MA',
     },
-    [v('work_type', 'Banking, Finance & Restructuring')]: {
+    [v('work_type', 'Finance & Banking')]: {
       owningDepartmentId: 'DEPT-CORP',
       owningTeamId: 'TPG-CORP-MA',
     },
-    [v('work_type', 'Dispute Resolution & Litigation')]: {
+    [v('work_type', 'Intellectual Property')]: {
+      owningDepartmentId: 'DEPT-CORP',
+      owningTeamId: 'TPG-CORP-MA',
+    },
+    [v('work_type', 'Technology & Digital')]: {
+      owningDepartmentId: 'DEPT-CORP',
+      owningTeamId: 'TPG-CORP-MA',
+    },
+    [v('work_type', 'Dispute Resolution')]: {
       owningDepartmentId: 'DEPT-DR',
       owningTeamId: 'TPG-DR-COM',
     },
-    [v('work_type', 'Private Client, Trusts & Family')]: {
+    [v('work_type', 'Private Client')]: {
+      owningDepartmentId: 'DEPT-PC',
+      owningTeamId: 'TPG-PC-WILLS',
+    },
+    [v('work_type', 'Family')]: {
       owningDepartmentId: 'DEPT-PC',
       owningTeamId: 'TPG-PC-WILLS',
     },
@@ -1128,7 +1205,7 @@ export function buildDemoData(
       owningDepartmentId: 'DEPT-EMP',
       owningTeamId: 'TPG-EMP-ADV',
     },
-    [v('work_type', 'Regulatory, Public & Specialist')]: {
+    [v('work_type', 'Regulatory & Compliance')]: {
       owningDepartmentId: 'DEPT-RISK',
       owningTeamId: 'TPG-RISK-AML',
     },
@@ -2377,6 +2454,8 @@ export function buildDemoData(
     feeEstimateGbp: 15000,
     closedAt: day(-63),
     completedAt: day(-63),
+    retentionPeriod: formatRetentionPeriodLabel(12),
+    destructionDueAt: calculateDestructionDate(day(-63), 12),
     stageId: v('matter_stage', 'Stage 7 — File Closure'),
     milestoneId: msId('Stage 7 — File Closure', 'File archive'),
     tags: ['commercial property', 'completed'],
@@ -2439,6 +2518,8 @@ export function buildDemoData(
     feeEstimateGbp: 2750,
     closedAt: day(-126),
     completedAt: day(-126),
+    retentionPeriod: formatRetentionPeriodLabel(6),
+    destructionDueAt: calculateDestructionDate(day(-126), 6),
     stageId: v('matter_stage', 'Stage 7 — File Closure'),
     milestoneId: msId('Stage 7 — File Closure', 'File archive'),
     tags: ['mermaid quay', 'retail lease'],

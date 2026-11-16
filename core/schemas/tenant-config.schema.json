@@ -1084,6 +1084,467 @@
           "description": "Optional dedicated PostgreSQL server FQDN (output from core/infra/modules/tenant.bicep when deployDedicatedPostgresServer is true)"
         }
       }
+    },
+    "workTypes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Work-type defaults and per-work-type overrides driving automatic opening tasks, work-type risk questionnaires and closure retention dates (S0-22; forward-compatible with S0-28b workTypeCapOverrides)",
+      "default": {
+        "defaults": {
+          "autoTaskTemplates": [],
+          "riskQuestions": [],
+          "retention": {
+            "retentionYears": 6,
+            "baseline": "closed_on",
+            "allowMatterOverride": false,
+            "statutoryNote": "Firm standard limitation and file retention policy"
+          }
+        },
+        "items": []
+      },
+      "properties": {
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Firm-wide fallback templates, risk questions and retention period when no work-type or practice-area override matches",
+          "default": {
+            "autoTaskTemplates": [],
+            "riskQuestions": [],
+            "retention": {
+              "retentionYears": 6,
+              "baseline": "closed_on",
+              "allowMatterOverride": false,
+              "statutoryNote": "Firm standard limitation and file retention policy"
+            }
+          },
+          "properties": {
+            "autoTaskTemplates": {
+              "type": "array",
+              "default": [],
+              "description": "Firm-wide fallback automatic task templates instantiated on matter opening",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "title",
+                  "trigger",
+                  "dueWorkingDaysOffset",
+                  "priorityId",
+                  "ownerRoleKey"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique stable identifier for this task template"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Task title created when the template triggers"
+                  },
+                  "trigger": {
+                    "type": "string",
+                    "enum": ["matter_open"],
+                    "default": "matter_open",
+                    "description": "Matter lifecycle trigger event for this task template"
+                  },
+                  "dueWorkingDaysOffset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 365,
+                    "default": 5,
+                    "description": "Working-day offset from trigger date for the task due date"
+                  },
+                  "priorityId": {
+                    "type": "string",
+                    "enum": [
+                      "task_priority.low",
+                      "task_priority.normal",
+                      "task_priority.high",
+                      "task_priority.urgent"
+                    ],
+                    "default": "task_priority.normal",
+                    "description": "Task priority choice value ID assigned to generated tasks"
+                  },
+                  "ownerRoleKey": {
+                    "type": "string",
+                    "enum": [
+                      "fee_earner",
+                      "supervisor",
+                      "partner",
+                      "legal_secretary",
+                      "intake",
+                      "enquiries_coordinator",
+                      "finance",
+                      "risk_compliance",
+                      "managing_partner",
+                      "admin"
+                    ],
+                    "default": "fee_earner",
+                    "description": "Stable HomeRoleKey used to resolve the initial task assignee"
+                  }
+                }
+              }
+            },
+            "riskQuestions": {
+              "type": "array",
+              "default": [],
+              "description": "Additional firm-wide risk assessment questions combined with the standard S0-08 sections",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "sectionKey", "prompt", "weight", "options"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique question identifier stored with the risk assessment snapshot"
+                  },
+                  "sectionKey": {
+                    "type": "string",
+                    "enum": ["client", "matter", "jurisdiction", "delivery", "work_type"],
+                    "default": "work_type",
+                    "description": "Risk assessment section key where the question renders"
+                  },
+                  "sectionTitle": {
+                    "type": "string",
+                    "default": "Work-type risk factors",
+                    "description": "Heading used for the dynamic work-type risk section"
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Question prompt shown to the fee earner in the opening wizard"
+                  },
+                  "weight": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 1,
+                    "description": "Server-side score multiplier applied to the chosen option score"
+                  },
+                  "required": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether an answer is mandatory on matter opening submission"
+                  },
+                  "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "description": "Selectable risk answer options with score and band",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["value", "label", "score", "riskLevel"],
+                      "properties": {
+                        "value": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Machine option code stored in the risk answer payload"
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Human-readable option text rendered in the UI"
+                        },
+                        "score": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 100,
+                          "default": 0,
+                          "description": "Base numeric score before question weight multiplier"
+                        },
+                        "riskLevel": {
+                          "type": "string",
+                          "enum": ["low", "medium", "high"],
+                          "default": "low",
+                          "description": "Risk classification tier implied by selecting this option"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "retention": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Firm-wide fallback retention rule used to calculate destruction_date upon matter closure",
+              "default": {
+                "retentionYears": 6,
+                "baseline": "closed_on",
+                "allowMatterOverride": false,
+                "statutoryNote": "Firm standard limitation and file retention policy"
+              },
+              "properties": {
+                "retentionYears": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100,
+                  "default": 6,
+                  "description": "Whole years after closure before matter destruction due date"
+                },
+                "baseline": {
+                  "type": "string",
+                  "enum": ["closed_on"],
+                  "default": "closed_on",
+                  "description": "Anchor date field used when calculating destruction_date"
+                },
+                "allowMatterOverride": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether an individual matter may record an exception retention note or override"
+                },
+                "statutoryNote": {
+                  "type": "string",
+                  "default": "Firm standard limitation and file retention policy",
+                  "description": "Regulatory or statutory justification for this retention rule"
+                }
+              }
+            }
+          }
+        },
+        "items": {
+          "type": "array",
+          "default": [],
+          "description": "Per-work-type or practice-area rules keyed by workTypeId",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["workTypeId"],
+            "properties": {
+              "workTypeId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Target work-type subcategory ID or parent practice area ID"
+              },
+              "practiceAreaId": {
+                "type": "string",
+                "default": "",
+                "description": "Optional parent practice area ID used for grouping and reporting"
+              },
+              "active": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this per-work-type configuration rule is active"
+              },
+              "autoTaskTemplates": {
+                "type": "array",
+                "default": [],
+                "description": "Automatic task templates for matters of this work type",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "title",
+                    "trigger",
+                    "dueWorkingDaysOffset",
+                    "priorityId",
+                    "ownerRoleKey"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Unique stable identifier for this task template"
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Task title created when the template triggers"
+                    },
+                    "trigger": {
+                      "type": "string",
+                      "enum": ["matter_open"],
+                      "default": "matter_open",
+                      "description": "Matter lifecycle trigger event for this task template"
+                    },
+                    "dueWorkingDaysOffset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 365,
+                      "default": 5,
+                      "description": "Working-day offset from trigger date for the task due date"
+                    },
+                    "priorityId": {
+                      "type": "string",
+                      "enum": [
+                        "task_priority.low",
+                        "task_priority.normal",
+                        "task_priority.high",
+                        "task_priority.urgent"
+                      ],
+                      "default": "task_priority.normal",
+                      "description": "Task priority choice value ID assigned to generated tasks"
+                    },
+                    "ownerRoleKey": {
+                      "type": "string",
+                      "enum": [
+                        "fee_earner",
+                        "supervisor",
+                        "partner",
+                        "legal_secretary",
+                        "intake",
+                        "enquiries_coordinator",
+                        "finance",
+                        "risk_compliance",
+                        "managing_partner",
+                        "admin"
+                      ],
+                      "default": "fee_earner",
+                      "description": "Stable HomeRoleKey used to resolve the initial task assignee"
+                    }
+                  }
+                }
+              },
+              "riskQuestions": {
+                "type": "array",
+                "default": [],
+                "description": "Work-type-specific risk assessment questions",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["id", "sectionKey", "prompt", "weight", "options"],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Unique question identifier stored with the risk assessment snapshot"
+                    },
+                    "sectionKey": {
+                      "type": "string",
+                      "enum": ["client", "matter", "jurisdiction", "delivery", "work_type"],
+                      "default": "work_type",
+                      "description": "Risk assessment section key where the question renders"
+                    },
+                    "sectionTitle": {
+                      "type": "string",
+                      "default": "Work-type risk factors",
+                      "description": "Heading used for the dynamic work-type risk section"
+                    },
+                    "prompt": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Question prompt shown to the fee earner in the opening wizard"
+                    },
+                    "weight": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10,
+                      "default": 1,
+                      "description": "Server-side score multiplier applied to the chosen option score"
+                    },
+                    "required": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Whether an answer is mandatory on matter opening submission"
+                    },
+                    "options": {
+                      "type": "array",
+                      "minItems": 2,
+                      "description": "Selectable risk answer options with score and band",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["value", "label", "score", "riskLevel"],
+                        "properties": {
+                          "value": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Machine option code stored in the risk answer payload"
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Human-readable option text rendered in the UI"
+                          },
+                          "score": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "default": 0,
+                            "description": "Base numeric score before question weight multiplier"
+                          },
+                          "riskLevel": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"],
+                            "default": "low",
+                            "description": "Risk classification tier implied by selecting this option"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "retention": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Retention rule overriding firm defaults for this work type",
+                "properties": {
+                  "retentionYears": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 6,
+                    "description": "Whole years after closure before matter destruction due date"
+                  },
+                  "baseline": {
+                    "type": "string",
+                    "enum": ["closed_on"],
+                    "default": "closed_on",
+                    "description": "Anchor date field used when calculating destruction_date"
+                  },
+                  "allowMatterOverride": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether an individual matter may record an exception retention note or override"
+                  },
+                  "statutoryNote": {
+                    "type": "string",
+                    "default": "Firm standard limitation and file retention policy",
+                    "description": "Regulatory or statutory justification for this retention rule"
+                  }
+                }
+              },
+              "workTypeCapOverrides": {
+                "type": "array",
+                "x-reserved": {
+                  "for": "S0-28b",
+                  "reason": "CFA and DBA statutory fee cap overrides per work type will be enforced alongside feeArrangementCapCategories in S0-28b."
+                },
+                "description": "Reserved for S0-28b: per-work-type CFA/DBA statutory fee cap overrides",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["capCategoryKey", "maxPercent", "capBaseKey"],
+                  "properties": {
+                    "capCategoryKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "CFA or DBA cap category key"
+                    },
+                    "maxPercent": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100,
+                      "description": "Cap percentage bounded above by statutory maximum"
+                    },
+                    "capBaseKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Monetary base against which maxPercent is applied"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

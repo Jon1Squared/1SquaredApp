@@ -43,6 +43,7 @@ export type TenantModuleConfigKey =
   | 'form_sections'
   | 'dismissed_duplicates'
   | 'work_type_profiles'
+  | 'work_type_configs'
   | 'document_generation_override'
   | 'document_store_override'
   | (string & {});
@@ -1185,6 +1186,20 @@ export class TenantCatalogueRepository extends TenantScopedRepository {
     updatedById = 'system',
   ): Promise<TConfig> {
     return this.putModuleConfig(ctx, 'task_settings', config, updatedById);
+  }
+
+  public async getWorkTypeConfigs<TConfig = unknown>(
+    ctx: TenantContext,
+  ): Promise<TConfig | null> {
+    return this.getModuleConfig<TConfig>(ctx, 'work_type_configs');
+  }
+
+  public async putWorkTypeConfigs<TConfig = unknown>(
+    ctx: TenantContext,
+    config: TConfig,
+    updatedById = 'system',
+  ): Promise<TConfig> {
+    return this.putModuleConfig(ctx, 'work_type_configs', config, updatedById);
   }
 
   public async getCountersConfig(

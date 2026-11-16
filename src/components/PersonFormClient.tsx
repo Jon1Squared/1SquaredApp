@@ -392,7 +392,9 @@ export function PersonFormClient({
     () => existingEmp?.employeeNumber ?? generateNextEmployeeNumber(allPeople),
   );
   const [empEntityId, setEmpEntityId] = useState<string>(
-    existingEmp?.employingEntityId ?? DEFAULT_LEGAL_ENTITY_ID,
+    existingEmp?.employingEntityId ??
+      orgStructure.legalEntities[0]?.id ??
+      DEFAULT_LEGAL_ENTITY_ID,
   );
   // Firm job title is separate from contact job title (`jobTitle` on Person)
   const [empJobTitle, setEmpJobTitle] = useState<string>(
@@ -405,10 +407,16 @@ export function PersonFormClient({
     existingEmp?.roleType ?? initialMappedRole?.roleType ?? 'Fee earner',
   );
   const [empDivisionId, setEmpDivisionId] = useState<string | null>(
-    existingEmp?.divisionId ?? initialResolvedDept?.parentDivisionId ?? 'DIV-LEGAL',
+    existingEmp?.divisionId ??
+      initialResolvedDept?.parentDivisionId ??
+      orgStructure.divisions[0]?.id ??
+      null,
   );
   const [empDepartmentId, setEmpDepartmentId] = useState<string>(
-    existingEmp?.departmentId ?? initialResolvedDept?.id ?? 'DEPT-RE',
+    existingEmp?.departmentId ??
+      initialResolvedDept?.id ??
+      orgStructure.departments[0]?.id ??
+      '',
   );
   const [empTeamOrPgId, setEmpTeamOrPgId] = useState<string | null>(
     existingEmp?.teamOrPracticeGroupId ??
@@ -418,13 +426,22 @@ export function PersonFormClient({
       null,
   );
   const [empOfficeId, setEmpOfficeId] = useState<string | null>(
-    existingEmp?.officeId ?? initialResolvedOffice?.id ?? 'OFF-CDF',
+    existingEmp?.officeId ??
+      initialResolvedOffice?.id ??
+      orgStructure.offices[0]?.id ??
+      null,
   );
   const [empCostCentreId, setEmpCostCentreId] = useState<string | null>(
-    existingEmp?.costCentreId ?? initialResolvedDept?.defaultCostCentreId ?? 'CC-RE',
+    existingEmp?.costCentreId ??
+      initialResolvedDept?.defaultCostCentreId ??
+      orgStructure.costCentres[0]?.id ??
+      null,
   );
   const [empProfitCentreId, setEmpProfitCentreId] = useState<string | null>(
-    existingEmp?.profitCentreId ?? initialResolvedDept?.defaultProfitCentreId ?? 'PC-RE',
+    existingEmp?.profitCentreId ??
+      initialResolvedDept?.defaultProfitCentreId ??
+      orgStructure.profitCentres[0]?.id ??
+      null,
   );
   const [empIsTopOfHierarchy, setEmpIsTopOfHierarchy] = useState<boolean>(
     Boolean(existingEmp?.isTopOfHierarchy),

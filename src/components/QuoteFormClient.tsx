@@ -16,6 +16,7 @@ import {
 } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail, primaryPhone } from '@/domain/names';
+import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
 import {
   allowedNameEdits,
   editDistance,
@@ -34,6 +35,7 @@ import type {
   ChoiceValue,
   Enquiry,
   Matter,
+  OrgStructureCatalogue,
   Organisation,
   Person,
   PersonOrganisationLink,
@@ -55,6 +57,7 @@ interface Props {
   organisations: Organisation[];
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
+  orgStructure?: OrgStructureCatalogue;
   currentUserId: string;
   tenantId: string;
   onCancelOverride?: () => void;
@@ -82,6 +85,7 @@ export function QuoteFormClient({
   organisations,
   links = [],
   values,
+  orgStructure,
   currentUserId,
   tenantId,
   onCancelOverride,
@@ -173,8 +177,23 @@ export function QuoteFormClient({
 
   // Work type & scope
   const allWorkTypes = useMemo(
-    () => valuesForList(values, 'work_type').filter((v) => v.active),
-    [values],
+    () =>
+      valuesForList(values, 'work_type').filter(
+        (v) =>
+          isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+          v.id === existing?.practiceAreaId ||
+          v.id === existing?.workTypeSubcategoryId ||
+          v.id === initialEnquiry?.practiceAreaId ||
+          v.id === initialEnquiry?.workTypeSubcategoryId,
+      ),
+    [
+      values,
+      orgStructure,
+      existing?.practiceAreaId,
+      existing?.workTypeSubcategoryId,
+      initialEnquiry?.practiceAreaId,
+      initialEnquiry?.workTypeSubcategoryId,
+    ],
   );
   const practiceAreas = useMemo(
     () => allWorkTypes.filter((v) => !v.parentId),

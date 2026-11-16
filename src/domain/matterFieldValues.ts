@@ -5,6 +5,7 @@ export const SERVER_OWNED_MATTER_FIELD_KEYS = [
   'matterOpeningGate',
   'matterCostsGovernance',
   'riskAssessment',
+  '__riskAssessmentSnapshot',
 ] as const;
 
 export type ServerOwnedMatterFieldKey = (typeof SERVER_OWNED_MATTER_FIELD_KEYS)[number];

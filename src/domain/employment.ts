@@ -1099,13 +1099,18 @@ export function createDefaultEmploymentRecord(opts: {
   orgStructure?: Pick<
     OrgStructureCatalogue,
     'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
-  >;
+  > &
+    Partial<Pick<OrgStructureCatalogue, 'legalEntities'>>;
   byId: string;
   nowIso?: string;
   status?: EmploymentStatus;
   primaryDomain?: string | null;
 }): EmploymentRecord {
-  const orgStructure = opts.orgStructure ?? {
+  const orgStructure: Pick<
+    OrgStructureCatalogue,
+    'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
+  > &
+    Partial<Pick<OrgStructureCatalogue, 'legalEntities'>> = opts.orgStructure ?? {
     departments: DEFAULT_ORG_DEPARTMENTS,
     offices: DEFAULT_ORG_OFFICES,
     teamsOrPracticeGroups: DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
@@ -1121,7 +1126,14 @@ export function createDefaultEmploymentRecord(opts: {
   const resolvedDept =
     resolveOrgDepartment(opts.person.departmentId, orgStructure) ?? orgStructure.departments[0];
   const resolvedOffice =
-    resolveOrgOffice(opts.person.addresses?.[0]?.town, orgStructure) ?? orgStructure.offices[0];
+    resolveOrgOffice(opts.person.addresses?.[0]?.town, orgStructure) ??
+    orgStructure.offices[0] ??
+    null;
+  const resolvedLegalEntityId =
+    orgStructure.legalEntities?.find((le) => le.isDefault && le.active)?.id ??
+    orgStructure.legalEntities?.find((le) => le.active)?.id ??
+    orgStructure.legalEntities?.[0]?.id ??
+    DEFAULT_LEGAL_ENTITY_ID;
 
   const defaultTeam =
     orgStructure.teamsOrPracticeGroups.find((t) => t.parentDepartmentId === resolvedDept.id) ??
@@ -1183,7 +1195,7 @@ export function createDefaultEmploymentRecord(opts: {
     engagementType,
     status: opts.status ?? 'Pre-start',
     employeeNumber: empNumber,
-    employingEntityId: DEFAULT_LEGAL_ENTITY_ID,
+    employingEntityId: resolvedLegalEntityId,
     jobTitle: opts.person.jobTitle || roleType,
     gradeOrBand:
       roleType === 'Partner/Member'
@@ -1197,7 +1209,7 @@ export function createDefaultEmploymentRecord(opts: {
     divisionId: resolvedDept.parentDivisionId,
     departmentId: resolvedDept.id,
     teamOrPracticeGroupId: defaultTeam?.id ?? null,
-    officeId: resolvedOffice.id,
+    officeId: resolvedOffice?.id ?? null,
     costCentreId: resolvedDept.defaultCostCentreId,
     profitCentreId: resolvedDept.defaultProfitCentreId,
     isTopOfHierarchy: Boolean(isTop),
@@ -1224,7 +1236,7 @@ export function createDefaultEmploymentRecord(opts: {
         divisionId: resolvedDept.parentDivisionId,
         departmentId: resolvedDept.id,
         teamOrPracticeGroupId: defaultTeam?.id ?? null,
-        officeId: resolvedOffice.id,
+        officeId: resolvedOffice?.id ?? null,
         costCentreId: resolvedDept.defaultCostCentreId,
         profitCentreId: resolvedDept.defaultProfitCentreId,
         lineManagerId: defaultLineManagerId,
@@ -1338,7 +1350,8 @@ export function migrateEmployeesToEmploymentRecords(
   orgStructure: Pick<
     OrgStructureCatalogue,
     'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
-  > = {
+  > &
+    Partial<Pick<OrgStructureCatalogue, 'legalEntities'>> = {
     departments: DEFAULT_ORG_DEPARTMENTS,
     offices: DEFAULT_ORG_OFFICES,
     teamsOrPracticeGroups: DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,

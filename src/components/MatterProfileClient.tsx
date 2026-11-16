@@ -28,6 +28,7 @@ import {
 import {
   addNoteAction,
   liftMatterRestrictionAction,
+  updateMatterLifecycleStatusAction,
   markEngagementLetterDraftedAction,
   saveMatterAction,
   saveTaskAction,
@@ -35,6 +36,7 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime } from '@/domain/dates';
+import { isClosedMatterStatus } from '@/domain/workTypeConfig';
 import { resolveLabel, resolveLabels } from '@/domain/lists';
 import {
   extractCriticalDates,
@@ -113,6 +115,7 @@ interface MatterProfileClientProps {
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
   canLiftRestriction?: boolean;
+  canEditMatter?: boolean;
   pmsView?: MatterPmsViewBundle;
   notes: Note[];
   audit: AuditEntry[];
@@ -302,6 +305,7 @@ export function MatterProfileClient({
   canTakeByTaskId,
   canViewFinance = false,
   canLiftRestriction = false,
+  canEditMatter = false,
   pmsView,
   notes,
   audit,
@@ -343,6 +347,14 @@ export function MatterProfileClient({
   const [matterRowVersion, setMatterRowVersion] = useState<number>(
     matter.rowVersion ?? 1,
   );
+  const [lifecycleDrawerOpen, setLifecycleDrawerOpen] = useState(false);
+  const [lifecycleClosedOn, setLifecycleClosedOn] = useState(() =>
+    (matter.closedAt ?? new Date().toISOString()).slice(0, 10),
+  );
+  const [lifecycleReason, setLifecycleReason] = useState('');
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [savingLifecycle, setSavingLifecycle] = useState(false);
+  const isMatterCurrentlyClosed = isClosedMatterStatus(matter.matterStatusId, values);
 
   const nameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -1008,6 +1020,38 @@ export function MatterProfileClient({
     router.refresh();
   }
 
+  async function handleLifecycleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingLifecycle(true);
+    setLifecycleError(null);
+    const action = isMatterCurrentlyClosed ? 'reopen' : 'close';
+    const res = await updateMatterLifecycleStatusAction(matter.id, action, {
+      closedAt: action === 'close' ? lifecycleClosedOn || null : null,
+      reason: lifecycleReason.trim() || undefined,
+      expectedRowVersion: matterRowVersion,
+    });
+    setSavingLifecycle(false);
+    if (res.code || (res.errors && Object.keys(res.errors).length > 0)) {
+      const msg =
+        res.message ??
+        (res.errors ? Object.values(res.errors)[0] : undefined) ??
+        'Could not update matter status.';
+      setLifecycleError(msg);
+      return;
+    }
+    if (res.matter?.rowVersion != null) {
+      setMatterRowVersion(res.matter.rowVersion);
+    }
+    setLifecycleDrawerOpen(false);
+    setLifecycleReason('');
+    showToast(
+      action === 'close'
+        ? `Matter closed — destruction due ${res.matter?.destructionDueAt ? formatDate(res.matter.destructionDueAt) : 'scheduled'}`
+        : 'Matter reopened — closure and destruction dates cleared',
+    );
+    router.refresh();
+  }
+
   return (
     <div className="page-list matter-profile-page">
       {/* Page Header matching Matters list & standard page header typography */}
@@ -1073,12 +1117,107 @@ export function MatterProfileClient({
             <MessageSquarePlus size={16} />
             <span>Add note</span>
           </button>
+          {canEditMatter ? (
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={() => {
+                setLifecycleError(null);
+                setLifecycleDrawerOpen((o) => !o);
+              }}
+            >
+              <CalendarClock size={16} />
+              <span>{isMatterCurrentlyClosed ? 'Reopen matter' : 'Close matter'}</span>
+            </button>
+          ) : null}
           <Link href={`/matters/${matter.id}/edit`} className="btn btn--primary">
             <Edit3 size={16} />
             <span>Edit</span>
           </Link>
         </div>
       </div>
+
+      {/* Close / Reopen Matter Lifecycle Drawer */}
+      {lifecycleDrawerOpen && canEditMatter ? (
+        <div
+          className="home-panel"
+          style={{ padding: '18px 22px', marginBottom: 22 }}
+        >
+          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+            {isMatterCurrentlyClosed ? 'Reopen closed matter' : 'Close matter & calculate file retention'}
+          </div>
+          <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+            {isMatterCurrentlyClosed
+              ? 'Reopening restores active status and clears the closure date and scheduled destruction date. This action is audited.'
+              : 'Closing records the closure date, checks any matter-closure key-date gates, and computes destruction_date from the work-type retention policy. Matters are never deleted automatically.'}
+          </p>
+          {lifecycleError ? (
+            <div
+              style={{
+                marginBottom: 10,
+                padding: '8px 12px',
+                borderRadius: 6,
+                background: '#fef2f2',
+                border: '1px solid #ef4444',
+                color: '#991b1b',
+                fontSize: 13,
+              }}
+            >
+              {lifecycleError}
+            </div>
+          ) : null}
+          <form
+            onSubmit={handleLifecycleSubmit}
+            style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}
+          >
+            {!isMatterCurrentlyClosed ? (
+              <div className="field-group" style={{ marginBottom: 0 }}>
+                <label className="field-label" htmlFor="mp-close-date">
+                  Closed date
+                </label>
+                <input
+                  id="mp-close-date"
+                  type="date"
+                  className="field-input"
+                  value={lifecycleClosedOn}
+                  onChange={(e) => setLifecycleClosedOn(e.target.value)}
+                />
+              </div>
+            ) : null}
+            <div className="field-group" style={{ marginBottom: 0, flex: 1, minWidth: 220 }}>
+              <label className="field-label" htmlFor="mp-lifecycle-reason">
+                Reason / note
+              </label>
+              <input
+                id="mp-lifecycle-reason"
+                type="text"
+                className="field-input"
+                placeholder={
+                  isMatterCurrentlyClosed
+                    ? 'Reason for reopening this matter…'
+                    : 'Completion / closure note…'
+                }
+                value={lifecycleReason}
+                onChange={(e) => setLifecycleReason(e.target.value)}
+              />
+            </div>
+            <button type="submit" className="btn btn--primary" disabled={savingLifecycle}>
+              {savingLifecycle
+                ? 'Saving…'
+                : isMatterCurrentlyClosed
+                  ? 'Confirm reopen'
+                  : 'Confirm close'}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => setLifecycleDrawerOpen(false)}
+            >
+              Cancel
+            </button>
+          </form>
+        </div>
+      ) : null}
 
       {/* Lift Restriction Drawer */}
       {liftOpen && canLiftRestriction && (matter.isStaffMatter || matter.hasEthicalWall) ? (
@@ -2174,6 +2313,29 @@ export function MatterProfileClient({
                       <div className="worklist-title" style={{ marginTop: 2, marginBottom: 0 }}>
                         {((matter.fieldValues['sourceOfWork'] as string) || '').trim() ||
                           originLabel || <span className="muted">Not recorded</span>}
+                      </div>
+                    </div>
+                  </li>
+
+                  <li className="worklist-row">
+                    <div className="worklist-main">
+                      <div className="worklist-meta">Closed &amp; file retention</div>
+                      <div className="worklist-title" style={{ marginTop: 2, marginBottom: 0 }}>
+                        {matter.closedAt ? (
+                          <span>
+                            Closed {formatDate(matter.closedAt)}
+                            {matter.retentionPeriod ? ` · Retention: ${matter.retentionPeriod}` : ''}
+                            {matter.destructionDueAt
+                              ? ` · Destruction due: ${formatDate(matter.destructionDueAt)}`
+                              : ''}
+                          </span>
+                        ) : (
+                          <span className="muted">
+                            {matter.retentionPeriod
+                              ? `Policy: ${matter.retentionPeriod} (destruction date set on closure)`
+                              : 'Destruction due date calculated upon closure'}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </li>
