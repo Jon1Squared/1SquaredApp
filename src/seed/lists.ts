@@ -4,6 +4,9 @@
  */
 import taxonomy from './data/taxonomy.json';
 import {
+  DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP,
+} from '@/domain/orgStructure';
+import {
   slug,
   vid,
   type ChoiceList,
@@ -482,6 +485,12 @@ const HIERARCHIES: HierSeed[] = [
       meta: {
         amlInScope: defaultWorkTypeAmlScope(w.practiceArea),
         clientMoneyThresholdGbp: defaultWorkTypeThreshold(w.practiceArea),
+        ...(DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP[vid('work_type', w.practiceArea)]
+          ? {
+              departmentId:
+                DEFAULT_PRACTICE_AREA_DEPARTMENT_MAP[vid('work_type', w.practiceArea)],
+            }
+          : {}),
       },
       children: w.subcategories.map((s) => ({
         label: s.name,

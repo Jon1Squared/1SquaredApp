@@ -68,5 +68,10 @@ This guide explains how **Matters**, **Enquiries**, **Quotes**, **Tasks**, and *
 
 - The left-hand navigation rail includes **Key dates** (\`/key-dates\`), controlled by \`leftRailVisibility.keyDates\` and visible to any user holding the \`keydate:view\` permission.
 - System configuration for key dates is available under **Admin → Key dates & limitation** (\`/admin/key-dates\`) for users holding \`keydate:configure\`.
+
+## Synchronised departments, work types, and matter lifecycle
+
+- **Department and practice-area synchronisation**: Departments (\`org_structure.departments\`), practice areas (\`work_type\` parents with \`meta.departmentId\`), and work types remain synchronised across **Administration**, **New Enquiry**, **New Quote**, and **New / Edit Matter**. Deactivating a department hides its inactive practice areas and work types for new intake while preserving existing saved selections on historical records.
+- **Work-type configuration and lifecycle controls**: Administrators configure per-work-type automatic opening task templates, weighted risk questions, and closure retention years under **Admin → Work types** (\`/admin/work-types\`, requiring \`admin:access\` and MFA). On Matter profiles, users with \`matter:edit\` can close or reopen matters subject to the Key Dates closure gate, automatically calculating or clearing the file's \`destructionDueAt\` date.
 `,
 };

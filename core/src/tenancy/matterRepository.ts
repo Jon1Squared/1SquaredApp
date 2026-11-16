@@ -562,7 +562,10 @@ function buildMatterDbParameters(
     matter.fieldValues?.__riskAssessmentSnapshot &&
     typeof matter.fieldValues.__riskAssessmentSnapshot === 'object'
       ? (matter.fieldValues.__riskAssessmentSnapshot as Record<string, unknown>)
-      : null;
+      : matter.fieldValues?.riskAssessment &&
+          typeof matter.fieldValues.riskAssessment === 'object'
+        ? (matter.fieldValues.riskAssessment as Record<string, unknown>)
+        : null;
 
   return {
     tenantId: ctx.tenantId,

@@ -55,6 +55,7 @@ import {
 } from '@/domain/addressLookup';
 import { personDisplayName, primaryEmail, primaryPhone } from '@/domain/names';
 import { hasMinThreeCharToken } from '@/domain/normalise';
+import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
 import { isTaskOpen, resolveRoutedTeam } from '@/domain/tasks';
 import type {
   Address,
@@ -67,6 +68,7 @@ import type {
   EnquirySentEmailSnapshot,
   EnquirySettings,
   Matter,
+  OrgStructureCatalogue,
   Organisation,
   Person,
   Quote,
@@ -105,6 +107,7 @@ interface Props {
   enquiries?: Enquiry[];
   teams: Team[];
   values: ChoiceValue[];
+  orgStructure?: OrgStructureCatalogue;
   customFields?: CustomFieldDefinition[];
   enquirySettings?: EnquirySettings;
   currentUserId: string;
@@ -126,6 +129,7 @@ export function EnquiryFormClient({
   enquiries = [],
   teams,
   values,
+  orgStructure,
   customFields = [],
   enquirySettings,
   currentUserId,
@@ -151,12 +155,24 @@ export function EnquiryFormClient({
     [values],
   );
   const practiceAreas = useMemo(
-    () => valuesForList(values, 'work_type').filter((v) => !v.parentId && v.active),
-    [values],
+    () =>
+      valuesForList(values, 'work_type').filter(
+        (v) =>
+          !v.parentId &&
+          (isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+            v.id === enquiry?.practiceAreaId),
+      ),
+    [values, orgStructure, enquiry?.practiceAreaId],
   );
   const allWorkTypes = useMemo(
-    () => valuesForList(values, 'work_type').filter((v) => v.active),
-    [values],
+    () =>
+      valuesForList(values, 'work_type').filter(
+        (v) =>
+          isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+          v.id === enquiry?.practiceAreaId ||
+          v.id === enquiry?.workTypeSubcategoryId,
+      ),
+    [values, orgStructure, enquiry?.practiceAreaId, enquiry?.workTypeSubcategoryId],
   );
   const contactMethods = useMemo(
     () => valuesForList(values, 'contact_method').filter((v) => v.active),

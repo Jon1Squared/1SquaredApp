@@ -26,6 +26,7 @@
     "rateSourceMode": "pms_when_linked",
     "allowMatterRateOverrides": true,
     "partnerSignOffThresholdGbp": 25000,
+    "vatRatePercent": 20,
     "rateCards": [
       {
         "id": "RC-DEFAULT",
@@ -693,5 +694,201 @@
       "criticalNoActivityDays": 30,
       "criticalNoActivityWindowDays": 90
     }
+  },
+  "workTypes": {
+    "defaults": {
+      "autoTaskTemplates": [
+        {
+          "id": "firm-opening-file-setup",
+          "title": "Complete initial matter file setup and client care check",
+          "trigger": "matter_open",
+          "dueWorkingDaysOffset": 3,
+          "priorityId": "task_priority.normal",
+          "ownerRoleKey": "fee_earner"
+        }
+      ],
+      "riskQuestions": [],
+      "retention": {
+        "retentionYears": 6,
+        "baseline": "closed_on",
+        "allowMatterOverride": false,
+        "statutoryNote": "Firm standard six-year civil limitation file retention policy"
+      }
+    },
+    "items": [
+      {
+        "workTypeId": "work_type.corporate_and_commercial_mergers_and_acquisitions",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "ma-due-diligence-pack",
+            "title": "Assemble M&A legal due diligence request list and data room index",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          },
+          {
+            "id": "ma-partner-risk-signoff",
+            "title": "Review target corporate structure and sanction screening",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 1,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "partner"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "maCrossBorderComplexity",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Does the transaction involve multi-jurisdictional corporate groups or regulated assets?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "domestic_standard",
+                "label": "Domestic UK entities only",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "multi_jurisdiction_regulated",
+                "label": "Multi-jurisdictional group or regulated assets",
+                "score": 5,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 7,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Corporate transaction closing bible seven-year retention policy"
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_commercial_property",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "cp-title-and-searches",
+            "title": "Order official Land Registry copies and pre-contract property searches",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          },
+          {
+            "id": "cp-source-of-funds",
+            "title": "Verify completion funding trail and SDLT compliance pack",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 3,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "risk_compliance"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "propertyDevelopmentEnvironmental",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Does the property transaction carry environmental contamination or development funding risk?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "standard_occupied_title",
+                "label": "Standard commercial title with clear searches",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "development_or_contamination",
+                "label": "Brownfield / development or high-value offshore funding",
+                "score": 4,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 12,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Limitation Act 1980 twelve-year specialty / deed retention policy"
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_residential_conveyancing",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "res-convey-protocol-pack",
+            "title": "Issue protocol property information forms and source-of-funds pack",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "residentialSourceOfFundsSource",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Are purchase funds arriving from third-party gifts or non-UK accounts?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "uk_mortgage_and_savings",
+                "label": "Standard UK high-street lender and verified domestic savings",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "gifted_or_overseas_funds",
+                "label": "Gifted deposit or overseas/complex funding origin",
+                "score": 4,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 15,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Residential conveyancing mortgage-lender & latent-damage 15-year file policy"
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_tribunal_claims",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "emp-acas-limitation-diary",
+            "title": "Verify ACAS early conciliation dates and tribunal response deadline",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 1,
+            "priorityId": "task_priority.urgent",
+            "ownerRoleKey": "supervisor"
+          }
+        ],
+        "riskQuestions": [],
+        "retention": {
+          "retentionYears": 6,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Employment tribunal and statutory claims six-year file retention policy"
+        }
+      }
+    ]
   }
 }

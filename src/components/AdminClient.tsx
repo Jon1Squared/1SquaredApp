@@ -32,7 +32,12 @@ import { whereUsed } from '@/domain/fieldRegistry';
 import { canDeactivate, resolveLabel, valuesForList } from '@/domain/lists';
 import { buildDefaultMatterPartyTaxonomy } from '@/domain/matterParties';
 import { personDisplayName, primaryEmail } from '@/domain/names';
-import { buildDefaultOrgStructure } from '@/domain/orgStructure';
+import {
+  buildDefaultOrgStructure,
+  DEFAULT_LEGAL_ENTITY_ID,
+  resolveDepartmentForPracticeArea,
+  resolvePracticeAreasForDepartment,
+} from '@/domain/orgStructure';
 import { findPracticeAreaRoutingClashes, userTeams } from '@/domain/tasks';
 import type {
   AppRole,
@@ -66,7 +71,9 @@ import { MatterCostsAdminSection } from './MatterCostsAdminSection';
 import { MatterPartiesAdminSection } from './MatterPartiesAdminSection';
 import { PmsLinksAdminSection } from './PmsLinksAdminSection';
 import { RbacAdminSection } from './RbacAdminSection';
+import type { WorkTypesConfiguration } from '@platform/core-api';
 import { KeyDatesAdminPanel } from './KeyDatesAdminPanel';
+import { WorkTypesAdminPanel } from './WorkTypesAdminPanel';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 import type { PermissionKey, RbacConfiguration } from '@/domain/rbac';
@@ -80,6 +87,7 @@ export type AdminTab =
   | 'document-templates'
   | 'document-stores'
   | 'key-dates'
+  | 'work-types'
   | 'lists'
   | 'custom-fields'
   | 'teams'
@@ -182,6 +190,8 @@ interface Props {
   permissionsByPersonId?: Record<string, PermissionKey[]>;
   rbacConfig: RbacConfiguration;
   keyDatesConfig?: KeyDatesConfig;
+  workTypesConfig?: WorkTypesConfiguration;
+  hasMfaVerified?: boolean;
   currentUserKeyDatePermissions?: KeyDatePermission[];
   entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
   entraEnvStatus?: import('@/server/entraAuth').EntraEnvStatus;
@@ -224,6 +234,8 @@ export function AdminClient({
   permissionsByPersonId = {},
   rbacConfig,
   keyDatesConfig,
+  workTypesConfig,
+  hasMfaVerified = false,
   currentUserKeyDatePermissions = [],
   entraSession,
   entraEnvStatus,
@@ -241,12 +253,20 @@ export function AdminClient({
   const [newDivCode, setNewDivCode] = useState('');
   const [newDeptName, setNewDeptName] = useState('');
   const [newDeptCode, setNewDeptCode] = useState('');
-  const [newDeptDivId, setNewDeptDivId] = useState('DIV-LEGAL');
-  const [newDeptCcId, setNewDeptCcId] = useState('CC-RE');
-  const [newDeptPcId, setNewDeptPcId] = useState('PC-RE');
+  const [newDeptDivId, setNewDeptDivId] = useState(
+    () => orgCatalogue.divisions[0]?.id ?? '',
+  );
+  const [newDeptCcId, setNewDeptCcId] = useState(
+    () => orgCatalogue.costCentres[0]?.id ?? '',
+  );
+  const [newDeptPcId, setNewDeptPcId] = useState(
+    () => orgCatalogue.profitCentres[0]?.id ?? '',
+  );
   const [newTeamName, setNewTeamName] = useState('');
   const [newTeamCode, setNewTeamCode] = useState('');
-  const [newTeamDeptId, setNewTeamDeptId] = useState('DEPT-RE');
+  const [newTeamDeptId, setNewTeamDeptId] = useState(
+    () => orgCatalogue.departments[0]?.id ?? '',
+  );
   const [newOfficeName, setNewOfficeName] = useState('');
   const [newOfficeCode, setNewOfficeCode] = useState('');
   const [newCcName, setNewCcName] = useState('');
@@ -317,6 +337,8 @@ export function AdminClient({
   const [editBillingBasisId, setEditBillingBasisId] = useState('');
   const [editAmlInScope, setEditAmlInScope] = useState(true);
   const [editClientMoneyThresholdGbp, setEditClientMoneyThresholdGbp] = useState('100000');
+  const [editDepartmentId, setEditDepartmentId] = useState('');
+  const [editingDeptId, setEditingDeptId] = useState<string | null>(null);
 
   // Add value state & popup modal state
   const DEFAULT_STAGE_GROUP_ID = 'matter_stage_group.default_group';
@@ -553,11 +575,21 @@ export function AdminClient({
     setEditBillingBasisId(v.meta?.billingBasisId ?? '');
     setEditAmlInScope(v.meta?.amlInScope !== 'false');
     setEditClientMoneyThresholdGbp(v.meta?.clientMoneyThresholdGbp ?? '100000');
+    setEditDepartmentId(
+      !v.parentId && v.listKey === 'work_type'
+        ? (v.meta?.departmentId ??
+            resolveDepartmentForPracticeArea(v.id, orgCatalogue, values, {
+              includeInactive: true,
+            })?.id ??
+            '')
+        : '',
+    );
   };
 
   const handleSaveValue = (id: string) => {
     if (!editLabel.trim()) return;
     startTransition(async () => {
+      const targetVal = values.find((x) => x.id === id);
       const metaPatch: Record<string, string> | undefined =
         selectedList.key === 'work_type'
           ? {
@@ -566,6 +598,7 @@ export function AdminClient({
               billingBasisId: editBillingBasisId,
               amlInScope: editAmlInScope ? 'true' : 'false',
               clientMoneyThresholdGbp: editClientMoneyThresholdGbp.trim() || '100000',
+              ...(!targetVal?.parentId ? { departmentId: editDepartmentId } : {}),
             }
           : undefined;
       const res = await updateChoiceValueAction(id, {
@@ -1042,6 +1075,25 @@ export function AdminClient({
                       <span>In scope for Money Laundering Regulations</span>
                     </label>
                   </div>
+                  {!v.parentId ? (
+                    <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+                      <label className="field-label" style={{ fontSize: 12 }}>
+                        Owning Department (syncs Intake, Quotes &amp; Matters)
+                      </label>
+                      <select
+                        className="field-select"
+                        value={editDepartmentId}
+                        onChange={(e) => setEditDepartmentId(e.target.value)}
+                      >
+                        <option value="">Unassigned (no department link)…</option>
+                        {orgCatalogue.departments.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name} ({d.code}){!d.active ? ' (Inactive)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               <div style={{ display: 'flex', gap: 8 }}>
@@ -1158,6 +1210,22 @@ export function AdminClient({
                           {Number(v.meta.clientMoneyThresholdGbp).toLocaleString('en-GB')}
                         </span>
                       ) : null}
+                      {!v.parentId
+                        ? (() => {
+                            const mappedDept = resolveDepartmentForPracticeArea(
+                              v.id,
+                              orgCatalogue,
+                              values,
+                              { includeInactive: true },
+                            );
+                            return mappedDept ? (
+                              <span>
+                                · <strong>Department:</strong> {mappedDept.name} ({mappedDept.code})
+                                {!mappedDept.active ? ' (Inactive)' : ''}
+                              </span>
+                            ) : null;
+                          })()
+                        : null}
                     </div>
                   ) : null}
                 </div>
@@ -1252,6 +1320,17 @@ export function AdminClient({
         >
           Organisation structure &amp; teams ({orgCatalogue.departments.length} depts · {teams.length} teams)
         </button>
+        {workTypesConfig ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'work-types'}
+            className={`tab-btn ${tab === 'work-types' ? 'tab-btn--active' : ''}`}
+            onClick={() => setTab('work-types')}
+          >
+            Work types &amp; retention ({workTypesConfig.items.length} rules)
+          </button>
+        ) : null}
         {enableMatterCostsGovernance ? (
           <button
             type="button"
@@ -1377,6 +1456,16 @@ export function AdminClient({
       )}
 
       {/* TAB: KEY DATES & LIMITATION */}
+      {tab === 'work-types' && workTypesConfig && (
+        <WorkTypesAdminPanel
+          initialConfig={workTypesConfig}
+          values={values}
+          orgStructure={orgCatalogue}
+          canEdit={Boolean(currentUserPermissions?.includes('admin:access'))}
+          hasMfaVerified={hasMfaVerified}
+        />
+      )}
+
       {tab === 'key-dates' && keyDatesConfig && (
         <KeyDatesAdminPanel
           initialConfig={keyDatesConfig}
@@ -3123,7 +3212,7 @@ export function AdminClient({
                         id,
                         code: newDivCode.trim().toUpperCase(),
                         name: newDivName.trim(),
-                        parentLegalEntityId: orgCatalogue.legalEntities[0]?.id ?? 'LE-PV-LLP',
+                        parentLegalEntityId: orgCatalogue.legalEntities[0]?.id ?? DEFAULT_LEGAL_ENTITY_ID,
                         active: true,
                       },
                     ],
@@ -3154,21 +3243,24 @@ export function AdminClient({
                   <th>Code</th>
                   <th>Department Name</th>
                   <th>Parent Division</th>
-                  <th>Default Cost Centre</th>
-                  <th>Default Profit Centre</th>
+                  <th>Linked Practice Areas</th>
+                  <th>Status</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {orgCatalogue.departments.map((dept) => {
                   const div = orgCatalogue.divisions.find((d) => d.id === dept.parentDivisionId);
-                  const cc = orgCatalogue.costCentres.find(
-                    (c) => c.id === dept.defaultCostCentreId,
-                  );
-                  const pc = orgCatalogue.profitCentres.find(
-                    (p) => p.id === dept.defaultProfitCentreId,
-                  );
+                  const linkedPracticeAreas =
+                    dept.practiceAreaIds !== undefined
+                      ? practiceAreas.filter((pa) => dept.practiceAreaIds!.includes(pa.id))
+                      : resolvePracticeAreasForDepartment(dept.id, values, orgCatalogue, {
+                          includeInactive: true,
+                        });
+                  const linkedPaIdSet = new Set(linkedPracticeAreas.map((pa) => pa.id));
+                  const isEditingThisDept = editingDeptId === dept.id;
                   return (
-                    <tr key={dept.id}>
+                    <tr key={dept.id} style={{ opacity: dept.active ? 1 : 0.65 }}>
                       <td>{dept.id}</td>
                       <td>
                         <code>{dept.code}</code>
@@ -3177,8 +3269,134 @@ export function AdminClient({
                         <strong>{dept.name}</strong>
                       </td>
                       <td>{div ? `${div.name} (${div.code})` : dept.parentDivisionId}</td>
-                      <td>{cc ? `${cc.code} — ${cc.name}` : '—'}</td>
-                      <td>{pc ? `${pc.code} — ${pc.name}` : '—'}</td>
+                      <td>
+                        {linkedPracticeAreas.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {linkedPracticeAreas.map((pa) => (
+                              <span
+                                key={pa.id}
+                                style={{
+                                  fontSize: 11.5,
+                                  padding: '1px 6px',
+                                  borderRadius: 4,
+                                  background: 'var(--bg-subtle, #f1f5f9)',
+                                  border: '1px solid var(--color-divider)',
+                                }}
+                              >
+                                {pa.label}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>None</span>
+                        )}
+                        {isEditingThisDept ? (
+                          <div
+                            style={{
+                              marginTop: 8,
+                              padding: 8,
+                              border: '1px solid var(--color-divider)',
+                              borderRadius: 6,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                              maxHeight: 190,
+                              overflowY: 'auto',
+                            }}
+                          >
+                            {practiceAreas.map((pa) => {
+                              const checked = linkedPaIdSet.has(pa.id);
+                              return (
+                                <label
+                                  key={pa.id}
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                    fontSize: 12,
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    disabled={pending}
+                                    onChange={() => {
+                                      const nextSelectedIds = checked
+                                        ? Array.from(linkedPaIdSet).filter((x) => x !== pa.id)
+                                        : [...Array.from(linkedPaIdSet), pa.id];
+                                      const next: OrgStructureCatalogue = {
+                                        ...orgCatalogue,
+                                        departments: orgCatalogue.departments.map((d) =>
+                                          d.id === dept.id
+                                            ? { ...d, practiceAreaIds: nextSelectedIds }
+                                            : {
+                                                ...d,
+                                                practiceAreaIds: (d.practiceAreaIds ?? []).filter(
+                                                  (id) => !nextSelectedIds.includes(id),
+                                                ),
+                                              },
+                                        ),
+                                      };
+                                      setOrgCatalogue(next);
+                                      startTransition(async () => {
+                                        await saveOrgStructureAction(next);
+                                        showToast(
+                                          `Updated practice areas for ${dept.name}`,
+                                        );
+                                      });
+                                    }}
+                                  />
+                                  <span>{pa.label}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td>
+                        <StatusPill
+                          label={dept.active ? 'Active' : 'Inactive'}
+                          tone={dept.active ? 'positive' : 'neutral'}
+                        />
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() =>
+                              setEditingDeptId((prev) => (prev === dept.id ? null : dept.id))
+                            }
+                          >
+                            {isEditingThisDept ? 'Done' : 'Practice areas'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            disabled={pending}
+                            onClick={() => {
+                              const next: OrgStructureCatalogue = {
+                                ...orgCatalogue,
+                                departments: orgCatalogue.departments.map((d) =>
+                                  d.id === dept.id ? { ...d, active: !d.active } : d,
+                                ),
+                              };
+                              setOrgCatalogue(next);
+                              startTransition(async () => {
+                                await saveOrgStructureAction(next);
+                                showToast(
+                                  dept.active
+                                    ? `${dept.name} deactivated across Intake, Quotes & Matters`
+                                    : `${dept.name} activated`,
+                                );
+                              });
+                            }}
+                          >
+                            {dept.active ? 'Deactivate' : 'Activate'}
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -3252,8 +3470,8 @@ export function AdminClient({
                         code: newDeptCode.trim().toUpperCase(),
                         name: newDeptName.trim(),
                         parentDivisionId: newDeptDivId,
-                        defaultCostCentreId: newDeptCcId || 'CC-RE',
-                        defaultProfitCentreId: newDeptPcId || 'PC-RE',
+                        defaultCostCentreId: newDeptCcId || orgCatalogue.costCentres[0]?.id || '',
+                        defaultProfitCentreId: newDeptPcId || orgCatalogue.profitCentres[0]?.id || '',
                         legacyChoiceValueId: null,
                         active: true,
                       },
@@ -3666,7 +3884,8 @@ export function AdminClient({
                           id,
                           code: newOfficeCode.trim().toUpperCase(),
                           name: newOfficeName.trim(),
-                          parentLegalEntityId: 'LE-PV-LLP',
+                          parentLegalEntityId:
+                          orgCatalogue.legalEntities[0]?.id ?? DEFAULT_LEGAL_ENTITY_ID,
                           address: {
                             id: `addr-${id}`,
                             typeId: null,

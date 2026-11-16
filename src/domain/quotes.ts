@@ -3,6 +3,13 @@
  * calculations, automatic status transitions (Follow-up due, Expired),
  * tab filtering, and 3-tier default queue ordering.
  */
+import {
+  calculateVatMinorUnits,
+  minorUnitsToPounds,
+  percentToBasisPoints,
+  poundsToMinorUnits,
+  sumMinorUnits,
+} from '@platform/core-api';
 import { addDays, toIsoDate } from './dates';
 import { type EnquiriesQueueTab, urgencyRank } from './enquiries';
 import { resolveLabel } from './lists';
@@ -43,8 +50,26 @@ export const CLOSED_QUOTE_STATUSES = new Set<QuoteStatus>([
   'Superseded',
 ]);
 
+function toNonNegativeMinorUnits(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  if (num < 1e-6) return 0;
+  const raw = String(num);
+  if (/[eE]/.test(raw)) {
+    return poundsToMinorUnits(num.toFixed(4));
+  }
+  return poundsToMinorUnits(raw);
+}
+
 export function roundCurrency(value: number): number {
-  return Math.round((Number(value) || 0) * 100) / 100;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  if (Math.abs(num) < 1e-6) return 0;
+  const raw = String(num);
+  if (/[eE]/.test(raw)) {
+    return minorUnitsToPounds(poundsToMinorUnits(num.toFixed(4)));
+  }
+  return minorUnitsToPounds(poundsToMinorUnits(raw));
 }
 
 export function formatGbp(amount: number | null | undefined, includePence = false): string {
@@ -70,43 +95,60 @@ export interface QuoteTotals {
 }
 
 /**
- * Calculate VAT and totals for a quote.
- * Standard UK VAT rate is 20%.
+ * Calculate VAT and totals for a quote using exact integer minor units (pence).
+ * Supports per-quote VAT rate (default 20%) and per-disbursement VAT overrides.
  */
 export function calculateQuoteTotals(
   feeAmountExVat: number,
   vatOnFee: number | null | undefined,
   disbursements: QuoteDisbursement[] = [],
-  standardVatRate = 0.2,
+  vatRatePercent = 20,
 ): QuoteTotals {
-  const feeEx = roundCurrency(Math.max(0, Number(feeAmountExVat) || 0));
-  const feeVat =
+  const safeVatPercent =
+    typeof vatRatePercent === 'number' &&
+    Number.isFinite(vatRatePercent) &&
+    vatRatePercent >= 0
+      ? vatRatePercent
+      : 20;
+  const vatBasisPoints = percentToBasisPoints(safeVatPercent);
+  const feeExMinor = toNonNegativeMinorUnits(feeAmountExVat);
+  const feeVatMinor =
     vatOnFee !== null && vatOnFee !== undefined && Number.isFinite(Number(vatOnFee))
-      ? roundCurrency(Math.max(0, Number(vatOnFee)))
-      : roundCurrency(feeEx * standardVatRate);
+      ? toNonNegativeMinorUnits(vatOnFee)
+      : calculateVatMinorUnits(feeExMinor, vatBasisPoints);
 
-  let disbEx = 0;
-  let disbVat = 0;
+  const disbExMinorList: number[] = [];
+  const disbVatMinorList: number[] = [];
+
   for (const d of disbursements) {
-    const amt = roundCurrency(Math.max(0, Number(d.amountExVat) || 0));
-    disbEx = roundCurrency(disbEx + amt);
-    if (d.vatApplicable) {
-      disbVat = roundCurrency(disbVat + roundCurrency(amt * standardVatRate));
+    const amtMinor = toNonNegativeMinorUnits(d.amountExVat);
+    disbExMinorList.push(amtMinor);
+    if (
+      d.vatOverridden &&
+      d.vatAmount !== undefined &&
+      d.vatAmount !== null &&
+      Number.isFinite(Number(d.vatAmount))
+    ) {
+      disbVatMinorList.push(toNonNegativeMinorUnits(d.vatAmount));
+    } else if (d.vatApplicable) {
+      disbVatMinorList.push(calculateVatMinorUnits(amtMinor, vatBasisPoints));
     }
   }
 
-  const totalExVat = roundCurrency(feeEx + disbEx);
-  const totalVat = roundCurrency(feeVat + disbVat);
-  const totalIncVat = roundCurrency(totalExVat + totalVat);
+  const disbExMinor = sumMinorUnits(disbExMinorList);
+  const disbVatMinor = sumMinorUnits(disbVatMinorList);
+  const totalExMinor = sumMinorUnits([feeExMinor, disbExMinor]);
+  const totalVatMinor = sumMinorUnits([feeVatMinor, disbVatMinor]);
+  const totalIncMinor = sumMinorUnits([totalExMinor, totalVatMinor]);
 
   return {
-    feeAmountExVat: feeEx,
-    vatOnFee: feeVat,
-    disbursementsExVat: disbEx,
-    vatOnDisbursements: disbVat,
-    totalExVat,
-    totalVat,
-    totalIncVat,
+    feeAmountExVat: minorUnitsToPounds(feeExMinor),
+    vatOnFee: minorUnitsToPounds(feeVatMinor),
+    disbursementsExVat: minorUnitsToPounds(disbExMinor),
+    vatOnDisbursements: minorUnitsToPounds(disbVatMinor),
+    totalExVat: minorUnitsToPounds(totalExMinor),
+    totalVat: minorUnitsToPounds(totalVatMinor),
+    totalIncVat: minorUnitsToPounds(totalIncMinor),
   };
 }
 

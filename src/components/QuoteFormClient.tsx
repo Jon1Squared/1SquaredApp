@@ -16,6 +16,7 @@ import {
 } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail, primaryPhone } from '@/domain/names';
+import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
 import {
   allowedNameEdits,
   editDistance,
@@ -34,6 +35,7 @@ import type {
   ChoiceValue,
   Enquiry,
   Matter,
+  OrgStructureCatalogue,
   Organisation,
   Person,
   PersonOrganisationLink,
@@ -55,8 +57,10 @@ interface Props {
   organisations: Organisation[];
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
+  orgStructure?: OrgStructureCatalogue;
   currentUserId: string;
   tenantId: string;
+  tenantVatRatePercent?: number;
   onCancelOverride?: () => void;
   onSuccessOverride?: (quote: Quote) => void;
 }
@@ -82,8 +86,10 @@ export function QuoteFormClient({
   organisations,
   links = [],
   values,
+  orgStructure,
   currentUserId,
   tenantId,
+  tenantVatRatePercent = 20,
   onCancelOverride,
   onSuccessOverride,
 }: Props) {
@@ -173,8 +179,23 @@ export function QuoteFormClient({
 
   // Work type & scope
   const allWorkTypes = useMemo(
-    () => valuesForList(values, 'work_type').filter((v) => v.active),
-    [values],
+    () =>
+      valuesForList(values, 'work_type').filter(
+        (v) =>
+          isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+          v.id === existing?.practiceAreaId ||
+          v.id === existing?.workTypeSubcategoryId ||
+          v.id === initialEnquiry?.practiceAreaId ||
+          v.id === initialEnquiry?.workTypeSubcategoryId,
+      ),
+    [
+      values,
+      orgStructure,
+      existing?.practiceAreaId,
+      existing?.workTypeSubcategoryId,
+      initialEnquiry?.practiceAreaId,
+      initialEnquiry?.workTypeSubcategoryId,
+    ],
   );
   const practiceAreas = useMemo(
     () => allWorkTypes.filter((v) => !v.parentId),
@@ -227,6 +248,17 @@ export function QuoteFormClient({
     [feeAmountStr],
   );
 
+  const [refreshVatRate, setRefreshVatRate] = useState<boolean>(
+    () => mode === 'revise',
+  );
+  const existingVatRatePercent = existing?.vatRatePercent ?? 20;
+  const effectiveVatRatePercent =
+    mode === 'new'
+      ? tenantVatRatePercent
+      : refreshVatRate
+        ? tenantVatRatePercent
+        : existingVatRatePercent;
+
   const [vatOverridden, setVatOverridden] = useState<boolean>(
     () => Boolean(existing?.vatOverridden),
   );
@@ -238,8 +270,13 @@ export function QuoteFormClient({
     if (vatOverridden) {
       return roundCurrency(Math.max(0, Number(vatInputStr) || 0));
     }
-    return roundCurrency(feeAmountNum * 0.2);
-  }, [feeAmountNum, vatOverridden, vatInputStr]);
+    return calculateQuoteTotals(
+      feeAmountNum,
+      null,
+      [],
+      effectiveVatRatePercent,
+    ).vatOnFee;
+  }, [feeAmountNum, vatOverridden, vatInputStr, effectiveVatRatePercent]);
 
   const [disbursements, setDisbursements] = useState<QuoteDisbursement[]>(() =>
     existing?.disbursements?.length
@@ -248,8 +285,14 @@ export function QuoteFormClient({
   );
 
   const totals = useMemo(
-    () => calculateQuoteTotals(feeAmountNum, effectiveVatOnFee, disbursements),
-    [feeAmountNum, effectiveVatOnFee, disbursements],
+    () =>
+      calculateQuoteTotals(
+        feeAmountNum,
+        effectiveVatOnFee,
+        disbursements,
+        effectiveVatRatePercent,
+      ),
+    [feeAmountNum, effectiveVatOnFee, disbursements, effectiveVatRatePercent],
   );
 
   // Dates & ownership
@@ -811,6 +854,7 @@ export function QuoteFormClient({
           followUpAfterDays: Math.max(1, Number(followUpAfterDaysStr) || 7),
           revisionNote,
           markAsSent,
+          refreshVatRate,
         });
         if (res.error || !res.quote) {
           showToast(res.error ?? 'Failed to revise quote');
@@ -859,6 +903,7 @@ export function QuoteFormClient({
         {
           id: existing?.id,
           markAsSent,
+          refreshVatRate,
         },
       );
 
@@ -1494,7 +1539,7 @@ export function QuoteFormClient({
                   <label className="field-label" htmlFor="qte-vat-amount">
                     VAT{' '}
                     <span className="muted" style={{ fontWeight: 400 }}>
-                      (£ — standard 20%)
+                      (£ — standard {effectiveVatRatePercent}%)
                     </span>
                   </label>
                   {vatOverridden ? (
@@ -1504,7 +1549,7 @@ export function QuoteFormClient({
                       style={{ fontSize: 11, padding: '0 4px', minHeight: 18 }}
                       onClick={() => setVatOverridden(false)}
                     >
-                      Reset to 20%
+                      Reset to {effectiveVatRatePercent}%
                     </button>
                   ) : null}
                 </div>
@@ -1512,7 +1557,7 @@ export function QuoteFormClient({
                   id="qte-vat-amount"
                   type="number"
                   min="0"
-                  step="1"
+                  step="0.01"
                   className="field-input"
                   value={vatOverridden ? vatInputStr : String(effectiveVatOnFee)}
                   onChange={(e) => {
@@ -1520,6 +1565,27 @@ export function QuoteFormClient({
                     setVatInputStr(e.target.value);
                   }}
                 />
+                {existing && existingVatRatePercent !== tenantVatRatePercent ? (
+                  <label
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 12,
+                      marginTop: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={refreshVatRate}
+                      onChange={(e) => setRefreshVatRate(e.target.checked)}
+                    />
+                    <span className="muted">
+                      Update quote VAT rate from {existingVatRatePercent}% to current firm setting ({tenantVatRatePercent}%)
+                    </span>
+                  </label>
+                ) : null}
               </div>
             </div>
 
@@ -1612,7 +1678,7 @@ export function QuoteFormClient({
                             })
                           }
                         />
-                        <span>+ 20% VAT</span>
+                        <span>+ {effectiveVatRatePercent}% VAT</span>
                       </label>
                       <button
                         type="button"
@@ -2120,7 +2186,9 @@ export function QuoteFormClient({
                 <span>{formatGbp(totals.feeAmountExVat, true)}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span className="muted">VAT on professional fee</span>
+                <span className="muted">
+                  VAT on professional fee ({vatOverridden ? 'overridden' : `${effectiveVatRatePercent}%`})
+                </span>
                 <span>{formatGbp(totals.vatOnFee, true)}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>

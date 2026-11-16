@@ -728,7 +728,6 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
 
       const afterPositiveTasks =
         await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx);
-      expect(afterPositiveTasks.length).toBe(prePositiveTasksCount + 1);
       const newAutoTasks = afterPositiveTasks.filter(
         (t) =>
           t.autoTrigger === 'complete_matter_opening' &&
@@ -737,6 +736,17 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
           ),
       );
       expect(newAutoTasks).toHaveLength(1);
+      const newWorkTypeAutoTasks = afterPositiveTasks.filter(
+        (t) =>
+          t.autoTrigger === 'work_type_auto_task' &&
+          t.linkedRecords.some(
+            (lr) => lr.recordType === 'matter' && lr.recordId === positiveSaveRes.matter!.id,
+          ),
+      );
+      expect(newWorkTypeAutoTasks.length).toBeGreaterThanOrEqual(1);
+      expect(afterPositiveTasks.length).toBe(
+        prePositiveTasksCount + 1 + newWorkTypeAutoTasks.length,
+      );
       const createdAutoTask = newAutoTasks[0]!;
       expect(
         (

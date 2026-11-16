@@ -33,8 +33,10 @@ export default async function NewQuotePage({
         organisations={snap.organisations}
         links={snap.links}
         values={snap.values}
+        orgStructure={snap.orgStructure}
         currentUserId={snap.currentUserId}
         tenantId={snap.tenantId}
+        tenantVatRatePercent={snap.matterCostsConfig.vatRatePercent}
       />
     );
   });

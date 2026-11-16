@@ -72,9 +72,19 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import { resolveOrgDepartment } from '@/domain/orgStructure';
+import type { WorkTypesConfiguration } from '@platform/core-api';
+import {
+  isWorkTypeChoiceActive,
+  resolveDepartmentForPracticeArea,
+  resolveOrgDepartment,
+} from '@/domain/orgStructure';
+import {
+  DEFAULT_WORK_TYPES_CONFIG,
+  resolveWorkTypeRiskQuestions,
+} from '@/domain/workTypeConfig';
 import {
   calculateDisbursementsTotal,
+  calculateMatterSnapshotTotals,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
   mapWorkBasisToBillingBasisId,
@@ -92,7 +102,7 @@ import {
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
-  MATTER_RISK_SECTIONS,
+  resolveMatterRiskSections,
   summarizeMatterRiskAssessment,
   type CustomKeyDateEntry,
 } from '@/domain/matterOpeningRecord';
@@ -168,6 +178,7 @@ interface MatterFormClientProps {
   employees: Person[];
   currentUser: Person;
   orgStructure: OrgStructureCatalogue;
+  workTypesConfig?: WorkTypesConfiguration;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
   matterCostsConfig: MatterCostsConfig;
   canReassignOwnership?: boolean;
@@ -270,6 +281,7 @@ export function MatterFormClient({
   employees: initialEmployees,
   currentUser,
   orgStructure,
+  workTypesConfig,
   matterPartyTaxonomy,
   matterCostsConfig,
   canReassignOwnership = false,
@@ -345,12 +357,31 @@ export function MatterFormClient({
   const card4Ref = useRef<HTMLElement | null>(null);
   const card5Ref = useRef<HTMLElement | null>(null);
 
+  const effectiveWorkTypesConfig = useMemo(
+    () => workTypesConfig ?? DEFAULT_WORK_TYPES_CONFIG,
+    [workTypesConfig],
+  );
+
   const practiceAreas = useMemo(
     () =>
       values
-        .filter((v) => v.listKey === 'work_type' && !v.parentId && v.active)
+        .filter(
+          (v) =>
+            v.listKey === 'work_type' &&
+            !v.parentId &&
+            (isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+              v.id === existing?.practiceAreaId ||
+              v.id === initialQuote?.practiceAreaId ||
+              v.id === initialEnquiry?.practiceAreaId),
+        )
         .sort((a, b) => a.sortOrder - b.sortOrder),
-    [values],
+    [
+      values,
+      orgStructure,
+      existing?.practiceAreaId,
+      initialQuote?.practiceAreaId,
+      initialEnquiry?.practiceAreaId,
+    ],
   );
 
   const isEditingExistingMatter = Boolean(
@@ -1066,6 +1097,12 @@ export function MatterFormClient({
   });
 
   // 2 · MATTER COSTS state (initialised from existing matter, quote, or client-customised rate card)
+  const hasExistingMatterCostsSnapshot = Boolean(
+    existing?.fieldValues?.['matterCosts'] &&
+      typeof existing.fieldValues['matterCosts'] === 'object' &&
+      (existing.fieldValues['matterCosts'] as Partial<MatterCostsSnapshot>).workBasis,
+  );
+
   const initialMatterCosts = useMemo(
     () =>
       resolveMatterCostsSnapshot({
@@ -1078,6 +1115,12 @@ export function MatterFormClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
+
+  const [matterVatRatePercent, setMatterVatRatePercent] = useState<number>(
+    () => initialMatterCosts.vatRatePercent ?? costsConfig.vatRatePercent ?? 20,
+  );
+  const [refreshCostsRates, setRefreshCostsRates] = useState<boolean>(false);
+  const [refreshCostsVatRate, setRefreshCostsVatRate] = useState<boolean>(false);
 
   const [costWorkBasis, setCostWorkBasis] = useState<MatterCostWorkBasis>(
     initialMatterCosts.workBasis,
@@ -1136,6 +1179,7 @@ export function MatterFormClient({
       activeRateCards.find((rc) => rc.id === cardId) ??
       activeRateCards[0];
     if (!card) return;
+    setRefreshCostsRates(true);
     setCostRateCardId(card.id);
     const usePms =
       preferSource === 'pms' ||
@@ -1180,7 +1224,7 @@ export function MatterFormClient({
   useEffect(() => {
     if (prevCostPracticeAreaRef.current === practiceAreaId) return;
     prevCostPracticeAreaRef.current = practiceAreaId;
-    if (costRateSource === 'custom_override') return;
+    if (hasExistingMatterCostsSnapshot || costRateSource === 'custom_override') return;
     const lookedUp = lookupRatesForMatter({
       config: costsConfig,
       practiceAreaId,
@@ -1274,6 +1318,16 @@ export function MatterFormClient({
     return Number.isFinite(n) && n > 0 ? n : null;
   }, [feeEstimateGbp]);
 
+  const matterCostsTotals = useMemo(
+    () =>
+      calculateMatterSnapshotTotals({
+        totalEstimateGbp: numericFeeEstimateGbp,
+        disbursements: costDisbursements,
+        vatRatePercent: matterVatRatePercent,
+      }),
+    [costDisbursements, matterVatRatePercent, numericFeeEstimateGbp],
+  );
+
   const numericAgreedCapGbp = useMemo(() => {
     const n = Number(String(agreedFeeCapGbp).replace(/[£,\s]/g, ''));
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -1306,7 +1360,10 @@ export function MatterFormClient({
     paymentOnAccountRequired,
   ]);
 
-  function buildMatterCostsSnapshotPayload(): MatterCostsSnapshot {
+  function buildMatterCostsSnapshotPayload(): MatterCostsSnapshot & {
+    refreshRates?: boolean;
+    refreshVatRate?: boolean;
+  } {
     const finalDisbursements = [...costDisbursements];
     if (newDisbursementDescription.trim()) {
       const pendingAmt = Number(newDisbursementAmount);
@@ -1317,7 +1374,11 @@ export function MatterFormClient({
         vatApplicable: newDisbursementVat,
       });
     }
-    const disbTotal = calculateDisbursementsTotal(finalDisbursements);
+    const snapTotals = calculateMatterSnapshotTotals({
+      totalEstimateGbp: numericFeeEstimateGbp,
+      disbursements: finalDisbursements,
+      vatRatePercent: matterVatRatePercent,
+    });
     return {
       workBasis: costWorkBasis,
       rateCardId: selectedRateCard?.id ?? costRateCardId ?? 'RC-DEFAULT',
@@ -1329,13 +1390,21 @@ export function MatterFormClient({
       customGrades: customGradeRates,
       totalEstimateGbp: numericFeeEstimateGbp,
       agreedCapGbp: costWorkBasis === 'capped' ? numericAgreedCapGbp : null,
+      vatRatePercent: matterVatRatePercent,
       disbursements: finalDisbursements,
-      disbursementsTotalGbp: disbTotal,
+      disbursementsTotalGbp: snapTotals.disbursementsTotalGbp,
+      disbursementsVatGbp: snapTotals.disbursementsVatGbp,
+      disbursementsTotalIncVatGbp: snapTotals.disbursementsTotalIncVatGbp,
+      estimatedFeeVatGbp: snapTotals.estimatedFeeVatGbp,
+      totalIncVatGbp: snapTotals.totalIncVatGbp,
       paymentOnAccountRequired,
       paymentOnAccountAmountGbp:
         paymentOnAccountRequired === 'Yes' ? numericPoaAmountGbp : null,
       notes: costNotes.trim() || undefined,
+      capturedAt: initialMatterCosts.capturedAt,
       updatedAt: new Date().toISOString(),
+      ...(refreshCostsRates ? { refreshRates: true } : {}),
+      ...(refreshCostsVatRate ? { refreshVatRate: true } : {}),
     };
   }
 
@@ -1380,6 +1449,7 @@ export function MatterFormClient({
   });
   const [expandedRiskSectionIds, setExpandedRiskSectionIds] = useState<string[]>([
     'about_instruction',
+    'work_type_risk_factors',
   ]);
   const [riskListView, setRiskListView] = useState<boolean>(false);
   const [customKeyDates, setCustomKeyDates] = useState<CustomKeyDateEntry[]>(() => {
@@ -1630,6 +1700,15 @@ export function MatterFormClient({
     });
   }, [clientIds, derivedClientRelationshipCdd.option]);
 
+  const workTypeRiskQuestions = useMemo(
+    () =>
+      resolveWorkTypeRiskQuestions(effectiveWorkTypesConfig, {
+        workTypeSubcategoryId,
+        practiceAreaId,
+      }),
+    [effectiveWorkTypesConfig, workTypeSubcategoryId, practiceAreaId],
+  );
+
   // Compute active risk sections, per-section completion counts, per-section risk, and overall risk via shared builder
   const riskAssessmentSummary = useMemo(
     () =>
@@ -1637,6 +1716,8 @@ export function MatterFormClient({
         answers: riskAnswers,
         followUps: riskFollowUps,
         customKeyDates,
+        extraRiskQuestions: workTypeRiskQuestions,
+        workTypeSubcategoryId: workTypeSubcategoryId || null,
         completedById: currentUser.id,
         completedByName: personDisplayName(currentUser),
         leadFeeEarnerId: leadFeeEarnerId || null,
@@ -1646,7 +1727,16 @@ export function MatterFormClient({
             : leadFeeEarnerId
           : null,
       }),
-    [riskAnswers, riskFollowUps, customKeyDates, leadFeeEarnerId, currentUser, people],
+    [
+      riskAnswers,
+      riskFollowUps,
+      customKeyDates,
+      workTypeRiskQuestions,
+      workTypeSubcategoryId,
+      leadFeeEarnerId,
+      currentUser,
+      people,
+    ],
   );
 
   // Sync calculated overall risk level to riskRatingId
@@ -2057,7 +2147,9 @@ export function MatterFormClient({
       queueMicrotask(() => {
         setRiskAnswers(nextAnswers);
         setRiskFollowUps(nextFollowUps);
-        setExpandedRiskSectionIds(MATTER_RISK_SECTIONS.map((sec) => sec.id));
+        setExpandedRiskSectionIds(
+          resolveMatterRiskSections(workTypeRiskQuestions).map((sec) => sec.id),
+        );
       });
     }
 
@@ -2974,9 +3066,26 @@ export function MatterFormClient({
   const subcategoriesForPractice = useMemo(
     () =>
       values
-        .filter((v) => v.listKey === 'work_type' && v.parentId === practiceAreaId && v.active)
+        .filter(
+          (v) =>
+            v.listKey === 'work_type' &&
+            v.parentId === practiceAreaId &&
+            (isWorkTypeChoiceActive(v.id, values, orgStructure) ||
+              v.id === existing?.workTypeSubcategoryId ||
+              v.id === initialQuote?.workTypeSubcategoryId ||
+              v.id === initialEnquiry?.workTypeSubcategoryId ||
+              v.id === workTypeSubcategoryId),
+        )
         .sort((a, b) => a.sortOrder - b.sortOrder),
-    [values, practiceAreaId],
+    [
+      values,
+      practiceAreaId,
+      orgStructure,
+      existing?.workTypeSubcategoryId,
+      initialQuote?.workTypeSubcategoryId,
+      initialEnquiry?.workTypeSubcategoryId,
+      workTypeSubcategoryId,
+    ],
   );
 
   // Fixed client parties + user-added parties (Part 2.1 & 2.6)
@@ -6353,7 +6462,11 @@ export function MatterFormClient({
                       !owningDepartmentExplicitlyChosen &&
                       !owningTeamId
                     ) {
-                      const nextOrgDept = resolveOrgDepartment(nextPa, orgStructure);
+                      const nextOrgDept = resolveDepartmentForPracticeArea(
+                        nextPa,
+                        orgStructure,
+                        values,
+                      );
                       const nextOwningDeptId = nextOrgDept?.id ?? '';
                       setOwningDepartmentId(nextOwningDeptId);
                     }
@@ -6362,7 +6475,7 @@ export function MatterFormClient({
                         (v) =>
                           v.listKey === 'work_type' &&
                           v.parentId === nextPa &&
-                          v.active,
+                          isWorkTypeChoiceActive(v.id, values, orgStructure),
                       )
                       .sort((a, b) => a.sortOrder - b.sortOrder)[0];
                     setWorkTypeSubcategoryId(
@@ -7053,6 +7166,11 @@ export function MatterFormClient({
                           }}
                         >
                           Rates are looked up automatically for the selected Department from the Application Rates Table or PMS Rate Table (when linked).
+                          {!costsConfig.allowMatterRateOverrides ? (
+                            <span style={{ display: 'block', marginTop: 2, fontWeight: 600 }}>
+                              Matter-level hourly rate overrides are locked by firm configuration.
+                            </span>
+                          ) : null}
                         </div>
                       </div>
 
@@ -7180,22 +7298,40 @@ export function MatterFormClient({
                         </select>
                       </div>
 
-                      <StatusPill
-                        label={
-                          costRateSource === 'pms'
-                            ? 'Source: PMS Fee Earner Rates'
-                            : costRateSource === 'custom_override'
-                              ? 'Source: Matter Custom Rate Override'
-                              : 'Source: Application Rates Table'
-                        }
-                        tone={
-                          costRateSource === 'pms'
-                            ? 'positive'
-                            : costRateSource === 'custom_override'
-                              ? 'warning'
-                              : 'neutral'
-                        }
-                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <StatusPill
+                          label={
+                            costRateSource === 'pms'
+                              ? 'Source: PMS Fee Earner Rates'
+                              : costRateSource === 'custom_override'
+                                ? 'Source: Matter Custom Rate Override'
+                                : 'Source: Application Rates Table'
+                          }
+                          tone={
+                            costRateSource === 'pms'
+                              ? 'positive'
+                              : costRateSource === 'custom_override'
+                                ? 'warning'
+                                : 'neutral'
+                          }
+                        />
+                        {hasExistingMatterCostsSnapshot && !isReadOnlyFeeEarner ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            style={{ borderRadius: 999, height: 28, fontSize: 12 }}
+                            onClick={() =>
+                              applyRateCardToState(
+                                selectedRateCard?.id ?? costRateCardId,
+                                costRateSource === 'pms' ? 'pms' : 'app_table',
+                              )
+                            }
+                          >
+                            <RefreshCw size={12} />
+                            <span>Refresh rates from card</span>
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
 
                     {/* Partner / Associate / Trainee Hourly Rates Table */}
@@ -7733,7 +7869,7 @@ export function MatterFormClient({
                                 })
                               }
                             />
-                            <span>+ VAT</span>
+                            <span>+ {matterVatRatePercent}% VAT</span>
                           </label>
                           {!isReadOnlyFeeEarner ? (
                             <button
@@ -7806,7 +7942,7 @@ export function MatterFormClient({
                           checked={newDisbursementVat}
                           onChange={(e) => setNewDisbursementVat(e.target.checked)}
                         />
-                        <span>+ VAT</span>
+                        <span>+ {matterVatRatePercent}% VAT</span>
                       </label>
                       <button
                         type="button"
@@ -7834,7 +7970,7 @@ export function MatterFormClient({
                       fontSize: 12.5,
                     }}
                   >
-                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
                       <span style={{ color: 'var(--text-secondary)' }}>
                         Professional fees estimate:{' '}
                         <strong style={{ color: 'var(--text-primary)' }}>
@@ -7849,17 +7985,49 @@ export function MatterFormClient({
                           {formatGbp(disbursementsTotalGbp)}
                         </strong>
                       </span>
+                      <span style={{ color: 'var(--text-secondary)' }}>
+                        VAT (@ {matterVatRatePercent}%):{' '}
+                        <strong style={{ color: 'var(--text-primary)' }}>
+                          {formatGbp(matterCostsTotals.combinedVatGbp, true)}
+                        </strong>
+                      </span>
+                      {hasExistingMatterCostsSnapshot &&
+                      !isReadOnlyFeeEarner &&
+                      matterVatRatePercent !== costsConfig.vatRatePercent ? (
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          style={{ fontSize: 11.5, padding: '2px 8px', height: 24 }}
+                          onClick={() => {
+                            setMatterVatRatePercent(costsConfig.vatRatePercent);
+                            setRefreshCostsVatRate(true);
+                          }}
+                        >
+                          Update VAT to {costsConfig.vatRatePercent}%
+                        </button>
+                      ) : null}
                     </div>
-                    <span
-                      style={{
-                        fontWeight: 700,
-                        fontSize: 13.5,
-                        color: 'var(--text-primary)',
-                      }}
-                    >
-                      Combined total estimate (ex VAT):{' '}
-                      {formatGbp((numericFeeEstimateGbp ?? 0) + disbursementsTotalGbp)}
-                    </span>
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 13,
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        Ex VAT: {formatGbp(matterCostsTotals.combinedExVatGbp, true)}
+                      </span>
+                      <span
+                        style={{
+                          fontWeight: 700,
+                          fontSize: 13.5,
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        Combined total estimate (inc VAT):{' '}
+                        {formatGbp(matterCostsTotals.combinedIncVatGbp, true)}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -8415,7 +8583,9 @@ export function MatterFormClient({
                       {sec.visibleQuestions.map((q, qIdx) => {
                         const selectedVal = riskAnswers[q.id] ?? '';
                         const selectedOpt = q.options.find(
-                          (o) => o.label === selectedVal,
+                          (o) =>
+                            o.label === selectedVal ||
+                            (Boolean(o.value) && o.value === selectedVal),
                         );
                         const showFollowUp = Boolean(selectedOpt?.triggersFollowUp);
                         const isLastInSec = qIdx === sec.visibleQuestions.length - 1;
@@ -8552,7 +8722,9 @@ export function MatterFormClient({
                                 aria-label={q.question}
                               >
                                 {q.options.map((opt) => {
-                                  const isSelected = selectedVal === opt.label;
+                                  const isSelected =
+                                    selectedVal === opt.label ||
+                                    (Boolean(opt.value) && selectedVal === opt.value);
                                   return (
                                     <button
                                       key={opt.label}
@@ -8871,7 +9043,9 @@ export function MatterFormClient({
                         {sec.visibleQuestions.map((q) => {
                           const selectedVal = riskAnswers[q.id] ?? '';
                           const selectedOpt = q.options.find(
-                            (o) => o.label === selectedVal,
+                            (o) =>
+                              o.label === selectedVal ||
+                              (Boolean(o.value) && o.value === selectedVal),
                           );
                           const showFollowUp = Boolean(selectedOpt?.triggersFollowUp);
 
@@ -8990,7 +9164,9 @@ export function MatterFormClient({
                                 aria-label={q.question}
                               >
                                 {q.options.map((opt) => {
-                                  const isSelected = selectedVal === opt.label;
+                                  const isSelected =
+                                    selectedVal === opt.label ||
+                                    (Boolean(opt.value) && selectedVal === opt.value);
                                   return (
                                     <button
                                       key={opt.label}

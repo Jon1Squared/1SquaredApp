@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import {
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
   AppRole,
@@ -129,6 +130,8 @@ import {
   getKeyDateExceptionsReportRecord,
   exportKeyDateExceptionsReportRecord,
   saveKeyDatesConfigRecord,
+  saveWorkTypesConfigRecord,
+  updateMatterLifecycleStatusRecord,
 } from '@/server/services';
 import type {
   KeyDateCalculation,
@@ -1075,12 +1078,13 @@ export async function updateWorkTypeProfilesAction(
 
 export async function saveQuoteAction(
   input: SaveQuoteInput,
-  opts: { id?: string; markAsSent?: boolean } = {},
+  opts: { id?: string; markAsSent?: boolean; refreshVatRate?: boolean } = {},
 ) {
   return guardedAction('saveQuoteAction', async ({ personId: byId }) => {
     const res = await saveQuoteRecord(input, {
       id: opts?.id,
       markAsSent: opts?.markAsSent,
+      refreshVatRate: opts?.refreshVatRate,
       byId,
     });
     revalidateAll();
@@ -1126,6 +1130,7 @@ export async function reviseQuoteAction(
     followUpAfterDays?: number;
     revisionNote?: string;
     markAsSent?: boolean;
+    refreshVatRate?: boolean;
   },
 ) {
   return guardedAction('reviseQuoteAction', async ({ personId: byId }) => {
@@ -1637,6 +1642,35 @@ export async function saveKeyDatesConfigAction(
     const res = await saveKeyDatesConfigRecord(newConfig, reason, actor.personId, {
       mfaVerified: actor.mfaVerified,
     });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveWorkTypesConfigAction(
+  newConfig: WorkTypesConfiguration,
+  reason: string,
+) {
+  return guardedAction('saveWorkTypesConfigAction', async (actor) => {
+    const res = await saveWorkTypesConfigRecord(newConfig, reason, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function updateMatterLifecycleStatusAction(
+  matterId: string,
+  action: 'close' | 'reopen',
+  opts: {
+    closedAt?: string | null;
+    reason?: string;
+    expectedRowVersion?: number | null;
+  } = {},
+) {
+  return guardedAction('updateMatterLifecycleStatusAction', async ({ personId: byId }) => {
+    const res = await updateMatterLifecycleStatusRecord(matterId, action, opts, byId);
     revalidateAll();
     return res;
   });

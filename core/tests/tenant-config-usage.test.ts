@@ -610,11 +610,6 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     const expectedReservedByPath: Record<string, string> = {
       'branding.accentColorHex': 'backlog',
       'branding.logoAssetKey': 'backlog',
-      'matterCosts.rateSourceMode': 'S0-23',
-      'matterCosts.allowMatterRateOverrides': 'S0-23',
-      'matterCosts.partnerSignOffThresholdGbp': 'S0-23',
-      'matterCosts.rateCards': 'S0-23',
-      'matterCosts.disbursementPresets': 'S0-23',
       'integrations.pmsConnectionSecretVaultRef': 'backlog',
       'integrations.companiesHouseApiKeyVaultRef': 'backlog',
       'integrations.pmsSync.enabled': 'backlog',
@@ -625,7 +620,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       'integrations.pmsSync.pollIntervalMinutes': 'backlog',
       'integrations.pmsSync.fieldMappings': 'backlog',
       'documentGeneration.customDocumentTypes': 'backlog',
-      'documentAccess.autoRemediateDrift': 'S0-25',
+      'documentAccess.autoRemediateDrift': 'backlog',
       'keyDates.defaults.teamAssignment': 'backlog',
       'keyDates.matterTypes[].defaultRuleSetIds': 'backlog',
       'keyDates.limitationRuleSets[].rules[].claimType': 'backlog',
@@ -935,10 +930,52 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
 
     expect(
       collectConfigReservedSettings(baseRaw).some((msg) =>
-        msg.includes('[RESERVED_CONFIG_KEY] matterCosts.rateSourceMode'),
+        msg.includes('[RESERVED_CONFIG_KEY] integrations.pmsConnectionSecretVaultRef'),
       ),
     ).toBe(true);
+    expect(
+      collectConfigReservedSettings(baseRaw).some((msg) =>
+        msg.includes('[RESERVED_CONFIG_KEY] matterCosts.'),
+      ),
+    ).toBe(false);
     expect(collectStructuredConfigReservedSettings({})).toEqual([]);
+  });
+
+  it('validates matterCosts.vatRatePercent range (0..100) and defaults omitted value to 20', () => {
+    const validBase = structuredClone(notALawFirmBaseConfig) as Record<string, unknown>;
+    const baseMatterCosts = (validBase.matterCosts ?? {}) as Record<string, unknown>;
+
+    for (const validVat of [0, 5, 17.5, 20, 100]) {
+      const candidate = structuredClone(validBase);
+      (candidate.matterCosts as Record<string, unknown>).vatRatePercent = validVat;
+      const parsed = TenantConfigurationSchema.safeParse(candidate);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.matterCosts.vatRatePercent).toBe(validVat);
+      }
+    }
+
+    const omittedCandidate = structuredClone(validBase);
+    const { vatRatePercent: _omitted, ...withoutVat } = baseMatterCosts;
+    void _omitted;
+    omittedCandidate.matterCosts = withoutVat;
+    const omittedParsed = TenantConfigurationSchema.safeParse(omittedCandidate);
+    expect(omittedParsed.success).toBe(true);
+    if (omittedParsed.success) {
+      expect(omittedParsed.data.matterCosts.vatRatePercent).toBe(20);
+    }
+
+    for (const invalidVat of [-0.1, -1, 100.01, 150]) {
+      const candidate = structuredClone(validBase);
+      (candidate.matterCosts as Record<string, unknown>).vatRatePercent = invalidVat;
+      const parsed = TenantConfigurationSchema.safeParse(candidate);
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(
+          parsed.error.issues.some((issue) => issue.path.includes('vatRatePercent')),
+        ).toBe(true);
+      }
+    }
   });
 
   it('logs reserved settings once as info at startup when loading tenant configuration', () => {

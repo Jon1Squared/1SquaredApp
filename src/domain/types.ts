@@ -167,6 +167,7 @@ export interface OrgDepartment {
   defaultCostCentreId: string;
   defaultProfitCentreId: string;
   legacyChoiceValueId?: string | null;
+  practiceAreaIds?: string[];
   active: boolean;
 }
 
@@ -179,8 +180,8 @@ export interface OrgTeamOrPracticeGroup {
 }
 
 export interface OrgOffice {
-  id: string; // e.g. 'OFF-CDF'
-  name: string; // e.g. 'Cardiff'
+  id: string; // e.g. 'OFF-MAIN'
+  name: string; // e.g. 'Head Office'
   code: string;
   parentLegalEntityId: string;
   address: Address;
@@ -487,7 +488,7 @@ export interface EmploymentRecord {
   engagementType: EngagementType;
   status: EmploymentStatus;
   employeeNumber: string; // unique
-  employingEntityId: string; // defaults to 'LE-PV-LLP'
+  employingEntityId: string; // defaults to 'LE-PRIMARY'
   jobTitle: string; // Firm job title (distinct from contact jobTitle)
   gradeOrBand: string;
   roleType: EmployeeRoleType;
@@ -1073,9 +1074,10 @@ export interface Task {
   completedById: string | null;
   completedAt: string | null;
   comments: TaskComment[];
-  autoTrigger?: AutoTaskTrigger | null;
+  autoTrigger?: AutoTaskTrigger | 'work_type_auto_task' | null;
   linkedKeyDateId?: string | null;
   idempotencyKey?: string | null;
+  systemKey?: string | null;
 }
 
 // ------------------------------------------------------------------ Enquiries
@@ -1245,6 +1247,8 @@ export interface QuoteDisbursement {
   description: string;
   amountExVat: number;
   vatApplicable: boolean;
+  vatAmount?: number;
+  vatOverridden?: boolean;
 }
 
 export interface QuoteFollowUpEntry {
@@ -1262,7 +1266,9 @@ export interface QuoteVersionSnapshot {
   feeBasis: QuoteFeeBasis;
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
+  vatRatePercent?: number;
   vatAmount: number;
+  vatOverridden?: boolean;
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
   scope: string;
@@ -1271,6 +1277,7 @@ export interface QuoteVersionSnapshot {
   createdAt: string;
   sentAt: string | null;
   supersededAt: string;
+  capturedAt?: string;
   byId: string;
   revisionNote?: string;
 }
@@ -1313,10 +1320,12 @@ export interface Quote {
   feeBasis: QuoteFeeBasis;
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
+  vatRatePercent?: number;
   vatAmount: number;
   vatOverridden?: boolean;
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
+  capturedAt?: string;
   feeEarnerId: string; // P-xxxxxx
   assignedTeamId: string | null; // TM-xxxxxx
   validUntil: string; // YYYY-MM-DD
@@ -1695,6 +1704,8 @@ export interface MatterDisbursementEntry {
   description: string;
   amountGbp: number;
   vatApplicable?: boolean;
+  vatAmountGbp?: number;
+  vatOverridden?: boolean;
 }
 
 export interface MatterCostsSnapshot {
@@ -1708,12 +1719,18 @@ export interface MatterCostsSnapshot {
   customGrades?: CustomGradeRateRow[];
   totalEstimateGbp: number | null;
   agreedCapGbp?: number | null;
+  vatRatePercent?: number;
   disbursements: MatterDisbursementEntry[];
   disbursementsTotalGbp: number;
+  disbursementsVatGbp?: number;
+  disbursementsTotalIncVatGbp?: number;
+  estimatedFeeVatGbp?: number | null;
+  totalIncVatGbp?: number | null;
   paymentOnAccountRequired: 'Yes' | 'No' | '';
   paymentOnAccountAmountGbp: number | null;
   notes?: string;
   updatedAt?: string;
+  capturedAt?: string;
 }
 
 /**
@@ -1729,6 +1746,8 @@ export interface MatterCostsConfig {
   pmsLinkActive: boolean; // Whether a live/imported PMS rate link is enabled
   pmsLastSyncedAt?: string | null;
   allowMatterRateOverrides: boolean; // Whether fee earners can override looked-up rates on a matter
+  partnerSignOffThresholdGbp: number; // Fee estimate or agreed cap threshold requiring Partner sign-off
+  vatRatePercent: number; // Standard UK VAT percentage (0..100, default 20)
   defaultPaymentOnAccount: 'Yes' | 'No' | '';
   defaultPaymentOnAccountAmountGbp?: number;
   rateCards: RateCardEntry[];
@@ -1808,6 +1827,7 @@ export interface AppSnapshot {
   enquirySettings: EnquirySettings;
   taskSettings: TaskSettings;
   matterCostsConfig: MatterCostsConfig;
+  workTypesConfig?: import('@platform/core-api').WorkTypesConfiguration;
   taskBadgeCount: number;
   notes: Note[];
   audit: AuditEntry[];

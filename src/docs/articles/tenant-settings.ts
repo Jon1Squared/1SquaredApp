@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-13',
+  updated: '2026-11-15',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -43,15 +43,16 @@ Every leaf property in the tenant configuration schema is either actively read a
 
 ### Matter costs configuration (tenant level)
 
-Runtime rate cards and partner sign-off thresholds are currently stored in the firm store and managed through Administration when \`featureFlags.enableMatterCostsGovernance\` is enabled. The declarative \`matterCosts.*\` block in \`base.json\` is reserved for S0-23, which unifies the tenant configuration and runtime store:
+The \`matterCosts.*\` settings in \`base.json\` and environment overlays supply schema-validated tenant defaults (\`resolveEffectiveMatterCostsConfig\` in \`src/domain/matterCosts.ts\`), merged with per-tenant overrides stored in \`public.tenant_module_configs\` (\`'matter_costs'\`, managed via **Administration -> Rates & matter costs** and \`saveMatterCostsConfigAction\` when \`featureFlags.enableMatterCostsGovernance\` is enabled):
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`matterCosts.rateSourceMode\` | \`"pms_when_linked"\` | Reserved (S0-23) | Unifying tenant-level and runtime-store matter costs configuration |
-| \`matterCosts.allowMatterRateOverrides\` | \`true\` | Reserved (S0-23) | Unifying tenant-level and runtime-store matter costs configuration |
-| \`matterCosts.partnerSignOffThresholdGbp\` | \`25000\` | Reserved (S0-23) | Unifying tenant-level and runtime-store matter costs configuration |
-| \`matterCosts.rateCards\` | \`[]\` | Reserved (S0-23) | Unifying tenant-level and runtime-store matter costs configuration |
-| \`matterCosts.disbursementPresets\` | \`[]\` | Reserved (S0-23) | Unifying tenant-level and runtime-store matter costs configuration |
+| \`matterCosts.rateSourceMode\` | \`"pms_when_linked"\` | Active | Controls hourly rate card lookup order (\`app_table\`, \`pms_when_linked\`, or \`pms_only\`) |
+| \`matterCosts.allowMatterRateOverrides\` | \`true\` | Active | Controls whether fee earners may customise Partner, Associate, Trainee, or custom grade rates on a matter; enforced server-side in \`saveMatterRecord\` |
+| \`matterCosts.partnerSignOffThresholdGbp\` | \`25000\` | Active | Default fee estimate / agreed cap threshold in GBP passed to \`beforeMatterCostsCalculate\` and \`beforeMatterOpen\` governance hooks |
+| \`matterCosts.vatRatePercent\` | \`20\` | Active | Standard UK VAT percentage (\`0\`–\`100\`, additive default \`20\`) captured into new quotes and matter cost snapshots and calculated in exact integer pence via \`@platform/core-api\` |
+| \`matterCosts.rateCards\` | \`[]\` | Active | Tenant-default hourly rate cards by practice area mapped into runtime \`MatterCostsConfig\` when no module override exists |
+| \`matterCosts.disbursementPresets\` | \`[]\` | Active | Tenant-default disbursement presets merged when no module override exists |
 
 ### Integrations and PMS synchronisation
 
@@ -88,7 +89,7 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`documentAccess.departmentEntraGroups\` | \`{}\` | Active | Department to Entra security group mappings |
 | \`documentAccess.teamEntraGroups\` | \`{}\` | Active | Team to Entra security group mappings |
 | \`documentAccess.uniqueScopeWarningThreshold\` | \`4000\` | Active | Warning threshold for unique SharePoint permission scopes per library |
-| \`documentAccess.autoRemediateDrift\` | \`false\` | Reserved (S0-25) | Reserved for scheduled automatic SharePoint permission drift remediation |
+| \`documentAccess.autoRemediateDrift\` | \`false\` | Reserved (backlog) | Reserved for future scheduled automatic SharePoint permission drift remediation (backlog item beyond Stage 0) |
 | \`documentAccess.defaultPolicy\` / \`policiesByStore\` | Built-in policy | Active | Inheritance-based document access policies |
 | \`matterFolderTemplates.*\` | Required \`default\` | Active | Versioned matter folder templates with work-type and department inheritance |
 | \`keyDates.*\` | Enabled | Active | Key dates, limitation rule sets (marking a rule set \`reviewed\` records the saving actor's person ID in \`reviewedBy\` and today's ISO date in \`reviewedOn\` on the server, rejects invalid \`reviewStatus\` values, and clears \`reviewedBy\` / \`reviewedOn\` when unmarked), key date types (\`allowManualEntry: false\` disables the Manual Date Entry button, switches to the limitation calculator when \`allowCalculation\` is enabled or displays a notice when neither is enabled, and returns \`ActionDenied\` (\`FORBIDDEN\`) on manual creation, manual supersede, or spoofed system sources), verification rules, reminder schedules, and calendar sync |
@@ -99,5 +100,8 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`keyVault.vaultName\` | Optional | Active | Deployed per-tenant Azure Key Vault name (3–24 characters, populated from \`keyVaultName\` output of \`core/infra/modules/tenant.bicep\`); enforced by \`assertTenantOwnsKeyVaultSecretRef\` against every \`kv://\` secret reference |
 | \`keyVault.vaultUri\` | Optional | Active | Deployed per-tenant Azure Key Vault URI (\`https://<vault>.vault.azure.net/\`, populated from \`keyVaultUri\` output of \`core/infra/modules/tenant.bicep\`); validated alongside \`keyVault.vaultName\` |
 | \`database.dedicatedServerHost\` | Optional | Active | Hostname of a dedicated Azure Database for PostgreSQL Flexible Server (\`psql-<slug>-<env>.postgres.database.azure.com\`) for Model B hosted tenants requiring their own server or a Customer-Managed Key (ADR 0028 Decision 1) |
+| \`workTypes.defaults.*\` | 6 years retention | Active | Firm-wide fallback automatic opening task templates (\`matter_open\`), work-type risk questions, and closure retention period (\`1\`–\`100\` years) |
+| \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator edits in \`public.tenant_module_configs\` (\`work_type_configs\`, gated by \`admin:access\` + MFA) |
+| \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Reserved (S0-28b) | Reserved for per-work-type CFA/DBA statutory fee cap overrides |
 `.trim(),
 };

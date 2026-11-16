@@ -840,6 +840,7 @@ export interface TenantConfiguration {
     rateSourceMode: 'application_table' | 'pms_when_linked';
     allowMatterRateOverrides: boolean;
     partnerSignOffThresholdGbp: number;
+    vatRatePercent: number;
     rateCards: RateCardConfigEntry[];
     disbursementPresets: DisbursementPresetConfigEntry[];
   };
@@ -861,6 +862,84 @@ export interface TenantConfiguration {
   keyDates?: KeyDatesConfiguration;
   keyVault?: TenantKeyVaultConfig;
   database?: TenantDatabaseConfig;
+  workTypes?: WorkTypesConfiguration;
+}
+
+// ------------------------------------------------------------------ Work Type & Departmental Behaviour Configuration (S0-22)
+
+export type WorkTypeAutoTaskTrigger = 'matter_open';
+
+export interface WorkTypeAutoTaskTemplateConfig {
+  id: string;
+  title: string;
+  trigger: WorkTypeAutoTaskTrigger;
+  dueWorkingDaysOffset: number;
+  priorityId:
+    | 'task_priority.low'
+    | 'task_priority.normal'
+    | 'task_priority.high'
+    | 'task_priority.urgent';
+  ownerRoleKey: HomeRoleKey;
+}
+
+export type WorkTypeRiskLevel = 'low' | 'medium' | 'high';
+
+export type WorkTypeRiskSectionKey =
+  | 'client'
+  | 'matter'
+  | 'jurisdiction'
+  | 'delivery'
+  | 'work_type';
+
+export interface WorkTypeRiskQuestionOptionConfig {
+  value: string;
+  label: string;
+  score: number;
+  riskLevel: WorkTypeRiskLevel;
+}
+
+export interface WorkTypeRiskQuestionConfig {
+  id: string;
+  sectionKey: WorkTypeRiskSectionKey;
+  sectionTitle?: string;
+  prompt: string;
+  weight: number;
+  required?: boolean;
+  options: WorkTypeRiskQuestionOptionConfig[];
+}
+
+export interface WorkTypeRetentionConfig {
+  retentionYears: number;
+  baseline: 'closed_on';
+  allowMatterOverride?: boolean;
+  statutoryNote?: string;
+}
+
+export interface WorkTypeFeeCapOverrideReservedConfig {
+  capCategoryKey: string;
+  maxPercent: number;
+  capBaseKey: string;
+}
+
+export interface WorkTypeDefaultsConfig {
+  autoTaskTemplates: WorkTypeAutoTaskTemplateConfig[];
+  riskQuestions: WorkTypeRiskQuestionConfig[];
+  retention: WorkTypeRetentionConfig;
+}
+
+export interface WorkTypeConfigItem {
+  workTypeId: string;
+  practiceAreaId?: string;
+  active?: boolean;
+  autoTaskTemplates?: WorkTypeAutoTaskTemplateConfig[];
+  riskQuestions?: WorkTypeRiskQuestionConfig[];
+  retention?: WorkTypeRetentionConfig;
+  workTypeCapOverrides?: WorkTypeFeeCapOverrideReservedConfig[];
+}
+
+export interface WorkTypesConfiguration {
+  defaults: WorkTypeDefaultsConfig;
+  items: WorkTypeConfigItem[];
 }
 
 // ------------------------------------------------------------------ External Document Store Integration Contracts (ADR-0017 .. ADR-0021)
@@ -1720,4 +1799,6 @@ export interface FirmAuditPageResult {
   entries: FirmAuditEntryRecord[];
   nextBeforeSeq: number | null;
 }
+
+export * from '../domain/money/index';
 

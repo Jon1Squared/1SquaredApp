@@ -63,6 +63,7 @@ export default async function MatterProfilePage({
           employees={snap.employees}
           currentUser={snap.currentUser}
           orgStructure={snap.orgStructure}
+          workTypesConfig={snap.workTypesConfig}
           matterPartyTaxonomy={snap.matterPartyTaxonomy}
           matterCostsConfig={snap.matterCostsConfig}
           canReassignOwnership={snap.currentUserPermissions.includes('matter:reassign_ownership')}
@@ -112,6 +113,7 @@ export default async function MatterProfilePage({
         canTakeByTaskId={snap.canTakeByTaskId}
         canViewFinance={snap.finance.canViewMatter}
         canLiftRestriction={snap.currentUserPermissions.includes('matter:restriction:lift')}
+        canEditMatter={snap.currentUserPermissions.includes('matter:edit')}
         pmsView={pmsView}
         notes={snap.notes.filter((n) => n.recordType === 'matter' && n.recordId === matter.id)}
         audit={matterAudit}
