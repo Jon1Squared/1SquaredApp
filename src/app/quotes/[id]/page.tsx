@@ -61,6 +61,8 @@ export default async function QuoteDetailPage({
         currentUserId={snap.currentUserId}
         tenantId={snap.tenantId}
         tenantVatRatePercent={snap.matterCostsConfig.vatRatePercent}
+        workTypesConfig={snap.workTypesConfig}
+        firmFeeArrangementCaps={snap.matterCostsConfig.feeArrangementCaps}
         initialAction={sp.action ?? null}
       />
     );

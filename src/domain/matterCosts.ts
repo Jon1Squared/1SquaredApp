@@ -20,9 +20,13 @@ import type {
 import type { PmsFeeEarner } from '@/pms/types';
 import {
   calculateVatMinorUnits,
+  createDefaultFirmFeeArrangementCaps,
+  type FeeArrangementBasis,
+  type FeeArrangementCapEntry,
   minorUnitsToPounds,
   percentToBasisPoints,
   poundsToMinorUnits,
+  roundHalfAwayFromZeroFromBasisPoints,
   sumMinorUnits,
   type GradeRateResolution,
   type ResolvedApplicableRatesResult,
@@ -59,7 +63,57 @@ export const WORK_BASIS_OPTIONS: {
     description: 'Charged at hourly rates up to an agreed maximum fee cap',
     showsHourlyRates: true,
   },
+  {
+    key: 'conditional_fee_agreement',
+    label: 'Conditional fee (CFA)',
+    shortLabel: 'CFA',
+    description:
+      'No-win, no-fee conditional fee arrangement with a capped success fee uplift',
+    showsHourlyRates: true,
+  },
+  {
+    key: 'damages_based_agreement',
+    label: 'Damages-based agreement (DBA)',
+    shortLabel: 'DBA',
+    description:
+      'Contingency fee calculated as a capped percentage share of sums recovered',
+    showsHourlyRates: false,
+  },
 ];
+
+export function mapMatterWorkBasisToArrangementBasis(
+  workBasis: MatterCostWorkBasis | string | null | undefined,
+): FeeArrangementBasis | null {
+  if (
+    workBasis === 'conditional_fee_agreement' ||
+    workBasis === 'damages_based_agreement'
+  ) {
+    return workBasis;
+  }
+  return null;
+}
+
+/**
+ * Calculates the CFA success fee uplift amount in exact minor units (pence)
+ * using symmetric half-away-from-zero basis-point rounding (`ADR 0034`).
+ */
+export function computeCfaSuccessFeeUpliftGbp(
+  baseCostsGbp: number,
+  upliftPercent: number,
+): number {
+  const baseMinor = toNonNegativeMinorUnitsSafe(baseCostsGbp);
+  const safePercent =
+    typeof upliftPercent === 'number' &&
+    Number.isFinite(upliftPercent) &&
+    upliftPercent >= 0
+      ? upliftPercent
+      : 0;
+  const upliftMinor = roundHalfAwayFromZeroFromBasisPoints(
+    baseMinor,
+    percentToBasisPoints(safePercent),
+  );
+  return minorUnitsToPounds(upliftMinor);
+}
 
 export interface MatterCostsProfileDescriptor {
   clientProfileCode?: string;
@@ -241,6 +295,7 @@ export function createDefaultMatterCostsConfig(
     defaultPaymentOnAccount: '',
     rateCards,
     disbursementPresets,
+    feeArrangementCaps: createDefaultFirmFeeArrangementCaps(),
     updatedAt: nowIso,
     updatedById: 'system',
   };
@@ -433,6 +488,20 @@ export function resolveEffectiveMatterCostsConfig(
   const cfgVatRatePercent = tenantConfig?.matterCosts?.vatRatePercent;
   const cfgRateCards = tenantConfig?.matterCosts?.rateCards;
   const cfgDisbursementPresets = tenantConfig?.matterCosts?.disbursementPresets;
+  const cfgFeeArrangementCaps = tenantConfig?.matterCosts?.feeArrangementCaps;
+
+  const mappedCfgFeeArrangementCaps: FeeArrangementCapEntry[] = [];
+  if (Array.isArray(cfgFeeArrangementCaps)) {
+    for (const entry of cfgFeeArrangementCaps) {
+      if (entry && entry.capCategoryKey && entry.capBaseKey) {
+        mappedCfgFeeArrangementCaps.push({
+          capCategoryKey: entry.capCategoryKey,
+          maxPercent: Number(entry.maxPercent),
+          capBaseKey: entry.capBaseKey,
+        });
+      }
+    }
+  }
 
   const values = options?.values ?? [];
   const resolvedRateSourceMode = mapConfigRateSourceMode(cfgRateSourceMode);
@@ -503,6 +572,13 @@ export function resolveEffectiveMatterCostsConfig(
       disbursementPresets: Array.isArray(dbOverride.disbursementPresets)
         ? dbOverride.disbursementPresets
         : mappedCfgPresets,
+      feeArrangementCaps:
+        Array.isArray(dbOverride.feeArrangementCaps) &&
+        dbOverride.feeArrangementCaps.length > 0
+          ? dbOverride.feeArrangementCaps
+          : mappedCfgFeeArrangementCaps.length > 0
+            ? mappedCfgFeeArrangementCaps
+            : createDefaultFirmFeeArrangementCaps(),
     };
   }
 
@@ -521,6 +597,10 @@ export function resolveEffectiveMatterCostsConfig(
     rateCards: mappedCfgRateCards.length > 0 ? mappedCfgRateCards : defaults.rateCards,
     disbursementPresets:
       mappedCfgPresets.length > 0 ? mappedCfgPresets : defaults.disbursementPresets,
+    feeArrangementCaps:
+      mappedCfgFeeArrangementCaps.length > 0
+        ? mappedCfgFeeArrangementCaps
+        : defaults.feeArrangementCaps,
   };
 }
 
@@ -543,6 +623,13 @@ export function applyEffectiveMatterCostsToTenantConfig(
       allowMatterRateOverrides: costsConfig.allowMatterRateOverrides,
       partnerSignOffThresholdGbp: costsConfig.partnerSignOffThresholdGbp,
       vatRatePercent: costsConfig.vatRatePercent,
+      feeArrangementCaps: (
+        costsConfig.feeArrangementCaps ?? createDefaultFirmFeeArrangementCaps()
+      ).map((cap) => ({
+        capCategoryKey: cap.capCategoryKey,
+        maxPercent: cap.maxPercent,
+        capBaseKey: cap.capBaseKey,
+      })),
     },
   };
 }
@@ -714,6 +801,24 @@ export function mapWorkBasisToBillingBasisId(
       ''
     );
   }
+  if (workBasis === 'conditional_fee_agreement') {
+    return (
+      basisOptions.find(
+        (v) =>
+          v.label.toLowerCase().includes('cfa') ||
+          v.label.toLowerCase().includes('conditional'),
+      )?.id ?? ''
+    );
+  }
+  if (workBasis === 'damages_based_agreement') {
+    return (
+      basisOptions.find(
+        (v) =>
+          v.label.toLowerCase().includes('dba') ||
+          v.label.toLowerCase().includes('damages'),
+      )?.id ?? ''
+    );
+  }
   return (
     basisOptions.find((v) => v.label.toLowerCase().includes('hourly'))?.id ?? ''
   );
@@ -724,6 +829,12 @@ export function mapBillingBasisLabelToWorkBasis(
   hasAgreedCap?: boolean,
 ): MatterCostWorkBasis {
   const lower = (label || '').toLowerCase();
+  if (lower.includes('cfa') || lower.includes('conditional')) {
+    return 'conditional_fee_agreement';
+  }
+  if (lower.includes('dba') || lower.includes('damages-based') || lower.includes('damages based')) {
+    return 'damages_based_agreement';
+  }
   if (lower.includes('fixed')) return 'fixed_fee';
   if (lower.includes('cap') || hasAgreedCap) return 'capped';
   return 'hourly_rates';
@@ -871,6 +982,30 @@ export function resolveMatterCostsSnapshot(params: {
         saved.agreedCapGbp !== undefined
           ? saved.agreedCapGbp
           : (existing?.agreedFeeCapGbp ?? null),
+      ...(saved.feeArrangementCapCategoryKey
+        ? { feeArrangementCapCategoryKey: saved.feeArrangementCapCategoryKey }
+        : {}),
+      ...(saved.feeArrangementPercent !== undefined
+        ? { feeArrangementPercent: saved.feeArrangementPercent }
+        : {}),
+      ...(saved.feeArrangementCapBaseKey
+        ? { feeArrangementCapBaseKey: saved.feeArrangementCapBaseKey }
+        : {}),
+      ...(saved.feeArrangementCapBaseDescription
+        ? {
+            feeArrangementCapBaseDescription:
+              saved.feeArrangementCapBaseDescription,
+          }
+        : {}),
+      ...(saved.feeArrangementAppliedCapPercent !== undefined
+        ? {
+            feeArrangementAppliedCapPercent:
+              saved.feeArrangementAppliedCapPercent,
+          }
+        : {}),
+      ...(saved.feeArrangementCapLevel
+        ? { feeArrangementCapLevel: saved.feeArrangementCapLevel }
+        : {}),
       vatRatePercent: frozenVatRatePercent,
       disbursements,
       disbursementsTotalGbp: computedTotals.disbursementsTotalGbp,
@@ -911,7 +1046,11 @@ export function resolveMatterCostsSnapshot(params: {
   if (initialQuote) {
     if (initialQuote.feeBasis === 'Fixed fee') workBasis = 'fixed_fee';
     else if (initialQuote.feeBasis === 'Capped fee') workBasis = 'capped';
-    else workBasis = 'hourly_rates';
+    else if (initialQuote.feeBasis === 'Conditional fee agreement (CFA)') {
+      workBasis = 'conditional_fee_agreement';
+    } else if (initialQuote.feeBasis === 'Damages-based agreement (DBA)') {
+      workBasis = 'damages_based_agreement';
+    } else workBasis = 'hourly_rates';
   } else if (existing?.billingBasisId) {
     const bbLabel = resolveLabel(values, existing.billingBasisId);
     workBasis = mapBillingBasisLabelToWorkBasis(
@@ -1003,6 +1142,30 @@ export function resolveMatterCostsSnapshot(params: {
       : {}),
     totalEstimateGbp,
     agreedCapGbp,
+    ...(initialQuote?.feeArrangementCapCategoryKey
+      ? { feeArrangementCapCategoryKey: initialQuote.feeArrangementCapCategoryKey }
+      : {}),
+    ...(initialQuote?.feeArrangementPercent !== undefined
+      ? { feeArrangementPercent: initialQuote.feeArrangementPercent }
+      : {}),
+    ...(initialQuote?.feeArrangementCapBaseKey
+      ? { feeArrangementCapBaseKey: initialQuote.feeArrangementCapBaseKey }
+      : {}),
+    ...(initialQuote?.feeArrangementCapBaseDescription
+      ? {
+          feeArrangementCapBaseDescription:
+            initialQuote.feeArrangementCapBaseDescription,
+        }
+      : {}),
+    ...(initialQuote?.feeArrangementAppliedCapPercent !== undefined
+      ? {
+          feeArrangementAppliedCapPercent:
+            initialQuote.feeArrangementAppliedCapPercent,
+        }
+      : {}),
+    ...(initialQuote?.feeArrangementCapLevel
+      ? { feeArrangementCapLevel: initialQuote.feeArrangementCapLevel }
+      : {}),
     vatRatePercent: initialVatRatePercent,
     disbursements,
     disbursementsTotalGbp: computedTotals.disbursementsTotalGbp,

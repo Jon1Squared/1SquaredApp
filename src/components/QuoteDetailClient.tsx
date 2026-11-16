@@ -38,7 +38,11 @@ import type {
   Quote,
   QuoteDeclineReason,
 } from '@/domain/types';
-import type { ResolvedApplicableRatesResult } from '@platform/core-api';
+import type {
+  FeeArrangementCapEntry,
+  ResolvedApplicableRatesResult,
+  WorkTypesConfiguration,
+} from '@platform/core-api';
 import { formatRateTierBadgeLabel } from '@/domain/matterCosts';
 import { QuoteFormClient } from './QuoteFormClient';
 import { StatusPill } from './SearchBox';
@@ -56,6 +60,8 @@ interface Props {
   currentUserId: string;
   tenantId: string;
   tenantVatRatePercent?: number;
+  workTypesConfig?: WorkTypesConfiguration;
+  firmFeeArrangementCaps?: FeeArrangementCapEntry[];
   initialAction?: string | null;
   initialResolvedRates?: ResolvedApplicableRatesResult | null;
 }
@@ -72,6 +78,8 @@ export function QuoteDetailClient({
   currentUserId,
   tenantId,
   tenantVatRatePercent = 20,
+  workTypesConfig,
+  firmFeeArrangementCaps,
   initialAction = null,
   initialResolvedRates = null,
 }: Props) {
@@ -248,6 +256,8 @@ export function QuoteDetailClient({
         currentUserId={currentUserId}
         tenantId={tenantId}
         tenantVatRatePercent={tenantVatRatePercent}
+        workTypesConfig={workTypesConfig}
+        firmFeeArrangementCaps={firmFeeArrangementCaps}
         onCancelOverride={() => setViewMode('detail')}
         onSuccessOverride={() => {
           setViewMode('detail');
@@ -751,6 +761,23 @@ export function QuoteDetailClient({
                 <tr className="data-list__row">
                   <td className="data-list__td">
                     <strong>Professional fee ({quote.feeBasis})</strong>
+                    {quote.feeArrangementPercent !== undefined &&
+                    quote.feeArrangementPercent !== null &&
+                    quote.feeArrangementCapBaseDescription ? (
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        {quote.feeArrangementPercent}% of{' '}
+                        {quote.feeArrangementCapBaseDescription}
+                        {quote.feeArrangementAppliedCapPercent != null
+                          ? ` · Cap: ${quote.feeArrangementAppliedCapPercent}% (${
+                              quote.feeArrangementCapLevel === 'work_type'
+                                ? 'work type cap'
+                                : quote.feeArrangementCapLevel === 'firm'
+                                  ? 'firm cap'
+                                  : 'statutory maximum'
+                            })`
+                          : ''}
+                      </div>
+                    ) : null}
                     {quote.feeBasis === 'Hourly rate with estimate' && quote.hourlyRateGbp ? (
                       <div className="muted" style={{ fontSize: 12 }}>
                         Hourly rate: {formatGbp(quote.hourlyRateGbp)}/hr ex VAT
@@ -890,6 +917,14 @@ export function QuoteDetailClient({
                         </strong>
                         <StatusPill label="Superseded" tone="neutral" />
                       </div>
+                      {ver.feeArrangementPercent !== undefined &&
+                      ver.feeArrangementPercent !== null &&
+                      ver.feeArrangementCapBaseDescription ? (
+                        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                          Fee arrangement: {ver.feeArrangementPercent}% of{' '}
+                          {ver.feeArrangementCapBaseDescription}
+                        </div>
+                      ) : null}
                       <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
                         Superseded {formatDateTime(ver.supersededAt)} by {nameOfPerson(ver.byId)}
                         {ver.revisionNote ? ` — "${ver.revisionNote}"` : ''}

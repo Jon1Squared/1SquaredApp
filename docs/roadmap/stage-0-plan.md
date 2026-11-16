@@ -241,7 +241,7 @@ These need a person with the right admin access. Claude Code should list them in
 | Add SPF, DKIM and DMARC records for 1Squared.co.uk if they aren’t already in place. | S0-26 | Helps demo emails reach inboxes rather than spam. |
 | Confirm Azure subscription access for creating the Container Apps environment and database. | S0-13 | **Done** (confirmed 14 November 2026; `1Squared Non-Live` subscription `rg-onesquared-demo-uksouth`). |
 | Create and approve the 1Squared Teams app (manifest upload by a Teams administrator) and grant `TeamsActivity.Send` to its app registration. | S0-29 | |
-| Confirm the CFA and DBA cap values to use as configuration defaults. | S0-28b | A product owner decision, not legal advice. |
+| Confirm the CFA and DBA cap values to use as configuration defaults. | S0-28b | **Done** (confirmed 12 November 2026 in [WP5-owner-decisions](../../PlanReviews/WP5-owner-decisions.md) and codified in [ADR 0034](../decisions/0034-fee-arrangements-and-caps.md); product configuration decision, not legal advice). |
 | Turn on GitHub secret scanning and push protection for the repository. | S0-01 | **Done** (confirmed 6 November 2026). Complements the CI scan. |
 | Put `ANTHROPIC_API_KEY` in Key Vault (and local `.env.local`) for environments that use AI extraction. | S0-01 | **Local `.env.local` done** (6 November 2026). Key Vault follows when an Azure environment exists (S0-13). The browser key box is removed. |
 | Create the demo deployment's Entra app registration and test users for each role. | S0-11b, S0-27 | **Done** (confirmed 14–15 November 2026; `1Squared Demo` app registration + 8 invented demo personas seeded via `demo-entra-map` in Key Vault). |

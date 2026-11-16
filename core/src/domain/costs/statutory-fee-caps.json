@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "1.0.0",
+  "rows": [
+    {
+      "rowId": "STAT-CAP-CFA-GENERAL-CIVIL-2013",
+      "capCategoryKey": "cfa_general_civil",
+      "feeBasis": "conditional_fee_agreement",
+      "caseTypeLabel": "General civil",
+      "maxPercent": 100,
+      "capBaseKey": "base_costs",
+      "capBaseDescription": "base costs",
+      "effectiveFrom": "2013-04-01",
+      "effectiveTo": null,
+      "legislationRef": "Courts and Legal Services Act 1990 s.58; Conditional Fee Agreements Order 2013, art. 3"
+    },
+    {
+      "rowId": "STAT-CAP-CFA-PI-2013",
+      "capCategoryKey": "cfa_personal_injury",
+      "feeBasis": "conditional_fee_agreement",
+      "caseTypeLabel": "Personal injury (first instance)",
+      "maxPercent": 25,
+      "capBaseKey": "general_damages_and_past_pecuniary_losses_net_of_benefits",
+      "capBaseDescription": "general damages for pain, suffering and loss of amenity plus past pecuniary losses, net of benefits recovered",
+      "effectiveFrom": "2013-04-01",
+      "effectiveTo": null,
+      "legislationRef": "Conditional Fee Agreements Order 2013, art. 4-5"
+    },
+    {
+      "rowId": "STAT-CAP-DBA-GENERAL-CIVIL-2013",
+      "capCategoryKey": "dba_general_civil",
+      "feeBasis": "damages_based_agreement",
+      "caseTypeLabel": "General civil",
+      "maxPercent": 50,
+      "capBaseKey": "sums_recovered_inc_vat",
+      "capBaseDescription": "sums recovered, including VAT",
+      "effectiveFrom": "2013-04-01",
+      "effectiveTo": null,
+      "legislationRef": "Damages-Based Agreements Regulations 2013, reg. 4(3)"
+    },
+    {
+      "rowId": "STAT-CAP-DBA-EMPLOYMENT-2013",
+      "capCategoryKey": "dba_employment",
+      "feeBasis": "damages_based_agreement",
+      "caseTypeLabel": "Employment",
+      "maxPercent": 35,
+      "capBaseKey": "sums_recovered_inc_vat",
+      "capBaseDescription": "sums recovered, including VAT",
+      "effectiveFrom": "2013-04-01",
+      "effectiveTo": null,
+      "legislationRef": "Damages-Based Agreements Regulations 2013, reg. 7"
+    },
+    {
+      "rowId": "STAT-CAP-DBA-PI-2013",
+      "capCategoryKey": "dba_personal_injury",
+      "feeBasis": "damages_based_agreement",
+      "caseTypeLabel": "Personal injury",
+      "maxPercent": 25,
+      "capBaseKey": "general_damages_and_past_losses_inc_vat",
+      "capBaseDescription": "general damages plus past losses, including VAT",
+      "effectiveFrom": "2013-04-01",
+      "effectiveTo": null,
+      "legislationRef": "Damages-Based Agreements Regulations 2013, reg. 4(2)"
+    }
+  ]
+}

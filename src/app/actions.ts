@@ -1141,6 +1141,9 @@ export async function reviseQuoteAction(
     refreshVatRate?: boolean;
     rateGradeKey?: string;
     refreshRates?: boolean;
+    feeArrangementCapCategoryKey?: string;
+    feeArrangementPercent?: number | null;
+    feeArrangementCapBaseKey?: string;
   },
 ) {
   return guardedAction('reviseQuoteAction', async ({ personId: byId }) => {

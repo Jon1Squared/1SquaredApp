@@ -5,6 +5,7 @@
  */
 import {
   calculateVatMinorUnits,
+  type FeeArrangementBasis,
   minorUnitsToPounds,
   percentToBasisPoints,
   poundsToMinorUnits,
@@ -31,7 +32,21 @@ export const QUOTE_FEE_BASES: QuoteFeeBasis[] = [
   'Estimate',
   'Capped fee',
   'Hourly rate with estimate',
+  'Conditional fee agreement (CFA)',
+  'Damages-based agreement (DBA)',
 ];
+
+export function mapQuoteFeeBasisToArrangementBasis(
+  feeBasis: QuoteFeeBasis | string | null | undefined,
+): FeeArrangementBasis | null {
+  if (feeBasis === 'Conditional fee agreement (CFA)') {
+    return 'conditional_fee_agreement';
+  }
+  if (feeBasis === 'Damages-based agreement (DBA)') {
+    return 'damages_based_agreement';
+  }
+  return null;
+}
 
 export const QUOTE_DECLINE_REASONS: QuoteDeclineReason[] = [
   'Price',

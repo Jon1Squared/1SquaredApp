@@ -66,6 +66,33 @@
         "practiceAreaKey": "work_type.corporate_and_commercial",
         "vatApplicable": false
       }
+    ],
+    "feeArrangementCaps": [
+      {
+        "capCategoryKey": "cfa_general_civil",
+        "maxPercent": 100,
+        "capBaseKey": "base_costs"
+      },
+      {
+        "capCategoryKey": "cfa_personal_injury",
+        "maxPercent": 25,
+        "capBaseKey": "general_damages_and_past_pecuniary_losses_net_of_benefits"
+      },
+      {
+        "capCategoryKey": "dba_general_civil",
+        "maxPercent": 50,
+        "capBaseKey": "sums_recovered_inc_vat"
+      },
+      {
+        "capCategoryKey": "dba_employment",
+        "maxPercent": 35,
+        "capBaseKey": "sums_recovered_inc_vat"
+      },
+      {
+        "capCategoryKey": "dba_personal_injury",
+        "maxPercent": 25,
+        "capBaseKey": "general_damages_and_past_losses_inc_vat"
+      }
     ]
   },
   "integrations": {
@@ -887,6 +914,26 @@
           "baseline": "closed_on",
           "allowMatterOverride": false,
           "statutoryNote": "Employment tribunal and statutory claims six-year file retention policy"
+        },
+        "feeArrangementCapCategories": {
+          "damages_based_agreement": "dba_employment"
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_court_pleadings",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "retention": {
+          "retentionYears": 6,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Civil litigation and dispute resolution six-year file retention policy"
+        },
+        "feeArrangementCapCategories": {
+          "conditional_fee_agreement": "cfa_general_civil",
+          "damages_based_agreement": "dba_general_civil"
         }
       }
     ]

@@ -4,7 +4,12 @@ import React, { useEffect, useMemo, useRef, useState, useTransition } from 'reac
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Building2, Link2, Plus, RefreshCw, Search, Trash2, User, X } from 'lucide-react';
-import type { ResolvedApplicableRatesResult } from '@platform/core-api';
+import {
+  resolveEffectiveFeeCaps,
+  type FeeArrangementCapEntry,
+  type ResolvedApplicableRatesResult,
+  type WorkTypesConfiguration,
+} from '@platform/core-api';
 import {
   resolveApplicableRatesAction,
   reviseQuoteAction,
@@ -35,9 +40,14 @@ import {
 import {
   calculateQuoteTotals,
   formatGbp,
+  mapQuoteFeeBasisToArrangementBasis,
   QUOTE_FEE_BASES,
   roundCurrency,
 } from '@/domain/quotes';
+import {
+  DEFAULT_WORK_TYPES_CONFIG,
+  resolveWorkTypeFeeArrangementSettings,
+} from '@/domain/workTypeConfig';
 import type {
   ChoiceValue,
   Enquiry,
@@ -69,6 +79,8 @@ interface Props {
   currentUserId: string;
   tenantId: string;
   tenantVatRatePercent?: number;
+  workTypesConfig?: WorkTypesConfiguration;
+  firmFeeArrangementCaps?: FeeArrangementCapEntry[];
   onCancelOverride?: () => void;
   onSuccessOverride?: (quote: Quote) => void;
 }
@@ -99,6 +111,8 @@ export function QuoteFormClient({
   currentUserId,
   tenantId,
   tenantVatRatePercent = 20,
+  workTypesConfig,
+  firmFeeArrangementCaps,
   onCancelOverride,
   onSuccessOverride,
 }: Props) {
@@ -242,6 +256,14 @@ export function QuoteFormClient({
   const [feeBasis, setFeeBasis] = useState<QuoteFeeBasis>(
     () => existing?.feeBasis ?? 'Fixed fee',
   );
+  const [feeArrangementPercentStr, setFeeArrangementPercentStr] = useState<string>(
+    () =>
+      existing?.feeArrangementPercent !== undefined &&
+      existing?.feeArrangementPercent !== null
+        ? String(existing.feeArrangementPercent)
+        : '',
+  );
+  const [quoteFeeCapError, setQuoteFeeCapError] = useState<string | null>(null);
   const [feeAmountStr, setFeeAmountStr] = useState<string>(() =>
     existing ? String(existing.feeAmountExVat) : '',
   );
@@ -340,6 +362,49 @@ export function QuoteFormClient({
     () => roundCurrency(Math.max(0, Number(feeAmountStr) || 0)),
     [feeAmountStr],
   );
+
+  const arrangementBasis = useMemo(
+    () => mapQuoteFeeBasisToArrangementBasis(feeBasis),
+    [feeBasis],
+  );
+  const workTypeFeeSettings = useMemo(
+    () =>
+      resolveWorkTypeFeeArrangementSettings(
+        workTypesConfig ?? DEFAULT_WORK_TYPES_CONFIG,
+        {
+          workTypeSubcategoryId: workTypeSubcategoryId || null,
+          practiceAreaId,
+        },
+      ),
+    [workTypesConfig, workTypeSubcategoryId, practiceAreaId],
+  );
+  const arrangementMappedCategoryKey = useMemo(() => {
+    if (!arrangementBasis) return null;
+    return arrangementBasis === 'conditional_fee_agreement'
+      ? workTypeFeeSettings.feeArrangementCapCategories
+          .conditional_fee_agreement ?? null
+      : workTypeFeeSettings.feeArrangementCapCategories
+          .damages_based_agreement ?? null;
+  }, [arrangementBasis, workTypeFeeSettings]);
+  const arrangementCapResolution = useMemo(() => {
+    if (!arrangementMappedCategoryKey) return null;
+    const res = resolveEffectiveFeeCaps({
+      capCategoryKey: arrangementMappedCategoryKey,
+      firmCaps: firmFeeArrangementCaps,
+      workTypeCapOverrides: workTypeFeeSettings.workTypeCapOverrides,
+    });
+    return res.ok ? res.resolution : null;
+  }, [
+    arrangementMappedCategoryKey,
+    firmFeeArrangementCaps,
+    workTypeFeeSettings.workTypeCapOverrides,
+  ]);
+  const feeArrangementPercentNum = useMemo(() => {
+    const trimmed = feeArrangementPercentStr.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }, [feeArrangementPercentStr]);
 
   const [refreshVatRate, setRefreshVatRate] = useState<boolean>(
     () => mode === 'revise',
@@ -930,6 +995,19 @@ export function QuoteFormClient({
       linkedOrganisationId || linkedPersonId ? 'existing' : 'prospect';
 
     startTransition(async () => {
+      setQuoteFeeCapError(null);
+      const feeArrangementPayload = arrangementBasis
+        ? {
+            feeArrangementCapCategoryKey:
+              arrangementCapResolution?.capCategoryKey ??
+              arrangementMappedCategoryKey ??
+              undefined,
+            feeArrangementPercent: feeArrangementPercentNum,
+            feeArrangementCapBaseKey:
+              arrangementCapResolution?.capBaseKey ?? undefined,
+          }
+        : {};
+
       if (mode === 'revise' && existing) {
         const res = await reviseQuoteAction(existing.id, {
           feeBasis,
@@ -950,9 +1028,12 @@ export function QuoteFormClient({
           refreshVatRate,
           rateGradeKey,
           refreshRates,
+          ...feeArrangementPayload,
         });
         if (res.error || !res.quote) {
-          showToast(res.error ?? 'Failed to revise quote');
+          const errMsg = res.error ?? 'Failed to revise quote';
+          setQuoteFeeCapError(errMsg);
+          showToast(errMsg);
           return;
         }
         showToast(
@@ -996,6 +1077,7 @@ export function QuoteFormClient({
           followUpAfterDays: Math.max(1, Number(followUpAfterDaysStr) || 7),
           rateGradeKey,
           refreshRates,
+          ...feeArrangementPayload,
         },
         {
           id: existing?.id,
@@ -1005,7 +1087,9 @@ export function QuoteFormClient({
       );
 
       if (res.error || !res.quote) {
-        showToast(res.error ?? 'Could not save quote');
+        const errMsg = res.error ?? 'Could not save quote';
+        setQuoteFeeCapError(errMsg);
+        showToast(errMsg);
         return;
       }
 
@@ -1023,7 +1107,15 @@ export function QuoteFormClient({
   };
 
   const isWorkTypeComplete = Boolean(practiceAreaId && scope.trim());
-  const isFeesComplete = Boolean(feeBasis && feeAmountStr.trim() !== '' && feeAmountNum > 0);
+  const isFeesComplete = arrangementBasis
+    ? Boolean(
+        arrangementCapResolution &&
+          feeArrangementPercentNum !== null &&
+          feeArrangementPercentNum >= 0 &&
+          feeArrangementPercentNum <=
+            arrangementCapResolution.appliedCapPercent,
+      )
+    : Boolean(feeBasis && feeAmountStr.trim() !== '' && feeAmountNum > 0);
 
   return (
     <div className="new-enquiry-page">
@@ -1698,7 +1790,12 @@ export function QuoteFormClient({
 
               <div className="field-group">
                 <label className="field-label" htmlFor="qte-fee-amount">
-                  Professional fee (£ ex VAT) <span className="required">*</span>
+                  {arrangementBasis === 'damages_based_agreement'
+                    ? 'Indicative base fee estimate (£ ex VAT, optional)'
+                    : 'Professional fee (£ ex VAT)'}{' '}
+                  {arrangementBasis === 'damages_based_agreement' ? null : (
+                    <span className="required">*</span>
+                  )}
                 </label>
                 <input
                   id="qte-fee-amount"
@@ -1706,7 +1803,11 @@ export function QuoteFormClient({
                   min="0"
                   step="50"
                   className="field-input"
-                  placeholder="e.g. 2850"
+                  placeholder={
+                    arrangementBasis === 'damages_based_agreement'
+                      ? '0 (recovery-contingent)'
+                      : 'e.g. 2850'
+                  }
                   value={feeAmountStr}
                   onChange={(e) => setFeeAmountStr(e.target.value)}
                 />
@@ -1766,6 +1867,163 @@ export function QuoteFormClient({
                 ) : null}
               </div>
             </div>
+
+            {arrangementBasis ? (
+              <div
+                style={{
+                  padding: '12px 14px',
+                  borderRadius: 10,
+                  border: '1px solid var(--border-subtle)',
+                  background: 'var(--bg-surface-subtle)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 10,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                  }}
+                >
+                  <strong style={{ fontSize: 13 }}>
+                    {arrangementBasis === 'conditional_fee_agreement'
+                      ? 'Conditional Fee Agreement (CFA) Terms'
+                      : 'Damages-Based Agreement (DBA) Terms'}
+                  </strong>
+                  {arrangementCapResolution ? (
+                    <StatusPill
+                      label={`Max ${arrangementCapResolution.appliedCapPercent}% (${
+                        arrangementCapResolution.capLevel === 'work_type'
+                          ? 'work type cap'
+                          : arrangementCapResolution.capLevel === 'firm'
+                            ? 'firm cap'
+                            : 'statutory maximum'
+                      })`}
+                      tone="neutral"
+                    />
+                  ) : (
+                    <StatusPill label="Unmapped work type" tone="warning" />
+                  )}
+                </div>
+
+                {!arrangementCapResolution ? (
+                  <div
+                    role="alert"
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      border: '1px solid var(--status-warning, #d97706)',
+                      background: 'rgba(217, 119, 6, 0.08)',
+                      fontSize: 12.5,
+                    }}
+                  >
+                    This work type does not have a mapped{' '}
+                    {arrangementBasis === 'conditional_fee_agreement'
+                      ? 'CFA'
+                      : 'DBA'}{' '}
+                    statutory cap category in Administration → Work types. Saving a quote on this fee basis will be blocked fail closed (<code>FEE_CAP_CATEGORY_UNMAPPED</code>).
+                  </div>
+                ) : (
+                  <div className="form-grid-3">
+                    <div className="field-group">
+                      <label className="field-label" htmlFor="qte-fee-cap-percent">
+                        {arrangementBasis === 'conditional_fee_agreement'
+                          ? 'Success fee uplift (%)'
+                          : 'Damages-based fee (%)'}{' '}
+                        <span className="required">*</span>
+                      </label>
+                      <input
+                        id="qte-fee-cap-percent"
+                        type="number"
+                        min={0}
+                        max={arrangementCapResolution.appliedCapPercent}
+                        step={0.5}
+                        className="field-input"
+                        placeholder={`Up to ${arrangementCapResolution.appliedCapPercent}%`}
+                        value={feeArrangementPercentStr}
+                        onChange={(e) => {
+                          setQuoteFeeCapError(null);
+                          setFeeArrangementPercentStr(e.target.value);
+                        }}
+                      />
+                    </div>
+                    <div className="field-group" style={{ gridColumn: 'span 2' }}>
+                      <span className="field-label">Locked calculation base</span>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>
+                        {arrangementCapResolution.capBaseDescription}{' '}
+                        <span className="muted" style={{ fontWeight: 400 }}>
+                          ({arrangementCapResolution.caseTypeLabel} ·{' '}
+                          <code>{arrangementCapResolution.capBaseKey}</code>)
+                        </span>
+                      </div>
+                      <span className="field-hint">
+                        Exceeding the {arrangementCapResolution.appliedCapPercent}% cap is blocked on save with no override path ({arrangementCapResolution.legislationRef}).
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {arrangementCapResolution &&
+                feeArrangementPercentNum !== null &&
+                feeArrangementPercentNum >
+                  arrangementCapResolution.appliedCapPercent ? (
+                  <div
+                    role="alert"
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      border: '1px solid var(--status-alert)',
+                      background: 'rgba(220, 38, 38, 0.08)',
+                      color: 'var(--status-alert)',
+                      fontSize: 12.5,
+                    }}
+                  >
+                    Submitted percentage of {feeArrangementPercentNum}% exceeds the{' '}
+                    {arrangementCapResolution.capLevel === 'work_type'
+                      ? 'work type cap'
+                      : arrangementCapResolution.capLevel === 'firm'
+                        ? 'firm cap'
+                        : 'statutory maximum'}{' '}
+                    of {arrangementCapResolution.appliedCapPercent}% of{' '}
+                    {arrangementCapResolution.capBaseDescription}.
+                  </div>
+                ) : null}
+
+                {quoteFeeCapError ? (
+                  <div
+                    role="alert"
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      border: '1px solid var(--status-alert)',
+                      background: 'rgba(220, 38, 38, 0.08)',
+                      color: 'var(--status-alert)',
+                      fontSize: 12.5,
+                    }}
+                  >
+                    {quoteFeeCapError}
+                  </div>
+                ) : null}
+              </div>
+            ) : quoteFeeCapError ? (
+              <div
+                role="alert"
+                style={{
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  border: '1px solid var(--status-alert)',
+                  background: 'rgba(220, 38, 38, 0.08)',
+                  color: 'var(--status-alert)',
+                  fontSize: 12.5,
+                }}
+              >
+                {quoteFeeCapError}
+              </div>
+            ) : null}
 
             <hr
               style={{
@@ -2353,6 +2611,19 @@ export function QuoteFormClient({
                 <span className="muted">Fee basis</span>
                 <strong>{feeBasis}</strong>
               </div>
+              {arrangementBasis && arrangementCapResolution ? (
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <span className="muted">Agreed % &amp; base</span>
+                  <span style={{ textAlign: 'right', fontSize: 12.5 }}>
+                    <strong>
+                      {feeArrangementPercentNum !== null
+                        ? `${feeArrangementPercentNum}%`
+                        : '—'}
+                    </strong>{' '}
+                    of {arrangementCapResolution.capBaseDescription}
+                  </span>
+                </div>
+              ) : null}
               {feeBasis === 'Hourly rate with estimate' && Number(hourlyRateStr) > 0 ? (
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span className="muted">Hourly rate (ex VAT)</span>

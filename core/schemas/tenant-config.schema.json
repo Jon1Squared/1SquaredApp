@@ -220,6 +220,66 @@
         "disbursementPresets": {
           "type": "array",
           "description": "Default tenant disbursement presets seeded when no runtime module configuration override is stored."
+        },
+        "feeArrangementCaps": {
+          "type": "array",
+          "description": "Firm-level CFA and DBA fee percentage caps per statutory category (defaults equal statutory maximums; validated against core statutory-fee-caps.json).",
+          "default": [
+            {
+              "capCategoryKey": "cfa_general_civil",
+              "maxPercent": 100,
+              "capBaseKey": "base_costs"
+            },
+            {
+              "capCategoryKey": "cfa_personal_injury",
+              "maxPercent": 25,
+              "capBaseKey": "general_damages_and_past_pecuniary_losses_net_of_benefits"
+            },
+            {
+              "capCategoryKey": "dba_general_civil",
+              "maxPercent": 50,
+              "capBaseKey": "sums_recovered_inc_vat"
+            },
+            {
+              "capCategoryKey": "dba_employment",
+              "maxPercent": 35,
+              "capBaseKey": "sums_recovered_inc_vat"
+            },
+            {
+              "capCategoryKey": "dba_personal_injury",
+              "maxPercent": 25,
+              "capBaseKey": "general_damages_and_past_losses_inc_vat"
+            }
+          ],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["capCategoryKey", "maxPercent", "capBaseKey"],
+            "properties": {
+              "capCategoryKey": {
+                "type": "string",
+                "enum": [
+                  "cfa_general_civil",
+                  "cfa_personal_injury",
+                  "dba_general_civil",
+                  "dba_employment",
+                  "dba_personal_injury"
+                ],
+                "description": "Statutory CFA or DBA cap category key"
+              },
+              "maxPercent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Firm maximum fee percentage (0 up to the statutory maximum)"
+              },
+              "capBaseKey": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Required statutory calculation base key paired with maxPercent"
+              }
+            }
+          }
         }
       }
     },
@@ -1503,13 +1563,30 @@
                   }
                 }
               },
+              "feeArrangementCapCategories": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Explicit mapping from CFA and DBA fee bases to statutory cap categories for this work type (fail closed when omitted on CFA/DBA matters and quotes).",
+                "properties": {
+                  "conditional_fee_agreement": {
+                    "type": "string",
+                    "enum": ["cfa_general_civil", "cfa_personal_injury"],
+                    "description": "Statutory CFA cap category applied to matters and quotes of this work type"
+                  },
+                  "damages_based_agreement": {
+                    "type": "string",
+                    "enum": [
+                      "dba_general_civil",
+                      "dba_employment",
+                      "dba_personal_injury"
+                    ],
+                    "description": "Statutory DBA cap category applied to matters and quotes of this work type"
+                  }
+                }
+              },
               "workTypeCapOverrides": {
                 "type": "array",
-                "x-reserved": {
-                  "for": "S0-28b",
-                  "reason": "CFA and DBA statutory fee cap overrides per work type will be enforced alongside feeArrangementCapCategories in S0-28b."
-                },
-                "description": "Reserved for S0-28b: per-work-type CFA/DBA statutory fee cap overrides",
+                "description": "Per-work-type CFA and DBA cap percentage overrides (bounded above by the statutory maximum; R486 permits overrides above or below the firm default cap).",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -1517,7 +1594,13 @@
                   "properties": {
                     "capCategoryKey": {
                       "type": "string",
-                      "minLength": 1,
+                      "enum": [
+                        "cfa_general_civil",
+                        "cfa_personal_injury",
+                        "dba_general_civil",
+                        "dba_employment",
+                        "dba_personal_injury"
+                      ],
                       "description": "CFA or DBA cap category key"
                     },
                     "maxPercent": {

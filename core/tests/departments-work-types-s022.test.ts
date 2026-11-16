@@ -165,7 +165,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     expect(baseCfg.workTypes?.defaults.retention.retentionYears).toBe(6);
     expect(baseCfg.workTypes?.items.length).toBeGreaterThanOrEqual(4);
 
-    // Overlay merges and preserves workTypes + forward-compatible workTypeCapOverrides (S0-28b)
+    // Overlay merges and preserves workTypes + active workTypeCapOverrides (S0-28b)
     const overlaid = loadAndValidateTenantConfig(
       baseRaw,
       {
@@ -183,11 +183,15 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
                 allowMatterOverride: false,
                 statutoryNote: 'Shareholder governance nine-year retention',
               },
+              feeArrangementCapCategories: {
+                conditional_fee_agreement: 'cfa_personal_injury',
+              },
               workTypeCapOverrides: [
                 {
-                  capCategoryKey: 's028b_cfa_success_fee',
-                  maxPercent: 25,
-                  capBaseKey: 'damages_recovered',
+                  capCategoryKey: 'cfa_personal_injury',
+                  maxPercent: 20,
+                  capBaseKey:
+                    'general_damages_and_past_pecuniary_losses_net_of_benefits',
                 },
               ],
             },
@@ -204,11 +208,14 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         'work_type.corporate_and_commercial_shareholder_agreements',
     );
     expect(addedItem?.retention?.retentionYears).toBe(9);
+    expect(addedItem?.feeArrangementCapCategories).toEqual({
+      conditional_fee_agreement: 'cfa_personal_injury',
+    });
     expect(addedItem?.workTypeCapOverrides).toEqual([
       {
-        capCategoryKey: 's028b_cfa_success_fee',
-        maxPercent: 25,
-        capBaseKey: 'damages_recovered',
+        capCategoryKey: 'cfa_personal_injury',
+        maxPercent: 20,
+        capBaseKey: 'general_damages_and_past_pecuniary_losses_net_of_benefits',
       },
     ]);
 

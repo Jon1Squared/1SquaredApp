@@ -63,6 +63,8 @@ export default async function NewQuotePage({
         currentUserId={snap.currentUserId}
         tenantId={snap.tenantId}
         tenantVatRatePercent={snap.matterCostsConfig.vatRatePercent}
+        workTypesConfig={snap.workTypesConfig}
+        firmFeeArrangementCaps={snap.matterCostsConfig.feeArrangementCaps}
       />
     );
   });

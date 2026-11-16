@@ -76,12 +76,13 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import type {
-  GradeRateResolution,
-  MatterRateOverrideRecord,
-  ResolvedApplicableRatesResult,
-  ResolvedRateTier,
-  WorkTypesConfiguration,
+import {
+  resolveEffectiveFeeCaps,
+  type GradeRateResolution,
+  type MatterRateOverrideRecord,
+  type ResolvedApplicableRatesResult,
+  type ResolvedRateTier,
+  type WorkTypesConfiguration,
 } from '@platform/core-api';
 import {
   isWorkTypeChoiceActive,
@@ -90,14 +91,17 @@ import {
 } from '@/domain/orgStructure';
 import {
   DEFAULT_WORK_TYPES_CONFIG,
+  resolveWorkTypeFeeArrangementSettings,
   resolveWorkTypeRiskQuestions,
 } from '@/domain/workTypeConfig';
 import {
   calculateDisbursementsTotal,
   calculateMatterSnapshotTotals,
+  computeCfaSuccessFeeUpliftGbp,
   formatRateTierBadgeLabel,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
+  mapMatterWorkBasisToArrangementBasis,
   mapWorkBasisToBillingBasisId,
   resolveMatterCostsSnapshot,
   WORK_BASIS_OPTIONS,
@@ -1042,6 +1046,20 @@ export function MatterFormClient({
       } else if (initialQuote.feeBasis === 'Capped fee') {
         const capped = basisOptions.find((v) => v.label.toLowerCase().includes('cap'));
         if (capped) return capped.id;
+      } else if (initialQuote.feeBasis === 'Conditional fee agreement (CFA)') {
+        const cfa = basisOptions.find(
+          (v) =>
+            v.label.toLowerCase().includes('cfa') ||
+            v.label.toLowerCase().includes('conditional'),
+        );
+        if (cfa) return cfa.id;
+      } else if (initialQuote.feeBasis === 'Damages-based agreement (DBA)') {
+        const dba = basisOptions.find(
+          (v) =>
+            v.label.toLowerCase().includes('dba') ||
+            v.label.toLowerCase().includes('damages'),
+        );
+        if (dba) return dba.id;
       } else {
         const hourly = basisOptions.find((v) => v.label.toLowerCase().includes('hourly'));
         if (hourly) return hourly.id;
@@ -1140,6 +1158,13 @@ export function MatterFormClient({
 
   const [costWorkBasis, setCostWorkBasis] = useState<MatterCostWorkBasis>(
     initialMatterCosts.workBasis,
+  );
+  const [feeArrangementPercentStr, setFeeArrangementPercentStr] = useState<string>(
+    () =>
+      initialMatterCosts.feeArrangementPercent !== undefined &&
+      initialMatterCosts.feeArrangementPercent !== null
+        ? String(initialMatterCosts.feeArrangementPercent)
+        : '',
   );
   const [costRateSource, setCostRateSource] = useState<MatterCostsSnapshot['rateSource']>(
     initialMatterCosts.rateSource,
@@ -1348,7 +1373,10 @@ export function MatterFormClient({
         ? 'Fixed fee'
         : nextBasis === 'hourly_rates' || nextBasis === 'capped'
           ? 'Hourly'
-          : '';
+          : nextBasis === 'conditional_fee_agreement' ||
+              nextBasis === 'damages_based_agreement'
+            ? 'CFA or DBA'
+            : '';
     if (riskFeeAnswer) {
       setRiskAnswers((prev) => ({ ...prev, feeBasis: riskFeeAnswer }));
     }
@@ -1435,11 +1463,65 @@ export function MatterFormClient({
     return Number.isFinite(n) && n > 0 ? n : null;
   }, [retainerMoniesOnAccountGbp]);
 
+  const arrangementBasis = useMemo(
+    () => mapMatterWorkBasisToArrangementBasis(costWorkBasis),
+    [costWorkBasis],
+  );
+
+  const workTypeFeeSettings = useMemo(
+    () =>
+      resolveWorkTypeFeeArrangementSettings(
+        workTypesConfig ?? DEFAULT_WORK_TYPES_CONFIG,
+        {
+          workTypeSubcategoryId: workTypeSubcategoryId || null,
+          practiceAreaId,
+        },
+      ),
+    [workTypesConfig, workTypeSubcategoryId, practiceAreaId],
+  );
+
+  const arrangementMappedCategoryKey = useMemo(() => {
+    if (!arrangementBasis) return null;
+    return arrangementBasis === 'conditional_fee_agreement'
+      ? workTypeFeeSettings.feeArrangementCapCategories
+          .conditional_fee_agreement ?? null
+      : workTypeFeeSettings.feeArrangementCapCategories
+          .damages_based_agreement ?? null;
+  }, [arrangementBasis, workTypeFeeSettings]);
+
+  const arrangementCapResolution = useMemo(() => {
+    if (!arrangementMappedCategoryKey) return null;
+    const res = resolveEffectiveFeeCaps({
+      capCategoryKey: arrangementMappedCategoryKey,
+      firmCaps: costsConfig.feeArrangementCaps,
+      workTypeCapOverrides: workTypeFeeSettings.workTypeCapOverrides,
+    });
+    return res.ok ? res.resolution : null;
+  }, [
+    arrangementMappedCategoryKey,
+    costsConfig.feeArrangementCaps,
+    workTypeFeeSettings.workTypeCapOverrides,
+  ]);
+
+  const feeArrangementPercentNum = useMemo(() => {
+    const trimmed = feeArrangementPercentStr.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }, [feeArrangementPercentStr]);
+
   const matterCostsCompletion = useMemo(() => {
     const hasBasis = Boolean(costWorkBasis);
-    const hasEstimate =
-      numericFeeEstimateGbp != null ||
-      (costWorkBasis === 'capped' && numericAgreedCapGbp != null);
+    const hasEstimate = arrangementBasis
+      ? Boolean(
+          arrangementCapResolution &&
+            feeArrangementPercentNum !== null &&
+            feeArrangementPercentNum >= 0 &&
+            feeArrangementPercentNum <=
+              arrangementCapResolution.appliedCapPercent,
+        )
+      : numericFeeEstimateGbp != null ||
+        (costWorkBasis === 'capped' && numericAgreedCapGbp != null);
     const hasPoaChoice =
       paymentOnAccountRequired === 'Yes' || paymentOnAccountRequired === 'No';
     const doneCount =
@@ -1452,6 +1534,9 @@ export function MatterFormClient({
     };
   }, [
     costWorkBasis,
+    arrangementBasis,
+    arrangementCapResolution,
+    feeArrangementPercentNum,
     numericFeeEstimateGbp,
     numericAgreedCapGbp,
     paymentOnAccountRequired,
@@ -1492,6 +1577,23 @@ export function MatterFormClient({
       customGrades: customGradeRates,
       totalEstimateGbp: numericFeeEstimateGbp,
       agreedCapGbp: costWorkBasis === 'capped' ? numericAgreedCapGbp : null,
+      ...(arrangementBasis
+        ? {
+            feeArrangementCapCategoryKey:
+              arrangementCapResolution?.capCategoryKey ??
+              arrangementMappedCategoryKey ??
+              undefined,
+            feeArrangementPercent: feeArrangementPercentNum,
+            feeArrangementCapBaseKey:
+              arrangementCapResolution?.capBaseKey ?? undefined,
+            feeArrangementCapBaseDescription:
+              arrangementCapResolution?.capBaseDescription ?? undefined,
+            feeArrangementAppliedCapPercent:
+              arrangementCapResolution?.appliedCapPercent ?? undefined,
+            feeArrangementCapLevel:
+              arrangementCapResolution?.capLevel ?? undefined,
+          }
+        : {}),
       vatRatePercent: matterVatRatePercent,
       disbursements: finalDisbursements,
       disbursementsTotalGbp: snapTotals.disbursementsTotalGbp,
@@ -6730,7 +6832,8 @@ export function MatterFormClient({
                   </div>
                 ) : null}
               </div>
-              {serverSaveErrors.costsGovernance ||
+              {serverSaveErrors.matterCosts ||
+              serverSaveErrors.costsGovernance ||
               serverSaveErrors.extensions ||
               serverSaveErrors.keyDates ||
               serverSaveErrors.conflict ||
@@ -6748,7 +6851,8 @@ export function MatterFormClient({
                     fontSize: 13,
                   }}
                 >
-                  {serverSaveErrors.costsGovernance ||
+                  {serverSaveErrors.matterCosts ||
+                    serverSaveErrors.costsGovernance ||
                     serverSaveErrors.extensions ||
                     serverSaveErrors.keyDates ||
                     serverSaveErrors.conflict ||
@@ -7149,7 +7253,7 @@ export function MatterFormClient({
                 {/* 1. Work / Fee Basis */}
                 <div className="field-group">
                   <label className="field-label">
-                    1. Is the work Fixed fee, Hourly rates, or Capped?{' '}
+                    1. Select the work and fee basis{' '}
                     <span className="field-required">*</span>
                   </label>
                   <div
@@ -7228,8 +7332,176 @@ export function MatterFormClient({
                   </div>
                 </div>
 
-                {/* 2. Hourly Rates Table Lookup (shown when Hourly rates or Capped is selected) */}
-                {costWorkBasis === 'hourly_rates' || costWorkBasis === 'capped' ? (
+                {/* CFA / DBA Fee Arrangement Terms & Statutory/Firm/Work-Type Cap */}
+                {arrangementBasis ? (
+                  <div
+                    style={{
+                      padding: '14px 16px',
+                      borderRadius: 10,
+                      border: '1px solid var(--border-subtle)',
+                      background: 'var(--bg-surface-subtle)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: 8,
+                      }}
+                    >
+                      <strong style={{ fontSize: 13 }}>
+                        {arrangementBasis === 'conditional_fee_agreement'
+                          ? 'Conditional Fee Agreement (CFA) Terms & Cap'
+                          : 'Damages-Based Agreement (DBA) Terms & Cap'}
+                      </strong>
+                      {arrangementCapResolution ? (
+                        <StatusPill
+                          label={`Applicable cap: ${arrangementCapResolution.appliedCapPercent}% (${
+                            arrangementCapResolution.capLevel === 'work_type'
+                              ? 'work type cap'
+                              : arrangementCapResolution.capLevel === 'firm'
+                                ? 'firm cap'
+                                : 'statutory maximum'
+                          })`}
+                          tone="neutral"
+                        />
+                      ) : (
+                        <StatusPill label="Unmapped work type" tone="warning" />
+                      )}
+                    </div>
+
+                    {!arrangementCapResolution ? (
+                      <div
+                        role="alert"
+                        style={{
+                          padding: '8px 10px',
+                          borderRadius: 8,
+                          border: '1px solid var(--status-warning, #d97706)',
+                          background: 'rgba(217, 119, 6, 0.08)',
+                          fontSize: 12.5,
+                        }}
+                      >
+                        The selected work type has no mapped{' '}
+                        {arrangementBasis === 'conditional_fee_agreement'
+                          ? 'CFA'
+                          : 'DBA'}{' '}
+                        statutory cap category in Administration → Work types. Saving will fail closed (<code>FEE_CAP_CATEGORY_UNMAPPED</code>).
+                      </div>
+                    ) : (
+                      <div className="form-grid" style={{ gap: '12px 16px' }}>
+                        <div className="field-group">
+                          <label
+                            className="field-label"
+                            htmlFor="nm-fee-arrangement-percent"
+                          >
+                            {arrangementBasis === 'conditional_fee_agreement'
+                              ? 'Success fee uplift (%)'
+                              : 'Damages-based fee (%)'}{' '}
+                            <span className="field-required">*</span>
+                          </label>
+                          <input
+                            id="nm-fee-arrangement-percent"
+                            type="number"
+                            min={0}
+                            max={arrangementCapResolution.appliedCapPercent}
+                            step={0.5}
+                            className="field-input"
+                            placeholder={`Up to ${arrangementCapResolution.appliedCapPercent}%`}
+                            disabled={isReadOnlyFeeEarner}
+                            value={feeArrangementPercentStr}
+                            onChange={(e) =>
+                              setFeeArrangementPercentStr(e.target.value)
+                            }
+                          />
+                          {arrangementBasis === 'conditional_fee_agreement' &&
+                          arrangementCapResolution.capBaseKey === 'base_costs' &&
+                          numericFeeEstimateGbp != null &&
+                          feeArrangementPercentNum != null ? (
+                            <span className="field-hint">
+                              Indicative uplift on {formatGbp(numericFeeEstimateGbp)} base costs:{' '}
+                              <strong>
+                                {formatGbp(
+                                  computeCfaSuccessFeeUpliftGbp(
+                                    numericFeeEstimateGbp,
+                                    feeArrangementPercentNum,
+                                  ),
+                                  true,
+                                )}
+                              </strong>
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="field-group">
+                          <span className="field-label">
+                            Locked calculation base
+                          </span>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>
+                            {arrangementCapResolution.capBaseDescription}{' '}
+                            <span className="muted" style={{ fontWeight: 400 }}>
+                              ({arrangementCapResolution.caseTypeLabel} ·{' '}
+                              <code>{arrangementCapResolution.capBaseKey}</code>)
+                            </span>
+                          </div>
+                          <span className="field-hint">
+                            Enforced server-side with no Risk or Partner override path above {arrangementCapResolution.appliedCapPercent}% ({arrangementCapResolution.legislationRef}).
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {arrangementCapResolution &&
+                    feeArrangementPercentNum !== null &&
+                    feeArrangementPercentNum >
+                      arrangementCapResolution.appliedCapPercent ? (
+                      <div
+                        role="alert"
+                        style={{
+                          padding: '8px 10px',
+                          borderRadius: 8,
+                          border: '1px solid var(--status-alert)',
+                          background: 'rgba(220, 38, 38, 0.08)',
+                          color: 'var(--status-alert)',
+                          fontSize: 12.5,
+                        }}
+                      >
+                        Submitted percentage of {feeArrangementPercentNum}% exceeds the{' '}
+                        {arrangementCapResolution.capLevel === 'work_type'
+                          ? 'work type cap'
+                          : arrangementCapResolution.capLevel === 'firm'
+                            ? 'firm cap'
+                            : 'statutory maximum'}{' '}
+                        of {arrangementCapResolution.appliedCapPercent}% of{' '}
+                        {arrangementCapResolution.capBaseDescription}.
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {serverSaveErrors.matterCosts ? (
+                  <div
+                    role="alert"
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      border: '1px solid var(--status-alert)',
+                      background: 'rgba(220, 38, 38, 0.08)',
+                      color: 'var(--status-alert)',
+                      fontSize: 12.5,
+                    }}
+                  >
+                    {serverSaveErrors.matterCosts}
+                  </div>
+                ) : null}
+
+                {/* 2. Hourly Rates Table Lookup (shown when Hourly rates, Capped, or CFA is selected) */}
+                {costWorkBasis === 'hourly_rates' ||
+                costWorkBasis === 'capped' ||
+                costWorkBasis === 'conditional_fee_agreement' ? (
                   <div
                     style={{
                       padding: '14px 16px',
@@ -7996,8 +8268,12 @@ export function MatterFormClient({
                       2.{' '}
                       {costWorkBasis === 'fixed_fee'
                         ? 'Total Fixed Fee Estimate (£ ex VAT)'
-                        : 'Total Estimate (£ ex VAT)'}{' '}
-                      <span className="field-required">*</span>
+                        : costWorkBasis === 'damages_based_agreement'
+                          ? 'Indicative Fee Estimate (£ ex VAT, optional)'
+                          : 'Total Estimate (£ ex VAT)'}{' '}
+                      {costWorkBasis === 'damages_based_agreement' ? null : (
+                        <span className="field-required">*</span>
+                      )}
                     </label>
                     <input
                       id="nm-cost-total-estimate"

@@ -7,6 +7,11 @@
 export const CORE_VERSION = '1.1.0';
 export const CORE_API_VERSION = '1.1.0';
 
+import type {
+  FeeArrangementCapEntry,
+  WorkTypeFeeArrangementCapCategories,
+} from '../domain/costs/statutoryCaps';
+
 export type HostingMode = 'single_tenant' | 'multi_tenant';
 export type PlatformEnvironment = 'dev' | 'test' | 'training' | 'demo' | 'live';
 
@@ -843,6 +848,7 @@ export interface TenantConfiguration {
     vatRatePercent: number;
     rateCards: RateCardConfigEntry[];
     disbursementPresets: DisbursementPresetConfigEntry[];
+    feeArrangementCaps: FeeArrangementCapEntry[];
   };
   integrations: {
     pmsConnectionSecretVaultRef: string;
@@ -915,11 +921,13 @@ export interface WorkTypeRetentionConfig {
   statutoryNote?: string;
 }
 
-export interface WorkTypeFeeCapOverrideReservedConfig {
-  capCategoryKey: string;
-  maxPercent: number;
-  capBaseKey: string;
-}
+export type WorkTypeFeeCapOverrideConfig = FeeArrangementCapEntry;
+
+/** @deprecated Use `WorkTypeFeeCapOverrideConfig` (activated in S0-28b). */
+export type WorkTypeFeeCapOverrideReservedConfig = WorkTypeFeeCapOverrideConfig;
+
+export type WorkTypeFeeArrangementCapCategoriesConfig =
+  WorkTypeFeeArrangementCapCategories;
 
 export interface WorkTypeDefaultsConfig {
   autoTaskTemplates: WorkTypeAutoTaskTemplateConfig[];
@@ -934,7 +942,8 @@ export interface WorkTypeConfigItem {
   autoTaskTemplates?: WorkTypeAutoTaskTemplateConfig[];
   riskQuestions?: WorkTypeRiskQuestionConfig[];
   retention?: WorkTypeRetentionConfig;
-  workTypeCapOverrides?: WorkTypeFeeCapOverrideReservedConfig[];
+  feeArrangementCapCategories?: WorkTypeFeeArrangementCapCategoriesConfig;
+  workTypeCapOverrides?: WorkTypeFeeCapOverrideConfig[];
 }
 
 export interface WorkTypesConfiguration {
@@ -1509,7 +1518,12 @@ export interface MatterDocumentsCloseHookResult {
 
 export interface MatterCostsHookInput {
   matterId: string;
-  workBasis: 'hourly_rates' | 'fixed_fee' | 'capped';
+  workBasis:
+    | 'hourly_rates'
+    | 'fixed_fee'
+    | 'capped'
+    | 'conditional_fee_agreement'
+    | 'damages_based_agreement';
   estimatedFeeGbp: number;
   disbursementsTotalGbp: number;
   partnerSignOffCompleted: boolean;
