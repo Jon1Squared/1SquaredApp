@@ -62,5 +62,12 @@ A single canonical **Person** record represents an individual across every conte
 
 - **UK address lookup**: queries the server-side \`/api/address-lookup\` route using the tenant’s configured Ideal Postcodes key. When address lookup is not configured or returns no match, the form displays a clear message prompting the user to enter the address manually, and never fills a fabricated street address.
 - **Companies House lookup**: until the live Companies House API integration is enabled, searching from the organisation form reports *"Companies House lookup isn't set up"* rather than returning demo company records.
+
+## 6. Self-service notification preferences (Notifications tab)
+
+Every employee can manage how they receive notifications on their own profile (**View my employee profile → Notifications**, or via **Preferences** in the notification bell popover and **Notification preferences** in the account menu, \`/people/<personId>?tab=notifications\`), gated on \`notification:view_own\` and \`notification:manage_own_preferences\` and restricted strictly to their own record:
+
+- **Standard S4 defaults:** By default, urgent categories (**Task assigned to you**, **Task overdue**, **Enquiry assigned to you**, **Approval or sign-off requested**, **Approval request decided**, and **Register review assigned**) dispatch an **Immediate email**, whilst routine categories (**New task in team queue**, **New comment on a task**, **Task due soon**, **Key date approaching**, **Credit control escalation**, **Register compliance reminder**, and **General notifications**) default to a **Daily digest** sent once on working weekdays (Monday–Friday at \`08:00\` tenant local time via \`notification-digests\`). All 13 categories enable **In-app** alerts by default and keep **Microsoft Teams** alerts opt-in (\`false\`).
+- **Per-category customisation & opting out:** For each of the 13 categories, employees can toggle **In-app** visibility, choose **Immediate email**, **Daily digest (08:00 Mon–Fri)**, **Weekly digest** (choosing a preferred Monday–Friday delivery day), or **Off (none)** to stop email alerts for that category whilst retaining in-app or digest choices for others, and opt in to **Microsoft Teams** activity notifications (which deliver redacted category summaries and deep-link paths without confidential client or matter content).
 `,
 };

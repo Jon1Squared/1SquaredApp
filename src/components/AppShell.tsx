@@ -671,19 +671,31 @@ export function AppShell({
                     <span className="section-label">
                       Notifications ({unreadNotifCount} unread)
                     </span>
-                    {unreadNotifCount > 0 ? (
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        style={{ fontSize: 11, padding: '2px 6px' }}
-                        onClick={async () => {
-                          await markAllNotificationsReadAction();
-                          router.refresh();
-                        }}
-                      >
-                        Mark all read
-                      </button>
-                    ) : null}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {currentUser.isEmployee ? (
+                        <Link
+                          href={`/people/${currentUser.id}?tab=notifications`}
+                          className="btn btn--ghost btn--sm"
+                          style={{ fontSize: 11, padding: '2px 6px' }}
+                          onClick={() => setNotifOpen(false)}
+                        >
+                          Preferences
+                        </Link>
+                      ) : null}
+                      {unreadNotifCount > 0 ? (
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          style={{ fontSize: 11, padding: '2px 6px' }}
+                          onClick={async () => {
+                            await markAllNotificationsReadAction();
+                            router.refresh();
+                          }}
+                        >
+                          Mark all read
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="popover-menu__list">
                     {notifications.length === 0 ? (
@@ -779,6 +791,15 @@ export function AppShell({
                   >
                     <span>View my employee profile</span>
                   </Link>
+                  {currentUser.isEmployee ? (
+                    <Link
+                      href={`/people/${currentUser.id}?tab=notifications`}
+                      className="popover-menu__item"
+                      onClick={() => setAvatarOpen(false)}
+                    >
+                      <span>Notification preferences</span>
+                    </Link>
+                  ) : null}
                   <button type="button" className="popover-menu__item" onClick={toggleTheme}>
                     {theme === 'light' ? <Moon size={15} /> : <Sun size={15} />}
                     <span>Switch to {theme === 'light' ? 'dark' : 'light'} mode</span>

@@ -137,6 +137,39 @@ export function resolveTenantLocalDateAndHour(
   };
 }
 
+const ISO_WEEKDAY_BY_SHORT: Readonly<Record<string, 1 | 2 | 3 | 4 | 5 | 6 | 7>> =
+  Object.freeze({
+    mon: 1,
+    tue: 2,
+    wed: 3,
+    thu: 4,
+    fri: 5,
+    sat: 6,
+    sun: 7,
+  });
+
+/**
+ * Resolves the tenant-local ISO-8601 weekday (`1` = Monday ... `7` = Sunday)
+ * for `now` in `timeZone` (default `'Europe/London'`), honouring GMT/BST transitions.
+ */
+export function resolveTenantIsoWeekday(
+  now: Date = new Date(),
+  timeZone = 'Europe/London',
+): 1 | 2 | 3 | 4 | 5 | 6 | 7 {
+  const effectiveTimeZone = isValidIanaTimeZone(timeZone)
+    ? timeZone.trim()
+    : 'Europe/London';
+  const shortWeekday = new Intl.DateTimeFormat('en-GB', {
+    timeZone: effectiveTimeZone,
+    weekday: 'short',
+  })
+    .format(now)
+    .trim()
+    .toLowerCase()
+    .slice(0, 3);
+  return ISO_WEEKDAY_BY_SHORT[shortWeekday] ?? 1;
+}
+
 export function sanitizeJobSummaryCounts(
   raw: Record<string, unknown> | null | undefined,
 ): Record<string, JobSummaryValue> {

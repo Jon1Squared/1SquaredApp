@@ -219,6 +219,8 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain('param enableUsageRetentionPurgeJob bool = true');
     expect(platformBicep).toContain('param enableEnquiryAnonymisationJob bool = true');
     expect(platformBicep).toContain('param enableRegisterRemindersJob bool = true');
+    expect(platformBicep).toContain('param enableOutboxDrainJob bool = true');
+    expect(platformBicep).toContain('param enableNotificationDigestsJob bool = true');
     expect(platformBicep).toContain("cronExpression: '0 * * * *'");
 
     // Internal-only PDF converter Container App
@@ -338,7 +340,8 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
       ['enquiryAnonymisationJob', 'registerRemindersJob'],
       ['registerRemindersJob', 'outboxDrainJob'],
-      ['outboxDrainJob', 'seedDemoJob'],
+      ['outboxDrainJob', 'notificationDigestsJob'],
+      ['notificationDigestsJob', 'seedDemoJob'],
     ] as const) {
       expect(resourceBlock(name, next), name).toContain(
         'runtimeAppInsightsMetricsPublisherRole',
@@ -346,6 +349,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     }
     expect(platformBicep).toContain('outbox.delivery.failed_permanent');
     expect(platformBicep).toContain('caj-outbox-drain-${environment}');
+    expect(platformBicep).toContain('caj-ntf-dig-${environment}');
     expect(
       platformNoComments.slice(
         platformNoComments.indexOf('resource seedDemoJob '),

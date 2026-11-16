@@ -26,6 +26,9 @@ import type {
   FirmAuditEntryInput,
   NotificationChannelFrequency,
   NotificationKind,
+  OutgoingTeamsActivityTemplateParameter,
+  TeamsActivityOutboxRecord,
+  TeamsActivityOutboxStatus,
   TenantContext,
   UserNotificationPreference,
 } from '../api/index';
@@ -238,6 +241,136 @@ function mapPreferenceRow(
     digestDayOfWeek: Number(row.digest_day_of_week ?? 1),
     updatedAt: toIsoString(row.updated_at) ?? new Date().toISOString(),
   };
+}
+
+interface DbTeamsOutboxRow {
+  tenant_id: string;
+  id: string;
+  idempotency_key: string;
+  recipient_person_id: string;
+  entra_object_id: string | null;
+  activity_type: string;
+  preview_text: string | null;
+  template_parameters_json: unknown;
+  deep_link_path: string;
+  correlation_id: string;
+  status: string;
+  attempt_count: number | string;
+  next_attempt_at: Date | string;
+  claimed_at: Date | string | null;
+  claim_token: string | null;
+  sent_at: Date | string | null;
+  provider_request_id: string | null;
+  last_error_code: string | null;
+  content_scrubbed_at: Date | string | null;
+  created_by_person_id: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+function normalizeTeamsTemplateParameters(
+  raw: unknown,
+): OutgoingTeamsActivityTemplateParameter[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: OutgoingTeamsActivityTemplateParameter[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.name === 'string' && typeof entry.value === 'string') {
+      out.push({ name: entry.name, value: entry.value });
+    }
+  }
+  return out;
+}
+
+function mapTeamsOutboxRow(row: DbTeamsOutboxRow): TeamsActivityOutboxRecord {
+  return {
+    tenantId: row.tenant_id,
+    id: row.id,
+    idempotencyKey: row.idempotency_key,
+    recipientPersonId: row.recipient_person_id,
+    entraObjectId: row.entra_object_id ?? null,
+    activityType: row.activity_type,
+    previewText: row.preview_text ?? null,
+    templateParameters: normalizeTeamsTemplateParameters(
+      row.template_parameters_json,
+    ),
+    deepLinkPath: row.deep_link_path,
+    correlationId: row.correlation_id,
+    status: row.status as TeamsActivityOutboxStatus,
+    attemptCount: Number(row.attempt_count ?? 0),
+    nextAttemptAt: toIsoString(row.next_attempt_at),
+    claimedAt: toNullableIsoString(row.claimed_at),
+    claimToken: row.claim_token ?? null,
+    sentAt: toNullableIsoString(row.sent_at),
+    providerRequestId: row.provider_request_id ?? null,
+    lastErrorCode: row.last_error_code ?? null,
+    contentScrubbedAt: toNullableIsoString(row.content_scrubbed_at),
+    createdByPersonId: row.created_by_person_id ?? null,
+    createdAt: toIsoString(row.created_at),
+    updatedAt: toIsoString(row.updated_at),
+  };
+}
+
+function computeAttemptFailurePlan(params: {
+  readonly currentAttemptCount: number;
+  readonly error: unknown;
+  readonly maxAttempts?: number;
+  readonly baseBackoffSeconds?: number;
+  readonly now: Date;
+}): {
+  readonly nextAttemptCount: number;
+  readonly permanentFailure: boolean;
+  readonly errorCode: string;
+  readonly nextAttemptAtIso: string;
+} {
+  const maxAttempts = Math.max(
+    1,
+    Math.floor(params.maxAttempts ?? DEFAULT_OUTBOX_MAX_ATTEMPTS),
+  );
+  const baseBackoffSeconds = Math.max(
+    1,
+    Math.floor(params.baseBackoffSeconds ?? DEFAULT_OUTBOX_BASE_BACKOFF_SECONDS),
+  );
+  const errorCode =
+    typeof params.error === 'string' &&
+    /^[A-Z0-9_.:-]{1,64}$/.test(params.error.trim())
+      ? params.error.trim()
+      : sanitizeJobErrorCode(params.error);
+  const nextAttemptCount = params.currentAttemptCount + 1;
+  const permanentFailure = nextAttemptCount >= maxAttempts;
+  const backoffSeconds = Math.min(
+    MAX_OUTBOX_BACKOFF_SECONDS,
+    baseBackoffSeconds * 2 ** Math.max(0, nextAttemptCount - 1),
+  );
+  return {
+    nextAttemptCount,
+    permanentFailure,
+    errorCode,
+    nextAttemptAtIso: new Date(
+      params.now.getTime() + backoffSeconds * 1000,
+    ).toISOString(),
+  };
+}
+
+export interface EnqueueTeamsActivityOutboxInput {
+  readonly idempotencyKey?: string;
+  readonly recipientPersonId: string;
+  readonly entraObjectId?: string | null;
+  readonly activityType: string;
+  readonly previewText: string;
+  readonly templateParameters?: readonly OutgoingTeamsActivityTemplateParameter[];
+  readonly deepLinkPath: string;
+  readonly correlationId?: string;
+  readonly createdByPersonId?: string | null;
+  readonly nextAttemptAt?: string;
+}
+
+export interface EnqueueTeamsActivityOutboxResult {
+  readonly record: TeamsActivityOutboxRecord;
+  readonly deduplicated: boolean;
 }
 
 export interface EnqueueEmailOutboxInput {
@@ -564,20 +697,6 @@ export class TenantOutboxRepository extends TenantScopedRepository {
   }> {
     const now = params.failedAt ?? new Date();
     const nowIso = now.toISOString();
-    const maxAttempts = Math.max(
-      1,
-      Math.floor(params.maxAttempts ?? DEFAULT_OUTBOX_MAX_ATTEMPTS),
-    );
-    const baseBackoffSeconds = Math.max(
-      1,
-      Math.floor(
-        params.baseBackoffSeconds ?? DEFAULT_OUTBOX_BASE_BACKOFF_SECONDS,
-      ),
-    );
-    const errorCode =
-      typeof params.error === 'string' && /^[A-Z0-9_.:-]{1,64}$/.test(params.error.trim())
-        ? params.error.trim()
-        : sanitizeJobErrorCode(params.error);
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const currentRes = await tx.query<DbEmailOutboxRow>(
@@ -595,16 +714,27 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         return {
           updated: false,
           permanentFailure: false,
-          errorCode,
+          errorCode: computeAttemptFailurePlan({
+            currentAttemptCount: 0,
+            error: params.error,
+            maxAttempts: params.maxAttempts,
+            baseBackoffSeconds: params.baseBackoffSeconds,
+            now,
+          }).errorCode,
           record: null,
         };
       }
       this.assertRowTenant(ctx, current.tenant_id, 'EmailOutbox');
 
-      const nextAttemptCount = Number(current.attempt_count ?? 0) + 1;
-      const permanentFailure = nextAttemptCount >= maxAttempts;
+      const plan = computeAttemptFailurePlan({
+        currentAttemptCount: Number(current.attempt_count ?? 0),
+        error: params.error,
+        maxAttempts: params.maxAttempts,
+        baseBackoffSeconds: params.baseBackoffSeconds,
+        now,
+      });
 
-      if (permanentFailure) {
+      if (plan.permanentFailure) {
         const permRes = await tx.query<DbEmailOutboxRow>(
           `UPDATE public.email_outbox
               SET status = 'failed_permanent',
@@ -622,8 +752,8 @@ export class TenantOutboxRepository extends TenantScopedRepository {
             ctx.tenantId,
             params.id,
             params.claimToken,
-            nextAttemptCount,
-            errorCode,
+            plan.nextAttemptCount,
+            plan.errorCode,
             nowIso,
           ],
         );
@@ -641,18 +771,10 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         return {
           updated: true,
           permanentFailure: true,
-          errorCode,
+          errorCode: plan.errorCode,
           record: mapOutboxRow(updatedRow),
         };
       }
-
-      const backoffSeconds = Math.min(
-        MAX_OUTBOX_BACKOFF_SECONDS,
-        baseBackoffSeconds * 2 ** Math.max(0, nextAttemptCount - 1),
-      );
-      const nextAttemptAtIso = new Date(
-        now.getTime() + backoffSeconds * 1000,
-      ).toISOString();
 
       const retryRes = await tx.query<DbEmailOutboxRow>(
         `UPDATE public.email_outbox
@@ -672,9 +794,9 @@ export class TenantOutboxRepository extends TenantScopedRepository {
           ctx.tenantId,
           params.id,
           params.claimToken,
-          nextAttemptCount,
-          nextAttemptAtIso,
-          errorCode,
+          plan.nextAttemptCount,
+          plan.nextAttemptAtIso,
+          plan.errorCode,
           nowIso,
         ],
       );
@@ -683,7 +805,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       return {
         updated: true,
         permanentFailure: false,
-        errorCode,
+        errorCode: plan.errorCode,
         record: mapOutboxRow(updatedRow),
       };
     });
@@ -892,6 +1014,28 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     });
   }
 
+  public async listAllNotificationPreferences(
+    ctx: TenantContext,
+  ): Promise<readonly UserNotificationPreference[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbNotificationPreferenceRow>(
+        `SELECT *
+           FROM public.user_notification_preferences
+          WHERE tenant_id = $1
+          ORDER BY person_id ASC, notification_kind ASC`,
+        [ctx.tenantId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'UserNotificationPreference',
+        );
+        return mapPreferenceRow(row);
+      });
+    });
+  }
+
   public async upsertNotificationPreference(
     ctx: TenantContext,
     input: UpsertNotificationPreferenceInput,
@@ -959,6 +1103,577 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     });
   }
 
+  public async enqueueTeamsActivity(
+    ctx: TenantContext,
+    input: EnqueueTeamsActivityOutboxInput,
+    options?: { readonly auditEntries?: readonly FirmAuditEntryInput[] },
+  ): Promise<EnqueueTeamsActivityOutboxResult> {
+    const idempotencyKey =
+      input.idempotencyKey?.trim() || `auto:${randomUUID()}`;
+    const recipientPersonId = input.recipientPersonId.trim();
+    const activityType = input.activityType.trim();
+    const previewText = input.previewText.trim();
+    const deepLinkPath = input.deepLinkPath.trim();
+    if (!recipientPersonId || !activityType || !previewText || !deepLinkPath) {
+      throw new Error(
+        'TEAMS_OUTBOX_INVALID: recipientPersonId, activityType, previewText, and deepLinkPath are required.',
+      );
+    }
+
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const existingRes = await tx.query<DbTeamsOutboxRow>(
+        `SELECT *
+           FROM public.teams_activity_outbox
+          WHERE tenant_id = $1
+            AND idempotency_key = $2
+          LIMIT 1`,
+        [ctx.tenantId, idempotencyKey],
+      );
+      if (existingRes.rows[0]) {
+        this.assertRowTenant(ctx, existingRes.rows[0].tenant_id, 'TeamsActivityOutbox');
+        return {
+          record: mapTeamsOutboxRow(existingRes.rows[0]),
+          deduplicated: true,
+        };
+      }
+
+      const seqRes = await tx.query<{ seq: string }>(
+        `SELECT nextval('public.tenant_teams_outbox_id_seq')::text AS seq`,
+      );
+      const id = `TOB-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
+      const nowIso = new Date().toISOString();
+      const nextAttemptAt = input.nextAttemptAt?.trim() || nowIso;
+      const correlationId = input.correlationId?.trim() || ctx.correlationId;
+
+      const insertRes = await tx.query<DbTeamsOutboxRow>(
+        `INSERT INTO public.teams_activity_outbox (
+           tenant_id, id, idempotency_key, recipient_person_id, entra_object_id,
+           activity_type, preview_text, template_parameters_json, deep_link_path,
+           correlation_id, status, attempt_count, next_attempt_at, claimed_at,
+           claim_token, sent_at, provider_request_id, last_error_code,
+           content_scrubbed_at, created_by_person_id, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5,
+           $6, $7, $8::jsonb, $9,
+           $10, 'pending', 0, $11::timestamptz, NULL,
+           NULL, NULL, NULL, NULL,
+           NULL, $12, $13::timestamptz, $13::timestamptz
+         )
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+         RETURNING *`,
+        [
+          ctx.tenantId,
+          id,
+          idempotencyKey,
+          recipientPersonId,
+          input.entraObjectId?.trim() || null,
+          activityType,
+          previewText,
+          JSON.stringify(input.templateParameters ?? []),
+          deepLinkPath,
+          correlationId,
+          nextAttemptAt,
+          input.createdByPersonId ?? null,
+          nowIso,
+        ],
+      );
+
+      if (!insertRes.rows[0]) {
+        const winnerRes = await tx.query<DbTeamsOutboxRow>(
+          `SELECT *
+             FROM public.teams_activity_outbox
+            WHERE tenant_id = $1
+              AND idempotency_key = $2
+            LIMIT 1`,
+          [ctx.tenantId, idempotencyKey],
+        );
+        const winner = winnerRes.rows[0]!;
+        this.assertRowTenant(ctx, winner.tenant_id, 'TeamsActivityOutbox');
+        return {
+          record: mapTeamsOutboxRow(winner),
+          deduplicated: true,
+        };
+      }
+
+      const inserted = insertRes.rows[0];
+      this.assertRowTenant(ctx, inserted.tenant_id, 'TeamsActivityOutbox');
+      if (options?.auditEntries && options.auditEntries.length > 0) {
+        await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
+      }
+      return {
+        record: mapTeamsOutboxRow(inserted),
+        deduplicated: false,
+      };
+    });
+  }
+
+  public async claimDueTeamsOutboxBatch(
+    ctx: TenantContext,
+    options?: {
+      readonly limit?: number;
+      readonly now?: Date;
+      readonly claimToken?: string;
+      readonly reclaimStaleBeforeMinutes?: number;
+    },
+  ): Promise<readonly TeamsActivityOutboxRecord[]> {
+    const limit = Math.max(1, Math.min(100, Math.floor(options?.limit ?? 20)));
+    const now = options?.now ?? new Date();
+    const nowIso = now.toISOString();
+    const staleMinutes = Math.max(
+      1,
+      Math.floor(
+        options?.reclaimStaleBeforeMinutes ?? DEFAULT_OUTBOX_STALE_CLAIM_MINUTES,
+      ),
+    );
+    const staleCutoffIso = new Date(
+      now.getTime() - staleMinutes * 60_000,
+    ).toISOString();
+    const claimToken = options?.claimToken?.trim() || randomUUID();
+
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbTeamsOutboxRow>(
+        `WITH due AS (
+           SELECT tenant_id, id
+             FROM public.teams_activity_outbox
+            WHERE tenant_id = $1
+              AND content_scrubbed_at IS NULL
+              AND (
+                (status = 'pending' AND next_attempt_at <= $2::timestamptz)
+                OR (
+                  status = 'sending'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at <= $3::timestamptz
+                )
+              )
+            ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+            LIMIT $4
+            FOR UPDATE SKIP LOCKED
+         )
+         UPDATE public.teams_activity_outbox o
+            SET status = 'sending',
+                claimed_at = $2::timestamptz,
+                claim_token = $5,
+                updated_at = $2::timestamptz
+           FROM due
+          WHERE o.tenant_id = due.tenant_id
+            AND o.id = due.id
+         RETURNING o.*`,
+        [ctx.tenantId, nowIso, staleCutoffIso, limit, claimToken],
+      );
+
+      const records = res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'TeamsActivityOutbox');
+        return mapTeamsOutboxRow(row);
+      });
+      records.sort((a, b) =>
+        a.createdAt === b.createdAt
+          ? a.id.localeCompare(b.id)
+          : a.createdAt.localeCompare(b.createdAt),
+      );
+      return records;
+    });
+  }
+
+  public async markTeamsOutboxSent(
+    ctx: TenantContext,
+    params: {
+      readonly id: string;
+      readonly claimToken: string;
+      readonly entraObjectId?: string | null;
+      readonly providerRequestId?: string | null;
+      readonly sentAt?: Date;
+      readonly auditEntries?: readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{ readonly updated: boolean; readonly record: TeamsActivityOutboxRecord | null }> {
+    const nowIso = (params.sentAt ?? new Date()).toISOString();
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbTeamsOutboxRow>(
+        `UPDATE public.teams_activity_outbox
+            SET status = 'sent',
+                attempt_count = attempt_count + 1,
+                entra_object_id = COALESCE($5, entra_object_id),
+                sent_at = $4::timestamptz,
+                claimed_at = NULL,
+                claim_token = NULL,
+                provider_request_id = $6,
+                last_error_code = NULL,
+                updated_at = $4::timestamptz
+          WHERE tenant_id = $1
+            AND id = $2
+            AND status = 'sending'
+            AND claim_token = $3
+         RETURNING *`,
+        [
+          ctx.tenantId,
+          params.id,
+          params.claimToken,
+          nowIso,
+          params.entraObjectId ?? null,
+          params.providerRequestId ?? null,
+        ],
+      );
+      const row = res.rows[0];
+      if (!row) {
+        return { updated: false, record: null };
+      }
+      this.assertRowTenant(ctx, row.tenant_id, 'TeamsActivityOutbox');
+      if (params.auditEntries && params.auditEntries.length > 0) {
+        await this.auditRepo.appendAuditEntries(ctx, params.auditEntries);
+      }
+      return { updated: true, record: mapTeamsOutboxRow(row) };
+    });
+  }
+
+  private async markTeamsOutboxDropped(
+    ctx: TenantContext,
+    status: 'dropped_allowlist' | 'dropped_unbound',
+    defaultErrorCode: string,
+    params: {
+      readonly id: string;
+      readonly claimToken: string;
+      readonly entraObjectId?: string | null;
+      readonly reasonCode?: string;
+      readonly droppedAt?: Date;
+      readonly auditEntries?: readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{ readonly updated: boolean; readonly record: TeamsActivityOutboxRecord | null }> {
+    const nowIso = (params.droppedAt ?? new Date()).toISOString();
+    const errorCode = params.reasonCode?.trim() || defaultErrorCode;
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbTeamsOutboxRow>(
+        `UPDATE public.teams_activity_outbox
+            SET status = $5,
+                attempt_count = attempt_count + 1,
+                entra_object_id = COALESCE($7, entra_object_id),
+                claimed_at = NULL,
+                claim_token = NULL,
+                last_error_code = $6,
+                updated_at = $4::timestamptz
+          WHERE tenant_id = $1
+            AND id = $2
+            AND status = 'sending'
+            AND claim_token = $3
+         RETURNING *`,
+        [
+          ctx.tenantId,
+          params.id,
+          params.claimToken,
+          nowIso,
+          status,
+          errorCode,
+          params.entraObjectId ?? null,
+        ],
+      );
+      const row = res.rows[0];
+      if (!row) {
+        return { updated: false, record: null };
+      }
+      this.assertRowTenant(ctx, row.tenant_id, 'TeamsActivityOutbox');
+      if (params.auditEntries && params.auditEntries.length > 0) {
+        await this.auditRepo.appendAuditEntries(ctx, params.auditEntries);
+      }
+      return { updated: true, record: mapTeamsOutboxRow(row) };
+    });
+  }
+
+  public async markTeamsOutboxDroppedAllowlist(
+    ctx: TenantContext,
+    params: {
+      readonly id: string;
+      readonly claimToken: string;
+      readonly entraObjectId?: string | null;
+      readonly reasonCode?: string;
+      readonly droppedAt?: Date;
+      readonly auditEntries?: readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{ readonly updated: boolean; readonly record: TeamsActivityOutboxRecord | null }> {
+    return this.markTeamsOutboxDropped(
+      ctx,
+      'dropped_allowlist',
+      'TEAMS_ALLOWLIST_BLOCKED',
+      params,
+    );
+  }
+
+  public async markTeamsOutboxDroppedUnbound(
+    ctx: TenantContext,
+    params: {
+      readonly id: string;
+      readonly claimToken: string;
+      readonly reasonCode?: string;
+      readonly droppedAt?: Date;
+      readonly auditEntries?: readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{ readonly updated: boolean; readonly record: TeamsActivityOutboxRecord | null }> {
+    return this.markTeamsOutboxDropped(
+      ctx,
+      'dropped_unbound',
+      'TEAMS_RECIPIENT_UNBOUND',
+      params,
+    );
+  }
+
+  public async markTeamsOutboxAttemptFailed(
+    ctx: TenantContext,
+    params: {
+      readonly id: string;
+      readonly claimToken: string;
+      readonly error: unknown;
+      readonly maxAttempts?: number;
+      readonly baseBackoffSeconds?: number;
+      readonly failedAt?: Date;
+      readonly auditEntriesOnPermanentFailure?: readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{
+    readonly updated: boolean;
+    readonly permanentFailure: boolean;
+    readonly errorCode: string;
+    readonly record: TeamsActivityOutboxRecord | null;
+  }> {
+    const now = params.failedAt ?? new Date();
+    const nowIso = now.toISOString();
+
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const currentRes = await tx.query<DbTeamsOutboxRow>(
+        `SELECT *
+           FROM public.teams_activity_outbox
+          WHERE tenant_id = $1
+            AND id = $2
+            AND status = 'sending'
+            AND claim_token = $3
+          FOR UPDATE`,
+        [ctx.tenantId, params.id, params.claimToken],
+      );
+      const current = currentRes.rows[0];
+      if (!current) {
+        return {
+          updated: false,
+          permanentFailure: false,
+          errorCode: computeAttemptFailurePlan({
+            currentAttemptCount: 0,
+            error: params.error,
+            maxAttempts: params.maxAttempts,
+            baseBackoffSeconds: params.baseBackoffSeconds,
+            now,
+          }).errorCode,
+          record: null,
+        };
+      }
+      this.assertRowTenant(ctx, current.tenant_id, 'TeamsActivityOutbox');
+
+      const plan = computeAttemptFailurePlan({
+        currentAttemptCount: Number(current.attempt_count ?? 0),
+        error: params.error,
+        maxAttempts: params.maxAttempts,
+        baseBackoffSeconds: params.baseBackoffSeconds,
+        now,
+      });
+
+      if (plan.permanentFailure) {
+        const permRes = await tx.query<DbTeamsOutboxRow>(
+          `UPDATE public.teams_activity_outbox
+              SET status = 'failed_permanent',
+                  attempt_count = $4,
+                  claimed_at = NULL,
+                  claim_token = NULL,
+                  last_error_code = $5,
+                  updated_at = $6::timestamptz
+            WHERE tenant_id = $1
+              AND id = $2
+              AND status = 'sending'
+              AND claim_token = $3
+           RETURNING *`,
+          [
+            ctx.tenantId,
+            params.id,
+            params.claimToken,
+            plan.nextAttemptCount,
+            plan.errorCode,
+            nowIso,
+          ],
+        );
+        const updatedRow = permRes.rows[0]!;
+        this.assertRowTenant(ctx, updatedRow.tenant_id, 'TeamsActivityOutbox');
+        if (
+          params.auditEntriesOnPermanentFailure &&
+          params.auditEntriesOnPermanentFailure.length > 0
+        ) {
+          await this.auditRepo.appendAuditEntries(
+            ctx,
+            params.auditEntriesOnPermanentFailure,
+          );
+        }
+        return {
+          updated: true,
+          permanentFailure: true,
+          errorCode: plan.errorCode,
+          record: mapTeamsOutboxRow(updatedRow),
+        };
+      }
+
+      const retryRes = await tx.query<DbTeamsOutboxRow>(
+        `UPDATE public.teams_activity_outbox
+            SET status = 'pending',
+                attempt_count = $4,
+                next_attempt_at = $5::timestamptz,
+                claimed_at = NULL,
+                claim_token = NULL,
+                last_error_code = $6,
+                updated_at = $7::timestamptz
+          WHERE tenant_id = $1
+            AND id = $2
+            AND status = 'sending'
+            AND claim_token = $3
+         RETURNING *`,
+        [
+          ctx.tenantId,
+          params.id,
+          params.claimToken,
+          plan.nextAttemptCount,
+          plan.nextAttemptAtIso,
+          plan.errorCode,
+          nowIso,
+        ],
+      );
+      const updatedRow = retryRes.rows[0]!;
+      this.assertRowTenant(ctx, updatedRow.tenant_id, 'TeamsActivityOutbox');
+      return {
+        updated: true,
+        permanentFailure: false,
+        errorCode: plan.errorCode,
+        record: mapTeamsOutboxRow(updatedRow),
+      };
+    });
+  }
+
+  public async scrubExpiredTeamsOutboxContent(
+    ctx: TenantContext,
+    params?: {
+      readonly retentionDays?: number;
+      readonly now?: Date;
+      readonly auditEntriesFactory?: (
+        scrubbedCount: number,
+        nowIso: string,
+      ) => readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{ readonly lockAcquired: boolean; readonly scrubbedCount: number }> {
+    const retentionDays = Math.max(
+      1,
+      Math.min(
+        3650,
+        Math.floor(params?.retentionDays ?? DEFAULT_OUTBOX_RETENTION_DAYS),
+      ),
+    );
+    const now = params?.now ?? new Date();
+    const nowIso = now.toISOString();
+    const cutoffIso = new Date(
+      now.getTime() - retentionDays * 86_400_000,
+    ).toISOString();
+    const lockKey = `onesquared_teams_outbox_scrub:${ctx.tenantId}`;
+
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const lockRes = await tx.query<{ acquired: boolean }>(
+        `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired`,
+        [lockKey],
+      );
+      if (!lockRes.rows[0]?.acquired) {
+        return { lockAcquired: false, scrubbedCount: 0 };
+      }
+
+      const scrubRes = await tx.query<{ tenant_id: string; id: string }>(
+        `UPDATE public.teams_activity_outbox
+            SET preview_text = NULL,
+                template_parameters_json = '[]'::jsonb,
+                entra_object_id = NULL,
+                content_scrubbed_at = $2::timestamptz,
+                updated_at = $2::timestamptz
+          WHERE tenant_id = $1
+            AND content_scrubbed_at IS NULL
+            AND status IN ('sent', 'dropped_allowlist', 'dropped_unbound', 'failed_permanent')
+            AND COALESCE(sent_at, updated_at, created_at) <= $3::timestamptz
+         RETURNING tenant_id, id`,
+        [ctx.tenantId, nowIso, cutoffIso],
+      );
+
+      for (const row of scrubRes.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'TeamsActivityOutbox');
+      }
+
+      const scrubbedCount = scrubRes.rows.length;
+      if (scrubbedCount > 0 && params?.auditEntriesFactory) {
+        const auditEntries = params.auditEntriesFactory(scrubbedCount, nowIso);
+        if (auditEntries.length > 0) {
+          await this.auditRepo.appendAuditEntries(ctx, auditEntries);
+        }
+      }
+
+      return { lockAcquired: true, scrubbedCount };
+    });
+  }
+
+  public async getTeamsOutboxRecordById(
+    ctx: TenantContext,
+    id: string,
+  ): Promise<TeamsActivityOutboxRecord | null> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbTeamsOutboxRow>(
+        `SELECT *
+           FROM public.teams_activity_outbox
+          WHERE tenant_id = $1
+            AND id = $2
+          LIMIT 1`,
+        [ctx.tenantId, id],
+      );
+      const row = res.rows[0];
+      if (!row) {
+        return null;
+      }
+      this.assertRowTenant(ctx, row.tenant_id, 'TeamsActivityOutbox');
+      return mapTeamsOutboxRow(row);
+    });
+  }
+
+  public async listTeamsOutboxRecords(
+    ctx: TenantContext,
+    filter?: {
+      readonly status?: TeamsActivityOutboxStatus;
+      readonly limit?: number;
+    },
+  ): Promise<readonly TeamsActivityOutboxRecord[]> {
+    const limit = Math.max(1, Math.min(200, Math.floor(filter?.limit ?? 100)));
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const params: unknown[] = [ctx.tenantId];
+      let where = 'tenant_id = $1';
+      if (filter?.status) {
+        params.push(filter.status);
+        where += ` AND status = $${params.length}`;
+      }
+      params.push(limit);
+      const res = await tx.query<DbTeamsOutboxRow>(
+        `SELECT *
+           FROM public.teams_activity_outbox
+          WHERE ${where}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $${params.length}`,
+        params,
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'TeamsActivityOutbox');
+        return mapTeamsOutboxRow(row);
+      });
+    });
+  }
+
+  public async countAllTenantTeamsOutboxRows(ctx: TenantContext): Promise<number> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.teams_activity_outbox WHERE tenant_id = $1`,
+        [ctx.tenantId],
+      );
+      return Number(res.rows[0]?.count ?? 0);
+    });
+  }
+
   public async countAllTenantOutboxRows(ctx: TenantContext): Promise<{
     readonly outbox: number;
     readonly preferences: number;
@@ -985,6 +1700,10 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     await this.withTenantTransaction(ctx, async (tx) => {
       await tx.query(
         `DELETE FROM public.email_outbox WHERE tenant_id = $1`,
+        [ctx.tenantId],
+      );
+      await tx.query(
+        `DELETE FROM public.teams_activity_outbox WHERE tenant_id = $1`,
         [ctx.tenantId],
       );
       await tx.query(

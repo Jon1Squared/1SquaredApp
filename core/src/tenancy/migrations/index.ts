@@ -2638,6 +2638,80 @@ DROP SEQUENCE IF EXISTS public.tenant_email_outbox_id_seq;
 `.trim(),
   };
 
+export const TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020: TenantMigrationDefinition =
+  {
+    version: '0020',
+    name: '0020_teams_outbox_and_digests_expand',
+    description:
+      'Creates tenant-scoped teams_activity_outbox queue table and sequence, and extends notifications with digest_sent_at and matter_id columns plus partial index for daily and weekly digests (ADR 0035, S0-29).',
+    dependsOn: ['0019'],
+    tablesChanged: ['teams_activity_outbox', 'notifications'],
+    upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_teams_outbox_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.teams_activity_outbox (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  recipient_person_id TEXT NOT NULL,
+  entra_object_id TEXT NULL,
+  activity_type TEXT NOT NULL,
+  preview_text TEXT NULL,
+  template_parameters_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  deep_link_path TEXT NOT NULL,
+  correlation_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (
+      'pending',
+      'sending',
+      'sent',
+      'dropped_allowlist',
+      'dropped_unbound',
+      'failed_permanent'
+    )),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  claimed_at TIMESTAMPTZ NULL,
+  claim_token TEXT NULL,
+  sent_at TIMESTAMPTZ NULL,
+  provider_request_id TEXT NULL,
+  last_error_code TEXT NULL,
+  content_scrubbed_at TIMESTAMPTZ NULL,
+  created_by_person_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  CONSTRAINT uq_teams_activity_outbox_idempotency UNIQUE (tenant_id, idempotency_key),
+  CONSTRAINT chk_teams_activity_outbox_content_or_scrubbed
+    CHECK ((content_scrubbed_at IS NOT NULL) OR (preview_text IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_teams_activity_outbox_due
+  ON public.teams_activity_outbox (tenant_id, status, next_attempt_at);
+
+CREATE INDEX IF NOT EXISTS idx_teams_activity_outbox_scrub
+  ON public.teams_activity_outbox (tenant_id, updated_at);
+
+ALTER TABLE public.notifications
+  ADD COLUMN IF NOT EXISTS digest_sent_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS matter_id TEXT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_notifications_undigested
+  ON public.notifications (tenant_id, user_id, created_at)
+  WHERE digest_sent_at IS NULL;
+`.trim(),
+    downSql: `
+DROP INDEX IF EXISTS public.idx_notifications_undigested;
+ALTER TABLE public.notifications
+  DROP COLUMN IF EXISTS matter_id,
+  DROP COLUMN IF EXISTS digest_sent_at;
+DROP INDEX IF EXISTS public.idx_teams_activity_outbox_scrub;
+DROP INDEX IF EXISTS public.idx_teams_activity_outbox_due;
+DROP TABLE IF EXISTS public.teams_activity_outbox;
+DROP SEQUENCE IF EXISTS public.tenant_teams_outbox_id_seq;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -2658,6 +2732,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   REGISTERS_ENGINE_MIGRATION_0017,
   TENANT_SEARCH_INDEXES_MIGRATION_0018,
   EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019,
+  TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020,
 ];
 
 export function validateMigrationCatalogueOrder(

@@ -43,7 +43,7 @@ export function collectNormalizedRecipients(
   return out;
 }
 
-function parseVaultAllowListEntries(secretValue: string): string[] {
+export function parseVaultAllowListEntries(secretValue: string): string[] {
   const trimmed = secretValue.trim();
   if (!trimmed) {
     return [];
@@ -67,7 +67,7 @@ function parseVaultAllowListEntries(secretValue: string): string[] {
     .filter(Boolean);
 }
 
-function matchesAllowListRule(
+export function matchesAllowListRule(
   recipientAddress: string,
   rules: readonly string[],
 ): boolean {
@@ -94,6 +94,46 @@ function matchesAllowListRule(
     }
   }
   return false;
+}
+
+export async function collectCombinedAllowListRules(
+  ctx: TenantContext,
+  config: {
+    readonly recipientAllowList?: readonly string[];
+    readonly recipientAllowListVaultRef?: string;
+  },
+  options?: { readonly secretReader?: KeyVaultSecretReader },
+): Promise<
+  | { readonly ok: true; readonly rules: readonly string[] }
+  | { readonly ok: false; readonly reason: 'ALLOWLIST_VAULT_UNREADABLE' }
+> {
+  const staticEntries = (config.recipientAllowList ?? [])
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+
+  const vaultEntries: string[] = [];
+  if (config.recipientAllowListVaultRef) {
+    assertTenantOwnsKeyVaultSecretRef(ctx, config.recipientAllowListVaultRef);
+    const reader =
+      options?.secretReader ?? new DefaultAzureKeyVaultSecretReader();
+    try {
+      const rawSecret = await reader.readSecret(
+        ctx,
+        config.recipientAllowListVaultRef,
+      );
+      vaultEntries.push(...parseVaultAllowListEntries(rawSecret));
+    } catch {
+      return {
+        ok: false,
+        reason: 'ALLOWLIST_VAULT_UNREADABLE',
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    rules: [...staticEntries, ...vaultEntries],
+  };
 }
 
 export async function evaluateEmailAllowList(
@@ -138,33 +178,18 @@ export async function evaluateEmailAllowList(
     };
   }
 
-  const staticEntries = (email.recipientAllowList ?? [])
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
-
-  const vaultEntries: string[] = [];
-  if (email.recipientAllowListVaultRef) {
-    assertTenantOwnsKeyVaultSecretRef(ctx, email.recipientAllowListVaultRef);
-    const reader =
-      options?.secretReader ?? new DefaultAzureKeyVaultSecretReader();
-    try {
-      const rawSecret = await reader.readSecret(
-        ctx,
-        email.recipientAllowListVaultRef,
-      );
-      vaultEntries.push(...parseVaultAllowListEntries(rawSecret));
-    } catch {
-      return {
-        enforced: true,
-        allowed: false,
-        allowedRecipients: [],
-        blockedRecipients: allRecipients,
-        reason: 'EMAIL_ALLOWLIST_VAULT_UNREADABLE',
-      };
-    }
+  const rulesResult = await collectCombinedAllowListRules(ctx, email, options);
+  if (!rulesResult.ok) {
+    return {
+      enforced: true,
+      allowed: false,
+      allowedRecipients: [],
+      blockedRecipients: allRecipients,
+      reason: 'EMAIL_ALLOWLIST_VAULT_UNREADABLE',
+    };
   }
 
-  const combinedRules = [...staticEntries, ...vaultEntries];
+  const combinedRules = rulesResult.rules;
   if (combinedRules.length === 0) {
     return {
       enforced: true,

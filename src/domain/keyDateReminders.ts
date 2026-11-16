@@ -688,6 +688,7 @@ export function runTenantKeyDateReminderJob(
             ? `/matters/${keyDate.matterId}`
             : `/enquiries`,
           recordId: keyDate.matterId ?? keyDate.enquiryId ?? keyDate.id,
+          matterId: keyDate.matterId ?? null,
           createdAt: nowIso,
           read: false,
           byId: effectiveActorId,
@@ -799,6 +800,7 @@ export function runTenantKeyDateReminderJob(
             ? `/matters/${keyDate.matterId}`
             : `/enquiries`,
           recordId: keyDate.matterId ?? keyDate.enquiryId ?? keyDate.id,
+          matterId: keyDate.matterId ?? null,
           createdAt: nowIso,
           read: false,
           byId: effectiveActorId,

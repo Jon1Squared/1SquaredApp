@@ -1181,6 +1181,41 @@ export const TenantConfigurationSchema = z
           .describe(
             'Tenant outbound transactional email configuration (ADR 0027, S0-26)',
           ),
+        teams: z
+          .object({
+            provider: z
+              .enum(['disabled', 'dev_catcher', 'graph'])
+              .default('disabled'),
+            teamsAppId: z.string().trim().min(1).optional(),
+            recipientAllowList: z.array(z.string().trim().min(1)).optional(),
+            recipientAllowListVaultRef: KeyVaultRefSchema.optional(),
+            devCatcher: z
+              .object({
+                endpointUrl: z.string().trim().min(1),
+              })
+              .strict()
+              .optional(),
+            graph: z
+              .object({
+                tenantId: z.string().trim().min(1),
+                clientId: z.string().trim().min(1),
+                certificateVaultRef: KeyVaultRefSchema,
+                certificateThumbprint: z
+                  .string()
+                  .regex(
+                    /^[A-Fa-f0-9]{40}$/,
+                    'certificateThumbprint must be a 40-hex SHA-1 thumbprint',
+                  )
+                  .optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional()
+          .describe(
+            'Tenant Microsoft Teams Activity Feed delivery configuration (ADR 0035, S0-29)',
+          ),
       })
       .strict(),
     customFields: z
@@ -2568,6 +2603,16 @@ export const TenantConfigurationSchema = z
       .describe(
         'Configurable firm registers, compliance workflows, and reminder schedules (ADR 0032, S0-24)',
       ),
+    notifications: z
+      .object({
+        digestHourLocal: z.number().int().min(0).max(23).default(8),
+      })
+      .strict()
+      .optional()
+      .default({ digestHourLocal: 8 })
+      .describe(
+        'Tenant notification digest schedule and delivery settings (ADR 0035, S0-29)',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -2669,6 +2714,52 @@ export const TenantConfigurationSchema = z
           path: ['integrations', 'email', 'acs', 'connectionVaultRef'],
           message: 'integrations.email.acs.connectionVaultRef is required when provider is "acs".',
         });
+      }
+    }
+    if (cfg.integrations?.teams) {
+      if (cfg.integrations.teams.recipientAllowListVaultRef) {
+        secretRefChecks.push({
+          path: ['integrations', 'teams', 'recipientAllowListVaultRef'],
+          ref: cfg.integrations.teams.recipientAllowListVaultRef,
+        });
+      }
+      if (cfg.integrations.teams.graph?.certificateVaultRef) {
+        secretRefChecks.push({
+          path: ['integrations', 'teams', 'graph', 'certificateVaultRef'],
+          ref: cfg.integrations.teams.graph.certificateVaultRef,
+        });
+      }
+      if (cfg.environment === 'live' && cfg.integrations.teams.provider === 'dev_catcher') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['integrations', 'teams', 'provider'],
+          message: 'integrations.teams.provider "dev_catcher" is forbidden in live environments.',
+        });
+      }
+      if (
+        cfg.integrations.teams.provider === 'dev_catcher' &&
+        !cfg.integrations.teams.devCatcher?.endpointUrl
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['integrations', 'teams', 'devCatcher', 'endpointUrl'],
+          message: 'integrations.teams.devCatcher.endpointUrl is required when provider is "dev_catcher".',
+        });
+      }
+      if (cfg.integrations.teams.provider === 'graph') {
+        if (!cfg.integrations.teams.graph) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['integrations', 'teams', 'graph'],
+            message: 'integrations.teams.graph settings are required when provider is "graph".',
+          });
+        } else if (!cfg.integrations.teams.graph.certificateThumbprint) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['integrations', 'teams', 'graph', 'certificateThumbprint'],
+            message: 'integrations.teams.graph.certificateThumbprint is required when provider is "graph".',
+          });
+        }
       }
     }
 
@@ -3269,6 +3360,24 @@ export function loadAndValidateTenantConfig(
   const overlayEmailDevCatcher = overlayEmail?.devCatcher as
     | Record<string, unknown>
     | undefined;
+  const baseTeams = baseIntegrations?.teams as
+    | Record<string, unknown>
+    | undefined;
+  const overlayTeams = overlayIntegrations?.teams as
+    | Record<string, unknown>
+    | undefined;
+  const baseTeamsGraph = baseTeams?.graph as
+    | Record<string, unknown>
+    | undefined;
+  const overlayTeamsGraph = overlayTeams?.graph as
+    | Record<string, unknown>
+    | undefined;
+  const baseTeamsDevCatcher = baseTeams?.devCatcher as
+    | Record<string, unknown>
+    | undefined;
+  const overlayTeamsDevCatcher = overlayTeams?.devCatcher as
+    | Record<string, unknown>
+    | undefined;
 
   const baseMatterCosts = baseConfig.matterCosts as
     | Record<string, unknown>
@@ -3362,8 +3471,45 @@ export function loadAndValidateTenantConfig(
             },
           }
         : {}),
+      ...(baseTeams || overlayTeams
+        ? {
+            teams: {
+              ...(baseTeams ?? {}),
+              ...(overlayTeams ?? {}),
+              ...(baseTeamsGraph || overlayTeamsGraph
+                ? {
+                    graph: {
+                      ...(baseTeamsGraph ?? {}),
+                      ...(overlayTeamsGraph ?? {}),
+                    },
+                  }
+                : {}),
+              ...(baseTeamsDevCatcher || overlayTeamsDevCatcher
+                ? {
+                    devCatcher: {
+                      ...(baseTeamsDevCatcher ?? {}),
+                      ...(overlayTeamsDevCatcher ?? {}),
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
     },
   };
+
+  const baseNotifications = baseConfig.notifications as
+    | Record<string, unknown>
+    | undefined;
+  const overlayNotifications = environmentOverlay.notifications as
+    | Record<string, unknown>
+    | undefined;
+  if (baseNotifications || overlayNotifications) {
+    merged.notifications = {
+      ...(baseNotifications ?? {}),
+      ...(overlayNotifications ?? {}),
+    };
+  }
 
   const baseFirm = baseConfig.firm as Record<string, unknown> | undefined;
   const overlayFirm = environmentOverlay.firm as

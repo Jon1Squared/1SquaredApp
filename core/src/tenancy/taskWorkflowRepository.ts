@@ -93,6 +93,8 @@ export interface TenantNotificationRecord {
   detail: string;
   href: string;
   recordId: string;
+  matterId?: string | null;
+  digestSentAt?: string | null;
   byId?: string | null;
   createdAt: string;
   read: boolean;
@@ -167,6 +169,8 @@ interface NotificationRow extends Record<string, unknown> {
   by_id: string | null;
   read: boolean;
   read_at: Date | string | null;
+  digest_sent_at?: Date | string | null;
+  matter_id?: string | null;
   created_at: Date | string;
   metadata_json: Record<string, unknown> | null;
 }
@@ -390,6 +394,16 @@ function mapRowToNotification(row: NotificationRow): TenantNotificationRecord {
   };
   if (row.read_at !== null && row.read_at !== undefined) {
     result.readAt = toIsoString(row.read_at);
+  }
+  if (row.matter_id !== undefined && row.matter_id !== null) {
+    result.matterId = row.matter_id;
+  } else if (meta.matterId !== undefined) {
+    result.matterId = meta.matterId;
+  }
+  if (row.digest_sent_at !== undefined && row.digest_sent_at !== null) {
+    result.digestSentAt = toIsoString(row.digest_sent_at);
+  } else if (meta.digestSentAt !== undefined) {
+    result.digestSentAt = meta.digestSentAt;
   }
   return result;
 }
@@ -1038,11 +1052,13 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     await tx.query(
       `INSERT INTO notifications (
          tenant_id, id, user_id, kind, title, body,
-         href, record_id, by_id, read, read_at, created_at, metadata_json
+         href, record_id, by_id, read, read_at, created_at, metadata_json,
+         digest_sent_at, matter_id
        )
        VALUES (
          $1, $2, $3, $4, $5, $6,
-         $7, $8, $9, $10, $11::timestamptz, $12::timestamptz, $13::jsonb
+         $7, $8, $9, $10, $11::timestamptz, $12::timestamptz, $13::jsonb,
+         $14::timestamptz, $15
        )
        ON CONFLICT (tenant_id, id) DO UPDATE SET
          user_id = EXCLUDED.user_id,
@@ -1055,7 +1071,9 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
          read = EXCLUDED.read,
          read_at = EXCLUDED.read_at,
          created_at = EXCLUDED.created_at,
-         metadata_json = EXCLUDED.metadata_json`,
+         metadata_json = EXCLUDED.metadata_json,
+         digest_sent_at = COALESCE(EXCLUDED.digest_sent_at, notifications.digest_sent_at),
+         matter_id = COALESCE(EXCLUDED.matter_id, notifications.matter_id)`,
       [
         ctx.tenantId,
         notification.id,
@@ -1070,6 +1088,8 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         notification.readAt ?? null,
         createdAt,
         JSON.stringify(notification),
+        notification.digestSentAt ?? null,
+        notification.matterId ?? null,
       ],
     );  }
 
@@ -1128,9 +1148,41 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
                AND NOT EXISTS (
                  SELECT 1 FROM matters m
                  WHERE m.tenant_id = n.tenant_id
-                   AND m.id = n.record_id
+                   AND (m.id = n.record_id OR m.id = n.matter_id)
                    AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
                    AND NOT (m.restricted_access_user_ids_json ? $2)
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM key_dates kd
+                 LEFT JOIN matters km
+                   ON km.tenant_id = kd.tenant_id AND km.id = kd.matter_id
+                 LEFT JOIN enquiries ke
+                   ON ke.tenant_id = kd.tenant_id AND ke.id = kd.enquiry_id
+                 WHERE kd.tenant_id = n.tenant_id
+                   AND kd.id = n.record_id
+                   AND (
+                     (
+                       km.id IS NOT NULL
+                       AND (km.is_staff_matter = TRUE OR km.has_ethical_wall = TRUE)
+                       AND NOT (km.restricted_access_user_ids_json ? $2)
+                     )
+                     OR (
+                       ke.id IS NOT NULL
+                       AND NOT (
+                         (ke.status <> 'Draft' OR ke.created_by_id = $2)
+                         AND (
+                           ke.converted_matter_id IS NULL
+                           OR NOT EXISTS (
+                             SELECT 1 FROM matters kem
+                             WHERE kem.tenant_id = ke.tenant_id
+                               AND kem.id = ke.converted_matter_id
+                               AND (kem.is_staff_matter = TRUE OR kem.has_ethical_wall = TRUE)
+                               AND NOT (kem.restricted_access_user_ids_json ? $2)
+                           )
+                         )
+                       )
+                     )
+                   )
                )
                AND NOT EXISTS (
                  SELECT 1 FROM enquiries e
@@ -1188,15 +1240,15 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   ): Promise<boolean> {
     return this.withTenantTransaction(ctx, async (tx) => {
       const nowIso = new Date().toISOString();
-      const params: unknown[] = [ctx.tenantId, notificationId, nowIso];
+      const selectParams: unknown[] = [ctx.tenantId, notificationId];
       let userClause = '';
       if (userId) {
-        params.push(userId);
-        userClause = `AND user_id = $${params.length}`;
+        selectParams.push(userId);
+        userClause = `AND user_id = $${selectParams.length}`;
       }
       const res = await tx.query<NotificationRow>(
         `SELECT * FROM notifications WHERE tenant_id = $1 AND id = $2 ${userClause} FOR UPDATE`,
-        userId ? [ctx.tenantId, notificationId, userId] : [ctx.tenantId, notificationId],
+        selectParams,
       );
       const row = res.rows[0];
       if (!row) {
@@ -1269,6 +1321,50 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         this.assertRowTenant(ctx, row.tenant_id, 'notifications.deleteNotificationById');
       }      return res.rowCount > 0;
     });
+  }
+
+  public async listUndigestedNotificationsForDigest<T = TenantNotificationRecord>(
+    ctx: TenantContext,
+    options?: { readonly forUpdate?: boolean },
+  ): Promise<T[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<NotificationRow>(
+        `SELECT *
+           FROM public.notifications
+          WHERE tenant_id = $1
+            AND digest_sent_at IS NULL
+          ORDER BY created_at ASC, id ASC${options?.forUpdate ? ' FOR UPDATE' : ''}`,
+        [ctx.tenantId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'notifications.listUndigestedNotificationsForDigest');
+        return mapRowToNotification(row) as unknown as T;
+      });
+    });
+  }
+
+  public async markNotificationsDigestSentInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    notificationIds: readonly string[],
+    digestSentAtIso: string,
+  ): Promise<number> {
+    if (notificationIds.length === 0) {
+      return 0;
+    }
+    const res = await tx.query<{ tenant_id: string; id: string }>(
+      `UPDATE public.notifications
+          SET digest_sent_at = $3::timestamptz
+        WHERE tenant_id = $1
+          AND id = ANY($2::text[])
+          AND digest_sent_at IS NULL
+       RETURNING tenant_id, id`,
+      [ctx.tenantId, [...notificationIds], digestSentAtIso],
+    );
+    for (const row of res.rows) {
+      this.assertRowTenant(ctx, row.tenant_id, 'notifications.markNotificationsDigestSentInTx');
+    }
+    return res.rows.length;
   }
 
   // ---------------------------------------------------------------------------

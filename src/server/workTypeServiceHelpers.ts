@@ -206,6 +206,7 @@ export async function instantiateWorkTypeAutoTasksInTx(params: {
       detail: string;
       href: string;
       recordId: string;
+      matterId?: string | null;
       byId: string;
       at?: string;
     },
@@ -325,6 +326,7 @@ export async function instantiateWorkTypeAutoTasksInTx(params: {
         detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
         href: `/tasks/${task.id}`,
         recordId: task.id,
+        matterId: matter.id,
         byId,
         at: nowIso,
       });

@@ -108,6 +108,12 @@
         "@notalawfirm.example"
       ]
     },
+    "teams": {
+      "provider": "disabled",
+      "recipientAllowList": [
+        "@notalawfirm.example"
+      ]
+    },
     "pmsSync": {
       "enabled": true,
       "providerKey": "generic_sql",
@@ -946,5 +952,8 @@
         }
       }
     ]
+  },
+  "notifications": {
+    "digestHourLocal": 8
   }
 }

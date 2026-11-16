@@ -20,6 +20,7 @@ param enableUsageRetentionPurgeJob = true
 param enableEnquiryAnonymisationJob = true
 param enableRegisterRemindersJob = true
 param enableOutboxDrainJob = true
+param enableNotificationDigestsJob = true
 param enableSeedDemoJob = true
 param enableIdealPostcodesSecret = false
 param enableAnthropicSecret = false

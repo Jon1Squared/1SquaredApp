@@ -75,6 +75,9 @@ param enableRegisterRemindersJob bool = true
 @description('Enable the 5-minute outbox-drain scheduled Container Apps job (S0-26)')
 param enableOutboxDrainJob bool = true
 
+@description('Enable the hourly notification-digests scheduled Container Apps job (ADR 0035, S0-29)')
+param enableNotificationDigestsJob bool = true
+
 @description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
 param enableSeedDemoJob bool = environment != 'live'
 
@@ -170,6 +173,7 @@ var usagePurgeJobName = take('caj-doc-prg-${environment}', 32)
 var enquiryAnonymiseJobName = take('caj-enq-anon-${environment}', 32)
 var registerRemindersJobName = take('caj-reg-rem-${environment}', 32)
 var outboxDrainJobName = take('caj-outbox-drain-${environment}', 32)
+var notificationDigestsJobName = take('caj-ntf-dig-${environment}', 32)
 var jobFailureAlertRuleName = take('alrt-jobs-${resourceSuffix}', 60)
 
 var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
@@ -1514,6 +1518,64 @@ resource outboxDrainJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enab
             'node'
             'dist/jobs/run-job.mjs'
             'outbox-drain'
+          ]
+          env: runtimeCommonEnv
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    runtimePlatformKvSecretsUserRole
+    runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
+    pgMinTlsVersion
+    pgBouncerPoolMode
+  ]
+}
+
+resource notificationDigestsJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enableSchedulerJobs && enableNotificationDigestsJob) {
+  name: notificationDigestsJobName
+  location: location
+  tags: platformTags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${runtimeIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnv.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Schedule'
+      replicaTimeout: 1800
+      replicaRetryLimit: 1
+      scheduleTriggerConfig: {
+        cronExpression: '0 * * * *'
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: acrLoginServer
+          identity: runtimeIdentity.id
+        }
+      ]
+      secrets: runtimeKeyVaultSecrets
+    }
+    template: {
+      containers: [
+        {
+          name: 'notification-digests'
+          image: appContainerImage
+          command: [
+            'node'
+            'dist/jobs/run-job.mjs'
+            'notification-digests'
           ]
           env: runtimeCommonEnv
           resources: {

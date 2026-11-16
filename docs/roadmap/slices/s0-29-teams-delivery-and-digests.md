@@ -134,8 +134,9 @@ Bump `CORE_REQUIRED_SCHEMA_VERSION` from `'0019'` to `'0020'` and add `0020_team
 ## 9. Manual Setup / External Blockers
 
 Live Graph `TeamsActivity.Send` delivery in the demo environment depends on Section 8 manual tasks (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without them):
-- Register Teams App manifest & Azure Entra app permission `TeamsActivity.Send` with tenant admin consent.
-- Upload Teams app package to tenant catalog and set `integrations.teams.teamsAppId` + Key Vault certificate refs in runtime configuration.
+- Teams Entra application ID `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` is pre-configured in `client-not-a-law-firm/config/environments/demo.json` (`integrations.teams.provider = "disabled"` until unlocked).
+- Register / upload the 1Squared Teams App manifest to the tenant Teams Admin Center catalog (referencing app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8`) and grant Microsoft Graph application permission `TeamsActivity.Send` with tenant administrator consent.
+- Import the Teams Graph client certificate (`kv://kv-notalawfirm-demo/graph-teams-client-cert`, matching thumbprint configured once provisioned) and permitted pilot recipient list (`kv://kv-notalawfirm-demo/teams-recipient-allowlist`) into `kv-notalawfirm-demo` before switching `integrations.teams.provider` from `"disabled"` to `"graph"`.
 
 ---
 
