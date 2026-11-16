@@ -13,6 +13,7 @@ import {
   getActiveTenantConfiguration,
   isNonLiveDemoEnvironment,
 } from '@/platform/tenantRuntime';
+import type { RegisterRecord } from '@platform/core-api';
 import type {
   Address,
   AuditEntry,
@@ -160,6 +161,7 @@ export interface DemoData {
   homePagesConfig: HomePagesConfig;
   notes: Note[];
   audit: AuditEntry[];
+  registerRecords: RegisterRecord[];
   customFields: CustomFieldDefinition[];
   customLists: ChoiceList[];
   customValues: ChoiceValue[];
@@ -4099,18 +4101,6 @@ export function buildDemoData(
       assignedPartnerId: 'P-000001',
       status: 'Pending',
     },
-    {
-      id: 'SO-000003',
-      kind: 'undertaking',
-      title: "Undertaking: discharge of seller's mortgage on completion",
-      matterNumber: 'PRI001-0001',
-      matterId: mOwenWill.id,
-      subtitle: 'PRI001-0001 · Standard Law Society undertaking · Completion 23 Oct 2026',
-      requestedById: 'P-000002',
-      requestedAt: ts(0, 9),
-      assignedPartnerId: 'P-000001',
-      status: 'Pending',
-    },
   ];
 
   const homePagesConfig = createDefaultHomePagesConfig(
@@ -4325,6 +4315,68 @@ export function buildDemoData(
     homePagesConfig,
     notes,
     audit,
+    registerRecords: [
+      {
+        id: 'REG-000001',
+        tenantId: '',
+        registerTypeKey: 'undertaking',
+        reference: 'UND-000001',
+        title: "Undertaking: discharge of seller's mortgage on completion",
+        status: 'open',
+        matterId: mOwenWill.id,
+        enquiryId: null,
+        personId: null,
+        organisationId: null,
+        ownerId: 'P-000002',
+        assignedApproverId: null,
+        decidedById: null,
+        decidedAt: null,
+        dueAt: '2026-10-23T17:00:00.000Z',
+        reviewAt: '2026-10-16T09:00:00.000Z',
+        reminderScheduleDays: null,
+        fieldValues: {
+          recipientName: 'Barclays Bank UK PLC (Redemption Team)',
+          undertakingTerms:
+            "On completion of the purchase of 14 Priory Close (PRI001-0001), discharge the seller's legal charge and deliver executed Form DS1 / e-DS1 within 14 days.",
+          givenByPersonId: 'P-000002',
+          dischargeCriteria: 'Receipt of executed e-DS1 and updated Land Registry official copy.',
+        },
+        rowVersion: 1,
+        createdById: 'P-000002',
+        createdAt: ts(0, 9),
+        updatedById: 'P-000002',
+        updatedAt: ts(0, 9),
+      },
+      {
+        id: 'REG-000002',
+        tenantId: '',
+        registerTypeKey: 'complaint',
+        reference: 'CMP-000001',
+        title: 'Client service turnaround concern (initial quote correspondence)',
+        status: 'investigating',
+        matterId: null,
+        enquiryId: null,
+        personId: null,
+        organisationId: null,
+        ownerId: 'P-000001',
+        assignedApproverId: 'P-000005',
+        decidedById: null,
+        decidedAt: null,
+        dueAt: '2026-11-27T17:00:00.000Z',
+        reviewAt: '2026-11-20T09:00:00.000Z',
+        reminderScheduleDays: null,
+        fieldValues: {
+          complainantName: 'Mr A. Davies',
+          complaintSummary:
+            'Informal concern raised regarding quote follow-up timing during summer leave cover.',
+        },
+        rowVersion: 1,
+        createdById: 'P-000001',
+        createdAt: ts(-2, 14),
+        updatedById: 'P-000001',
+        updatedAt: ts(-1, 10),
+      },
+    ],
     customFields,
     customLists,
     customValues,

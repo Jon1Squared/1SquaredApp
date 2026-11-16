@@ -333,6 +333,38 @@ const SUBTREE_ALIASES_BY_PARENT_PATH: Readonly<
     scopeAnchor:
       /\b(?:businessCalendars|BusinessCalendarConfig|findBusinessCalendar)\b/,
   },
+  registers: {
+    aliases: ['registers'],
+    scopeAnchor: /\b(?:RegistersConfiguration|resolveEffectiveRegisterTypes)\b/,
+  },
+  'registers.customTypes[]': {
+    aliases: ['customRegisterType'],
+    scopeAnchor: /\b(?:validateRegisterTypeDefinition|resolveEffectiveRegisterTypes)\b/,
+  },
+  'registers.customTypes[].approvalRules': {
+    aliases: ['approvalRules'],
+    scopeAnchor: /\bcloneApprovalRules\b/,
+  },
+  'registers.customTypes[].states[]': {
+    aliases: ['stateDef'],
+    scopeAnchor: /\bcloneStateDefinition\b/,
+  },
+  'registers.customTypes[].transitions[]': {
+    aliases: ['transitionDef'],
+    scopeAnchor: /\bcloneTransitionDefinition\b/,
+  },
+  'registers.customTypes[].fields[]': {
+    aliases: ['fieldDef'],
+    scopeAnchor: /\bcloneFieldDefinition\b/,
+  },
+  'registers.typeOverrides.*': {
+    aliases: ['typeOverride'],
+    scopeAnchor: /\bapplyRegisterTypeOverride\b/,
+  },
+  'registers.typeOverrides.*.additionalFields[]': {
+    aliases: ['fieldDef'],
+    scopeAnchor: /\b(?:applyRegisterTypeOverride|cloneFieldDefinition)\b/,
+  },
 };
 
 function isLeafReferencedInRuntime(

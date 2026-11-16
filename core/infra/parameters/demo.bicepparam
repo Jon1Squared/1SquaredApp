@@ -18,6 +18,7 @@ param enableSchedulerJobs = true
 param enableKeyDateRemindersJob = true
 param enableUsageRetentionPurgeJob = true
 param enableEnquiryAnonymisationJob = true
+param enableRegisterRemindersJob = true
 param enableSeedDemoJob = true
 param enableIdealPostcodesSecret = false
 param enableAnthropicSecret = false

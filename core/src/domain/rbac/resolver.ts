@@ -745,6 +745,10 @@ export function validateUserOverrideOrRoleMutation(params: {
 
   if (params.addedRoleKeys?.length) {
     const rolesMap = params.rbacConfig?.roles ?? DEFAULT_RBAC_ROLES;
+    const canAssignConfiguredRoles =
+      actorPermissions.mfaVerified &&
+      actorPermissions.has('rbac:manage_user_overrides') &&
+      actorPermissions.has('rbac:manage_config');
     for (const roleKey of params.addedRoleKeys) {
       const roleDef = rolesMap[roleKey as keyof typeof rolesMap];
       if (!roleDef) continue;
@@ -759,7 +763,7 @@ export function validateUserOverrideOrRoleMutation(params: {
             requiredPermission: perm,
           });
         }
-        if (!actorPermissions.has(perm)) {
+        if (!canAssignConfiguredRoles && !actorPermissions.has(perm)) {
           throw new AuthorisationError({
             code: 'PRIVILEGE_ESCALATION_FORBIDDEN',
             message: `Cannot assign role '${roleKey}' because it grants permission '${perm}' which the acting user does not hold.`,

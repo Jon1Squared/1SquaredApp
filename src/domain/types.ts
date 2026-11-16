@@ -293,18 +293,28 @@ export type KeyDatePermissionKey =
   | 'keydate:waive'
   | 'keydate:configure';
 
+export type RegisterPermissionKey =
+  | 'register:view'
+  | 'register:create'
+  | 'register:edit'
+  | 'register:approve'
+  | 'register:configure'
+  | 'undertaking:manage';
+
 export type JobOnlyPermissionKey =
   | 'tenant:provision'
   | 'tenant:migrate'
   | 'tenant:seed_demo'
   | 'keydate:run_reminders'
   | 'document_generation:purge_usage'
-  | 'enquiry:run_retention_anonymise';
+  | 'enquiry:run_retention_anonymise'
+  | 'register:run_reminders';
 
 export type PermissionKey =
   | EmployeePermission
   | DocumentPermission
   | KeyDatePermissionKey
+  | RegisterPermissionKey
   | JobOnlyPermissionKey
   | 'finance:view_matter'
   | 'finance:credit_control'
@@ -1411,7 +1421,8 @@ export type NotificationKind =
   | 'team_task_arrived'
   | 'task_comment'
   | 'enquiry_assigned'
-  | 'task_overdue';
+  | 'task_overdue'
+  | 'register_reminder';
 
 export interface NotificationItem {
   id: string; // NTF-000001
@@ -1681,7 +1692,7 @@ export interface HomePagesConfig {
   updatedById: string;
 }
 
-export type SignOffKind = 'write_off' | 'matter_opening' | 'undertaking';
+export type SignOffKind = 'write_off' | 'matter_opening';
 
 export interface SignOffItem {
   id: string; // SO-000001
@@ -1882,6 +1893,9 @@ export interface AppSnapshot {
   taskSettings: TaskSettings;
   matterCostsConfig: MatterCostsConfig;
   workTypesConfig?: import('@platform/core-api').WorkTypesConfiguration;
+  registersConfig?: import('@platform/core-api').RegistersConfiguration;
+  registerTypes?: import('@platform/core-api').RegisterTypeDefinition[];
+  registerRecords?: import('@platform/core-api').RegisterRecord[];
   taskBadgeCount: number;
   notes: Note[];
   audit: AuditEntry[];

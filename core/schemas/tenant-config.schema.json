@@ -1109,6 +1109,10 @@
       "$ref": "./keyDates.config.schema.json",
       "description": "Key dates and limitation module configuration"
     },
+    "registers": {
+      "$ref": "./registers.config.schema.json",
+      "description": "Configurable firm registers, compliance workflows, and reminder schedules (ADR 0032, S0-24)"
+    },
     "keyVault": {
       "type": "object",
       "additionalProperties": false,

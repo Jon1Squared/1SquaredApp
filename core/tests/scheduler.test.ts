@@ -118,6 +118,7 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         'keydate:run_reminders',
         'document_generation:purge_usage',
         'enquiry:run_retention_anonymise',
+        'register:run_reminders',
       ]);
       expect(ALL_PERMISSION_KEYS.length).toBe(
         ALL_USER_PERMISSION_KEYS.length + ALL_JOB_ONLY_PERMISSION_KEYS.length,
@@ -1061,6 +1062,7 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         'key-date-reminders',
         'usage-retention-purge',
         'enquiry-retention-anonymise',
+        'register-reminders',
       ]);
 
       const unknownExit = await executeCliJobRunner(

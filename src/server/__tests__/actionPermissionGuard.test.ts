@@ -353,9 +353,9 @@ describe('S0-02: server action and API route permission guard (ADR 0025)', () =>
   const routeFiles = walkRouteFiles(API_DIR);
   const routeHandlers = parseExportedRoutesFromFiles(routeFiles);
 
-  it('discovers all 115 exported server actions and all 11 API route handlers, and validates their policies and wrappers', () => {
+  it('discovers all 121 exported server actions and all 11 API route handlers, and validates their policies and wrappers', () => {
     const actions = parseExportedActionsFromSource(actionsSource);
-    expect(actions.length).toBe(115);
+    expect(actions.length).toBe(121);
     expect(routeHandlers.length).toBe(11);
 
     const validationErrors = validateActionAndRouteGuard({

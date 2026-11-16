@@ -9,6 +9,7 @@
 
 import { z } from 'zod';
 import keyDatesJsonSchema from '../../schemas/keyDates.config.schema.json';
+import registersJsonSchema from '../../schemas/registers.config.schema.json';
 import tenantConfigJsonSchema from '../../schemas/tenant-config.schema.json';
 import type {
   DocumentGenerationConfig,
@@ -22,6 +23,7 @@ import type {
   PermissionKey,
   PlatformEnvironment,
   RbacConfiguration,
+  RegistersConfiguration,
   TenantConfiguration,
 } from '../api/index';
 import {
@@ -2367,6 +2369,156 @@ export const TenantConfigurationSchema = z
       .describe(
         'Work-type defaults and per-work-type overrides driving automatic opening tasks, risk questionnaire items and closure retention dates (S0-22)',
       ),
+    registers: (() => {
+      const RegisterPermissionEnum = z.enum([
+        'register:view',
+        'register:create',
+        'register:edit',
+        'register:approve',
+        'register:configure',
+        'undertaking:manage',
+        'signoff:approve',
+      ]);
+      const RegisterManagePermissionEnum = z.enum([
+        'register:view',
+        'register:create',
+        'register:edit',
+        'register:approve',
+        'register:configure',
+        'undertaking:manage',
+      ]);
+      const RegisterFieldSchema = z
+        .object({
+          key: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/),
+          label: z.string().min(1),
+          type: z.enum([
+            'text',
+            'textarea',
+            'number',
+            'currency_gbp',
+            'boolean',
+            'date',
+            'select',
+            'person',
+          ]),
+          required: z.boolean().default(false).optional(),
+          description: z.string().optional(),
+          options: z.array(z.string().min(1)).optional(),
+          defaultValue: z.union([z.string(), z.number(), z.boolean()]).optional(),
+        })
+        .strict();
+      const RegisterStateSchema = z
+        .object({
+          key: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
+          label: z.string().min(1),
+          isTerminal: z.boolean().default(false).optional(),
+          tone: z
+            .enum(['neutral', 'info', 'warning', 'success', 'danger'])
+            .default('neutral')
+            .optional(),
+        })
+        .strict();
+      const RegisterTransitionSchema = z
+        .object({
+          key: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
+          label: z.string().min(1),
+          fromStatuses: z.array(z.string().min(1)).min(1),
+          toStatus: z.string().min(1),
+          requiredPermission: RegisterPermissionEnum,
+          requiresComment: z.boolean().default(false).optional(),
+          forbidSelfAction: z.boolean().default(false).optional(),
+          requireAssignedApproverMatch: z.boolean().default(false).optional(),
+          setsDecidedAt: z.boolean().default(false).optional(),
+        })
+        .strict();
+      const RegisterApprovalRulesSchema = z
+        .object({
+          requireTwoPersonApproval: z.boolean(),
+          forbidSelfApproval: z.literal(true),
+          allowedApproverRoles: z.array(z.string().min(1)).optional(),
+          requireAssignedApproverMatch: z.boolean().default(false).optional(),
+        })
+        .strict()
+        .nullable();
+      const RegisterReminderScheduleSchema = z
+        .object({
+          enabled: z.boolean().default(true),
+          dueDaysBefore: z
+            .array(z.number().int().min(-365).max(365))
+            .default([14, 7, 1, 0, -1, -7]),
+          reviewDaysBefore: z
+            .array(z.number().int().min(-365).max(365))
+            .default([14, 7, 0]),
+          recipientMode: z
+            .enum(['owner_and_approver', 'owner_only', 'matter_team_and_owner'])
+            .default('owner_and_approver'),
+        })
+        .strict();
+      const RegisterTypeDefSchema = z
+        .object({
+          key: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/),
+          label: z.string().min(1),
+          pluralLabel: z.string().min(1),
+          description: z.string().min(1),
+          isCore: z.boolean(),
+          enabled: z.boolean().default(true),
+          referencePrefix: z.string().regex(/^[A-Z0-9]{2,6}$/),
+          initialStatus: z.string().min(1),
+          createPermission: RegisterManagePermissionEnum,
+          editPermission: RegisterManagePermissionEnum,
+          requireMatterLink: z.boolean().default(false).optional(),
+          approvalRules: RegisterApprovalRulesSchema,
+          reminderSchedule: RegisterReminderScheduleSchema,
+          states: z.array(RegisterStateSchema).min(1),
+          transitions: z.array(RegisterTransitionSchema),
+          fields: z.array(RegisterFieldSchema),
+          showInNavigation: z.boolean().default(true).optional(),
+        })
+        .strict();
+      const RegisterTypeOverrideSchema = z
+        .object({
+          enabled: z.boolean().optional(),
+          label: z.string().min(1).optional(),
+          pluralLabel: z.string().min(1).optional(),
+          description: z.string().min(1).optional(),
+          showInNavigation: z.boolean().optional(),
+          reminderSchedule: z
+            .object({
+              enabled: z.boolean().optional(),
+              dueDaysBefore: z.array(z.number().int().min(-365).max(365)).optional(),
+              reviewDaysBefore: z.array(z.number().int().min(-365).max(365)).optional(),
+              recipientMode: z
+                .enum(['owner_and_approver', 'owner_only', 'matter_team_and_owner'])
+                .optional(),
+            })
+            .strict()
+            .optional(),
+          additionalFields: z.array(RegisterFieldSchema).optional(),
+        })
+        .strict();
+      return z
+        .object({
+          defaultReminderHourLocal: z.number().int().min(0).max(23).default(8).optional(),
+          defaultDueDaysBefore: z
+            .array(z.number().int().min(-365).max(365))
+            .default([14, 7, 1, 0, -1, -7])
+            .optional(),
+          defaultReviewDaysBefore: z
+            .array(z.number().int().min(-365).max(365))
+            .default([14, 7, 0])
+            .optional(),
+          customTypes: z.array(RegisterTypeDefSchema).default([]).optional(),
+          typeOverrides: z
+            .record(z.string().min(1), RegisterTypeOverrideSchema)
+            .default({})
+            .optional(),
+        })
+        .strict();
+    })()
+      .optional()
+      .describe(
+        'Configurable firm registers, compliance workflows, and reminder schedules (ADR 0032, S0-24)',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -2716,6 +2868,10 @@ const EXTERNAL_CONFIG_JSON_SCHEMAS: Readonly<
   Record<string, Record<string, unknown>>
 > = {
   './keyDates.config.schema.json': keyDatesJsonSchema as unknown as Record<
+    string,
+    unknown
+  >,
+  './registers.config.schema.json': registersJsonSchema as unknown as Record<
     string,
     unknown
   >,
@@ -3202,6 +3358,19 @@ export function loadAndValidateTenantConfig(
     };
   }
 
+  const baseRegisters = baseConfig.registers as
+    | Record<string, unknown>
+    | undefined;
+  const overlayRegisters = environmentOverlay.registers as
+    | Record<string, unknown>
+    | undefined;
+  if (baseRegisters || overlayRegisters) {
+    merged.registers = {
+      ...(baseRegisters ?? {}),
+      ...(overlayRegisters ?? {}),
+    };
+  }
+
   const baseKeyVault = baseConfig.keyVault as
     | Record<string, unknown>
     | undefined;
@@ -3411,6 +3580,7 @@ export function loadAndValidateTenantConfig(
 }
 
 export const KeyDatesConfigSubSchema = TenantConfigurationSchema.shape.keyDates;
+export const RegistersConfigSubSchema = TenantConfigurationSchema.shape.registers;
 export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;
@@ -3457,6 +3627,26 @@ export function validateKeyDatesConfig(
     throw new Error('KEY_DATES_CONFIG_INVALID: keyDates configuration must be a JSON object.');
   }
   return KeyDatesConfigSubSchema.parse(rawKeyDatesConfig);
+}
+
+/**
+ * Validates a standalone `registers` configuration object against `registers.config.schema.json`
+ * (rejecting unknown keys and applying defaults).
+ */
+export function validateRegistersConfig(
+  rawRegistersConfig: unknown,
+): RegistersConfiguration {
+  if (
+    typeof rawRegistersConfig !== 'object' ||
+    rawRegistersConfig === null ||
+    Array.isArray(rawRegistersConfig)
+  ) {
+    throw new Error(
+      'REGISTERS_CONFIG_INVALID: registers configuration must be a JSON object.',
+    );
+  }
+  const parsed = RegistersConfigSubSchema.unwrap().parse(rawRegistersConfig);
+  return parsed as RegistersConfiguration;
 }
 
 /**
@@ -3590,6 +3780,8 @@ export const ExtensionPermissionSchema = z.enum([
   'pms:sync',
   'keydate:read',
   'keydate:write',
+  'register:read',
+  'register:write',
 ]);
 
 export const ExtensionHookPointSchema = z.enum([
@@ -3604,6 +3796,9 @@ export const ExtensionHookPointSchema = z.enum([
   'keyDate.beforeCreate',
   'keyDate.afterStatusChange',
   'keyDate.calculateCustomRule',
+  'register.beforeCreate',
+  'register.beforeTransition',
+  'register.afterTransition',
 ]);
 
 export const ExtensionManifestSchema = z

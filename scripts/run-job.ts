@@ -30,6 +30,7 @@ import { guardedJob, type GuardedJobOptions } from '../src/server/authorize';
 import {
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledKeyDateRemindersJobSweep,
+  runScheduledRegisterRemindersJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
 } from '../src/server/services';
 import { runSeedDemoTenant, type SeedDemoTenantResult } from './seed-demo-tenant';
@@ -79,6 +80,13 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
       name: 'enquiry-retention-anonymise',
       description:
         'Anonymise closed unconverted enquiries past the tenant retention period once per local day at 02:00 local time',
+      mode: 'scheduled',
+      schedule: '0 * * * *',
+    },
+    {
+      name: 'register-reminders',
+      description:
+        'Dispatch due and periodic review reminders for open firm register records and undertakings once per stage',
       mode: 'scheduled',
       schedule: '0 * * * *',
     },
@@ -513,6 +521,19 @@ export async function executeCliJobRunner(
     writeOut(
       `${JSON.stringify({
         event: 'job.enquiry-retention-anonymise.completed',
+        succeededCount: summary.succeededTenants.length,
+        skippedCount: summary.skippedTenants.length,
+        failedCount: summary.failedTenants.length,
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
+  if (jobName === 'register-reminders') {
+    const summary = await runScheduledRegisterRemindersJobSweep();
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.register-reminders.completed',
         succeededCount: summary.succeededTenants.length,
         skippedCount: summary.skippedTenants.length,
         failedCount: summary.failedTenants.length,

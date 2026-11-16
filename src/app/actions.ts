@@ -5,6 +5,7 @@ import {
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   type ClientRateOverrideClientType,
+  type RegistersConfiguration,
   type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
@@ -128,6 +129,12 @@ import {
   acknowledgeKeyDateReminderRecord,
   runKeyDateReminderSchedulerRecord,
   queryKeyDatesTeamDiaryRecord,
+  listRegistersWorkspaceDataRecord,
+  getRegisterRecordDetailRecord,
+  createRegisterRecordService,
+  transitionRegisterRecordService,
+  updateRegisterRecordDetailsService,
+  saveRegistersConfigRecord,
   getKeyDateExceptionsReportRecord,
   exportKeyDateExceptionsReportRecord,
   saveKeyDatesConfigRecord,
@@ -1771,6 +1778,89 @@ export async function resolveApplicableRatesAction(params: {
 }) {
   return guardedAction('resolveApplicableRatesAction', async ({ personId: byId }) => {
     return resolveApplicableRatesRecord(params, byId);
+  });
+}
+
+// ------------------------------------------------------------------ Configurable Registers Engine & Undertakings (S0-24)
+
+export async function listRegistersWorkspaceAction(
+  filter: {
+    registerTypeKey?: string;
+    status?: string;
+    matterId?: string;
+  } = {},
+) {
+  return guardedAction('listRegistersWorkspaceAction', async ({ personId: byId }) => {
+    return listRegistersWorkspaceDataRecord(filter, byId);
+  });
+}
+
+export async function getRegisterRecordDetailAction(recordId: string) {
+  return guardedAction('getRegisterRecordDetailAction', async ({ personId: byId }) => {
+    return getRegisterRecordDetailRecord(recordId, byId);
+  });
+}
+
+export async function createRegisterRecordAction(input: {
+  registerTypeKey: string;
+  title: string;
+  matterId?: string | null;
+  enquiryId?: string | null;
+  personId?: string | null;
+  organisationId?: string | null;
+  assignedApproverId?: string | null;
+  dueAt?: string | null;
+  reviewAt?: string | null;
+  reminderScheduleDays?: readonly number[] | null;
+  fieldValues?: Record<string, unknown>;
+}) {
+  return guardedAction('createRegisterRecordAction', async ({ personId: byId }) => {
+    const res = await createRegisterRecordService(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function transitionRegisterRecordAction(input: {
+  recordId: string;
+  transitionKey: string;
+  comment?: string | null;
+  fieldUpdates?: Record<string, unknown>;
+  expectedRowVersion?: number;
+}) {
+  return guardedAction('transitionRegisterRecordAction', async ({ personId: byId }) => {
+    const res = await transitionRegisterRecordService(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function updateRegisterRecordAction(input: {
+  recordId: string;
+  expectedRowVersion?: number;
+  title?: string;
+  assignedApproverId?: string | null;
+  dueAt?: string | null;
+  reviewAt?: string | null;
+  fieldValues?: Record<string, unknown>;
+}) {
+  return guardedAction('updateRegisterRecordAction', async ({ personId: byId }) => {
+    const res = await updateRegisterRecordDetailsService(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveRegistersConfigAction(
+  newConfig: RegistersConfiguration,
+  reason: string,
+) {
+  return guardedAction('saveRegistersConfigAction', async (actor) => {
+    const res = await saveRegistersConfigRecord(newConfig, reason, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+    });
+    revalidateAll();
+    return res;
   });
 }
 

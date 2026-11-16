@@ -69,6 +69,9 @@ param enableUsageRetentionPurgeJob bool = true
 @description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
 param enableEnquiryAnonymisationJob bool = true
 
+@description('Enable the hourly register-reminders scheduled Container Apps job (S0-24)')
+param enableRegisterRemindersJob bool = true
+
 @description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
 param enableSeedDemoJob bool = environment != 'live'
 
@@ -162,6 +165,7 @@ var seedDemoJobName = take('caj-seed-demo-${environment}', 32)
 var keyDateRemindersJobName = take('caj-kd-rem-${environment}', 32)
 var usagePurgeJobName = take('caj-doc-prg-${environment}', 32)
 var enquiryAnonymiseJobName = take('caj-enq-anon-${environment}', 32)
+var registerRemindersJobName = take('caj-reg-rem-${environment}', 32)
 var jobFailureAlertRuleName = take('alrt-jobs-${resourceSuffix}', 60)
 
 var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
@@ -511,7 +515,7 @@ resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
     appInsights
   ]
   properties: {
-    description: 'Raises an alert whenever a 1Squared Container Apps job (migrate, store-import, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise) fails or times out (ADR 0030 §7).'
+    description: 'Raises an alert whenever a 1Squared Container Apps job (migrate, store-import, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise, register-reminders) fails or times out (ADR 0030 §7, ADR 0032).'
     enabled: true
     evaluationFrequency: 'PT5M'
     scopes: [
@@ -1378,6 +1382,64 @@ resource enquiryAnonymisationJob 'Microsoft.App/jobs@2025-07-01' = if (deployApp
             'node'
             'dist/jobs/run-job.mjs'
             'enquiry-retention-anonymise'
+          ]
+          env: runtimeCommonEnv
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    runtimePlatformKvSecretsUserRole
+    runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
+    pgMinTlsVersion
+    pgBouncerPoolMode
+  ]
+}
+
+resource registerRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enableSchedulerJobs && enableRegisterRemindersJob) {
+  name: registerRemindersJobName
+  location: location
+  tags: platformTags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${runtimeIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnv.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Schedule'
+      replicaTimeout: 1800
+      replicaRetryLimit: 1
+      scheduleTriggerConfig: {
+        cronExpression: '0 * * * *'
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: acrLoginServer
+          identity: runtimeIdentity.id
+        }
+      ]
+      secrets: runtimeKeyVaultSecrets
+    }
+    template: {
+      containers: [
+        {
+          name: 'register-reminders'
+          image: appContainerImage
+          command: [
+            'node'
+            'dist/jobs/run-job.mjs'
+            'register-reminders'
           ]
           env: runtimeCommonEnv
           resources: {

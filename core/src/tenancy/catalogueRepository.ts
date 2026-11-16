@@ -46,6 +46,7 @@ export type TenantModuleConfigKey =
   | 'work_type_configs'
   | 'document_generation_override'
   | 'document_store_override'
+  | 'registers'
   | (string & {});
 
 export type TenantFirmProfilePayload = Record<string, unknown>;

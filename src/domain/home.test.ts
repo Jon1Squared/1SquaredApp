@@ -476,7 +476,7 @@ describe('Role-based Home pages & configuration', () => {
 
   it('supports inline Home actions: approve/discuss sign-offs and request bill / flag write-off', async () => {
     const snapBefore = await getAppSnapshot('P-000001');
-    expect(snapBefore.signOffs.filter((s) => s.status === 'Pending').length).toBe(3);
+    expect(snapBefore.signOffs.filter((s) => s.status === 'Pending').length).toBe(2);
 
     // Approve SO-000001
     const appRes = await approveSignOff('SO-000001', 'P-000001');

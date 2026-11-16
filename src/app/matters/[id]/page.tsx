@@ -7,6 +7,7 @@ import {
   getMatterPmsViewBundle,
   listAuditEntriesForRecord,
   listMatterRateOverridesRecord,
+  listRegistersWorkspaceDataRecord,
   recordRecentlyViewed,
   resolveApplicableRatesRecord,
   withPageActor,
@@ -111,9 +112,10 @@ export default async function MatterProfilePage({
       : null;
     const pmsView =
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;
-    const [matterKeyDates, matterAudit] = await Promise.all([
+    const [matterKeyDates, matterAudit, matterRegistersRes] = await Promise.all([
       getMatterKeyDatesSnapshot(matter.id, userId),
       listAuditEntriesForRecord('matter', matter.id, userId, { limit: 200 }),
+      listRegistersWorkspaceDataRecord({ matterId: matter.id }, userId),
     ]);
 
     return (
@@ -137,6 +139,19 @@ export default async function MatterProfilePage({
         keyDateReminderStates={matterKeyDates.keyDateReminderStates}
         keyDateCalendarSyncs={matterKeyDates.keyDateCalendarSyncs}
         userKeyDatePermissions={snap.currentUserKeyDatePermissions}
+        userPermissions={snap.currentUserPermissions}
+        registersConfig={snap.registersConfig}
+        registerTypes={snap.registerTypes}
+        matterRegisterRecords={
+          matterRegistersRes && !isActionDenied(matterRegistersRes) && matterRegistersRes.ok
+            ? matterRegistersRes.records
+            : []
+        }
+        matterRegisterTransitions={
+          matterRegistersRes && !isActionDenied(matterRegistersRes) && matterRegistersRes.ok
+            ? matterRegistersRes.transitionsByRecordId
+            : {}
+        }
         canVerifyByKeyDateId={matterKeyDates.canVerifyByKeyDateId}
         canTakeByTaskId={snap.canTakeByTaskId}
         canViewFinance={snap.finance.canViewMatter}

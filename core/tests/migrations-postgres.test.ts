@@ -183,9 +183,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0016 -> 0015 -> 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
-    const activeAt0016 = await runner.getActiveTables(ctx);
-    expect(activeAt0016).toEqual(
+    // Round-trip rollback 0017 -> 0016 -> 0015 -> 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    const activeAt0017 = await runner.getActiveTables(ctx);
+    expect(activeAt0017).toEqual(
       expect.arrayContaining([
         'people',
         'person_emails',
@@ -231,9 +231,17 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'job_runs',
         'client_rate_overrides',
         'matter_rate_overrides',
+        'register_records',
+        'register_transitions',
+        'register_reminder_states',
       ]),
     );
-    expect(activeAt0016).not.toContain('matter_restriction_metadata');
+    expect(activeAt0017).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
+    const activeAfter0017Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0017Rollback).not.toContain('register_records');
+    expect(activeAfter0017Rollback).not.toContain('register_transitions');
+    expect(activeAfter0017Rollback).not.toContain('register_reminder_states');
     expect(await runner.rollbackVersion(ctx, '0016')).toBe(true);
     const activeAfter0016Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0016Rollback).not.toContain('client_rate_overrides');
@@ -360,6 +368,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'job_runs',
         'client_rate_overrides',
         'matter_rate_overrides',
+        'register_records',
+        'register_transitions',
+        'register_reminder_states',
       ]),
     );
   });
@@ -1055,10 +1066,11 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(colAt0015.rowCount).toBe(0);
 
-      // Roll back 0016 before 0015 (since 0016 depends on 0015) -> 0015 downSql recreates and back-populates both bridges and grants tenant role privileges
+      // Roll back 0017 then 0016 before 0015 (since 0017 -> 0016 -> 0015) -> 0015 downSql recreates and back-populates both bridges and grants tenant role privileges
       await expect(runner.rollbackVersion(ctx, '0015')).rejects.toThrow(
         /MIGRATION_ROLLBACK_ORDER_ERROR/,
       );
+      expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0016')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0015')).toBe(true);
 
@@ -1105,9 +1117,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privCheck.rows[0]).toEqual({ has_select: true, has_insert: true });
 
-      // Re-apply 0015 and 0016 -> upSql drops both bridges again and recreates 0016 tables
+      // Re-apply 0015, 0016, and 0017 -> upSql drops both bridges again and recreates 0016/0017 tables
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0015', '0016']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0015', '0016', '0017']);
 
       const tableAfterReapply = await client.query(
         `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'matter_restriction_metadata'`,
@@ -1151,6 +1163,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privsUp.rows[0]).toEqual({ cro_ins: true, mro_del: true });
 
+      expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0016')).toBe(true);
       const tablesDown = await client.query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables
@@ -1160,7 +1173,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(tablesDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0016']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0016', '0017']);
 
       const tablesReapplied = await client.query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables
@@ -1172,6 +1185,144 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'client_rate_overrides',
         'matter_rate_overrides',
       ]);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('0017_registers_engine_expand creates tables & sequences, backfills sign_offs, grants role privileges, and reverses cleanly (up -> down -> up)', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-registers-0017', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-registers-0017');
+    const runner = new TenantMigrationRunner();
+    const pre0017 = CORE_TENANT_MIGRATIONS.filter((m) => m.version < '0017');
+    await runner.applyUp(ctx, pre0017);
+    await runner.rollbackVersion(ctx, '0017');
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await client.query(`DELETE FROM public.sign_offs WHERE tenant_id = 'mig-registers-0017'`);
+      await client.query(
+        `INSERT INTO public.sign_offs (
+          tenant_id, id, kind, status, matter_id, matter_number, title, subtitle,
+          requested_by_id, assigned_approver_id, decided_by_id, amount_gbp,
+          requested_at, decided_at, discussion_note, payload_json
+        ) VALUES
+          ('mig-registers-0017', 'SO-000001', 'write_off', 'Pending', 'M-000001', 'MAT-001', 'Write-off approval', 'Excess write-off', 'P-000002', 'P-000001', NULL, 250.50, '2026-10-01T09:00:00Z', NULL, NULL, '{"customFlag":true}'::jsonb),
+          ('mig-registers-0017', 'SO-000002', 'matter_opening', 'Discussing', 'M-000002', 'MAT-002', 'High-risk opening', 'PEP review', 'P-000003', 'P-000001', NULL, NULL, '2026-10-02T10:00:00Z', NULL, 'Checking source of funds', '{}'::jsonb),
+          ('mig-registers-0017', 'SO-000003', 'undertaking', 'Pending', 'M-000001', 'MAT-001', 'Discharge mortgage', 'Standard undertaking', 'P-000002', 'P-000001', NULL, NULL, '2026-10-03T11:00:00Z', NULL, NULL, '{}'::jsonb)`,
+      );
+
+      await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+      const tablesUp = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public'
+           AND table_name IN ('register_records', 'register_transitions', 'register_reminder_states')
+         ORDER BY table_name ASC`,
+      );
+      expect(tablesUp.rows.map((r) => r.table_name)).toEqual([
+        'register_records',
+        'register_reminder_states',
+        'register_transitions',
+      ]);
+
+      const privsUp = await client.query<{
+        rr_ins: boolean;
+        rt_sel: boolean;
+        rrs_upd: boolean;
+        seq_rec: boolean;
+        seq_tr: boolean;
+      }>(
+        `SELECT
+           has_table_privilege('role_tenant_mig_registers_0017_test', 'public.register_records', 'INSERT') AS rr_ins,
+           has_table_privilege('role_tenant_mig_registers_0017_test', 'public.register_transitions', 'SELECT') AS rt_sel,
+           has_table_privilege('role_tenant_mig_registers_0017_test', 'public.register_reminder_states', 'UPDATE') AS rrs_upd,
+           has_sequence_privilege('role_tenant_mig_registers_0017_test', 'public.tenant_register_record_id_seq', 'USAGE') AS seq_rec,
+           has_sequence_privilege('role_tenant_mig_registers_0017_test', 'public.tenant_register_transition_id_seq', 'USAGE') AS seq_tr`,
+      );
+      expect(privsUp.rows[0]).toEqual({
+        rr_ins: true,
+        rt_sel: true,
+        rrs_upd: true,
+        seq_rec: true,
+        seq_tr: true,
+      });
+
+      const backfilled = await client.query<{
+        id: string;
+        register_type_key: string;
+        status: string;
+        assigned_approver_id: string | null;
+        field_values_json: Record<string, unknown>;
+      }>(
+        `SELECT id, register_type_key, status, assigned_approver_id, field_values_json
+         FROM public.register_records
+         WHERE tenant_id = 'mig-registers-0017'
+         ORDER BY id ASC`,
+      );
+      expect(backfilled.rows).toHaveLength(3);
+      expect(backfilled.rows[0]).toMatchObject({
+        id: 'SO-000001',
+        register_type_key: 'sign_off',
+        status: 'pending_approval',
+        assigned_approver_id: 'P-000001',
+        field_values_json: {
+          signOffKind: 'write_off',
+          matterNumber: 'MAT-001',
+          amountGbp: 250.5,
+          customFlag: true,
+        },
+      });
+      expect(backfilled.rows[1]).toMatchObject({
+        id: 'SO-000002',
+        register_type_key: 'sign_off',
+        status: 'discussing',
+      });
+      expect(backfilled.rows[2]).toMatchObject({
+        id: 'SO-000003',
+        register_type_key: 'undertaking',
+        status: 'open',
+        assigned_approver_id: null,
+      });
+
+      // Mutate a sign_off in register_records, roll back 0017, verify sync back into sign_offs and table drop
+      await client.query(
+        `UPDATE public.register_records
+         SET status = 'approved', decided_by_id = 'P-000001', decided_at = '2026-10-04T12:00:00Z'
+         WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
+      );
+
+      expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
+      const syncedSignOff = await client.query<{
+        status: string;
+        decided_by_id: string | null;
+        payload_json: Record<string, unknown>;
+      }>(
+        `SELECT status, decided_by_id, payload_json
+         FROM public.sign_offs
+         WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
+      );
+      expect(syncedSignOff.rows[0]).toMatchObject({
+        status: 'Approved',
+        decided_by_id: 'P-000001',
+        payload_json: { customFlag: true },
+      });
+
+      const tablesDown = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public'
+           AND table_name IN ('register_records', 'register_transitions', 'register_reminder_states')`,
+      );
+      expect(tablesDown.rowCount).toBe(0);
+
+      const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0017']);
+      const rebackfilled = await client.query<{ status: string }>(
+        `SELECT status FROM public.register_records WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
+      );
+      expect(rebackfilled.rows[0]?.status).toBe('approved');
     } finally {
       await client.end();
     }

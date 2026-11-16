@@ -63,6 +63,8 @@ export default async function HomePage({
         tasks={snap.tasks}
         teams={snap.teams}
         values={snap.values}
+        registerTypes={snap.registerTypes}
+        registerRecords={snap.registerRecords}
         finance={snap.finance}
         pmsLinks={matterFinance?.pmsLinks}
         pmsAsAtDate={

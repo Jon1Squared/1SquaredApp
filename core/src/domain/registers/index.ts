@@ -1,0 +1,1169 @@
+/**
+ * Configurable Firm Registers & Undertakings Domain Engine (`core/src/domain/registers/`).
+ *
+ * Pure, tenant-agnostic core domain logic (ADR 0032, S0-24):
+ * - Defines canonical `CORE_REGISTER_TYPES` (`sign_off`, `undertaking`, `complaint`, `breach`)
+ * - Merges `tenantConfig.registers` and `tenant_module_configs['registers']` overrides cleanly
+ * - Validates register record field payloads against configured `RegisterFieldDefinition` lists
+ * - Enforces state-machine transition rules, direct undertaking creation (`approvalRules: null`),
+ *   unconditional self-approval prohibition on approval registers, and assigned-approver matching
+ * - Evaluates deterministic reminder stages (`dueDaysBefore` / `reviewDaysBefore`) in tenant local timezone
+ */
+
+import type {
+  PermissionKey,
+  RegisterApprovalRules,
+  RegisterFieldDefinition,
+  RegisterPermission,
+  RegisterRecord,
+  RegisterReminderScheduleConfig,
+  RegistersConfiguration,
+  RegisterStateDefinition,
+  RegisterTransitionDefinition,
+  RegisterTypeDefinition,
+  RegisterTypeOverride,
+} from '../../api/index';
+
+export const REGISTER_DOMAIN_ERROR_CODES = {
+  VALIDATION_ERROR: 'REGISTER_VALIDATION_ERROR',
+  INVALID_TRANSITION: 'REGISTER_INVALID_TRANSITION',
+  SELF_APPROVAL_FORBIDDEN: 'REGISTER_SELF_APPROVAL_FORBIDDEN',
+  APPROVER_MISMATCH: 'REGISTER_APPROVER_MISMATCH',
+  CONCURRENCY_CONFLICT: 'REGISTER_CONCURRENCY_CONFLICT',
+  NOT_FOUND: 'REGISTER_NOT_FOUND',
+  TYPE_DISABLED: 'REGISTER_TYPE_DISABLED',
+} as const;
+
+export type RegisterDomainErrorCode =
+  (typeof REGISTER_DOMAIN_ERROR_CODES)[keyof typeof REGISTER_DOMAIN_ERROR_CODES];
+
+export function createRegisterDomainError(
+  code: RegisterDomainErrorCode,
+  message: string,
+): Error & { code: RegisterDomainErrorCode } {
+  const err = new Error(`${code}: ${message}`) as Error & {
+    code: RegisterDomainErrorCode;
+  };
+  err.code = code;
+  return err;
+}
+
+export const DEFAULT_REGISTER_REMINDER_HOUR_LOCAL = 8;
+export const DEFAULT_REGISTER_DUE_DAYS_BEFORE: readonly number[] = Object.freeze([
+  14, 7, 1, 0, -1, -7,
+]);
+export const DEFAULT_REGISTER_REVIEW_DAYS_BEFORE: readonly number[] = Object.freeze([
+  14, 7, 0,
+]);
+
+export const DEFAULT_REGISTERS_CONFIG: RegistersConfiguration = Object.freeze({
+  defaultReminderHourLocal: DEFAULT_REGISTER_REMINDER_HOUR_LOCAL,
+  defaultDueDaysBefore: [...DEFAULT_REGISTER_DUE_DAYS_BEFORE],
+  defaultReviewDaysBefore: [...DEFAULT_REGISTER_REVIEW_DAYS_BEFORE],
+  customTypes: [],
+  typeOverrides: {},
+});
+
+export const CORE_REGISTER_TYPES: Readonly<
+  Record<'sign_off' | 'undertaking' | 'complaint' | 'breach', RegisterTypeDefinition>
+> = Object.freeze({
+  sign_off: {
+    key: 'sign_off',
+    label: 'Sign-Off',
+    pluralLabel: 'Sign-Offs',
+    description:
+      'Partner sign-offs for write-offs and high-risk matter openings requiring two-person approval.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'SO',
+    initialStatus: 'pending_approval',
+    createPermission: 'register:create',
+    editPermission: 'register:edit',
+    requireMatterLink: false,
+    approvalRules: {
+      requireTwoPersonApproval: true,
+      forbidSelfApproval: true,
+      allowedApproverRoles: [
+        'partner',
+        'managing_partner',
+        'risk_compliance',
+        'supervisor',
+      ],
+      requireAssignedApproverMatch: true,
+    },
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [7, 1, 0],
+      reviewDaysBefore: [],
+      recipientMode: 'owner_and_approver',
+    },
+    states: [
+      { key: 'pending_approval', label: 'Pending approval', isTerminal: false, tone: 'warning' },
+      { key: 'discussing', label: 'Discussing', isTerminal: false, tone: 'info' },
+      { key: 'approved', label: 'Approved', isTerminal: true, tone: 'success' },
+      { key: 'rejected', label: 'Rejected', isTerminal: true, tone: 'danger' },
+    ],
+    transitions: [
+      {
+        key: 'discuss',
+        label: 'Request discussion',
+        fromStatuses: ['pending_approval'],
+        toStatus: 'discussing',
+        requiredPermission: 'register:approve',
+        forbidSelfAction: true,
+        requireAssignedApproverMatch: true,
+      },
+      {
+        key: 'resubmit',
+        label: 'Resubmit for approval',
+        fromStatuses: ['discussing'],
+        toStatus: 'pending_approval',
+        requiredPermission: 'register:edit',
+      },
+      {
+        key: 'approve',
+        label: 'Approve',
+        fromStatuses: ['pending_approval', 'discussing'],
+        toStatus: 'approved',
+        requiredPermission: 'register:approve',
+        forbidSelfAction: true,
+        requireAssignedApproverMatch: true,
+        setsDecidedAt: true,
+      },
+      {
+        key: 'reject',
+        label: 'Reject',
+        fromStatuses: ['pending_approval', 'discussing'],
+        toStatus: 'rejected',
+        requiredPermission: 'register:approve',
+        requiresComment: true,
+        forbidSelfAction: true,
+        requireAssignedApproverMatch: true,
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'signOffKind',
+        label: 'Sign-off category',
+        type: 'select',
+        required: true,
+        options: ['write_off', 'matter_opening'],
+        defaultValue: 'write_off',
+      },
+      {
+        key: 'matterNumber',
+        label: 'Matter reference',
+        type: 'text',
+      },
+      {
+        key: 'subtitle',
+        label: 'Context summary',
+        type: 'text',
+      },
+      {
+        key: 'amountGbp',
+        label: 'Amount (GBP)',
+        type: 'currency_gbp',
+      },
+      {
+        key: 'discussionNote',
+        label: 'Discussion note',
+        type: 'textarea',
+      },
+    ],
+    showInNavigation: true,
+  },
+  undertaking: {
+    key: 'undertaking',
+    label: 'Undertaking',
+    pluralLabel: 'Undertakings',
+    description:
+      'Solicitor and firm undertakings created directly by practising fee earners with discharge tracking and reminders.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'UND',
+    initialStatus: 'open',
+    createPermission: 'undertaking:manage',
+    editPermission: 'undertaking:manage',
+    requireMatterLink: false,
+    // ADR 0032 Amendment 2: direct undertaking creation without two-person partner approval
+    approvalRules: null,
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [14, 7, 1, 0, -1, -7],
+      reviewDaysBefore: [14, 7, 0],
+      recipientMode: 'matter_team_and_owner',
+    },
+    states: [
+      { key: 'open', label: 'Open', isTerminal: false, tone: 'info' },
+      { key: 'varied', label: 'Varied', isTerminal: false, tone: 'warning' },
+      { key: 'overdue', label: 'Overdue', isTerminal: false, tone: 'danger' },
+      { key: 'discharged', label: 'Discharged', isTerminal: true, tone: 'success' },
+      { key: 'cancelled', label: 'Cancelled', isTerminal: true, tone: 'neutral' },
+    ],
+    transitions: [
+      {
+        key: 'vary',
+        label: 'Record variation',
+        fromStatuses: ['open', 'overdue'],
+        toStatus: 'varied',
+        requiredPermission: 'undertaking:manage',
+        requiresComment: true,
+      },
+      {
+        key: 'reopen',
+        label: 'Reopen undertaking',
+        fromStatuses: ['varied', 'overdue'],
+        toStatus: 'open',
+        requiredPermission: 'undertaking:manage',
+      },
+      {
+        key: 'mark_overdue',
+        label: 'Mark overdue',
+        fromStatuses: ['open', 'varied'],
+        toStatus: 'overdue',
+        requiredPermission: 'undertaking:manage',
+      },
+      {
+        key: 'discharge',
+        label: 'Discharge undertaking',
+        fromStatuses: ['open', 'varied', 'overdue'],
+        toStatus: 'discharged',
+        requiredPermission: 'undertaking:manage',
+        setsDecidedAt: true,
+      },
+      {
+        key: 'cancel',
+        label: 'Cancel / withdraw',
+        fromStatuses: ['open', 'varied', 'overdue'],
+        toStatus: 'cancelled',
+        requiredPermission: 'undertaking:manage',
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'recipientName',
+        label: 'Recipient / counterparty',
+        type: 'text',
+        required: true,
+        description: 'Firm, lender, or party receiving the benefit of the undertaking.',
+      },
+      {
+        key: 'undertakingTerms',
+        label: 'Terms of undertaking',
+        type: 'textarea',
+        required: true,
+        description: 'Exact wording and scope of the professional undertaking.',
+      },
+      {
+        key: 'givenByPersonId',
+        label: 'Given by fee earner',
+        type: 'person',
+        required: true,
+      },
+      {
+        key: 'dischargeCriteria',
+        label: 'Discharge conditions',
+        type: 'textarea',
+      },
+      {
+        key: 'dischargeEvidence',
+        label: 'Discharge confirmation',
+        type: 'textarea',
+      },
+      {
+        key: 'variationSummary',
+        label: 'Variation note',
+        type: 'textarea',
+      },
+    ],
+    showInNavigation: true,
+  },
+  complaint: {
+    key: 'complaint',
+    label: 'Client Complaint',
+    pluralLabel: 'Complaints',
+    description:
+      'First-tier client complaints, investigation ownership, and LeO escalation timeframe tracking.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'CMP',
+    initialStatus: 'open',
+    createPermission: 'register:create',
+    editPermission: 'register:edit',
+    requireMatterLink: false,
+    approvalRules: null,
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [14, 7, 1, 0, -1],
+      reviewDaysBefore: [7, 0],
+      recipientMode: 'owner_and_approver',
+    },
+    states: [
+      { key: 'open', label: 'Open', isTerminal: false, tone: 'warning' },
+      { key: 'investigating', label: 'Under investigation', isTerminal: false, tone: 'info' },
+      { key: 'resolved', label: 'Resolved', isTerminal: true, tone: 'success' },
+      { key: 'closed', label: 'Closed', isTerminal: true, tone: 'neutral' },
+    ],
+    transitions: [
+      {
+        key: 'investigate',
+        label: 'Begin investigation',
+        fromStatuses: ['open'],
+        toStatus: 'investigating',
+        requiredPermission: 'register:edit',
+      },
+      {
+        key: 'resolve',
+        label: 'Mark resolved',
+        fromStatuses: ['open', 'investigating'],
+        toStatus: 'resolved',
+        requiredPermission: 'register:approve',
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+      {
+        key: 'close',
+        label: 'Close complaint',
+        fromStatuses: ['open', 'investigating', 'resolved'],
+        toStatus: 'closed',
+        requiredPermission: 'register:approve',
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'complainantName',
+        label: 'Complainant name',
+        type: 'text',
+        required: true,
+      },
+      {
+        key: 'complaintSummary',
+        label: 'Summary of complaint',
+        type: 'textarea',
+        required: true,
+      },
+      {
+        key: 'resolutionNotes',
+        label: 'Outcome / resolution summary',
+        type: 'textarea',
+      },
+    ],
+    showInNavigation: true,
+  },
+  breach: {
+    key: 'breach',
+    label: 'Compliance Breach',
+    pluralLabel: 'Breaches & Incidents',
+    description:
+      'COLP, COFA, and SRA regulatory breach register requiring independent compliance sign-off to close.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'BRC',
+    initialStatus: 'logged',
+    createPermission: 'register:create',
+    editPermission: 'register:edit',
+    requireMatterLink: false,
+    approvalRules: {
+      requireTwoPersonApproval: true,
+      forbidSelfApproval: true,
+      allowedApproverRoles: ['risk_compliance', 'managing_partner', 'partner'],
+      requireAssignedApproverMatch: false,
+    },
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [7, 1, 0],
+      reviewDaysBefore: [30, 7, 0],
+      recipientMode: 'owner_and_approver',
+    },
+    states: [
+      { key: 'logged', label: 'Logged', isTerminal: false, tone: 'danger' },
+      { key: 'remediation', label: 'Remediation in progress', isTerminal: false, tone: 'warning' },
+      { key: 'closed', label: 'Closed', isTerminal: true, tone: 'success' },
+    ],
+    transitions: [
+      {
+        key: 'start_remediation',
+        label: 'Start remediation',
+        fromStatuses: ['logged'],
+        toStatus: 'remediation',
+        requiredPermission: 'register:edit',
+      },
+      {
+        key: 'close_breach',
+        label: 'Sign off & close',
+        fromStatuses: ['logged', 'remediation'],
+        toStatus: 'closed',
+        requiredPermission: 'register:approve',
+        requiresComment: true,
+        forbidSelfAction: true,
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'regulatoryCategory',
+        label: 'Regulatory category',
+        type: 'select',
+        required: true,
+        options: ['COLP', 'COFA', 'AML / CFT', 'Confidentiality / Security', 'Other'],
+        defaultValue: 'COLP',
+      },
+      {
+        key: 'breachSummary',
+        label: 'Incident summary',
+        type: 'textarea',
+        required: true,
+      },
+      {
+        key: 'materialityAssessment',
+        label: 'Materiality assessment',
+        type: 'select',
+        options: ['Non-material', 'Material - SRA report required'],
+        defaultValue: 'Non-material',
+      },
+      {
+        key: 'remediationPlan',
+        label: 'Remediation plan',
+        type: 'textarea',
+      },
+    ],
+    showInNavigation: true,
+  },
+});
+
+const CORE_REGISTER_KEY_SET = new Set<string>(Object.keys(CORE_REGISTER_TYPES));
+
+function cloneStateDefinition(stateDef: RegisterStateDefinition): RegisterStateDefinition {
+  return {
+    key: stateDef.key,
+    label: stateDef.label,
+    isTerminal: stateDef.isTerminal ?? false,
+    tone: stateDef.tone ?? 'neutral',
+  };
+}
+
+function cloneFieldDefinition(fieldDef: RegisterFieldDefinition): RegisterFieldDefinition {
+  return {
+    key: fieldDef.key,
+    label: fieldDef.label,
+    type: fieldDef.type,
+    required: fieldDef.required ?? false,
+    ...(fieldDef.description !== undefined ? { description: fieldDef.description } : {}),
+    ...(fieldDef.options ? { options: [...fieldDef.options] } : {}),
+    ...(fieldDef.defaultValue !== undefined ? { defaultValue: fieldDef.defaultValue } : {}),
+  };
+}
+
+function cloneTransitionDefinition(
+  transitionDef: RegisterTransitionDefinition,
+): RegisterTransitionDefinition {
+  return {
+    key: transitionDef.key,
+    label: transitionDef.label,
+    fromStatuses: [...transitionDef.fromStatuses],
+    toStatus: transitionDef.toStatus,
+    requiredPermission: transitionDef.requiredPermission,
+    requiresComment: transitionDef.requiresComment ?? false,
+    forbidSelfAction: transitionDef.forbidSelfAction ?? false,
+    requireAssignedApproverMatch: transitionDef.requireAssignedApproverMatch ?? false,
+    setsDecidedAt: transitionDef.setsDecidedAt ?? false,
+  };
+}
+
+function cloneApprovalRules(
+  approvalRules: RegisterApprovalRules | null,
+): RegisterApprovalRules | null {
+  if (!approvalRules) return null;
+  if (approvalRules.forbidSelfApproval !== true) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      'Register approvalRules must unconditionally enforce forbidSelfApproval: true.',
+    );
+  }
+  return {
+    requireTwoPersonApproval: Boolean(approvalRules.requireTwoPersonApproval),
+    forbidSelfApproval: true,
+    ...(approvalRules.allowedApproverRoles
+      ? { allowedApproverRoles: [...approvalRules.allowedApproverRoles] }
+      : {}),
+    requireAssignedApproverMatch: Boolean(approvalRules.requireAssignedApproverMatch),
+  };
+}
+
+function cloneReminderSchedule(
+  reminderSchedule: RegisterReminderScheduleConfig,
+  defaultDueDays: readonly number[],
+  defaultReviewDays: readonly number[],
+): RegisterReminderScheduleConfig {
+  return {
+    enabled: Boolean(reminderSchedule.enabled),
+    dueDaysBefore: [...(reminderSchedule.dueDaysBefore ?? defaultDueDays)],
+    reviewDaysBefore: [...(reminderSchedule.reviewDaysBefore ?? defaultReviewDays)],
+    recipientMode: reminderSchedule.recipientMode ?? 'owner_and_approver',
+  };
+}
+
+export function validateRegisterTypeDefinition(
+  customRegisterType: RegisterTypeDefinition,
+  defaultDueDays: readonly number[] = DEFAULT_REGISTER_DUE_DAYS_BEFORE,
+  defaultReviewDays: readonly number[] = DEFAULT_REGISTER_REVIEW_DAYS_BEFORE,
+): RegisterTypeDefinition {
+  if (!customRegisterType.key || !/^[a-z][a-z0-9_]{1,47}$/.test(customRegisterType.key)) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Invalid register type key "${customRegisterType.key}".`,
+    );
+  }
+  const states = (customRegisterType.states ?? []).map(cloneStateDefinition);
+  if (states.length === 0) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Register type "${customRegisterType.key}" must declare at least one state.`,
+    );
+  }
+  const stateKeySet = new Set(states.map((s) => s.key));
+  if (!stateKeySet.has(customRegisterType.initialStatus)) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Register type "${customRegisterType.key}" initialStatus "${customRegisterType.initialStatus}" is not in states.`,
+    );
+  }
+  const transitions = (customRegisterType.transitions ?? []).map(cloneTransitionDefinition);
+  const transitionKeys = new Set<string>();
+  for (const t of transitions) {
+    if (transitionKeys.has(t.key)) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Register type "${customRegisterType.key}" contains duplicate transition key "${t.key}".`,
+      );
+    }
+    transitionKeys.add(t.key);
+    if (!stateKeySet.has(t.toStatus)) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Transition "${t.key}" on register "${customRegisterType.key}" points to unknown toStatus "${t.toStatus}".`,
+      );
+    }
+    for (const fromStatus of t.fromStatuses) {
+      if (!stateKeySet.has(fromStatus)) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+          `Transition "${t.key}" on register "${customRegisterType.key}" references unknown fromStatus "${fromStatus}".`,
+        );
+      }
+    }
+  }
+  const fields = (customRegisterType.fields ?? []).map(cloneFieldDefinition);
+  const fieldKeys = new Set<string>();
+  for (const f of fields) {
+    if (fieldKeys.has(f.key)) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Register type "${customRegisterType.key}" contains duplicate field key "${f.key}".`,
+      );
+    }
+    fieldKeys.add(f.key);
+    if (f.type === 'select' && (!f.options || f.options.length === 0)) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Select field "${f.key}" on register "${customRegisterType.key}" must define at least one option.`,
+      );
+    }
+  }
+  return {
+    key: customRegisterType.key,
+    label: customRegisterType.label,
+    pluralLabel: customRegisterType.pluralLabel,
+    description: customRegisterType.description,
+    isCore: Boolean(customRegisterType.isCore),
+    enabled: customRegisterType.enabled ?? true,
+    referencePrefix: customRegisterType.referencePrefix,
+    initialStatus: customRegisterType.initialStatus,
+    createPermission: customRegisterType.createPermission,
+    editPermission: customRegisterType.editPermission,
+    requireMatterLink: Boolean(customRegisterType.requireMatterLink),
+    approvalRules: cloneApprovalRules(customRegisterType.approvalRules),
+    reminderSchedule: cloneReminderSchedule(
+      customRegisterType.reminderSchedule,
+      defaultDueDays,
+      defaultReviewDays,
+    ),
+    states,
+    transitions,
+    fields,
+    showInNavigation: customRegisterType.showInNavigation ?? true,
+  };
+}
+
+function applyRegisterTypeOverride(
+  baseType: RegisterTypeDefinition,
+  typeOverride: RegisterTypeOverride,
+): RegisterTypeDefinition {
+  const nextFields = baseType.fields.map(cloneFieldDefinition);
+  const existingKeys = new Set(nextFields.map((f) => f.key));
+  for (const extraField of typeOverride.additionalFields ?? []) {
+    if (existingKeys.has(extraField.key)) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Cannot override core field "${extraField.key}" on register "${baseType.key}" via additionalFields.`,
+      );
+    }
+    existingKeys.add(extraField.key);
+    nextFields.push(cloneFieldDefinition(extraField));
+  }
+  const rsOverride = typeOverride.reminderSchedule;
+  return {
+    ...baseType,
+    enabled: typeOverride.enabled ?? baseType.enabled,
+    label: typeOverride.label ?? baseType.label,
+    pluralLabel: typeOverride.pluralLabel ?? baseType.pluralLabel,
+    description: typeOverride.description ?? baseType.description,
+    showInNavigation: typeOverride.showInNavigation ?? baseType.showInNavigation,
+    reminderSchedule: {
+      enabled: rsOverride?.enabled ?? baseType.reminderSchedule.enabled,
+      dueDaysBefore: rsOverride?.dueDaysBefore
+        ? [...rsOverride.dueDaysBefore]
+        : [...baseType.reminderSchedule.dueDaysBefore],
+      reviewDaysBefore: rsOverride?.reviewDaysBefore
+        ? [...rsOverride.reviewDaysBefore]
+        : [...baseType.reminderSchedule.reviewDaysBefore],
+      recipientMode: rsOverride?.recipientMode ?? baseType.reminderSchedule.recipientMode,
+    },
+    fields: nextFields,
+  };
+}
+
+export function mergeRegistersConfigurations(
+  baseConfig?: RegistersConfiguration | null,
+  overrideConfig?: RegistersConfiguration | null,
+): RegistersConfiguration {
+  const base = baseConfig ?? DEFAULT_REGISTERS_CONFIG;
+  const override = overrideConfig ?? null;
+
+  const customByKey = new Map<string, RegisterTypeDefinition>();
+  for (const item of base.customTypes ?? []) {
+    customByKey.set(item.key, item);
+  }
+  for (const item of override?.customTypes ?? []) {
+    customByKey.set(item.key, item);
+  }
+
+  const mergedOverrides: Record<string, RegisterTypeOverride> = {};
+  for (const [k, v] of Object.entries(base.typeOverrides ?? {})) {
+    mergedOverrides[k] = { ...v };
+  }
+  for (const [k, v] of Object.entries(override?.typeOverrides ?? {})) {
+    mergedOverrides[k] = {
+      ...(mergedOverrides[k] ?? {}),
+      ...v,
+      ...(mergedOverrides[k]?.reminderSchedule || v.reminderSchedule
+        ? {
+            reminderSchedule: {
+              ...(mergedOverrides[k]?.reminderSchedule ?? {}),
+              ...(v.reminderSchedule ?? {}),
+            },
+          }
+        : {}),
+      ...(v.additionalFields !== undefined
+        ? { additionalFields: [...v.additionalFields] }
+        : {}),
+    };
+  }
+
+  return {
+    defaultReminderHourLocal:
+      override?.defaultReminderHourLocal ??
+      base.defaultReminderHourLocal ??
+      DEFAULT_REGISTER_REMINDER_HOUR_LOCAL,
+    defaultDueDaysBefore: override?.defaultDueDaysBefore
+      ? [...override.defaultDueDaysBefore]
+      : base.defaultDueDaysBefore
+        ? [...base.defaultDueDaysBefore]
+        : [...DEFAULT_REGISTER_DUE_DAYS_BEFORE],
+    defaultReviewDaysBefore: override?.defaultReviewDaysBefore
+      ? [...override.defaultReviewDaysBefore]
+      : base.defaultReviewDaysBefore
+        ? [...base.defaultReviewDaysBefore]
+        : [...DEFAULT_REGISTER_REVIEW_DAYS_BEFORE],
+    customTypes: [...customByKey.values()],
+    typeOverrides: mergedOverrides,
+  };
+}
+
+export function resolveEffectiveRegisterTypes(
+  tenantRegistersConfig?: RegistersConfiguration | null,
+  moduleOverrideConfig?: RegistersConfiguration | null,
+): RegisterTypeDefinition[] {
+  const merged = mergeRegistersConfigurations(tenantRegistersConfig, moduleOverrideConfig);
+  const defaultDueDays = merged.defaultDueDaysBefore ?? DEFAULT_REGISTER_DUE_DAYS_BEFORE;
+  const defaultReviewDays = merged.defaultReviewDaysBefore ?? DEFAULT_REGISTER_REVIEW_DAYS_BEFORE;
+
+  const resolvedMap = new Map<string, RegisterTypeDefinition>();
+  for (const coreType of Object.values(CORE_REGISTER_TYPES)) {
+    resolvedMap.set(
+      coreType.key,
+      validateRegisterTypeDefinition(coreType, defaultDueDays, defaultReviewDays),
+    );
+  }
+
+  for (const customRegisterType of merged.customTypes ?? []) {
+    if (CORE_REGISTER_KEY_SET.has(customRegisterType.key)) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Custom register type "${customRegisterType.key}" collides with a reserved core register key; use typeOverrides instead.`,
+      );
+    }
+    const validatedCustom = validateRegisterTypeDefinition(
+      { ...customRegisterType, isCore: false },
+      defaultDueDays,
+      defaultReviewDays,
+    );
+    resolvedMap.set(validatedCustom.key, validatedCustom);
+  }
+
+  for (const [key, typeOverride] of Object.entries(merged.typeOverrides ?? {})) {
+    const target = resolvedMap.get(key);
+    if (!target) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `typeOverrides references unknown register key "${key}".`,
+      );
+    }
+    resolvedMap.set(key, applyRegisterTypeOverride(target, typeOverride));
+  }
+
+  return [...resolvedMap.values()];
+}
+
+export function findEffectiveRegisterType(
+  registerTypeKey: string,
+  tenantRegistersConfig?: RegistersConfiguration | null,
+  moduleOverrideConfig?: RegistersConfiguration | null,
+): RegisterTypeDefinition | null {
+  const all = resolveEffectiveRegisterTypes(tenantRegistersConfig, moduleOverrideConfig);
+  return all.find((t) => t.key === registerTypeKey) ?? null;
+}
+
+export function validateRegisterFieldValues(params: {
+  registerType: RegisterTypeDefinition;
+  fieldValues: Record<string, unknown>;
+  applyDefaults: boolean;
+  enforceRequired?: boolean;
+}): Record<string, unknown> {
+  const { registerType, fieldValues, applyDefaults, enforceRequired = true } = params;
+  const next: Record<string, unknown> = { ...(fieldValues ?? {}) };
+
+  for (const fieldDef of registerType.fields) {
+    let val = next[fieldDef.key];
+    if ((val === undefined || val === null || val === '') && applyDefaults && fieldDef.defaultValue !== undefined) {
+      val = fieldDef.defaultValue;
+      next[fieldDef.key] = val;
+    }
+
+    const isEmpty =
+      val === undefined ||
+      val === null ||
+      (typeof val === 'string' && val.trim().length === 0);
+
+    if (isEmpty) {
+      if (enforceRequired && fieldDef.required) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+          `Field "${fieldDef.label}" (${fieldDef.key}) is required for ${registerType.label}.`,
+        );
+      }
+      continue;
+    }
+
+    switch (fieldDef.type) {
+      case 'text':
+      case 'textarea':
+      case 'person': {
+        if (typeof val !== 'string') {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be a string.`,
+          );
+        }
+        next[fieldDef.key] = val.trim();
+        break;
+      }
+      case 'number':
+      case 'currency_gbp': {
+        const numeric = typeof val === 'string' ? Number(val) : val;
+        if (typeof numeric !== 'number' || !Number.isFinite(numeric)) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be a finite number.`,
+          );
+        }
+        next[fieldDef.key] = numeric;
+        break;
+      }
+      case 'boolean': {
+        if (typeof val !== 'boolean') {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be a boolean.`,
+          );
+        }
+        break;
+      }
+      case 'date': {
+        if (typeof val !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(val)) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be an ISO date string (YYYY-MM-DD).`,
+          );
+        }
+        break;
+      }
+      case 'select': {
+        if (typeof val !== 'string' || (fieldDef.options && !fieldDef.options.includes(val))) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" value "${String(val)}" is not an allowed option.`,
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  return next;
+}
+
+export function validateRegisterCreateInput(params: {
+  registerType: RegisterTypeDefinition;
+  title: string;
+  matterId: string | null;
+  dueAt: string | null;
+  reviewAt: string | null;
+  fieldValues: Record<string, unknown>;
+}): { title: string; dueAt: string | null; reviewAt: string | null; fieldValues: Record<string, unknown> } {
+  const { registerType, title, matterId, dueAt, reviewAt, fieldValues } = params;
+  if (!registerType.enabled) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.TYPE_DISABLED,
+      `Register type "${registerType.key}" is disabled for this tenant.`,
+    );
+  }
+  const cleanTitle = title.trim();
+  if (!cleanTitle) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Title is required when creating a ${registerType.label} record.`,
+    );
+  }
+  if (registerType.requireMatterLink && !matterId) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Register type "${registerType.key}" requires a linked matter.`,
+    );
+  }
+  const normaliseIso = (val: string | null, label: string): string | null => {
+    if (!val || !val.trim()) return null;
+    const d = new Date(val);
+    if (Number.isNaN(d.getTime())) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `${label} must be a valid ISO timestamp or date.`,
+      );
+    }
+    return d.toISOString();
+  };
+  const normalisedFields = validateRegisterFieldValues({
+    registerType,
+    fieldValues,
+    applyDefaults: true,
+    enforceRequired: true,
+  });
+  return {
+    title: cleanTitle,
+    dueAt: normaliseIso(dueAt, 'dueAt'),
+    reviewAt: normaliseIso(reviewAt, 'reviewAt'),
+    fieldValues: normalisedFields,
+  };
+}
+
+export function actorCanExecuteRegisterTransition(
+  actorPermissionSet: ReadonlySet<PermissionKey>,
+  registerType: RegisterTypeDefinition,
+  transition: RegisterTransitionDefinition,
+): boolean {
+  if (actorPermissionSet.has(transition.requiredPermission as PermissionKey)) {
+    return true;
+  }
+  if (
+    registerType.key === 'sign_off' &&
+    transition.requiredPermission === 'register:approve' &&
+    actorPermissionSet.has('signoff:approve')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function validateRegisterTransitionExecution(params: {
+  registerType: RegisterTypeDefinition;
+  record: RegisterRecord;
+  transitionKey: string;
+  actorId: string;
+  actorRoles: readonly string[];
+  actorPermissionSet: ReadonlySet<PermissionKey>;
+  comment: string | null;
+  expectedRowVersion?: number;
+}): {
+  transition: RegisterTransitionDefinition;
+  nextStatus: string;
+  targetState: RegisterStateDefinition;
+} {
+  const {
+    registerType,
+    record,
+    transitionKey,
+    actorId,
+    actorRoles,
+    actorPermissionSet,
+    comment,
+    expectedRowVersion,
+  } = params;
+
+  if (!registerType.enabled) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.TYPE_DISABLED,
+      `Register type "${registerType.key}" is disabled for this tenant.`,
+    );
+  }
+
+  if (expectedRowVersion !== undefined && record.rowVersion !== expectedRowVersion) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.CONCURRENCY_CONFLICT,
+      `Register record "${record.id}" has been modified concurrently (expected version ${expectedRowVersion}, actual ${record.rowVersion}).`,
+    );
+  }
+
+  const transition = registerType.transitions.find((t) => t.key === transitionKey);
+  if (!transition) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
+      `Transition "${transitionKey}" is not defined on register "${registerType.key}".`,
+    );
+  }
+
+  if (!actorCanExecuteRegisterTransition(actorPermissionSet, registerType, transition)) {
+    const err = new Error(
+      `FORBIDDEN: Missing permission "${transition.requiredPermission}" for transition "${transition.key}" on register "${registerType.key}".`,
+    ) as Error & { code: string; requiredPermission: PermissionKey };
+    err.code = 'FORBIDDEN';
+    err.requiredPermission = transition.requiredPermission as PermissionKey;
+    throw err;
+  }
+
+  if (!transition.fromStatuses.includes(record.status)) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
+      `Cannot execute transition "${transition.key}" from status "${record.status}".`,
+    );
+  }
+
+  const targetState = registerType.states.find((s) => s.key === transition.toStatus);
+  if (!targetState) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
+      `Target status "${transition.toStatus}" does not exist on register "${registerType.key}".`,
+    );
+  }
+
+  const mustBlockSelfAction =
+    transition.forbidSelfAction ||
+    Boolean(registerType.approvalRules && transition.requiredPermission !== registerType.editPermission);
+
+  if (mustBlockSelfAction && (record.ownerId === actorId || record.createdById === actorId)) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
+      `Self-approval or self-sign-off is forbidden on ${registerType.label} "${record.reference}".`,
+    );
+  }
+
+  const mustMatchAssignedApprover =
+    Boolean(transition.requireAssignedApproverMatch) ||
+    Boolean(registerType.approvalRules?.requireAssignedApproverMatch);
+
+  if (
+    mustMatchAssignedApprover &&
+    transition.forbidSelfAction &&
+    record.assignedApproverId &&
+    record.assignedApproverId !== actorId
+  ) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
+      `Only the assigned approver (${record.assignedApproverId}) may perform transition "${transition.key}".`,
+    );
+  }
+
+  if (
+    registerType.approvalRules?.allowedApproverRoles?.length &&
+    transition.forbidSelfAction &&
+    !actorRoles.includes('admin')
+  ) {
+    const allowedSet = new Set(registerType.approvalRules.allowedApproverRoles);
+    const hasAllowedRole = actorRoles.some((r) => allowedSet.has(r));
+    if (!hasAllowedRole) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
+        `Actor roles [${actorRoles.join(', ')}] do not satisfy allowedApproverRoles for "${registerType.key}".`,
+      );
+    }
+  }
+
+  if (transition.requiresComment && (!comment || !comment.trim())) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `A comment is required for transition "${transition.label}".`,
+    );
+  }
+
+  return {
+    transition,
+    nextStatus: transition.toStatus,
+    targetState,
+  };
+}
+
+export interface EvaluatedRegisterReminderCandidate {
+  registerRecordId: string;
+  registerTypeKey: string;
+  reference: string;
+  title: string;
+  triggerKind: 'due' | 'review';
+  stageDaysBefore: number;
+  targetLocalYmd: string;
+  idempotencyKey: string;
+  isOverdue: boolean;
+}
+
+export function resolveIsoTimestampToLocalYmd(
+  isoTimestamp: string,
+  timeZone: string,
+): string {
+  const d = new Date(isoTimestamp);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(d);
+  const year = parts.find((p) => p.type === 'year')?.value ?? '1970';
+  const month = parts.find((p) => p.type === 'month')?.value ?? '01';
+  const day = parts.find((p) => p.type === 'day')?.value ?? '01';
+  return `${year}-${month}-${day}`;
+}
+
+function diffCalendarDaysYmd(targetYmd: string, currentLocalYmd: string): number {
+  const targetMs = Date.parse(`${targetYmd}T00:00:00Z`);
+  const currentMs = Date.parse(`${currentLocalYmd}T00:00:00Z`);
+  return Math.round((targetMs - currentMs) / 86_400_000);
+}
+
+export function evaluateRegisterDueAndReviewReminders(params: {
+  record: RegisterRecord;
+  registerType: RegisterTypeDefinition;
+  registersConfig: RegistersConfiguration;
+  localDateYmd: string;
+  timeZone: string;
+}): EvaluatedRegisterReminderCandidate[] {
+  const { record, registerType, registersConfig, localDateYmd, timeZone } = params;
+  if (!registerType.enabled || !registerType.reminderSchedule.enabled) {
+    return [];
+  }
+  const currentState = registerType.states.find((s) => s.key === record.status);
+  if (currentState?.isTerminal) {
+    return [];
+  }
+
+  const dueOffsets =
+    record.reminderScheduleDays && record.reminderScheduleDays.length > 0
+      ? record.reminderScheduleDays
+      : registerType.reminderSchedule.dueDaysBefore.length > 0
+        ? registerType.reminderSchedule.dueDaysBefore
+        : (registersConfig.defaultDueDaysBefore ?? DEFAULT_REGISTER_DUE_DAYS_BEFORE);
+
+  const reviewOffsets =
+    registerType.reminderSchedule.reviewDaysBefore.length > 0
+      ? registerType.reminderSchedule.reviewDaysBefore
+      : (registersConfig.defaultReviewDaysBefore ?? DEFAULT_REGISTER_REVIEW_DAYS_BEFORE);
+
+  const candidates: EvaluatedRegisterReminderCandidate[] = [];
+
+  if (record.dueAt) {
+    const dueLocalYmd = resolveIsoTimestampToLocalYmd(record.dueAt, timeZone);
+    const daysRemaining = diffCalendarDaysYmd(dueLocalYmd, localDateYmd);
+    if (dueOffsets.includes(daysRemaining)) {
+      candidates.push({
+        registerRecordId: record.id,
+        registerTypeKey: record.registerTypeKey,
+        reference: record.reference,
+        title: record.title,
+        triggerKind: 'due',
+        stageDaysBefore: daysRemaining,
+        targetLocalYmd: dueLocalYmd,
+        idempotencyKey: `${record.id}:due:${daysRemaining}:${dueLocalYmd}`,
+        isOverdue: daysRemaining < 0,
+      });
+    }
+  }
+
+  if (record.reviewAt) {
+    const reviewLocalYmd = resolveIsoTimestampToLocalYmd(record.reviewAt, timeZone);
+    const daysRemaining = diffCalendarDaysYmd(reviewLocalYmd, localDateYmd);
+    if (reviewOffsets.includes(daysRemaining)) {
+      candidates.push({
+        registerRecordId: record.id,
+        registerTypeKey: record.registerTypeKey,
+        reference: record.reference,
+        title: record.title,
+        triggerKind: 'review',
+        stageDaysBefore: daysRemaining,
+        targetLocalYmd: reviewLocalYmd,
+        idempotencyKey: `${record.id}:review:${daysRemaining}:${reviewLocalYmd}`,
+        isOverdue: daysRemaining < 0,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+export function getEffectiveReminderHourLocal(
+  registers?: RegistersConfiguration | null,
+): number {
+  return registers?.defaultReminderHourLocal ?? DEFAULT_REGISTER_REMINDER_HOUR_LOCAL;
+}
+
+export function getDefaultDueAndReviewDaysForConfig(
+  registers?: RegistersConfiguration | null,
+): { dueDaysBefore: readonly number[]; reviewDaysBefore: readonly number[]; customTypes: readonly RegisterTypeDefinition[]; typeOverrides: Readonly<Record<string, RegisterTypeOverride>> } {
+  return {
+    dueDaysBefore: registers?.defaultDueDaysBefore ?? DEFAULT_REGISTER_DUE_DAYS_BEFORE,
+    reviewDaysBefore: registers?.defaultReviewDaysBefore ?? DEFAULT_REGISTER_REVIEW_DAYS_BEFORE,
+    customTypes: registers?.customTypes ?? [],
+    typeOverrides: registers?.typeOverrides ?? {},
+  };
+}
+
+export function isRegisterPermission(key: string): key is RegisterPermission {
+  return (
+    key === 'register:view' ||
+    key === 'register:create' ||
+    key === 'register:edit' ||
+    key === 'register:approve' ||
+    key === 'register:configure' ||
+    key === 'undertaking:manage'
+  );
+}

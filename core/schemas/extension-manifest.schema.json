@@ -38,7 +38,9 @@
           "audit:write",
           "pms:sync",
           "keydate:read",
-          "keydate:write"
+          "keydate:write",
+          "register:read",
+          "register:write"
         ]
       }
     },
@@ -57,7 +59,10 @@
           "beforeMatterDocumentsClose",
           "keyDate.beforeCreate",
           "keyDate.afterStatusChange",
-          "keyDate.calculateCustomRule"
+          "keyDate.calculateCustomRule",
+          "register.beforeCreate",
+          "register.beforeTransition",
+          "register.afterTransition"
         ]
       }
     },
