@@ -48,45 +48,47 @@ Graph `sendActivityNotification` only delivers notifications to users for whom t
 ## 4. Generate `graph-teams-client-cert` Inside Key Vault (`kvnotalawfi2cdo3cw7vuafm`)
 
 > [!IMPORTANT]
-> Generating a Windows `.pfx` and importing it into Azure Key Vault failed for the mail app even when using `TripleDES_SHA1`. Generate the Teams client certificate **directly inside Azure Key Vault** using the exact workflow that succeeded for `graph-mail-certificate`.
+> Generating a Windows `.pfx` and importing it into Azure Key Vault failed for the mail app even when using `TripleDES_SHA1`. Generate the Teams client certificate **directly inside Azure Key Vault** with `secretProperties.contentType = "application/x-pem-file"`, because `GraphAppTokenProvider` only accepts unencrypted PEM secrets and rejects `application/x-pkcs12` secrets with `GRAPH_CERT_FORMAT_UNSUPPORTED`.
 
 1. **Confirm RBAC roles on the vault:**
    - You need **Key Vault Certificates Officer** (to create/download the certificate) and **Key Vault Secrets Officer** (to set `teams-recipient-allowlist`) on **`kvnotalawfi2cdo3cw7vuafm`**.
    - Confirm the runtime Managed Identity (`id-runtime-<slug>-<env>`) already holds **Key Vault Secrets User** on `kvnotalawfi2cdo3cw7vuafm`.
 2. **Temporarily open `kvnotalawfi2cdo3cw7vuafm` to your single public IP address:**
-   ```bash
-   MY_IP=$(curl -s https://api.ipify.org)
-   az keyvault update \
-     --name "kvnotalawfi2cdo3cw7vuafm" \
-     --public-network-access Enabled \
+   ```powershell
+   $MY_IP = (Invoke-RestMethod https://api.ipify.org).Trim()
+   az keyvault update `
+     --name "kvnotalawfi2cdo3cw7vuafm" `
+     --public-network-access Enabled `
      --default-action Deny
-   az keyvault network-rule add \
-     --name "kvnotalawfi2cdo3cw7vuafm" \
-     --ip-address "${MY_IP}/32"
+   az keyvault network-rule add `
+     --name "kvnotalawfi2cdo3cw7vuafm" `
+     --ip-address "$MY_IP/32"
    ```
-3. **Generate `graph-teams-client-cert` using the default policy with the subject changed and the key exportable:**
-   ```bash
-   az keyvault certificate get-default-policy > teams-policy.json
-   # Edit teams-policy.json:
-   # - set x509CertificateProperties.subject (for example "CN=graph-teams.1squared.co.uk")
-   # - set keyProperties.exportable to true
-   az keyvault certificate create \
-     --vault-name "kvnotalawfi2cdo3cw7vuafm" \
-     --name "graph-teams-client-cert" \
-     --policy @teams-policy.json
+3. **Generate `graph-teams-client-cert` using the default policy with `contentType = 'application/x-pem-file'`, the subject changed, and the key exportable:**
+   ```powershell
+   $p = az keyvault certificate get-default-policy | ConvertFrom-Json
+   $p.x509CertificateProperties.subject = 'CN=graph-teams.1squared.co.uk'
+   $p.keyProperties.exportable = $true
+   $p.secretProperties.contentType = 'application/x-pem-file'
+   $p | ConvertTo-Json -Depth 10 | Set-Content -Path teams-policy.json -Encoding utf8
+
+   az keyvault certificate create `
+     --vault-name "kvnotalawfi2cdo3cw7vuafm" `
+     --name "graph-teams-client-cert" `
+     --policy "@teams-policy.json"
    ```
-   (Key Vault stores the backing secret under `kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert`, which `GraphAppTokenProvider` parses directly in memory without any disk write.)
+   (Setting `$p.secretProperties.contentType = 'application/x-pem-file'` stores the backing private key and certificate in PEM format under `kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert`, which `GraphAppTokenProvider` parses directly in memory with `X509Certificate` and `createPrivateKey` without any disk write.)
 4. **Download `.cer`, upload it to Entra app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8`, and record the thumbprint:**
-   ```bash
-   az keyvault certificate download \
-     --vault-name "kvnotalawfi2cdo3cw7vuafm" \
-     --name "graph-teams-client-cert" \
-     --file "graph-teams-client-cert.cer" \
+   ```powershell
+   az keyvault certificate download `
+     --vault-name "kvnotalawfi2cdo3cw7vuafm" `
+     --name "graph-teams-client-cert" `
+     --file "graph-teams-client-cert.cer" `
      --encoding DER
 
-   az keyvault certificate show \
-     --vault-name "kvnotalawfi2cdo3cw7vuafm" \
-     --name "graph-teams-client-cert" \
+   az keyvault certificate show `
+     --vault-name "kvnotalawfi2cdo3cw7vuafm" `
+     --name "graph-teams-client-cert" `
      --query "x509Thumbprint" -o tsv
    ```
    Upload `graph-teams-client-cert.cer` to Entra app registration **`76474047-ac1f-49ee-83f3-5a2a58c2b3f8`** under **Certificates & secrets -> Certificates**, note the 40-character uppercase SHA-1 hex thumbprint (`integrations.teams.graph.certificateThumbprint` in `demo.json`), and delete local temporary files (`teams-policy.json`, `graph-teams-client-cert.cer`).
@@ -161,6 +163,7 @@ Keep `integrations.teams.provider = "disabled"` in `client-not-a-law-firm/config
 
 ## 8. Common Error Codes & Diagnostics
 
+- `GRAPH_CERT_FORMAT_UNSUPPORTED`: Key Vault certificate secret (`graph-teams-client-cert`) is PKCS#12 (`application/x-pkcs12`) or otherwise not an unencrypted PEM bundle. Create the certificate with `$p.secretProperties.contentType = 'application/x-pem-file'`.
 - `TEAMS_GRAPH_CONFIG_INVALID`: Missing `certificateThumbprint`, `certificateVaultRef`, `clientId`, or `tenantId` under `integrations.teams.graph`.
 - `TEAMS_CONTENT_SCRUB_REJECTED`: Confidential content or disallowed parameter name attempted to enter the Teams payload; blocked before queuing or HTTP send.
 - `GRAPH_CERT_THUMBPRINT_MISMATCH`: `graph-teams-client-cert` in `kvnotalawfi2cdo3cw7vuafm` does not match `integrations.teams.graph.certificateThumbprint`.
