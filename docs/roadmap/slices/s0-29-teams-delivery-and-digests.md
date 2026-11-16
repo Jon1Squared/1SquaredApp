@@ -131,13 +131,11 @@ Bump `CORE_REQUIRED_SCHEMA_VERSION` from `'0019'` to `'0020'` and add `0020_team
 
 ---
 
-## 9. Manual Setup / External Blockers
+## 9. Manual Setup & Readiness
 
-Live Graph `TeamsActivity.Send` delivery in the demo environment depends on Section 8 manual tasks documented in [`docs/runbooks/teams-app-setup.md`](../../runbooks/teams-app-setup.md) (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without them):
-- Microsoft Entra app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`) is pre-configured in `client-not-a-law-firm/config/environments/demo.json` (`integrations.teams.provider = "disabled"` until unlocked), with **`TeamsActivity.Send` application permission already granted admin consent** (`User.Read` removed), and a ready-to-upload package is built at `core/integrations/teams/app-package/` (`npm run teams:package`).
-- **Remaining blockers before switching `"provider"` from `"disabled"` to `"graph"`:**
-  1. Enable custom apps (if needed), upload `dist/teams-app/onesquared-teams-app.zip` in Microsoft Teams Admin Center, and assign an App Setup Policy installing it for the demo users.
-  2. Generate `graph-teams-client-cert` (`kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert`) directly inside Key Vault `kvnotalawfi2cdo3cw7vuafm` with `secretProperties.contentType = "application/x-pem-file"` (uploading its `.cer` to app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` and recording `certificateThumbprint` in `demo.json`), populate `teams-recipient-allowlist` (`kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist`), and verify live delivery before switching `integrations.teams.provider` from `"disabled"` to `"graph"`.
+Live Graph `TeamsActivity.Send` delivery in the demo environment relies on Section 8 setup documented in [`docs/runbooks/teams-app-setup.md`](../../runbooks/teams-app-setup.md) (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without live Azure access):
+- **Done (16 November 2026):** Microsoft Entra app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`) has **`TeamsActivity.Send` application permission granted with admin consent** (`User.Read` removed); `core/integrations/teams/app-package/` is packaged, uploaded and allowed in Teams Admin Center with an App Setup Policy assigned to the demo users; PEM certificate `graph-teams-client-cert` (`secretProperties.contentType = "application/x-pem-file"`, SHA-1 thumbprint `6A23E571EA3F43D1DB39C187A201B40454159D3B`) and `teams-recipient-allowlist` are created in `kvnotalawfi2cdo3cw7vuafm` with `.cer` uploaded to Entra; `demo.json` holds `"certificateThumbprint": "6A23E571EA3F43D1DB39C187A201B40454159D3B"` and `"provider": "disabled"`.
+- **Remaining activation step:** After Checkpoint 5c deploys to Azure, run the live Graph verification test and switch `integrations.teams.provider` from `"disabled"` to `"graph"`.
 
 ---
 

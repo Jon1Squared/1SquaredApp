@@ -4,15 +4,16 @@ This runbook covers the operational setup required to enable live Microsoft Team
 
 All demo tenant Key Vault references in `client-not-a-law-firm/config/environments/demo.json` resolve to the deployed Azure Key Vault **`kvnotalawfi2cdo3cw7vuafm`** (`https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/`).
 
-## 1. Completed Microsoft Entra Prerequisites
-
-The Microsoft Entra application registration for Teams Activity Feed notifications is already created and consented:
+## 1. Completed Microsoft Entra, Teams Admin & Key Vault Prerequisites (`16 November 2026`)
 
 | Item | Value / Scope | Status |
 | :--- | :--- | :--- |
 | **Microsoft Entra application & Teams App ID** | `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` in directory `f8218d9a-e055-463f-add2-f03679aad7f2` | **Done** |
 | **Microsoft Graph application permission** | `TeamsActivity.Send` granted with tenant administrator consent (`User.Read` has been removed) | **Done** |
 | **Teams app package manifest & icons** | `core/integrations/teams/app-package/` (`manifest.json` schema `1.16`, `color.png` 192×192, `outline.png` 32×32) | **Done** |
+| **Teams Admin Center upload & Setup Policy** | `onesquared-teams-app.zip` uploaded and allowed in Teams Admin Center; App Setup Policy assigned to the demo users | **Done (16 November 2026)** |
+| **Key Vault `graph-teams-client-cert` PEM certificate** | Generated inside `kvnotalawfi2cdo3cw7vuafm` with `secretProperties.contentType = "application/x-pem-file"`, SHA-1 thumbprint **`6A23E571EA3F43D1DB39C187A201B40454159D3B`**, `.cer` uploaded to `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` | **Done (16 November 2026)** |
+| **Allow-list secret (`teams-recipient-allowlist`)** | `kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist` created in `kvnotalawfi2cdo3cw7vuafm` | **Done (16 November 2026)** |
 
 > [!NOTE]
 > Confidential matter titles, client names, email addresses, and free-text notes never leave the platform boundary. `CoreTeamsNotifier` strips or rejects confidential fields before sending only built-in redacted `activityType` events (defined in `core/integrations/teams/app-package/manifest.json`) to bound internal users (`Person.entraObjectId` from PostgreSQL).
@@ -149,13 +150,12 @@ Confirm the final command outputs **`Disabled`**.
 
 ## 7. Live Verification Test & Switching `"provider"` from `"disabled"` to `"graph"`
 
-Keep `integrations.teams.provider = "disabled"` in `client-not-a-law-firm/config/environments/demo.json` until the steps above are finished:
+Keep `integrations.teams.provider = "disabled"` in `client-not-a-law-firm/config/environments/demo.json` until Checkpoint 5c is deployed and live Graph verification succeeds:
 
 1. **Test prerequisites:**
    - Ensure the target test user has an **Entra `entraObjectId` bound** in PostgreSQL (`people.entra_object_id`), has opted into Teams notifications (`teamsEnabled: true` on their profile's **Notifications** tab), and matches `teams-recipient-allowlist` (`kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist`).
-   - Wait up to a few hours after assigning the Teams App Setup Policy for Microsoft Teams to install the app on the user's client.
-2. **Update configuration and run a live verification check:**
-   - Set `integrations.teams.graph.certificateThumbprint` in `client-not-a-law-firm/config/environments/demo.json` (or deployment config) to the 40-character uppercase SHA-1 hex thumbprint recorded in Section 4.
+   - Confirm `integrations.teams.graph.certificateThumbprint` is set to `6A23E571EA3F43D1DB39C187A201B40454159D3B` (already set in `demo.json`).
+2. **Deploy Checkpoint 5c and run a live verification check:**
    - Temporarily test a live notification trigger (for example assigning a task to the allow-listed user) with `integrations.teams.provider = "graph"`, run/wait for `caj-outbox-drain-demo`, and confirm the user receives a redacted Teams Activity Feed notification linking safely back into the platform (`https://teams.microsoft.com/l/entity/<teamsAppId>/home?...`) with zero client names or confidential titles in the card.
    - Check telemetry/outbox state: `public.teams_activity_outbox` marks the row `'sent'` (`outbox.delivery.sent`), whilst un-bound users stop with `'dropped_unbound'` and non-allow-listed recipients stop with `'dropped_not_allow_listed'` and zero-PII audit entry `'teams-notification-dropped-allowlist'`.
 3. **Promote `demo.json` after the live check:**

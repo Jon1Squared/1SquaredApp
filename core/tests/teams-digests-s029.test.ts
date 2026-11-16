@@ -443,7 +443,7 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       graph: {
         certificateVaultRef:
           'kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate',
-        certificateThumbprint: 'BC9CB621EF3BDC2413D3EA345609586ABF5167ED',
+        certificateThumbprint: 'C5428D7F519AE513A5B8CE027D291876CEDA40D3',
       },
     });
     expect(demoCfg.documentStores?.[0]?.auth.certificateKeyVaultSecretRef).toBe(
@@ -457,6 +457,7 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       graph: {
         clientId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
         certificateVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert',
+        certificateThumbprint: '6A23E571EA3F43D1DB39C187A201B40454159D3B',
       },
     });
 
