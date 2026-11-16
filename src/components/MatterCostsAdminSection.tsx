@@ -7,6 +7,11 @@ import {
   syncMatterCostsRatesFromPmsAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import {
+  createDefaultFirmFeeArrangementCaps,
+  listActiveStatutoryFeeCaps,
+  validateFirmFeeCapEntries,
+} from '@platform/core-api';
 import type {
   ChoiceValue,
   CustomGradeRateRow,
@@ -164,11 +169,24 @@ export function MatterCostsAdminSection({
       showToast('Partner cost sign-off threshold must be £0 or greater.');
       return;
     }
+    const feeCapValidation = validateFirmFeeCapEntries(config.feeArrangementCaps);
+    if (!feeCapValidation.ok) {
+      showToast(feeCapValidation.message);
+      return;
+    }
     startTransition(async () => {
-      const saved = await saveMatterCostsConfigAction(config);
-      if (isActionDenied(saved)) { showToast(saved.message); return; }
-      setConfig(saved);
-      showToast('Matter Costs & Client Rate Cards saved');
+      try {
+        const saved = await saveMatterCostsConfigAction(config);
+        if (isActionDenied(saved)) { showToast(saved.message); return; }
+        setConfig(saved);
+        showToast('Matter Costs & Client Rate Cards saved');
+      } catch (err) {
+        showToast(
+          err instanceof Error
+            ? err.message
+            : 'Could not save Matter Costs configuration.',
+        );
+      }
     });
   }
 
@@ -504,6 +522,125 @@ export function MatterCostsAdminSection({
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Firm CFA & DBA Fee Arrangement Caps */}
+      <div className="subcard">
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 10,
+            marginBottom: 10,
+          }}
+        >
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>
+              CFA &amp; DBA Fee Arrangement Caps
+            </h3>
+            <p className="muted" style={{ margin: '3px 0 0', fontSize: 12.5 }}>
+              Firm-wide percentage caps per statutory category. Defaults match statutory maximums; lower house caps apply unless a work-type rule specifies an override (up to the statutory maximum).
+            </p>
+          </div>
+        </div>
+
+        <table className="data-list__table" style={{ width: '100%', fontSize: 13 }}>
+          <thead>
+            <tr className="data-list__head-row">
+              <th className="data-list__th">Fee basis &amp; category</th>
+              <th className="data-list__th">Statutory max</th>
+              <th className="data-list__th">Firm cap (%)</th>
+              <th className="data-list__th">Locked calculation base</th>
+            </tr>
+          </thead>
+          <tbody>
+            {listActiveStatutoryFeeCaps().map((row) => {
+              const currentCaps =
+                config.feeArrangementCaps && config.feeArrangementCaps.length > 0
+                  ? config.feeArrangementCaps
+                  : createDefaultFirmFeeArrangementCaps();
+              const existingEntry = currentCaps.find(
+                (c) => c.capCategoryKey === row.capCategoryKey,
+              );
+              const firmMaxPercent = existingEntry?.maxPercent ?? row.maxPercent;
+              return (
+                <tr key={row.capCategoryKey} className="data-list__row">
+                  <td className="data-list__td">
+                    <strong>
+                      {row.feeBasis === 'conditional_fee_agreement' ? 'CFA' : 'DBA'} —{' '}
+                      {row.caseTypeLabel}
+                    </strong>
+                    <div className="muted" style={{ fontSize: 11.5 }}>
+                      <code>{row.capCategoryKey}</code> · {row.legislationRef}
+                    </div>
+                  </td>
+                  <td className="data-list__td">
+                    <StatusPill label={`${row.maxPercent}%`} tone="neutral" />
+                  </td>
+                  <td className="data-list__td">
+                    <input
+                      type="number"
+                      className="field-input"
+                      aria-label={`${row.caseTypeLabel} firm cap percentage`}
+                      min={0}
+                      max={row.maxPercent}
+                      step={0.5}
+                      style={{ width: 96 }}
+                      value={firmMaxPercent}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const parsed = raw === '' ? 0 : Number(raw);
+                        setConfig((prev) => {
+                          const baseList =
+                            prev.feeArrangementCaps &&
+                            prev.feeArrangementCaps.length > 0
+                              ? prev.feeArrangementCaps
+                              : createDefaultFirmFeeArrangementCaps();
+                          const nextList = baseList.some(
+                            (c) => c.capCategoryKey === row.capCategoryKey,
+                          )
+                            ? baseList.map((c) =>
+                                c.capCategoryKey === row.capCategoryKey
+                                  ? {
+                                      ...c,
+                                      maxPercent: Number.isFinite(parsed)
+                                        ? parsed
+                                        : 0,
+                                      capBaseKey: row.capBaseKey,
+                                    }
+                                  : c,
+                              )
+                            : [
+                                ...baseList,
+                                {
+                                  capCategoryKey: row.capCategoryKey,
+                                  maxPercent: Number.isFinite(parsed)
+                                    ? parsed
+                                    : 0,
+                                  capBaseKey: row.capBaseKey,
+                                },
+                              ];
+                          return {
+                            ...prev,
+                            feeArrangementCaps: nextList,
+                          };
+                        });
+                      }}
+                    />
+                  </td>
+                  <td className="data-list__td">
+                    <div>{row.capBaseDescription}</div>
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      <code>{row.capBaseKey}</code>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       {/* Application & PMS Rates Table */}

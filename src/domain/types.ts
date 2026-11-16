@@ -5,6 +5,8 @@
  */
 
 import type {
+  FeeArrangementCapEntry,
+  FeeCapLevel,
   GradeRateResolution,
   RbacConfiguration,
   ResolvedRateSource,
@@ -1238,7 +1240,9 @@ export type QuoteFeeBasis =
   | 'Fixed fee'
   | 'Estimate'
   | 'Capped fee'
-  | 'Hourly rate with estimate';
+  | 'Hourly rate with estimate'
+  | 'Conditional fee agreement (CFA)'
+  | 'Damages-based agreement (DBA)';
 
 export type QuoteDeclineReason =
   | 'Price'
@@ -1292,6 +1296,12 @@ export interface QuoteVersionSnapshot {
   rateCardName?: string | null;
   rateGradeKey?: string;
   rateProvenanceByGrade?: Record<string, GradeRateResolution>;
+  feeArrangementCapCategoryKey?: string;
+  feeArrangementPercent?: number | null;
+  feeArrangementCapBaseKey?: string;
+  feeArrangementCapBaseDescription?: string;
+  feeArrangementAppliedCapPercent?: number | null;
+  feeArrangementCapLevel?: FeeCapLevel;
 }
 
 export interface QuoteTimelineEvent {
@@ -1345,6 +1355,12 @@ export interface Quote {
   rateCardName?: string | null;
   rateGradeKey?: string;
   rateProvenanceByGrade?: Record<string, GradeRateResolution>;
+  feeArrangementCapCategoryKey?: string;
+  feeArrangementPercent?: number | null;
+  feeArrangementCapBaseKey?: string;
+  feeArrangementCapBaseDescription?: string;
+  feeArrangementAppliedCapPercent?: number | null;
+  feeArrangementCapLevel?: FeeCapLevel;
   feeEarnerId: string; // P-xxxxxx
   assignedTeamId: string | null; // TM-xxxxxx
   validUntil: string; // YYYY-MM-DD
@@ -1684,7 +1700,12 @@ export interface SignOffItem {
 }
 
 // ------------------------------------------------------------------ Matter Costs & Multi-Client Customisable Rates Table
-export type MatterCostWorkBasis = 'fixed_fee' | 'hourly_rates' | 'capped';
+export type MatterCostWorkBasis =
+  | 'fixed_fee'
+  | 'hourly_rates'
+  | 'capped'
+  | 'conditional_fee_agreement'
+  | 'damages_based_agreement';
 
 export type RateTableSourceMode = 'app_table' | 'pms_when_linked' | 'pms_only';
 
@@ -1745,6 +1766,12 @@ export interface MatterCostsSnapshot {
   rateProvenanceByGrade?: Record<string, GradeRateResolution>;
   totalEstimateGbp: number | null;
   agreedCapGbp?: number | null;
+  feeArrangementCapCategoryKey?: string;
+  feeArrangementPercent?: number | null;
+  feeArrangementCapBaseKey?: string;
+  feeArrangementCapBaseDescription?: string;
+  feeArrangementAppliedCapPercent?: number | null;
+  feeArrangementCapLevel?: FeeCapLevel;
   vatRatePercent?: number;
   disbursements: MatterDisbursementEntry[];
   disbursementsTotalGbp: number;
@@ -1778,6 +1805,7 @@ export interface MatterCostsConfig {
   defaultPaymentOnAccountAmountGbp?: number;
   rateCards: RateCardEntry[];
   disbursementPresets: DisbursementPresetItem[];
+  feeArrangementCaps?: FeeArrangementCapEntry[];
   updatedAt: string;
   updatedById: string;
 }

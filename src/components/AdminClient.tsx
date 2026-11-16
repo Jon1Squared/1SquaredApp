@@ -1461,6 +1461,7 @@ export function AdminClient({
           initialConfig={workTypesConfig}
           values={values}
           orgStructure={orgCatalogue}
+          matterCostsConfig={matterCostsConfig}
           canEdit={Boolean(currentUserPermissions?.includes('admin:access'))}
           hasMfaVerified={hasMfaVerified}
         />

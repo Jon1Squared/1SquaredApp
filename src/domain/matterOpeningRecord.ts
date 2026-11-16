@@ -1526,7 +1526,31 @@ export function resolveMatterOpeningSnapshot(
       role: customRoles[tid] || 'Team member',
     })),
     billingAndFinancials: {
-      billingBasis: resolveLabel(values, matter.billingBasisId) || '—',
+      billingBasis: (() => {
+        const mc = matter.fieldValues?.['matterCosts'] as
+          | {
+              workBasis?: string;
+              feeArrangementPercent?: number | null;
+              feeArrangementCapBaseDescription?: string;
+            }
+          | undefined;
+        const baseLabel =
+          resolveLabel(values, matter.billingBasisId) ||
+          (mc?.workBasis === 'conditional_fee_agreement'
+            ? 'Conditional Fee (CFA)'
+            : mc?.workBasis === 'damages_based_agreement'
+              ? 'Damages-Based Agreement (DBA)'
+              : '—');
+        if (
+          mc &&
+          mc.feeArrangementPercent !== undefined &&
+          mc.feeArrangementPercent !== null &&
+          mc.feeArrangementCapBaseDescription
+        ) {
+          return `${baseLabel} (${mc.feeArrangementPercent}% of ${mc.feeArrangementCapBaseDescription})`;
+        }
+        return baseLabel;
+      })(),
       feeEstimateGbp:
         matter.feeEstimateGbp != null
           ? `£${matter.feeEstimateGbp.toLocaleString('en-GB')}`

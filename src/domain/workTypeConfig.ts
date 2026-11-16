@@ -1,7 +1,10 @@
 import type {
+  FeeArrangementCapEntry,
   TenantConfiguration,
   WorkTypeAutoTaskTemplateConfig,
   WorkTypeConfigItem,
+  WorkTypeFeeArrangementCapCategoriesConfig,
+  WorkTypeFeeCapOverrideConfig,
   WorkTypeRetentionConfig,
   WorkTypeRiskQuestionConfig,
   WorkTypeRiskQuestionOptionConfig,
@@ -206,6 +209,29 @@ export function resolveEffectiveWorkTypesConfig(
           }
         : undefined;
 
+      const cfaCat =
+        item.feeArrangementCapCategories?.conditional_fee_agreement;
+      const dbaCat =
+        item.feeArrangementCapCategories?.damages_based_agreement;
+      const itemFeeCapCategories:
+        | WorkTypeFeeArrangementCapCategoriesConfig
+        | undefined =
+        cfaCat || dbaCat
+          ? {
+              ...(cfaCat ? { conditional_fee_agreement: cfaCat } : {}),
+              ...(dbaCat ? { damages_based_agreement: dbaCat } : {}),
+            }
+          : undefined;
+
+      const itemCapOverrides: WorkTypeFeeCapOverrideConfig[] = [];
+      for (const ov of item.workTypeCapOverrides ?? []) {
+        itemCapOverrides.push({
+          capCategoryKey: ov.capCategoryKey,
+          maxPercent: ov.maxPercent,
+          capBaseKey: ov.capBaseKey,
+        });
+      }
+
       mergedItemsMap.set(item.workTypeId, {
         workTypeId: item.workTypeId,
         practiceAreaId: item.practiceAreaId ?? '',
@@ -213,6 +239,12 @@ export function resolveEffectiveWorkTypesConfig(
         autoTaskTemplates: itemAutoTaskTemplates,
         riskQuestions: itemRiskQuestions,
         ...(itemRetention ? { retention: itemRetention } : {}),
+        ...(itemFeeCapCategories
+          ? { feeArrangementCapCategories: itemFeeCapCategories }
+          : {}),
+        ...(itemCapOverrides.length > 0
+          ? { workTypeCapOverrides: itemCapOverrides }
+          : {}),
       });
     }
   };
@@ -323,6 +355,63 @@ export function resolveWorkTypeRetention(
     ...config.defaults.retention,
     source: 'firm_default',
     matchedWorkTypeId: null,
+  };
+}
+
+export interface ResolvedWorkTypeFeeArrangementSettings {
+  effectiveWorkTypeId: string;
+  feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesConfig;
+  workTypeCapOverrides: FeeArrangementCapEntry[];
+  matchedSource: 'work_type' | 'practice_area' | 'none';
+}
+
+/**
+ * Resolves CFA/DBA category mappings and per-work-type cap overrides (`R486`),
+ * allowing subcategory-level settings to override parent practice-area rules while
+ * preserving unmapped slots as `undefined` so validation fails closed.
+ */
+export function resolveWorkTypeFeeArrangementSettings(
+  config: WorkTypesConfiguration,
+  input: EffectiveWorkTypesResolutionInput,
+): ResolvedWorkTypeFeeArrangementSettings {
+  const { subItem, paItem } = findMatchingWorkTypeItems(config, input);
+  const effectiveWorkTypeId =
+    (subItem?.workTypeId ??
+      paItem?.workTypeId ??
+      (input.workTypeSubcategoryId ?? '').trim()) ||
+    (input.practiceAreaId ?? '').trim();
+
+  const conditional_fee_agreement =
+    subItem?.feeArrangementCapCategories?.conditional_fee_agreement ??
+    paItem?.feeArrangementCapCategories?.conditional_fee_agreement;
+  const damages_based_agreement =
+    subItem?.feeArrangementCapCategories?.damages_based_agreement ??
+    paItem?.feeArrangementCapCategories?.damages_based_agreement;
+
+  const overridesByCategory = new Map<string, FeeArrangementCapEntry>();
+  for (const ov of paItem?.workTypeCapOverrides ?? []) {
+    overridesByCategory.set(ov.capCategoryKey, {
+      capCategoryKey: ov.capCategoryKey,
+      maxPercent: ov.maxPercent,
+      capBaseKey: ov.capBaseKey,
+    });
+  }
+  for (const ov of subItem?.workTypeCapOverrides ?? []) {
+    overridesByCategory.set(ov.capCategoryKey, {
+      capCategoryKey: ov.capCategoryKey,
+      maxPercent: ov.maxPercent,
+      capBaseKey: ov.capBaseKey,
+    });
+  }
+
+  return {
+    effectiveWorkTypeId,
+    feeArrangementCapCategories: {
+      ...(conditional_fee_agreement ? { conditional_fee_agreement } : {}),
+      ...(damages_based_agreement ? { damages_based_agreement } : {}),
+    },
+    workTypeCapOverrides: Array.from(overridesByCategory.values()),
+    matchedSource: subItem ? 'work_type' : paItem ? 'practice_area' : 'none',
   };
 }
 

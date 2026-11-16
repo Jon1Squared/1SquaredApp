@@ -1,13 +1,14 @@
 'use client';
 
 import React, { useMemo, useState, useTransition } from 'react';
-import type {
-  HomeRoleKey,
-  WorkTypeAutoTaskTemplateConfig,
-  WorkTypeConfigItem,
-  WorkTypeRiskQuestionConfig,
-  WorkTypeRiskQuestionOptionConfig,
-  WorkTypesConfiguration,
+import {
+  listActiveStatutoryFeeCaps,
+  type HomeRoleKey,
+  type WorkTypeAutoTaskTemplateConfig,
+  type WorkTypeConfigItem,
+  type WorkTypeRiskQuestionConfig,
+  type WorkTypeRiskQuestionOptionConfig,
+  type WorkTypesConfiguration,
 } from '@platform/core-api';
 import { saveWorkTypesConfigAction } from '@/app/actions';
 import { valuesForList } from '@/domain/lists';
@@ -15,7 +16,11 @@ import {
   isWorkTypeChoiceActive,
   resolveDepartmentForPracticeArea,
 } from '@/domain/orgStructure';
-import type { ChoiceValue, OrgStructureCatalogue } from '@/domain/types';
+import type {
+  ChoiceValue,
+  MatterCostsConfig,
+  OrgStructureCatalogue,
+} from '@/domain/types';
 import {
   resolveWorkTypeAutoTaskTemplates,
   resolveWorkTypeRetention,
@@ -28,6 +33,7 @@ interface WorkTypesAdminPanelProps {
   initialConfig: WorkTypesConfiguration;
   values: ChoiceValue[];
   orgStructure?: OrgStructureCatalogue;
+  matterCostsConfig?: MatterCostsConfig | null;
   canEdit: boolean;
   hasMfaVerified?: boolean;
 }
@@ -74,6 +80,7 @@ export function WorkTypesAdminPanel({
   initialConfig,
   values,
   orgStructure,
+  matterCostsConfig = null,
   canEdit,
   hasMfaVerified = true,
 }: WorkTypesAdminPanelProps) {
@@ -967,6 +974,213 @@ export function WorkTypesAdminPanel({
                     }
                   />
                 </div>
+              </div>
+
+              <div>
+                <h4 style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>
+                  CFA &amp; DBA Statutory Cap Categories &amp; Work-Type Overrides
+                </h4>
+                <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                  Map CFA and DBA fee bases to statutory cap categories for this work type (required before saving CFA/DBA matters or quotes). Optional work-type cap overrides take precedence over firm defaults and may sit above or below the firm cap up to the statutory maximum.
+                </p>
+                {(() => {
+                  const statutoryRows = listActiveStatutoryFeeCaps();
+                  const cfaRows = statutoryRows.filter(
+                    (r) => r.feeBasis === 'conditional_fee_agreement',
+                  );
+                  const dbaRows = statutoryRows.filter(
+                    (r) => r.feeBasis === 'damages_based_agreement',
+                  );
+                  const mappedCfa =
+                    selectedItem?.feeArrangementCapCategories
+                      ?.conditional_fee_agreement ?? '';
+                  const mappedDba =
+                    selectedItem?.feeArrangementCapCategories
+                      ?.damages_based_agreement ?? '';
+                  const firmCaps = matterCostsConfig?.feeArrangementCaps ?? [];
+                  const currentOverrides =
+                    selectedItem?.workTypeCapOverrides ?? [];
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                        <label style={{ fontSize: 12 }}>
+                          <span style={{ display: 'block', fontWeight: 600, marginBottom: 3 }}>
+                            CFA statutory cap category
+                          </span>
+                          <select
+                            className="field-select"
+                            value={mappedCfa}
+                            onChange={(e) => {
+                              const nextCat = e.target.value;
+                              updateSelectedItem(selectedChoice, (item) => {
+                                const prevCats =
+                                  item.feeArrangementCapCategories ?? {};
+                                const nextCats = {
+                                  ...(prevCats.damages_based_agreement
+                                    ? {
+                                        damages_based_agreement:
+                                          prevCats.damages_based_agreement,
+                                      }
+                                    : {}),
+                                  ...(nextCat
+                                    ? { conditional_fee_agreement: nextCat }
+                                    : {}),
+                                };
+                                return {
+                                  ...item,
+                                  feeArrangementCapCategories:
+                                    Object.keys(nextCats).length > 0
+                                      ? nextCats
+                                      : undefined,
+                                };
+                              });
+                            }}
+                          >
+                            <option value="">Unmapped (CFA blocked fail closed)</option>
+                            {cfaRows.map((r) => (
+                              <option key={r.capCategoryKey} value={r.capCategoryKey}>
+                                {r.caseTypeLabel} ({r.maxPercent}% of {r.capBaseDescription})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label style={{ fontSize: 12 }}>
+                          <span style={{ display: 'block', fontWeight: 600, marginBottom: 3 }}>
+                            DBA statutory cap category
+                          </span>
+                          <select
+                            className="field-select"
+                            value={mappedDba}
+                            onChange={(e) => {
+                              const nextCat = e.target.value;
+                              updateSelectedItem(selectedChoice, (item) => {
+                                const prevCats =
+                                  item.feeArrangementCapCategories ?? {};
+                                const nextCats = {
+                                  ...(prevCats.conditional_fee_agreement
+                                    ? {
+                                        conditional_fee_agreement:
+                                          prevCats.conditional_fee_agreement,
+                                      }
+                                    : {}),
+                                  ...(nextCat
+                                    ? { damages_based_agreement: nextCat }
+                                    : {}),
+                                };
+                                return {
+                                  ...item,
+                                  feeArrangementCapCategories:
+                                    Object.keys(nextCats).length > 0
+                                      ? nextCats
+                                      : undefined,
+                                };
+                              });
+                            }}
+                          >
+                            <option value="">Unmapped (DBA blocked fail closed)</option>
+                            {dbaRows.map((r) => (
+                              <option key={r.capCategoryKey} value={r.capCategoryKey}>
+                                {r.caseTypeLabel} ({r.maxPercent}% of {r.capBaseDescription})
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <span style={{ fontSize: 12, fontWeight: 600 }}>
+                          Work-type cap overrides (leave blank to inherit firm cap)
+                        </span>
+                        {statutoryRows.map((row) => {
+                          const existingOverride = currentOverrides.find(
+                            (ov) => ov.capCategoryKey === row.capCategoryKey,
+                          );
+                          const firmCap =
+                            firmCaps.find(
+                              (c) => c.capCategoryKey === row.capCategoryKey,
+                            )?.maxPercent ?? row.maxPercent;
+                          return (
+                            <div
+                              key={row.capCategoryKey}
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 120px auto',
+                                gap: 8,
+                                alignItems: 'center',
+                                fontSize: 12,
+                              }}
+                            >
+                              <span>
+                                <strong>
+                                  {row.feeBasis === 'conditional_fee_agreement'
+                                    ? 'CFA'
+                                    : 'DBA'}{' '}
+                                  — {row.caseTypeLabel}
+                                </strong>{' '}
+                                <span className="muted">
+                                  (Firm cap {firmCap}% · Statutory max {row.maxPercent}% of{' '}
+                                  {row.capBaseDescription})
+                                </span>
+                              </span>
+                              <input
+                                type="number"
+                                className="field-input"
+                                min={0}
+                                max={row.maxPercent}
+                                step={0.5}
+                                placeholder={`${firmCap}%`}
+                                aria-label={`${row.caseTypeLabel} work-type cap override percentage`}
+                                value={
+                                  existingOverride
+                                    ? String(existingOverride.maxPercent)
+                                    : ''
+                                }
+                                onChange={(e) => {
+                                  const raw = e.target.value.trim();
+                                  updateSelectedItem(selectedChoice, (item) => {
+                                    const filtered = (
+                                      item.workTypeCapOverrides ?? []
+                                    ).filter(
+                                      (ov) =>
+                                        ov.capCategoryKey !== row.capCategoryKey,
+                                    );
+                                    if (!raw) {
+                                      return {
+                                        ...item,
+                                        workTypeCapOverrides:
+                                          filtered.length > 0
+                                            ? filtered
+                                            : undefined,
+                                      };
+                                    }
+                                    const parsed = Number(raw);
+                                    if (!Number.isFinite(parsed)) {
+                                      return item;
+                                    }
+                                    return {
+                                      ...item,
+                                      workTypeCapOverrides: [
+                                        ...filtered,
+                                        {
+                                          capCategoryKey: row.capCategoryKey,
+                                          maxPercent: parsed,
+                                          capBaseKey: row.capBaseKey,
+                                        },
+                                      ],
+                                    };
+                                  });
+                                }}
+                              />
+                              <span className="muted" style={{ fontSize: 11 }}>
+                                % max {row.maxPercent}%
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>

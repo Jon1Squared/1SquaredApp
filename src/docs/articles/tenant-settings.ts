@@ -53,6 +53,7 @@ The \`matterCosts.*\` settings in \`base.json\` and environment overlays supply 
 | \`matterCosts.vatRatePercent\` | \`20\` | Active | Standard UK VAT percentage (\`0\`–\`100\`, additive default \`20\`) captured into new quotes and matter cost snapshots and calculated in exact integer pence via \`@platform/core-api\` |
 | \`matterCosts.rateCards\` | \`[]\` | Active | Tenant-default hourly rate cards by practice area mapped into runtime \`MatterCostsConfig\` when no module override exists |
 | \`matterCosts.disbursementPresets\` | \`[]\` | Active | Tenant-default disbursement presets merged when no module override exists |
+| \`matterCosts.feeArrangementCaps\` | Statutory defaults (\`100%\`, \`25%\`, \`50%\`, \`35%\`, \`25%\`) | Active | Firm-level CFA and DBA cap percentages paired with locked statutory calculation bases (\`capBaseKey\`); editable in **Administration -> Rates & matter costs** (\`0\` up to statutory maximum; rejected with \`FEE_CAP_CONFIG_EXCEEDS_STATUTORY\` if above statutory limits) |
 
 ### Integrations and PMS synchronisation
 
@@ -102,6 +103,7 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`database.dedicatedServerHost\` | Optional | Active | Hostname of a dedicated Azure Database for PostgreSQL Flexible Server (\`psql-<slug>-<env>.postgres.database.azure.com\`) for Model B hosted tenants requiring their own server or a Customer-Managed Key (ADR 0028 Decision 1) |
 | \`workTypes.defaults.*\` | 6 years retention | Active | Firm-wide fallback automatic opening task templates (\`matter_open\`), work-type risk questions, and closure retention period (\`1\`–\`100\` years) |
 | \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator edits in \`public.tenant_module_configs\` (\`work_type_configs\`, gated by \`admin:access\` + MFA) |
-| \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Reserved (S0-28b) | Reserved for per-work-type CFA/DBA statutory fee cap overrides |
+| \`workTypes.items[].feeArrangementCapCategories\` | Optional | Active | Maps \`conditional_fee_agreement\` and \`damages_based_agreement\` fee bases on a work type to a core statutory cap category key (\`cfa_general_civil\`, \`cfa_personal_injury\`, \`dba_general_civil\`, \`dba_employment\`, \`dba_personal_injury\`); unmapped CFA/DBA matters and quotes fail closed with \`FEE_CAP_CATEGORY_UNMAPPED\` (\`S0-28b\`) |
+| \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Active | Per-work-type CFA/DBA fee cap percentage overrides (\`R486\`, editable up to each category’s core statutory maximum regardless of lower firm defaults; takes precedence over \`matterCosts.feeArrangementCaps\` when present) |
 `.trim(),
 };

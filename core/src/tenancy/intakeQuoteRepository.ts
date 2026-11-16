@@ -17,6 +17,7 @@
  */
 
 import type {
+  FeeCapLevel,
   FirmAuditEntryInput as AppendTenantAuditEntryInput,
   GradeRateResolution,
   ResolvedRateSource,
@@ -201,7 +202,13 @@ export interface TenantQuoteDisbursementRecord {
 export interface TenantQuoteVersionSnapshotRecord {
   version: number;
   status: 'Superseded';
-  feeBasis: 'Fixed fee' | 'Estimate' | 'Capped fee' | 'Hourly rate with estimate';
+  feeBasis:
+    | 'Fixed fee'
+    | 'Estimate'
+    | 'Capped fee'
+    | 'Hourly rate with estimate'
+    | 'Conditional fee agreement (CFA)'
+    | 'Damages-based agreement (DBA)';
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
   vatRatePercent?: number;
@@ -225,6 +232,12 @@ export interface TenantQuoteVersionSnapshotRecord {
   rateCardName?: string | null;
   rateGradeKey?: string;
   rateProvenanceByGrade?: Record<string, GradeRateResolution>;
+  feeArrangementCapCategoryKey?: string;
+  feeArrangementPercent?: number | null;
+  feeArrangementCapBaseKey?: string;
+  feeArrangementCapBaseDescription?: string;
+  feeArrangementAppliedCapPercent?: number | null;
+  feeArrangementCapLevel?: FeeCapLevel;
 }
 
 export interface TenantQuoteTimelineEventRecord {
@@ -278,6 +291,12 @@ export interface TenantQuoteRecord {
   rateCardName?: string | null;
   rateGradeKey?: string;
   rateProvenanceByGrade?: Record<string, GradeRateResolution>;
+  feeArrangementCapCategoryKey?: string;
+  feeArrangementPercent?: number | null;
+  feeArrangementCapBaseKey?: string;
+  feeArrangementCapBaseDescription?: string;
+  feeArrangementAppliedCapPercent?: number | null;
+  feeArrangementCapLevel?: FeeCapLevel;
   feeEarnerId: string;
   assignedTeamId: string | null;
   validUntil: string;
@@ -669,6 +688,48 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
           rateProvenanceByGrade: structuredClone(
             pricing.rateProvenanceByGrade ?? profile.rateProvenanceByGrade,
           ) as Record<string, GradeRateResolution>,
+        }
+      : {}),
+    ...((pricing.feeArrangementCapCategoryKey ?? profile.feeArrangementCapCategoryKey)
+      ? {
+          feeArrangementCapCategoryKey: String(
+            pricing.feeArrangementCapCategoryKey ?? profile.feeArrangementCapCategoryKey,
+          ),
+        }
+      : {}),
+    ...((pricing.feeArrangementPercent ?? profile.feeArrangementPercent) !== undefined
+      ? {
+          feeArrangementPercent: (pricing.feeArrangementPercent ??
+            profile.feeArrangementPercent ??
+            null) as number | null,
+        }
+      : {}),
+    ...((pricing.feeArrangementCapBaseKey ?? profile.feeArrangementCapBaseKey)
+      ? {
+          feeArrangementCapBaseKey: String(
+            pricing.feeArrangementCapBaseKey ?? profile.feeArrangementCapBaseKey,
+          ),
+        }
+      : {}),
+    ...((pricing.feeArrangementCapBaseDescription ?? profile.feeArrangementCapBaseDescription)
+      ? {
+          feeArrangementCapBaseDescription: String(
+            pricing.feeArrangementCapBaseDescription ?? profile.feeArrangementCapBaseDescription,
+          ),
+        }
+      : {}),
+    ...((pricing.feeArrangementAppliedCapPercent ?? profile.feeArrangementAppliedCapPercent) !==
+    undefined
+      ? {
+          feeArrangementAppliedCapPercent: (pricing.feeArrangementAppliedCapPercent ??
+            profile.feeArrangementAppliedCapPercent ??
+            null) as number | null,
+        }
+      : {}),
+    ...((pricing.feeArrangementCapLevel ?? profile.feeArrangementCapLevel)
+      ? {
+          feeArrangementCapLevel: (pricing.feeArrangementCapLevel ??
+            profile.feeArrangementCapLevel) as FeeCapLevel,
         }
       : {}),
     feeEarnerId: row.prepared_by_id ?? profile.feeEarnerId ?? '',
@@ -1437,6 +1498,24 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       ...(quote.rateGradeKey ? { rateGradeKey: quote.rateGradeKey } : {}),
       ...(quote.rateProvenanceByGrade
         ? { rateProvenanceByGrade: quote.rateProvenanceByGrade }
+        : {}),
+      ...(quote.feeArrangementCapCategoryKey
+        ? { feeArrangementCapCategoryKey: quote.feeArrangementCapCategoryKey }
+        : {}),
+      ...(quote.feeArrangementPercent !== undefined
+        ? { feeArrangementPercent: quote.feeArrangementPercent }
+        : {}),
+      ...(quote.feeArrangementCapBaseKey
+        ? { feeArrangementCapBaseKey: quote.feeArrangementCapBaseKey }
+        : {}),
+      ...(quote.feeArrangementCapBaseDescription
+        ? { feeArrangementCapBaseDescription: quote.feeArrangementCapBaseDescription }
+        : {}),
+      ...(quote.feeArrangementAppliedCapPercent !== undefined
+        ? { feeArrangementAppliedCapPercent: quote.feeArrangementAppliedCapPercent }
+        : {}),
+      ...(quote.feeArrangementCapLevel
+        ? { feeArrangementCapLevel: quote.feeArrangementCapLevel }
         : {}),
     };
 

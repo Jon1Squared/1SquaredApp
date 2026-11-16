@@ -75,6 +75,7 @@ import {
 import {
   calculateQuoteTotals,
   evaluateQuoteEffectiveStatus,
+  mapQuoteFeeBasisToArrangementBasis,
   quoteClientDisplayName,
   roundCurrency,
 } from '@/domain/quotes';
@@ -167,6 +168,7 @@ import {
   isClosedOrArchivedMatterStatus,
   resolveEffectiveWorkTypesConfig,
   resolveMatterLifecycleTargetStatusId,
+  resolveWorkTypeFeeArrangementSettings,
   resolveWorkTypeRiskQuestions,
   validateMatterClosureDate,
 } from '@/domain/workTypeConfig';
@@ -185,6 +187,7 @@ import {
   applyEffectiveMatterCostsToTenantConfig,
   calculateMatterSnapshotTotals,
   lookupRatesForMatter,
+  mapMatterWorkBasisToArrangementBasis,
   resolveEffectiveMatterCostsConfig,
   resolveMatterCostsSnapshot,
   syncRateCardsWithPmsFeeEarners,
@@ -242,7 +245,12 @@ import {
   createSignInActorFromVerifiedOidcToken,
 } from './entraAuth';
 import {
+  createDefaultFirmFeeArrangementCaps,
   executeUsageRetentionPurgeJob,
+  FEE_CAP_BASE_MISMATCH_CODE,
+  FEE_CAP_CATEGORY_UNMAPPED_CODE,
+  FEE_CAP_CONFIG_EXCEEDS_STATUTORY_CODE,
+  FeeCapValidationError,
   getActiveTenantTransactionState,
   INVALID_PARENT_ORGANISATION_CODE,
   loadActiveTenantRegistry,
@@ -256,12 +264,17 @@ import {
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
   TenantKeyDateRepository,
+  validateFeeArrangementTerms,
+  validateFirmFeeCapEntries,
   validateKeyDatesConfig,
   validateRbacConfig,
   validateWorkTypesConfig,
   type ClientRateOverrideClientType,
   type ClientRateOverrideRecord,
   type ControlledJobRunOutcome,
+  type EffectiveFeeCapResolution,
+  type FeeArrangementBasis,
+  type FeeCapErrorCode,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
   type JobRunRecord,
@@ -4700,9 +4713,55 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
       ? baselineProvenance
       : undefined;
 
+  const nextWorkBasis =
+    submitted.workBasis ?? existingSnapshot?.workBasis ?? 'hourly_rates';
+  const nextArrangementBasis =
+    mapMatterWorkBasisToArrangementBasis(nextWorkBasis);
+  const sameArrangementBasis =
+    Boolean(nextArrangementBasis) &&
+    existingSnapshot?.workBasis === nextWorkBasis;
+  const resolvedFeeArrangementCapCategoryKey = nextArrangementBasis
+    ? (submitted.feeArrangementCapCategoryKey ??
+      (sameArrangementBasis
+        ? existingSnapshot?.feeArrangementCapCategoryKey
+        : undefined))
+    : undefined;
+  const resolvedFeeArrangementPercent = nextArrangementBasis
+    ? submitted.feeArrangementPercent !== undefined
+      ? submitted.feeArrangementPercent
+      : sameArrangementBasis
+        ? existingSnapshot?.feeArrangementPercent
+        : undefined
+    : undefined;
+  const resolvedFeeArrangementCapBaseKey = nextArrangementBasis
+    ? (submitted.feeArrangementCapBaseKey ??
+      (sameArrangementBasis
+        ? existingSnapshot?.feeArrangementCapBaseKey
+        : undefined))
+    : undefined;
+  const resolvedFeeArrangementCapBaseDescription = nextArrangementBasis
+    ? (submitted.feeArrangementCapBaseDescription ??
+      (sameArrangementBasis
+        ? existingSnapshot?.feeArrangementCapBaseDescription
+        : undefined))
+    : undefined;
+  const resolvedFeeArrangementAppliedCapPercent = nextArrangementBasis
+    ? submitted.feeArrangementAppliedCapPercent !== undefined
+      ? submitted.feeArrangementAppliedCapPercent
+      : sameArrangementBasis
+        ? existingSnapshot?.feeArrangementAppliedCapPercent
+        : undefined
+    : undefined;
+  const resolvedFeeArrangementCapLevel = nextArrangementBasis
+    ? (submitted.feeArrangementCapLevel ??
+      (sameArrangementBasis
+        ? existingSnapshot?.feeArrangementCapLevel
+        : undefined))
+    : undefined;
+
   return {
     snapshot: {
-      workBasis: submitted.workBasis ?? existingSnapshot?.workBasis ?? 'hourly_rates',
+      workBasis: nextWorkBasis,
       rateSource: resolvedRateSource,
       ...(resolvedRateTier !== undefined ? { rateTier: resolvedRateTier } : {}),
       ...(resolvedRateAsAtDate ? { rateAsAtDate: resolvedRateAsAtDate } : {}),
@@ -4721,6 +4780,30 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
       ...(resolvedRateProvenance ? { rateProvenanceByGrade: resolvedRateProvenance } : {}),
       totalEstimateGbp,
       agreedCapGbp,
+      ...(resolvedFeeArrangementCapCategoryKey
+        ? { feeArrangementCapCategoryKey: resolvedFeeArrangementCapCategoryKey }
+        : {}),
+      ...(resolvedFeeArrangementPercent !== undefined
+        ? { feeArrangementPercent: resolvedFeeArrangementPercent }
+        : {}),
+      ...(resolvedFeeArrangementCapBaseKey
+        ? { feeArrangementCapBaseKey: resolvedFeeArrangementCapBaseKey }
+        : {}),
+      ...(resolvedFeeArrangementCapBaseDescription
+        ? {
+            feeArrangementCapBaseDescription:
+              resolvedFeeArrangementCapBaseDescription,
+          }
+        : {}),
+      ...(resolvedFeeArrangementAppliedCapPercent !== undefined
+        ? {
+            feeArrangementAppliedCapPercent:
+              resolvedFeeArrangementAppliedCapPercent,
+          }
+        : {}),
+      ...(resolvedFeeArrangementCapLevel
+        ? { feeArrangementCapLevel: resolvedFeeArrangementCapLevel }
+        : {}),
       vatRatePercent,
       disbursements,
       disbursementsTotalGbp: computedTotals.disbursementsTotalGbp,
@@ -4776,6 +4859,111 @@ function resolveMatterSignOffEstimateGbp(
       0,
   );
   return { resolvedCosts, estimatedFeeGbp };
+}
+
+function formatFeeArrangementAuditSummary(
+  source:
+    | {
+        feeArrangementCapCategoryKey?: string;
+        feeArrangementPercent?: number | null;
+        feeArrangementCapBaseKey?: string;
+        feeArrangementCapBaseDescription?: string;
+        feeArrangementAppliedCapPercent?: number | null;
+        feeArrangementCapLevel?: string;
+      }
+    | null
+    | undefined,
+): string | null {
+  if (!source?.feeArrangementCapCategoryKey) {
+    return null;
+  }
+  const pct =
+    typeof source.feeArrangementPercent === 'number'
+      ? `${source.feeArrangementPercent}%`
+      : 'unspecified %';
+  const baseDesc =
+    source.feeArrangementCapBaseDescription ||
+    source.feeArrangementCapBaseKey ||
+    'unknown base';
+  const baseKey = source.feeArrangementCapBaseKey || 'unknown';
+  const capInfo =
+    typeof source.feeArrangementAppliedCapPercent === 'number'
+      ? `; cap ${source.feeArrangementAppliedCapPercent}% [${source.feeArrangementCapLevel ?? 'statutory'}]`
+      : '';
+  return `${source.feeArrangementCapCategoryKey}: ${pct} of ${baseDesc} (baseKey=${baseKey}${capInfo})`;
+}
+
+function validateFeeArrangementAgainstConfigs(params: {
+  feeBasis: FeeArrangementBasis;
+  workTypeSubcategoryId?: string | null;
+  practiceAreaId?: string | null;
+  workTypesConfig: WorkTypesConfiguration;
+  submittedCapCategoryKey?: string | null;
+  submittedPercent: number | null | undefined;
+  submittedCapBaseKey?: string | null;
+  effectiveCostsConfig: MatterCostsConfig;
+  tenantCfg: ReturnType<typeof getActiveTenantConfiguration>;
+  asAtDate: string;
+}):
+  | { ok: true; resolution: EffectiveFeeCapResolution; acceptedPercent: number }
+  | { ok: false; code: FeeCapErrorCode; message: string } {
+  const workTypeSettings = resolveWorkTypeFeeArrangementSettings(
+    params.workTypesConfig,
+    {
+      workTypeSubcategoryId: params.workTypeSubcategoryId,
+      practiceAreaId: params.practiceAreaId,
+    },
+  );
+  return validateFeeArrangementTerms({
+    feeBasis: params.feeBasis,
+    workTypeId: workTypeSettings.effectiveWorkTypeId,
+    workTypeCapCategories: workTypeSettings.feeArrangementCapCategories,
+    submittedCapCategoryKey: params.submittedCapCategoryKey,
+    submittedPercent: params.submittedPercent,
+    submittedCapBaseKey: params.submittedCapBaseKey,
+    firmCaps:
+      params.effectiveCostsConfig.feeArrangementCaps ??
+      params.tenantCfg.matterCosts.feeArrangementCaps,
+    workTypeCapOverrides: workTypeSettings.workTypeCapOverrides,
+    asAtDate: params.asAtDate,
+  });
+}
+
+async function validateInTxFeeArrangementForRecord(params: {
+  ctx: TenantContext;
+  feeBasis: FeeArrangementBasis;
+  workTypeSubcategoryId?: string | null;
+  practiceAreaId?: string | null;
+  submittedCapCategoryKey?: string | null;
+  submittedPercent: number | null | undefined;
+  submittedCapBaseKey?: string | null;
+  effectiveCostsConfig: MatterCostsConfig;
+  asAtDate: string;
+}): Promise<
+  | { ok: true; resolution: EffectiveFeeCapResolution; acceptedPercent: number }
+  | { ok: false; code: FeeCapErrorCode; message: string }
+> {
+  const tenantCfg = getActiveTenantConfiguration();
+  const dbWorkTypesOverride =
+    await getCatalogueRepository().getWorkTypeConfigs<WorkTypesConfiguration>(
+      params.ctx,
+    );
+  const effectiveWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+    tenantCfg,
+    dbWorkTypesOverride ?? null,
+  );
+  return validateFeeArrangementAgainstConfigs({
+    feeBasis: params.feeBasis,
+    workTypeSubcategoryId: params.workTypeSubcategoryId,
+    practiceAreaId: params.practiceAreaId,
+    workTypesConfig: effectiveWorkTypesConfig,
+    submittedCapCategoryKey: params.submittedCapCategoryKey,
+    submittedPercent: params.submittedPercent,
+    submittedCapBaseKey: params.submittedCapBaseKey,
+    effectiveCostsConfig: params.effectiveCostsConfig,
+    tenantCfg,
+    asAtDate: params.asAtDate,
+  });
 }
 
 async function runMatterOpeningGate(params: {
@@ -6588,6 +6776,54 @@ export async function saveMatterRecord(
     matter.fieldValues['matterCosts'] = costsValidation.snapshot;
   }
 
+  const preTxCurrentCostsSnap = matter.fieldValues['matterCosts'] as
+    | Partial<MatterCostsSnapshot>
+    | undefined;
+  const preTxArrangementBasis = mapMatterWorkBasisToArrangementBasis(
+    preTxCurrentCostsSnap?.workBasis,
+  );
+  if (preTxArrangementBasis && preTxCurrentCostsSnap) {
+    const preTxWorkTypesConfig =
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        store.workTypeConfigsOverride ?? null,
+      );
+    const preTxCapCheck = validateFeeArrangementAgainstConfigs({
+      feeBasis: preTxArrangementBasis,
+      workTypeSubcategoryId: matter.workTypeSubcategoryId,
+      practiceAreaId: matter.practiceAreaId,
+      workTypesConfig: preTxWorkTypesConfig,
+      submittedCapCategoryKey: preTxCurrentCostsSnap.feeArrangementCapCategoryKey,
+      submittedPercent: preTxCurrentCostsSnap.feeArrangementPercent,
+      submittedCapBaseKey: preTxCurrentCostsSnap.feeArrangementCapBaseKey,
+      effectiveCostsConfig,
+      tenantCfg,
+      asAtDate: preTxTodayIso,
+    });
+    if (!preTxCapCheck.ok) {
+      return {
+        matter: null,
+        code: preTxCapCheck.code,
+        message: preTxCapCheck.message,
+        errors: {
+          matterCosts: preTxCapCheck.message,
+        },
+      };
+    }
+    matter.fieldValues['matterCosts'] = {
+      ...preTxCurrentCostsSnap,
+      feeArrangementCapCategoryKey: preTxCapCheck.resolution.capCategoryKey,
+      feeArrangementPercent: preTxCapCheck.acceptedPercent,
+      feeArrangementCapBaseKey: preTxCapCheck.resolution.capBaseKey,
+      feeArrangementCapBaseDescription:
+        preTxCapCheck.resolution.capBaseDescription,
+      feeArrangementAppliedCapPercent:
+        preTxCapCheck.resolution.appliedCapPercent,
+      feeArrangementCapLevel: preTxCapCheck.resolution.capLevel,
+    } satisfies Partial<MatterCostsSnapshot>;
+  }
+
   const host = getPlatformExtensionHost();
   const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
     store,
@@ -6888,6 +7124,52 @@ export async function saveMatterRecord(
           };
         }
         matter.fieldValues['matterCosts'] = inTxCostsValidation.snapshot;
+      }
+
+      const inTxMatterCosts = matter.fieldValues['matterCosts'] as
+        | MatterCostsSnapshot
+        | undefined;
+      const inTxArrangementBasis = mapMatterWorkBasisToArrangementBasis(
+        inTxMatterCosts?.workBasis,
+      );
+      let validatedInTxFeeSummary: string | null = null;
+      if (inTxArrangementBasis && inTxMatterCosts) {
+        const inTxCapCheck = validateFeeArrangementAgainstConfigs({
+          feeBasis: inTxArrangementBasis,
+          workTypeSubcategoryId: matter.workTypeSubcategoryId,
+          practiceAreaId: matter.practiceAreaId,
+          workTypesConfig: inTxWorkTypesConfig,
+          submittedCapCategoryKey: inTxMatterCosts.feeArrangementCapCategoryKey,
+          submittedPercent: inTxMatterCosts.feeArrangementPercent,
+          submittedCapBaseKey: inTxMatterCosts.feeArrangementCapBaseKey,
+          effectiveCostsConfig: inTxEffectiveCostsConfig,
+          tenantCfg,
+          asAtDate: inTxTenantTodayIso,
+        });
+        if (!inTxCapCheck.ok) {
+          return {
+            matter: null,
+            code: inTxCapCheck.code,
+            message: inTxCapCheck.message,
+            errors: {
+              matterCosts: inTxCapCheck.message,
+            },
+          };
+        }
+        const canonicalCosts: MatterCostsSnapshot = {
+          ...inTxMatterCosts,
+          feeArrangementCapCategoryKey: inTxCapCheck.resolution.capCategoryKey,
+          feeArrangementPercent: inTxCapCheck.acceptedPercent,
+          feeArrangementCapBaseKey: inTxCapCheck.resolution.capBaseKey,
+          feeArrangementCapBaseDescription:
+            inTxCapCheck.resolution.capBaseDescription,
+          feeArrangementAppliedCapPercent:
+            inTxCapCheck.resolution.appliedCapPercent,
+          feeArrangementCapLevel: inTxCapCheck.resolution.capLevel,
+        };
+        matter.fieldValues['matterCosts'] = canonicalCosts;
+        validatedInTxFeeSummary =
+          formatFeeArrangementAuditSummary(canonicalCosts);
       }
 
       for (const link of pendingEnquiryLinks) {
@@ -7279,6 +7561,28 @@ export async function saveMatterRecord(
       }
 
       await flushStagedAuditEntries(extensionCtx);
+      const prevMatterFeeSummary = formatFeeArrangementAuditSummary(
+        previousMatterSnapshot?.fieldValues?.['matterCosts'] as
+          | Partial<MatterCostsSnapshot>
+          | undefined,
+      );
+      if (
+        (validatedInTxFeeSummary !== null || prevMatterFeeSummary !== null) &&
+        validatedInTxFeeSummary !== prevMatterFeeSummary
+      ) {
+        await appendTenantAuditEntries(extensionCtx, [
+          {
+            recordType: 'matter',
+            recordId: matter.id,
+            action: previousMatterSnapshot ? 'update' : 'create',
+            field: 'Fee arrangement & cap',
+            oldValue: prevMatterFeeSummary,
+            newValue: validatedInTxFeeSummary ?? 'Standard fee basis (no CFA/DBA cap)',
+            byId: opts.byId,
+            at: now,
+          },
+        ]);
+      }
       auditFlushed = true;
       return null;
     });
@@ -8114,7 +8418,9 @@ export async function signOffMatterCostsRecord(
     matter: Matter | null;
     errors?: Record<string, string>;
     warnings?: string[];
-  } & Partial<ActionDenied>
+  } & Partial<Omit<ActionDenied, 'code'>> & {
+    code?: ActionDenialCode | FeeCapErrorCode;
+  }
 > {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enableMatterCostsGovernance) {
@@ -8333,21 +8639,40 @@ export async function signOffMatterCostsRecord(
     gateResult.governance ?? calcGovernance;
   matter.fieldValues['matterOpeningGate'] = gateResult.record;
 
-  await runWithAuditStagingScope(() =>
-    matterRepo.withTenantTransaction(extensionCtx, async () => {
-      if (!existingSavedCosts?.workBasis) {
-        const inTxCostsOverride =
-          await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(extensionCtx);
-        const inTxCostsConfig = resolveEffectiveMatterCostsConfig(
-          tenantCfg,
-          inTxCostsOverride ?? store.matterCostsConfig,
-          {
-            values: store.values,
-            clientProfileCode: tenantCfg.tenantId,
-            displayName: tenantCfg.displayName,
-            primaryDomain: tenantCfg.branding.primaryDomain,
-          },
+  const signOffTxOutcome = await runWithAuditStagingScope(() =>
+    matterRepo.withTenantTransaction(extensionCtx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [extensionCtx.tenantId, matter.id],
+      );
+      const inTxCostsOverride =
+        await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+          extensionCtx,
         );
+      const inTxCostsConfig = resolveEffectiveMatterCostsConfig(
+        tenantCfg,
+        inTxCostsOverride ?? store.matterCostsConfig,
+        {
+          values: store.values,
+          clientProfileCode: tenantCfg.tenantId,
+          displayName: tenantCfg.displayName,
+          primaryDomain: tenantCfg.branding.primaryDomain,
+        },
+      );
+      const inTxWorkTypesOverride =
+        await getCatalogueRepository().getWorkTypeConfigs<WorkTypesConfiguration>(
+          extensionCtx,
+        );
+      const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        inTxWorkTypesOverride ?? null,
+      );
+      const inTxAsAtDate = resolveTenantLocalDateAndHour(
+        new Date(),
+        tenantCfg.timeZone || 'Europe/London',
+      ).localDate;
+
+      if (!existingSavedCosts?.workBasis) {
         const inTxResolvedRates = await rateOverrideRepo.resolveApplicableRates(
           extensionCtx,
           {
@@ -8355,10 +8680,7 @@ export async function signOffMatterCostsRecord(
             clientId: matter.clientId || null,
             clientType: signOffClientType ?? null,
             practiceAreaId: matter.practiceAreaId || null,
-            asAtDate: resolveTenantLocalDateAndHour(
-              new Date(),
-              tenantCfg.timeZone || 'Europe/London',
-            ).localDate,
+            asAtDate: inTxAsAtDate,
             baseMatterCostsConfig: tenantCfg.matterCosts,
             fallbackRateCardConfig: inTxCostsConfig,
             timeZone: tenantCfg.timeZone,
@@ -8387,6 +8709,54 @@ export async function signOffMatterCostsRecord(
           capturedAt: now,
           updatedAt: now,
         };
+      }
+
+      // Partner / Risk cost sign-off never bypasses CFA/DBA statutory, firm, or work-type caps (ADR 0034 Decision 3).
+      const signOffCosts = matter.fieldValues['matterCosts'] as
+        | MatterCostsSnapshot
+        | undefined;
+      const signOffArrangementBasis = mapMatterWorkBasisToArrangementBasis(
+        signOffCosts?.workBasis,
+      );
+      let verifiedFeeSummary: string | null = null;
+      if (signOffArrangementBasis && signOffCosts) {
+        const capCheck = validateFeeArrangementAgainstConfigs({
+          feeBasis: signOffArrangementBasis,
+          workTypeSubcategoryId: matter.workTypeSubcategoryId,
+          practiceAreaId: matter.practiceAreaId,
+          workTypesConfig: inTxWorkTypesConfig,
+          submittedCapCategoryKey: signOffCosts.feeArrangementCapCategoryKey,
+          submittedPercent: signOffCosts.feeArrangementPercent,
+          submittedCapBaseKey: signOffCosts.feeArrangementCapBaseKey,
+          effectiveCostsConfig: inTxCostsConfig,
+          tenantCfg,
+          asAtDate: inTxAsAtDate,
+        });
+        if (!capCheck.ok) {
+          return {
+            earlyError: {
+              matter: null,
+              code: capCheck.code,
+              message: capCheck.message,
+              errors: { matterCosts: capCheck.message },
+            },
+          };
+        }
+        const canonicalSignOffCosts: MatterCostsSnapshot = {
+          ...signOffCosts,
+          feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+          feeArrangementPercent: capCheck.acceptedPercent,
+          feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+          feeArrangementCapBaseDescription:
+            capCheck.resolution.capBaseDescription,
+          feeArrangementAppliedCapPercent:
+            capCheck.resolution.appliedCapPercent,
+          feeArrangementCapLevel: capCheck.resolution.capLevel,
+        };
+        matter.fieldValues['matterCosts'] = canonicalSignOffCosts;
+        verifiedFeeSummary = formatFeeArrangementAuditSummary(
+          canonicalSignOffCosts,
+        );
       }
 
       if (
@@ -8438,6 +8808,20 @@ export async function signOffMatterCostsRecord(
         byId,
         at: now,
       });
+      if (verifiedFeeSummary) {
+        await appendTenantAuditEntries(extensionCtx, [
+          {
+            recordType: 'matter',
+            recordId: matter.id,
+            action: 'update',
+            field: 'Fee arrangement & cap (sign-off)',
+            oldValue: null,
+            newValue: verifiedFeeSummary,
+            byId,
+            at: now,
+          },
+        ]);
+      }
       if (openedBySignOff) {
         const existingTasksForSignOff =
           await taskRepoForSignOff.listAllTasksUnfiltered<Task>(extensionCtx);
@@ -8459,8 +8843,12 @@ export async function signOffMatterCostsRecord(
         });
       }
       await flushStagedAuditEntries(extensionCtx);
+      return null;
     }),
   );
+  if (signOffTxOutcome?.earlyError) {
+    return signOffTxOutcome.earlyError;
+  }
   return { matter: saved, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
@@ -15455,6 +15843,9 @@ export interface SaveQuoteInput {
   refreshVatRate?: boolean;
   rateGradeKey?: string;
   refreshRates?: boolean;
+  feeArrangementCapCategoryKey?: string;
+  feeArrangementPercent?: number | null;
+  feeArrangementCapBaseKey?: string;
 }
 
 function normalizeQuoteDisbursements(
@@ -15495,7 +15886,11 @@ function normalizeQuoteDisbursements(
 export async function saveQuoteRecord(
   input: SaveQuoteInput,
   opts: { id?: string; byId: string; markAsSent?: boolean; refreshVatRate?: boolean },
-): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+): Promise<
+  { quote?: Quote; error?: string } & Partial<Omit<ActionDenied, 'code'>> & {
+    code?: ActionDenialCode | FeeCapErrorCode;
+  }
+> {
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
   const intakeRepo = getIntakeQuoteRepository();
@@ -15620,6 +16015,51 @@ export async function saveQuoteRecord(
         now,
         tenantCfg.timeZone || 'Europe/London',
       ).localDate;
+
+      const arrangementBasis = mapQuoteFeeBasisToArrangementBasis(
+        input.feeBasis,
+      );
+      let validatedFeeArrangement:
+        | {
+            feeArrangementCapCategoryKey: string;
+            feeArrangementPercent: number;
+            feeArrangementCapBaseKey: string;
+            feeArrangementCapBaseDescription: string;
+            feeArrangementAppliedCapPercent: number;
+            feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
+          }
+        | undefined;
+      if (arrangementBasis) {
+        const capCheck = await validateInTxFeeArrangementForRecord({
+          ctx,
+          feeBasis: arrangementBasis,
+          workTypeSubcategoryId: input.workTypeSubcategoryId ?? null,
+          practiceAreaId: input.practiceAreaId,
+          submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
+          submittedPercent: input.feeArrangementPercent,
+          submittedCapBaseKey: input.feeArrangementCapBaseKey,
+          effectiveCostsConfig,
+          asAtDate: quoteAsAtDate,
+        });
+        if (!capCheck.ok) {
+          return {
+            code: capCheck.code,
+            message: capCheck.message,
+            error: capCheck.message,
+          };
+        }
+        validatedFeeArrangement = {
+          feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+          feeArrangementPercent: capCheck.acceptedPercent,
+          feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+          feeArrangementCapBaseDescription:
+            capCheck.resolution.capBaseDescription,
+          feeArrangementAppliedCapPercent:
+            capCheck.resolution.appliedCapPercent,
+          feeArrangementCapLevel: capCheck.resolution.capLevel,
+        };
+      }
+
       const rateOverrideRepo = getRateOverrideRepository();
       const targetClientId =
         clientType === 'existing' ? (linkedOrganisationId ?? linkedPersonId ?? null) : null;
@@ -15728,6 +16168,7 @@ export async function saveQuoteRecord(
         rateCardName: resolvedRates.rateCardName,
         rateGradeKey,
         rateProvenanceByGrade: resolvedRates.grades,
+        ...(validatedFeeArrangement ?? {}),
         feeEarnerId,
         assignedTeamId,
         validUntil,
@@ -15757,13 +16198,28 @@ export async function saveQuoteRecord(
         at: nowIso,
       });
       await flushStagedAuditEntries(ctx);
+      if (validatedFeeArrangement) {
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'quote',
+            recordId: created.id,
+            action: 'create',
+            field: 'Fee arrangement & cap',
+            oldValue: null,
+            newValue: formatFeeArrangementAuditSummary(created),
+            byId: opts.byId,
+            at: nowIso,
+          },
+        ]);
+      }
       return { quote: created };
     });
   }
 
-  // Update existing quote inside transaction with live matter_costs VAT & rate check
+  // Update existing quote inside transaction with live matter_costs VAT, rate & CFA/DBA cap check
   const wasSentNow = markSent && existing.status === 'Draft';
-  await intakeRepo.withTenantTransaction(ctx, async () => {
+  const prevFeeSummary = formatFeeArrangementAuditSummary(existing);
+  const updateTxOutcome = await intakeRepo.withTenantTransaction(ctx, async () => {
     const tenantCfg = getActiveTenantConfiguration();
     const dbCostsOverride =
       await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
@@ -15771,6 +16227,55 @@ export async function saveQuoteRecord(
       tenantCfg,
       dbCostsOverride,
     );
+    const quoteAsAtDate = resolveTenantLocalDateAndHour(
+      now,
+      tenantCfg.timeZone || 'Europe/London',
+    ).localDate;
+
+    const arrangementBasis = mapQuoteFeeBasisToArrangementBasis(
+      input.feeBasis,
+    );
+    let validatedFeeArrangement:
+      | {
+          feeArrangementCapCategoryKey: string;
+          feeArrangementPercent: number;
+          feeArrangementCapBaseKey: string;
+          feeArrangementCapBaseDescription: string;
+          feeArrangementAppliedCapPercent: number;
+          feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
+        }
+      | undefined;
+    if (arrangementBasis) {
+      const capCheck = await validateInTxFeeArrangementForRecord({
+        ctx,
+        feeBasis: arrangementBasis,
+        workTypeSubcategoryId: input.workTypeSubcategoryId ?? null,
+        practiceAreaId: input.practiceAreaId,
+        submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
+        submittedPercent: input.feeArrangementPercent,
+        submittedCapBaseKey: input.feeArrangementCapBaseKey,
+        effectiveCostsConfig,
+        asAtDate: quoteAsAtDate,
+      });
+      if (!capCheck.ok) {
+        return {
+          code: capCheck.code,
+          message: capCheck.message,
+          error: capCheck.message,
+        };
+      }
+      validatedFeeArrangement = {
+        feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+        feeArrangementPercent: capCheck.acceptedPercent,
+        feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+        feeArrangementCapBaseDescription:
+          capCheck.resolution.capBaseDescription,
+        feeArrangementAppliedCapPercent:
+          capCheck.resolution.appliedCapPercent,
+        feeArrangementCapLevel: capCheck.resolution.capLevel,
+      };
+    }
+
     const existingVatRate =
       typeof existing.vatRatePercent === 'number' &&
       Number.isFinite(existing.vatRatePercent)
@@ -15878,6 +16383,27 @@ export async function saveQuoteRecord(
     existing.capturedAt = shouldRefreshVat
       ? nowIso
       : existing.capturedAt ?? existing.updatedAt ?? existing.createdAt;
+    if (validatedFeeArrangement) {
+      existing.feeArrangementCapCategoryKey =
+        validatedFeeArrangement.feeArrangementCapCategoryKey;
+      existing.feeArrangementPercent =
+        validatedFeeArrangement.feeArrangementPercent;
+      existing.feeArrangementCapBaseKey =
+        validatedFeeArrangement.feeArrangementCapBaseKey;
+      existing.feeArrangementCapBaseDescription =
+        validatedFeeArrangement.feeArrangementCapBaseDescription;
+      existing.feeArrangementAppliedCapPercent =
+        validatedFeeArrangement.feeArrangementAppliedCapPercent;
+      existing.feeArrangementCapLevel =
+        validatedFeeArrangement.feeArrangementCapLevel;
+    } else {
+      delete existing.feeArrangementCapCategoryKey;
+      delete existing.feeArrangementPercent;
+      delete existing.feeArrangementCapBaseKey;
+      delete existing.feeArrangementCapBaseDescription;
+      delete existing.feeArrangementAppliedCapPercent;
+      delete existing.feeArrangementCapLevel;
+    }
     existing.feeEarnerId = feeEarnerId;
     existing.assignedTeamId = assignedTeamId;
     existing.validUntil = validUntil;
@@ -15913,7 +16439,29 @@ export async function saveQuoteRecord(
       at: nowIso,
     });
     await flushStagedAuditEntries(ctx);
+    const nextFeeSummary = formatFeeArrangementAuditSummary(existing);
+    if (
+      (nextFeeSummary !== null || prevFeeSummary !== null) &&
+      nextFeeSummary !== prevFeeSummary
+    ) {
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'quote',
+          recordId: existing.id,
+          action: 'update',
+          field: 'Fee arrangement & cap',
+          oldValue: prevFeeSummary,
+          newValue: nextFeeSummary ?? 'Standard fee basis (no CFA/DBA cap)',
+          byId: opts.byId,
+          at: nowIso,
+        },
+      ]);
+    }
+    return null;
   });
+  if (updateTxOutcome) {
+    return updateTxOutcome;
+  }
   return { quote: existing };
   });
 }
@@ -16105,9 +16653,16 @@ export async function reviseQuoteRecord(
     refreshVatRate?: boolean;
     rateGradeKey?: string;
     refreshRates?: boolean;
+    feeArrangementCapCategoryKey?: string;
+    feeArrangementPercent?: number | null;
+    feeArrangementCapBaseKey?: string;
   },
   byId: string,
-): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+): Promise<
+  { quote?: Quote; error?: string } & Partial<Omit<ActionDenied, 'code'>> & {
+    code?: ActionDenialCode | FeeCapErrorCode;
+  }
+> {
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
@@ -16166,37 +16721,7 @@ export async function reviseQuoteRecord(
       ? quote.vatRatePercent
       : 20;
   const priorCapturedAt = quote.capturedAt ?? quote.updatedAt ?? quote.createdAt;
-
-  quote.versionHistory.push({
-    version: quote.version,
-    status: 'Superseded',
-    feeBasis: quote.feeBasis,
-    feeAmountExVat: quote.feeAmountExVat,
-    hourlyRateGbp: quote.hourlyRateGbp,
-    vatRatePercent: priorVatRatePercent,
-    vatAmount: quote.vatAmount,
-    ...(quote.vatOverridden ? { vatOverridden: true } : {}),
-    disbursements: structuredClone(quote.disbursements),
-    totalIncVat: quote.totalIncVat,
-    scope: quote.scope,
-    assumptions: quote.assumptions,
-    validUntil: quote.validUntil,
-    createdAt: quote.createdAt,
-    sentAt: quote.sentAt,
-    supersededAt: nowIso,
-    capturedAt: priorCapturedAt,
-    byId,
-    revisionNote: input.revisionNote?.trim() || undefined,
-    ...(quote.rateSource ? { rateSource: quote.rateSource } : {}),
-    ...(typeof quote.rateTier === 'number' ? { rateTier: quote.rateTier } : {}),
-    ...(quote.rateAsAtDate ? { rateAsAtDate: quote.rateAsAtDate } : {}),
-    ...(quote.rateCardId !== undefined ? { rateCardId: quote.rateCardId } : {}),
-    ...(quote.rateCardName !== undefined ? { rateCardName: quote.rateCardName } : {}),
-    ...(quote.rateGradeKey ? { rateGradeKey: quote.rateGradeKey } : {}),
-    ...(quote.rateProvenanceByGrade
-      ? { rateProvenanceByGrade: structuredClone(quote.rateProvenanceByGrade) }
-      : {}),
-  });
+  const prevFeeSummary = formatFeeArrangementAuditSummary(quote);
 
   const prevVersion = quote.version;
   const nextVersion = prevVersion + 1;
@@ -16206,7 +16731,7 @@ export async function reviseQuoteRecord(
     Number(input.followUpAfterDays) || quote.followUpAfterDays || 7,
   );
 
-  await intakeRepo.withTenantTransaction(ctx, async () => {
+  const reviseTxOutcome = await intakeRepo.withTenantTransaction(ctx, async () => {
     const tenantCfg = getActiveTenantConfiguration();
     const dbCostsOverride =
       await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
@@ -16214,6 +16739,111 @@ export async function reviseQuoteRecord(
       tenantCfg,
       dbCostsOverride,
     );
+    const quoteAsAtDate = resolveTenantLocalDateAndHour(
+      now,
+      tenantCfg.timeZone || 'Europe/London',
+    ).localDate;
+
+    const arrangementBasis = mapQuoteFeeBasisToArrangementBasis(
+      input.feeBasis,
+    );
+    let validatedFeeArrangement:
+      | {
+          feeArrangementCapCategoryKey: string;
+          feeArrangementPercent: number;
+          feeArrangementCapBaseKey: string;
+          feeArrangementCapBaseDescription: string;
+          feeArrangementAppliedCapPercent: number;
+          feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
+        }
+      | undefined;
+    if (arrangementBasis) {
+      const capCheck = await validateInTxFeeArrangementForRecord({
+        ctx,
+        feeBasis: arrangementBasis,
+        workTypeSubcategoryId: quote.workTypeSubcategoryId ?? null,
+        practiceAreaId: quote.practiceAreaId,
+        submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
+        submittedPercent: input.feeArrangementPercent,
+        submittedCapBaseKey: input.feeArrangementCapBaseKey,
+        effectiveCostsConfig,
+        asAtDate: quoteAsAtDate,
+      });
+      if (!capCheck.ok) {
+        return {
+          code: capCheck.code,
+          message: capCheck.message,
+          error: capCheck.message,
+        };
+      }
+      validatedFeeArrangement = {
+        feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+        feeArrangementPercent: capCheck.acceptedPercent,
+        feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+        feeArrangementCapBaseDescription:
+          capCheck.resolution.capBaseDescription,
+        feeArrangementAppliedCapPercent:
+          capCheck.resolution.appliedCapPercent,
+        feeArrangementCapLevel: capCheck.resolution.capLevel,
+      };
+    }
+
+    // Archive current version as Superseded only after fee arrangement validation passes
+    quote.versionHistory.push({
+      version: quote.version,
+      status: 'Superseded',
+      feeBasis: quote.feeBasis,
+      feeAmountExVat: quote.feeAmountExVat,
+      hourlyRateGbp: quote.hourlyRateGbp,
+      vatRatePercent: priorVatRatePercent,
+      vatAmount: quote.vatAmount,
+      ...(quote.vatOverridden ? { vatOverridden: true } : {}),
+      disbursements: structuredClone(quote.disbursements),
+      totalIncVat: quote.totalIncVat,
+      scope: quote.scope,
+      assumptions: quote.assumptions,
+      validUntil: quote.validUntil,
+      createdAt: quote.createdAt,
+      sentAt: quote.sentAt,
+      supersededAt: nowIso,
+      capturedAt: priorCapturedAt,
+      byId,
+      revisionNote: input.revisionNote?.trim() || undefined,
+      ...(quote.rateSource ? { rateSource: quote.rateSource } : {}),
+      ...(typeof quote.rateTier === 'number' ? { rateTier: quote.rateTier } : {}),
+      ...(quote.rateAsAtDate ? { rateAsAtDate: quote.rateAsAtDate } : {}),
+      ...(quote.rateCardId !== undefined ? { rateCardId: quote.rateCardId } : {}),
+      ...(quote.rateCardName !== undefined ? { rateCardName: quote.rateCardName } : {}),
+      ...(quote.rateGradeKey ? { rateGradeKey: quote.rateGradeKey } : {}),
+      ...(quote.rateProvenanceByGrade
+        ? { rateProvenanceByGrade: structuredClone(quote.rateProvenanceByGrade) }
+        : {}),
+      ...(quote.feeArrangementCapCategoryKey
+        ? { feeArrangementCapCategoryKey: quote.feeArrangementCapCategoryKey }
+        : {}),
+      ...(quote.feeArrangementPercent !== undefined
+        ? { feeArrangementPercent: quote.feeArrangementPercent }
+        : {}),
+      ...(quote.feeArrangementCapBaseKey
+        ? { feeArrangementCapBaseKey: quote.feeArrangementCapBaseKey }
+        : {}),
+      ...(quote.feeArrangementCapBaseDescription
+        ? {
+            feeArrangementCapBaseDescription:
+              quote.feeArrangementCapBaseDescription,
+          }
+        : {}),
+      ...(quote.feeArrangementAppliedCapPercent !== undefined
+        ? {
+            feeArrangementAppliedCapPercent:
+              quote.feeArrangementAppliedCapPercent,
+          }
+        : {}),
+      ...(quote.feeArrangementCapLevel
+        ? { feeArrangementCapLevel: quote.feeArrangementCapLevel }
+        : {}),
+    });
+
     const appliedVatRatePercent =
       input.refreshVatRate === false
         ? priorVatRatePercent
@@ -16296,6 +16926,27 @@ export async function reviseQuoteRecord(
     quote.disbursements = disbursements;
     quote.totalIncVat = totals.totalIncVat;
     quote.capturedAt = nowIso;
+    if (validatedFeeArrangement) {
+      quote.feeArrangementCapCategoryKey =
+        validatedFeeArrangement.feeArrangementCapCategoryKey;
+      quote.feeArrangementPercent =
+        validatedFeeArrangement.feeArrangementPercent;
+      quote.feeArrangementCapBaseKey =
+        validatedFeeArrangement.feeArrangementCapBaseKey;
+      quote.feeArrangementCapBaseDescription =
+        validatedFeeArrangement.feeArrangementCapBaseDescription;
+      quote.feeArrangementAppliedCapPercent =
+        validatedFeeArrangement.feeArrangementAppliedCapPercent;
+      quote.feeArrangementCapLevel =
+        validatedFeeArrangement.feeArrangementCapLevel;
+    } else {
+      delete quote.feeArrangementCapCategoryKey;
+      delete quote.feeArrangementPercent;
+      delete quote.feeArrangementCapBaseKey;
+      delete quote.feeArrangementCapBaseDescription;
+      delete quote.feeArrangementAppliedCapPercent;
+      delete quote.feeArrangementCapLevel;
+    }
     quote.scope = input.scope.trim();
     quote.assumptions = (input.assumptions ?? '').trim();
     quote.validUntil = input.validUntil || toIsoDate(addDays(now, 30));
@@ -16352,8 +17003,30 @@ export async function reviseQuoteRecord(
       at: nowIso,
     });
     await flushStagedAuditEntries(ctx);
+    const nextFeeSummary = formatFeeArrangementAuditSummary(quote);
+    if (
+      (nextFeeSummary !== null || prevFeeSummary !== null) &&
+      nextFeeSummary !== prevFeeSummary
+    ) {
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'quote',
+          recordId: quote.id,
+          action: 'update',
+          field: 'Fee arrangement & cap',
+          oldValue: prevFeeSummary,
+          newValue: nextFeeSummary ?? 'Standard fee basis (no CFA/DBA cap)',
+          byId,
+          at: nowIso,
+        },
+      ]);
+    }
+    return null;
   });
 
+  if (reviseTxOutcome) {
+    return reviseTxOutcome;
+  }
   return { quote };
   });
 }
@@ -17042,6 +17715,16 @@ export async function saveMatterCostsConfig(
     }
   }
 
+  if (config.feeArrangementCaps !== undefined) {
+    const capValidation = validateFirmFeeCapEntries(config.feeArrangementCaps);
+    if (!capValidation.ok) {
+      throw new FeeCapValidationError(
+        capValidation.code,
+        `${capValidation.code}: ${capValidation.message}`,
+      );
+    }
+  }
+
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const catalogueRepo = getCatalogueRepository();
   const now = new Date().toISOString();
@@ -17058,10 +17741,33 @@ export async function saveMatterCostsConfig(
         config.vatRatePercent !== undefined
           ? config.vatRatePercent
           : previous?.vatRatePercent ?? tenantCfg.matterCosts.vatRatePercent;
+      const effectiveFeeArrangementCaps =
+        config.feeArrangementCaps !== undefined
+          ? validateFirmFeeCapEntries(config.feeArrangementCaps)
+          : null;
+      if (effectiveFeeArrangementCaps && !effectiveFeeArrangementCaps.ok) {
+        throw new FeeCapValidationError(
+          effectiveFeeArrangementCaps.code,
+          `${effectiveFeeArrangementCaps.code}: ${effectiveFeeArrangementCaps.message}`,
+        );
+      }
+      const nextFeeCaps =
+        effectiveFeeArrangementCaps && effectiveFeeArrangementCaps.ok
+          ? effectiveFeeArrangementCaps.entries
+          : previous?.feeArrangementCaps ??
+            tenantCfg.matterCosts.feeArrangementCaps ??
+            createDefaultFirmFeeArrangementCaps();
+      const formatCapsSummary = (
+        caps: MatterCostsConfig['feeArrangementCaps'] | undefined,
+      ) =>
+        (caps ?? [])
+          .map((c) => `${c.capCategoryKey}=${c.maxPercent}%@${c.capBaseKey}`)
+          .join(', ');
       const next: MatterCostsConfig = {
         ...config,
         partnerSignOffThresholdGbp: effectiveThreshold,
         vatRatePercent: effectiveVatRate,
+        feeArrangementCaps: nextFeeCaps,
         updatedAt: now,
         updatedById: byId,
       };
@@ -17073,9 +17779,9 @@ export async function saveMatterCostsConfig(
         action: 'update',
         field: 'Matter Costs & Rates Table Config',
         oldValue: previous
-          ? `${previous.clientProfileName} (${previous.rateSourceMode}, overrides=${previous.allowMatterRateOverrides}, threshold=£${previous.partnerSignOffThresholdGbp ?? 25000}, vat=${previous.vatRatePercent ?? 20}%, ${previous.rateCards?.length ?? 0} rate cards)`
+          ? `${previous.clientProfileName} (${previous.rateSourceMode}, overrides=${previous.allowMatterRateOverrides}, threshold=£${previous.partnerSignOffThresholdGbp ?? 25000}, vat=${previous.vatRatePercent ?? 20}%, ${previous.rateCards?.length ?? 0} rate cards, feeCaps=[${formatCapsSummary(previous.feeArrangementCaps)}])`
           : null,
-        newValue: `${next.clientProfileName} (${next.rateSourceMode}, overrides=${next.allowMatterRateOverrides}, threshold=£${next.partnerSignOffThresholdGbp}, vat=${next.vatRatePercent}%, ${next.rateCards.length} rate cards)`,
+        newValue: `${next.clientProfileName} (${next.rateSourceMode}, overrides=${next.allowMatterRateOverrides}, threshold=£${next.partnerSignOffThresholdGbp}, vat=${next.vatRatePercent}%, ${next.rateCards.length} rate cards, feeCaps=[${formatCapsSummary(next.feeArrangementCaps)}])`,
         byId,
         at: now,
       });
@@ -19939,7 +20645,8 @@ export async function saveWorkTypesConfigRecord(
   ok: boolean;
   config?: WorkTypesConfiguration;
   error?: string;
-  code?: 'FORBIDDEN' | 'MFA_REQUIRED' | 'VALIDATION_ERROR';
+  message?: string;
+  code?: 'FORBIDDEN' | 'MFA_REQUIRED' | 'VALIDATION_ERROR' | FeeCapErrorCode;
 }> {
   let ctx: TenantContext;
   try {
@@ -19996,13 +20703,19 @@ export async function saveWorkTypesConfigRecord(
   try {
     validated = validateWorkTypesConfig(newConfigInput);
   } catch (err) {
+    const errMessage =
+      err instanceof Error ? err.message : 'Invalid work-type configuration.';
+    const feeCapCodeMatch = new RegExp(
+      `\\b(${FEE_CAP_CONFIG_EXCEEDS_STATUTORY_CODE}|${FEE_CAP_BASE_MISMATCH_CODE}|${FEE_CAP_CATEGORY_UNMAPPED_CODE})\\b`,
+    ).exec(errMessage);
+    const code: 'VALIDATION_ERROR' | FeeCapErrorCode = feeCapCodeMatch
+      ? (feeCapCodeMatch[1] as FeeCapErrorCode)
+      : 'VALIDATION_ERROR';
     return {
       ok: false,
-      code: 'VALIDATION_ERROR',
-      error:
-        err instanceof Error
-          ? err.message
-          : 'Invalid work-type configuration.',
+      code,
+      error: errMessage,
+      message: errMessage,
     };
   }
 
@@ -20011,6 +20724,11 @@ export async function saveWorkTypesConfigRecord(
     store.workTypesConfig ??
     resolveEffectiveWorkTypesConfig(activeTenantCfg, store.workTypeConfigsOverride ?? null);
   const nextEffective = resolveEffectiveWorkTypesConfig(activeTenantCfg, validated);
+  const countOverrides = (cfg: WorkTypesConfiguration) =>
+    (cfg.items ?? []).reduce(
+      (sum, item) => sum + (item.workTypeCapOverrides?.length ?? 0),
+      0,
+    );
   const catalogueRepo = getCatalogueRepository();
   const nowIso = new Date().toISOString();
 
@@ -20022,8 +20740,8 @@ export async function saveWorkTypesConfigRecord(
         recordId: 'FIRM-WORK-TYPES-CONFIG',
         action: 'update',
         field: 'workTypes',
-        oldValue: `defaultsRetention=${previousEffective.defaults?.retention?.retentionYears ?? 6}; items=${previousEffective.items?.length ?? 0}`,
-        newValue: `defaultsRetention=${nextEffective.defaults?.retention?.retentionYears ?? 6}; items=${nextEffective.items?.length ?? 0}`,
+        oldValue: `defaultsRetention=${previousEffective.defaults?.retention?.retentionYears ?? 6}; items=${previousEffective.items?.length ?? 0}; capOverrides=${countOverrides(previousEffective)}`,
+        newValue: `defaultsRetention=${nextEffective.defaults?.retention?.retentionYears ?? 6}; items=${nextEffective.items?.length ?? 0}; capOverrides=${countOverrides(nextEffective)}`,
         byId: actor.id,
         at: nowIso,
         reason: reason?.trim() || 'Updated work-type configuration in Admin',

@@ -37,6 +37,13 @@ import {
   isJobOnlyPermissionKey,
 } from '../domain/rbac/registry';
 import { RESERVED_UNSUPPORTED_DOCUMENT_STORE_PROVIDERS } from '../integrations/document-stores/index';
+import {
+  createDefaultFirmFeeArrangementCaps,
+  STATUTORY_FEE_CAP_CATEGORY_KEYS,
+  validateFirmFeeCapEntries,
+  validateWorkTypeCapOverrides,
+  validateWorkTypeFeeArrangementCapCategories,
+} from '../domain/costs/statutoryCaps';
 import { assertTenantOwnsKeyVaultSecretRef } from '../tenancy/keyVaultSecrets';
 
 export const ALL_HOME_ROLE_KEYS: readonly HomeRoleKey[] = ALL_BUILTIN_ROLE_KEYS;
@@ -284,11 +291,38 @@ const WorkTypeRetentionSchema = z
   })
   .strict();
 
-const WorkTypeFeeCapOverrideReservedSchema = z
+const FeeArrangementCapEntrySchema = z
   .object({
-    capCategoryKey: z.string().trim().min(1),
-    maxPercent: z.number().min(0).max(100),
-    capBaseKey: z.string().trim().min(1),
+    capCategoryKey: z
+      .enum(STATUTORY_FEE_CAP_CATEGORY_KEYS)
+      .describe('Statutory CFA or DBA cap category key'),
+    maxPercent: z
+      .number()
+      .min(0)
+      .max(100)
+      .describe('Cap percentage bounded above by the statutory maximum'),
+    capBaseKey: z
+      .string()
+      .trim()
+      .min(1)
+      .describe('Monetary base against which maxPercent is applied'),
+  })
+  .strict();
+
+const WorkTypeFeeArrangementCapCategoriesSchema = z
+  .object({
+    conditional_fee_agreement: z
+      .enum(['cfa_general_civil', 'cfa_personal_injury'])
+      .optional()
+      .describe(
+        'Statutory CFA cap category applied to matters and quotes of this work type',
+      ),
+    damages_based_agreement: z
+      .enum(['dba_general_civil', 'dba_employment', 'dba_personal_injury'])
+      .optional()
+      .describe(
+        'Statutory DBA cap category applied to matters and quotes of this work type',
+      ),
   })
   .strict();
 
@@ -349,11 +383,14 @@ const WorkTypeConfigItemSchema = z
     retention: WorkTypeRetentionSchema.optional().describe(
       'Retention rule overriding firm defaults for this work type',
     ),
+    feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesSchema.optional().describe(
+      'Explicit mapping from CFA and DBA fee bases to statutory cap categories for this work type',
+    ),
     workTypeCapOverrides: z
-      .array(WorkTypeFeeCapOverrideReservedSchema)
+      .array(FeeArrangementCapEntrySchema)
       .optional()
       .describe(
-        'Reserved for S0-28b: per-work-type CFA/DBA statutory fee cap overrides',
+        'Per-work-type CFA and DBA cap percentage overrides bounded above by the statutory maximum',
       ),
   })
   .strict();
@@ -452,6 +489,28 @@ export const WorkTypesConfigSchema = z
         idx,
         'riskQuestions',
       ]);
+      if (item.feeArrangementCapCategories) {
+        const catCheck = validateWorkTypeFeeArrangementCapCategories(
+          item.feeArrangementCapCategories,
+        );
+        if (!catCheck.ok) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['items', idx, 'feeArrangementCapCategories'],
+            message: `${catCheck.code}: ${catCheck.message}`,
+          });
+        }
+      }
+      if (item.workTypeCapOverrides && item.workTypeCapOverrides.length > 0) {
+        const ovCheck = validateWorkTypeCapOverrides(item.workTypeCapOverrides);
+        if (!ovCheck.ok) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['items', idx, 'workTypeCapOverrides'],
+            message: `${ovCheck.code}: ${ovCheck.message}`,
+          });
+        }
+      }
     }
   });
 
@@ -1047,6 +1106,12 @@ export const TenantConfigurationSchema = z
           .default([])
           .describe(
             'Default tenant-level disbursement presets when no runtime module configuration override is stored',
+          ),
+        feeArrangementCaps: z
+          .array(FeeArrangementCapEntrySchema)
+          .default(() => createDefaultFirmFeeArrangementCaps())
+          .describe(
+            'Firm-level CFA and DBA fee percentage caps per statutory category (defaults equal statutory maximums)',
           ),
       })
       .strict(),
@@ -2502,6 +2567,18 @@ export const TenantConfigurationSchema = z
         });
       }
     }
+
+    // 5. Validate firm CFA/DBA fee arrangement caps against statutory maximums (ADR 0034 / S0-28b)
+    const firmCapCheck = validateFirmFeeCapEntries(
+      cfg.matterCosts.feeArrangementCaps,
+    );
+    if (!firmCapCheck.ok) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['matterCosts', 'feeArrangementCaps'],
+        message: `${firmCapCheck.code}: ${firmCapCheck.message}`,
+      });
+    }
   });
 
 export interface ConfigDeprecationWarning {
@@ -2915,6 +2992,37 @@ export function loadAndValidateTenantConfig(
     | Record<string, unknown>
     | undefined;
 
+  const baseMatterCosts = baseConfig.matterCosts as
+    | Record<string, unknown>
+    | undefined;
+  const overlayMatterCosts = environmentOverlay.matterCosts as
+    | Record<string, unknown>
+    | undefined;
+  let mergedFeeArrangementCaps: unknown = undefined;
+  if (
+    Array.isArray(baseMatterCosts?.feeArrangementCaps) &&
+    Array.isArray(overlayMatterCosts?.feeArrangementCaps)
+  ) {
+    const byCategory = new Map<string, unknown>();
+    for (const rawEntry of baseMatterCosts.feeArrangementCaps) {
+      if (rawEntry && typeof rawEntry === 'object' && !Array.isArray(rawEntry)) {
+        const key = (rawEntry as Record<string, unknown>).capCategoryKey;
+        if (typeof key === 'string') {
+          byCategory.set(key, rawEntry);
+        }
+      }
+    }
+    for (const rawEntry of overlayMatterCosts.feeArrangementCaps) {
+      if (rawEntry && typeof rawEntry === 'object' && !Array.isArray(rawEntry)) {
+        const key = (rawEntry as Record<string, unknown>).capCategoryKey;
+        if (typeof key === 'string') {
+          byCategory.set(key, rawEntry);
+        }
+      }
+    }
+    mergedFeeArrangementCaps = Array.from(byCategory.values());
+  }
+
   const merged: Record<string, unknown> = {
     ...baseConfig,
     ...environmentOverlay,
@@ -2927,8 +3035,11 @@ export function loadAndValidateTenantConfig(
       ...(environmentOverlay.featureFlags as Record<string, unknown> | undefined),
     },
     matterCosts: {
-      ...(baseConfig.matterCosts as Record<string, unknown> | undefined),
-      ...(environmentOverlay.matterCosts as Record<string, unknown> | undefined),
+      ...(baseMatterCosts ?? {}),
+      ...(overlayMatterCosts ?? {}),
+      ...(mergedFeeArrangementCaps !== undefined
+        ? { feeArrangementCaps: mergedFeeArrangementCaps }
+        : {}),
     },
     integrations: {
       ...(baseIntegrations ?? {}),
@@ -3233,6 +3344,24 @@ export function loadAndValidateTenantConfig(
               !Array.isArray(itemObj.retention)
                 ? (itemObj.retention as Record<string, unknown>)
                 : undefined;
+            const baseCapCats =
+              existingObj.feeArrangementCapCategories &&
+              typeof existingObj.feeArrangementCapCategories === 'object' &&
+              !Array.isArray(existingObj.feeArrangementCapCategories)
+                ? (existingObj.feeArrangementCapCategories as Record<
+                    string,
+                    unknown
+                  >)
+                : undefined;
+            const overCapCats =
+              itemObj.feeArrangementCapCategories &&
+              typeof itemObj.feeArrangementCapCategories === 'object' &&
+              !Array.isArray(itemObj.feeArrangementCapCategories)
+                ? (itemObj.feeArrangementCapCategories as Record<
+                    string,
+                    unknown
+                  >)
+                : undefined;
             combinedItems[existingIdx] = {
               ...existingObj,
               ...itemObj,
@@ -3242,6 +3371,15 @@ export function loadAndValidateTenantConfig(
                       itemObj.retention !== undefined && !overRet
                         ? itemObj.retention
                         : { ...(baseRet ?? {}), ...(overRet ?? {}) },
+                  }
+                : {}),
+              ...(baseCapCats || overCapCats
+                ? {
+                    feeArrangementCapCategories:
+                      itemObj.feeArrangementCapCategories !== undefined &&
+                      !overCapCats
+                        ? itemObj.feeArrangementCapCategories
+                        : { ...(baseCapCats ?? {}), ...(overCapCats ?? {}) },
                   }
                 : {}),
             };

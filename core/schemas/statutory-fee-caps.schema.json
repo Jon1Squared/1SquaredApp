@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.1squared.uk/schemas/statutory-fee-caps.schema.json",
+  "title": "StatutoryFeeCaps",
+  "description": "Authoritative, effective-dated core table of statutory CFA and DBA fee arrangement maximums and defined calculation bases (ADR 0034 / S0-28b).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "rows"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Semantic version of the statutory fee caps data schema"
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Effective-dated statutory CFA and DBA maximum percentage rows, each pairing a category, maximum percentage, and mandatory calculation base.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rowId",
+          "capCategoryKey",
+          "feeBasis",
+          "caseTypeLabel",
+          "maxPercent",
+          "capBaseKey",
+          "capBaseDescription",
+          "effectiveFrom",
+          "effectiveTo",
+          "legislationRef"
+        ],
+        "properties": {
+          "rowId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable unique identifier for this effective-dated statutory fee cap row"
+          },
+          "capCategoryKey": {
+            "type": "string",
+            "enum": [
+              "cfa_general_civil",
+              "cfa_personal_injury",
+              "dba_general_civil",
+              "dba_employment",
+              "dba_personal_injury"
+            ],
+            "description": "Canonical statutory cap category key referenced by work-type configuration and fee arrangements"
+          },
+          "feeBasis": {
+            "type": "string",
+            "enum": ["conditional_fee_agreement", "damages_based_agreement"],
+            "description": "Fee arrangement basis governed by this row"
+          },
+          "caseTypeLabel": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-readable case type category label (British English)"
+          },
+          "maxPercent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Statutory maximum percentage permitted for this category and effective period"
+          },
+          "capBaseKey": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Canonical machine key for the monetary base against which maxPercent is measured"
+          },
+          "capBaseDescription": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Authoritative human-readable calculation base description stored alongside every percentage"
+          },
+          "effectiveFrom": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive YYYY-MM-DD start date from which this statutory row applies"
+          },
+          "effectiveTo": {
+            "type": ["string", "null"],
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Inclusive YYYY-MM-DD end date, or null while this statutory row remains in force"
+          },
+          "legislationRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Statutory instrument or primary legislation reference supporting this row"
+          }
+        }
+      }
+    }
+  }
+}
