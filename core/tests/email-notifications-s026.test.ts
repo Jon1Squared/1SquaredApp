@@ -1399,7 +1399,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     ).toThrow(/TENANCY_AUTH_ERROR/);
   });
 
-  it('R498: demo-environment TenantContext resolves certificateVaultRef and all demo kv:// references against https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/ while refusing Tenant B and parses Key Vault base64 PKCS#12 secrets', async () => {
+  it('R498: demo-environment TenantContext resolves certificateVaultRef and all demo kv:// references against https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/ while refusing Tenant B', async () => {
     const rootDir = process.cwd();
     const baseCfg = JSON.parse(
       fs.readFileSync(
@@ -1497,10 +1497,13 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
       fetchFn: async (input) => {
         const url = String(input);
         requestedUrls.push(url);
-        return new Response(JSON.stringify({ value: cert.pkcs12Base64 }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
+        return new Response(
+          JSON.stringify({ value: `${cert.privateKeyPem}\n${cert.certPem}` }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
       },
     });
 
@@ -1516,7 +1519,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     expect(kvTokenRequests).toBe(0);
     expect(requestedUrls).toHaveLength(0);
 
-    // Demo TenantContext resolves to the real vault HTTPS URL and parses passwordless PKCS#12
+    // Demo TenantContext resolves to the real vault HTTPS URL and signs assertion from PEM
     let capturedAssertion = '';
     const tokenProvider = new GraphAppTokenProvider({
       secretReader: kvReader,
@@ -1541,6 +1544,108 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     ]);
 
     const [hdrB64, payB64, sigB64] = capturedAssertion.split('.');
+    expect(hdrB64 && payB64 && sigB64).toBeTruthy();
+    expect(
+      verifySignature(
+        'RSA-SHA256',
+        Buffer.from(`${hdrB64}.${payB64}`, 'utf8'),
+        cert.publicKeyPem,
+        Buffer.from(sigB64!, 'base64url'),
+      ),
+    ).toBe(true);
+  });
+
+  it('R500: GraphAppTokenProvider signs a valid RS256 assertion from a PEM secret, rejects PKCS#12 and non-PEM secrets with GRAPH_CERT_FORMAT_UNSUPPORTED, and rejects thumbprint mismatches', async () => {
+    const cert = generateEphemeralSelfSignedCertAndKey('graph-mail.1squared.co.uk');
+    const otherCert = generateEphemeralSelfSignedCertAndKey('other.1squared.co.uk');
+    const demoCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'demo-verifier',
+        tenantId: 'not-a-law-firm',
+        name: 'Demo Verifier',
+        email: 'demo.verifier@notalawfirm.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'demo',
+      correlationId: 'corr-r500-demo',
+      configuredKeyVault: {
+        vaultName: 'kvnotalawfi2cdo3cw7vuafm',
+        vaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
+      },
+    });
+
+    const baseGraphCfg = {
+      tenantId: 'f8218d9a-e055-463f-add2-f03679aad7f2',
+      clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
+      certificateVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate',
+      certificateThumbprint: cert.thumbprintHex,
+    };
+
+    let currentSecret = `${cert.privateKeyPem}\n${cert.certPem}`;
+    let entraRequests = 0;
+    let lastAssertion = '';
+
+    const provider = new GraphAppTokenProvider({
+      secretReader: {
+        readSecret: async () => currentSecret,
+      },
+      fetchFn: async (_url, init) => {
+        entraRequests += 1;
+        lastAssertion =
+          new URLSearchParams(String(init?.body ?? '')).get('client_assertion') ?? '';
+        return new Response(
+          JSON.stringify({ access_token: 'r500-pem-token', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    // 1. PKCS#12 secret is rejected with stable GRAPH_CERT_FORMAT_UNSUPPORTED
+    currentSecret = cert.pkcs12Base64;
+    await expect(
+      provider.acquireAppToken(demoCtx, baseGraphCfg),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof EmailIntegrationError &&
+        err.code === 'GRAPH_CERT_FORMAT_UNSUPPORTED',
+    );
+    expect(entraRequests).toBe(0);
+
+    // Non-PEM plain text / JSON secrets are also rejected with GRAPH_CERT_FORMAT_UNSUPPORTED
+    currentSecret = JSON.stringify({
+      certificatePem: cert.certPem,
+      privateKeyPem: cert.privateKeyPem,
+    });
+    await expect(
+      provider.acquireAppToken(demoCtx, baseGraphCfg),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof EmailIntegrationError &&
+        err.code === 'GRAPH_CERT_FORMAT_UNSUPPORTED',
+    );
+    expect(entraRequests).toBe(0);
+
+    // 2. Thumbprint mismatch on PEM secret is still rejected with GRAPH_CERT_THUMBPRINT_MISMATCH
+    currentSecret = `${otherCert.privateKeyPem}\n${otherCert.certPem}`;
+    await expect(
+      provider.acquireAppToken(demoCtx, baseGraphCfg),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof EmailIntegrationError &&
+        err.code === 'GRAPH_CERT_THUMBPRINT_MISMATCH',
+    );
+    expect(entraRequests).toBe(0);
+
+    // 3. Valid unencrypted PEM secret signs a verifiable RS256 client assertion
+    currentSecret = `${cert.privateKeyPem}\n${cert.certPem}`;
+    const token = await provider.acquireAppToken(demoCtx, baseGraphCfg);
+    expect(token).toBe('r500-pem-token');
+    expect(entraRequests).toBe(1);
+
+    const [hdrB64, payB64, sigB64] = lastAssertion.split('.');
     expect(hdrB64 && payB64 && sigB64).toBeTruthy();
     expect(
       verifySignature(
