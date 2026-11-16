@@ -273,6 +273,7 @@ import {
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   mergeRegistersConfigurations,
   ORGANISATION_PARENT_CYCLE_CODE,
+  poundsToMinorUnits,
   RATE_OVERRIDE_DATE_OVERLAP_CODE,
   RATE_OVERRIDE_INVALID_DATE_RANGE_CODE,
   RATE_OVERRIDE_VALIDATION_ERROR_CODE,
@@ -15915,6 +15916,23 @@ function normalizeQuoteDisbursements(
   return { disbursements: out };
 }
 
+function hourlyGbpMatchesMinorUnits(
+  hourlyRateGbp: number,
+  rateMinorUnits: number,
+): boolean {
+  if (!Number.isFinite(hourlyRateGbp) || hourlyRateGbp < 0) {
+    return false;
+  }
+  if (hourlyRateGbp > 0 && hourlyRateGbp < 1e-6) {
+    return rateMinorUnits === 0;
+  }
+  const raw = String(hourlyRateGbp);
+  const converted = /[eE]/.test(raw)
+    ? poundsToMinorUnits(hourlyRateGbp.toFixed(4))
+    : poundsToMinorUnits(raw);
+  return converted === rateMinorUnits;
+}
+
 export async function saveQuoteRecord(
   input: SaveQuoteInput,
   opts: { id?: string; byId: string; markAsSent?: boolean; refreshVatRate?: boolean },
@@ -16126,7 +16144,7 @@ export async function saveQuoteRecord(
       const hourlyMatchesResolved =
         effectiveHourlyRateGbp === null ||
         !gradeRes ||
-        Math.round(effectiveHourlyRateGbp * 100) === gradeRes.rateMinorUnits;
+        hourlyGbpMatchesMinorUnits(effectiveHourlyRateGbp, gradeRes.rateMinorUnits);
       const resolvedRateSource: Quote['rateSource'] =
         input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
           ? 'custom_override'
@@ -16352,7 +16370,7 @@ export async function saveQuoteRecord(
       const hourlyMatchesResolved =
         nextHourlyRateGbp === null ||
         !gradeRes ||
-        Math.round(nextHourlyRateGbp * 100) === gradeRes.rateMinorUnits;
+        hourlyGbpMatchesMinorUnits(nextHourlyRateGbp, gradeRes.rateMinorUnits);
       existing.rateSource =
         input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
           ? 'custom_override'
@@ -16374,7 +16392,7 @@ export async function saveQuoteRecord(
       if (
         frozenGradeRes &&
         nextHourlyRateGbp !== null &&
-        Math.round(nextHourlyRateGbp * 100) === frozenGradeRes.rateMinorUnits
+        hourlyGbpMatchesMinorUnits(nextHourlyRateGbp, frozenGradeRes.rateMinorUnits)
       ) {
         existing.rateSource = frozenGradeRes.source;
         existing.rateTier = frozenGradeRes.tier;
@@ -16918,7 +16936,7 @@ export async function reviseQuoteRecord(
       const hourlyMatchesResolved =
         revisedHourlyRateGbp === null ||
         !gradeRes ||
-        Math.round(revisedHourlyRateGbp * 100) === gradeRes.rateMinorUnits;
+        hourlyGbpMatchesMinorUnits(revisedHourlyRateGbp, gradeRes.rateMinorUnits);
       quote.rateSource =
         input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
           ? 'custom_override'
