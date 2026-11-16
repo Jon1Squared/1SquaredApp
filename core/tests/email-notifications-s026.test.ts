@@ -9,6 +9,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { TokenCredential } from '@azure/identity';
 import {
   ALL_JOB_ONLY_PERMISSION_KEYS,
   ALL_PERMISSION_KEYS,
@@ -17,6 +18,7 @@ import {
   CORE_REQUIRED_SCHEMA_VERSION,
   CORE_TENANT_MIGRATIONS,
   CoreEmailDispatcher,
+  DefaultAzureKeyVaultSecretReader,
   drainEmailOutboxForTenant,
   EmailIntegrationError,
   EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019,
@@ -34,6 +36,7 @@ import {
   type TenantConfiguration,
   type TenantContext,
 } from '../src/index';
+import { assertTenantOwnsKeyVaultSecretRef } from '../src/tenancy/keyVaultSecrets';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import { executeCliJobRunner, REGISTERED_CLI_JOBS } from '../../scripts/run-job';
 import {
@@ -116,11 +119,13 @@ function generateEphemeralSelfSignedCertAndKey(commonName = 'notalawfirm.example
   readonly privateKeyPem: string;
   readonly publicKeyPem: string;
   readonly thumbprintHex: string;
+  readonly pkcs12Base64: string;
 } {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', {
     modulusLength: 2048,
   });
   const spkiDer = publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+  const pkcs8KeyDer = privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer;
   const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
   const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
 
@@ -161,6 +166,35 @@ function generateEphemeralSelfSignedCertAndKey(commonName = 'notalawfirm.example
   const certBase64 = certDer.toString('base64').replace(/.{1,64}/g, '$&\n').trim();
   const certPem = `-----BEGIN CERTIFICATE-----\n${certBase64}\n-----END CERTIFICATE-----\n`;
 
+  // Unencrypted passwordless PKCS#12 PFX matching Azure Key Vault default application/x-pkcs12 secret format
+  const keyBag = derSequence(
+    derOid('2a864886f70d010c0a0101'),
+    derTag(0xa0, pkcs8KeyDer),
+  );
+  const certBag = derSequence(
+    derOid('2a864886f70d010c0a0103'),
+    derTag(
+      0xa0,
+      derSequence(
+        derOid('2a864886f70d01091601'),
+        derTag(0xa0, derTag(0x04, certDer)),
+      ),
+    ),
+  );
+  const safeContents = derSequence(keyBag, certBag);
+  const safeContentInfo = derSequence(
+    derOid('2a864886f70d010701'),
+    derTag(0xa0, derTag(0x04, safeContents)),
+  );
+  const authSafe = derSequence(safeContentInfo);
+  const pfxDer = derSequence(
+    derInteger(Buffer.from([0x03])),
+    derSequence(
+      derOid('2a864886f70d010701'),
+      derTag(0xa0, derTag(0x04, authSafe)),
+    ),
+  );
+
   const parsed = new X509Certificate(certPem);
   const thumbprintHex = parsed.fingerprint.replace(/:/g, '').toUpperCase();
 
@@ -169,6 +203,7 @@ function generateEphemeralSelfSignedCertAndKey(commonName = 'notalawfirm.example
     privateKeyPem,
     publicKeyPem,
     thumbprintHex,
+    pkcs12Base64: pfxDer.toString('base64'),
   };
 }
 
@@ -377,6 +412,10 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     );
 
     const demoCfg = loadAndValidateTenantConfig(baseCfg, demoOverlay, 'demo');
+    expect(demoCfg.keyVault).toEqual({
+      vaultName: 'kvnotalawfi2cdo3cw7vuafm',
+      vaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
+    });
     expect(demoCfg.integrations.email?.provider).toBe('disabled');
     expect(demoCfg.integrations.email?.senderAddress).toBe(
       'noreply@notalawfirm.example',
@@ -387,13 +426,13 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
       '@notalawfirm.example',
     ]);
     expect(demoCfg.integrations.email?.recipientAllowListVaultRef).toBe(
-      'kv://kv-notalawfirm-demo/email-recipient-allowlist',
+      'kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist',
     );
     expect(demoCfg.integrations.email?.graph).toEqual({
       tenantId: 'f8218d9a-e055-463f-add2-f03679aad7f2',
       clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
-      certificateVaultRef: 'kv://kv-notalawfirm-demo/graph-email-client-cert',
-      certificateThumbprint: 'B738D511CEF82CF63670CF540571CE03A1AB53E4',
+      certificateVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate',
+      certificateThumbprint: 'BC9CB621EF3BDC2413D3EA345609586ABF5167ED',
     });
 
     const devCfg = loadAndValidateTenantConfig(baseCfg, devOverlay, 'dev');
@@ -448,7 +487,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
                 clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
                 certificateVaultRef: 'kv://kv-other-tenant-test/graph-cert',
                 certificateThumbprint:
-                  'B738D511CEF82CF63670CF540571CE03A1AB53E4',
+                  'BC9CB621EF3BDC2413D3EA345609586ABF5167ED',
               },
             },
           },
@@ -501,7 +540,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     const alphaGraphCfg = {
       tenantId: 'f8218d9a-e055-463f-add2-f03679aad7f2',
       clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
-      certificateVaultRef: 'kv://kv-alphafirm-test/graph-email-client-cert',
+      certificateVaultRef: 'kv://kv-alphafirm-test/graph-mail-certificate',
       certificateThumbprint: cert.thumbprintHex,
     };
 
@@ -509,7 +548,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     await expect(
       tokenProvider.acquireAppToken(ctxAlpha, {
         ...alphaGraphCfg,
-        certificateVaultRef: 'kv://kv-bravofirm-test/graph-email-client-cert',
+        certificateVaultRef: 'kv://kv-bravofirm-test/graph-mail-certificate',
       }),
     ).rejects.toThrow(/TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED/);
     expect(secretReads).toBe(0);
@@ -577,7 +616,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     // Different tenant must NOT reuse alpha's cached token
     const bravoGraphCfg = {
       ...alphaGraphCfg,
-      certificateVaultRef: 'kv://kv-bravofirm-test/graph-email-client-cert',
+      certificateVaultRef: 'kv://kv-bravofirm-test/graph-mail-certificate',
     };
     const tokBravo = await tokenProvider.acquireAppToken(
       ctxBravo,
@@ -643,7 +682,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
     let kvAllowListReads = 0;
     const secretReader: KeyVaultSecretReader = {
       async readSecret(_c, ref) {
-        if (ref.endsWith('graph-email-client-cert')) {
+        if (ref.endsWith('graph-mail-certificate')) {
           return `${cert.certPem}\n${cert.privateKeyPem}`;
         }
         if (ref.endsWith('email-recipient-allowlist')) {
@@ -737,7 +776,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
         graph: {
           tenantId: 'f8218d9a-e055-463f-add2-f03679aad7f2',
           clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
-          certificateVaultRef: 'kv://kv-alphafirm-test/graph-email-client-cert',
+          certificateVaultRef: 'kv://kv-alphafirm-test/graph-mail-certificate',
           certificateThumbprint: cert.thumbprintHex,
         },
       },
@@ -826,7 +865,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
         graph: {
           tenantId: 'f8218d9a-e055-463f-add2-f03679aad7f2',
           clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
-          certificateVaultRef: 'kv://kv-alphafirm-test/graph-email-client-cert',
+          certificateVaultRef: 'kv://kv-alphafirm-test/graph-mail-certificate',
           certificateThumbprint: cert.thumbprintHex,
         },
       },
@@ -1358,5 +1397,158 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
         correlationId: 'corr-forged-1',
       }),
     ).toThrow(/TENANCY_AUTH_ERROR/);
+  });
+
+  it('R498: demo-environment TenantContext resolves certificateVaultRef and all demo kv:// references against https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/ while refusing Tenant B and parses Key Vault base64 PKCS#12 secrets', async () => {
+    const rootDir = process.cwd();
+    const baseCfg = JSON.parse(
+      fs.readFileSync(
+        path.join(rootDir, 'client-not-a-law-firm', 'config', 'base.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const demoOverlay = JSON.parse(
+      fs.readFileSync(
+        path.join(
+          rootDir,
+          'client-not-a-law-firm',
+          'config',
+          'environments',
+          'demo.json',
+        ),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+
+    const demoCfg = loadAndValidateTenantConfig(baseCfg, demoOverlay, 'demo');
+    expect(demoCfg.keyVault).toEqual({
+      vaultName: 'kvnotalawfi2cdo3cw7vuafm',
+      vaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
+    });
+
+    const demoCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'demo-verifier',
+        tenantId: demoCfg.tenantId,
+        name: 'Demo Verifier',
+        email: 'demo.verifier@notalawfirm.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: demoCfg.hostingMode,
+      environment: demoCfg.environment,
+      correlationId: 'corr-r498-demo',
+      configuredKeyVault: demoCfg.keyVault,
+    });
+
+    const tenantBCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'tenant-b-user',
+        tenantId: 'pembroke-vaughan',
+        name: 'Tenant B User',
+        email: 'user@pembroke-vaughan.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'demo',
+      correlationId: 'corr-r498-tenant-b',
+      configuredKeyVault: {
+        vaultName: 'kvpembrokevaughandemo01',
+        vaultUri: 'https://kvpembrokevaughandemo01.vault.azure.net/',
+      },
+    });
+
+    // Every configured kv:// reference in demo.json passes demoCtx ownership checks and is refused for Tenant B
+    const demoSecretRefs = [
+      demoCfg.integrations.pmsConnectionSecretVaultRef,
+      demoCfg.integrations.companiesHouseApiKeyVaultRef,
+      demoCfg.integrations.email?.recipientAllowListVaultRef,
+      demoCfg.integrations.email?.graph?.certificateVaultRef,
+      demoCfg.documentStores?.[0]?.auth.certificateKeyVaultSecretRef,
+    ].filter((r): r is string => typeof r === 'string' && r.length > 0);
+    expect(demoSecretRefs).toHaveLength(5);
+
+    for (const ref of demoSecretRefs) {
+      expect(assertTenantOwnsKeyVaultSecretRef(demoCtx, ref).vaultName).toBe(
+        'kvnotalawfi2cdo3cw7vuafm',
+      );
+      expect(() => assertTenantOwnsKeyVaultSecretRef(tenantBCtx, ref)).toThrow(
+        /TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED/,
+      );
+    }
+
+    const cert = generateEphemeralSelfSignedCertAndKey('graph-mail.1squared.co.uk');
+    let kvTokenRequests = 0;
+    const requestedUrls: string[] = [];
+    const credential: TokenCredential = {
+      async getToken() {
+        kvTokenRequests += 1;
+        return {
+          token: 'mock-kv-bearer-token',
+          expiresOnTimestamp: Date.now() + 3600_000,
+        };
+      },
+    };
+    const kvReader = new DefaultAzureKeyVaultSecretReader({
+      credential,
+      fetchFn: async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        return new Response(JSON.stringify({ value: cert.pkcs12Base64 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    const certRef = demoCfg.integrations.email!.graph!.certificateVaultRef;
+    expect(certRef).toBe(
+      'kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate',
+    );
+
+    // Tenant B must fail closed before credential.getToken or fetch is ever invoked
+    await expect(kvReader.readSecret(tenantBCtx, certRef)).rejects.toThrow(
+      /TENANCY_CROSS_TENANT_VAULT_ACCESS_DENIED/,
+    );
+    expect(kvTokenRequests).toBe(0);
+    expect(requestedUrls).toHaveLength(0);
+
+    // Demo TenantContext resolves to the real vault HTTPS URL and parses passwordless PKCS#12
+    let capturedAssertion = '';
+    const tokenProvider = new GraphAppTokenProvider({
+      secretReader: kvReader,
+      fetchFn: async (_url, init) => {
+        const params = new URLSearchParams(String(init?.body ?? ''));
+        capturedAssertion = params.get('client_assertion') ?? '';
+        return new Response(
+          JSON.stringify({ access_token: 'demo-graph-token', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    const graphToken = await tokenProvider.acquireAppToken(demoCtx, {
+      ...demoCfg.integrations.email!.graph!,
+      certificateThumbprint: cert.thumbprintHex,
+    });
+    expect(graphToken).toBe('demo-graph-token');
+    expect(kvTokenRequests).toBe(1);
+    expect(requestedUrls).toEqual([
+      'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/secrets/graph-mail-certificate?api-version=7.4',
+    ]);
+
+    const [hdrB64, payB64, sigB64] = capturedAssertion.split('.');
+    expect(hdrB64 && payB64 && sigB64).toBeTruthy();
+    expect(
+      verifySignature(
+        'RSA-SHA256',
+        Buffer.from(`${hdrB64}.${payB64}`, 'utf8'),
+        cert.publicKeyPem,
+        Buffer.from(sigB64!, 'base64url'),
+      ),
+    ).toBe(true);
   });
 });

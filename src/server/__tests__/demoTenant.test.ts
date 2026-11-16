@@ -933,7 +933,7 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
             postgresHost: '127.0.0.1',
             postgresDatabaseName: 'pg_tenant_not_a_law_firm_demo',
             postgresRoleName: 'role_tenant_not_a_law_firm_demo',
-            keyVaultUri: 'https://kv-notalawfirm-demo.vault.azure.net/',
+            keyVaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
             packageDir: 'client-not-a-law-firm',
             timeZone: 'Europe/London',
           },

@@ -124,8 +124,8 @@ Add additive, backwards-compatible `integrations.email` schema entries in `core/
 ## 9. Manual Setup / External Blockers
 
 Live Graph delivery in the demo/pilot environment depends on Section 8 manual tasks documented in `docs/runbooks/email-certificate-setup.md` (automated CI tests pass against mocked Graph & TCP SMTP `dev_catcher` without them):
-- **Done (12 November 2026):** Shared sender mailbox (`notifications@1squared.co.uk`) provisioned; Microsoft Entra app (`fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1`, directory `f8218d9a-e055-463f-add2-f03679aad7f2`, thumbprint `B738D511CEF82CF63670CF540571CE03A1AB53E4`) registered and scoped solely to that mailbox via Exchange Online RBAC for Applications; SPF/DKIM/DMARC DNS records configured for `1squared.co.uk`.
-- **Remaining blocker:** Import the PEM/PFX client certificate matching thumbprint `B738D511CEF82CF63670CF540571CE03A1AB53E4` into the tenant Azure Key Vault (`graph-email-client-cert`), populate `email-recipient-allowlist` (`recipientAllowListVaultRef`) with permitted tester addresses, and switch `demo.json` `integrations.email.provider` from `"disabled"` to `"graph"`.
+- **Done (12–16 November 2026):** Shared sender mailbox (`notifications@1squared.co.uk`) provisioned; Microsoft Entra app (`fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1`, directory `f8218d9a-e055-463f-add2-f03679aad7f2`) registered and scoped solely to that mailbox via Exchange Online RBAC for Applications; SPF/DKIM/DMARC DNS records configured for `1squared.co.uk`; client certificate `graph-mail-certificate` (`kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate`, thumbprint `BC9CB621EF3BDC2413D3EA345609586ABF5167ED`) generated inside `kvnotalawfi2cdo3cw7vuafm` with `.cer` uploaded to Microsoft Entra.
+- **Remaining blocker:** Populate `email-recipient-allowlist` (`kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist`) with permitted tester addresses, run the live verification check, and switch `demo.json` `integrations.email.provider` from `"disabled"` to `"graph"`.
 
 ---
 
