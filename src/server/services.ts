@@ -26,6 +26,8 @@ import {
   getTaskWorkflowRepository,
   runWithAuditStagingScope,
   stageAuditEntry,
+  getStagedAuditWatermark,
+  discardStagedAuditEntriesSince,
   TenantCatalogueRepository,
   TenantJobRunRepository,
   TenantPmsRepository,
@@ -6251,11 +6253,24 @@ export async function saveMatterRecord(
   const expectedRowVersionForPut = existing
     ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
     : undefined;
+  const stagedAuditMark = getStagedAuditWatermark();
+  let auditFlushed = false;
   try {
     await matterRepo.withTenantTransaction(extensionCtx, async () => {
       for (const person of pendingPeople) {
         await partyRepo.putPerson(extensionCtx, person);
       }
+      for (const org of pendingOrganisations) {
+        await partyRepo.putOrganisation(extensionCtx, org);
+      }
+      for (const link of pendingEnquiryLinks) {
+        await intakeRepo.putEnquiry(extensionCtx, link.enquiry);
+      }
+      const saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
+        expectedRowVersion: expectedRowVersionForPut,
+      });
+      matter = saved;
+
       const pendingPersonIdSet = new Set(pendingPeople.map((p) => p.id));
       for (const clientPersonId of individualClientPersonIds) {
         if (pendingPersonIdSet.has(clientPersonId)) continue;
@@ -6269,16 +6284,6 @@ export async function saveMatterRecord(
           now,
         );
       }
-      for (const org of pendingOrganisations) {
-        await partyRepo.putOrganisation(extensionCtx, org);
-      }
-      for (const link of pendingEnquiryLinks) {
-        await intakeRepo.putEnquiry(extensionCtx, link.enquiry);
-      }
-      const saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
-        expectedRowVersion: expectedRowVersionForPut,
-      });
-      matter = saved;
 
       if (!existing) {
         writeAudit(store, {
@@ -6525,6 +6530,7 @@ export async function saveMatterRecord(
       }
 
       await flushStagedAuditEntries(extensionCtx);
+      auditFlushed = true;
     });
   } catch (err) {
     if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
@@ -6538,6 +6544,10 @@ export async function saveMatterRecord(
       };
     }
     throw err;
+  } finally {
+    if (!auditFlushed) {
+      discardStagedAuditEntriesSince(stagedAuditMark);
+    }
   }
 
   if (previousMatterSnapshot) {

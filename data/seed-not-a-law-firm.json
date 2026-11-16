@@ -683,7 +683,8 @@
       "sortOrder": 1,
       "active": true,
       "parentId": null,
-      "description": "Contact at a client organisation"
+      "description": "Contact at a client organisation",
+      "systemKey": "client_contact"
     },
     {
       "id": "person_role.private_client",
@@ -692,7 +693,8 @@
       "sortOrder": 2,
       "active": true,
       "parentId": null,
-      "description": "An individual who is a client in their own right"
+      "description": "An individual who is a client in their own right",
+      "systemKey": "private_client"
     },
     {
       "id": "person_role.referrer",
@@ -701,7 +703,8 @@
       "sortOrder": 3,
       "active": true,
       "parentId": null,
-      "description": "Refers work to the firm"
+      "description": "Refers work to the firm",
+      "systemKey": "referrer"
     },
     {
       "id": "person_role.introducer",
@@ -710,7 +713,8 @@
       "sortOrder": 4,
       "active": true,
       "parentId": null,
-      "description": "Introduces work, often under a formal agreement"
+      "description": "Introduces work, often under a formal agreement",
+      "systemKey": "introducer"
     },
     {
       "id": "person_role.supplier_contact",
@@ -719,7 +723,8 @@
       "sortOrder": 5,
       "active": true,
       "parentId": null,
-      "description": "Contact at a supplier"
+      "description": "Contact at a supplier",
+      "systemKey": "supplier_contact"
     },
     {
       "id": "person_role.counsel",
@@ -728,7 +733,8 @@
       "sortOrder": 6,
       "active": true,
       "parentId": null,
-      "description": "Barrister or KC instructed by the firm"
+      "description": "Barrister or KC instructed by the firm",
+      "systemKey": "counsel"
     },
     {
       "id": "person_role.expert",
@@ -737,7 +743,8 @@
       "sortOrder": 7,
       "active": true,
       "parentId": null,
-      "description": "Independent expert or consultant"
+      "description": "Independent expert or consultant",
+      "systemKey": "expert"
     },
     {
       "id": "person_role.internal_colleague",
@@ -746,7 +753,8 @@
       "sortOrder": 8,
       "active": true,
       "parentId": null,
-      "description": "Colleague within the firm"
+      "description": "Colleague within the firm",
+      "systemKey": "internal_colleague"
     },
     {
       "id": "person_role.professional_adviser",
@@ -755,7 +763,8 @@
       "sortOrder": 9,
       "active": true,
       "parentId": null,
-      "description": "Accountant, tax adviser, IFA or similar"
+      "description": "Accountant, tax adviser, IFA or similar",
+      "systemKey": "professional_adviser"
     },
     {
       "id": "person_role.opposing_party",
@@ -764,7 +773,8 @@
       "sortOrder": 10,
       "active": true,
       "parentId": null,
-      "description": "The other side in a dispute or transaction"
+      "description": "The other side in a dispute or transaction",
+      "systemKey": "opposing_party"
     },
     {
       "id": "person_record_status.active",
@@ -1027,7 +1037,8 @@
       "label": "Previous name",
       "sortOrder": 1,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "previous_name"
     },
     {
       "id": "other_name_type.maiden_name",
@@ -1035,7 +1046,8 @@
       "label": "Maiden name",
       "sortOrder": 2,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "maiden_name"
     },
     {
       "id": "other_name_type.also_known_as",
@@ -1043,7 +1055,8 @@
       "label": "Also known as",
       "sortOrder": 3,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "also_known_as"
     },
     {
       "id": "other_name_type.alias",
@@ -1051,7 +1064,8 @@
       "label": "Alias",
       "sortOrder": 4,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "alias"
     },
     {
       "id": "verification_method.electronic_id_check",
@@ -1247,7 +1261,8 @@
       "label": "Client",
       "sortOrder": 1,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "client"
     },
     {
       "id": "organisation_relationship_type.former_client",
@@ -1255,7 +1270,8 @@
       "label": "Former client",
       "sortOrder": 2,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "former_client"
     },
     {
       "id": "organisation_relationship_type.prospect",
@@ -1263,7 +1279,8 @@
       "label": "Prospect",
       "sortOrder": 3,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "prospect"
     },
     {
       "id": "organisation_relationship_type.referrer",
@@ -1271,7 +1288,8 @@
       "label": "Referrer",
       "sortOrder": 4,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "referrer"
     },
     {
       "id": "organisation_relationship_type.introducer",
@@ -1279,7 +1297,8 @@
       "label": "Introducer",
       "sortOrder": 5,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "introducer"
     },
     {
       "id": "organisation_relationship_type.business_development_contact",
@@ -1287,7 +1306,8 @@
       "label": "Business development contact",
       "sortOrder": 6,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "business_development_contact"
     },
     {
       "id": "organisation_relationship_type.supplier",
@@ -1295,7 +1315,8 @@
       "label": "Supplier",
       "sortOrder": 7,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "supplier"
     },
     {
       "id": "organisation_relationship_type.strategic_partner",
@@ -1303,7 +1324,8 @@
       "label": "Strategic partner",
       "sortOrder": 8,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "strategic_partner"
     },
     {
       "id": "organisation_relationship_type.opposing_solicitors",
@@ -1311,7 +1333,8 @@
       "label": "Opposing solicitors",
       "sortOrder": 9,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "opposing_solicitors"
     },
     {
       "id": "organisation_relationship_type.counterparty",
@@ -1319,7 +1342,8 @@
       "label": "Counterparty",
       "sortOrder": 10,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "counterparty"
     },
     {
       "id": "organisation_relationship_type.barristers",
@@ -1327,7 +1351,8 @@
       "label": "Barristers",
       "sortOrder": 11,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "barristers"
     },
     {
       "id": "organisation_relationship_type.experts_and_consultants",
@@ -1335,7 +1360,8 @@
       "label": "Experts and consultants",
       "sortOrder": 12,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "experts_and_consultants"
     },
     {
       "id": "organisation_relationship_type.professional_adviser",
@@ -1343,7 +1369,8 @@
       "label": "Professional adviser",
       "sortOrder": 13,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "professional_adviser"
     },
     {
       "id": "organisation_record_status.active",
@@ -1633,7 +1660,8 @@
       "label": "Prospective",
       "sortOrder": 1,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "prospective"
     },
     {
       "id": "relationship_status.active",
@@ -1641,7 +1669,8 @@
       "label": "Active",
       "sortOrder": 2,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "active"
     },
     {
       "id": "relationship_status.dormant",
@@ -1649,7 +1678,8 @@
       "label": "Dormant",
       "sortOrder": 3,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "dormant"
     },
     {
       "id": "relationship_status.former",
@@ -1657,7 +1687,8 @@
       "label": "Former",
       "sortOrder": 4,
       "active": true,
-      "parentId": null
+      "parentId": null,
+      "systemKey": "former"
     },
     {
       "id": "contact_role.key_relationship_contact",
