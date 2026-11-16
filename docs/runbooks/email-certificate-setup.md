@@ -4,7 +4,7 @@ This runbook covers the operational setup required to enable live Microsoft Grap
 
 All demo tenant Key Vault references in `client-not-a-law-firm/config/environments/demo.json` resolve to the deployed Azure Key Vault **`kvnotalawfi2cdo3cw7vuafm`** (`https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/`).
 
-## 1. Completed Owner Setup & Remaining PEM Replacement (`R500`)
+## 1. Completed Owner Setup (`12–16 November 2026`)
 
 | Item | Value / Scope | Status |
 | :--- | :--- | :--- |
@@ -12,8 +12,8 @@ All demo tenant Key Vault references in `client-not-a-law-firm/config/environmen
 | **Microsoft Entra application registration** | Client ID `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1` in directory `f8218d9a-e055-463f-add2-f03679aad7f2` | **Done (12 November 2026)** |
 | **Exchange Online RBAC for Applications** | `Mail.Send` application access scoped strictly to `notifications@1squared.co.uk` | **Done (12 November 2026)** |
 | **Sender domain DNS records** | SPF, DKIM, and DMARC configured for `1squared.co.uk` | **Done (12 November 2026)** |
-| **Key Vault `graph-mail-certificate` PEM version (`R500`)** | Initial version (`BC9CB621EF3BDC2413D3EA345609586ABF5167ED`) used default `application/x-pkcs12`; `GraphAppTokenProvider` requires `application/x-pem-file` | **Pending owner action (`R500`)** |
-| **Allow-list secret (`email-recipient-allowlist`)** | `kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist` | **Pending owner action** |
+| **Key Vault `graph-mail-certificate` PEM version (`R500`)** | New PEM version (`secretProperties.contentType = "application/x-pem-file"`) generated inside `kvnotalawfi2cdo3cw7vuafm` with SHA-1 thumbprint **`C5428D7F519AE513A5B8CE027D291876CEDA40D3`**; `.cer` uploaded to `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1` and retired thumbprint removed | **Done (16 November 2026)** |
+| **Allow-list secret (`email-recipient-allowlist`)** | `kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist` created in `kvnotalawfi2cdo3cw7vuafm` | **Done (16 November 2026)** |
 
 > [!NOTE]
 > Importing a PFX exported from Windows into Azure Key Vault failed even when exported with `TripleDES_SHA1`. Generating the certificate directly inside Key Vault (`az keyvault certificate create`) avoids PFX import issues, provided the policy explicitly sets `secretProperties.contentType = "application/x-pem-file"`.
@@ -78,20 +78,15 @@ Use this exact procedure when generating or rotating `graph-mail-certificate` (o
    ```
    Confirm the final command outputs **`Disabled`**.
 
-## 3. Owner Action Required (`R500`): Replace `BC9CB621…` With a PEM Version Before Switching to `"graph"`
+## 3. Initial PKCS#12 Replacement History (`R500`, Completed)
 
-Because the initial `graph-mail-certificate` (`BC9CB621EF3BDC2413D3EA345609586ABF5167ED`) was created with Key Vault's default `application/x-pkcs12` content type, complete these steps while the vault firewall is temporarily open:
+The initial `graph-mail-certificate` version used Key Vault's default `application/x-pkcs12` content type. On 16 November 2026 the owner generated a PEM version (`$p.secretProperties.contentType = 'application/x-pem-file'`, thumbprint `C5428D7F519AE513A5B8CE027D291876CEDA40D3`), uploaded its `.cer` to Entra app `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1`, removed the retired initial certificate from Entra, and updated `integrations.email.graph.certificateThumbprint` in `client-not-a-law-firm/config/environments/demo.json`.
 
-1. Run Section 2 Step 3 against `kvnotalawfi2cdo3cw7vuafm` / `graph-mail-certificate` (`$p.secretProperties.contentType = 'application/x-pem-file'`) to create a **new certificate version** stored in PEM format.
-2. Download the new `.cer` (Section 2 Step 4) and upload it to Entra app `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1` (**Certificates & secrets -> Certificates**).
-3. **Remove the old `BC9CB621EF3BDC2413D3EA345609586ABF5167ED` certificate** from Entra app `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1`.
-4. Copy the new 40-character uppercase SHA-1 hex thumbprint (from Entra or `az keyvault certificate show ... --query x509Thumbprint`) into `integrations.email.graph.certificateThumbprint` in `client-not-a-law-firm/config/environments/demo.json` (which retains `BC9CB621EF3BDC2413D3EA345609586ABF5167ED` until you receive/apply the new thumbprint).
-
-## 4. Remaining Blocker: Populate `email-recipient-allowlist` While the Vault Is Open
+## 4. Non-Live Allow-List Secret Format (`email-recipient-allowlist`)
 
 In every non-live environment (`dev`, `test`, `training`, `demo`), `evaluateEmailAllowList` fails closed if `recipientAllowListVaultRef` is configured and unreadable, or if any recipient in `to`, `cc`, or `bcc` falls outside the combined allow-list.
 
-Until `email-recipient-allowlist` is populated, the PEM version of `graph-mail-certificate` is active, and live sending is verified, `client-not-a-law-firm/config/environments/demo.json` keeps `"provider": "disabled"`.
+`email-recipient-allowlist` was created in `kvnotalawfi2cdo3cw7vuafm` on **16 November 2026**. `client-not-a-law-firm/config/environments/demo.json` keeps `"provider": "disabled"` until the post-deploy live check in Section 5 succeeds.
 
 ### Exact Secret Name & Format (`email-recipient-allowlist`)
 
@@ -126,11 +121,11 @@ Remove-Item email-allowlist.txt
 
 ## 5. Enable `graph` in the Environment Overlay After the Live Check
 
-Keep `integrations.email.provider = "disabled"` in `client-not-a-law-firm/config/environments/demo.json` until the PEM `graph-mail-certificate` version is created, `email-recipient-allowlist` is populated, and live Graph send is checked:
+Keep `integrations.email.provider = "disabled"` in `client-not-a-law-firm/config/environments/demo.json` until deployment and live Graph verification succeed:
 
-1. Update `integrations.email.graph.certificateThumbprint` to match the new PEM certificate version.
+1. Confirm `integrations.email.graph.certificateThumbprint` is set to `C5428D7F519AE513A5B8CE027D291876CEDA40D3` (already set in `demo.json`).
 2. Ensure `integrations.email.senderAddress` is set to the provisioned mailbox (`notifications@1squared.co.uk` in the live demo deployment config overlay — keep RFC 2606 `@notalawfirm.example` in git config fixtures checked by `verify-invented-fixtures.mjs`).
-3. Perform a live verification send to an allow-listed test recipient, checking `caj-outbox-drain-demo` logs for `outbox.delivery.sent` (and confirming non-allow-listed addresses stop with `status = 'dropped_allowlist'`).
+3. Deploy the Checkpoint 5c image and trigger a verification email to an allow-listed test recipient via `caj-outbox-drain-demo`, checking logs for `outbox.delivery.sent` (and confirming non-allow-listed addresses stop with `status = 'dropped_allowlist'`).
 4. Once verified, change `integrations.email.provider` from `"disabled"` to `"graph"` and deploy the updated configuration.
 5. Confirm permanent failures (`attempt_count = 5`) raise an alert via Azure Monitor (`outbox.delivery.failed_permanent`).
 

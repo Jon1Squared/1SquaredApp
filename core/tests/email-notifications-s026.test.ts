@@ -432,7 +432,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
       tenantId: 'f8218d9a-e055-463f-add2-f03679aad7f2',
       clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
       certificateVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate',
-      certificateThumbprint: 'BC9CB621EF3BDC2413D3EA345609586ABF5167ED',
+      certificateThumbprint: 'C5428D7F519AE513A5B8CE027D291876CEDA40D3',
     });
 
     const devCfg = loadAndValidateTenantConfig(baseCfg, devOverlay, 'dev');
@@ -487,7 +487,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
                 clientId: 'fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1',
                 certificateVaultRef: 'kv://kv-other-tenant-test/graph-cert',
                 certificateThumbprint:
-                  'BC9CB621EF3BDC2413D3EA345609586ABF5167ED',
+                  'C5428D7F519AE513A5B8CE027D291876CEDA40D3',
               },
             },
           },
