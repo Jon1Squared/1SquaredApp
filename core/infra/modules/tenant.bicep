@@ -346,6 +346,18 @@ resource dedicatedPgBouncerPoolMode 'Microsoft.DBforPostgreSQL/flexibleServers/c
   ]
 }
 
+resource dedicatedPgAzureExtensions 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = if (deployDedicatedPostgresServer) {
+  parent: dedicatedPostgresServer
+  name: 'azure.extensions'
+  properties: {
+    value: 'PG_TRGM'
+    source: 'user-override'
+  }
+  dependsOn: [
+    dedicatedPgMinTlsVersion
+  ]
+}
+
 resource sharedTenantDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2025-08-01' = if (!deployDedicatedPostgresServer) {
   parent: sharedPostgresServer
   name: postgresDatabaseName
@@ -366,6 +378,7 @@ resource dedicatedTenantDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/data
     dedicatedPostgresEntraAdmin
     dedicatedPgMinTlsVersion
     dedicatedPgBouncerPoolMode
+    dedicatedPgAzureExtensions
   ]
 }
 

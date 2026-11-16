@@ -64,6 +64,11 @@ export const ACTION_PERMISSIONS = {
     reason:
       'Self-scoped notification state: markAllNotificationsRead only updates notifications addressed to the authenticated actor (recipientId === userId).',
   },
+  searchGlobalRecordsAction: {
+    kind: 'authenticated',
+    reason:
+      'Every authenticated user can run global server-side search; TenantSearchRepository enforces per-entity RBAC permissions and record-level visibility inside SQL WHERE clauses before ranking or counting.',
+  },
 
   // ---------------------------------------------------------------------------
   // Enforced at action wrapper level — S0-02 pilot (1)

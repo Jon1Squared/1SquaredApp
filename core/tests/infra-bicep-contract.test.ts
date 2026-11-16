@@ -189,6 +189,12 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       expect(content, `${label} TRANSACTION pool mode`).toContain(
         "value: 'TRANSACTION'",
       );
+      expect(content, `${label} azure.extensions`).toContain(
+        "name: 'azure.extensions'",
+      );
+      expect(content, `${label} PG_TRGM allowlist`).toContain(
+        "value: 'PG_TRGM'",
+      );
     }
 
     expect(tenantBicep).toContain('param deployDedicatedPostgresServer bool = false');

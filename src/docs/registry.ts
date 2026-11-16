@@ -19,6 +19,7 @@ import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
 import { duplicateChecks } from './articles/duplicate-checks';
 import { financeDataAndPermissionsArticle } from './articles/finance-data-and-permissions';
+import { globalSearchArticle } from './articles/global-search';
 import { homeAndProfileScreensArticle } from './articles/home-and-profile-screens';
 import { keyDatesAdministrationArticle } from './articles/key-dates-administration';
 import { keyDatesCalendarSyncArticle } from './articles/key-dates-calendar-sync';
@@ -70,6 +71,7 @@ export const ARTICLES: DocArticle[] = [
   matterOpeningAndRiskArticle,
   aiMatterExtractionArticle,
   mattersEnquiriesTasksNavigationArticle,
+  globalSearchArticle,
   registersEngineArticle,
   signOffQueueArticle,
   deploymentAndSecurityArticle,
