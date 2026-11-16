@@ -98,6 +98,8 @@ export type HomeSnapshotBaseProps = Pick<
   | 'tasks'
   | 'teams'
   | 'values'
+  | 'registerTypes'
+  | 'registerRecords'
 >;
 
 export interface HomeClientProps extends HomeSnapshotBaseProps {
@@ -175,6 +177,8 @@ export function HomeClient({
   tasks,
   teams,
   values,
+  registerTypes = [],
+  registerRecords = [],
   finance = DEFAULT_FINANCE_CAPABILITIES,
   pmsLinks = [],
   pmsAsAtDate,
@@ -4530,17 +4534,67 @@ export function HomeClient({
       // 34. undertakings_and_file_reviews (06 Risk & Compliance)
       // ================================================================
       case 'undertakings_and_file_reviews': {
+        const typeByKey = new Map(registerTypes.map((t) => [t.key, t]));
+        const matterById = new Map(matters.map((m) => [m.id, m]));
+        const openItems = registerRecords.filter((rec) => {
+          if (rec.registerTypeKey !== 'undertaking' && rec.registerTypeKey !== 'file_review') {
+            return false;
+          }
+          const stateDef = typeByKey
+            .get(rec.registerTypeKey)
+            ?.states.find((s) => s.key === rec.status);
+          return stateDef?.isTerminal !== true;
+        });
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Undertakings &amp; periodic file reviews</h2>
+                <span className="pill">{openItems.length}</span>
               </div>
+              <Link href="/registers" className="panel-more">
+                Open registers
+              </Link>
             </div>
             <div className="panel-body">
-              <div className="panel-body padded muted">
-                No open undertakings or scheduled periodic file reviews.
-              </div>
+              {openItems.length === 0 ? (
+                <div className="panel-body padded muted">
+                  No open undertakings or scheduled periodic file reviews.
+                </div>
+              ) : (
+                <ul className="worklist">
+                  {openItems.slice(0, 8).map((rec) => {
+                    const typeDef = typeByKey.get(rec.registerTypeKey);
+                    const stateDef = typeDef?.states.find((s) => s.key === rec.status);
+                    const linkedMatter = rec.matterId ? matterById.get(rec.matterId) : undefined;
+                    const targetDate = rec.dueAt ?? rec.reviewAt;
+                    return (
+                      <li key={rec.id} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <Link href={`/registers?record=${encodeURIComponent(rec.id)}`}>
+                              {rec.reference} · {rec.title}
+                            </Link>
+                          </div>
+                          <div className="worklist-meta">
+                            <span>{typeDef?.label ?? rec.registerTypeKey}</span>
+                            {linkedMatter && (
+                              <span>
+                                {' '}
+                                · {linkedMatter.matterNumber} — {linkedMatter.title}
+                              </span>
+                            )}
+                            {targetDate && <span> · Due {formatDate(targetDate)}</span>}
+                          </div>
+                        </div>
+                        <div className="worklist-right">
+                          <span className="pill">{stateDef?.label ?? rec.status}</span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           </section>
         );
@@ -4550,6 +4604,21 @@ export function HomeClient({
       // 35. complaints_incidents_and_breaches (06 Risk & Compliance)
       // ================================================================
       case 'complaints_incidents_and_breaches': {
+        const typeByKey = new Map(registerTypes.map((t) => [t.key, t]));
+        const matterById = new Map(matters.map((m) => [m.id, m]));
+        const openItems = registerRecords.filter((rec) => {
+          if (
+            rec.registerTypeKey !== 'complaint' &&
+            rec.registerTypeKey !== 'breach' &&
+            rec.registerTypeKey !== 'sra_breach'
+          ) {
+            return false;
+          }
+          const stateDef = typeByKey
+            .get(rec.registerTypeKey)
+            ?.states.find((s) => s.key === rec.status);
+          return stateDef?.isTerminal !== true;
+        });
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -4557,12 +4626,51 @@ export function HomeClient({
                 <h2 className="panel-title">
                   Complaints, SRA breaches &amp; residual balances
                 </h2>
+                <span className="pill">{openItems.length}</span>
               </div>
+              <Link href="/registers" className="panel-more">
+                Open registers
+              </Link>
             </div>
             <div className="panel-body">
-              <div className="panel-body padded muted">
-                No open complaints, SRA breaches or residual balance alerts.
-              </div>
+              {openItems.length === 0 ? (
+                <div className="panel-body padded muted">
+                  No open complaints, SRA breaches or residual balance alerts.
+                </div>
+              ) : (
+                <ul className="worklist">
+                  {openItems.slice(0, 8).map((rec) => {
+                    const typeDef = typeByKey.get(rec.registerTypeKey);
+                    const stateDef = typeDef?.states.find((s) => s.key === rec.status);
+                    const linkedMatter = rec.matterId ? matterById.get(rec.matterId) : undefined;
+                    const targetDate = rec.dueAt ?? rec.reviewAt;
+                    return (
+                      <li key={rec.id} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <Link href={`/registers?record=${encodeURIComponent(rec.id)}`}>
+                              {rec.reference} · {rec.title}
+                            </Link>
+                          </div>
+                          <div className="worklist-meta">
+                            <span>{typeDef?.label ?? rec.registerTypeKey}</span>
+                            {linkedMatter && (
+                              <span>
+                                {' '}
+                                · {linkedMatter.matterNumber} — {linkedMatter.title}
+                              </span>
+                            )}
+                            {targetDate && <span> · Target {formatDate(targetDate)}</span>}
+                          </div>
+                        </div>
+                        <div className="worklist-right">
+                          <span className="pill">{stateDef?.label ?? rec.status}</span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           </section>
         );

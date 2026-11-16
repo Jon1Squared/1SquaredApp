@@ -33,6 +33,7 @@ import { leaversAndReassignmentArticle } from './articles/leavers-and-reassignme
 import { matterOpeningAndRiskArticle } from './articles/matter-opening-and-risk';
 import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enquiries-tasks-and-navigation';
 import { quickConflictCheck } from './articles/quick-conflict-check';
+import { registersEngineArticle } from './articles/registers-engine';
 import { sharepointDocumentStoreArticle } from './articles/sharepoint-document-store';
 import { sharepointSitesSelectedSetupArticle } from './articles/sharepoint-sites-selected-setup';
 import { signOffQueueArticle } from './articles/sign-off-queue';
@@ -69,6 +70,7 @@ export const ARTICLES: DocArticle[] = [
   matterOpeningAndRiskArticle,
   aiMatterExtractionArticle,
   mattersEnquiriesTasksNavigationArticle,
+  registersEngineArticle,
   signOffQueueArticle,
   deploymentAndSecurityArticle,
   demoEnvironmentArticle,

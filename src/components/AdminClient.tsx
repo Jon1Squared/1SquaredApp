@@ -71,8 +71,13 @@ import { MatterCostsAdminSection } from './MatterCostsAdminSection';
 import { MatterPartiesAdminSection } from './MatterPartiesAdminSection';
 import { PmsLinksAdminSection } from './PmsLinksAdminSection';
 import { RbacAdminSection } from './RbacAdminSection';
-import type { WorkTypesConfiguration } from '@platform/core-api';
+import type {
+  RegistersConfiguration,
+  RegisterTypeDefinition,
+  WorkTypesConfiguration,
+} from '@platform/core-api';
 import { KeyDatesAdminPanel } from './KeyDatesAdminPanel';
+import { RegistersAdminPanel } from './RegistersAdminPanel';
 import { WorkTypesAdminPanel } from './WorkTypesAdminPanel';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -87,6 +92,7 @@ export type AdminTab =
   | 'document-templates'
   | 'document-stores'
   | 'key-dates'
+  | 'registers'
   | 'work-types'
   | 'lists'
   | 'custom-fields'
@@ -190,6 +196,8 @@ interface Props {
   permissionsByPersonId?: Record<string, PermissionKey[]>;
   rbacConfig: RbacConfiguration;
   keyDatesConfig?: KeyDatesConfig;
+  registersConfig?: RegistersConfiguration;
+  registerTypes?: RegisterTypeDefinition[];
   workTypesConfig?: WorkTypesConfiguration;
   hasMfaVerified?: boolean;
   currentUserKeyDatePermissions?: KeyDatePermission[];
@@ -234,6 +242,8 @@ export function AdminClient({
   permissionsByPersonId = {},
   rbacConfig,
   keyDatesConfig,
+  registersConfig,
+  registerTypes = [],
   workTypesConfig,
   hasMfaVerified = false,
   currentUserKeyDatePermissions = [],
@@ -1389,6 +1399,17 @@ export function AdminClient({
             Key dates &amp; limitation ({keyDatesConfig.keyDateTypes?.length ?? 0} types)
           </button>
         ) : null}
+        {registersConfig ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'registers'}
+            className={`tab-btn ${tab === 'registers' ? 'tab-btn--active' : ''}`}
+            onClick={() => setTab('registers')}
+          >
+            Registers &amp; undertakings ({registerTypes.length} types)
+          </button>
+        ) : null}
         <button
           type="button"
           role="tab"
@@ -1472,6 +1493,15 @@ export function AdminClient({
           initialConfig={keyDatesConfig}
           userPermissions={currentUserKeyDatePermissions}
           currentUserId={currentUserId}
+        />
+      )}
+
+      {tab === 'registers' && registersConfig && (
+        <RegistersAdminPanel
+          initialConfig={registersConfig}
+          registerTypes={registerTypes}
+          canConfigure={Boolean(currentUserPermissions?.includes('register:configure'))}
+          hasMfaVerified={hasMfaVerified}
         />
       )}
 

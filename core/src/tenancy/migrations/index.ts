@@ -2008,6 +2008,257 @@ DROP SEQUENCE IF EXISTS public.tenant_client_rate_override_id_seq;
 `.trim(),
 };
 
+export const REGISTERS_ENGINE_MIGRATION_0017: TenantMigrationDefinition = {
+  version: '0017',
+  name: '0017_registers_engine_expand',
+  description:
+    'Creates tenant-scoped register_records, register_transitions, and register_reminder_states tables and sequences, and backfills sign_offs records into register_records (ADR 0032, S0-24).',
+  tablesChanged: [
+    'register_records',
+    'register_transitions',
+    'register_reminder_states',
+  ],
+  dependsOn: ['0016'],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_register_record_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS public.tenant_register_transition_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.register_records (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  register_type_key TEXT NOT NULL,
+  reference TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  matter_id TEXT NULL,
+  enquiry_id TEXT NULL,
+  person_id TEXT NULL,
+  organisation_id TEXT NULL,
+  owner_id TEXT NULL,
+  assigned_approver_id TEXT NULL,
+  decided_by_id TEXT NULL,
+  decided_at TIMESTAMPTZ NULL,
+  due_at TIMESTAMPTZ NULL,
+  review_at TIMESTAMPTZ NULL,
+  reminder_schedule_days_json JSONB NULL,
+  field_values_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  row_version INTEGER NOT NULL DEFAULT 1,
+  created_by_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_register_records_tenant_type_status
+  ON public.register_records (tenant_id, register_type_key, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_register_records_tenant_matter
+  ON public.register_records (tenant_id, matter_id)
+  WHERE matter_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_register_records_tenant_due
+  ON public.register_records (tenant_id, due_at)
+  WHERE due_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_register_records_tenant_review
+  ON public.register_records (tenant_id, review_at)
+  WHERE review_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.register_transitions (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  register_record_id TEXT NOT NULL,
+  register_type_key TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  comment TEXT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  correlation_id TEXT NOT NULL,
+  transitioned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, register_record_id)
+    REFERENCES public.register_records (tenant_id, id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_register_transitions_tenant_record
+  ON public.register_transitions (tenant_id, register_record_id, transitioned_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.register_reminder_states (
+  tenant_id TEXT NOT NULL,
+  register_record_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('due', 'review')),
+  stage_days_before INTEGER NOT NULL,
+  last_notified_at TIMESTAMPTZ NULL,
+  last_skipped_reason TEXT NULL CHECK (
+    last_skipped_reason IS NULL
+    OR last_skipped_reason IN ('no_permitted_recipients', 'missing_matter', 'terminal_status')
+  ),
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, register_record_id, trigger_kind, stage_days_before),
+  CONSTRAINT uq_register_reminder_states_idempotency UNIQUE (tenant_id, idempotency_key),
+  FOREIGN KEY (tenant_id, register_record_id)
+    REFERENCES public.register_records (tenant_id, id)
+    ON DELETE CASCADE
+);
+
+INSERT INTO public.register_records (
+  tenant_id,
+  id,
+  register_type_key,
+  reference,
+  title,
+  status,
+  matter_id,
+  owner_id,
+  assigned_approver_id,
+  decided_by_id,
+  decided_at,
+  field_values_json,
+  row_version,
+  created_by_id,
+  created_at,
+  updated_by_id,
+  updated_at
+)
+SELECT
+  s.tenant_id,
+  s.id,
+  CASE
+    WHEN s.kind = 'undertaking' THEN 'undertaking'
+    ELSE 'sign_off'
+  END AS register_type_key,
+  s.id AS reference,
+  s.title,
+  CASE
+    WHEN s.kind = 'undertaking' THEN
+      CASE s.status
+        WHEN 'Approved' THEN 'discharged'
+        WHEN 'Rejected' THEN 'cancelled'
+        ELSE 'open'
+      END
+    ELSE
+      CASE s.status
+        WHEN 'Approved' THEN 'approved'
+        WHEN 'Rejected' THEN 'rejected'
+        WHEN 'Discussing' THEN 'discussing'
+        ELSE 'pending_approval'
+      END
+  END AS status,
+  s.matter_id,
+  s.requested_by_id,
+  CASE
+    WHEN s.kind = 'undertaking' THEN NULL
+    ELSE s.assigned_approver_id
+  END AS assigned_approver_id,
+  s.decided_by_id,
+  s.decided_at,
+  COALESCE(s.payload_json, '{}'::jsonb)
+    || jsonb_strip_nulls(
+      jsonb_build_object(
+        'signOffKind', s.kind,
+        'matterNumber', s.matter_number,
+        'subtitle', s.subtitle,
+        'amountGbp', s.amount_gbp,
+        'discussionNote', s.discussion_note
+      )
+    ),
+  1,
+  COALESCE(s.requested_by_id, 'system'),
+  s.requested_at,
+  COALESCE(s.decided_by_id, s.requested_by_id, 'system'),
+  COALESCE(s.decided_at, s.requested_at)
+FROM public.sign_offs s
+WHERE s.kind IN ('write_off', 'matter_opening', 'undertaking')
+ON CONFLICT (tenant_id, id) DO NOTHING;
+`.trim(),
+  downSql: `
+INSERT INTO public.sign_offs (
+  tenant_id,
+  id,
+  kind,
+  status,
+  matter_id,
+  matter_number,
+  title,
+  subtitle,
+  requested_by_id,
+  assigned_approver_id,
+  decided_by_id,
+  amount_gbp,
+  requested_at,
+  decided_at,
+  discussion_note,
+  payload_json
+)
+SELECT
+  r.tenant_id,
+  r.id,
+  COALESCE(
+    NULLIF(r.field_values_json->>'signOffKind', ''),
+    CASE WHEN r.register_type_key = 'undertaking' THEN 'undertaking' ELSE 'write_off' END
+  ) AS kind,
+  CASE r.status
+    WHEN 'approved' THEN 'Approved'
+    WHEN 'discharged' THEN 'Approved'
+    WHEN 'rejected' THEN 'Rejected'
+    WHEN 'cancelled' THEN 'Rejected'
+    WHEN 'discussing' THEN 'Discussing'
+    ELSE 'Pending'
+  END AS status,
+  r.matter_id,
+  NULLIF(r.field_values_json->>'matterNumber', ''),
+  r.title,
+  COALESCE(r.field_values_json->>'subtitle', ''),
+  r.owner_id,
+  r.assigned_approver_id,
+  r.decided_by_id,
+  CASE
+    WHEN r.field_values_json ? 'amountGbp' AND r.field_values_json->>'amountGbp' ~ '^-?[0-9]+(\\.[0-9]+)?$'
+    THEN (r.field_values_json->>'amountGbp')::numeric(12,2)
+    ELSE NULL
+  END AS amount_gbp,
+  r.created_at,
+  r.decided_at,
+  NULLIF(r.field_values_json->>'discussionNote', ''),
+  r.field_values_json - 'signOffKind' - 'matterNumber' - 'subtitle' - 'amountGbp' - 'discussionNote'
+FROM public.register_records r
+WHERE r.register_type_key = 'sign_off'
+   OR (r.register_type_key = 'undertaking' AND r.field_values_json->>'signOffKind' = 'undertaking')
+ON CONFLICT (tenant_id, id) DO UPDATE SET
+  kind = EXCLUDED.kind,
+  status = EXCLUDED.status,
+  matter_id = EXCLUDED.matter_id,
+  matter_number = EXCLUDED.matter_number,
+  title = EXCLUDED.title,
+  subtitle = EXCLUDED.subtitle,
+  requested_by_id = EXCLUDED.requested_by_id,
+  assigned_approver_id = EXCLUDED.assigned_approver_id,
+  decided_by_id = EXCLUDED.decided_by_id,
+  amount_gbp = EXCLUDED.amount_gbp,
+  requested_at = EXCLUDED.requested_at,
+  decided_at = EXCLUDED.decided_at,
+  discussion_note = EXCLUDED.discussion_note,
+  payload_json = EXCLUDED.payload_json;
+
+DROP TABLE IF EXISTS public.register_reminder_states;
+DROP INDEX IF EXISTS public.idx_register_transitions_tenant_record;
+DROP TABLE IF EXISTS public.register_transitions;
+DROP INDEX IF EXISTS public.idx_register_records_tenant_review;
+DROP INDEX IF EXISTS public.idx_register_records_tenant_due;
+DROP INDEX IF EXISTS public.idx_register_records_tenant_matter;
+DROP INDEX IF EXISTS public.idx_register_records_tenant_type_status;
+DROP TABLE IF EXISTS public.register_records;
+DROP SEQUENCE IF EXISTS public.tenant_register_transition_id_seq;
+DROP SEQUENCE IF EXISTS public.tenant_register_record_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -2025,6 +2276,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   SCHEDULER_JOB_RUNS_MIGRATION_0014,
   TRANSITIONAL_BRIDGES_CONTRACT_MIGRATION_0015,
   NEGOTIATED_RATES_MIGRATION_0016,
+  REGISTERS_ENGINE_MIGRATION_0017,
 ];
 
 export function validateMigrationCatalogueOrder(

@@ -168,18 +168,9 @@ export function resolvePersonAuthoritativeRoles(
     }
   }
 
-  // Legacy `appRole` transitional fallback (ADR-0016)
+  // Legacy `appRole` transitional fallback (ADR-0016): system admin maps strictly to `'admin'`
   if (person.appRole === 'admin') {
-    return [
-      'admin',
-      'fee_earner',
-      'partner',
-      'legal_secretary',
-      'enquiries_coordinator',
-      'finance',
-      'risk_compliance',
-      'managing_partner',
-    ];
+    return ['admin'];
   }
   if (person.appRole === 'call_handler') {
     return ['enquiries_coordinator'];

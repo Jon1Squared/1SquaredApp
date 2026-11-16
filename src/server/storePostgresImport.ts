@@ -22,7 +22,10 @@ import {
   TenantPartyRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
+  TenantRegisterRepository,
   TenantTaskWorkflowRepository,
+  type RegisterRecord,
+  type RegistersConfiguration,
   type FirmAuditEntryInput,
   type MatterRestrictionMetadata,
   type TenantChoiceListRecord,
@@ -69,6 +72,7 @@ export type ImportableStoreModule =
   | 'documents'
   | 'document-store'
   | 'key-dates'
+  | 'registers'
   | 'audit';
 
 export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
@@ -84,6 +88,7 @@ export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
   'documents',
   'document-store',
   'key-dates',
+  'registers',
   'audit',
 ];
 
@@ -158,6 +163,8 @@ export interface ImportStoreModulesResult {
     keyDateReminderStates: number;
     keyDateCalendarSyncs: number;
     hasKeyDatesConfigOverride: boolean;
+    registerRecords: number;
+    hasRegistersConfigOverride: boolean;
     auditEntries: number;
   };
 }
@@ -221,6 +228,10 @@ export async function clearMigratedPostgresModulesForTenant(options: {
   if (modules.includes('key-dates')) {
     const keyDateRepo = new TenantKeyDateRepository();
     await keyDateRepo.clearTenantData(ctx);
+  }
+  if (modules.includes('registers')) {
+    const registerRepo = new TenantRegisterRepository();
+    await registerRepo.clearTenantData(ctx);
   }
   if (modules.includes('tasks')) {
     const taskRepo = new TenantTaskWorkflowRepository();
@@ -342,6 +353,8 @@ export async function importFirmStoreModulesToPostgres(
     keyDateReminderStates: 0,
     keyDateCalendarSyncs: 0,
     hasKeyDatesConfigOverride: false,
+    registerRecords: 0,
+    hasRegistersConfigOverride: false,
     auditEntries: 0,
   };
 
@@ -1131,6 +1144,33 @@ export async function importFirmStoreModulesToPostgres(
     ) {
       throw new Error(
         'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection key dates row counts did not match imported totals.',
+      );
+    }
+  }
+
+  if (modules.includes('registers')) {
+    const registerRepo = new TenantRegisterRepository();
+    const registerRows: RegisterRecord[] = (store.registerRecords ?? []).filter(
+      (r) => r.registerTypeKey !== 'sign_off',
+    );
+    if (registerRows.length > 0) {
+      await registerRepo.putRegisterRecords(ctx, registerRows);
+      counts.registerRecords = registerRows.length;
+    }
+    if (store.registersConfigOverride !== undefined) {
+      await new TenantCatalogueRepository().putModuleConfig<RegistersConfiguration>(
+        ctx,
+        'registers',
+        store.registersConfigOverride,
+        ctx.actorId || 'system:import',
+      );
+      counts.hasRegistersConfigOverride = true;
+    }
+    const verifyRegRepo = new TenantRegisterRepository();
+    const verifiedRegCounts = await verifyRegRepo.countAllTenantRegisterRows(ctx);
+    if (verifiedRegCounts.registerRecords < counts.registerRecords) {
+      throw new Error(
+        'STORE_IMPORT_VERIFICATION_FAILED: Fresh-connection registers row counts did not match imported totals.',
       );
     }
   }

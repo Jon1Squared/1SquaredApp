@@ -30,7 +30,8 @@ import { TenantAuditRepository } from './auditRepository';
 import {
   ENQUIRY_VISIBLE_SQL_PREDICATE,
   QUOTE_VISIBLE_SQL_PREDICATE,
-} from './intakeQuoteRepository';
+} from './intakeQuoteRepository';
+import { REGISTER_RECORD_VISIBLE_SQL_PREDICATE } from './registerRepository';
 export interface TenantTaskLinkedRecord {
   recordType: 'matter' | 'person' | 'organisation' | 'enquiry' | 'quote';
   recordId: string;
@@ -170,23 +171,53 @@ interface NotificationRow extends Record<string, unknown> {
   metadata_json: Record<string, unknown> | null;
 }
 
-interface SignOffRow extends Record<string, unknown> {
+interface RegisterSignOffRow extends Record<string, unknown> {
   tenant_id: string;
   id: string;
-  kind: string;
+  register_type_key: string;
+  reference: string;
+  title: string;
   status: string;
   matter_id: string | null;
-  matter_number: string | null;
-  title: string;
-  subtitle: string;
-  requested_by_id: string | null;
+  owner_id: string | null;
   assigned_approver_id: string | null;
   decided_by_id: string | null;
-  amount_gbp: string | number | null;
-  requested_at: Date | string;
   decided_at: Date | string | null;
-  discussion_note: string | null;
-  payload_json: Record<string, unknown> | null;
+  field_values_json: Record<string, unknown> | null;
+  created_at: Date | string;
+}
+
+function mapSignOffStatusToRegisterStatus(status: string): string {
+  switch (status) {
+    case 'Approved':
+    case 'approved':
+      return 'approved';
+    case 'Rejected':
+    case 'rejected':
+      return 'rejected';
+    case 'Discussing':
+    case 'discussing':
+      return 'discussing';
+    case 'Pending':
+    case 'pending_approval':
+    default:
+      return 'pending_approval';
+  }
+}
+
+function mapRegisterStatusToSignOffStatus(status: string): string {
+  switch (status) {
+    case 'approved':
+      return 'Approved';
+    case 'rejected':
+      return 'Rejected';
+    case 'discussing':
+      return 'Discussing';
+    case 'pending_approval':
+      return 'Pending';
+    default:
+      return status;
+  }
 }
 
 interface RecentlyViewedRow extends Record<string, unknown> {
@@ -363,50 +394,72 @@ function mapRowToNotification(row: NotificationRow): TenantNotificationRecord {
   return result;
 }
 
-function mapRowToSignOff(row: SignOffRow): TenantSignOffRecord {
-  const payload =
-    row.payload_json && typeof row.payload_json === 'object'
-      ? (structuredClone(row.payload_json) as Partial<TenantSignOffRecord>)
+function mapRowToSignOff(row: RegisterSignOffRow): TenantSignOffRecord {
+  const fields =
+    row.field_values_json && typeof row.field_values_json === 'object'
+      ? (structuredClone(row.field_values_json) as Record<string, unknown>)
       : {};
+  const nestedPayload =
+    fields.legacyPayload && typeof fields.legacyPayload === 'object'
+      ? (fields.legacyPayload as Partial<TenantSignOffRecord>)
+      : {};
+  const legacyStatus =
+    typeof fields.legacySignOffStatus === 'string' && fields.legacySignOffStatus
+      ? fields.legacySignOffStatus
+      : undefined;
+  const resolvedStatus = legacyStatus ?? mapRegisterStatusToSignOffStatus(row.status);
+  const resolvedKind =
+    typeof fields.signOffKind === 'string' && fields.signOffKind
+      ? fields.signOffKind
+      : typeof nestedPayload.kind === 'string' && nestedPayload.kind
+        ? nestedPayload.kind
+        : 'write_off';
   const result: TenantSignOffRecord = {
-    ...payload,
+    ...nestedPayload,
     id: row.id,
-    kind: row.kind,
+    kind: resolvedKind,
     title: row.title,
-    subtitle: row.subtitle,
-    requestedById: row.requested_by_id ?? payload.requestedById ?? '',
+    subtitle:
+      typeof fields.subtitle === 'string'
+        ? fields.subtitle
+        : typeof nestedPayload.subtitle === 'string'
+          ? nestedPayload.subtitle
+          : '',
+    requestedById: row.owner_id ?? nestedPayload.requestedById ?? '',
     requestedAt:
-      typeof payload.requestedAt === 'string' && payload.requestedAt
-        ? payload.requestedAt
-        : toIsoString(row.requested_at),
+      typeof nestedPayload.requestedAt === 'string' && nestedPayload.requestedAt
+        ? nestedPayload.requestedAt
+        : toIsoString(row.created_at),
     assignedPartnerId:
       row.assigned_approver_id !== undefined
         ? row.assigned_approver_id
-        : (payload.assignedPartnerId ?? null),
-    status: row.status,
+        : (nestedPayload.assignedPartnerId ?? null),
+    status: resolvedStatus,
   };
   if (row.matter_id !== null && row.matter_id !== undefined) {
     result.matterId = row.matter_id;
   } else {
     delete result.matterId;
   }
-  if (row.matter_number !== null && row.matter_number !== undefined) {
-    result.matterNumber = row.matter_number;
+  const matterNum =
+    typeof fields.matterNumber === 'string' ? fields.matterNumber : undefined;
+  if (matterNum !== undefined) {
+    result.matterNumber = matterNum;
   }
-  if (row.amount_gbp !== null && row.amount_gbp !== undefined) {
-    result.amountGbp = Number(row.amount_gbp);
+  if (fields.amountGbp !== undefined && fields.amountGbp !== null) {
+    result.amountGbp = Number(fields.amountGbp);
   }
   if (row.decided_by_id !== null && row.decided_by_id !== undefined) {
     result.approvedById = row.decided_by_id;
   }
   if (row.decided_at !== null && row.decided_at !== undefined) {
     result.approvedAt =
-      typeof payload.approvedAt === 'string' && payload.approvedAt
-        ? payload.approvedAt
+      typeof nestedPayload.approvedAt === 'string' && nestedPayload.approvedAt
+        ? nestedPayload.approvedAt
         : toIsoString(row.decided_at);
   }
-  if (row.discussion_note !== null && row.discussion_note !== undefined) {
-    result.discussionNote = row.discussion_note;
+  if (typeof fields.discussionNote === 'string') {
+    result.discussionNote = fields.discussionNote;
   }
   return result;
 }
@@ -521,7 +574,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         | 'tenant_task_id_seq'
         | 'tenant_notification_id_seq'
         | 'tenant_sign_off_id_seq';
-      tableName: 'tasks' | 'notifications' | 'sign_offs';
+      tableName: 'tasks' | 'notifications' | 'register_records';
       count: number;
       padDigits: number;
     },
@@ -625,7 +678,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     return this.allocateSequenceIds(ctx, {
       prefix: 'SO',
       sequenceName: 'tenant_sign_off_id_seq',
-      tableName: 'sign_offs',
+      tableName: 'register_records',
       count,
       padDigits: options?.padDigits ?? 6,
     });
@@ -1097,6 +1150,12 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
                    AND t.id = n.record_id
                    AND NOT ${TASK_VISIBLE_SQL_PREDICATE}
                )
+               AND NOT EXISTS (
+                 SELECT 1 FROM public.register_records r
+                 WHERE r.tenant_id = n.tenant_id
+                   AND r.id = n.record_id
+                   AND NOT ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE}
+               )
              ORDER BY n.created_at DESC, n.id ASC`,
             [ctx.tenantId, viewerId, userId],
           );
@@ -1225,7 +1284,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       throw createTaskWorkflowError('SIGN_OFF_VALIDATION_ERROR', 'Sign-off id is required.');
     }
     const existingCheck = await tx.query<{ tenant_id: string }>(
-      `SELECT tenant_id FROM sign_offs WHERE id = $1`,
+      `SELECT tenant_id FROM public.register_records WHERE id = $1`,
       [signOff.id],
     );
     for (const r of existingCheck.rows) {
@@ -1238,51 +1297,72 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     }
 
     const requestedAt = signOff.requestedAt || new Date().toISOString();
+    const rawStatus = signOff.status || 'Pending';
+    const canonicalStatus = mapSignOffStatusToRegisterStatus(rawStatus);
+    const isCanonicalInput =
+      rawStatus === 'Pending' ||
+      rawStatus === 'Discussing' ||
+      rawStatus === 'Approved' ||
+      rawStatus === 'Rejected' ||
+      rawStatus === 'pending_approval' ||
+      rawStatus === 'discussing' ||
+      rawStatus === 'approved' ||
+      rawStatus === 'rejected';
+    const fieldValues: Record<string, unknown> = {
+      signOffKind: signOff.kind,
+      ...(signOff.matterNumber !== undefined ? { matterNumber: signOff.matterNumber } : {}),
+      ...(signOff.subtitle !== undefined ? { subtitle: signOff.subtitle } : {}),
+      ...(signOff.amountGbp !== undefined && signOff.amountGbp !== null
+        ? { amountGbp: Number(signOff.amountGbp) }
+        : {}),
+      ...(signOff.discussionNote !== undefined && signOff.discussionNote !== null
+        ? { discussionNote: signOff.discussionNote }
+        : {}),
+      ...(!isCanonicalInput ? { legacySignOffStatus: rawStatus } : {}),
+      legacyPayload: signOff,
+    };
+
     await tx.query(
-      `INSERT INTO sign_offs (
-         tenant_id, id, kind, status, matter_id, matter_number,
-         title, subtitle, requested_by_id, assigned_approver_id, decided_by_id,
-         amount_gbp, requested_at, decided_at, discussion_note, payload_json
+      `INSERT INTO public.register_records (
+         tenant_id, id, register_type_key, reference, title, status,
+         matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+         field_values_json, row_version, created_by_id, created_at, updated_by_id, updated_at
        )
        VALUES (
-         $1, $2, $3, $4, $5, $6,
-         $7, $8, $9, $10, $11,
-         $12, $13::timestamptz, $14::timestamptz, $15, $16::jsonb
+         $1, $2, 'sign_off', $3, $4, $5,
+         $6, $7, $8, $9, $10::timestamptz,
+         $11::jsonb, 1, $12, $13::timestamptz, $14, $15::timestamptz
        )
        ON CONFLICT (tenant_id, id) DO UPDATE SET
-         kind = EXCLUDED.kind,
+         register_type_key = 'sign_off',
+         reference = EXCLUDED.reference,
+         title = EXCLUDED.title,
          status = EXCLUDED.status,
          matter_id = EXCLUDED.matter_id,
-         matter_number = EXCLUDED.matter_number,
-         title = EXCLUDED.title,
-         subtitle = EXCLUDED.subtitle,
-         requested_by_id = EXCLUDED.requested_by_id,
+         owner_id = EXCLUDED.owner_id,
          assigned_approver_id = EXCLUDED.assigned_approver_id,
          decided_by_id = EXCLUDED.decided_by_id,
-         amount_gbp = EXCLUDED.amount_gbp,
-         requested_at = EXCLUDED.requested_at,
          decided_at = EXCLUDED.decided_at,
-         discussion_note = EXCLUDED.discussion_note,
-         payload_json = EXCLUDED.payload_json`,
+         field_values_json = EXCLUDED.field_values_json,
+         row_version = public.register_records.row_version + 1,
+         updated_by_id = EXCLUDED.updated_by_id,
+         updated_at = EXCLUDED.updated_at`,
       [
         ctx.tenantId,
         signOff.id,
-        signOff.kind,
-        signOff.status || 'Pending',
-        signOff.matterId ?? null,
-        signOff.matterNumber ?? null,
+        signOff.id,
         signOff.title ?? '',
-        signOff.subtitle ?? '',
+        canonicalStatus,
+        signOff.matterId ?? null,
         signOff.requestedById || null,
         signOff.assignedPartnerId || null,
         signOff.approvedById ?? null,
-        signOff.amountGbp !== undefined && signOff.amountGbp !== null
-          ? Number(signOff.amountGbp)
-          : null,
-        requestedAt,
         signOff.approvedAt ?? null,
-        signOff.discussionNote ?? null,
-        JSON.stringify(signOff),
+        JSON.stringify(fieldValues),
+        signOff.requestedById || ctx.actorId || 'system',
+        requestedAt,
+        signOff.approvedById || signOff.requestedById || ctx.actorId || 'system',
+        signOff.approvedAt ?? requestedAt,
       ],
     );  }
 
@@ -1296,8 +1376,12 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
-      const res = await tx.query<SignOffRow>(
-        `SELECT * FROM sign_offs WHERE tenant_id = $1 AND id = $2`,
+      const res = await tx.query<RegisterSignOffRow>(
+        `SELECT tenant_id, id, register_type_key, reference, title, status,
+                matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+                field_values_json, created_at
+         FROM public.register_records
+         WHERE tenant_id = $1 AND id = $2 AND register_type_key = 'sign_off'`,
         [ctx.tenantId, signOff.id],
       );
       const row = res.rows[0];
@@ -1336,15 +1420,23 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       const includeRestricted = Boolean(options?.includeRestricted);
       const viewerId = options?.viewerId ?? ctx.actorId;
       const res = includeRestricted
-        ? await tx.query<SignOffRow>(
-            `SELECT * FROM sign_offs s WHERE s.tenant_id = $1 AND s.id = $2`,
+        ? await tx.query<RegisterSignOffRow>(
+            `SELECT tenant_id, id, register_type_key, reference, title, status,
+                    matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+                    field_values_json, created_at
+             FROM public.register_records r
+             WHERE r.tenant_id = $1 AND r.register_type_key = 'sign_off' AND r.id = $2`,
             [ctx.tenantId, signOffId],
           )
-        : await tx.query<SignOffRow>(
-            `SELECT * FROM sign_offs s
-             WHERE s.tenant_id = $1
-               AND s.id = $3
-               AND ${SIGN_OFF_VISIBLE_SQL_PREDICATE}`,
+        : await tx.query<RegisterSignOffRow>(
+            `SELECT tenant_id, id, register_type_key, reference, title, status,
+                    matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+                    field_values_json, created_at
+             FROM public.register_records r
+             WHERE r.tenant_id = $1
+               AND r.register_type_key = 'sign_off'
+               AND r.id = $3
+               AND ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE}`,
             [ctx.tenantId, viewerId, signOffId],
           );
       const row = res.rows[0];
@@ -1370,23 +1462,32 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       const params: unknown[] = includeRestricted
         ? [ctx.tenantId]
         : [ctx.tenantId, viewerId];
-      const clauses: string[] = ['s.tenant_id = $1'];
+      const clauses: string[] = [
+        'r.tenant_id = $1',
+        "r.register_type_key = 'sign_off'",
+      ];
       if (!includeRestricted) {
-        clauses.push(SIGN_OFF_VISIBLE_SQL_PREDICATE);
+        clauses.push(REGISTER_RECORD_VISIBLE_SQL_PREDICATE);
       }
       if (options?.status) {
-        params.push(options.status);
-        clauses.push(`s.status = $${params.length}`);
+        const canonicalFilter = mapSignOffStatusToRegisterStatus(options.status);
+        params.push(canonicalFilter, options.status);
+        clauses.push(
+          `(r.status = $${params.length - 1} OR r.field_values_json->>'legacySignOffStatus' = $${params.length})`,
+        );
       }
       if (options?.matterId) {
         params.push(options.matterId);
-        clauses.push(`s.matter_id = $${params.length}`);
+        clauses.push(`r.matter_id = $${params.length}`);
       }
 
-      const res = await tx.query<SignOffRow>(
-        `SELECT * FROM sign_offs s
+      const res = await tx.query<RegisterSignOffRow>(
+        `SELECT tenant_id, id, register_type_key, reference, title, status,
+                matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+                field_values_json, created_at
+         FROM public.register_records r
          WHERE ${clauses.join(' AND ')}
-         ORDER BY s.requested_at DESC, s.id ASC`,
+         ORDER BY r.created_at DESC, r.id ASC`,
         params,
       );
       return res.rows.map((row) => {
@@ -1410,7 +1511,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   ): Promise<boolean> {
     return this.withTenantTransaction(ctx, async (tx) => {
       const res = await tx.query<{ tenant_id: string }>(
-        `DELETE FROM sign_offs WHERE tenant_id = $1 AND id = $2 RETURNING tenant_id`,
+        `DELETE FROM public.register_records WHERE tenant_id = $1 AND register_type_key = 'sign_off' AND id = $2 RETURNING tenant_id`,
         [ctx.tenantId, signOffId],
       );
       for (const row of res.rows) {
@@ -1590,7 +1691,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
           [ctx.tenantId],
         ),
         tx.query<{ count: string }>(
-          `SELECT COUNT(*)::text AS count FROM sign_offs WHERE tenant_id = $1`,
+          `SELECT COUNT(*)::text AS count FROM public.register_records WHERE tenant_id = $1 AND register_type_key = 'sign_off'`,
           [ctx.tenantId],
         ),
         tx.query<{ count: string }>(
@@ -1613,6 +1714,10 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       await tx.query(`DELETE FROM recently_viewed WHERE tenant_id = $1`, [
         ctx.tenantId,
       ]);
+      await tx.query(
+        `DELETE FROM public.register_records WHERE tenant_id = $1 AND register_type_key = 'sign_off'`,
+        [ctx.tenantId],
+      );
       await tx.query(`DELETE FROM sign_offs WHERE tenant_id = $1`, [
         ctx.tenantId,
       ]);

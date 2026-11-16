@@ -468,7 +468,7 @@ export const PERMISSION_REGISTRY: Readonly<
     key: 'signoff:approve',
     domain: 'signoff',
     description:
-      'Approve or request discussion on partner sign-off items (write-offs, high-risk matter openings, and undertakings).',
+      'Approve or request discussion on partner sign-off items (write-offs and high-risk matter openings).',
     sensitivity: 'restricted',
     requiresMfa: false,
     sinceVersion: '1.1.0',
@@ -674,6 +674,77 @@ export const PERMISSION_REGISTRY: Readonly<
     jobOnly: true,
     sinceVersion: '1.1.0',
   },
+  'register:view': {
+    key: 'register:view',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'View configurable firm register records, undertakings, and transition history within matter access rules (ADR 0032).',
+    sensitivity: 'standard',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'register:create': {
+    key: 'register:create',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Create new records in configurable firm registers (subject to per-register permissions and matter visibility rules).',
+    sensitivity: 'standard',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'register:edit': {
+    key: 'register:edit',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Edit active register record details and non-approval transitions in configurable firm registers.',
+    sensitivity: 'standard',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'register:approve': {
+    key: 'register:approve',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Approve, query, or reject register entries that require independent partner or compliance sign-off (self-approval forbidden).',
+    sensitivity: 'restricted',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'register:configure': {
+    key: 'register:configure',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Configure custom register definitions, field schemas, reminder schedules, and module overrides (MFA required).',
+    sensitivity: 'confidential',
+    requiresMfa: true,
+    sinceVersion: '1.1.0',
+  },
+  'undertaking:manage': {
+    key: 'undertaking:manage',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Create, vary, and discharge solicitor undertakings directly (practising fee-earner roles only; excluded from system admin).',
+    sensitivity: 'restricted',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'register:run_reminders': {
+    key: 'register:run_reminders',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Execute the scheduled hourly register compliance and review reminder job across provisioned tenants (ADR 0032; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(
@@ -732,7 +803,11 @@ export const DEFAULT_RBAC_ROLES: Readonly<
     description:
       'Full platform, configuration, RBAC, and operational administration.',
     isBuiltIn: true,
-    permissions: [...ALL_USER_PERMISSION_KEYS],
+    permissions: [
+      ...ALL_USER_PERMISSION_KEYS.filter(
+        (key) => key !== 'undertaking:manage',
+      ),
+    ],
   },
   managing_partner: {
     key: 'managing_partner',
@@ -795,6 +870,12 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'keydate:resolve',
       'keydate:waive',
       'keydate:override_calculation',
+      'register:view',
+      'register:create',
+      'register:edit',
+      'register:approve',
+      'register:configure',
+      'undertaking:manage',
     ],
   },
   partner: {
@@ -845,6 +926,11 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'keydate:resolve',
       'keydate:waive',
       'keydate:override_calculation',
+      'register:view',
+      'register:create',
+      'register:edit',
+      'register:approve',
+      'undertaking:manage',
     ],
   },
   risk_compliance: {
@@ -887,6 +973,11 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'keydate:view',
       'keydate:view_any_team',
       'keydate:verify',
+      'register:view',
+      'register:create',
+      'register:edit',
+      'register:approve',
+      'register:configure',
     ],
   },
   finance: {
@@ -909,6 +1000,9 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'finance:credit_control',
       'task:edit',
       'task:comment',
+      'register:view',
+      'register:create',
+      'register:edit',
     ],
   },
   fee_earner: {
@@ -943,6 +1037,10 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'keydate:view',
       'keydate:edit',
       'keydate:resolve',
+      'register:view',
+      'register:create',
+      'register:edit',
+      'undertaking:manage',
     ],
   },
   supervisor: {
@@ -985,6 +1083,11 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'keydate:verify',
       'keydate:resolve',
       'keydate:waive',
+      'register:view',
+      'register:create',
+      'register:edit',
+      'register:approve',
+      'undertaking:manage',
     ],
   },
   legal_secretary: {
@@ -1018,6 +1121,9 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'contact:edit',
       'keydate:view',
       'keydate:edit',
+      'register:view',
+      'register:create',
+      'register:edit',
     ],
   },
   enquiries_coordinator: {

@@ -10,6 +10,7 @@ import {
   Building2,
   CalendarClock,
   CheckSquare,
+  ClipboardCheck,
   FileText,
   Home,
   Moon,
@@ -268,6 +269,14 @@ export function AppShell({
         icon: CalendarClock,
         match: (p) => p.startsWith('/key-dates'),
         visible: leftRailVisibility.keyDates,
+      },
+      {
+        key: 'registers',
+        href: '/registers',
+        label: 'Registers',
+        icon: ClipboardCheck,
+        match: (p) => p.startsWith('/registers'),
+        visible: leftRailVisibility.registers,
       },
       {
         key: 'matters',

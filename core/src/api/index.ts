@@ -58,6 +58,18 @@ import type {
   KeyDatePermission,
 } from './keyDates.types';
 export * from './keyDates.types';
+import type {
+  RegisterAfterTransitionHookInput,
+  RegisterBeforeCreateHookInput,
+  RegisterBeforeCreateHookResult,
+  RegisterBeforeTransitionHookInput,
+  RegisterBeforeTransitionHookResult,
+  RegisterExtensionPermission,
+  RegisterExtensionPoint,
+  RegisterPermission,
+  RegistersConfiguration,
+} from './registers.types';
+export * from './registers.types';
 
 export type JobOnlyPermissionKey =
   | 'tenant:provision'
@@ -65,12 +77,14 @@ export type JobOnlyPermissionKey =
   | 'tenant:seed_demo'
   | 'keydate:run_reminders'
   | 'document_generation:purge_usage'
-  | 'enquiry:run_retention_anonymise';
+  | 'enquiry:run_retention_anonymise'
+  | 'register:run_reminders';
 
 export type PermissionKey =
   | EmployeePermission
   | DocumentPermission
   | KeyDatePermission
+  | RegisterPermission
   | JobOnlyPermissionKey
   | 'finance:view_matter'
   | 'finance:credit_control'
@@ -119,6 +133,7 @@ export type PermissionDomain =
   | 'enquiry'
   | 'quote'
   | 'signoff'
+  | 'register'
   | 'contact'
   | 'admin'
   | 'rbac';
@@ -211,7 +226,8 @@ export type ExtensionPermission =
   | 'config:read'
   | 'audit:write'
   | 'pms:sync'
-  | KeyDateExtensionPermission;
+  | KeyDateExtensionPermission
+  | RegisterExtensionPermission;
 
 export type ExtensionHookName =
   | 'beforeMatterCostsCalculate'
@@ -222,7 +238,8 @@ export type ExtensionHookName =
   | 'provideDocumentFields'
   | 'afterMatterDocumentsProvisioned'
   | 'beforeMatterDocumentsClose'
-  | KeyDateExtensionPoint;
+  | KeyDateExtensionPoint
+  | RegisterExtensionPoint;
 
 export interface ExtensionManifest {
   id: string;
@@ -866,6 +883,7 @@ export interface TenantConfiguration {
   matterFolderNameTemplate?: string;
   matterFolderTemplates?: MatterFolderTemplatesConfig;
   keyDates?: KeyDatesConfiguration;
+  registers?: RegistersConfiguration;
   keyVault?: TenantKeyVaultConfig;
   database?: TenantDatabaseConfig;
   workTypes?: WorkTypesConfiguration;
@@ -1587,6 +1605,21 @@ export interface PlatformExtension {
     ) =>
       | Promise<KeyDateCalculateCustomRuleHookResult>
       | KeyDateCalculateCustomRuleHookResult;
+    'register.beforeCreate'?: (
+      ctx: ExtensionExecutionContext,
+      input: RegisterBeforeCreateHookInput,
+    ) => Promise<RegisterBeforeCreateHookResult | void> | RegisterBeforeCreateHookResult | void;
+    'register.beforeTransition'?: (
+      ctx: ExtensionExecutionContext,
+      input: RegisterBeforeTransitionHookInput,
+    ) =>
+      | Promise<RegisterBeforeTransitionHookResult | void>
+      | RegisterBeforeTransitionHookResult
+      | void;
+    'register.afterTransition'?: (
+      ctx: ExtensionExecutionContext,
+      input: RegisterAfterTransitionHookInput,
+    ) => Promise<void> | void;
   };
 }
 
@@ -1778,7 +1811,9 @@ export type FirmAuditRecordType =
   | 'system'
   | 'employee_payroll'
   | 'employee_sensitive'
-  | 'key_date';
+  | 'key_date'
+  | 'register_record'
+  | 'registers_config';
 
 export interface FirmAuditEntryRecord {
   id: string;

@@ -80,6 +80,7 @@ import { KeyDatesPanel } from './KeyDatesPanel';
 import { MatterDocumentStoreSection } from './MatterDocumentStoreSection';
 import { MatterFinanceTab } from './MatterFinanceTab';
 import { RecordTasksSection } from './RecordTasksSection';
+import { RegistersWorkspaceClient } from './RegistersWorkspaceClient';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 import type {
@@ -111,6 +112,11 @@ interface MatterProfileClientProps {
   keyDateReminderStates?: KeyDateReminderState[];
   keyDateCalendarSyncs?: KeyDateCalendarSync[];
   userKeyDatePermissions?: KeyDatePermission[];
+  userPermissions?: import('@/domain/types').PermissionKey[];
+  registersConfig?: import('@platform/core-api').RegistersConfiguration;
+  registerTypes?: import('@platform/core-api').RegisterTypeDefinition[];
+  matterRegisterRecords?: import('@platform/core-api').RegisterRecord[];
+  matterRegisterTransitions?: Record<string, import('@platform/core-api').RegisterTransition[]>;
   canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
@@ -301,6 +307,11 @@ export function MatterProfileClient({
   keyDateReminderStates = [],
   keyDateCalendarSyncs = [],
   userKeyDatePermissions = [],
+  userPermissions = [],
+  registersConfig,
+  registerTypes = [],
+  matterRegisterRecords = [],
+  matterRegisterTransitions = {},
   canVerifyByKeyDateId,
   canTakeByTaskId,
   canViewFinance = false,
@@ -3356,6 +3367,34 @@ export function MatterProfileClient({
               </div>
             </div>
           </section>
+
+          {registersConfig &&
+          (userPermissions.includes('register:view') ||
+            userPermissions.includes('undertaking:manage')) ? (
+            <section className="home-panel" aria-label="Matter registers and undertakings">
+              <div className="panel-header">
+                <div className="panel-title-group">
+                  <h2 className="panel-title">
+                    Matter registers &amp; undertakings ({matterRegisterRecords.length})
+                  </h2>
+                </div>
+              </div>
+              <div className="panel-body padded">
+                <RegistersWorkspaceClient
+                  embedded
+                  lockedMatterId={matter.id}
+                  currentUserId={currentUserId}
+                  userPermissions={userPermissions}
+                  registerTypes={registerTypes}
+                  registersConfig={registersConfig}
+                  initialRecords={matterRegisterRecords}
+                  initialTransitionsByRecordId={matterRegisterTransitions}
+                  matters={[matter]}
+                  people={people}
+                />
+              </div>
+            </section>
+          ) : null}
         </div>
       ) : null}
 

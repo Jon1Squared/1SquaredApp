@@ -24,6 +24,7 @@ import {
   getPartyRepository,
   getPmsRepository,
   getRateOverrideRepository,
+  getRegisterRepository,
   getTaskWorkflowRepository,
   runWithAuditStagingScope,
   stageAuditEntry,
@@ -33,6 +34,7 @@ import {
   TenantJobRunRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
+  TenantRegisterRepository,
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
   getPlatformExtensionHost,
@@ -48,11 +50,13 @@ export {
   getPartyRepository,
   getPmsRepository,
   getRateOverrideRepository,
+  getRegisterRepository,
   getTaskWorkflowRepository,
   TenantCatalogueRepository,
   TenantJobRunRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
+  TenantRegisterRepository,
 };
 import {
   clearMigratedPostgresModulesForTenant,
@@ -246,20 +250,27 @@ import {
 } from './entraAuth';
 import {
   createDefaultFirmFeeArrangementCaps,
+  DEFAULT_REGISTERS_CONFIG,
+  evaluateRegisterDueAndReviewReminders,
   executeUsageRetentionPurgeJob,
   FEE_CAP_BASE_MISMATCH_CODE,
   FEE_CAP_CATEGORY_UNMAPPED_CODE,
   FEE_CAP_CONFIG_EXCEEDS_STATUTORY_CODE,
   FeeCapValidationError,
+  findEffectiveRegisterType,
   getActiveTenantTransactionState,
+  getEffectiveReminderHourLocal,
   INVALID_PARENT_ORGANISATION_CODE,
   loadActiveTenantRegistry,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  mergeRegistersConfigurations,
   ORGANISATION_PARENT_CYCLE_CODE,
   RATE_OVERRIDE_DATE_OVERLAP_CODE,
   RATE_OVERRIDE_INVALID_DATE_RANGE_CODE,
   RATE_OVERRIDE_VALIDATION_ERROR_CODE,
+  REGISTER_DOMAIN_ERROR_CODES,
+  resolveEffectiveRegisterTypes,
   resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
@@ -268,6 +279,10 @@ import {
   validateFirmFeeCapEntries,
   validateKeyDatesConfig,
   validateRbacConfig,
+  validateRegisterCreateInput,
+  validateRegisterFieldValues,
+  validateRegistersConfig,
+  validateRegisterTransitionExecution,
   validateWorkTypesConfig,
   type ClientRateOverrideClientType,
   type ClientRateOverrideRecord,
@@ -281,6 +296,10 @@ import {
   type KeyDatesConfiguration,
   type MatterRateOverrideRecord,
   type ParentChainNodeSummary,
+  type RegisterRecord,
+  type RegistersConfiguration,
+  type RegisterTransition,
+  type RegisterTypeDefinition,
   type ResolvedApplicableRatesResult,
   type TenantContext,
   type TenantRegistry,
@@ -2193,6 +2212,31 @@ async function getAppSnapshotInScope(
     workTypesConfig:
       store.workTypesConfig ??
       resolveEffectiveWorkTypesConfig(activeTenantCfg, store.workTypeConfigsOverride ?? null),
+    ...(await (async () => {
+      const canReadRegisters =
+        currentUserPermissions.includes('register:view') ||
+        currentUserPermissions.includes('undertaking:manage');
+      const dbRegOverride = await getCatalogueRepository().getModuleConfig<RegistersConfiguration>(
+        snapshotTenantCtx,
+        'registers',
+      );
+      const effectiveRegistersCfg = mergeRegistersConfigurations(
+        activeTenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG,
+        dbRegOverride,
+      );
+      const effectiveRegTypes = resolveEffectiveRegisterTypes(
+        activeTenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG,
+        dbRegOverride,
+      );
+      const visibleRegRecords = canReadRegisters
+        ? await getRegisterRepository().listVisibleRegisterRecords(snapshotTenantCtx, userId)
+        : [];
+      return {
+        registersConfig: effectiveRegistersCfg,
+        registerTypes: effectiveRegTypes,
+        registerRecords: visibleRegRecords,
+      };
+    })()),
     taskBadgeCount,
     notes: visibleNotes,
     audit: visibleAudit,
@@ -10254,16 +10298,7 @@ export async function updateEmployeeRoleSetting(
 
     const addedRoleKeys: string[] =
       appRole === 'admin'
-        ? [
-            'admin',
-            'managing_partner',
-            'partner',
-            'fee_earner',
-            'legal_secretary',
-            'enquiries_coordinator',
-            'finance',
-            'risk_compliance',
-          ]
+        ? ['admin']
         : appRole === 'team_lead'
           ? ['partner', 'fee_earner']
           : appRole === 'call_handler'
@@ -21822,4 +21857,1186 @@ export async function resolveApplicableRatesRecord(
   });
 
   return { resolved };
+}
+
+// ============================================================================
+// Configurable Registers Engine, Undertakings & Reminder Job (ADR 0032, S0-24)
+// ============================================================================
+
+async function resolveRegisterActorAndConfig(
+  byId?: string,
+  explicitMfa?: boolean,
+): Promise<{
+  ctx: TenantContext;
+  tenantCfg: ReturnType<typeof getActiveTenantConfiguration>;
+  actor: Person;
+  people: Person[];
+  teams: Team[];
+  actorRoles: HomeRoleKey[];
+  rbacConfig: RbacConfiguration;
+  permSet: ReturnType<typeof resolvePersonPermissionSet>;
+}> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const tenantCfg = getActiveTenantConfiguration();
+  const [people, teams, rbacConfig] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actor = people.find((p) => p.id === (byId || ctx.actorId) && !p.mergedIntoId) ?? null;
+  if (!actor) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: 'Signed-in employee record is required for register operations.',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      actorUserId: byId || ctx.actorId || 'anonymous',
+    });
+  }
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined;
+  const effectiveMfa =
+    explicitMfa ??
+    (activeSession?.personId === actor.id ? activeSession.mfaVerified === true : false);
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: people,
+    teams,
+    tokenRoles: effectiveTokenRoles,
+    mfaVerified: effectiveMfa,
+    config: { ...tenantCfg, rbac: rbacConfig },
+  });
+  const actorRoles = resolveEmployeeRoles(actor, teams);
+  return {
+    ctx,
+    tenantCfg,
+    actor,
+    people,
+    teams,
+    actorRoles,
+    rbacConfig,
+    permSet,
+  };
+}
+
+export type RegisterServiceDenialOrError =
+  | ActionDenied
+  | {
+      ok: false;
+      denied?: false;
+      code: string;
+      message: string;
+      error: string;
+    };
+
+function registerServiceFailure(
+  code: string,
+  message: string,
+): RegisterServiceDenialOrError {
+  if (code === 'MFA_REQUIRED' || code === 'FORBIDDEN' || code === 'UNAUTHENTICATED') {
+    return buildActionDenied(code, message);
+  }
+  return {
+    ok: false,
+    code,
+    message,
+    error: message,
+  };
+}
+
+function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
+  const rawErr = err as { code?: string; message?: string };
+  const rawCode = rawErr?.code ?? '';
+  const msg = rawErr?.message || (err instanceof Error ? err.message : 'Register operation failed.');
+  if (rawCode === 'MFA_REQUIRED') {
+    return registerServiceFailure('MFA_REQUIRED', msg);
+  }
+  if (
+    rawCode === 'FORBIDDEN' ||
+    rawCode === 'UNAUTHENTICATED' ||
+    rawCode === REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN ||
+    rawCode === REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH ||
+    rawCode === REGISTER_DOMAIN_ERROR_CODES.CONCURRENCY_CONFLICT ||
+    rawCode === REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND
+  ) {
+    return registerServiceFailure(rawCode, msg);
+  }
+  return registerServiceFailure(rawCode || 'VALIDATION_ERROR', msg);
+}
+
+export async function listRegistersWorkspaceDataRecord(
+  filter: {
+    registerTypeKey?: string;
+    status?: string;
+    matterId?: string;
+  } = {},
+  byId?: string,
+): Promise<
+  | {
+      ok: true;
+      records: RegisterRecord[];
+      transitionsByRecordId: Record<string, RegisterTransition[]>;
+      registerTypes: RegisterTypeDefinition[];
+      registersConfig: RegistersConfiguration;
+      matters: Matter[];
+      people: Person[];
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId);
+    const canView =
+      permSet.permissions.has('register:view') ||
+      permSet.permissions.has('undertaking:manage');
+    if (!canView) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to view firm registers.',
+      );
+    }
+
+    const dbOverride = await getCatalogueRepository().getModuleConfig<RegistersConfiguration>(
+      ctx,
+      'registers',
+    );
+    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const registersConfig = mergeRegistersConfigurations(baseRegisters, dbOverride);
+    const registerTypes = resolveEffectiveRegisterTypes(baseRegisters, dbOverride);
+    const registerRepo = getRegisterRepository();
+
+    const rawRecords = await registerRepo.listVisibleRegisterRecords(ctx, actor.id, {
+      ...(filter.registerTypeKey?.trim()
+        ? { registerTypeKey: filter.registerTypeKey.trim() }
+        : {}),
+      ...(filter.status?.trim() ? { status: filter.status.trim() } : {}),
+      ...(filter.matterId?.trim() ? { matterId: filter.matterId.trim() } : {}),
+    });
+
+    const hasGeneralRegisterView = permSet.permissions.has('register:view');
+    const records = hasGeneralRegisterView
+      ? rawRecords
+      : rawRecords.filter((r) => r.registerTypeKey === 'undertaking');
+
+    const transitionsByRecordId: Record<string, RegisterTransition[]> = {};
+    for (const rec of records) {
+      transitionsByRecordId[rec.id] = await registerRepo.listTransitionsForRecord(
+        ctx,
+        rec.id,
+        { viewerId: actor.id },
+      );
+    }
+
+    const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+    const visibleMatters = allMatters.filter((m) =>
+      canPersonAccessMatter(m, actor.id, actor, { allPeople: people, teams }),
+    );
+    const employeeMatterVisibility = buildMatterVisibilityForEmployeeRecord(
+      allMatters,
+      (m) => canPersonAccessMatter(m, actor.id, actor, { allPeople: people, teams }),
+    );
+    const orgStructure = buildDefaultOrgStructure({ legalName: tenantCfg.displayName });
+    const filteredPeople = people
+      .filter((p) => !p.mergedIntoId)
+      .map((p) =>
+        p.employment
+          ? {
+              ...p,
+              employment: filterEmploymentForUser(
+                p.employment,
+                actor,
+                people,
+                teams,
+                orgStructure,
+                { config: { rbac: rbacConfig } },
+                employeeMatterVisibility,
+              ),
+            }
+          : p,
+      );
+
+    return {
+      ok: true,
+      records,
+      transitionsByRecordId,
+      registerTypes,
+      registersConfig,
+      matters: visibleMatters,
+      people: filteredPeople,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function getRegisterRecordDetailRecord(
+  recordId: string,
+  byId?: string,
+): Promise<
+  | {
+      ok: true;
+      record: RegisterRecord;
+      transitions: RegisterTransition[];
+      registerType: RegisterTypeDefinition | null;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, permSet } =
+      await resolveRegisterActorAndConfig(byId);
+    const trimmedId = recordId?.trim() || '';
+    const registerRepo = getRegisterRepository();
+    const record = await registerRepo.getRegisterRecordById(ctx, trimmedId, {
+      includeRestricted: true,
+    });
+    if (!record) {
+      return registerServiceFailure('NOT_FOUND', `Register record "${trimmedId}" was not found.`);
+    }
+    const canViewRecord =
+      permSet.permissions.has('register:view') ||
+      (record.registerTypeKey === 'undertaking' && permSet.permissions.has('undertaking:manage'));
+    if (!canViewRecord) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to view this register record.',
+      );
+    }
+    if (record.matterId) {
+      const matter = await getMatterRepository().getMatterById<Matter>(ctx, record.matterId, {
+        includeRestricted: true,
+      });
+      if (!matter || !canPersonAccessMatter(matter, actor.id, actor, { allPeople: people, teams })) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'You do not have access to the restricted matter linked to this register record.',
+        );
+      }
+    }
+    const dbOverride = await getCatalogueRepository().getModuleConfig<RegistersConfiguration>(
+      ctx,
+      'registers',
+    );
+    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const registerType = findEffectiveRegisterType(
+      record.registerTypeKey,
+      baseRegisters,
+      dbOverride,
+    );
+    const transitions = await registerRepo.listTransitionsForRecord(ctx, record.id, {
+      viewerId: actor.id,
+    });
+    return {
+      ok: true,
+      record,
+      transitions,
+      registerType,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function createRegisterRecordService(
+  input: {
+    registerTypeKey: string;
+    title: string;
+    matterId?: string | null;
+    enquiryId?: string | null;
+    personId?: string | null;
+    organisationId?: string | null;
+    assignedApproverId?: string | null;
+    dueAt?: string | null;
+    reviewAt?: string | null;
+    reminderScheduleDays?: readonly number[] | null;
+    fieldValues?: Record<string, unknown>;
+  },
+  byId?: string,
+): Promise<
+  | {
+      ok: true;
+      record: RegisterRecord;
+      isolatedHookErrors?: string[];
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, permSet } =
+      await resolveRegisterActorAndConfig(byId);
+    const catRepo = getCatalogueRepository();
+    const matterRepo = getMatterRepository();
+    const registerRepo = getRegisterRepository();
+    const dbOverridePre = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
+    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const registerTypePre = findEffectiveRegisterType(
+      input.registerTypeKey?.trim() || '',
+      baseRegisters,
+      dbOverridePre,
+    );
+    if (!registerTypePre) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        `Register type "${input.registerTypeKey}" is not configured.`,
+      );
+    }
+    if (!permSet.permissions.has(registerTypePre.createPermission)) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        `Missing required permission "${registerTypePre.createPermission}" to create ${registerTypePre.label}.`,
+      );
+    }
+
+    const matterIdClean = input.matterId?.trim() || null;
+    if (matterIdClean) {
+      const matter = await matterRepo.getMatterById<Matter>(ctx, matterIdClean, {
+        includeRestricted: true,
+      });
+      if (!matter || !canPersonAccessMatter(matter, actor.id, actor, { allPeople: people, teams })) {
+        return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
+      }
+    }
+
+    const validatedPre = validateRegisterCreateInput({
+      registerType: registerTypePre,
+      title: input.title ?? '',
+      matterId: matterIdClean,
+      dueAt: input.dueAt ?? null,
+      reviewAt: input.reviewAt ?? null,
+      fieldValues: input.fieldValues ?? {},
+    });
+
+    // Execute pre-create extension hooks STRICTLY OUTSIDE any PostgreSQL write transaction.
+    const hookCfg =
+      ctx.tenantId === tenantCfg.tenantId
+        ? tenantCfg
+        : { ...tenantCfg, tenantId: ctx.tenantId };
+    const hookResult = await getPlatformExtensionHost().executeRegisterBeforeCreateHook(
+      ctx,
+      hookCfg,
+      {
+        tenantId: ctx.tenantId,
+        actorId: actor.id,
+        correlationId: ctx.correlationId,
+        registerType: registerTypePre,
+        draft: {
+          registerTypeKey: registerTypePre.key,
+          title: validatedPre.title,
+          matterId: matterIdClean,
+          enquiryId: input.enquiryId?.trim() || null,
+          personId: input.personId?.trim() || null,
+          organisationId: input.organisationId?.trim() || null,
+          ownerId: actor.id,
+          assignedApproverId: input.assignedApproverId?.trim() || null,
+          dueAt: validatedPre.dueAt,
+          reviewAt: validatedPre.reviewAt,
+          fieldValues: validatedPre.fieldValues,
+        },
+      },
+    );
+    if (!hookResult.allowProceed) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        hookResult.rejectionReason || 'Extension blocked register record creation.',
+      );
+    }
+
+    const createdRecord = await registerRepo.withTenantTransaction(ctx, async () => {
+      const dbOverrideTx = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
+      const registerTypeTx = findEffectiveRegisterType(
+        registerTypePre.key,
+        baseRegisters,
+        dbOverrideTx,
+      );
+      if (!registerTypeTx || !registerTypeTx.enabled) {
+        const msg = `Register type "${registerTypePre.key}" is disabled or removed.`;
+        throw Object.assign(new Error(msg), { code: REGISTER_DOMAIN_ERROR_CODES.TYPE_DISABLED });
+      }
+      if (matterIdClean) {
+        const matterTx = await matterRepo.getMatterById<Matter>(ctx, matterIdClean, {
+          includeRestricted: true,
+        });
+        if (!matterTx || !canPersonAccessMatter(matterTx, actor.id, actor, { allPeople: people, teams })) {
+          const msg = 'Matter not found or restricted.';
+          throw Object.assign(new Error(msg), { code: 'FORBIDDEN' });
+        }
+      }
+
+      const finalValidated = validateRegisterCreateInput({
+        registerType: registerTypeTx,
+        title: input.title ?? '',
+        matterId: matterIdClean,
+        dueAt: hookResult.dueAt,
+        reviewAt: hookResult.reviewAt,
+        fieldValues: hookResult.mergedFieldValues,
+      });
+
+      const idPrefix = registerTypeTx.key === 'sign_off' ? 'SO' : 'REG';
+      const newId = await registerRepo.allocateNextRecordId(ctx, { idPrefix });
+      const reference =
+        registerTypeTx.key === 'sign_off'
+          ? newId
+          : await registerRepo.allocateNextRecordId(ctx, {
+              idPrefix: registerTypeTx.referencePrefix,
+            });
+      const nowIso = new Date().toISOString();
+
+      const created = await registerRepo.createRegisterRecord(ctx, {
+        id: newId,
+        registerTypeKey: registerTypeTx.key,
+        reference,
+        title: finalValidated.title,
+        status: registerTypeTx.initialStatus,
+        matterId: matterIdClean,
+        enquiryId: input.enquiryId?.trim() || null,
+        personId: input.personId?.trim() || null,
+        organisationId: input.organisationId?.trim() || null,
+        ownerId: actor.id,
+        assignedApproverId:
+          registerTypeTx.approvalRules === null
+            ? null
+            : input.assignedApproverId?.trim() || null,
+        dueAt: finalValidated.dueAt,
+        reviewAt: finalValidated.reviewAt,
+        reminderScheduleDays: input.reminderScheduleDays ?? null,
+        fieldValues: finalValidated.fieldValues,
+        createdById: actor.id,
+      });
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'register_record',
+          recordId: newId,
+          action: 'create',
+          field: 'Status',
+          oldValue: '',
+          newValue: `${reference}: ${registerTypeTx.initialStatus} (${finalValidated.title})`,
+          byId: actor.id,
+          at: nowIso,
+        },
+      ]);
+      return created;
+    });
+
+    return {
+      ok: true,
+      record: createdRecord,
+      ...(hookResult.isolatedErrors.length > 0
+        ? { isolatedHookErrors: hookResult.isolatedErrors }
+        : {}),
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function transitionRegisterRecordService(
+  input: {
+    recordId: string;
+    transitionKey: string;
+    comment?: string | null;
+    fieldUpdates?: Record<string, unknown>;
+    expectedRowVersion?: number;
+  },
+  byId?: string,
+): Promise<
+  | {
+      ok: true;
+      record: RegisterRecord;
+      transition: RegisterTransition;
+      isolatedHookErrors?: string[];
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, actorRoles, permSet } =
+      await resolveRegisterActorAndConfig(byId);
+    const catRepo = getCatalogueRepository();
+    const matterRepo = getMatterRepository();
+    const registerRepo = getRegisterRepository();
+
+    const existingPre = await registerRepo.getRegisterRecordById(ctx, input.recordId?.trim() || '', {
+      includeRestricted: true,
+    });
+    if (!existingPre) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        `Register record "${input.recordId}" was not found.`,
+      );
+    }
+    if (existingPre.matterId) {
+      const matterPre = await matterRepo.getMatterById<Matter>(ctx, existingPre.matterId, {
+        includeRestricted: true,
+      });
+      if (!matterPre || !canPersonAccessMatter(matterPre, actor.id, actor, { allPeople: people, teams })) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'You do not have access to the restricted matter linked to this register record.',
+        );
+      }
+    }
+
+    const dbOverridePre = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
+    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const registerTypePre = findEffectiveRegisterType(
+      existingPre.registerTypeKey,
+      baseRegisters,
+      dbOverridePre,
+    );
+    if (!registerTypePre) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        `Register type "${existingPre.registerTypeKey}" is not configured.`,
+      );
+    }
+
+    const preValidated = validateRegisterTransitionExecution({
+      registerType: registerTypePre,
+      record: existingPre,
+      transitionKey: input.transitionKey,
+      actorId: actor.id,
+      actorRoles,
+      actorPermissionSet: permSet.permissions,
+      comment: input.comment ?? null,
+      expectedRowVersion: input.expectedRowVersion,
+    });
+
+    // Execute beforeTransition hook STRICTLY OUTSIDE any PostgreSQL write transaction.
+    const hookCfg =
+      ctx.tenantId === tenantCfg.tenantId
+        ? tenantCfg
+        : { ...tenantCfg, tenantId: ctx.tenantId };
+    const beforeHookRes = await getPlatformExtensionHost().executeRegisterBeforeTransitionHook(
+      ctx,
+      hookCfg,
+      {
+        tenantId: ctx.tenantId,
+        actorId: actor.id,
+        correlationId: ctx.correlationId,
+        registerType: registerTypePre,
+        record: existingPre,
+        transition: preValidated.transition,
+        comment: input.comment?.trim() || null,
+        fieldUpdates: input.fieldUpdates,
+      },
+    );
+    if (!beforeHookRes.allowProceed) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        beforeHookRes.rejectionReason || 'Extension rejected register transition.',
+      );
+    }
+
+    let finalRegisterType = registerTypePre;
+    const txOutcome = await registerRepo.withTenantTransaction(ctx, async () => {
+      const outcome = await registerRepo.lockAndExecuteTransition(ctx, {
+        recordId: existingPre.id,
+        transitionKey: input.transitionKey,
+        actorId: actor.id,
+        comment: input.comment?.trim() || null,
+        validateAndCompute: async (lockedRecord) => {
+          const dbOverrideTx = await catRepo.getModuleConfig<RegistersConfiguration>(
+            ctx,
+            'registers',
+          );
+          finalRegisterType =
+            findEffectiveRegisterType(
+              lockedRecord.registerTypeKey,
+              baseRegisters,
+              dbOverrideTx,
+            ) ?? registerTypePre;
+          if (lockedRecord.matterId) {
+            const matterTx = await matterRepo.getMatterById<Matter>(ctx, lockedRecord.matterId, {
+              includeRestricted: true,
+            });
+            if (
+              !matterTx ||
+              !canPersonAccessMatter(matterTx, actor.id, actor, { allPeople: people, teams })
+            ) {
+              throw Object.assign(
+                new Error('You do not have access to the restricted matter linked to this register record.'),
+                { code: 'FORBIDDEN' },
+              );
+            }
+          }
+          const revalidated = validateRegisterTransitionExecution({
+            registerType: finalRegisterType,
+            record: lockedRecord,
+            transitionKey: input.transitionKey,
+            actorId: actor.id,
+            actorRoles,
+            actorPermissionSet: permSet.permissions,
+            comment: input.comment ?? null,
+            expectedRowVersion: input.expectedRowVersion,
+          });
+          const mergedFields = validateRegisterFieldValues({
+            registerType: finalRegisterType,
+            fieldValues: {
+              ...lockedRecord.fieldValues,
+              ...beforeHookRes.mergedFieldUpdates,
+            },
+            applyDefaults: false,
+            enforceRequired: true,
+          });
+          return {
+            nextStatus: revalidated.nextStatus,
+            setsDecidedAt: Boolean(revalidated.transition.setsDecidedAt),
+            mergedFieldValues: mergedFields,
+          };
+        },
+      });
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'register_record',
+          recordId: outcome.updatedRecord.id,
+          action: 'status-change',
+          field: 'Status',
+          oldValue: outcome.previousRecord.status,
+          newValue: `${outcome.updatedRecord.status}${outcome.transition.comment ? ` (${outcome.transition.comment})` : ''}`,
+          byId: actor.id,
+          at: outcome.transition.transitionedAt,
+          ...(outcome.transition.comment ? { reason: outcome.transition.comment } : {}),
+        },
+      ]);
+      return outcome;
+    });
+
+    // Execute afterTransition hook STRICTLY POST-COMMIT outside any write transaction.
+    const afterHookRes = await getPlatformExtensionHost().executeRegisterAfterTransitionHook(
+      ctx,
+      hookCfg,
+      {
+        tenantId: ctx.tenantId,
+        actorId: actor.id,
+        correlationId: ctx.correlationId,
+        registerType: finalRegisterType,
+        previousRecord: txOutcome.previousRecord,
+        updatedRecord: txOutcome.updatedRecord,
+        transition: txOutcome.transition,
+      },
+    );
+    if (afterHookRes.isolatedErrors.length > 0) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'register.after_transition_hook_isolated_errors',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          count: afterHookRes.isolatedErrors.length,
+        }),
+      );
+    }
+
+    return {
+      ok: true,
+      record: txOutcome.updatedRecord,
+      transition: txOutcome.transition,
+      ...(afterHookRes.isolatedErrors.length > 0
+        ? { isolatedHookErrors: afterHookRes.isolatedErrors }
+        : {}),
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function updateRegisterRecordDetailsService(
+  input: {
+    recordId: string;
+    expectedRowVersion?: number;
+    title?: string;
+    assignedApproverId?: string | null;
+    dueAt?: string | null;
+    reviewAt?: string | null;
+    fieldValues?: Record<string, unknown>;
+  },
+  byId?: string,
+): Promise<
+  | { ok: true; record: RegisterRecord }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, permSet } =
+      await resolveRegisterActorAndConfig(byId);
+    const registerRepo = getRegisterRepository();
+    const catRepo = getCatalogueRepository();
+    const existing = await registerRepo.getRegisterRecordById(ctx, input.recordId?.trim() || '', {
+      includeRestricted: true,
+    });
+    if (!existing) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        `Register record "${input.recordId}" was not found.`,
+      );
+    }
+    if (existing.matterId) {
+      const matter = await getMatterRepository().getMatterById<Matter>(ctx, existing.matterId, {
+        includeRestricted: true,
+      });
+      if (!matter || !canPersonAccessMatter(matter, actor.id, actor, { allPeople: people, teams })) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'You do not have access to the restricted matter linked to this register record.',
+        );
+      }
+    }
+    const dbOverride = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
+    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const registerType = findEffectiveRegisterType(
+      existing.registerTypeKey,
+      baseRegisters,
+      dbOverride,
+    );
+    if (!registerType) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        `Register type "${existing.registerTypeKey}" is not configured.`,
+      );
+    }
+    if (!permSet.permissions.has(registerType.editPermission)) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        `Missing permission "${registerType.editPermission}" to edit ${registerType.label}.`,
+      );
+    }
+
+    const validatedFields = validateRegisterFieldValues({
+      registerType,
+      fieldValues: { ...existing.fieldValues, ...(input.fieldValues ?? {}) },
+      applyDefaults: false,
+      enforceRequired: true,
+    });
+    const nowIso = new Date().toISOString();
+    const updatedRecord = await registerRepo.withTenantTransaction(ctx, async () => {
+      const { updatedRecord: updated } = await registerRepo.updateRegisterRecordDetails(ctx, {
+        recordId: existing.id,
+        expectedRowVersion: input.expectedRowVersion,
+        ...(input.title !== undefined ? { title: input.title.trim() } : {}),
+        ...(input.assignedApproverId !== undefined
+          ? { assignedApproverId: input.assignedApproverId?.trim() || null }
+          : {}),
+        ...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
+        ...(input.reviewAt !== undefined ? { reviewAt: input.reviewAt } : {}),
+        fieldValues: validatedFields,
+        updatedById: actor.id,
+      });
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'register_record',
+          recordId: existing.id,
+          action: 'update',
+          field: 'Details',
+          oldValue: existing.title,
+          newValue: (input.title ?? existing.title).trim(),
+          byId: actor.id,
+          at: nowIso,
+        },
+      ]);
+      return updated;
+    });
+    return { ok: true, record: updatedRecord };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function saveRegistersConfigRecord(
+  newConfigInput: RegistersConfiguration,
+  reason: string,
+  byId?: string,
+  options?: { mfaVerified?: boolean } | boolean,
+): Promise<
+  | { ok: true; config: RegistersConfiguration; registerTypes: RegisterTypeDefinition[] }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const explicitMfa = typeof options === 'boolean' ? options : options?.mfaVerified;
+    const { ctx, tenantCfg, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      explicitMfa,
+    );
+    if (!permSet.permissions.has('register:configure')) {
+      return registerServiceFailure('FORBIDDEN', 'Missing required permission "register:configure".');
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to configure firm registers.',
+      );
+    }
+    const cleanReason = reason?.trim();
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'An audited change reason is required to save register configuration.',
+      );
+    }
+
+    const validated = validateRegistersConfig(newConfigInput);
+    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const effectiveTypes = resolveEffectiveRegisterTypes(baseRegisters, validated);
+
+    const catRepo = getCatalogueRepository();
+    const nowIso = new Date().toISOString();
+    const saved = await catRepo.withTenantTransaction(ctx, async () => {
+      const previous = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
+      const stored = await catRepo.putModuleConfig<RegistersConfiguration>(
+        ctx,
+        'registers',
+        validated,
+        actor.id,
+      );
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'registers_config',
+          recordId: 'FIRM-REGISTERS-CONFIG',
+          action: 'update',
+          field: 'Registers configuration',
+          oldValue: `${previous?.customTypes?.length ?? 0} custom registers`,
+          newValue: `${stored.customTypes?.length ?? 0} custom registers`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+        },
+      ]);
+      return stored;
+    });
+
+    return {
+      ok: true,
+      config: saved,
+      registerTypes: effectiveTypes,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export interface RegisterRemindersJobSummary {
+  readonly tenantId: string;
+  readonly localDate: string;
+  readonly candidatesEvaluated: number;
+  readonly remindersDispatched: number;
+  readonly skippedAlreadyNotified: number;
+  readonly skippedRestrictedOrMissingRecipients: number;
+}
+
+export async function executeRegisterRemindersForTenant(
+  ctx: TenantContext,
+  options: {
+    triggerSource: 'scheduled' | 'manual';
+    triggeredById: string;
+    timeZone?: string;
+    defaultRunHourLocal?: number;
+    statementTimeoutMs?: number;
+  },
+): Promise<ControlledJobRunOutcome<{ summary: RegisterRemindersJobSummary }>> {
+  const tenantConfig = getActiveTenantConfiguration();
+  const effectiveTimeZone =
+    options.timeZone?.trim() ||
+    (ctx.tenantId === tenantConfig.tenantId ? tenantConfig.timeZone : 'Europe/London') ||
+    'Europe/London';
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  const preModuleOverride = await getCatalogueRepository().getModuleConfig<RegistersConfiguration>(
+    ctx,
+    'registers',
+  );
+  const baseRegisters =
+    ctx.tenantId === tenantConfig.tenantId
+      ? tenantConfig.registers
+      : DEFAULT_REGISTERS_CONFIG;
+  const preMergedConfig = mergeRegistersConfigurations(baseRegisters, preModuleOverride);
+  const targetLocalHour =
+    options.defaultRunHourLocal ?? getEffectiveReminderHourLocal(preMergedConfig);
+
+  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+    jobKey: 'register-reminders',
+    triggerSource: options.triggerSource,
+    triggeredById: options.triggeredById,
+    timeZone: effectiveTimeZone,
+    targetLocalHour,
+    now,
+    statementTimeoutMs: options.statementTimeoutMs,
+    work: async ({ localDate }) => {
+      const registerRepo = getRegisterRepository();
+      const taskRepo = getTaskWorkflowRepository();
+      const partyRepo = getPartyRepository();
+      const matterRepo = getMatterRepository();
+      const hrRepo = getHrAndRbacRepository();
+      const catRepo = getCatalogueRepository();
+
+      const [people, matters, teams, rbacOverride, moduleOverride, candidates] =
+        await Promise.all([
+          partyRepo.listAllPeople<Person>(ctx),
+          matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+          hrRepo.listAllTeams<Team>(ctx),
+          hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
+          catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers'),
+          registerRepo.listReminderCandidateRecords(ctx),
+        ]);
+
+      const registersCfg = mergeRegistersConfigurations(baseRegisters, moduleOverride);
+      const effectiveTypes = resolveEffectiveRegisterTypes(baseRegisters, moduleOverride);
+      const typeByKey = new Map(effectiveTypes.map((t) => [t.key, t] as const));
+      const matterById = new Map(matters.map((m) => [m.id, m] as const));
+      const personById = new Map(people.map((p) => [p.id, p] as const));
+      const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride);
+
+      let candidatesEvaluated = 0;
+      let remindersDispatched = 0;
+      let skippedAlreadyNotified = 0;
+      let skippedRestrictedOrMissingRecipients = 0;
+
+      for (const record of candidates) {
+        const regType = typeByKey.get(record.registerTypeKey);
+        if (!regType) continue;
+        const stages = evaluateRegisterDueAndReviewReminders({
+          record,
+          registerType: regType,
+          registersConfig: registersCfg,
+          localDateYmd: localDate,
+          timeZone: effectiveTimeZone,
+        });
+        if (stages.length === 0) continue;
+
+        const linkedMatter = record.matterId
+          ? matterById.get(record.matterId) ?? null
+          : null;
+
+        for (const stage of stages) {
+          candidatesEvaluated += 1;
+          if (record.matterId && !linkedMatter) {
+            skippedRestrictedOrMissingRecipients += 1;
+            await registerRepo.withTenantTransaction(ctx, async (tx) => {
+              await registerRepo.tryAcquireReminderDispatchInTx(tx, ctx, {
+                registerRecordId: record.id,
+                idempotencyKey: stage.idempotencyKey,
+                triggerKind: stage.triggerKind,
+                stageDaysBefore: stage.stageDaysBefore,
+                lastNotifiedAt: null,
+                lastSkippedReason: 'missing_matter',
+              });
+            });
+            continue;
+          }
+
+          const rawRecipientIds = new Set<string>();
+          if (record.ownerId) rawRecipientIds.add(record.ownerId);
+          if (
+            regType.reminderSchedule.recipientMode !== 'owner_only' &&
+            record.assignedApproverId
+          ) {
+            rawRecipientIds.add(record.assignedApproverId);
+          }
+          if (
+            regType.reminderSchedule.recipientMode === 'matter_team_and_owner' &&
+            linkedMatter
+          ) {
+            if (linkedMatter.responsiblePartnerId) {
+              rawRecipientIds.add(linkedMatter.responsiblePartnerId);
+            }
+            if (linkedMatter.supervisingPartnerId) {
+              rawRecipientIds.add(linkedMatter.supervisingPartnerId);
+            }
+          }
+
+          const permittedRecipientIds: string[] = [];
+          for (const pid of rawRecipientIds) {
+            const p = personById.get(pid);
+            if (!p || p.mergedIntoId || isLeaverPerson(p)) continue;
+            const perms = resolvePersonPermissionSet(p, {
+              allPeople: people,
+              teams,
+              config: { ...tenantConfig, rbac: rbacConfig },
+            });
+            const canSeeReg =
+              perms.permissions.has('register:view') ||
+              (record.registerTypeKey === 'undertaking' &&
+                perms.permissions.has('undertaking:manage'));
+            if (!canSeeReg) continue;
+            if (
+              linkedMatter &&
+              !canPersonAccessMatter(linkedMatter, p.id, p, {
+                allPeople: people,
+                teams,
+              })
+            ) {
+              continue;
+            }
+            permittedRecipientIds.push(p.id);
+          }
+
+          if (permittedRecipientIds.length === 0) {
+            skippedRestrictedOrMissingRecipients += 1;
+            await registerRepo.withTenantTransaction(ctx, async (tx) => {
+              await registerRepo.tryAcquireReminderDispatchInTx(tx, ctx, {
+                registerRecordId: record.id,
+                idempotencyKey: stage.idempotencyKey,
+                triggerKind: stage.triggerKind,
+                stageDaysBefore: stage.stageDaysBefore,
+                lastNotifiedAt: null,
+                lastSkippedReason: 'no_permitted_recipients',
+              });
+            });
+            continue;
+          }
+
+          await registerRepo.withTenantTransaction(ctx, async (tx) => {
+            const acquired = await registerRepo.tryAcquireReminderDispatchInTx(tx, ctx, {
+              registerRecordId: record.id,
+              idempotencyKey: stage.idempotencyKey,
+              triggerKind: stage.triggerKind,
+              stageDaysBefore: stage.stageDaysBefore,
+              lastNotifiedAt: nowIso,
+              lastSkippedReason: null,
+              metadata: {
+                recipientIds: permittedRecipientIds,
+                localDate,
+              },
+            });
+            if (!acquired) {
+              skippedAlreadyNotified += 1;
+              return;
+            }
+
+            const ntfIds = await taskRepo.allocateNextNotificationIds(
+              ctx,
+              permittedRecipientIds.length,
+            );
+            const timingLabel = stage.isOverdue
+              ? `${Math.abs(stage.stageDaysBefore)}d overdue`
+              : stage.stageDaysBefore === 0
+                ? 'due today'
+                : `${stage.stageDaysBefore}d remaining`;
+            const kindLabel = stage.triggerKind === 'review' ? 'Review' : 'Compliance deadline';
+
+            for (let idx = 0; idx < permittedRecipientIds.length; idx++) {
+              await taskRepo.upsertNotificationInTx(tx, ctx, {
+                id: ntfIds[idx]!,
+                recipientId: permittedRecipientIds[idx]!,
+                kind: 'register_reminder',
+                title: `${regType.label} reminder: ${record.reference}`,
+                detail: `${record.title} — ${kindLabel} (${timingLabel})`,
+                href: `/registers?record=${record.id}`,
+                recordId: record.id,
+                byId: options.triggeredById,
+                read: false,
+                createdAt: nowIso,
+              });
+            }
+
+            await appendTenantAuditEntries(ctx, [
+              {
+                recordType: 'register_record',
+                recordId: record.id,
+                action: 'update',
+                field: 'Reminder dispatched',
+                oldValue: '',
+                newValue: stage.idempotencyKey,
+                byId: options.triggeredById,
+                at: nowIso,
+                reason: `${kindLabel} reminder (${timingLabel}) sent to ${permittedRecipientIds.length} recipient(s).`,
+              },
+            ]);
+            remindersDispatched += 1;
+          });
+        }
+      }
+
+      const summary: RegisterRemindersJobSummary = {
+        tenantId: ctx.tenantId,
+        localDate,
+        candidatesEvaluated,
+        remindersDispatched,
+        skippedAlreadyNotified,
+        skippedRestrictedOrMissingRecipients,
+      };
+
+      console.info(
+        JSON.stringify({
+          level: 'info',
+          event: 'register_reminders.completed',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          localDate,
+          candidatesEvaluated,
+          remindersDispatched,
+          skippedAlreadyNotified,
+          skippedRestrictedOrMissingRecipients,
+        }),
+      );
+
+      return {
+        result: { summary },
+        summary: {
+          candidatesEvaluated,
+          remindersDispatched,
+          skippedAlreadyNotified,
+          skippedRestrictedOrMissingRecipients,
+        },
+      };
+    },
+  });
+}
+
+export async function runScheduledRegisterRemindersJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) continue;
+    try {
+      const outcome = await guardedJob(
+        'register-reminders',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs }) =>
+          executeRegisterRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:register-reminders',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal,
+            statementTimeoutMs: timeoutMs,
+          }),
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status: outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
 }

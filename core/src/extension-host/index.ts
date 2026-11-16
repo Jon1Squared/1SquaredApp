@@ -27,9 +27,15 @@ import type {
   PlatformExtension,
   PmsOutboundCommand,
   PmsOutboundSyncResult,
+  RegisterAfterTransitionHookInput,
+  RegisterBeforeCreateHookInput,
+  RegisterBeforeCreateHookResult,
+  RegisterBeforeTransitionHookInput,
+  RegisterBeforeTransitionHookResult,
   TenantConfiguration,
   TenantContext,
 } from '../api/index';
+import { hasActiveTenantTransaction } from '../tenancy/tenantScopedRepository';
 import {
   buildExtensionFieldCatalogueEntries,
   isExcludedSensitiveEmployeeFieldKey,
@@ -136,6 +142,28 @@ export class ExtensionHost {
       ) {
         throw new Error(
           `EXTENSION_PERMISSION_ERROR: Extension "${manifest.id}" registers a keyDate read/calculation hook but does not declare permission "keydate:read" or "keydate:write".`,
+        );
+      }
+    }
+
+    if (
+      manifest.hooks.includes('register.beforeCreate') ||
+      manifest.hooks.includes('register.beforeTransition')
+    ) {
+      if (!manifest.permissions.includes('register:write')) {
+        throw new Error(
+          `EXTENSION_PERMISSION_ERROR: Extension "${manifest.id}" registers a pre-mutation register hook but does not declare permission "register:write".`,
+        );
+      }
+    }
+
+    if (manifest.hooks.includes('register.afterTransition')) {
+      if (
+        !manifest.permissions.includes('register:read') &&
+        !manifest.permissions.includes('register:write')
+      ) {
+        throw new Error(
+          `EXTENSION_PERMISSION_ERROR: Extension "${manifest.id}" registers hook "register.afterTransition" but does not declare permission "register:read" or "register:write".`,
         );
       }
     }
@@ -793,5 +821,319 @@ export class ExtensionHost {
     }
 
     return { result: null, isolatedErrors };
+  }
+
+  /**
+   * Executes active `register.beforeCreate` hooks strictly OUTSIDE any open PostgreSQL
+   * write transaction (`!hasActiveTenantTransaction`). Fails closed on throw or timeout.
+   */
+  public async executeRegisterBeforeCreateHook(
+    tenantCtx: TenantContext,
+    tenantConfig: TenantConfiguration,
+    input: RegisterBeforeCreateHookInput,
+  ): Promise<{
+    allowProceed: boolean;
+    rejectionReason?: string;
+    mergedFieldValues: Record<string, unknown>;
+    dueAt: string | null;
+    reviewAt: string | null;
+    isolatedErrors: string[];
+  }> {
+    if (tenantCtx.tenantId !== tenantConfig.tenantId) {
+      throw new Error(
+        'EXTENSION_TENANT_MISMATCH: TenantContext and TenantConfiguration must belong to the same tenant.',
+      );
+    }
+    if (hasActiveTenantTransaction(tenantCtx)) {
+      const err = new Error(
+        'EXTENSION_TRANSACTION_FORBIDDEN: Hook "register.beforeCreate" must execute outside an open PostgreSQL write transaction.',
+      ) as Error & { code: string };
+      err.code = 'EXTENSION_TRANSACTION_FORBIDDEN';
+      throw err;
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const isolatedErrors: string[] = [];
+    let mergedFieldValues: Record<string, unknown> = {
+      ...input.draft.fieldValues,
+    };
+    let dueAt = input.draft.dueAt;
+    let reviewAt = input.draft.reviewAt;
+
+    const scopedContext: ExtensionExecutionContext = Object.freeze({
+      tenant: Object.freeze({
+        tenantId: tenantCtx.tenantId,
+        hostingMode: tenantCtx.hostingMode,
+        environment: tenantCtx.environment,
+        correlationId: tenantCtx.correlationId,
+        actorRoles: tenantCtx.actorRoles,
+      }),
+      config: Object.freeze({ ...tenantConfig }),
+    });
+
+    for (const ext of active) {
+      const fn = ext.hooks['register.beforeCreate'];
+      if (!fn) continue;
+
+      if (!ext.manifest.permissions.includes('register:write')) {
+        const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "register.beforeCreate" requires permission "register:write".`;
+        isolatedErrors.push(msg);
+        return {
+          allowProceed: false,
+          rejectionReason: msg,
+          mergedFieldValues,
+          dueAt,
+          reviewAt,
+          isolatedErrors,
+        };
+      }
+
+      const timeoutMs =
+        ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
+
+      try {
+        const result = await Promise.race<RegisterBeforeCreateHookResult | void>([
+          Promise.resolve(
+            fn(scopedContext, {
+              ...input,
+              draft: {
+                ...input.draft,
+                dueAt,
+                reviewAt,
+                fieldValues: { ...mergedFieldValues },
+              },
+            }),
+          ),
+          new Promise<RegisterBeforeCreateHookResult | void>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
+                ),
+              timeoutMs,
+            ),
+          ),
+        ]);
+        if (result && typeof result === 'object') {
+          if (result.fieldValues && typeof result.fieldValues === 'object') {
+            mergedFieldValues = {
+              ...mergedFieldValues,
+              ...result.fieldValues,
+            };
+          }
+          if (result.dueAt !== undefined) {
+            dueAt = result.dueAt;
+          }
+          if (result.reviewAt !== undefined) {
+            reviewAt = result.reviewAt;
+          }
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Unknown error';
+        isolatedErrors.push(
+          `[Extension blocked create: ${ext.manifest.id}] ${reason}`,
+        );
+        return {
+          allowProceed: false,
+          rejectionReason: reason,
+          mergedFieldValues,
+          dueAt,
+          reviewAt,
+          isolatedErrors,
+        };
+      }
+    }
+
+    return {
+      allowProceed: true,
+      mergedFieldValues,
+      dueAt,
+      reviewAt,
+      isolatedErrors,
+    };
+  }
+
+  /**
+   * Executes active `register.beforeTransition` hooks strictly OUTSIDE any open PostgreSQL
+   * write transaction (`!hasActiveTenantTransaction`). Fails closed on throw or timeout.
+   */
+  public async executeRegisterBeforeTransitionHook(
+    tenantCtx: TenantContext,
+    tenantConfig: TenantConfiguration,
+    input: RegisterBeforeTransitionHookInput,
+  ): Promise<{
+    allowProceed: boolean;
+    rejectionReason?: string;
+    mergedFieldUpdates: Record<string, unknown>;
+    isolatedErrors: string[];
+  }> {
+    if (tenantCtx.tenantId !== tenantConfig.tenantId) {
+      throw new Error(
+        'EXTENSION_TENANT_MISMATCH: TenantContext and TenantConfiguration must belong to the same tenant.',
+      );
+    }
+    if (hasActiveTenantTransaction(tenantCtx)) {
+      const err = new Error(
+        'EXTENSION_TRANSACTION_FORBIDDEN: Hook "register.beforeTransition" must execute outside an open PostgreSQL write transaction.',
+      ) as Error & { code: string };
+      err.code = 'EXTENSION_TRANSACTION_FORBIDDEN';
+      throw err;
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const isolatedErrors: string[] = [];
+    let mergedFieldUpdates: Record<string, unknown> = {
+      ...(input.fieldUpdates ?? {}),
+    };
+
+    const scopedContext: ExtensionExecutionContext = Object.freeze({
+      tenant: Object.freeze({
+        tenantId: tenantCtx.tenantId,
+        hostingMode: tenantCtx.hostingMode,
+        environment: tenantCtx.environment,
+        correlationId: tenantCtx.correlationId,
+        actorRoles: tenantCtx.actorRoles,
+      }),
+      config: Object.freeze({ ...tenantConfig }),
+    });
+
+    for (const ext of active) {
+      const fn = ext.hooks['register.beforeTransition'];
+      if (!fn) continue;
+
+      if (!ext.manifest.permissions.includes('register:write')) {
+        const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "register.beforeTransition" requires permission "register:write".`;
+        isolatedErrors.push(msg);
+        return {
+          allowProceed: false,
+          rejectionReason: msg,
+          mergedFieldUpdates,
+          isolatedErrors,
+        };
+      }
+
+      const timeoutMs =
+        ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
+
+      try {
+        const result = await Promise.race<RegisterBeforeTransitionHookResult | void>([
+          Promise.resolve(
+            fn(scopedContext, {
+              ...input,
+              fieldUpdates: { ...mergedFieldUpdates },
+            }),
+          ),
+          new Promise<RegisterBeforeTransitionHookResult | void>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
+                ),
+              timeoutMs,
+            ),
+          ),
+        ]);
+        if (result?.fieldUpdates && typeof result.fieldUpdates === 'object') {
+          mergedFieldUpdates = {
+            ...mergedFieldUpdates,
+            ...result.fieldUpdates,
+          };
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Unknown error';
+        isolatedErrors.push(
+          `[Extension blocked transition: ${ext.manifest.id}] ${reason}`,
+        );
+        return {
+          allowProceed: false,
+          rejectionReason: reason,
+          mergedFieldUpdates,
+          isolatedErrors,
+        };
+      }
+    }
+
+    return {
+      allowProceed: true,
+      mergedFieldUpdates,
+      isolatedErrors,
+    };
+  }
+
+  /**
+   * Executes active `register.afterTransition` hooks strictly POST-COMMIT outside any open
+   * PostgreSQL write transaction (`!hasActiveTenantTransaction`), with timeout and error isolation.
+   */
+  public async executeRegisterAfterTransitionHook(
+    tenantCtx: TenantContext,
+    tenantConfig: TenantConfiguration,
+    input: RegisterAfterTransitionHookInput,
+  ): Promise<{ isolatedErrors: string[] }> {
+    if (tenantCtx.tenantId !== tenantConfig.tenantId) {
+      throw new Error(
+        'EXTENSION_TENANT_MISMATCH: TenantContext and TenantConfiguration must belong to the same tenant.',
+      );
+    }
+    if (hasActiveTenantTransaction(tenantCtx)) {
+      const err = new Error(
+        'EXTENSION_TRANSACTION_FORBIDDEN: Hook "register.afterTransition" must execute post-commit outside an open PostgreSQL write transaction.',
+      ) as Error & { code: string };
+      err.code = 'EXTENSION_TRANSACTION_FORBIDDEN';
+      throw err;
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const isolatedErrors: string[] = [];
+
+    const scopedContext: ExtensionExecutionContext = Object.freeze({
+      tenant: Object.freeze({
+        tenantId: tenantCtx.tenantId,
+        hostingMode: tenantCtx.hostingMode,
+        environment: tenantCtx.environment,
+        correlationId: tenantCtx.correlationId,
+        actorRoles: tenantCtx.actorRoles,
+      }),
+      config: Object.freeze({ ...tenantConfig }),
+    });
+
+    for (const ext of active) {
+      const fn = ext.hooks['register.afterTransition'];
+      if (!fn) continue;
+
+      if (
+        !ext.manifest.permissions.includes('register:read') &&
+        !ext.manifest.permissions.includes('register:write')
+      ) {
+        isolatedErrors.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "register.afterTransition" requires permission "register:read" or "register:write".`,
+        );
+        continue;
+      }
+
+      const timeoutMs =
+        ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
+
+      try {
+        await Promise.race([
+          Promise.resolve(fn(scopedContext, input)),
+          new Promise((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new ExtensionHookTimeoutError(ext.manifest.id, timeoutMs),
+                ),
+              timeoutMs,
+            ),
+          ),
+        ]);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'Unknown error';
+        isolatedErrors.push(
+          `[Extension isolated error: ${ext.manifest.id}] ${reason}`,
+        );
+      }
+    }
+
+    return { isolatedErrors };
   }
 }

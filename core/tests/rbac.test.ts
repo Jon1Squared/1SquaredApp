@@ -304,9 +304,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 60 canonical user permissions plus 6 job-only permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(66);
-      expect(ALL_USER_PERMISSION_KEYS.length).toBe(60);
+    it('defines all 66 canonical user permissions plus 7 job-only permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(73);
+      expect(ALL_USER_PERMISSION_KEYS.length).toBe(66);
       expect(ALL_JOB_ONLY_PERMISSION_KEYS).toEqual([
         'tenant:provision',
         'tenant:migrate',
@@ -314,6 +314,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         'keydate:run_reminders',
         'document_generation:purge_usage',
         'enquiry:run_retention_anonymise',
+        'register:run_reminders',
       ]);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];
@@ -390,9 +391,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         }),
       ).toThrow(/RBAC_TENANT_REQUIRED/);
 
-      // Admin holds all user permissions (and zero job-only permissions)
+      // Admin holds all user permissions except undertaking:manage (practising fee-earner roles only; ADR 0032) and zero job-only permissions
       const adminPerms = resolveForRole('admin');
-      expect(adminPerms.permissionList.length).toBe(ALL_USER_PERMISSION_KEYS.length);
+      expect(adminPerms.permissionList.length).toBe(ALL_USER_PERMISSION_KEYS.length - 1);
+      expect(adminPerms.has('undertaking:manage')).toBe(false);
+      expect(adminPerms.has('register:configure')).toBe(true);
       for (const jobPerm of ALL_JOB_ONLY_PERMISSION_KEYS) {
         expect(adminPerms.has(jobPerm)).toBe(false);
       }

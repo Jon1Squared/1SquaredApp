@@ -698,6 +698,43 @@ export const ACTION_PERMISSIONS = {
     },
     enforcedBy: 'action',
   },
+  listRegistersWorkspaceAction: {
+    kind: 'permission',
+    key: { anyOf: ['register:view', 'undertaking:manage'] },
+    enforcedBy: 'action',
+  },
+  getRegisterRecordDetailAction: {
+    kind: 'permission',
+    key: { anyOf: ['register:view', 'undertaking:manage'] },
+    enforcedBy: 'action',
+  },
+  createRegisterRecordAction: {
+    kind: 'permission',
+    key: { anyOf: ['register:create', 'undertaking:manage'] },
+    enforcedBy: 'action',
+  },
+  transitionRegisterRecordAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'register:edit',
+        'register:approve',
+        'signoff:approve',
+        'undertaking:manage',
+      ],
+    },
+    enforcedBy: 'action',
+  },
+  updateRegisterRecordAction: {
+    kind: 'permission',
+    key: { anyOf: ['register:edit', 'undertaking:manage'] },
+    enforcedBy: 'action',
+  },
+  saveRegistersConfigAction: {
+    kind: 'permission',
+    key: 'register:configure',
+    enforcedBy: 'action',
+  },
 } as const satisfies Record<string, ActionPolicy>;
 
 export type RegisteredActionName = keyof typeof ACTION_PERMISSIONS;
@@ -844,6 +881,15 @@ export const JOB_PERMISSIONS = {
     defaultRunHourLocal: 2,
     description:
       'Anonymise closed unconverted enquiries past the tenant retention period once per local day.',
+  },
+  'register-reminders': {
+    kind: 'job',
+    permission: 'register:run_reminders',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 8,
+    description:
+      'Dispatch due and periodic review reminders for active firm register records and undertakings once per stage.',
   },
 } as const satisfies Record<string, JobPolicy>;
 

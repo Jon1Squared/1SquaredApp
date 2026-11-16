@@ -95,6 +95,9 @@ param enableUsageRetentionPurgeJob bool = true
 @description('Enable the hourly enquiry-retention-anonymise scheduled Container Apps job (S0-19b)')
 param enableEnquiryAnonymisationJob bool = true
 
+@description('Enable the hourly register-reminders scheduled Container Apps job (S0-24)')
+param enableRegisterRemindersJob bool = true
+
 @description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
 param enableSeedDemoJob bool = environment != 'live'
 
@@ -166,6 +169,7 @@ module platform 'modules/platform.bicep' = {
     enableKeyDateRemindersJob: enableKeyDateRemindersJob
     enableUsageRetentionPurgeJob: enableUsageRetentionPurgeJob
     enableEnquiryAnonymisationJob: enableEnquiryAnonymisationJob
+    enableRegisterRemindersJob: enableRegisterRemindersJob
     enableSeedDemoJob: enableSeedDemoJob
     enableIdealPostcodesSecret: enableIdealPostcodesSecret
     enableAnthropicSecret: enableAnthropicSecret

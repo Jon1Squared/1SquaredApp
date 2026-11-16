@@ -26,6 +26,7 @@ import {
   TenantPartyRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
+  TenantRegisterRepository,
   TenantTaskWorkflowRepository,
   validateExtensionManifest,
   type ExtensionManifest,
@@ -774,6 +775,7 @@ const hrAndRbacRepositoryInstance = new TenantHrAndRbacRepository();
 const catalogueRepositoryInstance = new TenantCatalogueRepository();
 const pmsRepositoryInstance = new TenantPmsRepository();
 const rateOverrideRepositoryInstance = new TenantRateOverrideRepository();
+const registerRepositoryInstance = new TenantRegisterRepository();
 const jobRunRepositoryInstance = new TenantJobRunRepository();
 const auditRepositoryInstance = new TenantAuditRepository();
 let auditRepositoryOverrideForTesting: TenantAuditRepository | null = null;
@@ -809,6 +811,10 @@ export function getPmsRepository(): TenantPmsRepository {
 
 export function getRateOverrideRepository(): TenantRateOverrideRepository {
   return rateOverrideRepositoryInstance;
+}
+
+export function getRegisterRepository(): TenantRegisterRepository {
+  return registerRepositoryInstance;
 }
 
 export function getJobRunRepository(): TenantJobRunRepository {
@@ -1080,6 +1086,7 @@ export {
   TenantPartyRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
+  TenantRegisterRepository,
   TenantTaskWorkflowRepository,
 };
 

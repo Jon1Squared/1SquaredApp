@@ -184,7 +184,7 @@ export const PANEL_DEFINITIONS: PanelDefinition[] = [
     name: 'Sign-offs & approvals waiting on you',
     sourceLabel: '1Squared Tasks & Matter onboarding · one-click approve or return',
     category: 'Partner oversight',
-    description: 'Write-offs, high-risk matter openings, and undertakings awaiting partner approval.',
+    description: 'Write-offs and high-risk matter openings awaiting partner approval.',
   },
   {
     id: 'team_workload_and_utilisation',
@@ -845,6 +845,7 @@ export interface LeftRailVisibility {
   enquiries: boolean;
   tasks: boolean;
   keyDates: boolean;
+  registers: boolean;
   matters: boolean;
   contacts: boolean;
   finance: boolean;
@@ -897,6 +898,8 @@ export function getLeftRailVisibility(
   const isIntakeView = activeRole === 'enquiries_coordinator';
 
   const canSeeKeyDates = userPerms.has('keydate:view');
+  const canSeeRegisters =
+    userPerms.has('register:view') || userPerms.has('undertaking:manage');
   const canSeeFinance = userPerms.has('finance:view') && activeRolePerms.has('finance:view');
   const canSeeRisk = userPerms.has('risk:view') && activeRolePerms.has('risk:view');
   const canSeeAdmin = userPerms.has('admin:access');
@@ -906,6 +909,7 @@ export function getLeftRailVisibility(
     enquiries: !isFinanceView,
     tasks: true,
     keyDates: canSeeKeyDates,
+    registers: canSeeRegisters,
     matters: !isIntakeView,
     contacts: true,
     finance: canSeeFinance,

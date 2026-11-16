@@ -207,10 +207,12 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain("'key-date-reminders'");
     expect(platformBicep).toContain("'usage-retention-purge'");
     expect(platformBicep).toContain("'enquiry-retention-anonymise'");
+    expect(platformBicep).toContain("'register-reminders'");
     expect(platformBicep).toContain('param enableSchedulerJobs bool = true');
     expect(platformBicep).toContain('param enableKeyDateRemindersJob bool = true');
     expect(platformBicep).toContain('param enableUsageRetentionPurgeJob bool = true');
     expect(platformBicep).toContain('param enableEnquiryAnonymisationJob bool = true');
+    expect(platformBicep).toContain('param enableRegisterRemindersJob bool = true');
     expect(platformBicep).toContain("cronExpression: '0 * * * *'");
 
     // Internal-only PDF converter Container App
@@ -328,7 +330,8 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       ['webContainerApp', 'provisionJob'],
       ['keyDateRemindersJob', 'usageRetentionPurgeJob'],
       ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
-      ['enquiryAnonymisationJob', 'seedDemoJob'],
+      ['enquiryAnonymisationJob', 'registerRemindersJob'],
+      ['registerRemindersJob', 'seedDemoJob'],
     ] as const) {
       expect(resourceBlock(name, next), name).toContain(
         'runtimeAppInsightsMetricsPublisherRole',

@@ -86,6 +86,8 @@ export interface FirmStore {
   enquirySettings: EnquirySettings;
   taskSettings: TaskSettings;
   signOffs: SignOffItem[];
+  registerRecords?: import('@platform/core').RegisterRecord[];
+  registersConfigOverride?: import('@platform/core').RegistersConfiguration;
   homePagesConfig: HomePagesConfig;
   matterCostsConfig: MatterCostsConfig;
   pmsLinks: PmsLink[];
@@ -299,6 +301,7 @@ export function createSeedStore(
     enquirySettings: demo.enquirySettings,
     taskSettings: demo.taskSettings,
     signOffs: demo.signOffs,
+    registerRecords: demo.registerRecords ?? [],
     homePagesConfig: demo.homePagesConfig,
     matterCostsConfig,
     pmsLinks,
@@ -592,6 +595,7 @@ export function createCleanDeploymentStore(today: Date = new Date()): FirmStore 
       templates: DEFAULT_TASK_SETTINGS.templates.map((t) => ({ ...t })),
     },
     signOffs: [],
+    registerRecords: [],
     homePagesConfig,
     matterCostsConfig,
     pmsLinks: [],

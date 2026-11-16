@@ -6,7 +6,7 @@ export const homeAndProfileScreensArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How role-based Home panels, matter intake and compliance cards, and person and organisation compliance displays derive their values from stored records and show honest empty states when a module or screening integration is not yet connected.',
-  updated: '2026-11-15',
+  updated: '2026-11-16',
   body: `
 1Squared displays only stored, tenant-scoped records and practice management system (PMS) figures on every workspace screen. Product screens never fall back to invented client names, hard-coded figures, or fabricated compliance statuses.
 
@@ -25,7 +25,9 @@ Each role’s Home page renders a configurable set of panels (\`data-panel-id\` 
    - **\`wip_ready_to_bill\`**, **\`disbursements_and_invoices_to_log\`**, and **\`disbursements_awaiting_billing\`**: list unbilled WIP and disbursements from the PMS across accessible matters (gated on \`finance:view_matter\` or \`finance:view\`), showing a neutral \`No estimate\` label on \`wip_ready_to_bill\` when a matter has no fee estimate.
    - **PMS period labels**: all PMS financial panels and headline cards (\`fe_hours_month\`, \`my_time_and_wip\`, \`mp_fees_ytd\`, \`mp_cash_month\`, \`cash_collection_vs_target\`, \`firm_financial_pulse\`, \`performance_by_department\`, \`team_workload_and_utilisation\`, and \`utilisation_and_realisation_by_grade\`) derive their month and year labels from the PMS extract \`asAtDate\` (or show \`—\` / \`PMS as-at date unavailable\` when missing or invalid) and display \`PMS as at <date>\` (\`formatPmsAsAtLabel\`).
 
-2. **Empty-state panels for upcoming modules**: Where a register or workflow is scheduled for a later roadmap stage — **\`aml_and_cdd_queue\`** (and **\`rc_aml_pending\`**), **\`documents_and_correspondence_queue\`** (and **\`ls_letters_docs\`**), **\`undertakings_and_file_reviews\`**, **\`complaints_incidents_and_breaches\`** (and **\`rc_sra_breaches\`**), and **\`firm_risk_and_exceptions_register\`** — the panel remains in the layout and renders a neutral empty state (*"Not yet available"* or *"No open undertakings or scheduled periodic file reviews"*) with no positive status badge rather than invented rows or a fake *"0 pending"* / *"0 items"* badge.
+   - **\`undertakings_and_file_reviews\`** and **\`complaints_incidents_and_breaches\`**: list active undertakings, scheduled periodic file reviews, open complaints, and SRA breaches from visible \`register_records\` in \`TenantRegisterRepository\` (respecting restricted-matter access and linking straight to \`/registers?record=...\`), falling back to neutral empty states when no open records exist.
+
+2. **Empty-state panels for upcoming modules**: Where a register or workflow is scheduled for a later roadmap stage — **\`aml_and_cdd_queue\`** (and **\`rc_aml_pending\`**), **\`documents_and_correspondence_queue\`** (and **\`ls_letters_docs\`**), **\`rc_sra_breaches\`**, and **\`firm_risk_and_exceptions_register\`** — the panel remains in the layout and renders a neutral empty state (*"Not yet available"*) with no positive status badge rather than invented rows or a fake *"0 pending"* / *"0 items"* badge.
 
 Action buttons on Home and profile screens only appear when they perform a real server action or navigation (such as opening a record, recording a task, or downloading a CSV export). Prototype toast-only buttons are not shown.
 
