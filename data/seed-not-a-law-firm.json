@@ -23094,6 +23094,8 @@
     "rateSourceMode": "pms_when_linked",
     "pmsLinkActive": false,
     "allowMatterRateOverrides": true,
+    "partnerSignOffThresholdGbp": 25000,
+    "vatRatePercent": 20,
     "defaultPaymentOnAccount": "",
     "rateCards": [
       {

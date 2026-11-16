@@ -25,7 +25,6 @@ import {
   QUOTE_DECLINE_REASONS,
   quoteClientDisplayName,
   quoteWorkTypeSummary,
-  roundCurrency,
 } from '@/domain/quotes';
 import type {
   ChoiceValue,
@@ -54,6 +53,7 @@ interface Props {
   orgStructure?: OrgStructureCatalogue;
   currentUserId: string;
   tenantId: string;
+  tenantVatRatePercent?: number;
   initialAction?: string | null;
 }
 
@@ -68,6 +68,7 @@ export function QuoteDetailClient({
   orgStructure,
   currentUserId,
   tenantId,
+  tenantVatRatePercent = 20,
   initialAction = null,
 }: Props) {
   const router = useRouter();
@@ -111,9 +112,17 @@ export function QuoteDetailClient({
     ? matters.find((m) => m.id === quote.convertedMatterId) ?? null
     : null;
 
+  const quoteVatRatePercent = quote.vatRatePercent ?? 20;
+
   const totals = useMemo(
-    () => calculateQuoteTotals(quote.feeAmountExVat, quote.vatAmount, quote.disbursements),
-    [quote.feeAmountExVat, quote.vatAmount, quote.disbursements],
+    () =>
+      calculateQuoteTotals(
+        quote.feeAmountExVat,
+        quote.vatAmount,
+        quote.disbursements,
+        quoteVatRatePercent,
+      ),
+    [quote.feeAmountExVat, quote.vatAmount, quote.disbursements, quoteVatRatePercent],
   );
 
   const nameOfPerson = (id: string | null | undefined) => {
@@ -233,6 +242,7 @@ export function QuoteDetailClient({
         orgStructure={orgStructure}
         currentUserId={currentUserId}
         tenantId={tenantId}
+        tenantVatRatePercent={tenantVatRatePercent}
         onCancelOverride={() => setViewMode('detail')}
         onSuccessOverride={() => {
           setViewMode('detail');
@@ -696,7 +706,12 @@ export function QuoteDetailClient({
               <h2 style={{ fontSize: 16, margin: 0 }}>
                 Fee breakdown (v{quote.version})
               </h2>
-              <span className="status-pill status-pill--neutral">{quote.feeBasis}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="status-pill status-pill--neutral">
+                  VAT @ {quoteVatRatePercent}%
+                </span>
+                <span className="status-pill status-pill--neutral">{quote.feeBasis}</span>
+              </div>
             </div>
 
             <table className="data-list__table" style={{ width: '100%', fontSize: 13.5 }}>
@@ -732,13 +747,24 @@ export function QuoteDetailClient({
                 </tr>
 
                 {quote.disbursements.map((d) => {
-                  const dVat = d.vatApplicable ? roundCurrency(d.amountExVat * 0.2) : 0;
+                  const dVat = calculateQuoteTotals(
+                    0,
+                    0,
+                    [d],
+                    quoteVatRatePercent,
+                  ).vatOnDisbursements;
                   return (
                     <tr key={d.id} className="data-list__row">
                       <td className="data-list__td">
                         Disbursement: {d.description}
                         <span className="muted" style={{ fontSize: 12, marginLeft: 6 }}>
-                          ({d.vatApplicable ? 'VAT @ 20%' : 'No VAT'})
+                          (
+                          {d.vatOverridden
+                            ? 'VAT overridden'
+                            : d.vatApplicable
+                              ? `VAT @ ${quoteVatRatePercent}%`
+                              : 'No VAT'}
+                          )
                         </span>
                       </td>
                       <td className="data-list__td data-list__td--right">
@@ -803,7 +829,7 @@ export function QuoteDetailClient({
                     <strong>
                       v{quote.version} (Current) — {quote.feeBasis}:{' '}
                       {formatGbp(quote.feeAmountExVat)} ex VAT ({formatGbp(quote.totalIncVat)} inc
-                      VAT)
+                      VAT · {quoteVatRatePercent}% VAT)
                     </strong>
                     <StatusPill label={effectiveStatus} tone={quoteStatusTone(effectiveStatus)} />
                   </div>
@@ -834,7 +860,7 @@ export function QuoteDetailClient({
                       >
                         <strong>
                           v{ver.version} — {ver.feeBasis}: {formatGbp(ver.feeAmountExVat)} ex VAT (
-                          {formatGbp(ver.totalIncVat)} inc VAT)
+                          {formatGbp(ver.totalIncVat)} inc VAT · {ver.vatRatePercent ?? 20}% VAT)
                         </strong>
                         <StatusPill label="Superseded" tone="neutral" />
                       </div>

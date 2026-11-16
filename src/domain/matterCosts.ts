@@ -15,8 +15,17 @@ import type {
   MatterDisbursementEntry,
   Quote,
   RateCardEntry,
+  RateTableSourceMode,
 } from './types';
 import type { PmsFeeEarner } from '@/pms/types';
+import {
+  calculateVatMinorUnits,
+  minorUnitsToPounds,
+  percentToBasisPoints,
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type TenantConfiguration,
+} from '@platform/core-api';
 
 export const WORK_BASIS_OPTIONS: {
   key: MatterCostWorkBasis;
@@ -223,6 +232,8 @@ export function createDefaultMatterCostsConfig(
     rateSourceMode: 'pms_when_linked',
     pmsLinkActive: false,
     allowMatterRateOverrides: true,
+    partnerSignOffThresholdGbp: 25000,
+    vatRatePercent: 20,
     defaultPaymentOnAccount: '',
     rateCards,
     disbursementPresets,
@@ -375,12 +386,311 @@ export function lookupRatesForMatter(params: {
   };
 }
 
+function mapConfigRateSourceMode(
+  mode: TenantConfiguration['matterCosts']['rateSourceMode'] | undefined,
+): RateTableSourceMode {
+  if (mode === 'application_table') return 'app_table';
+  if (mode === 'pms_when_linked') return 'pms_when_linked';
+  return 'pms_when_linked';
+}
+
+function resolvePracticeAreaIdFromKey(
+  practiceAreaKey: string | null | undefined,
+  values: ChoiceValue[],
+): string | null {
+  if (!practiceAreaKey) return null;
+  const match = values.find(
+    (v) =>
+      v.listKey === 'work_type' &&
+      (v.id === practiceAreaKey || v.systemKey === practiceAreaKey),
+  );
+  return match?.id ?? practiceAreaKey;
+}
+
+/**
+ * Resolves the effective MatterCostsConfig by combining schema-validated
+ * tenant configuration defaults (`tenantConfig.matterCosts`) with an optional
+ * runtime module configuration override (`dbOverride`) stored per tenant.
+ */
+export function resolveEffectiveMatterCostsConfig(
+  tenantConfig?: Pick<TenantConfiguration, 'matterCosts'> | null,
+  dbOverride?: MatterCostsConfig | null,
+  options?: {
+    values?: ChoiceValue[];
+    clientProfileCode?: string;
+    displayName?: string;
+    primaryDomain?: string;
+  },
+): MatterCostsConfig {
+  const cfgRateSourceMode = tenantConfig?.matterCosts?.rateSourceMode;
+  const cfgAllowMatterRateOverrides = tenantConfig?.matterCosts?.allowMatterRateOverrides;
+  const cfgPartnerSignOffThresholdGbp =
+    tenantConfig?.matterCosts?.partnerSignOffThresholdGbp;
+  const cfgVatRatePercent = tenantConfig?.matterCosts?.vatRatePercent;
+  const cfgRateCards = tenantConfig?.matterCosts?.rateCards;
+  const cfgDisbursementPresets = tenantConfig?.matterCosts?.disbursementPresets;
+
+  const values = options?.values ?? [];
+  const resolvedRateSourceMode = mapConfigRateSourceMode(cfgRateSourceMode);
+  const resolvedAllowOverrides =
+    typeof cfgAllowMatterRateOverrides === 'boolean' ? cfgAllowMatterRateOverrides : true;
+  const resolvedThreshold =
+    typeof cfgPartnerSignOffThresholdGbp === 'number' &&
+    Number.isFinite(cfgPartnerSignOffThresholdGbp) &&
+    cfgPartnerSignOffThresholdGbp >= 0
+      ? cfgPartnerSignOffThresholdGbp
+      : 25000;
+  const resolvedVatRate =
+    typeof cfgVatRatePercent === 'number' &&
+    Number.isFinite(cfgVatRatePercent) &&
+    cfgVatRatePercent >= 0 &&
+    cfgVatRatePercent <= 100
+      ? cfgVatRatePercent
+      : 20;
+
+  const mappedCfgRateCards: RateCardEntry[] = Array.isArray(cfgRateCards)
+    ? cfgRateCards.map((rc) => ({
+        id: rc.id,
+        name: rc.name,
+        practiceAreaId: resolvePracticeAreaIdFromKey(rc.practiceAreaKey, values),
+        pmsDepartmentCode: rc.pmsDepartmentCode ?? null,
+        partnerRateGbp: Number(rc.partnerRateGbp) || 0,
+        associateRateGbp: Number(rc.associateRateGbp) || 0,
+        traineeRateGbp: Number(rc.traineeRateGbp) || 0,
+        customGrades: Array.isArray(rc.customGrades) ? rc.customGrades : [],
+        active: Boolean(rc.active),
+      }))
+    : [];
+
+  const mappedCfgPresets: DisbursementPresetItem[] = Array.isArray(cfgDisbursementPresets)
+    ? cfgDisbursementPresets.map((p) => ({
+        id: p.id,
+        description: p.description,
+        defaultAmountGbp: Number(p.defaultAmountGbp) || 0,
+        vatApplicable: Boolean(p.vatApplicable),
+        practiceAreaId: resolvePracticeAreaIdFromKey(p.practiceAreaKey, values),
+      }))
+    : [];
+
+  if (dbOverride) {
+    return {
+      ...dbOverride,
+      rateSourceMode: dbOverride.rateSourceMode ?? resolvedRateSourceMode,
+      allowMatterRateOverrides:
+        typeof dbOverride.allowMatterRateOverrides === 'boolean'
+          ? dbOverride.allowMatterRateOverrides
+          : resolvedAllowOverrides,
+      partnerSignOffThresholdGbp:
+        typeof dbOverride.partnerSignOffThresholdGbp === 'number' &&
+        Number.isFinite(dbOverride.partnerSignOffThresholdGbp) &&
+        dbOverride.partnerSignOffThresholdGbp >= 0
+          ? dbOverride.partnerSignOffThresholdGbp
+          : resolvedThreshold,
+      vatRatePercent:
+        typeof dbOverride.vatRatePercent === 'number' &&
+        Number.isFinite(dbOverride.vatRatePercent) &&
+        dbOverride.vatRatePercent >= 0 &&
+        dbOverride.vatRatePercent <= 100
+          ? dbOverride.vatRatePercent
+          : resolvedVatRate,
+      rateCards: Array.isArray(dbOverride.rateCards)
+        ? dbOverride.rateCards
+        : mappedCfgRateCards,
+      disbursementPresets: Array.isArray(dbOverride.disbursementPresets)
+        ? dbOverride.disbursementPresets
+        : mappedCfgPresets,
+    };
+  }
+
+  const defaults = createDefaultMatterCostsConfig(values, {
+    clientProfileCode: options?.clientProfileCode,
+    displayName: options?.displayName,
+    primaryDomain: options?.primaryDomain,
+  });
+
+  return {
+    ...defaults,
+    rateSourceMode: resolvedRateSourceMode,
+    allowMatterRateOverrides: resolvedAllowOverrides,
+    partnerSignOffThresholdGbp: resolvedThreshold,
+    vatRatePercent: resolvedVatRate,
+    rateCards: mappedCfgRateCards.length > 0 ? mappedCfgRateCards : defaults.rateCards,
+    disbursementPresets:
+      mappedCfgPresets.length > 0 ? mappedCfgPresets : defaults.disbursementPresets,
+  };
+}
+
+/**
+ * Returns a copy of `tenantConfig` whose `matterCosts` settings reflect the
+ * effective runtime MatterCostsConfig (used when invoking governance hooks).
+ */
+export function applyEffectiveMatterCostsToTenantConfig(
+  tenantConfig: TenantConfiguration,
+  costsConfig: MatterCostsConfig,
+): TenantConfiguration {
+  return {
+    ...tenantConfig,
+    matterCosts: {
+      ...tenantConfig.matterCosts,
+      rateSourceMode:
+        costsConfig.rateSourceMode === 'app_table'
+          ? 'application_table'
+          : 'pms_when_linked',
+      allowMatterRateOverrides: costsConfig.allowMatterRateOverrides,
+      partnerSignOffThresholdGbp: costsConfig.partnerSignOffThresholdGbp,
+      vatRatePercent: costsConfig.vatRatePercent,
+    },
+  };
+}
+
+function toNonNegativeMinorUnitsSafe(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  if (num < 1e-6) return 0;
+  const raw = String(num);
+  if (/[eE]/.test(raw)) {
+    return poundsToMinorUnits(num.toFixed(4));
+  }
+  return poundsToMinorUnits(raw);
+}
+
+export interface MatterDisbursementBreakdownLine {
+  id: string;
+  description: string;
+  amountGbp: number;
+  vatApplicable: boolean;
+  vatAmountGbp: number;
+  vatOverridden: boolean;
+  totalIncVatGbp: number;
+}
+
+export interface MatterDisbursementsBreakdown {
+  lines: MatterDisbursementBreakdownLine[];
+  netGbp: number;
+  vatGbp: number;
+  totalIncVatGbp: number;
+  netMinor: number;
+  vatMinor: number;
+  totalIncVatMinor: number;
+  vatRatePercent: number;
+}
+
 export function calculateDisbursementsTotal(
   disbursements: MatterDisbursementEntry[],
 ): number {
-  return Math.round(
-    disbursements.reduce((sum, item) => sum + (Number(item.amountGbp) || 0), 0) * 100,
-  ) / 100;
+  const minorAmounts = disbursements.map((item) => toNonNegativeMinorUnitsSafe(item.amountGbp));
+  return minorUnitsToPounds(sumMinorUnits(minorAmounts));
+}
+
+export function calculateMatterDisbursementsBreakdown(
+  disbursements: MatterDisbursementEntry[],
+  vatRatePercent = 20,
+): MatterDisbursementsBreakdown {
+  const safeVatRate =
+    typeof vatRatePercent === 'number' && Number.isFinite(vatRatePercent) && vatRatePercent >= 0
+      ? vatRatePercent
+      : 20;
+  const vatBasisPoints = percentToBasisPoints(safeVatRate);
+
+  const netAmountsMinor: number[] = [];
+  const vatAmountsMinor: number[] = [];
+  const lines: MatterDisbursementBreakdownLine[] = disbursements.map((item, idx) => {
+    const netMinor = toNonNegativeMinorUnitsSafe(item.amountGbp);
+    const vatApplicable = Boolean(item.vatApplicable);
+    const vatOverridden = Boolean(item.vatOverridden);
+    const vatMinor =
+      vatOverridden &&
+      item.vatAmountGbp !== undefined &&
+      item.vatAmountGbp !== null &&
+      Number.isFinite(Number(item.vatAmountGbp))
+        ? toNonNegativeMinorUnitsSafe(item.vatAmountGbp)
+        : vatApplicable
+          ? calculateVatMinorUnits(netMinor, vatBasisPoints)
+          : 0;
+    netAmountsMinor.push(netMinor);
+    vatAmountsMinor.push(vatMinor);
+    return {
+      id: item.id || `disb-${idx}`,
+      description: String(item.description ?? ''),
+      amountGbp: minorUnitsToPounds(netMinor),
+      vatApplicable,
+      vatAmountGbp: minorUnitsToPounds(vatMinor),
+      vatOverridden,
+      totalIncVatGbp: minorUnitsToPounds(sumMinorUnits([netMinor, vatMinor])),
+    };
+  });
+
+  const netMinorTotal = sumMinorUnits(netAmountsMinor);
+  const vatMinorTotal = sumMinorUnits(vatAmountsMinor);
+  const incVatMinorTotal = sumMinorUnits([netMinorTotal, vatMinorTotal]);
+
+  return {
+    lines,
+    netGbp: minorUnitsToPounds(netMinorTotal),
+    vatGbp: minorUnitsToPounds(vatMinorTotal),
+    totalIncVatGbp: minorUnitsToPounds(incVatMinorTotal),
+    netMinor: netMinorTotal,
+    vatMinor: vatMinorTotal,
+    totalIncVatMinor: incVatMinorTotal,
+    vatRatePercent: safeVatRate,
+  };
+}
+
+export function calculateMatterSnapshotTotals(params: {
+  totalEstimateGbp: number | null;
+  disbursements: MatterDisbursementEntry[];
+  vatRatePercent: number;
+}): {
+  disbursementsTotalGbp: number;
+  disbursementsVatGbp: number;
+  disbursementsTotalIncVatGbp: number;
+  estimatedFeeVatGbp: number | null;
+  totalIncVatGbp: number | null;
+  combinedExVatGbp: number;
+  combinedVatGbp: number;
+  combinedIncVatGbp: number;
+} {
+  const safeVatRate =
+    typeof params.vatRatePercent === 'number' &&
+    Number.isFinite(params.vatRatePercent) &&
+    params.vatRatePercent >= 0
+      ? params.vatRatePercent
+      : 20;
+  const vatBasisPoints = percentToBasisPoints(safeVatRate);
+  const disbBreakdown = calculateMatterDisbursementsBreakdown(params.disbursements, safeVatRate);
+
+  if (
+    params.totalEstimateGbp !== null &&
+    params.totalEstimateGbp !== undefined &&
+    Number.isFinite(params.totalEstimateGbp)
+  ) {
+    const feeNetMinor = toNonNegativeMinorUnitsSafe(params.totalEstimateGbp);
+    const feeVatMinor = calculateVatMinorUnits(feeNetMinor, vatBasisPoints);
+    const combinedExVatMinor = sumMinorUnits([feeNetMinor, disbBreakdown.netMinor]);
+    const combinedVatMinor = sumMinorUnits([feeVatMinor, disbBreakdown.vatMinor]);
+    const combinedIncVatMinor = sumMinorUnits([combinedExVatMinor, combinedVatMinor]);
+    return {
+      disbursementsTotalGbp: disbBreakdown.netGbp,
+      disbursementsVatGbp: disbBreakdown.vatGbp,
+      disbursementsTotalIncVatGbp: disbBreakdown.totalIncVatGbp,
+      estimatedFeeVatGbp: minorUnitsToPounds(feeVatMinor),
+      totalIncVatGbp: minorUnitsToPounds(combinedIncVatMinor),
+      combinedExVatGbp: minorUnitsToPounds(combinedExVatMinor),
+      combinedVatGbp: minorUnitsToPounds(combinedVatMinor),
+      combinedIncVatGbp: minorUnitsToPounds(combinedIncVatMinor),
+    };
+  }
+
+  return {
+    disbursementsTotalGbp: disbBreakdown.netGbp,
+    disbursementsVatGbp: disbBreakdown.vatGbp,
+    disbursementsTotalIncVatGbp: disbBreakdown.totalIncVatGbp,
+    estimatedFeeVatGbp: null,
+    totalIncVatGbp: params.disbursements.length > 0 ? disbBreakdown.totalIncVatGbp : null,
+    combinedExVatGbp: disbBreakdown.netGbp,
+    combinedVatGbp: disbBreakdown.vatGbp,
+    combinedIncVatGbp: disbBreakdown.totalIncVatGbp,
+  };
 }
 
 export function mapWorkBasisToBillingBasisId(
@@ -435,13 +745,33 @@ export function resolveMatterCostsSnapshot(params: {
   });
 
   if (saved && typeof saved === 'object' && saved.workBasis) {
-    const disbursements = Array.isArray(saved.disbursements)
+    const frozenVatRatePercent =
+      typeof saved.vatRatePercent === 'number' && Number.isFinite(saved.vatRatePercent)
+        ? saved.vatRatePercent
+        : typeof config.vatRatePercent === 'number' && Number.isFinite(config.vatRatePercent)
+          ? config.vatRatePercent
+          : 20;
+    const disbursements: MatterDisbursementEntry[] = Array.isArray(saved.disbursements)
       ? saved.disbursements.map((d, i) => ({
           id: d.id || `disb-${i}`,
           description: String(d.description ?? ''),
           amountGbp: Number(d.amountGbp) || 0,
+          ...(d.vatApplicable !== undefined ? { vatApplicable: Boolean(d.vatApplicable) } : {}),
+          ...(d.vatOverridden ? { vatOverridden: true } : {}),
+          ...(d.vatAmountGbp !== undefined && d.vatAmountGbp !== null
+            ? { vatAmountGbp: Number(d.vatAmountGbp) || 0 }
+            : {}),
         }))
       : [];
+    const totalEstimateGbp =
+      saved.totalEstimateGbp !== undefined
+        ? saved.totalEstimateGbp
+        : (existing?.feeEstimateGbp ?? null);
+    const computedTotals = calculateMatterSnapshotTotals({
+      totalEstimateGbp,
+      disbursements,
+      vatRatePercent: frozenVatRatePercent,
+    });
     return {
       workBasis: saved.workBasis,
       rateSource: saved.rateSource ?? lookedUp.activeSource,
@@ -454,16 +784,29 @@ export function resolveMatterCostsSnapshot(params: {
       traineeRateGbp:
         saved.traineeRateGbp !== undefined ? saved.traineeRateGbp : lookedUp.traineeRateGbp,
       customGrades: saved.customGrades ?? lookedUp.customGrades,
-      totalEstimateGbp:
-        saved.totalEstimateGbp !== undefined
-          ? saved.totalEstimateGbp
-          : (existing?.feeEstimateGbp ?? null),
+      totalEstimateGbp,
       agreedCapGbp:
         saved.agreedCapGbp !== undefined
           ? saved.agreedCapGbp
           : (existing?.agreedFeeCapGbp ?? null),
+      vatRatePercent: frozenVatRatePercent,
       disbursements,
-      disbursementsTotalGbp: calculateDisbursementsTotal(disbursements),
+      disbursementsTotalGbp: computedTotals.disbursementsTotalGbp,
+      disbursementsVatGbp:
+        typeof saved.disbursementsVatGbp === 'number' && Number.isFinite(saved.disbursementsVatGbp)
+          ? saved.disbursementsVatGbp
+          : computedTotals.disbursementsVatGbp,
+      disbursementsTotalIncVatGbp:
+        typeof saved.disbursementsTotalIncVatGbp === 'number' &&
+        Number.isFinite(saved.disbursementsTotalIncVatGbp)
+          ? saved.disbursementsTotalIncVatGbp
+          : computedTotals.disbursementsTotalIncVatGbp,
+      estimatedFeeVatGbp:
+        saved.estimatedFeeVatGbp !== undefined
+          ? saved.estimatedFeeVatGbp
+          : computedTotals.estimatedFeeVatGbp,
+      totalIncVatGbp:
+        saved.totalIncVatGbp !== undefined ? saved.totalIncVatGbp : computedTotals.totalIncVatGbp,
       paymentOnAccountRequired:
         saved.paymentOnAccountRequired ??
         (existing?.retainerMoniesOnAccountGbp && existing.retainerMoniesOnAccountGbp > 0
@@ -474,6 +817,10 @@ export function resolveMatterCostsSnapshot(params: {
           ? saved.paymentOnAccountAmountGbp
           : (existing?.retainerMoniesOnAccountGbp ?? null),
       notes: saved.notes ?? '',
+      ...(saved.updatedAt ? { updatedAt: saved.updatedAt } : {}),
+      ...((saved.capturedAt ?? saved.updatedAt)
+        ? { capturedAt: saved.capturedAt ?? saved.updatedAt }
+        : {}),
     };
   }
 
@@ -491,11 +838,25 @@ export function resolveMatterCostsSnapshot(params: {
     );
   }
 
+  const initialVatRatePercent =
+    initialQuote &&
+    typeof initialQuote.vatRatePercent === 'number' &&
+    Number.isFinite(initialQuote.vatRatePercent)
+      ? initialQuote.vatRatePercent
+      : typeof config.vatRatePercent === 'number' && Number.isFinite(config.vatRatePercent)
+        ? config.vatRatePercent
+        : 20;
+
   const disbursements: MatterDisbursementEntry[] = initialQuote?.disbursements
     ? initialQuote.disbursements.map((d) => ({
         id: d.id,
         description: d.description,
         amountGbp: d.amountExVat,
+        vatApplicable: d.vatApplicable,
+        ...(d.vatOverridden ? { vatOverridden: true } : {}),
+        ...(d.vatAmount !== undefined && d.vatAmount !== null
+          ? { vatAmountGbp: d.vatAmount }
+          : {}),
       }))
     : [];
 
@@ -512,6 +873,11 @@ export function resolveMatterCostsSnapshot(params: {
   const poaAmt = existing?.retainerMoniesOnAccountGbp ?? null;
   const poaReq: 'Yes' | 'No' | '' =
     poaAmt != null && poaAmt > 0 ? 'Yes' : config.defaultPaymentOnAccount;
+  const computedTotals = calculateMatterSnapshotTotals({
+    totalEstimateGbp,
+    disbursements,
+    vatRatePercent: initialVatRatePercent,
+  });
 
   return {
     workBasis,
@@ -527,8 +893,13 @@ export function resolveMatterCostsSnapshot(params: {
     customGrades: lookedUp.customGrades,
     totalEstimateGbp,
     agreedCapGbp,
+    vatRatePercent: initialVatRatePercent,
     disbursements,
-    disbursementsTotalGbp: calculateDisbursementsTotal(disbursements),
+    disbursementsTotalGbp: computedTotals.disbursementsTotalGbp,
+    disbursementsVatGbp: computedTotals.disbursementsVatGbp,
+    disbursementsTotalIncVatGbp: computedTotals.disbursementsTotalIncVatGbp,
+    estimatedFeeVatGbp: computedTotals.estimatedFeeVatGbp,
+    totalIncVatGbp: computedTotals.totalIncVatGbp,
     paymentOnAccountRequired: poaReq,
     paymentOnAccountAmountGbp: poaAmt,
     notes: '',

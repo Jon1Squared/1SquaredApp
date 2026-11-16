@@ -72,6 +72,7 @@ import {
   calculateQuoteTotals,
   evaluateQuoteEffectiveStatus,
   quoteClientDisplayName,
+  roundCurrency,
 } from '@/domain/quotes';
 import {
   buildMatterRiskAssessmentSnapshot,
@@ -177,7 +178,10 @@ import {
   migrateMatterPartiesToTwoFieldModel,
 } from '@/domain/matterParties';
 import {
-  createDefaultMatterCostsConfig,
+  applyEffectiveMatterCostsToTenantConfig,
+  calculateMatterSnapshotTotals,
+  lookupRatesForMatter,
+  resolveEffectiveMatterCostsConfig,
   resolveMatterCostsSnapshot,
   syncRateCardsWithPmsFeeEarners,
 } from '@/domain/matterCosts';
@@ -359,6 +363,8 @@ import type {
   HomeRoleKey,
   Matter,
   MatterCostsConfig,
+  MatterCostsSnapshot,
+  MatterDisbursementEntry,
   MatterPartyCapacityDef,
   MatterPartyMigrationReport,
   MatterPartyRelationshipDef,
@@ -864,17 +870,23 @@ async function loadTenantCatalogueStoreView(
     roles: syncedRoles,
   };
 
-  const matterCostsConfig =
-    (catSnap.moduleConfigs.matter_costs as MatterCostsConfig | undefined) ??
-    syncRateCardsWithPmsFeeEarners(
-      createDefaultMatterCostsConfig(values, nowIso, {
-        clientProfileCode: activeTenantConfig.tenantId,
-        displayName: activeTenantConfig.displayName,
-        primaryDomain: activeTenantConfig.branding.primaryDomain,
-      }),
-      (await getTenantPmsSource(ctx)).listFeeEarners(),
+  const baseMatterCostsConfig = resolveEffectiveMatterCostsConfig(
+    activeTenantConfig,
+    catSnap.moduleConfigs.matter_costs as MatterCostsConfig | undefined,
+    {
       values,
-    );
+      clientProfileCode: activeTenantConfig.tenantId,
+      displayName: activeTenantConfig.displayName,
+      primaryDomain: activeTenantConfig.branding.primaryDomain,
+    },
+  );
+  const matterCostsConfig = catSnap.moduleConfigs.matter_costs
+    ? baseMatterCostsConfig
+    : syncRateCardsWithPmsFeeEarners(
+        baseMatterCostsConfig,
+        (await getTenantPmsSource(ctx)).listFeeEarners(),
+        values,
+      );
 
   const enquirySettings: EnquirySettings =
     (catSnap.moduleConfigs.enquiry_settings as EnquirySettings | undefined) ?? {
@@ -2141,13 +2153,16 @@ async function getAppSnapshotInScope(
     notifications: userNotifications,
     enquirySettings: store.enquirySettings,
     taskSettings: store.taskSettings,
-    matterCostsConfig:
-      store.matterCostsConfig ??
-      createDefaultMatterCostsConfig(store.values, {
+    matterCostsConfig: resolveEffectiveMatterCostsConfig(
+      activeTenantCfg,
+      store.matterCostsConfig,
+      {
+        values: store.values,
         clientProfileCode: activeTenantCfg.tenantId,
         displayName: activeTenantCfg.displayName,
         primaryDomain: activeTenantCfg.branding.primaryDomain,
-      }),
+      },
+    ),
     workTypesConfig:
       store.workTypesConfig ??
       resolveEffectiveWorkTypesConfig(activeTenantCfg, store.workTypeConfigsOverride ?? null),
@@ -4408,17 +4423,211 @@ export async function generateMatterNumber(
   return getMatterRepository().allocateNextMatterNumber(effectiveCtx, prefix);
 }
 
+function areCustomGradesEquivalent(
+  a: { id: string; label: string; hourlyRateGbp: number }[] | undefined,
+  b: { id: string; label: string; hourlyRateGbp: number }[] | undefined,
+): boolean {
+  const listA = a ?? [];
+  const listB = b ?? [];
+  if (listA.length !== listB.length) return false;
+  for (let i = 0; i < listA.length; i += 1) {
+    if (
+      listA[i]!.id !== listB[i]!.id ||
+      listA[i]!.label !== listB[i]!.label ||
+      Number(listA[i]!.hourlyRateGbp) !== Number(listB[i]!.hourlyRateGbp)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isNonNegativeOptionalNumber(val: number | null | undefined): boolean {
+  if (val === null || val === undefined) return true;
+  return typeof val === 'number' && Number.isFinite(val) && val >= 0;
+}
+
+function sanitizeAndValidateSubmittedMatterCosts(params: {
+  submitted: Partial<MatterCostsSnapshot> & {
+    refreshRates?: boolean;
+    refreshVatRate?: boolean;
+  };
+  existingSnapshot?: Partial<MatterCostsSnapshot> | null;
+  effectiveCostsConfig: MatterCostsConfig;
+  practiceAreaId?: string | null;
+  nowIso: string;
+}): { snapshot?: MatterCostsSnapshot; error?: string } {
+  const { submitted, existingSnapshot, effectiveCostsConfig, practiceAreaId, nowIso } = params;
+  const lookedUp = lookupRatesForMatter({
+    config: effectiveCostsConfig,
+    practiceAreaId: practiceAreaId ?? null,
+    rateCardId: submitted.rateCardId ?? existingSnapshot?.rateCardId ?? null,
+  });
+
+  if (
+    !isNonNegativeOptionalNumber(submitted.totalEstimateGbp) ||
+    !isNonNegativeOptionalNumber(submitted.agreedCapGbp) ||
+    !isNonNegativeOptionalNumber(submitted.paymentOnAccountAmountGbp) ||
+    !isNonNegativeOptionalNumber(submitted.partnerRateGbp) ||
+    !isNonNegativeOptionalNumber(submitted.associateRateGbp) ||
+    !isNonNegativeOptionalNumber(submitted.traineeRateGbp)
+  ) {
+    return { error: 'Matter costs monetary figures and rates must be non-negative numbers.' };
+  }
+
+  const rawDisbursements = Array.isArray(submitted.disbursements)
+    ? submitted.disbursements
+    : Array.isArray(existingSnapshot?.disbursements)
+      ? existingSnapshot.disbursements
+      : [];
+  const disbursements: MatterDisbursementEntry[] = [];
+  for (let i = 0; i < rawDisbursements.length; i += 1) {
+    const d = rawDisbursements[i]!;
+    const amt = Number(d.amountGbp);
+    if (!Number.isFinite(amt) || amt < 0) {
+      return { error: 'Disbursement amounts must be non-negative numbers.' };
+    }
+    const vatOverridden = Boolean(d.vatOverridden);
+    if (
+      vatOverridden &&
+      d.vatAmountGbp !== undefined &&
+      d.vatAmountGbp !== null &&
+      (!Number.isFinite(Number(d.vatAmountGbp)) || Number(d.vatAmountGbp) < 0)
+    ) {
+      return { error: 'Overridden disbursement VAT amounts must be non-negative numbers.' };
+    }
+    disbursements.push({
+      id: d.id || `disb-${i}`,
+      description: String(d.description ?? ''),
+      amountGbp: roundCurrency(amt),
+      ...(d.vatApplicable !== undefined ? { vatApplicable: Boolean(d.vatApplicable) } : {}),
+      ...(vatOverridden ? { vatOverridden: true } : {}),
+      ...(d.vatAmountGbp !== undefined && d.vatAmountGbp !== null
+        ? { vatAmountGbp: roundCurrency(Math.max(0, Number(d.vatAmountGbp))) }
+        : {}),
+    });
+  }
+
+  const submittedPartnerRate =
+    submitted.partnerRateGbp !== undefined ? submitted.partnerRateGbp : lookedUp.partnerRateGbp;
+  const submittedAssociateRate =
+    submitted.associateRateGbp !== undefined
+      ? submitted.associateRateGbp
+      : lookedUp.associateRateGbp;
+  const submittedTraineeRate =
+    submitted.traineeRateGbp !== undefined ? submitted.traineeRateGbp : lookedUp.traineeRateGbp;
+  const submittedCustomGrades =
+    submitted.customGrades !== undefined ? submitted.customGrades : lookedUp.customGrades;
+
+  for (const grade of submittedCustomGrades ?? []) {
+    if (!Number.isFinite(Number(grade.hourlyRateGbp)) || Number(grade.hourlyRateGbp) < 0) {
+      return { error: 'Custom grade hourly rates must be non-negative numbers.' };
+    }
+  }
+
+  if (!effectiveCostsConfig.allowMatterRateOverrides) {
+    const matchesCardRates =
+      submitted.rateSource !== 'custom_override' &&
+      (submittedPartnerRate ?? null) === (lookedUp.partnerRateGbp ?? null) &&
+      (submittedAssociateRate ?? null) === (lookedUp.associateRateGbp ?? null) &&
+      (submittedTraineeRate ?? null) === (lookedUp.traineeRateGbp ?? null) &&
+      areCustomGradesEquivalent(submittedCustomGrades, lookedUp.customGrades);
+
+    const matchesUnchangedExisting =
+      Boolean(existingSnapshot?.workBasis) &&
+      !submitted.refreshRates &&
+      submitted.rateSource === existingSnapshot?.rateSource &&
+      (submittedPartnerRate ?? null) === (existingSnapshot?.partnerRateGbp ?? null) &&
+      (submittedAssociateRate ?? null) === (existingSnapshot?.associateRateGbp ?? null) &&
+      (submittedTraineeRate ?? null) === (existingSnapshot?.traineeRateGbp ?? null) &&
+      areCustomGradesEquivalent(submittedCustomGrades, existingSnapshot?.customGrades);
+
+    if (!matchesCardRates && !matchesUnchangedExisting) {
+      return {
+        error: 'Matter-level hourly rate overrides are disabled by firm configuration.',
+      };
+    }
+  }
+
+  const refreshRates = Boolean(submitted.refreshRates);
+  const refreshVatRate = Boolean(submitted.refreshVatRate);
+  const vatRatePercent = existingSnapshot?.workBasis
+    ? refreshVatRate
+      ? effectiveCostsConfig.vatRatePercent
+      : typeof existingSnapshot.vatRatePercent === 'number' &&
+          Number.isFinite(existingSnapshot.vatRatePercent)
+        ? existingSnapshot.vatRatePercent
+        : 20
+    : effectiveCostsConfig.vatRatePercent;
+
+  const capturedAt =
+    existingSnapshot?.capturedAt && !refreshVatRate && !refreshRates
+      ? existingSnapshot.capturedAt
+      : nowIso;
+
+  const totalEstimateGbp =
+    submitted.totalEstimateGbp !== undefined
+      ? submitted.totalEstimateGbp
+      : (existingSnapshot?.totalEstimateGbp ?? null);
+  const agreedCapGbp =
+    submitted.agreedCapGbp !== undefined
+      ? submitted.agreedCapGbp
+      : (existingSnapshot?.agreedCapGbp ?? null);
+
+  const computedTotals = calculateMatterSnapshotTotals({
+    totalEstimateGbp,
+    disbursements,
+    vatRatePercent,
+  });
+
+  return {
+    snapshot: {
+      workBasis: submitted.workBasis ?? existingSnapshot?.workBasis ?? 'hourly_rates',
+      rateSource: submitted.rateSource ?? existingSnapshot?.rateSource ?? lookedUp.activeSource,
+      rateCardId: submitted.rateCardId || existingSnapshot?.rateCardId || lookedUp.rateCard.id,
+      rateCardName:
+        submitted.rateCardName || existingSnapshot?.rateCardName || lookedUp.rateCard.name,
+      partnerRateGbp: submittedPartnerRate ?? null,
+      associateRateGbp: submittedAssociateRate ?? null,
+      traineeRateGbp: submittedTraineeRate ?? null,
+      customGrades: submittedCustomGrades,
+      totalEstimateGbp,
+      agreedCapGbp,
+      vatRatePercent,
+      disbursements,
+      disbursementsTotalGbp: computedTotals.disbursementsTotalGbp,
+      disbursementsVatGbp: computedTotals.disbursementsVatGbp,
+      disbursementsTotalIncVatGbp: computedTotals.disbursementsTotalIncVatGbp,
+      estimatedFeeVatGbp: computedTotals.estimatedFeeVatGbp,
+      totalIncVatGbp: computedTotals.totalIncVatGbp,
+      paymentOnAccountRequired:
+        submitted.paymentOnAccountRequired ??
+        existingSnapshot?.paymentOnAccountRequired ??
+        '',
+      paymentOnAccountAmountGbp:
+        submitted.paymentOnAccountAmountGbp !== undefined
+          ? submitted.paymentOnAccountAmountGbp
+          : (existingSnapshot?.paymentOnAccountAmountGbp ?? null),
+      notes: submitted.notes ?? existingSnapshot?.notes ?? '',
+      updatedAt: nowIso,
+      capturedAt,
+    },
+  };
+}
+
 function resolveMatterSignOffEstimateGbp(
   store: FirmStore,
   tenantCfg: ReturnType<typeof getActiveTenantConfiguration>,
   matter: Matter,
+  overrideCostsConfig?: MatterCostsConfig,
 ): {
   resolvedCosts: ReturnType<typeof resolveMatterCostsSnapshot>;
   estimatedFeeGbp: number;
 } {
   const costsConfig =
-    store.matterCostsConfig ??
-    createDefaultMatterCostsConfig(store.values, {
+    overrideCostsConfig ??
+    resolveEffectiveMatterCostsConfig(tenantCfg, store.matterCostsConfig, {
+      values: store.values,
       clientProfileCode: tenantCfg.tenantId,
       displayName: tenantCfg.displayName,
       primaryDomain: tenantCfg.branding.primaryDomain,
@@ -4445,6 +4654,7 @@ async function runMatterOpeningGate(params: {
   isNewMatter: boolean;
   extensionCtx: TenantContext;
   tenantCfg: ReturnType<typeof getActiveTenantConfiguration>;
+  effectiveCostsConfig?: MatterCostsConfig;
   costsHookInput: {
     matterId: string;
     workBasis: ReturnType<typeof resolveMatterCostsSnapshot>['workBasis'];
@@ -4467,9 +4677,20 @@ async function runMatterOpeningGate(params: {
     isNewMatter,
     extensionCtx,
     tenantCfg,
+    effectiveCostsConfig,
     costsHookInput,
     now,
   } = params;
+  const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+    tenantCfg,
+    effectiveCostsConfig ??
+      resolveEffectiveMatterCostsConfig(tenantCfg, store.matterCostsConfig, {
+        values: store.values,
+        clientProfileCode: tenantCfg.tenantId,
+        displayName: tenantCfg.displayName,
+        primaryDomain: tenantCfg.branding.primaryDomain,
+      }),
+  );
   const errors: Record<string, string> = {};
 
   // 1. Extension load failure on an enabled beforeMatterOpen extension fails closed.
@@ -4526,12 +4747,12 @@ async function runMatterOpeningGate(params: {
   // 3. beforeMatterOpen extension hook (when Matter Costs Governance is enabled for the tenant).
   const host = getPlatformExtensionHost();
   const openGovernance =
-    gateLoadFailure || !tenantCfg.featureFlags?.enableMatterCostsGovernance
+    gateLoadFailure || !effectiveTenantCfg.featureFlags?.enableMatterCostsGovernance
       ? null
       : await host.executeMatterCostsHook(
           'beforeMatterOpen',
           extensionCtx,
-          tenantCfg,
+          effectiveTenantCfg,
           costsHookInput,
         );
 
@@ -6151,12 +6372,65 @@ export async function saveMatterRecord(
       )
     : existing?.riskRatingId ?? '';
 
-  // R108 & R131 & R173 & R178 & R179 & R181: Run active tenant extension hooks and unified matter opening gate
+  // R108 & R131 & R144 & R173 & R178 & R179 & R181 & R495-R497 & S1:
+  // Run matter costs validation and extension hooks (beforeMatterCostsCalculate, beforeMatterOpen)
+  // BEFORE opening the write transaction so no DB connection or lock is held across async hooks.
+  const catRepo = getCatalogueRepository();
+  const liveDbCostsOverride =
+    await catRepo.getMatterCostsConfig<MatterCostsConfig>(extensionCtx);
+  const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+    tenantCfg,
+    liveDbCostsOverride ?? store.matterCostsConfig,
+    {
+      values: store.values,
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    },
+  );
+  const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+    tenantCfg,
+    effectiveCostsConfig,
+  );
+
+  const rawSubmittedMatterCosts = input.fieldValues?.['matterCosts'] as
+    | (Partial<MatterCostsSnapshot> & {
+        refreshRates?: boolean;
+        refreshVatRate?: boolean;
+      })
+    | undefined;
+  if (
+    rawSubmittedMatterCosts &&
+    typeof rawSubmittedMatterCosts === 'object'
+  ) {
+    const existingMatterCosts = existing?.fieldValues?.['matterCosts'] as
+      | Partial<MatterCostsSnapshot>
+      | undefined;
+    const costsValidation = sanitizeAndValidateSubmittedMatterCosts({
+      submitted: rawSubmittedMatterCosts,
+      existingSnapshot: existingMatterCosts,
+      effectiveCostsConfig,
+      practiceAreaId: matter.practiceAreaId,
+      nowIso: now,
+    });
+    if (!costsValidation.snapshot) {
+      return {
+        matter: null,
+        errors: {
+          matterCosts:
+            costsValidation.error ?? 'Invalid matter costs configuration.',
+        },
+      };
+    }
+    matter.fieldValues['matterCosts'] = costsValidation.snapshot;
+  }
+
   const host = getPlatformExtensionHost();
   const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
     store,
-    tenantCfg,
+    effectiveTenantCfg,
     matter,
+    effectiveCostsConfig,
   );
   const storedSignOff = matter.fieldValues['partnerCostSignOff'] as
     | PartnerCostSignOffRecord
@@ -6178,11 +6452,11 @@ export async function saveMatterRecord(
     disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
     partnerSignOffCompleted,
   };
-  const calcGovernance = tenantCfg.featureFlags?.enableMatterCostsGovernance
+  const calcGovernance = effectiveTenantCfg.featureFlags?.enableMatterCostsGovernance
     ? await host.executeMatterCostsHook(
         'beforeMatterCostsCalculate',
         extensionCtx,
-        tenantCfg,
+        effectiveTenantCfg,
         costsHookInput,
       )
     : {
@@ -6198,7 +6472,8 @@ export async function saveMatterRecord(
           matter,
           isNewMatter: !existing,
           extensionCtx,
-          tenantCfg,
+          tenantCfg: effectiveTenantCfg,
+          effectiveCostsConfig,
           costsHookInput,
           now,
         })
@@ -6215,34 +6490,10 @@ export async function saveMatterRecord(
     };
   }
 
-  for (const link of pendingEnquiryLinks) {
-    link.enquiry.linkedPersonId = link.linkedPersonId;
-  }
-
-  matter.fieldValues['matterCostsGovernance'] =
-    gateResult?.governance ?? calcGovernance;
-  if (gateResult) {
-    matter.fieldValues['matterOpeningGate'] = gateResult.record;
-  } else if (isPmsImport && willOpen) {
-    const importedGateRecord: MatterOpeningGateRecord = {
-      allowProceed: true,
-      estimatedFeeGbp,
-      checkedAt: now,
-    };
-    matter.fieldValues['matterOpeningGate'] = importedGateRecord;
-  } else if (!existingHasOpened) {
-    const draftGateRecord: MatterOpeningGateRecord = {
-      allowProceed: false,
-      estimatedFeeGbp,
-      checkedAt: now,
-    };
-    matter.fieldValues['matterOpeningGate'] = draftGateRecord;
-  }
-
+  let previousMatterSnapshot: Matter | undefined = existing ?? undefined;
   const expectedRowVersionForPut = existing
     ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
     : undefined;
-  let previousMatterSnapshot: Matter | undefined = existing ?? undefined;
   const stagedAuditMark = getStagedAuditWatermark();
   let auditFlushed = false;
   let txResult: {
@@ -6262,7 +6513,7 @@ export async function saveMatterRecord(
         message?: string;
         errors: Record<string, string>;
       } | null> => {
-      const catRepo = getCatalogueRepository();
+      // Acquire FOR UPDATE row lock first inside TX, verify optimistic version, enforce Key Dates/closure bounds, and compute retention
       let inTxExisting: Matter | null = null;
       if (existing) {
         await tx.query(
@@ -6280,6 +6531,20 @@ export async function saveMatterRecord(
             code: 'NOT_FOUND',
             message: 'NOT_FOUND: Matter not found or restricted.',
             errors: { access: 'Matter not found or restricted.' },
+          };
+        }
+        const inTxRowVersion =
+          (inTxExisting as Matter & { rowVersion?: number }).rowVersion ?? 1;
+        if (
+          expectedRowVersionForPut !== undefined &&
+          expectedRowVersionForPut !== null &&
+          inTxRowVersion !== expectedRowVersionForPut
+        ) {
+          return {
+            matter: null,
+            code: MATTER_CONCURRENCY_CONFLICT_CODE,
+            message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+            errors: { conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE },
           };
         }
         previousMatterSnapshot = inTxExisting;
@@ -6406,6 +6671,30 @@ export async function saveMatterRecord(
         matter.id = await matterRepo.allocateNextMatterId(extensionCtx);
       }
 
+      for (const link of pendingEnquiryLinks) {
+        link.enquiry.linkedPersonId = link.linkedPersonId;
+      }
+
+      matter.fieldValues['matterCostsGovernance'] =
+        gateResult?.governance ?? calcGovernance;
+      if (gateResult) {
+        matter.fieldValues['matterOpeningGate'] = gateResult.record;
+      } else if (isPmsImport && willOpen) {
+        const importedGateRecord: MatterOpeningGateRecord = {
+          allowProceed: true,
+          estimatedFeeGbp,
+          checkedAt: now,
+        };
+        matter.fieldValues['matterOpeningGate'] = importedGateRecord;
+      } else if (!existingHasOpened) {
+        const draftGateRecord: MatterOpeningGateRecord = {
+          allowProceed: false,
+          estimatedFeeGbp,
+          checkedAt: now,
+        };
+        matter.fieldValues['matterOpeningGate'] = draftGateRecord;
+      }
+
       if (!existingHasOpened) {
         // Re-build fresh snapshot until the matter has actually opened (non-prospective status)
         const cleanFieldVals = { ...matter.fieldValues };
@@ -6453,6 +6742,7 @@ export async function saveMatterRecord(
         matter.fieldValues['matterOpeningSnapshot'] = backfilledSnapshot;
       }
 
+      // Persist validated matter, linked parties, and staged audit entries inside the active transaction
       for (const person of pendingPeople) {
         await partyRepo.putPerson(extensionCtx, person);
       }
@@ -7704,9 +7994,56 @@ export async function signOffMatterCostsRecord(
     };
   }
 
-  const { resolvedCosts, estimatedFeeGbp: signedOffEstimateGbp } =
-    resolveMatterSignOffEstimateGbp(store, tenantCfg, matter);
   const now = touchMatter(matter, byId);
+  let saved!: Matter;
+  const warnings: string[] = [];
+  const prospectiveStatusId = vid('matter_status', 'Prospective / Enquiry');
+  const workTypesConfigForSignOff =
+    store.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      tenantCfg,
+      store.workTypeConfigsOverride ?? null,
+    );
+  const taskRepoForSignOff = getTaskWorkflowRepository();
+
+  const liveDbCostsOverride =
+    await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+      extensionCtx,
+    );
+  const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+    tenantCfg,
+    liveDbCostsOverride ?? store.matterCostsConfig,
+    {
+      values: store.values,
+      clientProfileCode: tenantCfg.tenantId,
+      displayName: tenantCfg.displayName,
+      primaryDomain: tenantCfg.branding.primaryDomain,
+    },
+  );
+  const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+    tenantCfg,
+    effectiveCostsConfig,
+  );
+  const existingSavedCosts = matter.fieldValues?.['matterCosts'] as
+    | Partial<MatterCostsSnapshot>
+    | undefined;
+  const { resolvedCosts, estimatedFeeGbp: signedOffEstimateGbp } =
+    resolveMatterSignOffEstimateGbp(
+      store,
+      effectiveTenantCfg,
+      matter,
+      effectiveCostsConfig,
+    );
+  const frozenSnapshot: MatterCostsSnapshot = {
+    ...resolvedCosts,
+    vatRatePercent:
+      typeof resolvedCosts.vatRatePercent === 'number' &&
+      Number.isFinite(resolvedCosts.vatRatePercent)
+        ? resolvedCosts.vatRatePercent
+        : effectiveCostsConfig.vatRatePercent,
+    capturedAt: existingSavedCosts?.capturedAt ?? resolvedCosts.capturedAt ?? now,
+    updatedAt: existingSavedCosts?.updatedAt ?? now,
+  };
   const signOffRecord: PartnerCostSignOffRecord = {
     byId,
     byName: personDisplayName(actingUser),
@@ -7716,6 +8053,7 @@ export async function signOffMatterCostsRecord(
   };
   matter.fieldValues = {
     ...(matter.fieldValues ?? {}),
+    matterCosts: frozenSnapshot,
     partnerCostSignOffCompleted: true,
     partnerCostSignOff: signOffRecord,
   };
@@ -7723,15 +8061,15 @@ export async function signOffMatterCostsRecord(
   const host = getPlatformExtensionHost();
   const hookInput = {
     matterId: matter.id,
-    workBasis: resolvedCosts.workBasis,
+    workBasis: frozenSnapshot.workBasis,
     estimatedFeeGbp: signedOffEstimateGbp,
-    disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+    disbursementsTotalGbp: frozenSnapshot.disbursementsTotalGbp,
     partnerSignOffCompleted: true,
   };
   const calcGovernance = await host.executeMatterCostsHook(
     'beforeMatterCostsCalculate',
     extensionCtx,
-    tenantCfg,
+    effectiveTenantCfg,
     hookInput,
   );
   const gateResult = await runMatterOpeningGate({
@@ -7739,7 +8077,8 @@ export async function signOffMatterCostsRecord(
     matter,
     isNewMatter: false,
     extensionCtx,
-    tenantCfg,
+    tenantCfg: effectiveTenantCfg,
+    effectiveCostsConfig,
     costsHookInput: hookInput,
     now,
   });
@@ -7747,54 +8086,45 @@ export async function signOffMatterCostsRecord(
     gateResult.governance ?? calcGovernance;
   matter.fieldValues['matterOpeningGate'] = gateResult.record;
 
-  const warnings: string[] = [];
-  const prospectiveStatusId = vid('matter_status', 'Prospective / Enquiry');
-  if (
-    matter.matterNumber !== 'DRAFT' &&
-    !matter.matterNumber.startsWith('DRAFT') &&
-    matter.matterStatusId === prospectiveStatusId &&
-    matter.conflictCheckRecord?.status === 'Approved'
-  ) {
-    if (gateResult.allowProceed) {
-      const activeStatusId = vid('matter_status', 'Active');
-      matter.matterStatusId = activeStatusId;
-      matter.recordStatusId = activeStatusId;
-      const cleanFieldVals = { ...matter.fieldValues };
-      delete cleanFieldVals['matterOpeningSnapshot'];
-      const openingSnapshot = resolveMatterOpeningSnapshot(
-        { ...matter, fieldValues: cleanFieldVals },
-        people,
-        organisations,
-        store.values,
-        enquiries,
-        quotes,
-      );
-      openingSnapshot.saveMode = 'opened';
-      openingSnapshot.capturedAt = now;
-      matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
-    } else {
-      warnings.push(
-        Object.values(gateResult.errors)[0] ??
-          'The matter will open once it passes the opening checks.',
-      );
-    }
-  } else if (!gateResult.allowProceed) {
-    const firstErr = Object.values(gateResult.errors)[0];
-    if (firstErr) warnings.push(firstErr);
-  }
-
-  let saved!: Matter;
-  const workTypesConfigForSignOff =
-    store.workTypesConfig ??
-    resolveEffectiveWorkTypesConfig(
-      tenantCfg,
-      store.workTypeConfigsOverride ?? null,
-    );
-  const taskRepoForSignOff = getTaskWorkflowRepository();
-  const openedBySignOff =
-    wasProspectiveBeforeSignOff && matter.matterStatusId !== prospectiveStatusId;
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(extensionCtx, async () => {
+
+      if (
+        matter.matterNumber !== 'DRAFT' &&
+        !matter.matterNumber.startsWith('DRAFT') &&
+        matter.matterStatusId === prospectiveStatusId &&
+        matter.conflictCheckRecord?.status === 'Approved'
+      ) {
+        if (gateResult.allowProceed) {
+          const activeStatusId = vid('matter_status', 'Active');
+          matter.matterStatusId = activeStatusId;
+          matter.recordStatusId = activeStatusId;
+          const cleanFieldVals = { ...matter.fieldValues };
+          delete cleanFieldVals['matterOpeningSnapshot'];
+          const openingSnapshot = resolveMatterOpeningSnapshot(
+            { ...matter, fieldValues: cleanFieldVals },
+            people,
+            organisations,
+            store.values,
+            enquiries,
+            quotes,
+          );
+          openingSnapshot.saveMode = 'opened';
+          openingSnapshot.capturedAt = now;
+          matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+        } else {
+          warnings.push(
+            Object.values(gateResult.errors)[0] ??
+              'The matter will open once it passes the opening checks.',
+          );
+        }
+      } else if (!gateResult.allowProceed) {
+        const firstErr = Object.values(gateResult.errors)[0];
+        if (firstErr) warnings.push(firstErr);
+      }
+
+      const openedBySignOff =
+        wasProspectiveBeforeSignOff && matter.matterStatusId !== prospectiveStatusId;
       saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
         expectedRowVersion: null,
       });
@@ -14822,11 +15152,47 @@ export interface SaveQuoteInput {
   validUntil?: string;
   feeEarnerId?: string;
   followUpAfterDays?: number;
+  refreshVatRate?: boolean;
+}
+
+function normalizeQuoteDisbursements(
+  rawDisbursements: QuoteDisbursement[] | undefined,
+): { disbursements?: QuoteDisbursement[]; error?: string } {
+  const list = rawDisbursements ?? [];
+  const out: QuoteDisbursement[] = [];
+  for (let idx = 0; idx < list.length; idx += 1) {
+    const d = list[idx]!;
+    if (!d.description?.trim() && !(Number(d.amountExVat) > 0)) {
+      continue;
+    }
+    const amt = Number(d.amountExVat);
+    if (!Number.isFinite(amt) || amt < 0) {
+      return { error: 'Disbursement amounts must be non-negative numbers.' };
+    }
+    const vatOverridden = Boolean(d.vatOverridden);
+    let vatAmount: number | undefined;
+    if (vatOverridden && d.vatAmount !== undefined && d.vatAmount !== null) {
+      const parsedVat = Number(d.vatAmount);
+      if (!Number.isFinite(parsedVat) || parsedVat < 0) {
+        return { error: 'Overridden disbursement VAT amounts must be non-negative numbers.' };
+      }
+      vatAmount = roundCurrency(parsedVat);
+    }
+    out.push({
+      id: d.id || `QDISB-${Date.now()}-${idx}`,
+      description: d.description.trim() || 'Disbursement',
+      amountExVat: roundCurrency(amt),
+      vatApplicable: Boolean(d.vatApplicable),
+      ...(vatOverridden ? { vatOverridden: true } : {}),
+      ...(vatAmount !== undefined ? { vatAmount } : {}),
+    });
+  }
+  return { disbursements: out };
 }
 
 export async function saveQuoteRecord(
   input: SaveQuoteInput,
-  opts: { id?: string; byId: string; markAsSent?: boolean },
+  opts: { id?: string; byId: string; markAsSent?: boolean; refreshVatRate?: boolean },
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
@@ -14901,21 +15267,21 @@ export async function saveQuoteRecord(
   if (!input.scope?.trim()) {
     return { error: 'Please enter the description of work / scope.' };
   }
+  if (!Number.isFinite(Number(input.feeAmountExVat)) || Number(input.feeAmountExVat) < 0) {
+    return { error: 'Fee amount must be a non-negative number.' };
+  }
+  if (
+    input.vatOverridden &&
+    (!Number.isFinite(Number(input.vatAmount)) || Number(input.vatAmount) < 0)
+  ) {
+    return { error: 'VAT amount must be a non-negative number.' };
+  }
 
-  const disbursements: QuoteDisbursement[] = (input.disbursements ?? [])
-    .filter((d) => d.description.trim() || Number(d.amountExVat) > 0)
-    .map((d, idx) => ({
-      id: d.id || `QDISB-${Date.now()}-${idx}`,
-      description: d.description.trim() || 'Disbursement',
-      amountExVat: Math.max(0, Number(d.amountExVat) || 0),
-      vatApplicable: Boolean(d.vatApplicable),
-    }));
-
-  const totals = calculateQuoteTotals(
-    input.feeAmountExVat,
-    input.vatOverridden ? input.vatAmount : null,
-    disbursements,
-  );
+  const normalizedDisbursements = normalizeQuoteDisbursements(input.disbursements);
+  if (!normalizedDisbursements.disbursements) {
+    return { error: normalizedDisbursements.error ?? 'Invalid quote disbursements.' };
+  }
+  const disbursements = normalizedDisbursements.disbursements;
 
   const feeEarnerId = input.feeEarnerId || existing?.feeEarnerId || opts.byId;
   const routedTeam = resolveRoutedTeam(input.practiceAreaId, teams);
@@ -14941,6 +15307,20 @@ export async function saveQuoteRecord(
 
   if (!existing) {
     return intakeRepo.withTenantTransaction(ctx, async () => {
+      const dbCostsOverride =
+        await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
+      const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+        getActiveTenantConfiguration(),
+        dbCostsOverride,
+      );
+      const vatRatePercent = effectiveCostsConfig.vatRatePercent;
+      const totals = calculateQuoteTotals(
+        input.feeAmountExVat,
+        input.vatOverridden ? input.vatAmount : null,
+        disbursements,
+        vatRatePercent,
+      );
+
       const reference = await intakeRepo.allocateNextQuoteReference(ctx, now.getFullYear());
       const timeline: Quote['timeline'] = [
         {
@@ -14987,10 +15367,12 @@ export async function saveQuoteRecord(
           input.feeBasis === 'Hourly rate with estimate'
             ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
             : null,
+        vatRatePercent,
         vatAmount: totals.vatOnFee,
         vatOverridden: Boolean(input.vatOverridden),
         disbursements,
         totalIncVat: totals.totalIncVat,
+        capturedAt: nowIso,
         feeEarnerId,
         assignedTeamId,
         validUntil,
@@ -15024,55 +15406,81 @@ export async function saveQuoteRecord(
     });
   }
 
-  // Update existing quote
+  // Update existing quote inside transaction with live matter_costs VAT check
   const wasSentNow = markSent && existing.status === 'Draft';
-  existing.clientType = clientType;
-  existing.linkedOrganisationId = linkedOrganisationId;
-  existing.linkedPersonId = linkedPersonId;
-  existing.prospectName = prospectName;
-  existing.prospectOrganisationName = prospectOrganisationName;
-  existing.prospectEmail = prospectEmail;
-  existing.prospectPhone = prospectPhone;
-  existing.linkedEnquiryId =
-    input.linkedEnquiryId !== undefined ? input.linkedEnquiryId || null : existing.linkedEnquiryId;
-  existing.practiceAreaId = input.practiceAreaId;
-  existing.workTypeSubcategoryId = input.workTypeSubcategoryId || null;
-  existing.scope = input.scope.trim();
-  existing.assumptions = (input.assumptions ?? '').trim();
-  existing.feeBasis = input.feeBasis;
-  existing.feeAmountExVat = totals.feeAmountExVat;
-  existing.hourlyRateGbp =
-    input.feeBasis === 'Hourly rate with estimate'
-      ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
-      : null;
-  existing.vatAmount = totals.vatOnFee;
-  existing.vatOverridden = Boolean(input.vatOverridden);
-  existing.disbursements = disbursements;
-  existing.totalIncVat = totals.totalIncVat;
-  existing.feeEarnerId = feeEarnerId;
-  existing.assignedTeamId = assignedTeamId;
-  existing.validUntil = validUntil;
-  existing.followUpAfterDays = followUpAfterDays;
-  existing.updatedById = opts.byId;
-  existing.updatedAt = nowIso;
-
-  if (wasSentNow || markSent) {
-    existing.status = 'Sent';
-    existing.sentAt = nowIso;
-    existing.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
-    existing.timeline.push({
-      id: `QT-${Date.now()}-sent`,
-      kind: 'sent',
-      at: nowIso,
-      byId: opts.byId,
-      title: `v${existing.version} marked as sent`,
-      detail: `Follow-up scheduled for ${existing.nextFollowUpDate}`,
-    });
-  } else {
-    existing.status = evaluateQuoteEffectiveStatus(existing, now);
-  }
-
   await intakeRepo.withTenantTransaction(ctx, async () => {
+    const dbCostsOverride =
+      await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
+    const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+      getActiveTenantConfiguration(),
+      dbCostsOverride,
+    );
+    const existingVatRate =
+      typeof existing.vatRatePercent === 'number' &&
+      Number.isFinite(existing.vatRatePercent)
+        ? existing.vatRatePercent
+        : 20;
+    const shouldRefreshVat = Boolean(input.refreshVatRate ?? opts.refreshVatRate);
+    const vatRatePercent = shouldRefreshVat
+      ? effectiveCostsConfig.vatRatePercent
+      : existingVatRate;
+    const totals = calculateQuoteTotals(
+      input.feeAmountExVat,
+      input.vatOverridden ? input.vatAmount : null,
+      disbursements,
+      vatRatePercent,
+    );
+
+    existing.clientType = clientType;
+    existing.linkedOrganisationId = linkedOrganisationId;
+    existing.linkedPersonId = linkedPersonId;
+    existing.prospectName = prospectName;
+    existing.prospectOrganisationName = prospectOrganisationName;
+    existing.prospectEmail = prospectEmail;
+    existing.prospectPhone = prospectPhone;
+    existing.linkedEnquiryId =
+      input.linkedEnquiryId !== undefined ? input.linkedEnquiryId || null : existing.linkedEnquiryId;
+    existing.practiceAreaId = input.practiceAreaId;
+    existing.workTypeSubcategoryId = input.workTypeSubcategoryId || null;
+    existing.scope = input.scope.trim();
+    existing.assumptions = (input.assumptions ?? '').trim();
+    existing.feeBasis = input.feeBasis;
+    existing.feeAmountExVat = totals.feeAmountExVat;
+    existing.hourlyRateGbp =
+      input.feeBasis === 'Hourly rate with estimate'
+        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+        : null;
+    existing.vatRatePercent = vatRatePercent;
+    existing.vatAmount = totals.vatOnFee;
+    existing.vatOverridden = Boolean(input.vatOverridden);
+    existing.disbursements = disbursements;
+    existing.totalIncVat = totals.totalIncVat;
+    existing.capturedAt = shouldRefreshVat
+      ? nowIso
+      : existing.capturedAt ?? existing.updatedAt ?? existing.createdAt;
+    existing.feeEarnerId = feeEarnerId;
+    existing.assignedTeamId = assignedTeamId;
+    existing.validUntil = validUntil;
+    existing.followUpAfterDays = followUpAfterDays;
+    existing.updatedById = opts.byId;
+    existing.updatedAt = nowIso;
+
+    if (wasSentNow || markSent) {
+      existing.status = 'Sent';
+      existing.sentAt = nowIso;
+      existing.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
+      existing.timeline.push({
+        id: `QT-${Date.now()}-sent`,
+        kind: 'sent',
+        at: nowIso,
+        byId: opts.byId,
+        title: `v${existing.version} marked as sent`,
+        detail: `Follow-up scheduled for ${existing.nextFollowUpDate}`,
+      });
+    } else {
+      existing.status = evaluateQuoteEffectiveStatus(existing, now);
+    }
+
     await intakeRepo.putQuote(ctx, existing);
     writeAudit(null, {
       recordType: 'quote',
@@ -15274,6 +15682,7 @@ export async function reviseQuoteRecord(
     followUpAfterDays?: number;
     revisionNote?: string;
     markAsSent?: boolean;
+    refreshVatRate?: boolean;
   },
   byId: string,
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
@@ -15313,13 +15722,38 @@ export async function reviseQuoteRecord(
   const nowIso = now.toISOString();
 
   // Archive current version as Superseded
+  if (!Number.isFinite(Number(input.feeAmountExVat)) || Number(input.feeAmountExVat) < 0) {
+    return { error: 'Fee amount must be a non-negative number.' };
+  }
+  if (
+    input.vatOverridden &&
+    (!Number.isFinite(Number(input.vatAmount)) || Number(input.vatAmount) < 0)
+  ) {
+    return { error: 'VAT amount must be a non-negative number.' };
+  }
+  const normalizedDisbursements = normalizeQuoteDisbursements(
+    input.disbursements ?? quote.disbursements,
+  );
+  if (!normalizedDisbursements.disbursements) {
+    return { error: normalizedDisbursements.error ?? 'Invalid quote disbursements.' };
+  }
+  const disbursements = normalizedDisbursements.disbursements;
+
+  const priorVatRatePercent =
+    typeof quote.vatRatePercent === 'number' && Number.isFinite(quote.vatRatePercent)
+      ? quote.vatRatePercent
+      : 20;
+  const priorCapturedAt = quote.capturedAt ?? quote.updatedAt ?? quote.createdAt;
+
   quote.versionHistory.push({
     version: quote.version,
     status: 'Superseded',
     feeBasis: quote.feeBasis,
     feeAmountExVat: quote.feeAmountExVat,
     hourlyRateGbp: quote.hourlyRateGbp,
+    vatRatePercent: priorVatRatePercent,
     vatAmount: quote.vatAmount,
+    ...(quote.vatOverridden ? { vatOverridden: true } : {}),
     disbursements: structuredClone(quote.disbursements),
     totalIncVat: quote.totalIncVat,
     scope: quote.scope,
@@ -15328,6 +15762,7 @@ export async function reviseQuoteRecord(
     createdAt: quote.createdAt,
     sentAt: quote.sentAt,
     supersededAt: nowIso,
+    capturedAt: priorCapturedAt,
     byId,
     revisionNote: input.revisionNote?.trim() || undefined,
   });
@@ -15335,82 +15770,87 @@ export async function reviseQuoteRecord(
   const prevVersion = quote.version;
   const nextVersion = prevVersion + 1;
 
-  const disbursements: QuoteDisbursement[] = (input.disbursements ?? quote.disbursements)
-    .filter((d) => d.description.trim() || Number(d.amountExVat) > 0)
-    .map((d, idx) => ({
-      id: d.id || `QDISB-${Date.now()}-${idx}`,
-      description: d.description.trim() || 'Disbursement',
-      amountExVat: Math.max(0, Number(d.amountExVat) || 0),
-      vatApplicable: Boolean(d.vatApplicable),
-    }));
-
-  const totals = calculateQuoteTotals(
-    input.feeAmountExVat,
-    input.vatOverridden ? input.vatAmount : null,
-    disbursements,
-  );
-
   const followUpAfterDays = Math.max(
     1,
     Number(input.followUpAfterDays) || quote.followUpAfterDays || 7,
   );
 
-  quote.version = nextVersion;
-  quote.feeBasis = input.feeBasis;
-  quote.feeAmountExVat = totals.feeAmountExVat;
-  quote.hourlyRateGbp =
-    input.feeBasis === 'Hourly rate with estimate'
-      ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
-      : null;
-  quote.vatAmount = totals.vatOnFee;
-  quote.vatOverridden = Boolean(input.vatOverridden);
-  quote.disbursements = disbursements;
-  quote.totalIncVat = totals.totalIncVat;
-  quote.scope = input.scope.trim();
-  quote.assumptions = (input.assumptions ?? '').trim();
-  quote.validUntil = input.validUntil || toIsoDate(addDays(now, 30));
-  quote.followUpAfterDays = followUpAfterDays;
-  quote.outcomeAt = null;
-  quote.outcomeNote = undefined;
-  quote.declineReason = null;
-  quote.declineNote = undefined;
-  quote.updatedAt = nowIso;
-  quote.updatedById = byId;
+  await intakeRepo.withTenantTransaction(ctx, async () => {
+    const dbCostsOverride =
+      await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
+    const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+      getActiveTenantConfiguration(),
+      dbCostsOverride,
+    );
+    const appliedVatRatePercent =
+      input.refreshVatRate === false
+        ? priorVatRatePercent
+        : effectiveCostsConfig.vatRatePercent;
 
-  const markSent = Boolean(input.markAsSent);
-  if (markSent) {
-    quote.status = 'Sent';
-    quote.sentAt = nowIso;
-    quote.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
-  } else {
-    quote.status = 'Draft';
-    quote.sentAt = null;
-    quote.nextFollowUpDate = null;
-  }
+    const totals = calculateQuoteTotals(
+      input.feeAmountExVat,
+      input.vatOverridden ? input.vatAmount : null,
+      disbursements,
+      appliedVatRatePercent,
+    );
 
-  quote.timeline.push({
-    id: `QT-${Date.now()}-rev`,
-    kind: 'revised',
-    at: nowIso,
-    byId,
-    title: `Revised quote to v${nextVersion} (v${prevVersion} marked Superseded)`,
-    detail:
-      input.revisionNote?.trim() ||
-      `Updated to ${quote.feeBasis} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
-  });
+    quote.version = nextVersion;
+    quote.feeBasis = input.feeBasis;
+    quote.feeAmountExVat = totals.feeAmountExVat;
+    quote.hourlyRateGbp =
+      input.feeBasis === 'Hourly rate with estimate'
+        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+        : null;
+    quote.vatRatePercent = appliedVatRatePercent;
+    quote.vatAmount = totals.vatOnFee;
+    quote.vatOverridden = Boolean(input.vatOverridden);
+    quote.disbursements = disbursements;
+    quote.totalIncVat = totals.totalIncVat;
+    quote.capturedAt = nowIso;
+    quote.scope = input.scope.trim();
+    quote.assumptions = (input.assumptions ?? '').trim();
+    quote.validUntil = input.validUntil || toIsoDate(addDays(now, 30));
+    quote.followUpAfterDays = followUpAfterDays;
+    quote.outcomeAt = null;
+    quote.outcomeNote = undefined;
+    quote.declineReason = null;
+    quote.declineNote = undefined;
+    quote.updatedAt = nowIso;
+    quote.updatedById = byId;
 
-  if (markSent) {
+    const markSent = Boolean(input.markAsSent);
+    if (markSent) {
+      quote.status = 'Sent';
+      quote.sentAt = nowIso;
+      quote.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
+    } else {
+      quote.status = 'Draft';
+      quote.sentAt = null;
+      quote.nextFollowUpDate = null;
+    }
+
     quote.timeline.push({
-      id: `QT-${Date.now()}-sent`,
-      kind: 'sent',
+      id: `QT-${Date.now()}-rev`,
+      kind: 'revised',
       at: nowIso,
       byId,
-      title: `v${nextVersion} marked as sent`,
-      detail: `Next follow-up scheduled for ${quote.nextFollowUpDate}`,
+      title: `Revised quote to v${nextVersion} (v${prevVersion} marked Superseded)`,
+      detail:
+        input.revisionNote?.trim() ||
+        `Updated to ${quote.feeBasis} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
     });
-  }
 
-  await intakeRepo.withTenantTransaction(ctx, async () => {
+    if (markSent) {
+      quote.timeline.push({
+        id: `QT-${Date.now()}-sent`,
+        kind: 'sent',
+        at: nowIso,
+        byId,
+        title: `v${nextVersion} marked as sent`,
+        detail: `Next follow-up scheduled for ${quote.nextFollowUpDate}`,
+      });
+    }
+
     await intakeRepo.putQuote(ctx, quote);
     writeAudit(null, {
       recordType: 'quote',
@@ -16093,31 +16533,67 @@ export async function saveMatterCostsConfig(
       actorUserId: byId,
     });
   }
+  if (config.vatRatePercent !== undefined) {
+    if (
+      typeof config.vatRatePercent !== 'number' ||
+      !Number.isFinite(config.vatRatePercent) ||
+      config.vatRatePercent < 0 ||
+      config.vatRatePercent > 100
+    ) {
+      throw new Error('Standard VAT rate must be a percentage between 0% and 100%.');
+    }
+  }
+  if (config.partnerSignOffThresholdGbp !== undefined) {
+    if (
+      typeof config.partnerSignOffThresholdGbp !== 'number' ||
+      !Number.isFinite(config.partnerSignOffThresholdGbp) ||
+      config.partnerSignOffThresholdGbp < 0
+    ) {
+      throw new Error('Partner cost sign-off threshold must be a non-negative GBP amount.');
+    }
+  }
+
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const catalogueRepo = getCatalogueRepository();
   const now = new Date().toISOString();
-  const next: MatterCostsConfig = {
-    ...config,
-    updatedAt: now,
-    updatedById: byId,
-  };
+  let savedConfig!: MatterCostsConfig;
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
+      const previous = await catalogueRepo.getMatterCostsConfig<MatterCostsConfig>(ctx);
+      const effectiveThreshold =
+        config.partnerSignOffThresholdGbp !== undefined
+          ? config.partnerSignOffThresholdGbp
+          : previous?.partnerSignOffThresholdGbp ??
+            tenantCfg.matterCosts.partnerSignOffThresholdGbp;
+      const effectiveVatRate =
+        config.vatRatePercent !== undefined
+          ? config.vatRatePercent
+          : previous?.vatRatePercent ?? tenantCfg.matterCosts.vatRatePercent;
+      const next: MatterCostsConfig = {
+        ...config,
+        partnerSignOffThresholdGbp: effectiveThreshold,
+        vatRatePercent: effectiveVatRate,
+        updatedAt: now,
+        updatedById: byId,
+      };
       await catalogueRepo.putMatterCostsConfig(ctx, next, byId);
+      savedConfig = next;
       writeAudit(null, {
         recordType: 'matter',
         recordId: 'FIRM-MATTER-COSTS-CONFIG',
         action: 'update',
         field: 'Matter Costs & Rates Table Config',
-        oldValue: null,
-        newValue: `${next.clientProfileName} (${next.rateSourceMode}, ${next.rateCards.length} rate cards)`,
+        oldValue: previous
+          ? `${previous.clientProfileName} (${previous.rateSourceMode}, overrides=${previous.allowMatterRateOverrides}, threshold=£${previous.partnerSignOffThresholdGbp ?? 25000}, vat=${previous.vatRatePercent ?? 20}%, ${previous.rateCards?.length ?? 0} rate cards)`
+          : null,
+        newValue: `${next.clientProfileName} (${next.rateSourceMode}, overrides=${next.allowMatterRateOverrides}, threshold=£${next.partnerSignOffThresholdGbp}, vat=${next.vatRatePercent}%, ${next.rateCards.length} rate cards)`,
         byId,
         at: now,
       });
       await flushStagedAuditEntries(ctx);
     }),
   );
-  return next;
+  return savedConfig;
 }
 
 export async function syncMatterCostsRatesFromPms(
@@ -16140,18 +16616,22 @@ export async function syncMatterCostsRatesFromPms(
   let next!: MatterCostsConfig;
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const [store, pms] = await Promise.all([
+      const [store, pms, dbOverride] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
         getTenantPmsSource(ctx),
+        catalogueRepo.getMatterCostsConfig<MatterCostsConfig>(ctx),
       ]);
       const feeEarners = pms.listFeeEarners();
-      const base =
-        store.matterCostsConfig ??
-        createDefaultMatterCostsConfig(store.values, {
+      const base = resolveEffectiveMatterCostsConfig(
+        tenantCfg,
+        dbOverride ?? store.matterCostsConfig,
+        {
+          values: store.values,
           clientProfileCode: tenantCfg.tenantId,
           displayName: tenantCfg.displayName,
           primaryDomain: tenantCfg.branding.primaryDomain,
-        });
+        },
+      );
       const synced = syncRateCardsWithPmsFeeEarners(
         base,
         feeEarners,

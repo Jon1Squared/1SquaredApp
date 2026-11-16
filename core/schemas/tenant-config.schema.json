@@ -193,40 +193,33 @@
             "pms_when_linked"
           ],
           "default": "pms_when_linked",
-          "x-reserved": {
-            "for": "S0-23",
-            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
-          }
+          "description": "Default hourly rate lookup source mode for new and refreshed matter costs snapshots."
         },
         "allowMatterRateOverrides": {
           "type": "boolean",
           "default": true,
-          "x-reserved": {
-            "for": "S0-23",
-            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
-          }
+          "description": "Whether fee earners may override standard rate card hourly rates on individual matters."
         },
         "partnerSignOffThresholdGbp": {
           "type": "number",
+          "minimum": 0,
           "default": 25000,
-          "x-reserved": {
-            "for": "S0-23",
-            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
-          }
+          "description": "Fee estimate or agreed cap threshold in GBP requiring Partner cost sign-off."
+        },
+        "vatRatePercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 20,
+          "description": "Standard UK VAT percentage applied to legal fees and taxable disbursements unless overridden on a line"
         },
         "rateCards": {
           "type": "array",
-          "x-reserved": {
-            "for": "S0-23",
-            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
-          }
+          "description": "Default tenant rate cards seeded when no runtime module configuration override is stored."
         },
         "disbursementPresets": {
           "type": "array",
-          "x-reserved": {
-            "for": "S0-23",
-            "reason": "Reserved for unifying tenant-level and runtime-store matter costs configuration in S0-23."
-          }
+          "description": "Default tenant disbursement presets seeded when no runtime module configuration override is stored."
         }
       }
     },
@@ -1021,8 +1014,8 @@
           "type": "boolean",
           "default": false,
           "x-reserved": {
-            "for": "S0-25",
-            "reason": "Reserved for scheduled automatic SharePoint permission drift remediation in S0-25."
+            "for": "backlog",
+            "reason": "Reserved for future scheduled automatic SharePoint permission drift remediation (backlog item beyond Stage 0)."
           }
         },
         "defaultPolicy": {

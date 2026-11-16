@@ -1078,12 +1078,13 @@ export async function updateWorkTypeProfilesAction(
 
 export async function saveQuoteAction(
   input: SaveQuoteInput,
-  opts: { id?: string; markAsSent?: boolean } = {},
+  opts: { id?: string; markAsSent?: boolean; refreshVatRate?: boolean } = {},
 ) {
   return guardedAction('saveQuoteAction', async ({ personId: byId }) => {
     const res = await saveQuoteRecord(input, {
       id: opts?.id,
       markAsSent: opts?.markAsSent,
+      refreshVatRate: opts?.refreshVatRate,
       byId,
     });
     revalidateAll();
@@ -1129,6 +1130,7 @@ export async function reviseQuoteAction(
     followUpAfterDays?: number;
     revisionNote?: string;
     markAsSent?: boolean;
+    refreshVatRate?: boolean;
   },
 ) {
   return guardedAction('reviseQuoteAction', async ({ personId: byId }) => {

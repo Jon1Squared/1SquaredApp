@@ -16,6 +16,12 @@ This directory holds the schema-validated tenant configuration for the invented 
 | `featureFlags.enableAiMatterExtraction` | `true` | `false` | Gates `POST /api/matters/extract` and the AI extraction panel (requires `integrations.aiProviderChoice === "anthropic"`) |
 | `featureFlags.enableDemoMode` | `false` (`false` in `base.json`, `dev.json` and `test.json`; `true` in `environments/demo.json`) | `false` | Enables Demo Mode, the persona switcher, sample document seeding, and data reset when `environment` is non-live (`dev`, `test`, `training`, or `demo`) |
 | `integrations.aiProviderChoice` | `"anthropic"` | `"disabled"` | Selects the AI model provider (`"anthropic"`, `"azure_openai_uk"`, or `"disabled"`) |
+| `matterCosts.rateSourceMode` | `"pms_when_linked"` | `"pms_when_linked"` | Default hourly rate lookup source mode for matter costs (`"application_table"` or `"pms_when_linked"`) |
+| `matterCosts.allowMatterRateOverrides` | `true` | `true` | Controls whether fee earners may override rate card hourly rates on individual matters (enforced server-side) |
+| `matterCosts.partnerSignOffThresholdGbp` | `25000` | `25000` | Default fee estimate or agreed cap threshold in GBP requiring Partner cost sign-off (can be overridden per tenant in Administration) |
+| `matterCosts.vatRatePercent` | `20` | `20` | Standard UK VAT percentage (`0–100`) applied to legal fees and taxable disbursements unless overridden on a quote, disbursement, or saved runtime override |
+| `matterCosts.rateCards` | Default 2 rate cards | `[]` | Tenant baseline rate cards merged when no runtime module configuration override is stored |
+| `matterCosts.disbursementPresets` | Default 4 presets | `[]` | Tenant baseline disbursement presets merged when no runtime module configuration override is stored |
 
 ## Reserved Tenant Settings (`x-reserved`)
 
@@ -25,14 +31,13 @@ Settings that are validated by `core/schemas/tenant-config.schema.json` for back
 |---|---|---|
 | `branding.accentColorHex` | `backlog` (F21) | Reserved for tenant branding theme rendering; the demo tenant uses the standard platform theme |
 | `branding.logoAssetKey` | `backlog` (F21) | Reserved for tenant firm logo rendering; the demo tenant uses the standard platform logo |
-| `matterCosts.*` (`rateSourceMode`, `allowMatterRateOverrides`, `partnerSignOffThresholdGbp`, `rateCards`, `disbursementPresets`) | `S0-23` | Reserved for unifying tenant-level and runtime-store matter costs configuration |
 | `integrations.pmsConnectionSecretVaultRef` | `S0-18` | Reserved for live tenant-scoped PMS database connection secret resolution |
 | `integrations.companiesHouseApiKeyVaultRef` | `S0-18` | Reserved for live Companies House API integration |
 | `integrations.pmsSync.*` (`enabled`, `providerKey`, `syncMode`, `matterCodeAllocation`, `clientCodeAllocation`, `pollIntervalMinutes`, `fieldMappings`) | `S0-18` | Reserved for live tenant-scoped PMS synchronisation and code allocation |
 | `customFields` | `S0-17` | Reserved for moving custom field definitions off the transitional JSON store |
 | `documentGeneration.usage.retentionMonths` | `S0-19` | Reserved for automated document usage event retention pruning |
 | `documentGeneration.customDocumentTypes` | `backlog` (F20) | Reserved for tenant-configured custom document classification types in document generation |
-| `documentAccess.autoRemediateDrift` | `S0-25` | Reserved for scheduled automatic SharePoint permission drift remediation |
+| `documentAccess.autoRemediateDrift` | `backlog` | Reserved for future scheduled automatic SharePoint permission drift remediation |
 | `keyDates.defaults.teamAssignment` | `backlog` (F19) | Reserved for additional key dates team diary assignment modes beyond `matter_owning_team` |
 | `keyDates.matterTypes[].defaultRuleSetIds` | `backlog` (F19) | Reserved for default limitation rule set filtering by matter type |
 | `keyDates.limitationRuleSets[].rules[].claimType` | `backlog` (F19) | Reserved for claim-type classification and filtering on limitation rules |

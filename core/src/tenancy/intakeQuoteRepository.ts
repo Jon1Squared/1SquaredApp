@@ -191,6 +191,8 @@ export interface TenantQuoteDisbursementRecord {
   description: string;
   amountExVat: number;
   vatApplicable: boolean;
+  vatAmount?: number;
+  vatOverridden?: boolean;
 }
 
 export interface TenantQuoteVersionSnapshotRecord {
@@ -199,7 +201,9 @@ export interface TenantQuoteVersionSnapshotRecord {
   feeBasis: 'Fixed fee' | 'Estimate' | 'Capped fee' | 'Hourly rate with estimate';
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
+  vatRatePercent?: number;
   vatAmount: number;
+  vatOverridden?: boolean;
   disbursements: TenantQuoteDisbursementRecord[];
   totalIncVat: number;
   scope: string;
@@ -208,6 +212,7 @@ export interface TenantQuoteVersionSnapshotRecord {
   createdAt: string;
   sentAt: string | null;
   supersededAt: string;
+  capturedAt?: string;
   byId: string;
   revisionNote?: string;
 }
@@ -250,10 +255,12 @@ export interface TenantQuoteRecord {
   feeBasis: string;
   feeAmountExVat: number;
   hourlyRateGbp: number | null;
+  vatRatePercent?: number;
   vatAmount: number;
   vatOverridden?: boolean;
   disbursements: TenantQuoteDisbursementRecord[];
   totalIncVat: number;
+  capturedAt?: string;
   feeEarnerId: string;
   assignedTeamId: string | null;
   validUntil: string;
@@ -597,6 +604,12 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
       pricing.hourlyRateGbp !== undefined
         ? (pricing.hourlyRateGbp as number | null)
         : (profile.hourlyRateGbp ?? null),
+    vatRatePercent:
+      typeof pricing.vatRatePercent === 'number' && Number.isFinite(pricing.vatRatePercent)
+        ? pricing.vatRatePercent
+        : typeof profile.vatRatePercent === 'number' && Number.isFinite(profile.vatRatePercent)
+          ? profile.vatRatePercent
+          : 20,
     vatAmount: Number(pricing.vatAmount ?? profile.vatAmount ?? 0),
     vatOverridden: Boolean(pricing.vatOverridden ?? profile.vatOverridden ?? false),
     disbursements: Array.isArray(pricing.disbursements)
@@ -607,6 +620,9 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
         ? structuredClone(profile.disbursements)
         : [],
     totalIncVat: Number(row.total_inc_vat_gbp ?? profile.totalIncVat ?? 0),
+    ...((pricing.capturedAt ?? profile.capturedAt)
+      ? { capturedAt: String(pricing.capturedAt ?? profile.capturedAt) }
+      : {}),
     feeEarnerId: row.prepared_by_id ?? profile.feeEarnerId ?? '',
     assignedTeamId:
       row.assigned_team_id !== undefined
@@ -1357,9 +1373,14 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       scope: quote.scope ?? '',
       assumptions: quote.assumptions ?? '',
       hourlyRateGbp: quote.hourlyRateGbp ?? null,
+      vatRatePercent:
+        typeof quote.vatRatePercent === 'number' && Number.isFinite(quote.vatRatePercent)
+          ? quote.vatRatePercent
+          : 20,
       vatAmount: Number(quote.vatAmount ?? 0),
       vatOverridden: Boolean(quote.vatOverridden),
       disbursements: quote.disbursements ?? [],
+      ...(quote.capturedAt ? { capturedAt: quote.capturedAt } : {}),
     };
 
     await tx.query(
