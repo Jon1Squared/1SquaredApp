@@ -38,6 +38,8 @@ import type {
   Quote,
   QuoteDeclineReason,
 } from '@/domain/types';
+import type { ResolvedApplicableRatesResult } from '@platform/core-api';
+import { formatRateTierBadgeLabel } from '@/domain/matterCosts';
 import { QuoteFormClient } from './QuoteFormClient';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -55,6 +57,7 @@ interface Props {
   tenantId: string;
   tenantVatRatePercent?: number;
   initialAction?: string | null;
+  initialResolvedRates?: ResolvedApplicableRatesResult | null;
 }
 
 export function QuoteDetailClient({
@@ -70,6 +73,7 @@ export function QuoteDetailClient({
   tenantId,
   tenantVatRatePercent = 20,
   initialAction = null,
+  initialResolvedRates = null,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -233,6 +237,7 @@ export function QuoteDetailClient({
       <QuoteFormClient
         mode={viewMode}
         existing={quote}
+        initialResolvedRates={initialResolvedRates}
         enquiries={enquiries}
         matters={matters}
         people={people}
@@ -707,6 +712,25 @@ export function QuoteDetailClient({
                 Fee breakdown (v{quote.version})
               </h2>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                {quote.rateSource ? (
+                  <span
+                    className={`status-pill ${
+                      quote.rateTier === 2 || quote.rateTier === 3 || quote.rateTier === 1
+                        ? 'status-pill--positive'
+                        : quote.rateSource === 'custom_override'
+                          ? 'status-pill--warning'
+                          : 'status-pill--neutral'
+                    }`}
+                  >
+                    {formatRateTierBadgeLabel(
+                      quote.rateTier,
+                      quote.rateSource,
+                      Object.values(quote.rateProvenanceByGrade ?? {}).find(
+                        (g) => g.tier === 3 && g.inheritedFromParentOrganisationName,
+                      )?.inheritedFromParentOrganisationName,
+                    )}
+                  </span>
+                ) : null}
                 <span className="status-pill status-pill--neutral">
                   VAT @ {quoteVatRatePercent}%
                 </span>
@@ -730,6 +754,8 @@ export function QuoteDetailClient({
                     {quote.feeBasis === 'Hourly rate with estimate' && quote.hourlyRateGbp ? (
                       <div className="muted" style={{ fontSize: 12 }}>
                         Hourly rate: {formatGbp(quote.hourlyRateGbp)}/hr ex VAT
+                        {quote.rateGradeKey ? ` (${quote.rateGradeKey})` : ''}
+                        {quote.rateAsAtDate ? ` · Frozen at ${formatDate(quote.rateAsAtDate)}` : ''}
                       </div>
                     ) : null}
                   </td>

@@ -23,6 +23,7 @@ import {
   getMatterRepository,
   getPartyRepository,
   getPmsRepository,
+  getRateOverrideRepository,
   getTaskWorkflowRepository,
   runWithAuditStagingScope,
   stageAuditEntry,
@@ -31,6 +32,7 @@ import {
   TenantCatalogueRepository,
   TenantJobRunRepository,
   TenantPmsRepository,
+  TenantRateOverrideRepository,
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
   getPlatformExtensionHost,
@@ -45,10 +47,12 @@ export {
   getMatterRepository,
   getPartyRepository,
   getPmsRepository,
+  getRateOverrideRepository,
   getTaskWorkflowRepository,
   TenantCatalogueRepository,
   TenantJobRunRepository,
   TenantPmsRepository,
+  TenantRateOverrideRepository,
 };
 import {
   clearMigratedPostgresModulesForTenant,
@@ -56,7 +60,7 @@ import {
   importFirmStoreModulesToPostgres,
 } from './storePostgresImport';
 import { attentionList } from '@/domain/attention';
-import { buildActionDenied, isActionDenied, type ActionDenied } from '@/domain/actionResult';
+import { buildActionDenied, isActionDenied, type ActionDenialCode, type ActionDenied } from '@/domain/actionResult';
 import { diffRecords } from '@/domain/audit';
 import { validateCustomFields } from '@/domain/customFields';
 import {
@@ -240,9 +244,14 @@ import {
 import {
   executeUsageRetentionPurgeJob,
   getActiveTenantTransactionState,
+  INVALID_PARENT_ORGANISATION_CODE,
   loadActiveTenantRegistry,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  ORGANISATION_PARENT_CYCLE_CODE,
+  RATE_OVERRIDE_DATE_OVERLAP_CODE,
+  RATE_OVERRIDE_INVALID_DATE_RANGE_CODE,
+  RATE_OVERRIDE_VALIDATION_ERROR_CODE,
   resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
@@ -250,11 +259,16 @@ import {
   validateKeyDatesConfig,
   validateRbacConfig,
   validateWorkTypesConfig,
+  type ClientRateOverrideClientType,
+  type ClientRateOverrideRecord,
   type ControlledJobRunOutcome,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
   type JobRunRecord,
   type KeyDatesConfiguration,
+  type MatterRateOverrideRecord,
+  type ParentChainNodeSummary,
+  type ResolvedApplicableRatesResult,
   type TenantContext,
   type TenantRegistry,
   type WorkTypesConfiguration,
@@ -3873,7 +3887,14 @@ export async function saveOrganisationRecord(
     matchedDuplicateIds?: string[];
     internalSystemStep?: 'enquiry_conversion' | 'quote_conversion';
   },
-): Promise<{ organisation: Organisation; errors?: Record<string, string> } & Partial<ActionDenied>> {
+): Promise<
+  {
+    organisation: Organisation;
+    code?: ActionDenialCode | string;
+    message?: string;
+    errors?: Record<string, string>;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
   const orgCtx = resolveDefaultServiceTenantContext(null, opts?.byId);
   const store = await loadTenantCatalogueStoreView(orgCtx);
   const partyRepo = getPartyRepository();
@@ -3942,10 +3963,21 @@ export async function saveOrganisationRecord(
     : existing?.possibleMatchIds ?? [];
 
   let organisation!: Organisation;
-  await runWithAuditStagingScope(() =>
-    partyRepo.withTenantTransaction(orgCtx, async () => {
-    const allocatedId =
-      existing?.id ?? (await partyRepo.allocateNextOrganisationId(orgCtx));
+  try {
+    await runWithAuditStagingScope(() =>
+      partyRepo.withTenantTransaction(orgCtx, async (tx) => {
+      const requestedParentId =
+        input.parentOrganisationId !== undefined
+          ? input.parentOrganisationId
+          : existing?.parentOrganisationId ?? null;
+      await partyRepo.validateOrganisationParentLinkInTx(
+        tx,
+        orgCtx,
+        existing?.id ?? null,
+        requestedParentId,
+      );
+      const allocatedId =
+        existing?.id ?? (await partyRepo.allocateNextOrganisationId(orgCtx));
     organisation = {
       id: allocatedId,
       recordType: 'organisation',
@@ -4101,6 +4133,23 @@ export async function saveOrganisationRecord(
     await flushStagedAuditEntries(orgCtx);
     }),
   );
+  } catch (err) {
+    const coded = err as { code?: string; message?: string };
+    if (
+      coded?.code === ORGANISATION_PARENT_CYCLE_CODE ||
+      coded?.code === INVALID_PARENT_ORGANISATION_CODE
+    ) {
+      return {
+        organisation: existing as Organisation,
+        code: coded.code,
+        message: coded.message ?? 'Invalid parent organisation.',
+        errors: {
+          parentOrganisationId: coded.message ?? 'Invalid parent organisation.',
+        },
+      };
+    }
+    throw err;
+  }
 
   return { organisation };
 }
@@ -4456,13 +4505,38 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
   effectiveCostsConfig: MatterCostsConfig;
   practiceAreaId?: string | null;
   nowIso: string;
+  resolvedRates?: ResolvedApplicableRatesResult | null;
 }): { snapshot?: MatterCostsSnapshot; error?: string } {
-  const { submitted, existingSnapshot, effectiveCostsConfig, practiceAreaId, nowIso } = params;
+  const {
+    submitted,
+    existingSnapshot,
+    effectiveCostsConfig,
+    practiceAreaId,
+    nowIso,
+    resolvedRates,
+  } = params;
   const lookedUp = lookupRatesForMatter({
     config: effectiveCostsConfig,
     practiceAreaId: practiceAreaId ?? null,
     rateCardId: submitted.rateCardId ?? existingSnapshot?.rateCardId ?? null,
   });
+
+  const baselineCustomGrades = resolvedRates
+    ? resolvedRates.customGrades.map((g) => ({
+        id: g.id,
+        label: g.label,
+        hourlyRateGbp: g.hourlyRateGbp,
+      }))
+    : lookedUp.customGrades;
+  const baselinePartnerRate = resolvedRates?.partnerRateGbp ?? lookedUp.partnerRateGbp;
+  const baselineAssociateRate = resolvedRates?.associateRateGbp ?? lookedUp.associateRateGbp;
+  const baselineTraineeRate = resolvedRates?.traineeRateGbp ?? lookedUp.traineeRateGbp;
+  const baselineSource = resolvedRates?.dominantSource ?? lookedUp.activeSource;
+  const baselineTier = resolvedRates?.dominantTier ?? 4;
+  const baselineCardId = resolvedRates?.rateCardId ?? lookedUp.rateCard.id;
+  const baselineCardName = resolvedRates?.rateCardName ?? lookedUp.rateCard.name;
+  const baselineAsAtDate = resolvedRates?.asAtDate;
+  const baselineProvenance = resolvedRates?.grades;
 
   if (
     !isNonNegativeOptionalNumber(submitted.totalEstimateGbp) ||
@@ -4508,16 +4582,33 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
     });
   }
 
+  const refreshRates = Boolean(submitted.refreshRates);
+  const refreshVatRate = Boolean(submitted.refreshVatRate);
+
   const submittedPartnerRate =
-    submitted.partnerRateGbp !== undefined ? submitted.partnerRateGbp : lookedUp.partnerRateGbp;
+    refreshRates || submitted.partnerRateGbp === undefined
+      ? (submitted.partnerRateGbp !== undefined && !refreshRates
+          ? submitted.partnerRateGbp
+          : baselinePartnerRate)
+      : submitted.partnerRateGbp;
   const submittedAssociateRate =
-    submitted.associateRateGbp !== undefined
-      ? submitted.associateRateGbp
-      : lookedUp.associateRateGbp;
+    refreshRates || submitted.associateRateGbp === undefined
+      ? (submitted.associateRateGbp !== undefined && !refreshRates
+          ? submitted.associateRateGbp
+          : baselineAssociateRate)
+      : submitted.associateRateGbp;
   const submittedTraineeRate =
-    submitted.traineeRateGbp !== undefined ? submitted.traineeRateGbp : lookedUp.traineeRateGbp;
+    refreshRates || submitted.traineeRateGbp === undefined
+      ? (submitted.traineeRateGbp !== undefined && !refreshRates
+          ? submitted.traineeRateGbp
+          : baselineTraineeRate)
+      : submitted.traineeRateGbp;
   const submittedCustomGrades =
-    submitted.customGrades !== undefined ? submitted.customGrades : lookedUp.customGrades;
+    refreshRates || submitted.customGrades === undefined
+      ? (submitted.customGrades !== undefined && !refreshRates
+          ? submitted.customGrades
+          : baselineCustomGrades)
+      : submitted.customGrades;
 
   for (const grade of submittedCustomGrades ?? []) {
     if (!Number.isFinite(Number(grade.hourlyRateGbp)) || Number(grade.hourlyRateGbp) < 0) {
@@ -4525,23 +4616,23 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
     }
   }
 
+  const matchesCardRates =
+    submitted.rateSource !== 'custom_override' &&
+    (submittedPartnerRate ?? null) === (baselinePartnerRate ?? null) &&
+    (submittedAssociateRate ?? null) === (baselineAssociateRate ?? null) &&
+    (submittedTraineeRate ?? null) === (baselineTraineeRate ?? null) &&
+    areCustomGradesEquivalent(submittedCustomGrades, baselineCustomGrades);
+
+  const matchesUnchangedExisting =
+    Boolean(existingSnapshot?.workBasis) &&
+    !refreshRates &&
+    submitted.rateSource === existingSnapshot?.rateSource &&
+    (submittedPartnerRate ?? null) === (existingSnapshot?.partnerRateGbp ?? null) &&
+    (submittedAssociateRate ?? null) === (existingSnapshot?.associateRateGbp ?? null) &&
+    (submittedTraineeRate ?? null) === (existingSnapshot?.traineeRateGbp ?? null) &&
+    areCustomGradesEquivalent(submittedCustomGrades, existingSnapshot?.customGrades);
+
   if (!effectiveCostsConfig.allowMatterRateOverrides) {
-    const matchesCardRates =
-      submitted.rateSource !== 'custom_override' &&
-      (submittedPartnerRate ?? null) === (lookedUp.partnerRateGbp ?? null) &&
-      (submittedAssociateRate ?? null) === (lookedUp.associateRateGbp ?? null) &&
-      (submittedTraineeRate ?? null) === (lookedUp.traineeRateGbp ?? null) &&
-      areCustomGradesEquivalent(submittedCustomGrades, lookedUp.customGrades);
-
-    const matchesUnchangedExisting =
-      Boolean(existingSnapshot?.workBasis) &&
-      !submitted.refreshRates &&
-      submitted.rateSource === existingSnapshot?.rateSource &&
-      (submittedPartnerRate ?? null) === (existingSnapshot?.partnerRateGbp ?? null) &&
-      (submittedAssociateRate ?? null) === (existingSnapshot?.associateRateGbp ?? null) &&
-      (submittedTraineeRate ?? null) === (existingSnapshot?.traineeRateGbp ?? null) &&
-      areCustomGradesEquivalent(submittedCustomGrades, existingSnapshot?.customGrades);
-
     if (!matchesCardRates && !matchesUnchangedExisting) {
       return {
         error: 'Matter-level hourly rate overrides are disabled by firm configuration.',
@@ -4549,8 +4640,6 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
     }
   }
 
-  const refreshRates = Boolean(submitted.refreshRates);
-  const refreshVatRate = Boolean(submitted.refreshVatRate);
   const vatRatePercent = existingSnapshot?.workBasis
     ? refreshVatRate
       ? effectiveCostsConfig.vatRatePercent
@@ -4580,17 +4669,56 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
     vatRatePercent,
   });
 
+  const keepExistingFrozenMetadata = matchesUnchangedExisting && !refreshRates;
+  const resolvedRateSource = keepExistingFrozenMetadata
+    ? (existingSnapshot?.rateSource ?? baselineSource)
+    : matchesCardRates
+      ? baselineSource
+      : 'custom_override';
+  const resolvedRateTier = keepExistingFrozenMetadata
+    ? (existingSnapshot?.rateTier ??
+        (resolvedRateSource === 'matter_override'
+          ? 1
+          : resolvedRateSource === 'client_override'
+            ? 2
+            : resolvedRateSource === 'client_group_override'
+              ? 3
+              : resolvedRateSource === 'app_table' || resolvedRateSource === 'pms'
+                ? 4
+                : undefined))
+    : matchesCardRates
+      ? baselineTier
+      : undefined;
+  const resolvedRateAsAtDate = keepExistingFrozenMetadata
+    ? existingSnapshot?.rateAsAtDate
+    : matchesCardRates
+      ? baselineAsAtDate
+      : undefined;
+  const resolvedRateProvenance = keepExistingFrozenMetadata
+    ? existingSnapshot?.rateProvenanceByGrade
+    : matchesCardRates
+      ? baselineProvenance
+      : undefined;
+
   return {
     snapshot: {
       workBasis: submitted.workBasis ?? existingSnapshot?.workBasis ?? 'hourly_rates',
-      rateSource: submitted.rateSource ?? existingSnapshot?.rateSource ?? lookedUp.activeSource,
-      rateCardId: submitted.rateCardId || existingSnapshot?.rateCardId || lookedUp.rateCard.id,
+      rateSource: resolvedRateSource,
+      ...(resolvedRateTier !== undefined ? { rateTier: resolvedRateTier } : {}),
+      ...(resolvedRateAsAtDate ? { rateAsAtDate: resolvedRateAsAtDate } : {}),
+      rateCardId:
+        (keepExistingFrozenMetadata ? existingSnapshot?.rateCardId : undefined) ||
+        submitted.rateCardId ||
+        baselineCardId,
       rateCardName:
-        submitted.rateCardName || existingSnapshot?.rateCardName || lookedUp.rateCard.name,
+        (keepExistingFrozenMetadata ? existingSnapshot?.rateCardName : undefined) ||
+        submitted.rateCardName ||
+        baselineCardName,
       partnerRateGbp: submittedPartnerRate ?? null,
       associateRateGbp: submittedAssociateRate ?? null,
       traineeRateGbp: submittedTraineeRate ?? null,
       customGrades: submittedCustomGrades,
+      ...(resolvedRateProvenance ? { rateProvenanceByGrade: resolvedRateProvenance } : {}),
       totalEstimateGbp,
       agreedCapGbp,
       vatRatePercent,
@@ -4620,6 +4748,7 @@ function resolveMatterSignOffEstimateGbp(
   tenantCfg: ReturnType<typeof getActiveTenantConfiguration>,
   matter: Matter,
   overrideCostsConfig?: MatterCostsConfig,
+  resolvedRates?: ResolvedApplicableRatesResult | null,
 ): {
   resolvedCosts: ReturnType<typeof resolveMatterCostsSnapshot>;
   estimatedFeeGbp: number;
@@ -4637,6 +4766,7 @@ function resolveMatterSignOffEstimateGbp(
     practiceAreaId: matter.practiceAreaId,
     config: costsConfig,
     values: store.values,
+    resolvedRates,
   });
   const estimatedFeeGbp = Number(
     matter.feeEstimateGbp ??
@@ -6399,6 +6529,38 @@ export async function saveMatterRecord(
         refreshVatRate?: boolean;
       })
     | undefined;
+  const rateOverrideRepo = getRateOverrideRepository();
+  const preTxTodayIso = resolveTenantLocalDateAndHour(
+    new Date(),
+    tenantCfg.timeZone || 'Europe/London',
+  ).localDate;
+  const matterClientTypeForRates: ClientRateOverrideClientType | undefined =
+    allOrganisationsWithPending.some((o) => o.id === matter.clientId)
+      ? 'organisation'
+      : allPeopleWithPending.some((p) => p.id === matter.clientId)
+        ? 'person'
+        : matter.clientId?.startsWith('O-')
+          ? 'organisation'
+          : matter.clientId
+            ? 'person'
+            : undefined;
+  const preTxRateCardId =
+    rawSubmittedMatterCosts?.rateCardId ??
+    (existing?.fieldValues?.['matterCosts'] as Partial<MatterCostsSnapshot> | undefined)
+      ?.rateCardId ??
+    null;
+  const preTxResolvedRates = await rateOverrideRepo.resolveApplicableRates(extensionCtx, {
+    matterId: existing?.id ?? null,
+    clientId: matter.clientId || null,
+    clientType: matterClientTypeForRates ?? null,
+    practiceAreaId: matter.practiceAreaId || null,
+    asAtDate: preTxTodayIso,
+    rateCardId: preTxRateCardId,
+    baseMatterCostsConfig: tenantCfg.matterCosts,
+    fallbackRateCardConfig: effectiveCostsConfig,
+    timeZone: tenantCfg.timeZone,
+  });
+
   if (
     rawSubmittedMatterCosts &&
     typeof rawSubmittedMatterCosts === 'object'
@@ -6412,6 +6574,7 @@ export async function saveMatterRecord(
       effectiveCostsConfig,
       practiceAreaId: matter.practiceAreaId,
       nowIso: now,
+      resolvedRates: preTxResolvedRates,
     });
     if (!costsValidation.snapshot) {
       return {
@@ -6431,6 +6594,7 @@ export async function saveMatterRecord(
     effectiveTenantCfg,
     matter,
     effectiveCostsConfig,
+    preTxResolvedRates,
   );
   const storedSignOff = matter.fieldValues['partnerCostSignOff'] as
     | PartnerCostSignOffRecord
@@ -6669,6 +6833,61 @@ export async function saveMatterRecord(
 
       if (!inTxExisting) {
         matter.id = await matterRepo.allocateNextMatterId(extensionCtx);
+      }
+
+      // R478/R479/ADR 0034: Re-read live costs config and resolve 4-tier rates inside the
+      // PostgreSQL transaction before persisting final matterCosts snapshot.
+      const inTxLiveDbCostsOverride =
+        await catRepo.getMatterCostsConfig<MatterCostsConfig>(extensionCtx);
+      const inTxEffectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+        tenantCfg,
+        inTxLiveDbCostsOverride ?? store.matterCostsConfig,
+        {
+          values: inTxDbValues,
+          clientProfileCode: tenantCfg.tenantId,
+          displayName: tenantCfg.displayName,
+          primaryDomain: tenantCfg.branding.primaryDomain,
+        },
+      );
+      const inTxResolvedRates = await rateOverrideRepo.resolveApplicableRates(
+        extensionCtx,
+        {
+          matterId: inTxExisting?.id ?? null,
+          clientId: matter.clientId || null,
+          clientType: matterClientTypeForRates ?? null,
+          practiceAreaId: matter.practiceAreaId || null,
+          asAtDate: inTxTenantTodayIso,
+          rateCardId:
+            rawSubmittedMatterCosts?.rateCardId ??
+            (inTxExisting?.fieldValues?.['matterCosts'] as Partial<MatterCostsSnapshot> | undefined)
+              ?.rateCardId ??
+            null,
+          baseMatterCostsConfig: tenantCfg.matterCosts,
+          fallbackRateCardConfig: inTxEffectiveCostsConfig,
+          timeZone: tenantCfg.timeZone,
+        },
+      );
+      if (rawSubmittedMatterCosts && typeof rawSubmittedMatterCosts === 'object') {
+        const inTxCostsValidation = sanitizeAndValidateSubmittedMatterCosts({
+          submitted: rawSubmittedMatterCosts,
+          existingSnapshot: inTxExisting?.fieldValues?.['matterCosts'] as
+            | Partial<MatterCostsSnapshot>
+            | undefined,
+          effectiveCostsConfig: inTxEffectiveCostsConfig,
+          practiceAreaId: matter.practiceAreaId,
+          nowIso: now,
+          resolvedRates: inTxResolvedRates,
+        });
+        if (!inTxCostsValidation.snapshot) {
+          return {
+            matter: null,
+            errors: {
+              matterCosts:
+                inTxCostsValidation.error ?? 'Invalid matter costs configuration.',
+            },
+          };
+        }
+        matter.fieldValues['matterCosts'] = inTxCostsValidation.snapshot;
       }
 
       for (const link of pendingEnquiryLinks) {
@@ -8027,12 +8246,40 @@ export async function signOffMatterCostsRecord(
   const existingSavedCosts = matter.fieldValues?.['matterCosts'] as
     | Partial<MatterCostsSnapshot>
     | undefined;
+  const signOffClientType: ClientRateOverrideClientType | undefined =
+    organisations.some((o) => o.id === matter.clientId)
+      ? 'organisation'
+      : people.some((p) => p.id === matter.clientId)
+        ? 'person'
+        : matter.clientId?.startsWith('O-')
+          ? 'organisation'
+          : matter.clientId
+            ? 'person'
+            : undefined;
+  const signOffTodayIso = resolveTenantLocalDateAndHour(
+    new Date(),
+    tenantCfg.timeZone || 'Europe/London',
+  ).localDate;
+  const rateOverrideRepo = getRateOverrideRepository();
+  const preTxSignOffRates = !existingSavedCosts?.workBasis
+    ? await rateOverrideRepo.resolveApplicableRates(extensionCtx, {
+        matterId: matter.id,
+        clientId: matter.clientId || null,
+        clientType: signOffClientType ?? null,
+        practiceAreaId: matter.practiceAreaId || null,
+        asAtDate: signOffTodayIso,
+        baseMatterCostsConfig: tenantCfg.matterCosts,
+        fallbackRateCardConfig: effectiveCostsConfig,
+        timeZone: tenantCfg.timeZone,
+      })
+    : null;
   const { resolvedCosts, estimatedFeeGbp: signedOffEstimateGbp } =
     resolveMatterSignOffEstimateGbp(
       store,
       effectiveTenantCfg,
       matter,
       effectiveCostsConfig,
+      preTxSignOffRates,
     );
   const frozenSnapshot: MatterCostsSnapshot = {
     ...resolvedCosts,
@@ -8088,6 +8335,59 @@ export async function signOffMatterCostsRecord(
 
   await runWithAuditStagingScope(() =>
     matterRepo.withTenantTransaction(extensionCtx, async () => {
+      if (!existingSavedCosts?.workBasis) {
+        const inTxCostsOverride =
+          await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(extensionCtx);
+        const inTxCostsConfig = resolveEffectiveMatterCostsConfig(
+          tenantCfg,
+          inTxCostsOverride ?? store.matterCostsConfig,
+          {
+            values: store.values,
+            clientProfileCode: tenantCfg.tenantId,
+            displayName: tenantCfg.displayName,
+            primaryDomain: tenantCfg.branding.primaryDomain,
+          },
+        );
+        const inTxResolvedRates = await rateOverrideRepo.resolveApplicableRates(
+          extensionCtx,
+          {
+            matterId: matter.id,
+            clientId: matter.clientId || null,
+            clientType: signOffClientType ?? null,
+            practiceAreaId: matter.practiceAreaId || null,
+            asAtDate: resolveTenantLocalDateAndHour(
+              new Date(),
+              tenantCfg.timeZone || 'Europe/London',
+            ).localDate,
+            baseMatterCostsConfig: tenantCfg.matterCosts,
+            fallbackRateCardConfig: inTxCostsConfig,
+            timeZone: tenantCfg.timeZone,
+          },
+        );
+        const inTxResolved = resolveMatterCostsSnapshot({
+          existing: {
+            ...matter,
+            fieldValues: {
+              ...(matter.fieldValues ?? {}),
+              matterCosts: undefined,
+            },
+          },
+          practiceAreaId: matter.practiceAreaId,
+          config: inTxCostsConfig,
+          values: store.values,
+          resolvedRates: inTxResolvedRates,
+        });
+        matter.fieldValues['matterCosts'] = {
+          ...inTxResolved,
+          vatRatePercent:
+            typeof inTxResolved.vatRatePercent === 'number' &&
+            Number.isFinite(inTxResolved.vatRatePercent)
+              ? inTxResolved.vatRatePercent
+              : inTxCostsConfig.vatRatePercent,
+          capturedAt: now,
+          updatedAt: now,
+        };
+      }
 
       if (
         matter.matterNumber !== 'DRAFT' &&
@@ -15153,6 +15453,8 @@ export interface SaveQuoteInput {
   feeEarnerId?: string;
   followUpAfterDays?: number;
   refreshVatRate?: boolean;
+  rateGradeKey?: string;
+  refreshRates?: boolean;
 }
 
 function normalizeQuoteDisbursements(
@@ -15307,12 +15609,61 @@ export async function saveQuoteRecord(
 
   if (!existing) {
     return intakeRepo.withTenantTransaction(ctx, async () => {
+      const tenantCfg = getActiveTenantConfiguration();
       const dbCostsOverride =
         await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
       const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-        getActiveTenantConfiguration(),
+        tenantCfg,
         dbCostsOverride,
       );
+      const quoteAsAtDate = resolveTenantLocalDateAndHour(
+        now,
+        tenantCfg.timeZone || 'Europe/London',
+      ).localDate;
+      const rateOverrideRepo = getRateOverrideRepository();
+      const targetClientId =
+        clientType === 'existing' ? (linkedOrganisationId ?? linkedPersonId ?? null) : null;
+      const targetClientType: ClientRateOverrideClientType | undefined = linkedOrganisationId
+        ? 'organisation'
+        : linkedPersonId
+          ? 'person'
+          : undefined;
+      const resolvedRates = await rateOverrideRepo.resolveApplicableRates(ctx, {
+        clientId: targetClientId,
+        clientType: targetClientType ?? null,
+        practiceAreaId: input.practiceAreaId,
+        asAtDate: quoteAsAtDate,
+        baseMatterCostsConfig: tenantCfg.matterCosts,
+        fallbackRateCardConfig: effectiveCostsConfig,
+        timeZone: tenantCfg.timeZone,
+      });
+      const rateGradeKey = input.rateGradeKey?.trim() || 'associate';
+      const gradeRes =
+        resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
+      const submittedHourly =
+        input.feeBasis === 'Hourly rate with estimate' &&
+        input.hourlyRateGbp !== undefined &&
+        input.hourlyRateGbp !== null &&
+        Number(input.hourlyRateGbp) > 0
+          ? Number(input.hourlyRateGbp)
+          : null;
+      const effectiveHourlyRateGbp =
+        input.feeBasis === 'Hourly rate with estimate'
+          ? (submittedHourly ?? ((gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null))
+          : null;
+      const hourlyMatchesResolved =
+        effectiveHourlyRateGbp === null ||
+        !gradeRes ||
+        Math.round(effectiveHourlyRateGbp * 100) === gradeRes.rateMinorUnits;
+      const resolvedRateSource: Quote['rateSource'] =
+        input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
+          ? 'custom_override'
+          : (gradeRes?.source ?? resolvedRates.dominantSource);
+      const resolvedRateTier =
+        resolvedRateSource === 'custom_override'
+          ? undefined
+          : (gradeRes?.tier ?? resolvedRates.dominantTier);
+
       const vatRatePercent = effectiveCostsConfig.vatRatePercent;
       const totals = calculateQuoteTotals(
         input.feeAmountExVat,
@@ -15363,16 +15714,20 @@ export async function saveQuoteRecord(
         assumptions: (input.assumptions ?? '').trim(),
         feeBasis: input.feeBasis,
         feeAmountExVat: totals.feeAmountExVat,
-        hourlyRateGbp:
-          input.feeBasis === 'Hourly rate with estimate'
-            ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
-            : null,
+        hourlyRateGbp: effectiveHourlyRateGbp,
         vatRatePercent,
         vatAmount: totals.vatOnFee,
         vatOverridden: Boolean(input.vatOverridden),
         disbursements,
         totalIncVat: totals.totalIncVat,
         capturedAt: nowIso,
+        rateSource: resolvedRateSource,
+        ...(resolvedRateTier !== undefined ? { rateTier: resolvedRateTier } : {}),
+        rateAsAtDate: resolvedRates.asAtDate,
+        rateCardId: resolvedRates.rateCardId,
+        rateCardName: resolvedRates.rateCardName,
+        rateGradeKey,
+        rateProvenanceByGrade: resolvedRates.grades,
         feeEarnerId,
         assignedTeamId,
         validUntil,
@@ -15406,13 +15761,14 @@ export async function saveQuoteRecord(
     });
   }
 
-  // Update existing quote inside transaction with live matter_costs VAT check
+  // Update existing quote inside transaction with live matter_costs VAT & rate check
   const wasSentNow = markSent && existing.status === 'Draft';
   await intakeRepo.withTenantTransaction(ctx, async () => {
+    const tenantCfg = getActiveTenantConfiguration();
     const dbCostsOverride =
       await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
     const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-      getActiveTenantConfiguration(),
+      tenantCfg,
       dbCostsOverride,
     );
     const existingVatRate =
@@ -15424,6 +15780,73 @@ export async function saveQuoteRecord(
     const vatRatePercent = shouldRefreshVat
       ? effectiveCostsConfig.vatRatePercent
       : existingVatRate;
+    const shouldRefreshRates = Boolean(input.refreshRates) || !existing.rateSource;
+    const rateGradeKey = input.rateGradeKey?.trim() || existing.rateGradeKey || 'associate';
+    let nextHourlyRateGbp =
+      input.feeBasis === 'Hourly rate with estimate'
+        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+        : null;
+    if (shouldRefreshRates) {
+      const quoteAsAtDate = resolveTenantLocalDateAndHour(
+        now,
+        tenantCfg.timeZone || 'Europe/London',
+      ).localDate;
+      const targetClientId =
+        clientType === 'existing' ? (linkedOrganisationId ?? linkedPersonId ?? null) : null;
+      const targetClientType: ClientRateOverrideClientType | undefined = linkedOrganisationId
+        ? 'organisation'
+        : linkedPersonId
+          ? 'person'
+          : undefined;
+      const resolvedRates = await getRateOverrideRepository().resolveApplicableRates(ctx, {
+        clientId: targetClientId,
+        clientType: targetClientType ?? null,
+        practiceAreaId: input.practiceAreaId,
+        asAtDate: quoteAsAtDate,
+        baseMatterCostsConfig: tenantCfg.matterCosts,
+        fallbackRateCardConfig: effectiveCostsConfig,
+        timeZone: tenantCfg.timeZone,
+      });
+      const gradeRes =
+        resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
+      if (input.feeBasis === 'Hourly rate with estimate' && nextHourlyRateGbp === null) {
+        nextHourlyRateGbp = (gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null;
+      }
+      const hourlyMatchesResolved =
+        nextHourlyRateGbp === null ||
+        !gradeRes ||
+        Math.round(nextHourlyRateGbp * 100) === gradeRes.rateMinorUnits;
+      existing.rateSource =
+        input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
+          ? 'custom_override'
+          : (gradeRes?.source ?? resolvedRates.dominantSource);
+      existing.rateTier =
+        existing.rateSource === 'custom_override'
+          ? undefined
+          : (gradeRes?.tier ?? resolvedRates.dominantTier);
+      existing.rateAsAtDate = resolvedRates.asAtDate;
+      existing.rateCardId = resolvedRates.rateCardId;
+      existing.rateCardName = resolvedRates.rateCardName;
+      existing.rateGradeKey = rateGradeKey;
+      existing.rateProvenanceByGrade = resolvedRates.grades;
+    } else if (
+      input.feeBasis === 'Hourly rate with estimate' &&
+      nextHourlyRateGbp !== existing.hourlyRateGbp
+    ) {
+      const frozenGradeRes = existing.rateProvenanceByGrade?.[rateGradeKey];
+      if (
+        frozenGradeRes &&
+        nextHourlyRateGbp !== null &&
+        Math.round(nextHourlyRateGbp * 100) === frozenGradeRes.rateMinorUnits
+      ) {
+        existing.rateSource = frozenGradeRes.source;
+        existing.rateTier = frozenGradeRes.tier;
+      } else if (nextHourlyRateGbp !== null) {
+        existing.rateSource = 'custom_override';
+        existing.rateTier = undefined;
+      }
+      existing.rateGradeKey = rateGradeKey;
+    }
     const totals = calculateQuoteTotals(
       input.feeAmountExVat,
       input.vatOverridden ? input.vatAmount : null,
@@ -15446,10 +15869,7 @@ export async function saveQuoteRecord(
     existing.assumptions = (input.assumptions ?? '').trim();
     existing.feeBasis = input.feeBasis;
     existing.feeAmountExVat = totals.feeAmountExVat;
-    existing.hourlyRateGbp =
-      input.feeBasis === 'Hourly rate with estimate'
-        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
-        : null;
+    existing.hourlyRateGbp = nextHourlyRateGbp;
     existing.vatRatePercent = vatRatePercent;
     existing.vatAmount = totals.vatOnFee;
     existing.vatOverridden = Boolean(input.vatOverridden);
@@ -15683,6 +16103,8 @@ export async function reviseQuoteRecord(
     revisionNote?: string;
     markAsSent?: boolean;
     refreshVatRate?: boolean;
+    rateGradeKey?: string;
+    refreshRates?: boolean;
   },
   byId: string,
 ): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
@@ -15765,6 +16187,15 @@ export async function reviseQuoteRecord(
     capturedAt: priorCapturedAt,
     byId,
     revisionNote: input.revisionNote?.trim() || undefined,
+    ...(quote.rateSource ? { rateSource: quote.rateSource } : {}),
+    ...(typeof quote.rateTier === 'number' ? { rateTier: quote.rateTier } : {}),
+    ...(quote.rateAsAtDate ? { rateAsAtDate: quote.rateAsAtDate } : {}),
+    ...(quote.rateCardId !== undefined ? { rateCardId: quote.rateCardId } : {}),
+    ...(quote.rateCardName !== undefined ? { rateCardName: quote.rateCardName } : {}),
+    ...(quote.rateGradeKey ? { rateGradeKey: quote.rateGradeKey } : {}),
+    ...(quote.rateProvenanceByGrade
+      ? { rateProvenanceByGrade: structuredClone(quote.rateProvenanceByGrade) }
+      : {}),
   });
 
   const prevVersion = quote.version;
@@ -15776,16 +16207,77 @@ export async function reviseQuoteRecord(
   );
 
   await intakeRepo.withTenantTransaction(ctx, async () => {
+    const tenantCfg = getActiveTenantConfiguration();
     const dbCostsOverride =
       await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
     const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-      getActiveTenantConfiguration(),
+      tenantCfg,
       dbCostsOverride,
     );
     const appliedVatRatePercent =
       input.refreshVatRate === false
         ? priorVatRatePercent
         : effectiveCostsConfig.vatRatePercent;
+
+    let revisedHourlyRateGbp =
+      input.feeBasis === 'Hourly rate with estimate'
+        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+        : null;
+    const rateGradeKey = input.rateGradeKey?.trim() || quote.rateGradeKey || 'associate';
+    if (input.refreshRates !== false) {
+      const quoteAsAtDate = resolveTenantLocalDateAndHour(
+        now,
+        tenantCfg.timeZone || 'Europe/London',
+      ).localDate;
+      const targetClientId =
+        quote.clientType === 'existing'
+          ? (quote.linkedOrganisationId ?? quote.linkedPersonId ?? null)
+          : null;
+      const targetClientType: ClientRateOverrideClientType | undefined =
+        quote.linkedOrganisationId
+          ? 'organisation'
+          : quote.linkedPersonId
+            ? 'person'
+            : undefined;
+      const resolvedRates = await getRateOverrideRepository().resolveApplicableRates(ctx, {
+        clientId: targetClientId,
+        clientType: targetClientType ?? null,
+        practiceAreaId: quote.practiceAreaId,
+        asAtDate: quoteAsAtDate,
+        baseMatterCostsConfig: tenantCfg.matterCosts,
+        fallbackRateCardConfig: effectiveCostsConfig,
+        timeZone: tenantCfg.timeZone,
+      });
+      const gradeRes =
+        resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
+      if (input.feeBasis === 'Hourly rate with estimate' && revisedHourlyRateGbp === null) {
+        revisedHourlyRateGbp = (gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null;
+      }
+      const hourlyMatchesResolved =
+        revisedHourlyRateGbp === null ||
+        !gradeRes ||
+        Math.round(revisedHourlyRateGbp * 100) === gradeRes.rateMinorUnits;
+      quote.rateSource =
+        input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
+          ? 'custom_override'
+          : (gradeRes?.source ?? resolvedRates.dominantSource);
+      quote.rateTier =
+        quote.rateSource === 'custom_override'
+          ? undefined
+          : (gradeRes?.tier ?? resolvedRates.dominantTier);
+      quote.rateAsAtDate = resolvedRates.asAtDate;
+      quote.rateCardId = resolvedRates.rateCardId;
+      quote.rateCardName = resolvedRates.rateCardName;
+      quote.rateGradeKey = rateGradeKey;
+      quote.rateProvenanceByGrade = resolvedRates.grades;
+    } else if (
+      input.feeBasis === 'Hourly rate with estimate' &&
+      revisedHourlyRateGbp !== quote.hourlyRateGbp
+    ) {
+      quote.rateSource = 'custom_override';
+      quote.rateTier = undefined;
+      quote.rateGradeKey = rateGradeKey;
+    }
 
     const totals = calculateQuoteTotals(
       input.feeAmountExVat,
@@ -15797,10 +16289,7 @@ export async function reviseQuoteRecord(
     quote.version = nextVersion;
     quote.feeBasis = input.feeBasis;
     quote.feeAmountExVat = totals.feeAmountExVat;
-    quote.hourlyRateGbp =
-      input.feeBasis === 'Hourly rate with estimate'
-        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
-        : null;
+    quote.hourlyRateGbp = revisedHourlyRateGbp;
     quote.vatRatePercent = appliedVatRatePercent;
     quote.vatAmount = totals.vatOnFee;
     quote.vatOverridden = Boolean(input.vatOverridden);
@@ -19852,4 +20341,767 @@ export async function updateMatterLifecycleStatusRecord(
       }
     }
   });
+}
+
+// ============================================================================
+// Negotiated Client, Parent-Group & Matter Rate Overrides (ADR 0034 §2 / S0-28a)
+// ============================================================================
+
+const CLIENT_RATE_VIEW_PERMS: readonly PermissionKey[] = [
+  'finance:view',
+  'finance:view_matter',
+  'finance:credit_control',
+  'admin:access',
+];
+
+const CLIENT_RATE_MANAGE_PERMS: readonly PermissionKey[] = [
+  'finance:view',
+  'finance:credit_control',
+  'admin:access',
+];
+
+const MATTER_RATE_VIEW_PERMS: readonly PermissionKey[] = [
+  'finance:view',
+  'finance:view_matter',
+  'finance:credit_control',
+  'admin:access',
+  'matter:costs:sign_off',
+];
+
+const RESOLVE_RATE_PERMS: readonly PermissionKey[] = [
+  'finance:view',
+  'finance:view_matter',
+  'finance:credit_control',
+  'admin:access',
+  'quote:view',
+  'quote:edit',
+  'matter:edit',
+];
+
+const MATTER_RATE_MANAGE_PERMS: readonly PermissionKey[] = [
+  'matter:create',
+  'matter:edit',
+  'matter:costs:sign_off',
+  'finance:view',
+  'finance:credit_control',
+  'admin:access',
+];
+
+function hasAnyPersonPermission(
+  actor: Person | null,
+  perms: readonly PermissionKey[],
+  people: Person[],
+  teams: Team[],
+): boolean {
+  if (!actor) return false;
+  return perms.some((perm) =>
+    hasPersonPermission(actor, perm, { allPeople: people, teams }),
+  );
+}
+
+function formatClientOverrideSummary(override: ClientRateOverrideRecord): string {
+  const scope = override.practiceAreaId || 'all practice areas';
+  const window = `${override.effectiveFrom}..${override.effectiveTo ?? 'open-ended'}`;
+  return `${override.clientId} (${override.clientType}) [${override.gradeKey} | ${scope}] £${override.rateGbp.toFixed(2)} (${window})`;
+}
+
+function formatMatterOverrideSummary(override: MatterRateOverrideRecord): string {
+  const window = `${override.effectiveFrom}..${override.effectiveTo ?? 'open-ended'}`;
+  return `${override.matterId} [${override.gradeKey}] £${override.rateGbp.toFixed(2)} (${window})`;
+}
+
+export interface InheritedParentRateOverrideView {
+  parentOrganisationId: string;
+  parentOrganisationName: string;
+  overrides: ClientRateOverrideRecord[];
+}
+
+export async function listClientRateOverridesRecord(
+  params: {
+    clientType: ClientRateOverrideClientType;
+    clientId: string;
+  },
+  byId: string,
+): Promise<
+  {
+    overrides: ClientRateOverrideRecord[];
+    parentChain: ParentChainNodeSummary[];
+    inheritedOverrides: InheritedParentRateOverrideView[];
+    error?: string;
+    code?: ActionDenialCode | string;
+    message?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
+  const [people, teams] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, CLIENT_RATE_VIEW_PERMS, people, teams)) {
+    const msg =
+      'You do not have permission to view negotiated client rate overrides.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      overrides: [],
+      parentChain: [],
+      inheritedOverrides: [],
+      error: msg,
+    };
+  }
+
+  const clientId = params.clientId?.trim() || '';
+  if (!clientId) {
+    return {
+      overrides: [],
+      parentChain: [],
+      inheritedOverrides: [],
+      code: RATE_OVERRIDE_VALIDATION_ERROR_CODE,
+      message: `${RATE_OVERRIDE_VALIDATION_ERROR_CODE}: Client ID is required.`,
+      error: 'Client ID is required.',
+    };
+  }
+
+  if (params.clientType === 'organisation') {
+    const org = await partyRepo.getOrganisationById<Organisation>(ctx, clientId);
+    if (!org) {
+      const msg = `NOT_FOUND: Organisation "${clientId}" not found.`;
+      return {
+        overrides: [],
+        parentChain: [],
+        inheritedOverrides: [],
+        code: 'NOT_FOUND',
+        message: msg,
+        error: msg,
+      };
+    }
+  } else {
+    const person = await partyRepo.getPersonById<Person>(ctx, clientId);
+    if (!person) {
+      const msg = `NOT_FOUND: Person "${clientId}" not found.`;
+      return {
+        overrides: [],
+        parentChain: [],
+        inheritedOverrides: [],
+        code: 'NOT_FOUND',
+        message: msg,
+        error: msg,
+      };
+    }
+  }
+
+  const repo = getRateOverrideRepository();
+  const overrides = await repo.listClientRateOverrides(ctx, {
+    clientType: params.clientType,
+    clientId,
+  });
+
+  if (params.clientType !== 'organisation') {
+    return { overrides, parentChain: [], inheritedOverrides: [] };
+  }
+
+  const parentChain = await repo.listActiveParentOrganisationChain(ctx, clientId);
+  const inheritedOverrides: InheritedParentRateOverrideView[] = [];
+  for (const node of parentChain) {
+    const parentRows = await repo.listClientRateOverrides(ctx, {
+      clientType: 'organisation',
+      clientId: node.id,
+    });
+    inheritedOverrides.push({
+      parentOrganisationId: node.id,
+      parentOrganisationName: node.legalName,
+      overrides: parentRows,
+    });
+  }
+
+  return { overrides, parentChain, inheritedOverrides };
+}
+
+export async function saveClientRateOverrideRecord(
+  input: {
+    id?: string;
+    clientType: ClientRateOverrideClientType;
+    clientId: string;
+    practiceAreaId?: string | null;
+    gradeKey: string;
+    rateGbp?: number;
+    rateMinorUnits?: number;
+    currency?: string;
+    effectiveFrom: string;
+    effectiveTo?: string | null;
+    notes?: string;
+  },
+  byId: string,
+): Promise<
+  {
+    override?: ClientRateOverrideRecord;
+    code?: ActionDenialCode | string;
+    message?: string;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
+  const [people, teams] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, CLIENT_RATE_MANAGE_PERMS, people, teams)) {
+    const msg =
+      'You do not have permission (finance:view, finance:credit_control, or admin:access) to manage negotiated client rate overrides.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const clientId = input.clientId?.trim() || '';
+  if (!clientId) {
+    const msg = `${RATE_OVERRIDE_VALIDATION_ERROR_CODE}: Client ID is required.`;
+    return {
+      code: RATE_OVERRIDE_VALIDATION_ERROR_CODE,
+      message: msg,
+      error: msg,
+    };
+  }
+
+  if (input.clientType === 'organisation') {
+    const org = await partyRepo.getOrganisationById<Organisation>(ctx, clientId);
+    if (!org || org.mergedIntoId) {
+      const msg = `INVALID_CLIENT: Active organisation "${clientId}" was not found in this tenant.`;
+      return { code: 'NOT_FOUND', message: msg, error: msg };
+    }
+  } else {
+    const person = await partyRepo.getPersonById<Person>(ctx, clientId);
+    if (!person || person.mergedIntoId) {
+      const msg = `INVALID_CLIENT: Active person "${clientId}" was not found in this tenant.`;
+      return { code: 'NOT_FOUND', message: msg, error: msg };
+    }
+  }
+
+  const repo = getRateOverrideRepository();
+  try {
+    const saved = await repo.withTenantTransaction(ctx, async () => {
+      const existing = input.id?.trim()
+        ? await repo.getClientRateOverrideById(ctx, input.id.trim())
+        : null;
+      if (input.id?.trim() && !existing) {
+        const err = new Error(
+          `NOT_FOUND: Client rate override "${input.id.trim()}" was not found.`,
+        ) as Error & { code: string };
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
+      if (existing && existing.clientId !== clientId) {
+        const err = new Error(
+          `${RATE_OVERRIDE_VALIDATION_ERROR_CODE}: Client rate override "${existing.id}" belongs to "${existing.clientId}", not "${clientId}".`,
+        ) as Error & { code: string };
+        err.code = RATE_OVERRIDE_VALIDATION_ERROR_CODE;
+        throw err;
+      }
+
+      const persisted = await repo.upsertClientRateOverride(ctx, {
+        ...input,
+        clientId,
+        byId,
+      });
+
+      const nowIso = persisted.updatedAt || new Date().toISOString();
+      const summaryNew = formatClientOverrideSummary(persisted);
+      const summaryOld = existing ? formatClientOverrideSummary(existing) : null;
+      const auditPayload: FirmAuditEntryInput[] = [
+        {
+          recordType: 'client_rate_override',
+          recordId: persisted.id,
+          action: existing ? 'update' : 'create',
+          field: existing ? 'Client rate override updated' : 'Client rate override created',
+          oldValue: summaryOld,
+          newValue: summaryNew,
+          byId,
+          at: nowIso,
+          snapshot: persisted,
+        },
+        {
+          recordType: persisted.clientType,
+          recordId: persisted.clientId,
+          action: 'rate-override-upsert',
+          field: `Negotiated rate override (${persisted.id} · ${persisted.gradeKey})`,
+          oldValue: summaryOld,
+          newValue: summaryNew,
+          byId,
+          at: nowIso,
+          snapshot: persisted,
+        },
+      ];
+      await appendTenantAuditEntries(ctx, auditPayload);
+      return persisted;
+    });
+
+    return { override: saved };
+  } catch (err) {
+    const coded = err as { code?: string; message?: string };
+    if (
+      coded?.code === RATE_OVERRIDE_DATE_OVERLAP_CODE ||
+      coded?.code === RATE_OVERRIDE_INVALID_DATE_RANGE_CODE ||
+      coded?.code === RATE_OVERRIDE_VALIDATION_ERROR_CODE ||
+      coded?.code === 'NOT_FOUND'
+    ) {
+      return {
+        code: coded.code,
+        message: coded.message ?? 'Invalid rate override.',
+        error: coded.message ?? 'Invalid rate override.',
+      };
+    }
+    throw err;
+  }
+}
+
+export async function deleteClientRateOverrideRecord(
+  id: string,
+  byId: string,
+): Promise<
+  {
+    deleted: boolean;
+    code?: ActionDenialCode | string;
+    message?: string;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
+  const [people, teams] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, CLIENT_RATE_MANAGE_PERMS, people, teams)) {
+    const msg =
+      'You do not have permission (finance:view, finance:credit_control, or admin:access) to delete negotiated client rate overrides.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      deleted: false,
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const trimmedId = id?.trim() || '';
+  if (!trimmedId) {
+    const msg = 'NOT_FOUND: Client rate override id is required.';
+    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+  }
+
+  const repo = getRateOverrideRepository();
+  const outcome = await repo.withTenantTransaction(ctx, async () => {
+    const existing = await repo.getClientRateOverrideById(ctx, trimmedId);
+    if (!existing) {
+      return { deleted: false, existing: null as ClientRateOverrideRecord | null };
+    }
+    const deleted = await repo.deleteClientRateOverride(ctx, trimmedId);
+    if (deleted) {
+      const nowIso = new Date().toISOString();
+      const summaryOld = formatClientOverrideSummary(existing);
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'client_rate_override',
+          recordId: existing.id,
+          action: 'rate-override-delete',
+          field: 'Client rate override removed',
+          oldValue: summaryOld,
+          newValue: null,
+          byId,
+          at: nowIso,
+          snapshot: existing,
+        },
+        {
+          recordType: existing.clientType,
+          recordId: existing.clientId,
+          action: 'rate-override-delete',
+          field: `Negotiated rate override removed (${existing.id} · ${existing.gradeKey})`,
+          oldValue: summaryOld,
+          newValue: null,
+          byId,
+          at: nowIso,
+          snapshot: existing,
+        },
+      ]);
+    }
+    return { deleted, existing };
+  });
+
+  if (!outcome.deleted) {
+    const msg = `NOT_FOUND: Client rate override "${trimmedId}" was not found.`;
+    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+  }
+  return { deleted: true };
+}
+
+export async function listMatterRateOverridesRecord(
+  matterId: string,
+  byId: string,
+): Promise<
+  {
+    overrides: MatterRateOverrideRecord[];
+    code?: ActionDenialCode | string;
+    message?: string;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const [people, teams, matter] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getMatterRepository().getMatterById<Matter>(ctx, matterId?.trim() || '', {
+      includeRestricted: true,
+    }),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, MATTER_RATE_VIEW_PERMS, people, teams)) {
+    const msg = 'You do not have permission to view matter rate overrides.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      overrides: [],
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+    const msg = 'Matter not found or restricted.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      overrides: [],
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const overrides = await getRateOverrideRepository().listMatterRateOverrides(ctx, {
+    matterId: matter.id,
+  });
+  return { overrides };
+}
+
+export async function saveMatterRateOverrideRecord(
+  input: {
+    id?: string;
+    matterId: string;
+    gradeKey: string;
+    rateGbp?: number;
+    rateMinorUnits?: number;
+    currency?: string;
+    effectiveFrom: string;
+    effectiveTo?: string | null;
+    notes?: string;
+  },
+  byId: string,
+): Promise<
+  {
+    override?: MatterRateOverrideRecord;
+    code?: ActionDenialCode | string;
+    message?: string;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const tenantCfg = getActiveTenantConfiguration();
+  const [people, teams, matter] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getMatterRepository().getMatterById<Matter>(ctx, input.matterId?.trim() || '', {
+      includeRestricted: true,
+    }),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, MATTER_RATE_MANAGE_PERMS, people, teams)) {
+    const msg = 'You do not have permission to manage matter rate overrides.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+    const msg = 'Matter not found or restricted.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const repo = getRateOverrideRepository();
+  const catRepo = getCatalogueRepository();
+  try {
+    const saved = await repo.withTenantTransaction(ctx, async () => {
+      const dbCostsOverride =
+        await catRepo.getMatterCostsConfig<MatterCostsConfig>(ctx);
+      const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+        tenantCfg,
+        dbCostsOverride,
+      );
+      if (!effectiveCostsConfig.allowMatterRateOverrides) {
+        const err = new Error(
+          'MATTER_RATE_OVERRIDES_DISABLED: Matter-level hourly rate overrides are disabled by firm configuration.',
+        ) as Error & { code: string };
+        err.code = 'MATTER_RATE_OVERRIDES_DISABLED';
+        throw err;
+      }
+
+      const existing = input.id?.trim()
+        ? await repo.getMatterRateOverrideById(ctx, input.id.trim())
+        : null;
+      if (input.id?.trim() && !existing) {
+        const err = new Error(
+          `NOT_FOUND: Matter rate override "${input.id.trim()}" was not found.`,
+        ) as Error & { code: string };
+        err.code = 'NOT_FOUND';
+        throw err;
+      }
+      if (existing && existing.matterId !== matter.id) {
+        const err = new Error(
+          `${RATE_OVERRIDE_VALIDATION_ERROR_CODE}: Matter rate override "${existing.id}" belongs to "${existing.matterId}", not "${matter.id}".`,
+        ) as Error & { code: string };
+        err.code = RATE_OVERRIDE_VALIDATION_ERROR_CODE;
+        throw err;
+      }
+
+      const persisted = await repo.upsertMatterRateOverride(ctx, {
+        ...input,
+        matterId: matter.id,
+        byId,
+      });
+
+      const nowIso = persisted.updatedAt || new Date().toISOString();
+      const summaryNew = formatMatterOverrideSummary(persisted);
+      const summaryOld = existing ? formatMatterOverrideSummary(existing) : null;
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'matter_rate_override',
+          recordId: persisted.id,
+          action: existing ? 'update' : 'create',
+          field: existing ? 'Matter rate override updated' : 'Matter rate override created',
+          oldValue: summaryOld,
+          newValue: summaryNew,
+          byId,
+          at: nowIso,
+          snapshot: persisted,
+        },
+        {
+          recordType: 'matter',
+          recordId: persisted.matterId,
+          action: 'rate-override-upsert',
+          field: `Matter rate override (${persisted.id} · ${persisted.gradeKey})`,
+          oldValue: summaryOld,
+          newValue: summaryNew,
+          byId,
+          at: nowIso,
+          snapshot: persisted,
+        },
+      ]);
+      return persisted;
+    });
+
+    return { override: saved };
+  } catch (err) {
+    const coded = err as { code?: string; message?: string };
+    if (
+      coded?.code === RATE_OVERRIDE_DATE_OVERLAP_CODE ||
+      coded?.code === RATE_OVERRIDE_INVALID_DATE_RANGE_CODE ||
+      coded?.code === RATE_OVERRIDE_VALIDATION_ERROR_CODE ||
+      coded?.code === 'MATTER_RATE_OVERRIDES_DISABLED' ||
+      coded?.code === 'NOT_FOUND'
+    ) {
+      return {
+        code: coded.code,
+        message: coded.message ?? 'Invalid matter rate override.',
+        error: coded.message ?? 'Invalid matter rate override.',
+      };
+    }
+    throw err;
+  }
+}
+
+export async function deleteMatterRateOverrideRecord(
+  id: string,
+  byId: string,
+): Promise<
+  {
+    deleted: boolean;
+    code?: ActionDenialCode | string;
+    message?: string;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, MATTER_RATE_MANAGE_PERMS, people, teams)) {
+    const msg = 'You do not have permission to delete matter rate overrides.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      deleted: false,
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const trimmedId = id?.trim() || '';
+  if (!trimmedId) {
+    const msg = 'NOT_FOUND: Matter rate override id is required.';
+    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+  }
+
+  const repo = getRateOverrideRepository();
+  const existing = await repo.getMatterRateOverrideById(ctx, trimmedId);
+  if (!existing) {
+    const msg = `NOT_FOUND: Matter rate override "${trimmedId}" was not found.`;
+    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+  }
+
+  const matter = await getMatterRepository().getMatterById<Matter>(ctx, existing.matterId, {
+    includeRestricted: true,
+  });
+  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+    const msg = 'Matter not found or restricted.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      deleted: false,
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const deleted = await repo.withTenantTransaction(ctx, async () => {
+    const ok = await repo.deleteMatterRateOverride(ctx, trimmedId);
+    if (ok) {
+      const nowIso = new Date().toISOString();
+      const summaryOld = formatMatterOverrideSummary(existing);
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'matter_rate_override',
+          recordId: existing.id,
+          action: 'rate-override-delete',
+          field: 'Matter rate override removed',
+          oldValue: summaryOld,
+          newValue: null,
+          byId,
+          at: nowIso,
+          snapshot: existing,
+        },
+        {
+          recordType: 'matter',
+          recordId: existing.matterId,
+          action: 'rate-override-delete',
+          field: `Matter rate override removed (${existing.id} · ${existing.gradeKey})`,
+          oldValue: summaryOld,
+          newValue: null,
+          byId,
+          at: nowIso,
+          snapshot: existing,
+        },
+      ]);
+    }
+    return ok;
+  });
+
+  if (!deleted) {
+    const msg = `NOT_FOUND: Matter rate override "${trimmedId}" was not found.`;
+    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+  }
+  return { deleted: true };
+}
+
+export async function resolveApplicableRatesRecord(
+  params: {
+    matterId?: string | null;
+    clientId?: string | null;
+    clientType?: ClientRateOverrideClientType | null;
+    practiceAreaId?: string | null;
+    asAtDate?: string | null;
+    rateCardId?: string | null;
+    preferredSource?: 'auto' | 'app_table' | 'pms';
+  },
+  byId: string,
+): Promise<
+  {
+    resolved?: ResolvedApplicableRatesResult;
+    code?: ActionDenialCode | string;
+    message?: string;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>>
+> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const tenantCfg = getActiveTenantConfiguration();
+  const [people, teams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (!hasAnyPersonPermission(actor, RESOLVE_RATE_PERMS, people, teams)) {
+    const msg = 'You do not have permission to resolve applicable hourly rates.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      code: 'FORBIDDEN',
+      message: msg,
+      error: msg,
+    };
+  }
+
+  const trimmedMatterId = params.matterId?.trim() || null;
+  if (trimmedMatterId) {
+    const matter = await getMatterRepository().getMatterById<Matter>(
+      ctx,
+      trimmedMatterId,
+      { includeRestricted: true },
+    );
+    if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+      const msg = 'Matter not found or restricted.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        code: 'FORBIDDEN',
+        message: msg,
+        error: msg,
+      };
+    }
+  }
+
+  const effectiveToday =
+    params.asAtDate?.trim() ||
+    resolveTenantLocalDateAndHour(new Date(), tenantCfg.timeZone || 'Europe/London')
+      .localDate;
+  const dbCostsOverride =
+    await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
+  const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+    tenantCfg,
+    dbCostsOverride,
+  );
+
+  const resolved = await getRateOverrideRepository().resolveApplicableRates(ctx, {
+    matterId: trimmedMatterId,
+    clientId: params.clientId?.trim() || null,
+    clientType: params.clientType ?? null,
+    practiceAreaId: params.practiceAreaId?.trim() || null,
+    asAtDate: effectiveToday,
+    rateCardId: params.rateCardId?.trim() || null,
+    preferredSource: params.preferredSource,
+    baseMatterCostsConfig: tenantCfg.matterCosts,
+    fallbackRateCardConfig: effectiveCostsConfig,
+    timeZone: tenantCfg.timeZone,
+  });
+
+  return { resolved };
 }

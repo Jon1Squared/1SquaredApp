@@ -4,7 +4,12 @@
  * Dates are ISO strings (date-only fields use YYYY-MM-DD).
  */
 
-import type { RbacConfiguration } from '@platform/core';
+import type {
+  GradeRateResolution,
+  RbacConfiguration,
+  ResolvedRateSource,
+  ResolvedRateTier,
+} from '@platform/core';
 import type { AttentionItem } from './attention';
 import type { LeaverOwnedRecordItem } from './employment';
 import type { LeftRailVisibility } from './homeConfig';
@@ -1280,6 +1285,13 @@ export interface QuoteVersionSnapshot {
   capturedAt?: string;
   byId: string;
   revisionNote?: string;
+  rateSource?: ResolvedRateSource | 'custom_override';
+  rateTier?: ResolvedRateTier;
+  rateAsAtDate?: string;
+  rateCardId?: string | null;
+  rateCardName?: string | null;
+  rateGradeKey?: string;
+  rateProvenanceByGrade?: Record<string, GradeRateResolution>;
 }
 
 export interface QuoteTimelineEvent {
@@ -1326,6 +1338,13 @@ export interface Quote {
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
   capturedAt?: string;
+  rateSource?: ResolvedRateSource | 'custom_override';
+  rateTier?: ResolvedRateTier;
+  rateAsAtDate?: string;
+  rateCardId?: string | null;
+  rateCardName?: string | null;
+  rateGradeKey?: string;
+  rateProvenanceByGrade?: Record<string, GradeRateResolution>;
   feeEarnerId: string; // P-xxxxxx
   assignedTeamId: string | null; // TM-xxxxxx
   validUntil: string; // YYYY-MM-DD
@@ -1462,7 +1481,9 @@ export type AuditAction =
   | 'data-reset'
   | 'data-cleared'
   | 'conflict-decision'
-  | 'entra-link';
+  | 'entra-link'
+  | 'rate-override-upsert'
+  | 'rate-override-delete';
 
 export interface AuditEntry {
   id: string;
@@ -1478,7 +1499,9 @@ export interface AuditEntry {
     | 'system'
     | 'employee_payroll'
     | 'employee_sensitive'
-    | 'key_date';
+    | 'key_date'
+    | 'client_rate_override'
+    | 'matter_rate_override';
   recordId: string;
   action: AuditAction;
   field: string | null;
@@ -1710,13 +1733,16 @@ export interface MatterDisbursementEntry {
 
 export interface MatterCostsSnapshot {
   workBasis: MatterCostWorkBasis;
-  rateSource: 'app_table' | 'pms' | 'custom_override';
+  rateSource: ResolvedRateSource | 'custom_override';
+  rateTier?: ResolvedRateTier;
+  rateAsAtDate?: string;
   rateCardId: string;
   rateCardName: string;
   partnerRateGbp: number | null;
   associateRateGbp: number | null;
   traineeRateGbp: number | null;
   customGrades?: CustomGradeRateRow[];
+  rateProvenanceByGrade?: Record<string, GradeRateResolution>;
   totalEstimateGbp: number | null;
   agreedCapGbp?: number | null;
   vatRatePercent?: number;

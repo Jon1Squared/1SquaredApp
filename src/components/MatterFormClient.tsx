@@ -34,8 +34,12 @@ import {
   type MatterAiExtractionResult,
 } from '@/domain/matterAiExtract';
 import {
+  deleteMatterRateOverrideAction,
+  listMatterRateOverridesAction,
+  resolveApplicableRatesAction,
   runMatterConflictSearchAction,
   saveMatterAction,
+  saveMatterRateOverrideAction,
   saveTaskAction,
   signOffMatterCostsAction,
   switchViewingRoleAction,
@@ -72,7 +76,13 @@ import {
   mapRelationshipToLegacyConflictRole,
   RELATIONSHIP_SORT_ORDER,
 } from '@/domain/matterParties';
-import type { WorkTypesConfiguration } from '@platform/core-api';
+import type {
+  GradeRateResolution,
+  MatterRateOverrideRecord,
+  ResolvedApplicableRatesResult,
+  ResolvedRateTier,
+  WorkTypesConfiguration,
+} from '@platform/core-api';
 import {
   isWorkTypeChoiceActive,
   resolveDepartmentForPracticeArea,
@@ -85,6 +95,7 @@ import {
 import {
   calculateDisbursementsTotal,
   calculateMatterSnapshotTotals,
+  formatRateTierBadgeLabel,
   lookupRatesForMatter,
   mapBillingBasisLabelToWorkBasis,
   mapWorkBasisToBillingBasisId,
@@ -166,6 +177,8 @@ interface MatterFormClientProps {
   initialQuote?: Quote | null;
   initialInstructingContactId?: string | null;
   initialConflictWarnings?: string[];
+  initialResolvedRates?: ResolvedApplicableRatesResult | null;
+  initialMatterRateOverrides?: MatterRateOverrideRecord[];
   activeViewingRole?: string;
   people: Person[];
   organisations: Organisation[];
@@ -269,6 +282,8 @@ export function MatterFormClient({
   initialQuote,
   initialInstructingContactId,
   initialConflictWarnings,
+  initialResolvedRates = null,
+  initialMatterRateOverrides = [],
   activeViewingRole = 'fee_earner',
   people: initialPeople,
   organisations: initialOrganisations,
@@ -1111,6 +1126,7 @@ export function MatterFormClient({
         practiceAreaId,
         config: costsConfig,
         values,
+        resolvedRates: initialResolvedRates,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
@@ -1125,9 +1141,29 @@ export function MatterFormClient({
   const [costWorkBasis, setCostWorkBasis] = useState<MatterCostWorkBasis>(
     initialMatterCosts.workBasis,
   );
-  const [costRateSource, setCostRateSource] = useState<
-    'app_table' | 'pms' | 'custom_override'
-  >(initialMatterCosts.rateSource);
+  const [costRateSource, setCostRateSource] = useState<MatterCostsSnapshot['rateSource']>(
+    initialMatterCosts.rateSource,
+  );
+  const [costRateTier, setCostRateTier] = useState<ResolvedRateTier | undefined>(
+    initialMatterCosts.rateTier,
+  );
+  const [costRateAsAtDate, setCostRateAsAtDate] = useState<string | undefined>(
+    initialMatterCosts.rateAsAtDate,
+  );
+  const [costRateProvenanceByGrade, setCostRateProvenanceByGrade] = useState<
+    Record<string, GradeRateResolution> | undefined
+  >(initialMatterCosts.rateProvenanceByGrade);
+  const [matterRateOverrides, setMatterRateOverrides] = useState<MatterRateOverrideRecord[]>(
+    initialMatterRateOverrides,
+  );
+  const [matterOvrFormOpen, setMatterOvrFormOpen] = useState(false);
+  const [matterOvrGradeKey, setMatterOvrGradeKey] = useState('partner');
+  const [matterOvrRateStr, setMatterOvrRateStr] = useState('');
+  const [matterOvrFrom, setMatterOvrFrom] = useState(today);
+  const [matterOvrTo, setMatterOvrTo] = useState('');
+  const [matterOvrNotes, setMatterOvrNotes] = useState('');
+  const [matterOvrError, setMatterOvrError] = useState<string | null>(null);
+  const [matterOvrBusy, setMatterOvrBusy] = useState(false);
   const [costRateCardId, setCostRateCardId] = useState<string>(
     initialMatterCosts.rateCardId ?? costsConfig.rateCards[0]?.id ?? 'RC-DEFAULT',
   );
@@ -1189,6 +1225,9 @@ export function MatterFormClient({
             costsConfig.pmsLinkActive)) &&
         card.pmsPartnerRateGbp != null);
     setCostRateSource(usePms ? 'pms' : 'app_table');
+    setCostRateTier(4);
+    setCostRateAsAtDate(undefined);
+    setCostRateProvenanceByGrade(undefined);
     setPartnerRateGbp(
       String(
         usePms && card.pmsPartnerRateGbp != null
@@ -1219,26 +1258,84 @@ export function MatterFormClient({
     );
   }
 
-  // Automatically look up the department's rate card when Department changes in Step 1 (unless manually overridden)
-  const prevCostPracticeAreaRef = useRef<string>(practiceAreaId);
+  const primaryClientId = clientIds[0] ?? '';
+
+  async function refreshApplicableRatesForMatter(explicitRefresh: boolean) {
+    const clientIsOrg = organisations.some((o) => o.id === primaryClientId);
+    const res = await resolveApplicableRatesAction({
+      matterId: existing?.id ?? null,
+      clientId: primaryClientId || null,
+      clientType: primaryClientId ? (clientIsOrg ? 'organisation' : 'person') : null,
+      practiceAreaId: practiceAreaId || null,
+    });
+    if (isActionDenied(res) || !res.resolved) {
+      return;
+    }
+    const r = res.resolved;
+    if (explicitRefresh) {
+      setRefreshCostsRates(true);
+    }
+    if (r.rateCardId) setCostRateCardId(r.rateCardId);
+    setCostRateSource(r.dominantSource);
+    setCostRateTier(r.dominantTier);
+    setCostRateAsAtDate(r.asAtDate);
+    setCostRateProvenanceByGrade(r.grades);
+    setPartnerRateGbp(String(r.partnerRateGbp));
+    setAssociateRateGbp(String(r.associateRateGbp));
+    setTraineeRateGbp(String(r.traineeRateGbp));
+    setCustomGradeRates(
+      r.customGrades.map((g) => ({
+        id: g.id,
+        label: g.label,
+        hourlyRateGbp: g.hourlyRateGbp,
+      })),
+    );
+  }
+
+  // Automatically resolve 4-tier rates when Client or Practice Area changes on unsaved costs snapshot
+  const prevCostHierarchyKeyRef = useRef<string>(`${primaryClientId}::${practiceAreaId}`);
   useEffect(() => {
-    if (prevCostPracticeAreaRef.current === practiceAreaId) return;
-    prevCostPracticeAreaRef.current = practiceAreaId;
+    const key = `${primaryClientId}::${practiceAreaId}`;
+    if (prevCostHierarchyKeyRef.current === key) return;
+    prevCostHierarchyKeyRef.current = key;
     if (hasExistingMatterCostsSnapshot || costRateSource === 'custom_override') return;
-    const lookedUp = lookupRatesForMatter({
-      config: costsConfig,
-      practiceAreaId,
-      preferredSource: costRateSource === 'pms' ? 'pms' : 'app_table',
+    let cancelled = false;
+    const clientIsOrg = organisations.some((o) => o.id === primaryClientId);
+    void resolveApplicableRatesAction({
+      matterId: existing?.id ?? null,
+      clientId: primaryClientId || null,
+      clientType: primaryClientId ? (clientIsOrg ? 'organisation' : 'person') : null,
+      practiceAreaId: practiceAreaId || null,
+    }).then((res) => {
+      if (cancelled || isActionDenied(res) || !res.resolved) return;
+      const r = res.resolved;
+      if (r.rateCardId) setCostRateCardId(r.rateCardId);
+      setCostRateSource(r.dominantSource);
+      setCostRateTier(r.dominantTier);
+      setCostRateAsAtDate(r.asAtDate);
+      setCostRateProvenanceByGrade(r.grades);
+      setPartnerRateGbp(String(r.partnerRateGbp));
+      setAssociateRateGbp(String(r.associateRateGbp));
+      setTraineeRateGbp(String(r.traineeRateGbp));
+      setCustomGradeRates(
+        r.customGrades.map((g) => ({
+          id: g.id,
+          label: g.label,
+          hourlyRateGbp: g.hourlyRateGbp,
+        })),
+      );
     });
-    queueMicrotask(() => {
-      if (lookedUp.rateCard.id) setCostRateCardId(lookedUp.rateCard.id);
-      setCostRateSource(lookedUp.activeSource);
-      setPartnerRateGbp(String(lookedUp.partnerRateGbp));
-      setAssociateRateGbp(String(lookedUp.associateRateGbp));
-      setTraineeRateGbp(String(lookedUp.traineeRateGbp));
-      setCustomGradeRates(lookedUp.customGrades);
-    });
-  }, [practiceAreaId, costsConfig, costRateSource]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    primaryClientId,
+    practiceAreaId,
+    organisations,
+    existing?.id,
+    hasExistingMatterCostsSnapshot,
+    costRateSource,
+  ]);
 
   function handleSelectWorkBasis(nextBasis: MatterCostWorkBasis) {
     setCostWorkBasis(nextBasis);
@@ -1384,9 +1481,14 @@ export function MatterFormClient({
       rateCardId: selectedRateCard?.id ?? costRateCardId ?? 'RC-DEFAULT',
       rateCardName: selectedRateCard?.name ?? 'Firm Standard Rates',
       rateSource: costRateSource,
-      partnerRateGbp: Number(partnerRateGbp) || 375,
-      associateRateGbp: Number(associateRateGbp) || 265,
-      traineeRateGbp: Number(traineeRateGbp) || 150,
+      ...(costRateTier !== undefined ? { rateTier: costRateTier } : {}),
+      ...(costRateAsAtDate ? { rateAsAtDate: costRateAsAtDate } : {}),
+      ...(costRateProvenanceByGrade
+        ? { rateProvenanceByGrade: costRateProvenanceByGrade }
+        : {}),
+      partnerRateGbp: Number(partnerRateGbp) || 0,
+      associateRateGbp: Number(associateRateGbp) || 0,
+      traineeRateGbp: Number(traineeRateGbp) || 0,
       customGrades: customGradeRates,
       totalEstimateGbp: numericFeeEstimateGbp,
       agreedCapGbp: costWorkBasis === 'capped' ? numericAgreedCapGbp : null,
@@ -7300,35 +7402,34 @@ export function MatterFormClient({
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <StatusPill
-                          label={
-                            costRateSource === 'pms'
-                              ? 'Source: PMS Fee Earner Rates'
-                              : costRateSource === 'custom_override'
-                                ? 'Source: Matter Custom Rate Override'
-                                : 'Source: Application Rates Table'
-                          }
+                          label={formatRateTierBadgeLabel(
+                            costRateTier,
+                            costRateSource,
+                            Object.values(costRateProvenanceByGrade ?? {}).find(
+                              (g) => g.tier === 3 && g.inheritedFromParentOrganisationName,
+                            )?.inheritedFromParentOrganisationName,
+                          )}
                           tone={
-                            costRateSource === 'pms'
+                            costRateTier === 1 || costRateTier === 2 || costRateTier === 3 || costRateSource === 'pms'
                               ? 'positive'
                               : costRateSource === 'custom_override'
                                 ? 'warning'
                                 : 'neutral'
                           }
                         />
-                        {hasExistingMatterCostsSnapshot && !isReadOnlyFeeEarner ? (
+                        {!isReadOnlyFeeEarner ? (
                           <button
                             type="button"
                             className="btn btn--secondary btn--sm"
                             style={{ borderRadius: 999, height: 28, fontSize: 12 }}
-                            onClick={() =>
-                              applyRateCardToState(
-                                selectedRateCard?.id ?? costRateCardId,
-                                costRateSource === 'pms' ? 'pms' : 'app_table',
-                              )
-                            }
+                            onClick={() => void refreshApplicableRatesForMatter(true)}
                           >
                             <RefreshCw size={12} />
-                            <span>Refresh rates from card</span>
+                            <span>
+                              {hasExistingMatterCostsSnapshot
+                                ? 'Refresh applicable rates'
+                                : 'Re-apply applicable rates'}
+                            </span>
                           </button>
                         ) : null}
                       </div>
@@ -7633,6 +7734,255 @@ export function MatterFormClient({
                         </div>
                       ))}
                     </div>
+
+                    {/* Tier 1: Effective-dated matter rate overrides when saved & permitted */}
+                    {existing?.id && costsConfig.allowMatterRateOverrides ? (
+                      <div
+                        style={{
+                          marginTop: 12,
+                          paddingTop: 12,
+                          borderTop: '1px solid var(--border-subtle)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: 12.5, fontWeight: 700 }}>
+                              Matter-level rate overrides (Tier 1)
+                            </div>
+                            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                              Effective-dated hourly rates specific to this matter (supersede client &amp; group rates).
+                            </div>
+                          </div>
+                          {!isReadOnlyFeeEarner ? (
+                            <button
+                              type="button"
+                              className="btn btn--secondary btn--sm"
+                              onClick={() => {
+                                setMatterOvrError(null);
+                                setMatterOvrFormOpen((v) => !v);
+                              }}
+                            >
+                              <Plus size={13} aria-hidden="true" />
+                              <span>{matterOvrFormOpen ? 'Close' : 'Add matter rate override'}</span>
+                            </button>
+                          ) : null}
+                        </div>
+
+                        {matterOvrFormOpen && !isReadOnlyFeeEarner ? (
+                          <div
+                            style={{
+                              padding: 12,
+                              borderRadius: 8,
+                              border: '1px solid var(--border-subtle)',
+                              background: 'var(--bg-surface)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 10,
+                            }}
+                          >
+                            {matterOvrError ? (
+                              <div
+                                role="alert"
+                                style={{
+                                  padding: '8px 10px',
+                                  borderRadius: 6,
+                                  background: '#fef2f2',
+                                  border: '1px solid #fecaca',
+                                  color: '#991b1b',
+                                  fontSize: 12.5,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {matterOvrError}
+                              </div>
+                            ) : null}
+                            <div className="form-grid-3" style={{ gap: 10 }}>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="mro-grade">
+                                  Grade
+                                </label>
+                                <select
+                                  id="mro-grade"
+                                  className="field-select"
+                                  value={matterOvrGradeKey}
+                                  onChange={(e) => setMatterOvrGradeKey(e.target.value)}
+                                >
+                                  <option value="partner">Partner</option>
+                                  <option value="associate">Associate</option>
+                                  <option value="trainee">Trainee</option>
+                                  {customGradeRates.map((cg) => (
+                                    <option key={cg.id} value={cg.id}>
+                                      {cg.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="mro-rate">
+                                  Rate (£/hr ex VAT)
+                                </label>
+                                <input
+                                  id="mro-rate"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  className="field-input"
+                                  value={matterOvrRateStr}
+                                  onChange={(e) => setMatterOvrRateStr(e.target.value)}
+                                />
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="mro-from">
+                                  Effective from
+                                </label>
+                                <input
+                                  id="mro-from"
+                                  type="date"
+                                  className="field-input"
+                                  value={matterOvrFrom}
+                                  onChange={(e) => setMatterOvrFrom(e.target.value)}
+                                />
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="mro-to">
+                                  Effective to (optional)
+                                </label>
+                                <input
+                                  id="mro-to"
+                                  type="date"
+                                  className="field-input"
+                                  value={matterOvrTo}
+                                  onChange={(e) => setMatterOvrTo(e.target.value)}
+                                />
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="mro-notes">
+                                  Notes
+                                </label>
+                                <input
+                                  id="mro-notes"
+                                  type="text"
+                                  className="field-input"
+                                  value={matterOvrNotes}
+                                  onChange={(e) => setMatterOvrNotes(e.target.value)}
+                                />
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                              <button
+                                type="button"
+                                className="btn btn--primary btn--sm"
+                                disabled={matterOvrBusy}
+                                onClick={() => {
+                                  const rateNum = Number(matterOvrRateStr);
+                                  if (!Number.isFinite(rateNum) || rateNum < 0) {
+                                    setMatterOvrError('Enter a valid non-negative hourly rate.');
+                                    return;
+                                  }
+                                  setMatterOvrBusy(true);
+                                  setMatterOvrError(null);
+                                  void saveMatterRateOverrideAction({
+                                    matterId: existing.id,
+                                    gradeKey: matterOvrGradeKey,
+                                    rateGbp: rateNum,
+                                    effectiveFrom: matterOvrFrom,
+                                    effectiveTo: matterOvrTo.trim() || null,
+                                    notes: matterOvrNotes.trim(),
+                                  })
+                                    .then(async (saveRes) => {
+                                      if (isActionDenied(saveRes)) {
+                                        setMatterOvrError(saveRes.message);
+                                        return;
+                                      }
+                                      if (saveRes.error || !saveRes.override) {
+                                        setMatterOvrError(
+                                          saveRes.message ?? saveRes.error ?? 'Could not save matter rate override.',
+                                        );
+                                        return;
+                                      }
+                                      const listRes = await listMatterRateOverridesAction(existing.id);
+                                      if (!isActionDenied(listRes) && !listRes.error) {
+                                        setMatterRateOverrides(listRes.overrides);
+                                      }
+                                      await refreshApplicableRatesForMatter(true);
+                                      setMatterOvrFormOpen(false);
+                                      setMatterOvrRateStr('');
+                                      setMatterOvrTo('');
+                                      setMatterOvrNotes('');
+                                      showToast('Matter rate override saved');
+                                    })
+                                    .finally(() => setMatterOvrBusy(false));
+                                }}
+                              >
+                                {matterOvrBusy ? 'Saving…' : 'Save matter rate override'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {matterRateOverrides.length > 0 ? (
+                          <div style={{ fontSize: 12.5, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {matterRateOverrides.map((ovr) => (
+                              <div
+                                key={ovr.id}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  padding: '6px 10px',
+                                  borderRadius: 6,
+                                  background: 'var(--bg-surface)',
+                                  border: '1px solid var(--border-subtle)',
+                                }}
+                              >
+                                <span>
+                                  <strong>{ovr.gradeKey}</strong>: £{ovr.rateGbp}/hr ({ovr.effectiveFrom} –{' '}
+                                  {ovr.effectiveTo ?? 'open-ended'})
+                                  {ovr.notes ? ` · ${ovr.notes}` : ''}
+                                </span>
+                                {!isReadOnlyFeeEarner ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn--ghost btn--sm"
+                                    disabled={matterOvrBusy}
+                                    onClick={() => {
+                                      setMatterOvrBusy(true);
+                                      void deleteMatterRateOverrideAction(ovr.id)
+                                        .then(async (delRes) => {
+                                          if (isActionDenied(delRes) || !delRes.deleted) {
+                                            showToast('Could not remove matter rate override');
+                                            return;
+                                          }
+                                          const listRes = await listMatterRateOverridesAction(existing.id);
+                                          if (!isActionDenied(listRes) && !listRes.error) {
+                                            setMatterRateOverrides(listRes.overrides);
+                                          }
+                                          await refreshApplicableRatesForMatter(true);
+                                          showToast('Matter rate override removed');
+                                        })
+                                        .finally(() => setMatterOvrBusy(false));
+                                    }}
+                                  >
+                                    Remove
+                                  </button>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 

@@ -27,6 +27,11 @@ import {
   syncPersonFirmWorkEmailInTx,
   upsertPersonEmploymentAndPayrollInTx,
 } from './hrRbacRepository';
+import { doEffectiveDateRangesOverlap } from '../domain/costs/rates';
+import {
+  INVALID_PARENT_ORGANISATION_CODE,
+  ORGANISATION_PARENT_CYCLE_CODE,
+} from './rateOverrideRepository';
 
 function escapeSqlLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, '\\$&');
@@ -1602,11 +1607,125 @@ export class TenantPartyRepository extends TenantScopedRepository {
   // Organisations
   // ============================================================================
 
+  /**
+   * Validates that setting `parentOrganisationId` on `organisationId` points to an active
+   * (`merged_into_id IS NULL`) organisation in the tenant and introduces no direct or
+   * transitive hierarchy cycles (`ORGANISATION_PARENT_CYCLE` / `INVALID_PARENT_ORGANISATION`).
+   */
+  public async validateOrganisationParentLinkInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    organisationId: string | null | undefined,
+    parentOrganisationId: string | null | undefined,
+  ): Promise<void> {
+    const parentId = parentOrganisationId?.trim() || null;
+    if (!parentId) {
+      return;
+    }
+    const selfId = organisationId?.trim() || null;
+    if (selfId && parentId === selfId) {
+      const err = new Error(
+        `${ORGANISATION_PARENT_CYCLE_CODE}: An organisation cannot be its own parent.`,
+      ) as Error & { code: string };
+      err.code = ORGANISATION_PARENT_CYCLE_CODE;
+      throw err;
+    }
+
+    const initialRes = await tx.query<{
+      tenant_id: string;
+      id: string;
+      merged_into_id: string | null;
+      parent_organisation_id: string | null;
+    }>(
+      `SELECT tenant_id, id, merged_into_id, parent_organisation_id
+       FROM public.organisations
+       WHERE tenant_id = $1 AND id = $2`,
+      [ctx.tenantId, parentId],
+    );
+    const initialRow = initialRes.rows[0];
+    if (!initialRow) {
+      const err = new Error(
+        `${INVALID_PARENT_ORGANISATION_CODE}: Parent organisation "${parentId}" was not found in this tenant.`,
+      ) as Error & { code: string };
+      err.code = INVALID_PARENT_ORGANISATION_CODE;
+      throw err;
+    }
+    this.assertRowTenant(ctx, initialRow.tenant_id, 'organisations.validateParentLinkInitial');
+    if (initialRow.merged_into_id) {
+      const err = new Error(
+        `${INVALID_PARENT_ORGANISATION_CODE}: Parent organisation "${parentId}" has been merged/deactivated and cannot be linked as a parent group.`,
+      ) as Error & { code: string };
+      err.code = INVALID_PARENT_ORGANISATION_CODE;
+      throw err;
+    }
+
+    const visited = new Set<string>([initialRow.id]);
+    let cursorParentId = initialRow.parent_organisation_id;
+    let hops = 0;
+
+    while (cursorParentId && hops < 50) {
+      hops += 1;
+      if (selfId && cursorParentId === selfId) {
+        const err = new Error(
+          `${ORGANISATION_PARENT_CYCLE_CODE}: Linking "${parentId}" as parent of "${selfId}" would create a cyclic organisation hierarchy.`,
+        ) as Error & { code: string };
+        err.code = ORGANISATION_PARENT_CYCLE_CODE;
+        throw err;
+      }
+      if (visited.has(cursorParentId)) {
+        const err = new Error(
+          `${ORGANISATION_PARENT_CYCLE_CODE}: Organisation parent hierarchy contains a cycle at "${cursorParentId}".`,
+        ) as Error & { code: string };
+        err.code = ORGANISATION_PARENT_CYCLE_CODE;
+        throw err;
+      }
+      visited.add(cursorParentId);
+
+      const ancestorRes = await tx.query<{
+        tenant_id: string;
+        id: string;
+        merged_into_id: string | null;
+        parent_organisation_id: string | null;
+      }>(
+        `SELECT tenant_id, id, merged_into_id, parent_organisation_id
+         FROM public.organisations
+         WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, cursorParentId],
+      );
+      const ancestor = ancestorRes.rows[0];
+      if (!ancestor) {
+        break;
+      }
+      this.assertRowTenant(ctx, ancestor.tenant_id, 'organisations.validateParentLinkAncestor');
+      if (ancestor.merged_into_id) {
+        break;
+      }
+      cursorParentId = ancestor.parent_organisation_id;
+    }
+  }
+
+  public async validateOrganisationParentLink(
+    ctx: TenantContext,
+    organisationId: string | null | undefined,
+    parentOrganisationId: string | null | undefined,
+  ): Promise<void> {
+    await this.withTenantReadTransaction(ctx, (tx) =>
+      this.validateOrganisationParentLinkInTx(tx, ctx, organisationId, parentOrganisationId),
+    );
+  }
+
   private async upsertOrganisationInTx<TOrg extends TenantOrganisationRecord = TenantOrganisationRecord>(
     tx: TenantSqlClient,
     ctx: TenantContext,
     org: TOrg,
   ): Promise<TOrg> {
+    if (org.parentOrganisationId && org.parentOrganisationId === org.id) {
+      const err = new Error(
+        `${ORGANISATION_PARENT_CYCLE_CODE}: Organisation "${org.id}" cannot reference itself as its parent organisation.`,
+      ) as Error & { code: string };
+      err.code = ORGANISATION_PARENT_CYCLE_CODE;
+      throw err;
+    }
     const profileJson: Record<string, unknown> = {
       recordOwnerId: org.recordOwnerId ?? null,
       recordStatusId: org.recordStatusId ?? 'record_status.active',
@@ -3449,13 +3568,119 @@ export class TenantPartyRepository extends TenantScopedRepository {
         [ctx.tenantId, survivorId, mergedId],
       );
 
+      // 12b. Reconcile negotiated client_rate_overrides (`S0-28a`):
+      //      Repoint non-overlapping merged overrides to survivor; preserve survivor on overlapping
+      //      (practice_area_id, grade_key, effective_from..effective_to) ranges and remove colliding rows.
+      const overrideRowsRes = await tx.query<{
+        tenant_id: string;
+        id: string;
+        client_type: string;
+        client_id: string;
+        practice_area_id: string | null;
+        grade_key: string;
+        effective_from_ymd: string;
+        effective_to_ymd: string | null;
+      }>(
+        `SELECT tenant_id, id, client_type, client_id, practice_area_id, grade_key,
+                TO_CHAR(effective_from, 'YYYY-MM-DD') AS effective_from_ymd,
+                TO_CHAR(effective_to, 'YYYY-MM-DD') AS effective_to_ymd
+         FROM public.client_rate_overrides
+         WHERE tenant_id = $1 AND client_id = ANY($2::text[])
+         ORDER BY CASE WHEN client_id = $3 THEN 0 ELSE 1 END, effective_from ASC, id ASC
+         FOR UPDATE`,
+        [ctx.tenantId, [survivorId, mergedId], survivorId],
+      );
+      const acceptedSurvivorOverrides: Array<{
+        practiceAreaId: string | null;
+        gradeKey: string;
+        effectiveFrom: string;
+        effectiveTo: string | null;
+      }> = [];
+      const mergedOverridesToCheck: Array<{
+        id: string;
+        practiceAreaId: string | null;
+        gradeKey: string;
+        effectiveFrom: string;
+        effectiveTo: string | null;
+      }> = [];
+      for (const row of overrideRowsRes.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'client_rate_overrides.executeMergeInTransaction');
+        const normalised = {
+          id: row.id,
+          practiceAreaId: row.practice_area_id ?? null,
+          gradeKey: row.grade_key,
+          effectiveFrom: row.effective_from_ymd,
+          effectiveTo: row.effective_to_ymd ?? null,
+        };
+        if (row.client_id === survivorId) {
+          acceptedSurvivorOverrides.push(normalised);
+        } else if (row.client_id === mergedId) {
+          mergedOverridesToCheck.push(normalised);
+        }
+      }
+
+      const repointedOverrideIds: string[] = [];
+      const droppedOverrideIds: string[] = [];
+      for (const mergedOvr of mergedOverridesToCheck) {
+        const collidesWithSurvivor = acceptedSurvivorOverrides.some(
+          (survOvr) =>
+            survOvr.practiceAreaId === mergedOvr.practiceAreaId &&
+            survOvr.gradeKey === mergedOvr.gradeKey &&
+            doEffectiveDateRangesOverlap(
+              survOvr.effectiveFrom,
+              survOvr.effectiveTo,
+              mergedOvr.effectiveFrom,
+              mergedOvr.effectiveTo,
+            ),
+        );
+        if (collidesWithSurvivor) {
+          await tx.query(
+            `DELETE FROM public.client_rate_overrides
+             WHERE tenant_id = $1 AND id = $2`,
+            [ctx.tenantId, mergedOvr.id],
+          );
+          droppedOverrideIds.push(mergedOvr.id);
+        } else {
+          await tx.query(
+            `UPDATE public.client_rate_overrides
+             SET client_id = $2,
+                 client_type = $3,
+                 updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $4`,
+            [ctx.tenantId, survivorId, recordType, mergedOvr.id],
+          );
+          acceptedSurvivorOverrides.push(mergedOvr);
+          repointedOverrideIds.push(mergedOvr.id);
+        }
+      }
+
       // 13. Record merge_history & audit_entries in the same transaction
       if (params.mergeHistory) {
         await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);
       }
-      if (params.auditEntries?.length) {
+      const extraOverrideMergeAudit: AppendTenantAuditEntryInput[] =
+        repointedOverrideIds.length > 0 || droppedOverrideIds.length > 0
+          ? [
+              {
+                recordType,
+                recordId: survivorId,
+                action: 'merge',
+                field: 'clientRateOverrides',
+                oldValue: mergedId,
+                newValue: survivorId,
+                reason: `Reconciled negotiated client rate overrides on merge of ${mergedId} into ${survivorId}: repointed [${repointedOverrideIds.join(', ') || 'none'}], superseded overlapping [${droppedOverrideIds.join(', ') || 'none'}].`,
+                byId: params.mergeHistory?.byId ?? ctx.actorId ?? 'system',
+                at: params.mergeHistory?.at ?? new Date().toISOString(),
+              },
+            ]
+          : [];
+      const combinedAuditEntries = [
+        ...(params.auditEntries ?? []),
+        ...extraOverrideMergeAudit,
+      ];
+      if (combinedAuditEntries.length > 0) {
         const auditRepo = new TenantAuditRepository();
-        await auditRepo.appendAuditEntries(ctx, params.auditEntries);
+        await auditRepo.appendAuditEntries(ctx, combinedAuditEntries);
       }
     });
   }

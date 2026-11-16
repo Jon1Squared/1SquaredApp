@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-15',
+  updated: '2026-11-16',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -48,7 +48,7 @@ The \`matterCosts.*\` settings in \`base.json\` and environment overlays supply 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
 | \`matterCosts.rateSourceMode\` | \`"pms_when_linked"\` | Active | Controls hourly rate card lookup order (\`app_table\`, \`pms_when_linked\`, or \`pms_only\`) |
-| \`matterCosts.allowMatterRateOverrides\` | \`true\` | Active | Controls whether fee earners may customise Partner, Associate, Trainee, or custom grade rates on a matter; enforced server-side in \`saveMatterRecord\` |
+| \`matterCosts.allowMatterRateOverrides\` | \`true\` | Active | Controls whether fee earners may customise Partner, Associate, Trainee, or custom grade rates on a matter (or add Tier 1 \`matter_rate_overrides\`, \`S0-28a\`); enforced server-side in \`saveMatterRecord\` and \`saveMatterRateOverrideRecord\`. Tier 2 negotiated client rates and Tier 3 parent-group rates remain active read-only baselines even when matter overrides are disabled |
 | \`matterCosts.partnerSignOffThresholdGbp\` | \`25000\` | Active | Default fee estimate / agreed cap threshold in GBP passed to \`beforeMatterCostsCalculate\` and \`beforeMatterOpen\` governance hooks |
 | \`matterCosts.vatRatePercent\` | \`20\` | Active | Standard UK VAT percentage (\`0\`–\`100\`, additive default \`20\`) captured into new quotes and matter cost snapshots and calculated in exact integer pence via \`@platform/core-api\` |
 | \`matterCosts.rateCards\` | \`[]\` | Active | Tenant-default hourly rate cards by practice area mapped into runtime \`MatterCostsConfig\` when no module override exists |

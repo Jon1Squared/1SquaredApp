@@ -183,9 +183,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeAfterFail = await runner.getActiveTables(ctx);
     expect(activeAfterFail).not.toContain('should_never_exist_table');
 
-    // Round-trip rollback 0015 -> 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
-    const activeAt0015 = await runner.getActiveTables(ctx);
-    expect(activeAt0015).toEqual(
+    // Round-trip rollback 0016 -> 0015 -> 0014 -> 0013 -> 0012 -> 0011 -> 0010 -> 0009 -> 0008 -> 0007 -> 0006 -> 0005 and re-apply
+    const activeAt0016 = await runner.getActiveTables(ctx);
+    expect(activeAt0016).toEqual(
       expect.arrayContaining([
         'people',
         'person_emails',
@@ -229,9 +229,15 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'pms_client_account_entries',
         'pms_credit_control_log',
         'job_runs',
+        'client_rate_overrides',
+        'matter_rate_overrides',
       ]),
     );
-    expect(activeAt0015).not.toContain('matter_restriction_metadata');
+    expect(activeAt0016).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0016')).toBe(true);
+    const activeAfter0016Rollback = await runner.getActiveTables(ctx);
+    expect(activeAfter0016Rollback).not.toContain('client_rate_overrides');
+    expect(activeAfter0016Rollback).not.toContain('matter_rate_overrides');
     expect(await runner.rollbackVersion(ctx, '0015')).toBe(true);
     const activeAfter0015Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0015Rollback).toContain('matter_restriction_metadata');
@@ -352,6 +358,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         'pms_client_account_entries',
         'pms_credit_control_log',
         'job_runs',
+        'client_rate_overrides',
+        'matter_rate_overrides',
       ]),
     );
   });
@@ -1047,7 +1055,11 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(colAt0015.rowCount).toBe(0);
 
-      // Roll back 0015 -> downSql recreates and back-populates both bridges and grants tenant role privileges
+      // Roll back 0016 before 0015 (since 0016 depends on 0015) -> 0015 downSql recreates and back-populates both bridges and grants tenant role privileges
+      await expect(runner.rollbackVersion(ctx, '0015')).rejects.toThrow(
+        /MIGRATION_ROLLBACK_ORDER_ERROR/,
+      );
+      expect(await runner.rollbackVersion(ctx, '0016')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0015')).toBe(true);
 
       const tableAfterDown = await client.query(
@@ -1093,9 +1105,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privCheck.rows[0]).toEqual({ has_select: true, has_insert: true });
 
-      // Re-apply 0015 -> upSql drops both bridges again
+      // Re-apply 0015 and 0016 -> upSql drops both bridges again and recreates 0016 tables
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0015']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0015', '0016']);
 
       const tableAfterReapply = await client.query(
         `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'matter_restriction_metadata'`,
@@ -1106,6 +1118,60 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'people' AND column_name = 'employment_json'`,
       );
       expect(colAfterReapply.rowCount).toBe(0);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('0016_negotiated_rates_expand applies client_rate_overrides & matter_rate_overrides with role privileges and reverses cleanly (up -> down -> up)', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'mig-rates-0016', environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext('mig-rates-0016');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      const tablesUp = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public'
+           AND table_name IN ('client_rate_overrides', 'matter_rate_overrides')
+         ORDER BY table_name ASC`,
+      );
+      expect(tablesUp.rows.map((r) => r.table_name)).toEqual([
+        'client_rate_overrides',
+        'matter_rate_overrides',
+      ]);
+
+      const privsUp = await client.query<{ cro_ins: boolean; mro_del: boolean }>(
+        `SELECT
+           has_table_privilege('role_tenant_mig_rates_0016_test', 'public.client_rate_overrides', 'INSERT') AS cro_ins,
+           has_table_privilege('role_tenant_mig_rates_0016_test', 'public.matter_rate_overrides', 'DELETE') AS mro_del`,
+      );
+      expect(privsUp.rows[0]).toEqual({ cro_ins: true, mro_del: true });
+
+      expect(await runner.rollbackVersion(ctx, '0016')).toBe(true);
+      const tablesDown = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public'
+           AND table_name IN ('client_rate_overrides', 'matter_rate_overrides')`,
+      );
+      expect(tablesDown.rowCount).toBe(0);
+
+      const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0016']);
+
+      const tablesReapplied = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public'
+           AND table_name IN ('client_rate_overrides', 'matter_rate_overrides')
+         ORDER BY table_name ASC`,
+      );
+      expect(tablesReapplied.rows.map((r) => r.table_name)).toEqual([
+        'client_rate_overrides',
+        'matter_rate_overrides',
+      ]);
     } finally {
       await client.end();
     }

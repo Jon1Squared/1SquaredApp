@@ -6,6 +6,7 @@ import {
   getAppSnapshot,
   getClientPmsViewBundle,
   listAuditEntriesForRecord,
+  listClientRateOverridesRecord,
   recordRecentlyViewed,
   withPageActor,
 } from '@/server/services';
@@ -66,6 +67,31 @@ export default async function OrganisationProfilePage({
     const pmsView =
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;
 
+    const canViewNegotiatedRates = snap.currentUserPermissions.some((p) =>
+      [
+        'finance:view',
+        'finance:view_matter',
+        'finance:credit_control',
+        'admin:access',
+      ].includes(p),
+    );
+    const canManageNegotiatedRates = snap.currentUserPermissions.some((p) =>
+      ['finance:view', 'finance:credit_control', 'admin:access'].includes(p),
+    );
+    const rateBundle = canViewNegotiatedRates
+      ? await listClientRateOverridesRecord(
+          { clientType: 'organisation', clientId: organisation.id },
+          userId,
+        )
+      : null;
+    const rateCustomGrades = Array.from(
+      new Map(
+        (snap.matterCostsConfig.rateCards ?? [])
+          .flatMap((rc) => rc.customGrades ?? [])
+          .map((cg) => [cg.id, { id: cg.id, label: cg.label }]),
+      ).values(),
+    );
+
     return (
       <OrganisationProfileClient
         organisation={organisation}
@@ -81,6 +107,20 @@ export default async function OrganisationProfilePage({
         canTakeByTaskId={snap.canTakeByTaskId}
         canViewFinance={snap.finance.canViewMatter}
         pmsView={pmsView}
+        canViewNegotiatedRates={canViewNegotiatedRates}
+        canManageNegotiatedRates={canManageNegotiatedRates}
+        clientRateOverrides={
+          rateBundle && !isActionDenied(rateBundle) ? rateBundle.overrides : []
+        }
+        parentRateChain={
+          rateBundle && !isActionDenied(rateBundle) ? rateBundle.parentChain : []
+        }
+        inheritedParentRateOverrides={
+          rateBundle && !isActionDenied(rateBundle)
+            ? rateBundle.inheritedOverrides
+            : []
+        }
+        rateCustomGrades={rateCustomGrades}
         values={snap.values}
         customFields={snap.customFields}
         notes={notes}

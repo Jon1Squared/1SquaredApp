@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import {
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  type ClientRateOverrideClientType,
   type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
@@ -132,6 +133,13 @@ import {
   saveKeyDatesConfigRecord,
   saveWorkTypesConfigRecord,
   updateMatterLifecycleStatusRecord,
+  listClientRateOverridesRecord,
+  saveClientRateOverrideRecord,
+  deleteClientRateOverrideRecord,
+  listMatterRateOverridesRecord,
+  saveMatterRateOverrideRecord,
+  deleteMatterRateOverrideRecord,
+  resolveApplicableRatesRecord,
 } from '@/server/services';
 import type {
   KeyDateCalculation,
@@ -1131,6 +1139,8 @@ export async function reviseQuoteAction(
     revisionNote?: string;
     markAsSent?: boolean;
     refreshVatRate?: boolean;
+    rateGradeKey?: string;
+    refreshRates?: boolean;
   },
 ) {
   return guardedAction('reviseQuoteAction', async ({ personId: byId }) => {
@@ -1673,6 +1683,91 @@ export async function updateMatterLifecycleStatusAction(
     const res = await updateMatterLifecycleStatusRecord(matterId, action, opts, byId);
     revalidateAll();
     return res;
+  });
+}
+
+// ------------------------------------------------------------------ Negotiated Client, Group & Matter Rate Overrides (S0-28a)
+
+export async function listClientRateOverridesAction(params: {
+  clientType: ClientRateOverrideClientType;
+  clientId: string;
+}) {
+  return guardedAction('listClientRateOverridesAction', async ({ personId: byId }) => {
+    return listClientRateOverridesRecord(params, byId);
+  });
+}
+
+export async function saveClientRateOverrideAction(input: {
+  id?: string;
+  clientType: ClientRateOverrideClientType;
+  clientId: string;
+  practiceAreaId?: string | null;
+  gradeKey: string;
+  rateGbp?: number;
+  rateMinorUnits?: number;
+  currency?: string;
+  effectiveFrom: string;
+  effectiveTo?: string | null;
+  notes?: string;
+}) {
+  return guardedAction('saveClientRateOverrideAction', async ({ personId: byId }) => {
+    const res = await saveClientRateOverrideRecord(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function deleteClientRateOverrideAction(id: string) {
+  return guardedAction('deleteClientRateOverrideAction', async ({ personId: byId }) => {
+    const res = await deleteClientRateOverrideRecord(id, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function listMatterRateOverridesAction(matterId: string) {
+  return guardedAction('listMatterRateOverridesAction', async ({ personId: byId }) => {
+    return listMatterRateOverridesRecord(matterId, byId);
+  });
+}
+
+export async function saveMatterRateOverrideAction(input: {
+  id?: string;
+  matterId: string;
+  gradeKey: string;
+  rateGbp?: number;
+  rateMinorUnits?: number;
+  currency?: string;
+  effectiveFrom: string;
+  effectiveTo?: string | null;
+  notes?: string;
+}) {
+  return guardedAction('saveMatterRateOverrideAction', async ({ personId: byId }) => {
+    const res = await saveMatterRateOverrideRecord(input, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function deleteMatterRateOverrideAction(id: string) {
+  return guardedAction('deleteMatterRateOverrideAction', async ({ personId: byId }) => {
+    const res = await deleteMatterRateOverrideRecord(id, byId);
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function resolveApplicableRatesAction(params: {
+  matterId?: string | null;
+  clientId?: string | null;
+  clientType?: ClientRateOverrideClientType | null;
+  practiceAreaId?: string | null;
+  asAtDate?: string | null;
+  rateCardId?: string | null;
+  preferredSource?: 'auto' | 'app_table' | 'pms';
+}) {
+  return guardedAction('resolveApplicableRatesAction', async ({ personId: byId }) => {
+    return resolveApplicableRatesRecord(params, byId);
   });
 }
 

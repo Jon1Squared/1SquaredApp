@@ -1,6 +1,12 @@
 import { notFound } from 'next/navigation';
 import { QuoteDetailClient } from '@/components/QuoteDetailClient';
-import { getAppSnapshot, recordRecentlyViewed, withPageActor } from '@/server/services';
+import { isActionDenied } from '@/domain/actionResult';
+import {
+  getAppSnapshot,
+  recordRecentlyViewed,
+  resolveApplicableRatesRecord,
+  withPageActor,
+} from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,9 +30,27 @@ export default async function QuoteDetailPage({
 
     await recordRecentlyViewed(userId, quote.id);
 
+    const rateClientId = quote.linkedOrganisationId ?? quote.linkedPersonId ?? null;
+    const rateClientType = quote.linkedOrganisationId
+      ? 'organisation'
+      : quote.linkedPersonId
+        ? 'person'
+        : null;
+    const ratesRes = await resolveApplicableRatesRecord(
+      {
+        clientId: rateClientId,
+        clientType: rateClientType,
+        practiceAreaId: quote.practiceAreaId,
+      },
+      userId,
+    );
+
     return (
       <QuoteDetailClient
         quote={quote}
+        initialResolvedRates={
+          ratesRes && !isActionDenied(ratesRes) ? (ratesRes.resolved ?? null) : null
+        }
         enquiries={snap.enquiries}
         matters={snap.matters}
         people={snap.people}

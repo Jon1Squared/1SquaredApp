@@ -1,10 +1,17 @@
 'use client';
 
-import React, { useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Building2, Link2, Plus, Search, Trash2, User, X } from 'lucide-react';
-import { reviseQuoteAction, saveQuoteAction } from '@/app/actions';
+import { Building2, Link2, Plus, RefreshCw, Search, Trash2, User, X } from 'lucide-react';
+import type { ResolvedApplicableRatesResult } from '@platform/core-api';
+import {
+  resolveApplicableRatesAction,
+  reviseQuoteAction,
+  saveQuoteAction,
+} from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
+import { formatRateTierBadgeLabel } from '@/domain/matterCosts';
 import { addDays, toIsoDate } from '@/domain/dates';
 import {
   detectPreliminaryConflicts,
@@ -51,6 +58,7 @@ interface Props {
   mode: 'new' | 'edit' | 'revise';
   existing?: Quote | null;
   initialEnquiry?: Enquiry | null;
+  initialResolvedRates?: ResolvedApplicableRatesResult | null;
   enquiries: Enquiry[];
   matters?: Matter[];
   people: Person[];
@@ -80,6 +88,7 @@ export function QuoteFormClient({
   mode,
   existing = null,
   initialEnquiry = null,
+  initialResolvedRates = null,
   enquiries,
   matters = [],
   people,
@@ -236,12 +245,96 @@ export function QuoteFormClient({
   const [feeAmountStr, setFeeAmountStr] = useState<string>(() =>
     existing ? String(existing.feeAmountExVat) : '',
   );
+  const [rateGradeKey, setRateGradeKey] = useState<string>(
+    () => existing?.rateGradeKey ?? 'associate',
+  );
+  const [resolvedRates, setResolvedRates] = useState<ResolvedApplicableRatesResult | null>(
+    () => initialResolvedRates,
+  );
+  const [refreshRates, setRefreshRates] = useState<boolean>(() => mode !== 'edit');
+  const [hourlyRateManuallyEdited, setHourlyRateManuallyEdited] = useState<boolean>(
+    () => mode === 'edit' && existing?.rateSource === 'custom_override',
+  );
   const [hourlyRateStr, setHourlyRateStr] = useState<string>(() => {
     if (existing?.hourlyRateGbp) return String(existing.hourlyRateGbp);
+    const initialFromRates =
+      initialResolvedRates?.grades?.[existing?.rateGradeKey ?? 'associate']?.rateGbp ??
+      initialResolvedRates?.associateRateGbp;
+    if (initialFromRates && initialFromRates > 0) return String(initialFromRates);
     const currentEmp = people.find((p) => p.id === (existing?.feeEarnerId ?? currentUserId));
     const rate = currentEmp?.employment?.feeEarner?.chargeOutRateGbp ?? null;
     return rate ? String(rate) : '320';
   });
+
+  const targetRateClientId = linkedOrganisationId ?? linkedPersonId ?? null;
+  const targetRateClientType = linkedOrganisationId
+    ? ('organisation' as const)
+    : linkedPersonId
+      ? ('person' as const)
+      : null;
+  const prevRateLookupKeyRef = useRef<string>(
+    `${targetRateClientId ?? ''}::${practiceAreaId}`,
+  );
+
+  useEffect(() => {
+    const key = `${targetRateClientId ?? ''}::${practiceAreaId}`;
+    if (prevRateLookupKeyRef.current === key) return;
+    prevRateLookupKeyRef.current = key;
+    if (mode === 'edit' && !refreshRates) return;
+    let cancelled = false;
+    void resolveApplicableRatesAction({
+      clientId: targetRateClientId,
+      clientType: targetRateClientType,
+      practiceAreaId: practiceAreaId || null,
+    }).then((res) => {
+      if (cancelled || isActionDenied(res) || !res.resolved) return;
+      setResolvedRates(res.resolved);
+      if (!hourlyRateManuallyEdited) {
+        const gradeRate =
+          res.resolved.grades?.[rateGradeKey]?.rateGbp ?? res.resolved.associateRateGbp;
+        if (gradeRate > 0) {
+          setHourlyRateStr(String(gradeRate));
+        }
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    targetRateClientId,
+    targetRateClientType,
+    practiceAreaId,
+    mode,
+    refreshRates,
+    hourlyRateManuallyEdited,
+    rateGradeKey,
+  ]);
+
+  const applyResolvedRateForGrade = (nextGradeKey: string) => {
+    setRateGradeKey(nextGradeKey);
+    const gradeRes = resolvedRates?.grades?.[nextGradeKey];
+    if (gradeRes && gradeRes.rateGbp > 0) {
+      setHourlyRateStr(String(gradeRes.rateGbp));
+      setHourlyRateManuallyEdited(false);
+    }
+  };
+
+  const refreshApplicableQuoteRates = async () => {
+    const res = await resolveApplicableRatesAction({
+      clientId: targetRateClientId,
+      clientType: targetRateClientType,
+      practiceAreaId: practiceAreaId || null,
+    });
+    if (isActionDenied(res) || !res.resolved) return;
+    setResolvedRates(res.resolved);
+    setRefreshRates(true);
+    setHourlyRateManuallyEdited(false);
+    const gradeRate =
+      res.resolved.grades?.[rateGradeKey]?.rateGbp ?? res.resolved.associateRateGbp;
+    if (gradeRate > 0) {
+      setHourlyRateStr(String(gradeRate));
+    }
+  };
 
   const feeAmountNum = useMemo(
     () => roundCurrency(Math.max(0, Number(feeAmountStr) || 0)),
@@ -855,6 +948,8 @@ export function QuoteFormClient({
           revisionNote,
           markAsSent,
           refreshVatRate,
+          rateGradeKey,
+          refreshRates,
         });
         if (res.error || !res.quote) {
           showToast(res.error ?? 'Failed to revise quote');
@@ -899,6 +994,8 @@ export function QuoteFormClient({
           validUntil,
           feeEarnerId,
           followUpAfterDays: Math.max(1, Number(followUpAfterDaysStr) || 7),
+          rateGradeKey,
+          refreshRates,
         },
         {
           id: existing?.id,
@@ -1502,20 +1599,101 @@ export function QuoteFormClient({
               </div>
 
               {feeBasis === 'Hourly rate with estimate' ? (
-                <div className="field-group">
-                  <label className="field-label" htmlFor="qte-hourly-rate">
-                    Hourly rate (£/hr ex VAT)
-                  </label>
-                  <input
-                    id="qte-hourly-rate"
-                    type="number"
-                    min="0"
-                    step="10"
-                    className="field-input"
-                    value={hourlyRateStr}
-                    onChange={(e) => setHourlyRateStr(e.target.value)}
-                  />
-                </div>
+                <>
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="qte-rate-grade">
+                      Rate grade
+                    </label>
+                    <select
+                      id="qte-rate-grade"
+                      className="field-select"
+                      value={rateGradeKey}
+                      onChange={(e) => applyResolvedRateForGrade(e.target.value)}
+                    >
+                      <option value="partner">Partner</option>
+                      <option value="associate">Associate</option>
+                      <option value="trainee">Trainee</option>
+                      {(resolvedRates?.customGrades ?? []).map((cg) => (
+                        <option key={cg.id} value={cg.id}>
+                          {cg.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="field-group">
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 6,
+                      }}
+                    >
+                      <label className="field-label" htmlFor="qte-hourly-rate">
+                        Hourly rate (£/hr ex VAT)
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        style={{ fontSize: 11, padding: '0 4px', minHeight: 18 }}
+                        onClick={() => void refreshApplicableQuoteRates()}
+                      >
+                        <RefreshCw size={11} aria-hidden="true" />
+                        <span>Apply hierarchy rate</span>
+                      </button>
+                    </div>
+                    <input
+                      id="qte-hourly-rate"
+                      type="number"
+                      min="0"
+                      step="10"
+                      className="field-input"
+                      value={hourlyRateStr}
+                      onChange={(e) => {
+                        setHourlyRateManuallyEdited(true);
+                        setHourlyRateStr(e.target.value);
+                      }}
+                    />
+                    {(() => {
+                      const activeGradeRes = resolvedRates?.grades?.[rateGradeKey];
+                      const activeTier =
+                        mode === 'edit' && !refreshRates
+                          ? existing?.rateTier
+                          : hourlyRateManuallyEdited
+                            ? undefined
+                            : (activeGradeRes?.tier ?? resolvedRates?.dominantTier);
+                      const activeSource =
+                        mode === 'edit' && !refreshRates
+                          ? existing?.rateSource
+                          : hourlyRateManuallyEdited
+                            ? 'custom_override'
+                            : (activeGradeRes?.source ?? resolvedRates?.dominantSource);
+                      const parentName =
+                        activeGradeRes?.inheritedFromParentOrganisationName ??
+                        Object.values(
+                          (mode === 'edit' && !refreshRates
+                            ? existing?.rateProvenanceByGrade
+                            : resolvedRates?.grades) ?? {},
+                        ).find((g) => g.tier === 3 && g.inheritedFromParentOrganisationName)
+                          ?.inheritedFromParentOrganisationName;
+                      return activeSource ? (
+                        <div style={{ marginTop: 4 }}>
+                          <StatusPill
+                            label={formatRateTierBadgeLabel(activeTier, activeSource, parentName)}
+                            tone={
+                              activeTier === 2 || activeTier === 3
+                                ? 'positive'
+                                : activeSource === 'custom_override'
+                                  ? 'warning'
+                                  : 'neutral'
+                            }
+                          />
+                        </div>
+                      ) : null;
+                    })()}
+                  </div>
+                </>
               ) : null}
 
               <div className="field-group">
