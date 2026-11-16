@@ -21,6 +21,7 @@ import {
   TenantMatterRepository,
   TenantPartyRepository,
   TenantPmsRepository,
+  TenantRateOverrideRepository,
   TenantTaskWorkflowRepository,
   type FirmAuditEntryInput,
   type MatterRestrictionMetadata,
@@ -57,6 +58,7 @@ import { createSeedStore, type FirmStore } from '@/seed/seedStoreBuilder';
 
 export type ImportableStoreModule =
   | 'parties'
+  | 'rate-overrides'
   | 'matters'
   | 'intake'
   | 'quotes'
@@ -71,6 +73,7 @@ export type ImportableStoreModule =
 
 export const ALL_IMPORTABLE_MODULES: readonly ImportableStoreModule[] = [
   'parties',
+  'rate-overrides',
   'matters',
   'intake',
   'quotes',
@@ -228,6 +231,19 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     await intakeQuoteRepo.clearTenantData(ctx, {
       includeEnquiries: modules.includes('intake'),
       includeQuotes: modules.includes('quotes'),
+    });
+  }
+  if (
+    modules.includes('matters') ||
+    modules.includes('parties') ||
+    modules.includes('rate-overrides')
+  ) {
+    const rateOverrideRepo = new TenantRateOverrideRepository();
+    await rateOverrideRepo.clearTenantData(ctx, {
+      includeClientOverrides:
+        modules.includes('parties') || modules.includes('rate-overrides'),
+      includeMatterOverrides:
+        modules.includes('matters') || modules.includes('rate-overrides'),
     });
   }
   if (modules.includes('matters')) {

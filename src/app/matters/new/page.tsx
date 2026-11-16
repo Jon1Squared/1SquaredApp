@@ -1,6 +1,12 @@
 import React from 'react';
 import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
-import { getAppSnapshot, withPageActor } from '@/server/services';
+import { isActionDenied } from '@/domain/actionResult';
+import {
+  getAppSnapshot,
+  listMatterRateOverridesRecord,
+  resolveApplicableRatesRecord,
+  withPageActor,
+} from '@/server/services';
 import { MatterFormClient } from '@/components/MatterFormClient';
 
 export const dynamic = 'force-dynamic';
@@ -32,6 +38,34 @@ export default async function NewMatterPage({
     const draftMatter = params.draftId
       ? snap.matters.find((m) => m.id === params.draftId) ?? null
       : null;
+    const rateClientId =
+      draftMatter?.clientId ??
+      params.clientId ??
+      initialQuote?.linkedOrganisationId ??
+      initialQuote?.linkedPersonId ??
+      null;
+    const ratePracticeAreaId =
+      draftMatter?.practiceAreaId ?? initialQuote?.practiceAreaId ?? null;
+    const [initialRatesRes, matterRateOverridesRes] = await Promise.all([
+      rateClientId || ratePracticeAreaId || draftMatter?.id
+        ? resolveApplicableRatesRecord(
+            {
+              matterId: draftMatter?.id ?? null,
+              clientId: rateClientId,
+              clientType: rateClientId?.startsWith('O-')
+                ? 'organisation'
+                : rateClientId
+                  ? 'person'
+                  : null,
+              practiceAreaId: ratePracticeAreaId,
+            },
+            actor.personId,
+          )
+        : Promise.resolve(null),
+      draftMatter?.id
+        ? listMatterRateOverridesRecord(draftMatter.id, actor.personId)
+        : Promise.resolve(null),
+    ]);
     return (
       <MatterFormClient
         existing={draftMatter}
@@ -45,6 +79,16 @@ export default async function NewMatterPage({
           initialQuote?.conflictDecision?.warnings ??
             initialEnquiry?.conflictDecision?.warnings,
         )}
+        initialResolvedRates={
+          initialRatesRes && !isActionDenied(initialRatesRes)
+            ? (initialRatesRes.resolved ?? null)
+            : null
+        }
+        initialMatterRateOverrides={
+          matterRateOverridesRes && !isActionDenied(matterRateOverridesRes)
+            ? matterRateOverridesRes.overrides
+            : []
+        }
         activeViewingRole={snap.activeViewingRole}
         people={snap.people}
         organisations={snap.organisations}

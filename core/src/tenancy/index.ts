@@ -42,6 +42,7 @@ export * from './hrRbacRepository';
 export * from './catalogueRepository';
 export * from './pmsRepository';
 export * from './jobRunRepository';
+export * from './rateOverrideRepository';
 
 export {
   isEntraMfaVerified,

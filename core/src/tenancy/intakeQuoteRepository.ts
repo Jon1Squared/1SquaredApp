@@ -18,6 +18,9 @@
 
 import type {
   FirmAuditEntryInput as AppendTenantAuditEntryInput,
+  GradeRateResolution,
+  ResolvedRateSource,
+  ResolvedRateTier,
   TenantContext,
 } from '../api/index';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
@@ -215,6 +218,13 @@ export interface TenantQuoteVersionSnapshotRecord {
   capturedAt?: string;
   byId: string;
   revisionNote?: string;
+  rateSource?: ResolvedRateSource | 'custom_override';
+  rateTier?: ResolvedRateTier;
+  rateAsAtDate?: string;
+  rateCardId?: string | null;
+  rateCardName?: string | null;
+  rateGradeKey?: string;
+  rateProvenanceByGrade?: Record<string, GradeRateResolution>;
 }
 
 export interface TenantQuoteTimelineEventRecord {
@@ -261,6 +271,13 @@ export interface TenantQuoteRecord {
   disbursements: TenantQuoteDisbursementRecord[];
   totalIncVat: number;
   capturedAt?: string;
+  rateSource?: ResolvedRateSource | 'custom_override';
+  rateTier?: ResolvedRateTier;
+  rateAsAtDate?: string;
+  rateCardId?: string | null;
+  rateCardName?: string | null;
+  rateGradeKey?: string;
+  rateProvenanceByGrade?: Record<string, GradeRateResolution>;
   feeEarnerId: string;
   assignedTeamId: string | null;
   validUntil: string;
@@ -622,6 +639,37 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
     totalIncVat: Number(row.total_inc_vat_gbp ?? profile.totalIncVat ?? 0),
     ...((pricing.capturedAt ?? profile.capturedAt)
       ? { capturedAt: String(pricing.capturedAt ?? profile.capturedAt) }
+      : {}),
+    ...((pricing.rateSource ?? profile.rateSource)
+      ? {
+          rateSource: (pricing.rateSource ?? profile.rateSource) as TenantQuoteRecord['rateSource'],
+        }
+      : {}),
+    ...(typeof (pricing.rateTier ?? profile.rateTier) === 'number'
+      ? { rateTier: (pricing.rateTier ?? profile.rateTier) as ResolvedRateTier }
+      : {}),
+    ...((pricing.rateAsAtDate ?? profile.rateAsAtDate)
+      ? { rateAsAtDate: String(pricing.rateAsAtDate ?? profile.rateAsAtDate) }
+      : {}),
+    ...((pricing.rateCardId ?? profile.rateCardId) !== undefined
+      ? {
+          rateCardId: (pricing.rateCardId ?? profile.rateCardId ?? null) as string | null,
+        }
+      : {}),
+    ...((pricing.rateCardName ?? profile.rateCardName) !== undefined
+      ? {
+          rateCardName: (pricing.rateCardName ?? profile.rateCardName ?? null) as string | null,
+        }
+      : {}),
+    ...((pricing.rateGradeKey ?? profile.rateGradeKey)
+      ? { rateGradeKey: String(pricing.rateGradeKey ?? profile.rateGradeKey) }
+      : {}),
+    ...((pricing.rateProvenanceByGrade ?? profile.rateProvenanceByGrade)
+      ? {
+          rateProvenanceByGrade: structuredClone(
+            pricing.rateProvenanceByGrade ?? profile.rateProvenanceByGrade,
+          ) as Record<string, GradeRateResolution>,
+        }
       : {}),
     feeEarnerId: row.prepared_by_id ?? profile.feeEarnerId ?? '',
     assignedTeamId:
@@ -1381,6 +1429,15 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       vatOverridden: Boolean(quote.vatOverridden),
       disbursements: quote.disbursements ?? [],
       ...(quote.capturedAt ? { capturedAt: quote.capturedAt } : {}),
+      ...(quote.rateSource ? { rateSource: quote.rateSource } : {}),
+      ...(typeof quote.rateTier === 'number' ? { rateTier: quote.rateTier } : {}),
+      ...(quote.rateAsAtDate ? { rateAsAtDate: quote.rateAsAtDate } : {}),
+      ...(quote.rateCardId !== undefined ? { rateCardId: quote.rateCardId } : {}),
+      ...(quote.rateCardName !== undefined ? { rateCardName: quote.rateCardName } : {}),
+      ...(quote.rateGradeKey ? { rateGradeKey: quote.rateGradeKey } : {}),
+      ...(quote.rateProvenanceByGrade
+        ? { rateProvenanceByGrade: quote.rateProvenanceByGrade }
+        : {}),
     };
 
     await tx.query(

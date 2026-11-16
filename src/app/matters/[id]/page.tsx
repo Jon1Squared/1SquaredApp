@@ -6,7 +6,9 @@ import {
   getMatterKeyDatesSnapshot,
   getMatterPmsViewBundle,
   listAuditEntriesForRecord,
+  listMatterRateOverridesRecord,
   recordRecentlyViewed,
+  resolveApplicableRatesRecord,
   withPageActor,
 } from '@/server/services';
 import { MatterFormClient } from '@/components/MatterFormClient';
@@ -44,6 +46,22 @@ export default async function MatterProfilePage({
         : snap.enquiries.find(
             (e) => e.convertedMatterId === matter.id || e.id === linkedQuote?.linkedEnquiryId,
           ) ?? null;
+      const [initialRatesRes, matterRateOverridesRes] = await Promise.all([
+        resolveApplicableRatesRecord(
+          {
+            matterId: matter.id,
+            clientId: matter.clientId || null,
+            clientType: snap.organisations.some((o) => o.id === matter.clientId)
+              ? 'organisation'
+              : matter.clientId
+                ? 'person'
+                : null,
+            practiceAreaId: matter.practiceAreaId || null,
+          },
+          userId,
+        ),
+        listMatterRateOverridesRecord(matter.id, userId),
+      ]);
       return (
         <MatterFormClient
           existing={matter}
@@ -51,6 +69,16 @@ export default async function MatterProfilePage({
           initialQuote={linkedQuote}
           isReopenedDraft={
             matter.matterNumber === 'DRAFT' || matter.conflictCheckStatus === 'Draft'
+          }
+          initialResolvedRates={
+            initialRatesRes && !isActionDenied(initialRatesRes)
+              ? (initialRatesRes.resolved ?? null)
+              : null
+          }
+          initialMatterRateOverrides={
+            matterRateOverridesRes && !isActionDenied(matterRateOverridesRes)
+              ? matterRateOverridesRes.overrides
+              : []
           }
           activeViewingRole={snap.activeViewingRole}
           people={snap.people}

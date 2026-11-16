@@ -25,8 +25,16 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import type { ClientPmsViewBundle } from '@/server/services';
+import type {
+  ClientRateOverrideRecord,
+  ParentChainNodeSummary,
+} from '@platform/core-api';
+import type {
+  ClientPmsViewBundle,
+  InheritedParentRateOverrideView,
+} from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { ClientRateOverridesPanel } from './ClientRateOverridesPanel';
 import { DocumentListSection } from './DocumentListSection';
 import {
   AuditAndMergeSection,
@@ -71,6 +79,12 @@ interface Props {
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
   pmsView?: ClientPmsViewBundle;
+  canViewNegotiatedRates?: boolean;
+  canManageNegotiatedRates?: boolean;
+  clientRateOverrides?: ClientRateOverrideRecord[];
+  parentRateChain?: ParentChainNodeSummary[];
+  inheritedParentRateOverrides?: InheritedParentRateOverrideView[];
+  rateCustomGrades?: Array<{ id: string; label: string }>;
   values: ChoiceValue[];
   customFields: CustomFieldDefinition[];
   notes: Note[];
@@ -176,6 +190,12 @@ export function OrganisationProfileClient({
   canTakeByTaskId,
   canViewFinance = false,
   pmsView,
+  canViewNegotiatedRates = false,
+  canManageNegotiatedRates = false,
+  clientRateOverrides = [],
+  parentRateChain = [],
+  inheritedParentRateOverrides = [],
+  rateCustomGrades = [],
   values,
   customFields,
   notes,
@@ -1779,64 +1799,80 @@ export function OrganisationProfileClient({
 
       {/* ===================== TAB: COMPLIANCE & BILLING ===================== */}
       {tab === 'compliance' && (
-        <section className="home-panel">
-          <div className="panel-header">
-            <div className="panel-title-group">
-              <h2 className="panel-title">Compliance, due diligence &amp; billing</h2>
+        <>
+          <section className="home-panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2 className="panel-title">Compliance, due diligence &amp; billing</h2>
+              </div>
             </div>
-          </div>
-          <div className="panel-body padded">
-            <div className="kv-grid">
-              <KeyValue label="Client or supplier reference">
-                {organisation.clientReference}
-              </KeyValue>
-              <KeyValue label="Onboarding status">
-                {resolveLabel(values, organisation.onboardingStatusId)}
-              </KeyValue>
-              <KeyValue label="Conflict check status">
-                {resolveLabel(values, organisation.conflictStatusId)}
-              </KeyValue>
-              <KeyValue label="Conflict check reference">
-                {organisation.conflictReference}
-              </KeyValue>
-              <KeyValue label="Risk rating">
-                {resolveLabel(values, organisation.riskRatingId)}
-              </KeyValue>
-              <KeyValue label="Risk assessment status">
-                {resolveLabel(values, organisation.riskAssessmentStatusId)}
-              </KeyValue>
-              <KeyValue label="Due diligence / verification status">
-                {resolveLabel(values, organisation.verificationStatusId)}
-              </KeyValue>
-              <KeyValue label="Last verified">
-                {formatDate(organisation.lastVerifiedAt)}
-              </KeyValue>
-              <KeyValue label="Billing address" full>
-                {formatAddress(organisation.billingAddress, values)}
-              </KeyValue>
-              <KeyValue label="Invoice preferences">
-                {resolveLabel(values, organisation.invoicePreferenceId)}
-              </KeyValue>
-              <KeyValue label="Payment terms">
-                {resolveLabel(values, organisation.paymentTermsId)}
-              </KeyValue>
-              <KeyValue label="Credit control notes" full>
-                {organisation.creditControlNotes}
-              </KeyValue>
-              <KeyValue label="Engagement terms & document reference" full>
-                {organisation.engagementTermsRef}
-              </KeyValue>
-              <KeyValue label="Review date">{formatDate(organisation.reviewDate)}</KeyValue>
-              <KeyValue label="Reviewer">
-                {organisation.reviewerId ? (
-                  <Link href={`/people/${organisation.reviewerId}`}>
-                    {nameById[organisation.reviewerId] ?? organisation.reviewerId}
-                  </Link>
-                ) : null}
-              </KeyValue>
+            <div className="panel-body padded">
+              <div className="kv-grid">
+                <KeyValue label="Client or supplier reference">
+                  {organisation.clientReference}
+                </KeyValue>
+                <KeyValue label="Onboarding status">
+                  {resolveLabel(values, organisation.onboardingStatusId)}
+                </KeyValue>
+                <KeyValue label="Conflict check status">
+                  {resolveLabel(values, organisation.conflictStatusId)}
+                </KeyValue>
+                <KeyValue label="Conflict check reference">
+                  {organisation.conflictReference}
+                </KeyValue>
+                <KeyValue label="Risk rating">
+                  {resolveLabel(values, organisation.riskRatingId)}
+                </KeyValue>
+                <KeyValue label="Risk assessment status">
+                  {resolveLabel(values, organisation.riskAssessmentStatusId)}
+                </KeyValue>
+                <KeyValue label="Due diligence / verification status">
+                  {resolveLabel(values, organisation.verificationStatusId)}
+                </KeyValue>
+                <KeyValue label="Last verified">
+                  {formatDate(organisation.lastVerifiedAt)}
+                </KeyValue>
+                <KeyValue label="Billing address" full>
+                  {formatAddress(organisation.billingAddress, values)}
+                </KeyValue>
+                <KeyValue label="Invoice preferences">
+                  {resolveLabel(values, organisation.invoicePreferenceId)}
+                </KeyValue>
+                <KeyValue label="Payment terms">
+                  {resolveLabel(values, organisation.paymentTermsId)}
+                </KeyValue>
+                <KeyValue label="Credit control notes" full>
+                  {organisation.creditControlNotes}
+                </KeyValue>
+                <KeyValue label="Engagement terms & document reference" full>
+                  {organisation.engagementTermsRef}
+                </KeyValue>
+                <KeyValue label="Review date">{formatDate(organisation.reviewDate)}</KeyValue>
+                <KeyValue label="Reviewer">
+                  {organisation.reviewerId ? (
+                    <Link href={`/people/${organisation.reviewerId}`}>
+                      {nameById[organisation.reviewerId] ?? organisation.reviewerId}
+                    </Link>
+                  ) : null}
+                </KeyValue>
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
+
+          {canViewNegotiatedRates ? (
+            <ClientRateOverridesPanel
+              clientType="organisation"
+              clientId={organisation.id}
+              clientLabel={organisation.legalName}
+              values={values}
+              customGrades={rateCustomGrades}
+              canManage={canManageNegotiatedRates}
+              initialOverrides={clientRateOverrides}
+              initialParentChain={parentRateChain}
+              initialInheritedOverrides={inheritedParentRateOverrides}
+            />
+          ) : null}
+        </>
       )}
 
       {/* ===================== TAB: DOCUMENTS ===================== */}

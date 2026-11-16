@@ -1801,4 +1801,5 @@ export interface FirmAuditPageResult {
 }
 
 export * from '../domain/money/index';
+export * from '../domain/costs/index';
 

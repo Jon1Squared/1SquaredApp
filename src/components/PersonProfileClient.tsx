@@ -46,8 +46,10 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
+import type { ClientRateOverrideRecord } from '@platform/core-api';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { ClientRateOverridesPanel } from './ClientRateOverridesPanel';
 import { DocumentListSection } from './DocumentListSection';
 import {
   AuditAndMergeSection,
@@ -93,6 +95,10 @@ interface Props {
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
   pmsView?: ClientPmsViewBundle;
+  canViewNegotiatedRates?: boolean;
+  canManageNegotiatedRates?: boolean;
+  clientRateOverrides?: ClientRateOverrideRecord[];
+  rateCustomGrades?: Array<{ id: string; label: string }>;
   values: ChoiceValue[];
   customFields: CustomFieldDefinition[];
   notes: Note[];
@@ -164,6 +170,10 @@ export function PersonProfileClient({
   canTakeByTaskId,
   canViewFinance = false,
   pmsView,
+  canViewNegotiatedRates = false,
+  canManageNegotiatedRates = false,
+  clientRateOverrides = [],
+  rateCustomGrades = [],
   values,
   customFields,
   notes,
@@ -1936,6 +1946,7 @@ export function PersonProfileClient({
       )}
 
       {tab === 'compliance' && (
+        <>
           <div className="client-card">
             <div className="kv-grid">
               <KeyValue label="Able to act">{ableToAct ? 'Yes' : 'No'}</KeyValue>
@@ -1955,7 +1966,19 @@ export function PersonProfileClient({
               </KeyValue>
             </div>
           </div>
-        )}
+          {canViewNegotiatedRates ? (
+            <ClientRateOverridesPanel
+              clientType="person"
+              clientId={person.id}
+              clientLabel={personFullName(person)}
+              values={values}
+              customGrades={rateCustomGrades}
+              canManage={canManageNegotiatedRates}
+              initialOverrides={clientRateOverrides}
+            />
+          ) : null}
+        </>
+      )}
 
         {tab === 'documents' && (
         <DocumentListSection
@@ -2880,33 +2903,46 @@ export function PersonProfileClient({
       )}
 
       {tab === 'compliance' && (
-        <div className="kv-grid">
-          <KeyValue label="Contact record status">
-            {resolveLabel(values, person.recordStatusId)}
-          </KeyValue>
-          <KeyValue label="Duplicate status">
-            {resolveLabel(values, person.duplicateStatusId)}
-          </KeyValue>
-          <KeyValue label="Client ID verification status">
-            {resolveLabel(values, person.verificationStatusId)}
-          </KeyValue>
-          <KeyValue label="Verification date">{formatDate(person.verifiedAt)}</KeyValue>
-          <KeyValue label="Verification method">
-            {resolveLabel(values, person.verificationMethodId)}
-          </KeyValue>
-          <KeyValue label="Verification reviewer">
-            {person.verificationReviewerId ? (
-              <Link href={`/people/${person.verificationReviewerId}`}>
-                {nameById[person.verificationReviewerId] ?? person.verificationReviewerId}
-              </Link>
-            ) : null}
-          </KeyValue>
-          <KeyValue label="Risk assessment / due diligence references" full>
-            {person.riskReferences}
-          </KeyValue>
-          <KeyValue label="Data source">{resolveLabel(values, person.sourceId)}</KeyValue>
-          <KeyValue label="Last verified date">{formatDate(person.lastVerifiedAt)}</KeyValue>
-        </div>
+        <>
+          <div className="kv-grid">
+            <KeyValue label="Contact record status">
+              {resolveLabel(values, person.recordStatusId)}
+            </KeyValue>
+            <KeyValue label="Duplicate status">
+              {resolveLabel(values, person.duplicateStatusId)}
+            </KeyValue>
+            <KeyValue label="Client ID verification status">
+              {resolveLabel(values, person.verificationStatusId)}
+            </KeyValue>
+            <KeyValue label="Verification date">{formatDate(person.verifiedAt)}</KeyValue>
+            <KeyValue label="Verification method">
+              {resolveLabel(values, person.verificationMethodId)}
+            </KeyValue>
+            <KeyValue label="Verification reviewer">
+              {person.verificationReviewerId ? (
+                <Link href={`/people/${person.verificationReviewerId}`}>
+                  {nameById[person.verificationReviewerId] ?? person.verificationReviewerId}
+                </Link>
+              ) : null}
+            </KeyValue>
+            <KeyValue label="Risk assessment / due diligence references" full>
+              {person.riskReferences}
+            </KeyValue>
+            <KeyValue label="Data source">{resolveLabel(values, person.sourceId)}</KeyValue>
+            <KeyValue label="Last verified date">{formatDate(person.lastVerifiedAt)}</KeyValue>
+          </div>
+          {canViewNegotiatedRates ? (
+            <ClientRateOverridesPanel
+              clientType="person"
+              clientId={person.id}
+              clientLabel={personFullName(person)}
+              values={values}
+              customGrades={rateCustomGrades}
+              canManage={canManageNegotiatedRates}
+              initialOverrides={clientRateOverrides}
+            />
+          ) : null}
+        </>
       )}
 
       {tab === 'documents' && (

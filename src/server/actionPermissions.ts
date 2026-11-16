@@ -618,6 +618,86 @@ export const ACTION_PERMISSIONS = {
     key: 'finance:credit_control',
     enforcedBy: 'action',
   },
+
+  // S0-28a: Negotiated client, parent-group & matter rate overrides (7)
+  listClientRateOverridesAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'finance:view',
+        'finance:view_matter',
+        'finance:credit_control',
+        'admin:access',
+      ],
+    },
+    enforcedBy: 'action',
+  },
+  saveClientRateOverrideAction: {
+    kind: 'permission',
+    key: { anyOf: ['finance:view', 'finance:credit_control', 'admin:access'] },
+    enforcedBy: 'action',
+  },
+  deleteClientRateOverrideAction: {
+    kind: 'permission',
+    key: { anyOf: ['finance:view', 'finance:credit_control', 'admin:access'] },
+    enforcedBy: 'action',
+  },
+  listMatterRateOverridesAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'finance:view',
+        'finance:view_matter',
+        'finance:credit_control',
+        'admin:access',
+        'matter:costs:sign_off',
+      ],
+    },
+    enforcedBy: 'action',
+  },
+  saveMatterRateOverrideAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'matter:create',
+        'matter:edit',
+        'matter:costs:sign_off',
+        'finance:view',
+        'finance:credit_control',
+        'admin:access',
+      ],
+    },
+    enforcedBy: 'action',
+  },
+  deleteMatterRateOverrideAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'matter:create',
+        'matter:edit',
+        'matter:costs:sign_off',
+        'finance:view',
+        'finance:credit_control',
+        'admin:access',
+      ],
+    },
+    enforcedBy: 'action',
+  },
+  resolveApplicableRatesAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'finance:view',
+        'finance:view_matter',
+        'finance:credit_control',
+        'admin:access',
+        'quote:view',
+        'quote:edit',
+        'matter:edit',
+      ],
+    },
+    enforcedBy: 'action',
+  },
 } as const satisfies Record<string, ActionPolicy>;
 
 export type RegisteredActionName = keyof typeof ACTION_PERMISSIONS;

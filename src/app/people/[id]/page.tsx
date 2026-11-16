@@ -6,6 +6,7 @@ import {
   getAppSnapshot,
   getClientPmsViewBundle,
   listAuditEntriesForRecord,
+  listClientRateOverridesRecord,
   recordRecentlyViewed,
   withPageActor,
   type ClientPmsViewBundle,
@@ -82,6 +83,31 @@ export default async function PersonProfilePage({
       }
     }
 
+    const canViewNegotiatedRates = snap.currentUserPermissions.some((p) =>
+      [
+        'finance:view',
+        'finance:view_matter',
+        'finance:credit_control',
+        'admin:access',
+      ].includes(p),
+    );
+    const canManageNegotiatedRates = snap.currentUserPermissions.some((p) =>
+      ['finance:view', 'finance:credit_control', 'admin:access'].includes(p),
+    );
+    const rateBundle = canViewNegotiatedRates
+      ? await listClientRateOverridesRecord(
+          { clientType: 'person', clientId: person.id },
+          userId,
+        )
+      : null;
+    const rateCustomGrades = Array.from(
+      new Map(
+        (snap.matterCostsConfig.rateCards ?? [])
+          .flatMap((rc) => rc.customGrades ?? [])
+          .map((cg) => [cg.id, { id: cg.id, label: cg.label }]),
+      ).values(),
+    );
+
     return (
       <PersonProfileClient
         person={person}
@@ -97,6 +123,12 @@ export default async function PersonProfilePage({
         canTakeByTaskId={snap.canTakeByTaskId}
         canViewFinance={snap.finance.canViewMatter}
         pmsView={pmsView}
+        canViewNegotiatedRates={canViewNegotiatedRates}
+        canManageNegotiatedRates={canManageNegotiatedRates}
+        clientRateOverrides={
+          rateBundle && !isActionDenied(rateBundle) ? rateBundle.overrides : []
+        }
+        rateCustomGrades={rateCustomGrades}
         values={snap.values}
         customFields={snap.customFields}
         notes={notes}

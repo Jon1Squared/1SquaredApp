@@ -1941,6 +1941,73 @@ WHERE p.tenant_id = e.tenant_id AND p.id = e.person_id;
 `.trim(),
 };
 
+export const NEGOTIATED_RATES_MIGRATION_0016: TenantMigrationDefinition = {
+  version: '0016',
+  name: '0016_negotiated_rates_expand',
+  description:
+    'Creates tenant-scoped client_rate_overrides and matter_rate_overrides tables and ID sequences for effective-dated 4-tier negotiated rate resolution (ADR 0034, S0-28a).',
+  tablesChanged: ['client_rate_overrides', 'matter_rate_overrides'],
+  dependsOn: ['0015'],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_client_rate_override_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS public.tenant_matter_rate_override_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.client_rate_overrides (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  client_type TEXT NOT NULL CHECK (client_type IN ('person', 'organisation')),
+  client_id TEXT NOT NULL,
+  practice_area_id TEXT NULL,
+  grade_key TEXT NOT NULL,
+  rate_minor_units BIGINT NOT NULL CHECK (rate_minor_units >= 0),
+  currency TEXT NOT NULL DEFAULT 'GBP',
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  created_by_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  CHECK (effective_to IS NULL OR effective_to >= effective_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_rate_overrides_lookup
+  ON public.client_rate_overrides (tenant_id, client_id, grade_key, practice_area_id, effective_from, effective_to);
+
+CREATE TABLE IF NOT EXISTS public.matter_rate_overrides (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  grade_key TEXT NOT NULL,
+  rate_minor_units BIGINT NOT NULL CHECK (rate_minor_units >= 0),
+  currency TEXT NOT NULL DEFAULT 'GBP',
+  effective_from DATE NOT NULL,
+  effective_to DATE NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  created_by_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, matter_id) REFERENCES public.matters (tenant_id, id) ON DELETE CASCADE,
+  CHECK (effective_to IS NULL OR effective_to >= effective_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_matter_rate_overrides_lookup
+  ON public.matter_rate_overrides (tenant_id, matter_id, grade_key, effective_from, effective_to);
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS public.idx_matter_rate_overrides_lookup;
+DROP TABLE IF EXISTS public.matter_rate_overrides;
+DROP SEQUENCE IF EXISTS public.tenant_matter_rate_override_id_seq;
+
+DROP INDEX IF EXISTS public.idx_client_rate_overrides_lookup;
+DROP TABLE IF EXISTS public.client_rate_overrides;
+DROP SEQUENCE IF EXISTS public.tenant_client_rate_override_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -1957,6 +2024,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   PMS_PER_TENANT_MIGRATION_0013,
   SCHEDULER_JOB_RUNS_MIGRATION_0014,
   TRANSITIONAL_BRIDGES_CONTRACT_MIGRATION_0015,
+  NEGOTIATED_RATES_MIGRATION_0016,
 ];
 
 export function validateMigrationCatalogueOrder(

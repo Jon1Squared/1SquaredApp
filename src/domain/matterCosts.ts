@@ -24,6 +24,10 @@ import {
   percentToBasisPoints,
   poundsToMinorUnits,
   sumMinorUnits,
+  type GradeRateResolution,
+  type ResolvedApplicableRatesResult,
+  type ResolvedRateSource,
+  type ResolvedRateTier,
   type TenantConfiguration,
 } from '@platform/core-api';
 
@@ -725,14 +729,62 @@ export function mapBillingBasisLabelToWorkBasis(
   return 'hourly_rates';
 }
 
+export function formatRateSourceLabel(
+  source: ResolvedRateSource | 'custom_override' | string | undefined,
+): string {
+  switch (source) {
+    case 'matter_override':
+      return 'Matter rate override';
+    case 'client_override':
+      return 'Negotiated client rate';
+    case 'client_group_override':
+      return 'Client group rate';
+    case 'pms':
+      return 'PMS rate card';
+    case 'app_table':
+      return 'Application rate card';
+    case 'custom_override':
+      return 'Custom matter rate override';
+    default:
+      return 'Standard rate card';
+  }
+}
+
+export function formatRateTierBadgeLabel(
+  tier: ResolvedRateTier | undefined,
+  source: ResolvedRateSource | 'custom_override' | string | undefined,
+  inheritedFromParentName?: string | null,
+): string {
+  if (source === 'custom_override') {
+    return 'Custom matter rate override';
+  }
+  switch (tier) {
+    case 1:
+      return 'Tier 1 — Matter rate override';
+    case 2:
+      return 'Tier 2 — Negotiated client rate';
+    case 3:
+      return inheritedFromParentName
+        ? `Tier 3 — Client group rate (${inheritedFromParentName})`
+        : 'Tier 3 — Client group rate';
+    case 4:
+      return source === 'pms'
+        ? 'Tier 4 — PMS rate card'
+        : 'Tier 4 — Application rate card';
+    default:
+      return formatRateSourceLabel(source);
+  }
+}
+
 export function resolveMatterCostsSnapshot(params: {
   existing?: Matter | null;
   initialQuote?: Quote | null;
   practiceAreaId?: string | null;
   config: MatterCostsConfig;
   values: ChoiceValue[];
+  resolvedRates?: ResolvedApplicableRatesResult | null;
 }): MatterCostsSnapshot {
-  const { existing, initialQuote, practiceAreaId, config, values } = params;
+  const { existing, initialQuote, practiceAreaId, config, values, resolvedRates } = params;
   const saved = existing?.fieldValues?.['matterCosts'] as
     | Partial<MatterCostsSnapshot>
     | undefined;
@@ -772,18 +824,48 @@ export function resolveMatterCostsSnapshot(params: {
       disbursements,
       vatRatePercent: frozenVatRatePercent,
     });
+    const fallbackTier: ResolvedRateTier | undefined =
+      saved.rateTier ??
+      (saved.rateSource === 'matter_override'
+        ? 1
+        : saved.rateSource === 'client_override'
+          ? 2
+          : saved.rateSource === 'client_group_override'
+            ? 3
+            : saved.rateSource === 'app_table' || saved.rateSource === 'pms'
+              ? 4
+              : undefined);
     return {
       workBasis: saved.workBasis,
-      rateSource: saved.rateSource ?? lookedUp.activeSource,
-      rateCardId: saved.rateCardId || lookedUp.rateCard.id,
-      rateCardName: saved.rateCardName || lookedUp.rateCard.name,
+      rateSource: saved.rateSource ?? resolvedRates?.dominantSource ?? lookedUp.activeSource,
+      ...(fallbackTier !== undefined ? { rateTier: fallbackTier } : {}),
+      ...(saved.rateAsAtDate ? { rateAsAtDate: saved.rateAsAtDate } : {}),
+      rateCardId: saved.rateCardId || resolvedRates?.rateCardId || lookedUp.rateCard.id,
+      rateCardName: saved.rateCardName || resolvedRates?.rateCardName || lookedUp.rateCard.name,
       partnerRateGbp:
-        saved.partnerRateGbp !== undefined ? saved.partnerRateGbp : lookedUp.partnerRateGbp,
+        saved.partnerRateGbp !== undefined
+          ? saved.partnerRateGbp
+          : (resolvedRates?.partnerRateGbp ?? lookedUp.partnerRateGbp),
       associateRateGbp:
-        saved.associateRateGbp !== undefined ? saved.associateRateGbp : lookedUp.associateRateGbp,
+        saved.associateRateGbp !== undefined
+          ? saved.associateRateGbp
+          : (resolvedRates?.associateRateGbp ?? lookedUp.associateRateGbp),
       traineeRateGbp:
-        saved.traineeRateGbp !== undefined ? saved.traineeRateGbp : lookedUp.traineeRateGbp,
-      customGrades: saved.customGrades ?? lookedUp.customGrades,
+        saved.traineeRateGbp !== undefined
+          ? saved.traineeRateGbp
+          : (resolvedRates?.traineeRateGbp ?? lookedUp.traineeRateGbp),
+      customGrades:
+        saved.customGrades ??
+        (resolvedRates
+          ? resolvedRates.customGrades.map((g) => ({
+              id: g.id,
+              label: g.label,
+              hourlyRateGbp: g.hourlyRateGbp,
+            }))
+          : lookedUp.customGrades),
+      ...(saved.rateProvenanceByGrade
+        ? { rateProvenanceByGrade: saved.rateProvenanceByGrade }
+        : {}),
       totalEstimateGbp,
       agreedCapGbp:
         saved.agreedCapGbp !== undefined
@@ -879,18 +961,46 @@ export function resolveMatterCostsSnapshot(params: {
     vatRatePercent: initialVatRatePercent,
   });
 
+  const resolvedCustomGrades: CustomGradeRateRow[] = resolvedRates
+    ? resolvedRates.customGrades.map((g) => ({
+        id: g.id,
+        label: g.label,
+        hourlyRateGbp: g.hourlyRateGbp,
+      }))
+    : lookedUp.customGrades;
+
+  const basePartnerRate = resolvedRates?.partnerRateGbp ?? lookedUp.partnerRateGbp;
+  const baseAssociateRate = resolvedRates?.associateRateGbp ?? lookedUp.associateRateGbp;
+  const baseTraineeRate = resolvedRates?.traineeRateGbp ?? lookedUp.traineeRateGbp;
+
   return {
     workBasis,
-    rateSource: lookedUp.activeSource,
-    rateCardId: lookedUp.rateCard.id,
-    rateCardName: lookedUp.rateCard.name,
-    partnerRateGbp: lookedUp.partnerRateGbp,
+    rateSource:
+      resolvedRates?.dominantSource ??
+      (initialQuote?.rateSource as ResolvedRateSource | 'custom_override' | undefined) ??
+      lookedUp.activeSource,
+    rateTier: resolvedRates?.dominantTier ?? initialQuote?.rateTier ?? 4,
+    ...(resolvedRates?.asAtDate ?? initialQuote?.rateAsAtDate
+      ? { rateAsAtDate: resolvedRates?.asAtDate ?? initialQuote?.rateAsAtDate }
+      : {}),
+    rateCardId: resolvedRates?.rateCardId ?? lookedUp.rateCard.id,
+    rateCardName: resolvedRates?.rateCardName ?? lookedUp.rateCard.name,
+    partnerRateGbp: basePartnerRate,
     associateRateGbp:
       initialQuote?.hourlyRateGbp && initialQuote.hourlyRateGbp > 0
         ? initialQuote.hourlyRateGbp
-        : lookedUp.associateRateGbp,
-    traineeRateGbp: lookedUp.traineeRateGbp,
-    customGrades: lookedUp.customGrades,
+        : baseAssociateRate,
+    traineeRateGbp: baseTraineeRate,
+    customGrades: resolvedCustomGrades,
+    ...(resolvedRates?.grades ?? initialQuote?.rateProvenanceByGrade
+      ? {
+          rateProvenanceByGrade:
+            (resolvedRates?.grades ?? initialQuote?.rateProvenanceByGrade) as Record<
+              string,
+              GradeRateResolution
+            >,
+        }
+      : {}),
     totalEstimateGbp,
     agreedCapGbp,
     vatRatePercent: initialVatRatePercent,
