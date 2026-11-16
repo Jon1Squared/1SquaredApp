@@ -17,7 +17,8 @@
     "e2e": "playwright test",
     "ci": "node scripts/verify-ci.mjs",
     "pms:import": "tsx scripts/import-pms.ts",
-    "seed:demo": "tsx --conditions react-server scripts/seed-demo-tenant.ts"
+    "seed:demo": "tsx --conditions react-server scripts/seed-demo-tenant.ts",
+    "teams:package": "node scripts/package-teams-app.mjs"
   },
   "dependencies": {
     "@azure/identity": "^4.14.1",

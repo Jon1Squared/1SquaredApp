@@ -33,11 +33,11 @@
         "@1squared.co.uk",
         "@notalawfirm.example"
       ],
-      "recipientAllowListVaultRef": "kv://kv-notalawfirm-demo/teams-recipient-allowlist",
+      "recipientAllowListVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist",
       "graph": {
         "tenantId": "f8218d9a-e055-463f-add2-f03679aad7f2",
         "clientId": "76474047-ac1f-49ee-83f3-5a2a58c2b3f8",
-        "certificateVaultRef": "kv://kv-notalawfirm-demo/graph-teams-client-cert"
+        "certificateVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert"
       }
     }
   },

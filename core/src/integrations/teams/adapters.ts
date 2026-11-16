@@ -33,7 +33,14 @@ import type {
 } from '../email/keyVaultSecretReader';
 import { evaluateTeamsRecipientAllowList } from './allowList';
 import { TeamsIntegrationError } from './errors';
-import { sanitizeTeamsActivityPayload } from './scrubber';
+import {
+  SAFE_TEAMS_ACTIVITY_TYPE_BY_KIND,
+  sanitizeTeamsActivityPayload,
+} from './scrubber';
+
+const BUILT_IN_ACTOR_ONLY_ACTIVITY_TYPES: ReadonlySet<string> = new Set(
+  Object.values(SAFE_TEAMS_ACTIVITY_TYPE_BY_KIND),
+);
 
 export interface TeamsDevCatcherPayload {
   readonly tenantId: string;
@@ -322,6 +329,14 @@ export class CoreTeamsNotifier implements TeamsNotifier {
     );
 
     const graphEndpoint = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(allowEval.entraObjectId)}/teamwork/sendActivityNotification`;
+    const graphTemplateParameters = BUILT_IN_ACTOR_ONLY_ACTIVITY_TYPES.has(
+      cleanActivity.activityType,
+    )
+      ? []
+      : cleanActivity.templateParameters.map((p) => ({
+          name: p.name,
+          value: p.value,
+        }));
     const graphPayload = {
       topic: {
         source: 'text',
@@ -335,10 +350,7 @@ export class CoreTeamsNotifier implements TeamsNotifier {
       previewText: {
         content: cleanActivity.previewText,
       },
-      templateParameters: cleanActivity.templateParameters.map((p) => ({
-        name: p.name,
-        value: p.value,
-      })),
+      templateParameters: graphTemplateParameters,
     };
 
     const response = await this.fetchImpl(graphEndpoint, {

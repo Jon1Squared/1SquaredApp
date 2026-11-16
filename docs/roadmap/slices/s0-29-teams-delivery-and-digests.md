@@ -133,21 +133,22 @@ Bump `CORE_REQUIRED_SCHEMA_VERSION` from `'0019'` to `'0020'` and add `0020_team
 
 ## 9. Manual Setup / External Blockers
 
-Live Graph `TeamsActivity.Send` delivery in the demo environment depends on Section 8 manual tasks (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without them):
-- Teams Entra application ID `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` is pre-configured in `client-not-a-law-firm/config/environments/demo.json` (`integrations.teams.provider = "disabled"` until unlocked).
-- Register / upload the 1Squared Teams App manifest to the tenant Teams Admin Center catalog (referencing app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8`) and grant Microsoft Graph application permission `TeamsActivity.Send` with tenant administrator consent.
-- Import the Teams Graph client certificate (`kv://kv-notalawfirm-demo/graph-teams-client-cert`, matching thumbprint configured once provisioned) and permitted pilot recipient list (`kv://kv-notalawfirm-demo/teams-recipient-allowlist`) into `kv-notalawfirm-demo` before switching `integrations.teams.provider` from `"disabled"` to `"graph"`.
+Live Graph `TeamsActivity.Send` delivery in the demo environment depends on Section 8 manual tasks documented in [`docs/runbooks/teams-app-setup.md`](../../runbooks/teams-app-setup.md) (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without them):
+- Microsoft Entra app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`) is pre-configured in `client-not-a-law-firm/config/environments/demo.json` (`integrations.teams.provider = "disabled"` until unlocked), with **`TeamsActivity.Send` application permission already granted admin consent** (`User.Read` removed), and a ready-to-upload package is built at `core/integrations/teams/app-package/` (`npm run teams:package`).
+- **Remaining blockers before switching `"provider"` from `"disabled"` to `"graph"`:**
+  1. Enable custom apps (if needed), upload `dist/teams-app/onesquared-teams-app.zip` in Microsoft Teams Admin Center, and assign an App Setup Policy installing it for the demo users.
+  2. Generate `graph-teams-client-cert` (`kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert`) directly inside Key Vault `kvnotalawfi2cdo3cw7vuafm` (uploading its `.cer` to app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` and recording `certificateThumbprint` in `demo.json`), populate `teams-recipient-allowlist` (`kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist`), and verify live delivery before switching `integrations.teams.provider` from `"disabled"` to `"graph"`.
 
 ---
 
 ## 10. Acceptance Criteria
 
-- [ ] Migration `0020_teams_outbox_and_digests_expand` creates `public.teams_activity_outbox` and `notifications.digest_sent_at`; `CORE_REQUIRED_SCHEMA_VERSION === '0020'`.
-- [ ] All **12** `NotificationKind` values are supported end to end with `S4` (`daily_digest`) default, `'notification:view_own'` and `'notification:manage_own_preferences'`.
-- [ ] `notification-digests` runs via `guardedJob` (`'notification:send_digests'`, Bicep `caj-ntf-dig-<env>`), handles GMT/BST transitions accurately, re-verifies `canAccessMatter` and queues digests idempotently.
-- [ ] `TeamsNotifier` resolves `recipientPersonId` -> `entraObjectId`, enforces non-live allow-lists and content-scrubbing, and delivers through `public.teams_activity_outbox` + `outbox-drain`.
-- [ ] Two-tenant isolation tests, GMT/BST tests and `npm run ci` pass.
-- [ ] Help articles (`S4` daily_digest explanation included), `docs/release-notes.md` and `docs/roadmap/feature-list.md` (`32` -> `Completed`) are updated in the same PR.
+- [x] Migration `0020_teams_outbox_and_digests_expand` creates `public.teams_activity_outbox` and `notifications.digest_sent_at`; `CORE_REQUIRED_SCHEMA_VERSION === '0020'`.
+- [x] All **13** canonical `NotificationKind` values (the 12 operational kinds plus `general`) are supported end to end with `S4` (`daily_digest`) default, `'notification:view_own'` and `'notification:manage_own_preferences'`.
+- [x] `notification-digests` runs via `guardedJob` (`'notification:send_digests'`, Bicep `caj-ntf-dig-<env>`), handles GMT/BST transitions accurately, re-verifies `canAccessMatter` and queues digests idempotently.
+- [x] `TeamsNotifier` resolves `recipientPersonId` -> `entraObjectId`, enforces non-live allow-lists and content-scrubbing, delivers through `public.teams_activity_outbox` + `outbox-drain`, and includes a contract-tested `core/integrations/teams/app-package/` (`manifest.json` schema `1.16`, icons, `npm run teams:package`) plus `docs/runbooks/teams-app-setup.md`.
+- [x] Two-tenant isolation tests, GMT/BST tests and `npm run ci` pass.
+- [x] Help articles (`S4` daily_digest explanation included), `docs/runbooks/teams-app-setup.md`, `docs/release-notes.md` and `docs/roadmap/feature-list.md` (`32` -> `Completed`) are updated in the same PR.
 
 ---
 

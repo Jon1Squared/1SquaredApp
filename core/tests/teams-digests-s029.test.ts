@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   generateKeyPairSync,
   X509Certificate,
@@ -6,6 +7,7 @@ import {
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ALL_BUILTIN_ROLE_KEYS,
@@ -29,6 +31,7 @@ import {
   resolveTenantFromVerifiedToken,
   resolveTenantIsoWeekday,
   resolveTenantLocalDateAndHour,
+  SAFE_TEAMS_ACTIVITY_TYPE_BY_KIND,
   sanitizeTeamsActivityPayload,
   TeamsIntegrationError,
   TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020,
@@ -424,14 +427,36 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
     );
     const demoCfg = loadAndValidateTenantConfig(baseRaw, demoRaw);
     expect(demoCfg.notifications?.digestHourLocal).toBe(8);
+    expect(demoCfg.keyVault).toEqual({
+      vaultName: 'kvnotalawfi2cdo3cw7vuafm',
+      vaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
+    });
+    expect(demoCfg.integrations.pmsConnectionSecretVaultRef).toBe(
+      'kv://kvnotalawfi2cdo3cw7vuafm/pms-connection-string',
+    );
+    expect(demoCfg.integrations.companiesHouseApiKeyVaultRef).toBe(
+      'kv://kvnotalawfi2cdo3cw7vuafm/companies-house-api-key',
+    );
+    expect(demoCfg.integrations.email).toMatchObject({
+      recipientAllowListVaultRef:
+        'kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist',
+      graph: {
+        certificateVaultRef:
+          'kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate',
+        certificateThumbprint: 'BC9CB621EF3BDC2413D3EA345609586ABF5167ED',
+      },
+    });
+    expect(demoCfg.documentStores?.[0]?.auth.certificateKeyVaultSecretRef).toBe(
+      'kv://kvnotalawfi2cdo3cw7vuafm/sp-provisioning-cert',
+    );
     expect(demoCfg.integrations.teams).toMatchObject({
       provider: 'disabled',
       teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
       recipientAllowList: ['@1squared.co.uk', '@notalawfirm.example'],
-      recipientAllowListVaultRef: 'kv://kv-notalawfirm-demo/teams-recipient-allowlist',
+      recipientAllowListVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist',
       graph: {
         clientId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
-        certificateVaultRef: 'kv://kv-notalawfirm-demo/graph-teams-client-cert',
+        certificateVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert',
       },
     });
 
@@ -468,8 +493,8 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       loadAndValidateTenantConfig(baseRaw, {
         environment: 'demo',
         keyVault: {
-          vaultName: 'kv-notalawfirm-demo',
-          vaultUri: 'https://kv-notalawfirm-demo.vault.azure.net/',
+          vaultName: 'kvnotalawfi2cdo3cw7vuafm',
+          vaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
         },
         integrations: {
           teams: {
@@ -1202,6 +1227,10 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
     expect((activityReq?.init?.headers as Record<string, string>)?.authorization).toBe(
       'Bearer mock-graph-token-alpha',
     );
+    const parsedGraphBody = JSON.parse(String(activityReq?.init?.body ?? '{}')) as {
+      templateParameters?: unknown[];
+    };
+    expect(parsedGraphBody.templateParameters).toEqual([]);
 
     // Disabled TeamsNotifier throws TEAMS_PROVIDER_DISABLED
     const disabledNotifier = new CoreTeamsNotifier(
@@ -1541,5 +1570,168 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
     });
     expect(tokAlpha).toBe('tok-alpha');
     expect(tokBravo).toBe('tok-bravo');
+  });
+
+  it('R499: Teams app-package manifest.json, icons, and teams:package zip include every activityType the notifier can post', () => {
+    const pkgDir = path.join(
+      process.cwd(),
+      'core',
+      'integrations',
+      'teams',
+      'app-package',
+    );
+    const manifestRaw = fs.readFileSync(
+      path.join(pkgDir, 'manifest.json'),
+      'utf8',
+    );
+    const manifest = JSON.parse(manifestRaw) as {
+      $schema: string;
+      manifestVersion: string;
+      id: string;
+      icons: { color: string; outline: string };
+      webApplicationInfo?: { id: string; resource: string };
+      activities?: {
+        activityTypes?: Array<{
+          type: string;
+          description: string;
+          templateText: string;
+        }>;
+      };
+    };
+
+    expect(manifest.$schema).toContain('/teams/v1.16/');
+    expect(manifest.manifestVersion).toBe('1.16');
+    expect(manifest.id).toBe('76474047-ac1f-49ee-83f3-5a2a58c2b3f8');
+    expect(manifest.webApplicationInfo?.id).toBe(
+      '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
+    );
+    expect(manifest.icons).toEqual({
+      color: 'color.png',
+      outline: 'outline.png',
+    });
+
+    const expectedActivityTypes = new Set(
+      Object.values(SAFE_TEAMS_ACTIVITY_TYPE_BY_KIND),
+    );
+    const declaredTypes = new Map(
+      (manifest.activities?.activityTypes ?? []).map((entry) => [
+        entry.type,
+        entry,
+      ]),
+    );
+    expect(declaredTypes.size).toBe(expectedActivityTypes.size);
+    for (const kind of ALL_NOTIFICATION_KINDS) {
+      const built = buildSafeTeamsActivityFromNotification({
+        tenantId: 'r499-contract',
+        notificationId: `NTF-${kind}`,
+        recipientPersonId: 'P-000001',
+        kind,
+        href: '/home',
+        correlationId: `corr-${kind}`,
+      });
+      const entry = declaredTypes.get(built.activityType);
+      expect(entry, `Missing activityType "${built.activityType}" in manifest.json`).toBeDefined();
+      expect(entry!.description.length).toBeGreaterThan(0);
+      expect(entry!.description.length).toBeLessThanOrEqual(128);
+      expect(entry!.templateText).toContain('{actor}');
+      expect(entry!.templateText.length).toBeLessThanOrEqual(128);
+      const customPlaceholders = [...entry!.templateText.matchAll(/\{([^}]+)\}/g)]
+        .map((m) => m[1])
+        .filter((name) => name !== 'actor');
+      expect(customPlaceholders).toEqual([]);
+    }
+
+    // PNG binary header + dimension checks (192x192 color, 32x32 white-on-transparent outline)
+    const parsePngHeaderAndPixels = (pngBuf: Buffer) => {
+      expect(pngBuf.subarray(0, 8)).toEqual(
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      );
+      expect(pngBuf.subarray(12, 16).toString('ascii')).toBe('IHDR');
+      const width = pngBuf.readUInt32BE(16);
+      const height = pngBuf.readUInt32BE(20);
+      const colorType = pngBuf[25];
+      const idatChunks: Buffer[] = [];
+      let pos = 8;
+      while (pos < pngBuf.length) {
+        const len = pngBuf.readUInt32BE(pos);
+        const type = pngBuf.subarray(pos + 4, pos + 8).toString('ascii');
+        if (type === 'IDAT') {
+          idatChunks.push(pngBuf.subarray(pos + 8, pos + 8 + len));
+        }
+        pos += 12 + len;
+      }
+      return {
+        width,
+        height,
+        colorType,
+        rawScanlines: zlib.inflateSync(Buffer.concat(idatChunks)),
+      };
+    };
+
+    const colorPng = parsePngHeaderAndPixels(
+      fs.readFileSync(path.join(pkgDir, 'color.png')),
+    );
+    expect(colorPng.width).toBe(192);
+    expect(colorPng.height).toBe(192);
+    expect(colorPng.colorType).toBe(6);
+
+    const outlinePng = parsePngHeaderAndPixels(
+      fs.readFileSync(path.join(pkgDir, 'outline.png')),
+    );
+    expect(outlinePng.width).toBe(32);
+    expect(outlinePng.height).toBe(32);
+    expect(outlinePng.colorType).toBe(6);
+    const stride = 1 + 32 * 4;
+    let opaqueOutlinePixels = 0;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        const idx = y * stride + 1 + x * 4;
+        const r = outlinePng.rawScanlines[idx];
+        const g = outlinePng.rawScanlines[idx + 1];
+        const b = outlinePng.rawScanlines[idx + 2];
+        const a = outlinePng.rawScanlines[idx + 3];
+        if (a > 0) {
+          expect([r, g, b]).toEqual([255, 255, 255]);
+          opaqueOutlinePixels += 1;
+        }
+      }
+    }
+    expect(opaqueOutlinePixels).toBeGreaterThan(50);
+
+    // Run package script and verify ZIP has the 3 files at root (no folder prefixes)
+    execFileSync(
+      process.execPath,
+      [path.join(process.cwd(), 'scripts', 'package-teams-app.mjs')],
+      { encoding: 'utf8' },
+    );
+    const zipPath = path.join(
+      process.cwd(),
+      'dist',
+      'teams-app',
+      'onesquared-teams-app.zip',
+    );
+    const zipBuf = fs.readFileSync(zipPath);
+    const rootEntryNames: string[] = [];
+    let zipCursor = 0;
+    let extractedManifest: Buffer | null = null;
+    while (zipCursor + 4 <= zipBuf.length && zipBuf.readUInt32LE(zipCursor) === 0x04034b50) {
+      const compSize = zipBuf.readUInt32LE(zipCursor + 18);
+      const nameLen = zipBuf.readUInt16LE(zipCursor + 26);
+      const extraLen = zipBuf.readUInt16LE(zipCursor + 28);
+      const name = zipBuf
+        .subarray(zipCursor + 30, zipCursor + 30 + nameLen)
+        .toString('utf8');
+      expect(name).not.toContain('/');
+      rootEntryNames.push(name);
+      const dataStart = zipCursor + 30 + nameLen + extraLen;
+      if (name === 'manifest.json') {
+        extractedManifest = zlib.inflateRawSync(
+          zipBuf.subarray(dataStart, dataStart + compSize),
+        );
+      }
+      zipCursor = dataStart + compSize;
+    }
+    expect(rootEntryNames).toEqual(['manifest.json', 'color.png', 'outline.png']);
+    expect(extractedManifest?.toString('utf8')).toBe(manifestRaw);
   });
 });
