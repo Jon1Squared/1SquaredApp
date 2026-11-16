@@ -5,6 +5,8 @@ import {
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   type ClientRateOverrideClientType,
+  type GlobalSearchEntityType,
+  type GlobalSearchResponse,
   type RegistersConfiguration,
   type WorkTypesConfiguration,
 } from '@platform/core';
@@ -130,6 +132,7 @@ import {
   runKeyDateReminderSchedulerRecord,
   queryKeyDatesTeamDiaryRecord,
   listRegistersWorkspaceDataRecord,
+  searchGlobalRecords,
   getRegisterRecordDetailRecord,
   createRegisterRecordService,
   transitionRegisterRecordService,
@@ -1862,6 +1865,19 @@ export async function saveRegistersConfigAction(
     revalidateAll();
     return res;
   });
+}
+
+export async function searchGlobalRecordsAction(input: {
+  query: string;
+  entityTypes?: readonly GlobalSearchEntityType[];
+  limit?: number;
+  offset?: number;
+}): Promise<GlobalSearchResponse> {
+  return guardedAction('searchGlobalRecordsAction', async (actor) =>
+    searchGlobalRecords(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
 }
 
 

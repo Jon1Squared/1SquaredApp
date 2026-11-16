@@ -25,6 +25,7 @@ import {
   getPmsRepository,
   getRateOverrideRepository,
   getRegisterRepository,
+  getSearchRepository,
   getTaskWorkflowRepository,
   runWithAuditStagingScope,
   stageAuditEntry,
@@ -35,6 +36,7 @@ import {
   TenantPmsRepository,
   TenantRateOverrideRepository,
   TenantRegisterRepository,
+  TenantSearchRepository,
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
   getPlatformExtensionHost,
@@ -51,12 +53,14 @@ export {
   getPmsRepository,
   getRateOverrideRepository,
   getRegisterRepository,
+  getSearchRepository,
   getTaskWorkflowRepository,
   TenantCatalogueRepository,
   TenantJobRunRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
   TenantRegisterRepository,
+  TenantSearchRepository,
 };
 import {
   clearMigratedPostgresModulesForTenant,
@@ -144,7 +148,10 @@ import {
   suggestMatterMatches,
   type PmsSuggestedMatch,
 } from '@/domain/pms';
-import { buildSearchIndex } from '@/domain/searchIndex';
+import {
+  emitTenantTelemetryEvent,
+  resolveCurrentRequestCorrelationId,
+} from './telemetry';
 import {
   applyEffectiveDatedEmploymentHistory,
   applyLeaverEffects,
@@ -290,8 +297,11 @@ import {
   type EffectiveFeeCapResolution,
   type FeeArrangementBasis,
   type FeeCapErrorCode,
+  createZeroGlobalSearchCounts,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
+  type GlobalSearchEntityType,
+  type GlobalSearchResponse,
   type JobRunRecord,
   type KeyDatesConfiguration,
   type MatterRateOverrideRecord,
@@ -1941,19 +1951,6 @@ async function getAppSnapshotInScope(
     }
   }
 
-  const resolvedFirmName =
-    activeTenantCfg.displayName || store.firm?.shortName || store.firm?.name || '';
-  const searchIndex = buildSearchIndex(
-    people,
-    organisations,
-    visibleLinks,
-    store.values,
-    visibleMatters,
-    visibleEnquiries,
-    visibleTasks,
-    teams,
-    resolvedFirmName,
-  );
   const attention = attentionList([...people, ...organisations], store.values, now, {
     userId: effectiveWorkPerson.id,
     tasks: visibleTasks,
@@ -2241,7 +2238,7 @@ async function getAppSnapshotInScope(
     notes: visibleNotes,
     audit: visibleAudit,
     mergeHistory,
-    searchIndex,
+    searchIndex: [],
     attention,
     recentIds,
   };
@@ -23039,4 +23036,102 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
     skippedTenants,
     failedTenants,
   };
+}
+
+export interface SearchGlobalRecordsInput {
+  readonly query: string;
+  readonly entityTypes?: readonly GlobalSearchEntityType[];
+  readonly limit?: number;
+  readonly offset?: number;
+}
+
+/**
+ * Executes a tenant-scoped server-side hybrid search (FTS + trigram + ILIKE) across
+ * all nine searchable record types, enforcing RBAC permissions and record-level
+ * visibility inside PostgreSQL BEFORE ranking, pagination, or facet counting.
+ */
+export async function searchGlobalRecords(
+  input: SearchGlobalRecordsInput,
+  byId?: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<GlobalSearchResponse> {
+  const startedAt = Date.now();
+  const ctx =
+    options?.tenantCtx ?? resolveDefaultServiceTenantContext(null, byId);
+  const [people, teams, rbacConfig] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actorId = (byId ?? ctx.actorId).trim();
+  const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
+  if (!actor) {
+    return {
+      query: input.query,
+      normalizedQuery: input.query.trim().replace(/\s+/g, ' '),
+      hits: [],
+      totalCount: 0,
+      countsByType: createZeroGlobalSearchCounts(),
+      limit: Math.min(Math.max(Math.trunc(input.limit ?? 20), 1), 50),
+      offset: Math.max(Math.trunc(input.offset ?? 0), 0),
+      hasMore: false,
+    };
+  }
+
+  const permSet = resolvePersonPermissionSet(actor, {
+    teams,
+    config: { rbac: rbacConfig },
+  });
+  const keyDatesConfig = await getKeyDatesConfig({ ctx, userId: actor.id });
+  const keyDatePermissionOptions = {
+    config: keyDatesConfig,
+    allPeople: people,
+    teams,
+    rbac: { config: { rbac: rbacConfig } },
+  };
+  const canViewKeyDates =
+    Boolean(keyDatesConfig.enabled) &&
+    hasKeyDatePermission(actor, 'keydate:view', keyDatePermissionOptions);
+  const permittedDiaryTeamIds = canViewKeyDates
+    ? resolvePermittedDiaryTeamIds(
+        actor,
+        undefined,
+        teams,
+        keyDatePermissionOptions,
+      )
+    : [];
+
+  const response = await getSearchRepository().searchRecords(ctx, {
+    query: input.query,
+    entityTypes: input.entityTypes,
+    limit: input.limit,
+    offset: input.offset,
+    actor: {
+      actorId: actor.id,
+      hasRestrictedMatterAccess: permSet.permissions.has('matter:restricted:access'),
+      canViewDocuments: permSet.permissions.has('document:view'),
+      canViewQuotes: permSet.permissions.has('quote:view'),
+      canViewFinance:
+        permSet.permissions.has('finance:view') ||
+        permSet.permissions.has('finance:view_matter'),
+      canViewKeyDates,
+      permittedDiaryTeamIds,
+      canViewRegisters: permSet.permissions.has('register:view'),
+      canManageUndertakings: permSet.permissions.has('undertaking:manage'),
+    },
+  });
+
+  emitTenantTelemetryEvent({
+    eventName: 'search.global.executed',
+    tenantId: ctx.tenantId,
+    correlationId: await resolveCurrentRequestCorrelationId(ctx.correlationId),
+    properties: {
+      resultCount: response.totalCount,
+      returnedCount: response.hits.length,
+      durationMs: Date.now() - startedAt,
+      entityFilterCount: input.entityTypes?.length ?? 0,
+    },
+  });
+
+  return response;
 }

@@ -44,6 +44,7 @@ export * from './pmsRepository';
 export * from './jobRunRepository';
 export * from './rateOverrideRepository';
 export * from './registerRepository';
+export * from './searchRepository';
 
 export {
   isEntraMfaVerified,

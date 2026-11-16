@@ -871,6 +871,89 @@ mark {
   margin-bottom: 6px;
 }
 
+.search-facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.search-facet-pill {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-pill);
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.search-facet-pill:hover {
+  color: var(--color-text);
+  border-color: var(--color-primary);
+}
+
+.search-facet-pill--active {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.search-status-row {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  padding: 2px 4px 8px;
+}
+
+.search-type-pill {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-input-bg);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.search-highlight {
+  background: var(--color-primary-soft);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.search-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-divider);
+  display: flex;
+  justify-content: center;
+}
+
+.search-load-more {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-radius: var(--radius-pill);
+  padding: 6px 16px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.search-load-more:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.search-load-more:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 /* ==========================================================================
    Profile Header, Summary Line, Tabs & Key-Value Grids
    ========================================================================== */

@@ -120,7 +120,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
   });
 
   it('1. Migration 0017 version, SignOffKind narrowing, SO-000003 removal & seeded registerRecords contract', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0017');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0018');
     expect(Object.keys(CORE_REGISTER_TYPES)).toEqual([
       'sign_off',
       'undertaking',

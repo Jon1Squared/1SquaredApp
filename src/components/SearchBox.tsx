@@ -1,26 +1,55 @@
 'use client';
 
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Search as SearchIcon, X } from 'lucide-react';
-import { type MatchRange, type SearchDoc, type SearchHit, search, segments } from '@/domain/search';
+import type {
+  GlobalSearchEntityType,
+  GlobalSearchHit,
+  GlobalSearchResponse,
+} from '@platform/core';
+import { searchGlobalRecordsAction } from '@/app/actions';
+import type { SearchDoc } from '@/domain/search';
 
-export function HighlightedText({ text, ranges }: { text: string; ranges: MatchRange[] }) {
-  if (!ranges.length) return <>{text}</>;
-  const parts = segments(text, ranges);
-  return (
-    <>
-      {parts.map((p, i) =>
-        p.match ? (
-          <mark key={i}>{p.text}</mark>
-        ) : (
-          <React.Fragment key={i}>{p.text}</React.Fragment>
-        ),
-      )}
-    </>
-  );
-}
+const ENTITY_PLURAL_LABELS: Record<GlobalSearchEntityType, string> = {
+  matter: 'Matters',
+  person: 'People',
+  organisation: 'Organisations',
+  enquiry: 'Enquiries',
+  quote: 'Quotes',
+  task: 'Tasks',
+  document: 'Documents',
+  key_date: 'Key dates',
+  register_record: 'Registers',
+};
+
+const ENTITY_SINGULAR_LABELS: Record<GlobalSearchEntityType, string> = {
+  matter: 'Matter',
+  person: 'Person',
+  organisation: 'Organisation',
+  enquiry: 'Enquiry',
+  quote: 'Quote',
+  task: 'Task',
+  document: 'Document',
+  key_date: 'Key date',
+  register_record: 'Register',
+};
+
+const FACET_ORDER: readonly GlobalSearchEntityType[] = [
+  'matter',
+  'person',
+  'organisation',
+  'enquiry',
+  'quote',
+  'task',
+  'document',
+  'key_date',
+  'register_record',
+];
+
+const SEARCH_PAGE_SIZE = 20;
+const DEBOUNCE_DELAY_MS = 200;
 
 export function StatusPill({
   label,
@@ -32,83 +61,162 @@ export function StatusPill({
   return <span className={`status-pill status-pill--${tone}`}>{label}</span>;
 }
 
-export function SearchResultRow({
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const terms = Array.from(
+    new Set(
+      query
+        .trim()
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2),
+    ),
+  );
+  if (terms.length === 0 || !text) {
+    return <>{text}</>;
+  }
+  const escaped = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const regex = new RegExp(`(${escaped.join('|')})`, 'gi');
+  const lowerTerms = new Set(terms.map((t) => t.toLowerCase()));
+  const parts = text.split(regex);
+  return (
+    <>
+      {parts.map((part, idx) =>
+        lowerTerms.has(part.toLowerCase()) ? (
+          <mark key={idx} className="search-highlight">
+            {part}
+          </mark>
+        ) : (
+          <React.Fragment key={idx}>{part}</React.Fragment>
+        ),
+      )}
+    </>
+  );
+}
+
+function SearchResultRow({
   hit,
+  query,
   active,
-  onSelect,
-  id,
+  onPick,
+  onHover,
 }: {
-  hit: SearchHit;
+  hit: GlobalSearchHit;
+  query: string;
   active: boolean;
-  onSelect?: () => void;
-  id?: string;
+  onPick: () => void;
+  onHover: () => void;
 }) {
-  const href =
-    hit.doc.type === 'person'
-      ? `/people/${hit.doc.id}`
-      : hit.doc.type === 'matter'
-        ? `/matters/${hit.doc.id}`
-        : hit.doc.type === 'enquiry'
-          ? `/enquiries/${hit.doc.id}`
-          : hit.doc.type === 'task'
-            ? `/tasks/${hit.doc.id}`
-            : `/organisations/${hit.doc.id}`;
   return (
     <Link
-      id={id}
-      href={href}
+      href={hit.href}
+      onClick={onPick}
+      onMouseEnter={onHover}
       role="option"
       aria-selected={active}
-      onClick={onSelect}
       className={`list-row search-result-row ${active ? 'search-result-row--active' : ''}`}
     >
       <div className="list-row__main">
         <div className="list-row__title">
-          <HighlightedText text={hit.doc.title} ranges={hit.titleRanges} />
+          <HighlightedText text={hit.title} query={query} />
         </div>
         <div className="list-row__meta">
-          <span>{hit.doc.subtitle}</span>
-          {hit.doc.status ? <span> · {hit.doc.status}</span> : null}
-          {hit.matchedField ? (
-            <span className="matched-field-chip">
-              {' · '}
-              {hit.matchedField.label}:{' '}
-              <HighlightedText
-                text={hit.matchedField.text}
-                ranges={hit.matchedField.ranges}
-              />
-            </span>
-          ) : null}
+          <HighlightedText text={hit.subtitle} query={query} />
         </div>
       </div>
       <div className="list-row__aside">
-        {hit.doc.pills.map((p, idx) => (
-          <StatusPill key={idx} label={p.label} tone={p.tone} />
-        ))}
+        <span className="search-type-pill">
+          {ENTITY_SINGULAR_LABELS[hit.entityType]}
+        </span>
+        {hit.statusLabel ? (
+          <StatusPill label={hit.statusLabel} tone={hit.badgeTone} />
+        ) : null}
       </div>
     </Link>
   );
 }
 
 export function CompactHeaderSearch({
-  searchIndex,
-  variant = 'compact',
+  variant = 'header',
 }: {
-  searchIndex: SearchDoc[];
-  variant?: 'compact' | 'hero';
+  searchIndex?: SearchDoc[];
+  variant?: 'header' | 'hero';
 }) {
   const router = useRouter();
   const listboxId = useId();
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const [selectedType, setSelectedType] = useState<GlobalSearchEntityType | 'all'>('all');
+  const [response, setResponse] = useState<GlobalSearchResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestSeqRef = useRef(0);
 
-  const results = useMemo(() => search(searchIndex, query, 5), [searchIndex, query]);
+  const runSearch = useCallback(
+    async (
+      rawQuery: string,
+      filterType: GlobalSearchEntityType | 'all',
+      offset: number,
+      append: boolean,
+    ) => {
+      const trimmed = rawQuery.trim();
+      if (trimmed.length < 2) {
+        setResponse(null);
+        setLoading(false);
+        setLoadingMore(false);
+        setErrorMessage(null);
+        return;
+      }
 
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query]);
+      const reqId = ++requestSeqRef.current;
+      if (append) {
+        setLoadingMore(true);
+      } else {
+        setLoading(true);
+      }
+      setErrorMessage(null);
+
+      try {
+        const res = await searchGlobalRecordsAction({
+          query: rawQuery,
+          entityTypes: filterType === 'all' ? undefined : [filterType],
+          limit: SEARCH_PAGE_SIZE,
+          offset,
+        });
+        if (requestSeqRef.current !== reqId) return;
+
+        setResponse((prev) => {
+          if (append && prev) {
+            const seen = new Set(prev.hits.map((h) => `${h.entityType}:${h.id}`));
+            const appendedHits = res.hits.filter(
+              (h) => !seen.has(`${h.entityType}:${h.id}`),
+            );
+            return {
+              ...res,
+              hits: [...prev.hits, ...appendedHits],
+            };
+          }
+          return res;
+        });
+        if (!append) {
+          setActiveIdx(0);
+        }
+      } catch {
+        if (requestSeqRef.current !== reqId) return;
+        setErrorMessage('Search could not be completed. Please try again.');
+      } finally {
+        if (requestSeqRef.current === reqId) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -117,36 +225,93 @@ export function CompactHeaderSearch({
       }
     }
     document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
   }, []);
 
+  const hits = response?.hits ?? [];
+  const trimmedQuery = query.trim();
+  const showDropdown = open && trimmedQuery.length > 0;
+
+  const totalAcrossAllTypes = response
+    ? FACET_ORDER.reduce((sum, key) => sum + (response.countsByType[key] ?? 0), 0)
+    : 0;
+
+  function handleQueryChange(nextValue: string) {
+    setQuery(nextValue);
+    setOpen(true);
+    setActiveIdx(0);
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
+    if (nextValue.trim().length < 2) {
+      ++requestSeqRef.current;
+      setLoading(false);
+      setLoadingMore(false);
+      setErrorMessage(null);
+      setResponse(null);
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+    debounceTimerRef.current = setTimeout(() => {
+      void runSearch(nextValue, selectedType, 0, false);
+    }, DEBOUNCE_DELAY_MS);
+  }
+
+  function handleSelectFacet(nextType: GlobalSearchEntityType | 'all') {
+    setSelectedType(nextType);
+    setActiveIdx(0);
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (query.trim().length >= 2) {
+      void runSearch(query, nextType, 0, false);
+    }
+  }
+
+  function handleClear() {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    ++requestSeqRef.current;
+    setQuery('');
+    setSelectedType('all');
+    setResponse(null);
+    setLoading(false);
+    setLoadingMore(false);
+    setErrorMessage(null);
+    setOpen(false);
+    inputRef.current?.focus();
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!showDropdown || hits.length === 0) {
+      if (e.key === 'Escape') {
+        setOpen(false);
+      }
+      return;
+    }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      if (results.ordered.length) {
-        setActiveIndex((i) => (i + 1) % results.ordered.length);
-      }
+      setActiveIdx((i) => Math.min(i + 1, hits.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      if (results.ordered.length) {
-        setActiveIndex((i) => (i - 1 + results.ordered.length) % results.ordered.length);
-      }
-    } else if (e.key === 'Enter' && results.ordered[activeIndex]) {
+      setActiveIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter' && hits[activeIdx]) {
       e.preventDefault();
-      const target = results.ordered[activeIndex].doc;
       setOpen(false);
-      setQuery('');
-      router.push(
-        target.type === 'person'
-          ? `/people/${target.id}`
-          : target.type === 'matter'
-            ? `/matters/${target.id}`
-            : target.type === 'enquiry'
-              ? `/enquiries/${target.id}`
-              : target.type === 'task'
-                ? `/tasks/${target.id}`
-                : `/organisations/${target.id}`,
-      );
+      router.push(hits[activeIdx].href);
     } else if (e.key === 'Escape') {
       setOpen(false);
     }
@@ -163,21 +328,21 @@ export function CompactHeaderSearch({
           aria-hidden="true"
         />
         <input
-          id={isHero ? 'hero-global-search-input' : 'header-global-search-input'}
-          name="q"
+          ref={inputRef}
           type="search"
           role="combobox"
-          aria-label="Search or ask anything"
-          aria-expanded={open && query.trim().length > 0}
-          aria-controls={listboxId}
           aria-autocomplete="list"
-          placeholder="Search or ask anything"
+          aria-expanded={showDropdown}
+          aria-controls={listboxId}
+          aria-label="Global search"
+          placeholder={
+            isHero
+              ? 'Search people, organisations, matters, enquiries, quotes, tasks, documents, key dates or registers...'
+              : 'Search people, organisations, matters, quotes, documents...'
+          }
           value={query}
           onFocus={() => setOpen(true)}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
+          onChange={(e) => handleQueryChange(e.target.value)}
           onKeyDown={onKeyDown}
           className={isHero ? 'hero-search-input' : 'compact-search__input'}
         />
@@ -185,116 +350,106 @@ export function CompactHeaderSearch({
           <button
             type="button"
             aria-label="Clear search"
+            onClick={handleClear}
             className="compact-search__clear"
-            onClick={() => setQuery('')}
           >
-            <X size={isHero ? 18 : 15} />
+            <X size={15} />
           </button>
         ) : null}
       </div>
 
-      {open && query.trim().length > 0 ? (
-        <div id={listboxId} role="listbox" className="compact-search__dropdown">
-          {results.ordered.length === 0 ? (
+      {showDropdown ? (
+        <div
+          id={listboxId}
+          role="listbox"
+          aria-label="Global search results"
+          className="compact-search__dropdown"
+        >
+          {trimmedQuery.length < 2 ? (
             <div className="compact-search__empty">
-              No enquiries, tasks, matters, people or organisations match &ldquo;{query}&rdquo;
+              Enter at least two characters to search across permitted records.
             </div>
           ) : (
             <>
-              {results.enquiries.length > 0 && (
-                <div className="search-group">
-                  <div className="section-label search-group__label">Enquiries</div>
-                  {results.enquiries.map((hit) => {
-                    const idx = results.ordered.indexOf(hit);
+              {response ? (
+                <div className="search-facets" role="group" aria-label="Filter results by record type">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectFacet('all')}
+                    className={`search-facet-pill ${
+                      selectedType === 'all' ? 'search-facet-pill--active' : ''
+                    }`}
+                  >
+                    All ({totalAcrossAllTypes})
+                  </button>
+                  {FACET_ORDER.map((typeKey) => {
+                    const count = response.countsByType[typeKey] ?? 0;
+                    if (count === 0 && selectedType !== typeKey) {
+                      return null;
+                    }
                     return (
-                      <SearchResultRow
-                        key={hit.doc.id}
-                        hit={hit}
-                        active={idx === activeIndex}
-                        onSelect={() => {
-                          setOpen(false);
-                          setQuery('');
-                        }}
-                      />
+                      <button
+                        key={typeKey}
+                        type="button"
+                        onClick={() => handleSelectFacet(typeKey)}
+                        className={`search-facet-pill ${
+                          selectedType === typeKey ? 'search-facet-pill--active' : ''
+                        }`}
+                      >
+                        {ENTITY_PLURAL_LABELS[typeKey]} ({count})
+                      </button>
                     );
                   })}
                 </div>
-              )}
-              {results.tasks.length > 0 && (
-                <div className="search-group">
-                  <div className="section-label search-group__label">Tasks</div>
-                  {results.tasks.map((hit) => {
-                    const idx = results.ordered.indexOf(hit);
-                    return (
-                      <SearchResultRow
-                        key={hit.doc.id}
-                        hit={hit}
-                        active={idx === activeIndex}
-                        onSelect={() => {
-                          setOpen(false);
-                          setQuery('');
-                        }}
-                      />
-                    );
-                  })}
+              ) : null}
+
+              {loading ? (
+                <div className="compact-search__empty" role="status">
+                  Searching records...
                 </div>
-              )}
-              {results.matters.length > 0 && (
-                <div className="search-group">
-                  <div className="section-label search-group__label">Matters</div>
-                  {results.matters.map((hit) => {
-                    const idx = results.ordered.indexOf(hit);
-                    return (
-                      <SearchResultRow
-                        key={hit.doc.id}
-                        hit={hit}
-                        active={idx === activeIndex}
-                        onSelect={() => {
-                          setOpen(false);
-                          setQuery('');
-                        }}
-                      />
-                    );
-                  })}
+              ) : errorMessage ? (
+                <div className="compact-search__empty" role="alert">
+                  {errorMessage}
                 </div>
-              )}
-              {results.people.length > 0 && (
-                <div className="search-group">
-                  <div className="section-label search-group__label">People</div>
-                  {results.people.map((hit) => {
-                    const idx = results.ordered.indexOf(hit);
-                    return (
-                      <SearchResultRow
-                        key={hit.doc.id}
-                        hit={hit}
-                        active={idx === activeIndex}
-                        onSelect={() => {
-                          setOpen(false);
-                          setQuery('');
-                        }}
-                      />
-                    );
-                  })}
+              ) : hits.length === 0 ? (
+                <div className="compact-search__empty">
+                  No matching permitted records found for &ldquo;{trimmedQuery}&rdquo;.
                 </div>
-              )}
-              {results.organisations.length > 0 && (
-                <div className="search-group">
-                  <div className="section-label search-group__label">Organisations</div>
-                  {results.organisations.map((hit) => {
-                    const idx = results.ordered.indexOf(hit);
-                    return (
+              ) : (
+                <>
+                  <div className="search-status-row">
+                    Showing {hits.length} of {response?.totalCount ?? hits.length}{' '}
+                    {(response?.totalCount ?? hits.length) === 1 ? 'result' : 'results'}
+                  </div>
+                  <div className="list-group">
+                    {hits.map((hit, idx) => (
                       <SearchResultRow
-                        key={hit.doc.id}
+                        key={`${hit.entityType}:${hit.id}`}
                         hit={hit}
-                        active={idx === activeIndex}
-                        onSelect={() => {
-                          setOpen(false);
-                          setQuery('');
-                        }}
+                        query={trimmedQuery}
+                        active={idx === activeIdx}
+                        onHover={() => setActiveIdx(idx)}
+                        onPick={() => setOpen(false)}
                       />
-                    );
-                  })}
-                </div>
+                    ))}
+                  </div>
+                  {response?.hasMore ? (
+                    <div className="search-footer">
+                      <button
+                        type="button"
+                        disabled={loadingMore}
+                        onClick={() =>
+                          void runSearch(query, selectedType, hits.length, true)
+                        }
+                        className="search-load-more"
+                      >
+                        {loadingMore
+                          ? 'Loading more...'
+                          : `Load more results (${(response.totalCount ?? 0) - hits.length} remaining)`}
+                      </button>
+                    </div>
+                  ) : null}
+                </>
               )}
             </>
           )}
@@ -304,6 +459,6 @@ export function CompactHeaderSearch({
   );
 }
 
-export function HeroHomeSearch({ searchIndex }: { searchIndex: SearchDoc[] }) {
-  return <CompactHeaderSearch searchIndex={searchIndex} variant="hero" />;
+export function HeroHomeSearch(props: { searchIndex?: SearchDoc[] }) {
+  return <CompactHeaderSearch searchIndex={props.searchIndex} variant="hero" />;
 }

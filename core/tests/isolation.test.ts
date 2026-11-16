@@ -6885,6 +6885,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           getAppSnapshot(excludedActor.id),
         );
         expect(snap.matters.some((m) => m.id === wallMatter.id)).toBe(false);
+        expect(snap.searchIndex).toEqual([]);
         expect(
           snap.searchIndex.some(
             (doc) =>

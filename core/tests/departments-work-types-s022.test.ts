@@ -1393,7 +1393,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     await expect(freshCatRepo.getWorkTypeConfigs(forgedCtx)).rejects.toThrow();
 
     expect(runner).toBeDefined();
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0017');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0018');
   });
 
   it('10. R495: ignores client destructionDueAt and retentionPeriod on create and update, rejects non-closing/future/pre-open closedAt with code and message, and audits old/new values', async () => {

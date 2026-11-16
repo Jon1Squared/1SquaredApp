@@ -68,6 +68,7 @@ This guide explains how **Matters**, **Enquiries**, **Quotes**, **Tasks**, and *
 
 - The left-hand navigation rail includes **Key dates** (\`/key-dates\`), controlled by \`leftRailVisibility.keyDates\` and visible to any user holding the \`keydate:view\` permission.
 - System configuration for key dates is available under **Admin → Key dates & limitation** (\`/admin/key-dates\`) for users holding \`keydate:configure\`.
+- The header and Home global search bars execute debounced server-side search via \`searchGlobalRecordsAction\` and \`TenantSearchRepository\` across nine record types (see the **Global server-side search and visibility** Help article).
 
 ## Synchronised departments, work types, and matter lifecycle
 

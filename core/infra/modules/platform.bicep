@@ -677,6 +677,18 @@ resource pgBouncerPoolMode 'Microsoft.DBforPostgreSQL/flexibleServers/configurat
   ]
 }
 
+resource pgAzureExtensions 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-08-01' = {
+  parent: sharedPostgresServer
+  name: 'azure.extensions'
+  properties: {
+    value: 'PG_TRGM'
+    source: 'user-override'
+  }
+  dependsOn: [
+    pgMinTlsVersion
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // 6. Azure Container Apps Environment, Web App, Internal PDF Converter & Jobs
 // ---------------------------------------------------------------------------

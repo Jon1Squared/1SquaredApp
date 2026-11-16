@@ -2259,6 +2259,310 @@ DROP SEQUENCE IF EXISTS public.tenant_register_record_id_seq;
 `.trim(),
 };
 
+export const TENANT_SEARCH_INDEXES_MIGRATION_0018: TenantMigrationDefinition = {
+  version: '0018',
+  name: '0018_tenant_search_indexes_expand',
+  description:
+    'Install pg_trgm extension in public schema and create IMMUTABLE GIN full-text and trigram indexes across searchable entity tables plus document_links lookup index.',
+  dependsOn: ['0017'],
+  tablesChanged: [
+    'people',
+    'person_emails',
+    'organisations',
+    'matters',
+    'enquiries',
+    'quotes',
+    'tasks',
+    'documents',
+    'document_links',
+    'key_dates',
+    'register_records',
+  ],
+  upSql: `
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
+
+CREATE INDEX IF NOT EXISTS idx_document_links_tenant_document
+  ON public.document_links (tenant_id, document_id);
+
+CREATE INDEX IF NOT EXISTS idx_search_people_fts
+  ON public.people USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(first_name, '') || ' ' ||
+      COALESCE(preferred_name, '') || ' ' ||
+      COALESCE(other_names, '') || ' ' ||
+      COALESCE(surname, '') || ' ' ||
+      COALESCE(job_title, '') || ' ' ||
+      COALESCE(primary_email_lower, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  )
+  WHERE merged_into_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_search_people_trgm
+  ON public.people USING GIN (
+    (
+      COALESCE(first_name, '') || ' ' ||
+      COALESCE(preferred_name, '') || ' ' ||
+      COALESCE(other_names, '') || ' ' ||
+      COALESCE(surname, '') || ' ' ||
+      COALESCE(job_title, '') || ' ' ||
+      COALESCE(primary_email_lower, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  )
+  WHERE merged_into_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_search_person_emails_trgm
+  ON public.person_emails USING GIN (email_lower gin_trgm_ops)
+  WHERE active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_search_organisations_fts
+  ON public.organisations USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(legal_name, '') || ' ' ||
+      COALESCE(trading_name, '') || ' ' ||
+      COALESCE(company_number, '') || ' ' ||
+      COALESCE(vat_number, '') || ' ' ||
+      COALESCE(client_reference, '') || ' ' ||
+      COALESCE(general_email, '') || ' ' ||
+      COALESCE(main_phone, '') || ' ' ||
+      COALESCE(website, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  )
+  WHERE merged_into_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_search_organisations_trgm
+  ON public.organisations USING GIN (
+    (
+      COALESCE(legal_name, '') || ' ' ||
+      COALESCE(trading_name, '') || ' ' ||
+      COALESCE(company_number, '') || ' ' ||
+      COALESCE(vat_number, '') || ' ' ||
+      COALESCE(client_reference, '') || ' ' ||
+      COALESCE(general_email, '') || ' ' ||
+      COALESCE(main_phone, '') || ' ' ||
+      COALESCE(website, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  )
+  WHERE merged_into_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_search_matters_fts
+  ON public.matters USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(matter_number, '') || ' ' ||
+      COALESCE(title, '') || ' ' ||
+      COALESCE(practice_area_id, '') || ' ' ||
+      COALESCE(work_type_subcategory_id, '') || ' ' ||
+      COALESCE(status_id, '') || ' ' ||
+      COALESCE(current_stage_id, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  )
+  WHERE client_id <> 'O-KEYDATE-STUB';
+
+CREATE INDEX IF NOT EXISTS idx_search_matters_trgm
+  ON public.matters USING GIN (
+    (
+      COALESCE(matter_number, '') || ' ' ||
+      COALESCE(title, '') || ' ' ||
+      COALESCE(practice_area_id, '') || ' ' ||
+      COALESCE(work_type_subcategory_id, '') || ' ' ||
+      COALESCE(status_id, '') || ' ' ||
+      COALESCE(current_stage_id, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  )
+  WHERE client_id <> 'O-KEYDATE-STUB';
+
+CREATE INDEX IF NOT EXISTS idx_search_enquiries_fts
+  ON public.enquiries USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(reference, '') || ' ' ||
+      COALESCE(first_name, '') || ' ' ||
+      COALESCE(last_name, '') || ' ' ||
+      COALESCE(email, '') || ' ' ||
+      COALESCE(phone, '') || ' ' ||
+      COALESCE(postcode, '') || ' ' ||
+      COALESCE(calling_on_behalf_of, '') || ' ' ||
+      COALESCE(organisation_name, '') || ' ' ||
+      COALESCE(practice_area_id, '') || ' ' ||
+      COALESCE(summary_and_notes_json->>'matterSummary', '') || ' ' ||
+      COALESCE(id, '')
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_enquiries_trgm
+  ON public.enquiries USING GIN (
+    (
+      COALESCE(reference, '') || ' ' ||
+      COALESCE(first_name, '') || ' ' ||
+      COALESCE(last_name, '') || ' ' ||
+      COALESCE(email, '') || ' ' ||
+      COALESCE(phone, '') || ' ' ||
+      COALESCE(postcode, '') || ' ' ||
+      COALESCE(calling_on_behalf_of, '') || ' ' ||
+      COALESCE(organisation_name, '') || ' ' ||
+      COALESCE(practice_area_id, '') || ' ' ||
+      COALESCE(summary_and_notes_json->>'matterSummary', '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_quotes_fts
+  ON public.quotes USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(quote_reference, '') || ' ' ||
+      COALESCE(prospect_name, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(fee_basis, '') || ' ' ||
+      COALESCE(practice_area_id, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_quotes_trgm
+  ON public.quotes USING GIN (
+    (
+      COALESCE(quote_reference, '') || ' ' ||
+      COALESCE(prospect_name, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(fee_basis, '') || ' ' ||
+      COALESCE(practice_area_id, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_tasks_fts
+  ON public.tasks USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(reference, '') || ' ' ||
+      COALESCE(title, '') || ' ' ||
+      COALESCE(description, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_tasks_trgm
+  ON public.tasks USING GIN (
+    (
+      COALESCE(reference, '') || ' ' ||
+      COALESCE(title, '') || ' ' ||
+      COALESCE(description, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_documents_fts
+  ON public.documents USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(title, '') || ' ' ||
+      COALESCE(file_name, '') || ' ' ||
+      COALESCE(document_type, '') || ' ' ||
+      COALESCE(output_format, '') || ' ' ||
+      COALESCE(template_name, '') || ' ' ||
+      COALESCE(generated_by_name, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  )
+  WHERE is_deleted = FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_search_documents_trgm
+  ON public.documents USING GIN (
+    (
+      COALESCE(title, '') || ' ' ||
+      COALESCE(file_name, '') || ' ' ||
+      COALESCE(document_type, '') || ' ' ||
+      COALESCE(output_format, '') || ' ' ||
+      COALESCE(template_name, '') || ' ' ||
+      COALESCE(generated_by_name, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  )
+  WHERE is_deleted = FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_search_key_dates_fts
+  ON public.key_dates USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(title, '') || ' ' ||
+      COALESCE(category, '') || ' ' ||
+      COALESCE(key_date_type_id, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(notes, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_key_dates_trgm
+  ON public.key_dates USING GIN (
+    (
+      COALESCE(title, '') || ' ' ||
+      COALESCE(category, '') || ' ' ||
+      COALESCE(key_date_type_id, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(notes, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_register_records_fts
+  ON public.register_records USING GIN (
+    to_tsvector(
+      'simple',
+      COALESCE(reference, '') || ' ' ||
+      COALESCE(title, '') || ' ' ||
+      COALESCE(register_type_key, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(id, '')
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS idx_search_register_records_trgm
+  ON public.register_records USING GIN (
+    (
+      COALESCE(reference, '') || ' ' ||
+      COALESCE(title, '') || ' ' ||
+      COALESCE(register_type_key, '') || ' ' ||
+      COALESCE(status, '') || ' ' ||
+      COALESCE(id, '')
+    ) gin_trgm_ops
+  );
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS public.idx_search_register_records_trgm;
+DROP INDEX IF EXISTS public.idx_search_register_records_fts;
+DROP INDEX IF EXISTS public.idx_search_key_dates_trgm;
+DROP INDEX IF EXISTS public.idx_search_key_dates_fts;
+DROP INDEX IF EXISTS public.idx_search_documents_trgm;
+DROP INDEX IF EXISTS public.idx_search_documents_fts;
+DROP INDEX IF EXISTS public.idx_search_tasks_trgm;
+DROP INDEX IF EXISTS public.idx_search_tasks_fts;
+DROP INDEX IF EXISTS public.idx_search_quotes_trgm;
+DROP INDEX IF EXISTS public.idx_search_quotes_fts;
+DROP INDEX IF EXISTS public.idx_search_enquiries_trgm;
+DROP INDEX IF EXISTS public.idx_search_enquiries_fts;
+DROP INDEX IF EXISTS public.idx_search_matters_trgm;
+DROP INDEX IF EXISTS public.idx_search_matters_fts;
+DROP INDEX IF EXISTS public.idx_search_organisations_trgm;
+DROP INDEX IF EXISTS public.idx_search_organisations_fts;
+DROP INDEX IF EXISTS public.idx_search_person_emails_trgm;
+DROP INDEX IF EXISTS public.idx_search_people_trgm;
+DROP INDEX IF EXISTS public.idx_search_people_fts;
+DROP INDEX IF EXISTS public.idx_document_links_tenant_document;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -2277,6 +2581,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   TRANSITIONAL_BRIDGES_CONTRACT_MIGRATION_0015,
   NEGOTIATED_RATES_MIGRATION_0016,
   REGISTERS_ENGINE_MIGRATION_0017,
+  TENANT_SEARCH_INDEXES_MIGRATION_0018,
 ];
 
 export function validateMigrationCatalogueOrder(
