@@ -1144,7 +1144,7 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
     }) as TenantContext;
     await expect(freshCatRepo.getMatterCostsConfig(forgedCtx)).rejects.toThrow();
 
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0018');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0019');
   });
 
   it('7. S2: sums matter snapshot fee, multi-disbursement net, VAT, and combined totals strictly in integer minor units without float round-trips', () => {

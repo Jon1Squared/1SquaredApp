@@ -311,3 +311,9 @@ To remove all Azure resources in the demo resource group (whilst keeping your Mi
 ```powershell
 az group delete --name rg-onesquared-demo-uksouth --yes --no-wait
 ```
+
+## Outbound Email Certificate & Allow-List Blocker (`S0-26`)
+
+Owner prerequisites completed on **12 November 2026**: the `notifications@1squared.co.uk` shared mailbox, Entra app `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`, certificate thumbprint `B738D511CEF82CF63670CF540571CE03A1AB53E4`) with Exchange Online RBAC scoped strictly to that mailbox, and SPF/DKIM/DMARC DNS records for `1squared.co.uk`.
+
+Until the client certificate secret (`graph-email-client-cert`) and permitted pilot email list (`email-recipient-allowlist`) are imported into the tenant Azure Key Vault (`kv-notalawfirm-demo`), `client-not-a-law-firm/config/environments/demo.json` keeps `integrations.email.provider = "disabled"`. The 5-minute `caj-outbox-drain-demo` job runs harmlessly with no transport calls when disabled. Follow [`docs/runbooks/email-certificate-setup.md`](./email-certificate-setup.md) before switching `"provider"` to `"graph"`.

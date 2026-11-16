@@ -23,7 +23,7 @@ Related Architecture Decision Records:
 ## 1. Central Permission Registry (`PERMISSION_REGISTRY`)
 
 Defined in `core/src/domain/rbac/registry.ts` and exported from `@platform/core`.
-Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 66 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 7 job-only permissions; 73 total).
+Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 66 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 8 job-only permissions; 74 total).
 
 | Permission Key | Domain | Sensitivity | Requires MFA | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -100,6 +100,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `document_generation:purge_usage` | `document_generation` | `critical` | No (`jobOnly: true`) | Execute the unattended daily document generation usage retention purge for a tenant (`system:usage-retention-purge` via `guardedJob`) |
 | `enquiry:run_retention_anonymise` | `enquiry` | `critical` | No (`jobOnly: true`) | Execute the unattended daily enquiry retention anonymisation sweep for a tenant (`system:enquiry-retention-anonymise` via `guardedJob`) |
 | `register:run_reminders` | `register` | `critical` | No (`jobOnly: true`) | Execute the unattended hourly register and undertaking reminder sweep for a tenant (`system:register-reminders` via `guardedJob`) |
+| `notification:drain_outbox` | `notification` | `critical` | No (`jobOnly: true`) | Execute the scheduled `outbox-drain` job across provisioned tenants to deliver queued notifications and scrub expired content (`system:outbox-drain` via `guardedJob`, ADR 0027 / ADR 0035) |
 
 > **Job-only permission invariant (`ADR-0030 §3`):** No built-in or custom role (`admin` included) holds any `jobOnly: true` permission (`DEFAULT_RBAC_ROLES.admin.permissions` uses `ALL_USER_PERMISSION_KEYS` minus `undertaking:manage`). `resolvePermissions`, `resolvePersonPermissionSet`, `updatePersonPermissionOverrides`, and `updateTenantRbacConfig` strip or reject any attempt to grant a `jobOnly` permission to a person, role, or department (`FORBIDDEN`).
 
@@ -212,7 +213,7 @@ Per [ADR-0025](./decisions/0025-permission-enforcement-pattern.md), every server
 - **Policy Registry (`src/server/actionPermissions.ts`):**
   - `ACTION_PERMISSIONS`: maps each exported server action name to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'authenticated', reason }`, or `{ kind: 'gap', slice }`.
   - `ROUTE_PERMISSIONS`: maps each `<METHOD> /api/...` route handler to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'public', reason }`, or `{ kind: 'gap', slice }`.
-  - `JOB_PERMISSIONS`: maps each registered CLI background job (`provision`, `migrate`, `seed-demo`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`, `register-reminders`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
+  - `JOB_PERMISSIONS`: maps each registered CLI background job (`provision`, `migrate`, `seed-demo`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`, `register-reminders`, `outbox-drain`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
   - `MAX_KNOWN_GAPS`: locks the maximum count of `gap` entries so new actions cannot ship without a permission policy and the baseline gap count can only decrease as Stage 0 slices S0-03 to S0-07 and S0-10 close them.
 - **Action, Route & Job Wrappers (`src/server/authorize.ts`):**
   - `guardedAction(name, fn)` authenticates the actor from the verified Entra ID session, resolves `TenantContext` via `resolveCurrentTenantContext`, resolves the actor's `ResolvedPermissionSet` with the session's real `mfaVerified` state and token roles, and runs `fn` inside `runWithActiveActorSession`.

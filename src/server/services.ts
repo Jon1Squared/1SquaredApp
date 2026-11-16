@@ -39,7 +39,9 @@ import {
   TenantSearchRepository,
   getActiveTenantConfiguration,
   getExtensionHostLoadErrors,
+  getOutboxRepository,
   getPlatformExtensionHost,
+  getTenantConfigurationForRegistryEntry,
   isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
@@ -258,6 +260,7 @@ import {
 import {
   createDefaultFirmFeeArrangementCaps,
   DEFAULT_REGISTERS_CONFIG,
+  drainEmailOutboxForTenant,
   evaluateRegisterDueAndReviewReminders,
   executeUsageRetentionPurgeJob,
   FEE_CAP_BASE_MISMATCH_CODE,
@@ -267,6 +270,7 @@ import {
   findEffectiveRegisterType,
   getActiveTenantTransactionState,
   getEffectiveReminderHourLocal,
+  hasActiveTenantTransaction,
   INVALID_PARENT_ORGANISATION_CODE,
   loadActiveTenantRegistry,
   MATTER_CONCURRENCY_CONFLICT_CODE,
@@ -279,6 +283,7 @@ import {
   RATE_OVERRIDE_VALIDATION_ERROR_CODE,
   REGISTER_DOMAIN_ERROR_CODES,
   resolveEffectiveRegisterTypes,
+  resolveEmailIntegrationConfig,
   resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
@@ -293,6 +298,12 @@ import {
   validateRegisterTransitionExecution,
   validateWorkTypesConfig,
   type ClientRateOverrideClientType,
+  type DocumentStorageProvider,
+  type EmailOutboxRecord,
+  type EmailSender,
+  type KeyVaultSecretReader,
+  type OutboxDrainResult,
+  type TenantConfiguration,
   type ClientRateOverrideRecord,
   type ControlledJobRunOutcome,
   type EffectiveFeeCapResolution,
@@ -10126,6 +10137,119 @@ export async function clearAllDataToCleanDeployment(
 }
 
 // ------------------------------------------------------------------ Notifications
+function escapeHtmlTextForEmail(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function resolvePrimaryActiveEmailForPerson(person: Person): string | null {
+  const activeEmails = (person.emails ?? []).filter(
+    (entry) => entry.active !== false && entry.address?.trim(),
+  );
+  if (activeEmails.length === 0) {
+    return null;
+  }
+  return (
+    activeEmails.find((entry) => entry.isPrimary)?.address.trim() ??
+    activeEmails[0]?.address.trim() ??
+    null
+  );
+}
+
+/**
+ * Enqueues an immediate transactional email into `public.email_outbox` when
+ * `integrations.email.provider !== 'disabled'` and the recipient's notification
+ * preference resolves to `emailFrequency === 'immediate'`, followed by a best-effort
+ * post-commit drain when outside an enclosing database transaction (ADR 0027 §6.1).
+ * Leaves behaviour completely unchanged when `integrations.email.provider === 'disabled'`.
+ */
+export async function enqueueNotificationEmailIfImmediate(
+  ctx: TenantContext,
+  item: NotificationItem,
+  options?: {
+    readonly byId?: string | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainImmediately?: boolean;
+  },
+): Promise<EmailOutboxRecord | null> {
+  const tenantConfig = options?.tenantConfig ?? getActiveTenantConfiguration();
+  const emailCfg = resolveEmailIntegrationConfig(tenantConfig);
+  if ((emailCfg.provider ?? 'disabled') === 'disabled') {
+    return null;
+  }
+
+  const outboxRepo = getOutboxRepository();
+  const preference = await outboxRepo.getNotificationPreference(
+    ctx,
+    item.recipientId,
+    item.kind,
+  );
+  if (preference.emailFrequency !== 'immediate') {
+    return null;
+  }
+
+  const people = await getPartyRepository().listAllPeople<Person>(ctx);
+  const recipient = people.find(
+    (p) => p.id === item.recipientId && !p.mergedIntoId,
+  );
+  const recipientAddress = recipient
+    ? resolvePrimaryActiveEmailForPerson(recipient)
+    : null;
+  if (!recipientAddress) {
+    return null;
+  }
+
+  const subject = `[${tenantConfig.displayName}] ${item.title}`;
+  const textLines = [item.title, item.detail, item.href ? `Open record: ${item.href}` : ''].filter(
+    Boolean,
+  );
+  const htmlBody = [
+    `<p><strong>${escapeHtmlTextForEmail(item.title)}</strong></p>`,
+    item.detail ? `<p>${escapeHtmlTextForEmail(item.detail)}</p>` : '',
+    item.href
+      ? `<p>Reference path: <code>${escapeHtmlTextForEmail(item.href)}</code></p>`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('');
+
+  const { record } = await outboxRepo.enqueueEmail(ctx, {
+    idempotencyKey: `notification:${ctx.tenantId}:${item.id}`,
+    templateKey: `notification.${item.kind}`,
+    recipients: { to: [recipientAddress] },
+    subject,
+    htmlBody,
+    textBody: textLines.join('\n\n'),
+    createdByPersonId: options?.byId ?? item.byId ?? null,
+    correlationId: ctx.correlationId,
+  });
+
+  if (options?.drainImmediately !== false && !hasActiveTenantTransaction(ctx)) {
+    try {
+      await drainEmailOutboxForTenant(ctx, {
+        tenantConfig,
+        outboxRepository: outboxRepo,
+        emailSender: options?.emailSender,
+        secretReader: options?.secretReader,
+        storageProvider: options?.storageProvider,
+        actorId: options?.byId ?? 'system:notification-immediate',
+        batchSize: 10,
+      });
+    } catch {
+      // Best-effort post-commit drain: outbox row remains pending/scheduled for retry by outbox-drain.
+    }
+  }
+
+  return record;
+}
+
 async function pushNotification(
   ctx: TenantContext,
   input: {
@@ -10156,6 +10280,7 @@ async function pushNotification(
     byId: input.byId,
   };
   await taskRepo.putNotification(ctx, item);
+  await enqueueNotificationEmailIfImmediate(ctx, item, { byId: input.byId });
   return item;
 }
 
@@ -23053,6 +23178,102 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
     succeededTenants,
     skippedTenants,
     failedTenants,
+  };
+}
+
+export interface OutboxDrainSweepSummary extends ScheduledTenantJobSweepSummary {
+  readonly resultsByTenant: Record<string, OutboxDrainResult>;
+}
+
+/**
+ * Scheduled `outbox-drain` sweep across every enabled tenant in `TenantRegistry` (ADR 0027 §6.4).
+ * Runs under `guardedJob('outbox-drain', ...)` with `notification:drain_outbox` (`jobOnly: true`)
+ * and bypasses `public.job_runs`'s once-per-local-day uniqueness gate.
+ */
+export async function runScheduledOutboxDrainJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
+  readonly emailSender?: EmailSender;
+  readonly secretReader?: KeyVaultSecretReader;
+  readonly storageProvider?: DocumentStorageProvider;
+  readonly batchSize?: number;
+  readonly maxAttempts?: number;
+  readonly baseBackoffSeconds?: number;
+  readonly now?: Date;
+}): Promise<OutboxDrainSweepSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const outboxRepo = getOutboxRepository();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+  const resultsByTenant: Record<string, OutboxDrainResult> = {};
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) continue;
+    try {
+      const outcome = await guardedJob(
+        'outbox-drain',
+        entry,
+        async ({ tenantContext, tenantEntry }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return drainEmailOutboxForTenant(tenantContext, {
+            tenantConfig,
+            outboxRepository: outboxRepo,
+            emailSender: options?.emailSender,
+            secretReader: options?.secretReader,
+            storageProvider: options?.storageProvider,
+            actorId: 'system:outbox-drain',
+            batchSize: options?.batchSize,
+            maxAttempts: options?.maxAttempts,
+            baseBackoffSeconds: options?.baseBackoffSeconds,
+            now: options?.now,
+          });
+        },
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+
+      resultsByTenant[entry.tenantId] = outcome;
+      if (outcome.skippedDisabled && outcome.scrubbedCount === 0) {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status: 'skipped',
+          reason: 'email_provider_disabled',
+        });
+      } else {
+        succeededTenants.push(entry.tenantId);
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+    resultsByTenant,
   };
 }
 

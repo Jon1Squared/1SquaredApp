@@ -7,6 +7,14 @@
   "integrations": {
     "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-dev/pms-connection-string",
     "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-dev/companies-house-api-key",
-    "aiProviderChoice": "anthropic"
+    "aiProviderChoice": "anthropic",
+    "email": {
+      "provider": "disabled",
+      "devCatcher": {
+        "host": "127.0.0.1",
+        "port": 1025,
+        "secure": false
+      }
+    }
   }
 }

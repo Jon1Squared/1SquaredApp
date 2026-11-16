@@ -337,12 +337,15 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       ['keyDateRemindersJob', 'usageRetentionPurgeJob'],
       ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
       ['enquiryAnonymisationJob', 'registerRemindersJob'],
-      ['registerRemindersJob', 'seedDemoJob'],
+      ['registerRemindersJob', 'outboxDrainJob'],
+      ['outboxDrainJob', 'seedDemoJob'],
     ] as const) {
       expect(resourceBlock(name, next), name).toContain(
         'runtimeAppInsightsMetricsPublisherRole',
       );
     }
+    expect(platformBicep).toContain('outbox.delivery.failed_permanent');
+    expect(platformBicep).toContain('caj-outbox-drain-${environment}');
     expect(
       platformNoComments.slice(
         platformNoComments.indexOf('resource seedDemoJob '),

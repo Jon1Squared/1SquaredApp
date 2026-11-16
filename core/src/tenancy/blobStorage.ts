@@ -55,7 +55,7 @@ function sanitizeFileName(fileName: string): string {
   return base;
 }
 
-function assertBlobKeyBelongsToTenant(
+export function assertBlobKeyBelongsToTenant(
   ctx: TenantContext,
   blobKey: string,
 ): void {

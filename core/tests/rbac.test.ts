@@ -304,8 +304,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   });
 
   describe('1. Permission Registry & Field Catalogue Contract (ADR-0010)', () => {
-    it('defines all 66 canonical user permissions plus 7 job-only permissions with metadata and MFA flags', () => {
-      expect(ALL_PERMISSION_KEYS.length).toBe(73);
+    it('defines all 66 canonical user permissions plus 8 job-only permissions with metadata and MFA flags', () => {
+      expect(ALL_PERMISSION_KEYS.length).toBe(74);
       expect(ALL_USER_PERMISSION_KEYS.length).toBe(66);
       expect(ALL_JOB_ONLY_PERMISSION_KEYS).toEqual([
         'tenant:provision',
@@ -315,6 +315,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         'document_generation:purge_usage',
         'enquiry:run_retention_anonymise',
         'register:run_reminders',
+        'notification:drain_outbox',
       ]);
       for (const key of ALL_PERMISSION_KEYS) {
         const entry = PERMISSION_REGISTRY[key];

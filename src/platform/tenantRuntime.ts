@@ -23,6 +23,7 @@ import {
   TenantIntakeQuoteRepository,
   TenantJobRunRepository,
   TenantMatterRepository,
+  TenantOutboxRepository,
   TenantPartyRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
@@ -33,9 +34,11 @@ import {
   type ExtensionManifest,
   type FirmAuditEntryInput,
   type FirmAuditEntryRecord,
+  type HostingMode,
   type PermissionKey,
   type TenantConfiguration,
   type TenantContext,
+  type TenantRegistryEntry,
 } from '@platform/core';
 import type { PlatformExtension } from '@platform/core-api';
 import type { AuditEntry } from '@/domain/types';
@@ -653,6 +656,64 @@ export function getActiveTenantConfiguration(): TenantConfiguration {
   return validated;
 }
 
+export function getTenantConfigurationForRegistryEntry(
+  entry: Pick<TenantRegistryEntry, 'tenantId' | 'packageDir' | 'environment'>,
+  hostingModeOverride?: HostingMode,
+): TenantConfiguration {
+  const activeCfg = getActiveTenantConfiguration();
+  if (
+    activeCfg.tenantId === entry.tenantId &&
+    activeCfg.environment === entry.environment &&
+    (!hostingModeOverride || activeCfg.hostingMode === hostingModeOverride)
+  ) {
+    return activeCfg;
+  }
+  const pathMod =
+    typeof process.getBuiltinModule === 'function'
+      ? (process.getBuiltinModule('node:path') as typeof import('node:path'))
+      : null;
+  const fsMod =
+    typeof process.getBuiltinModule === 'function'
+      ? (process.getBuiltinModule('node:fs') as typeof import('node:fs'))
+      : null;
+  if (!pathMod || !fsMod) {
+    throw new Error(
+      'TENANT_CONFIG_ERROR: Registry entry configuration loading requires Node.js runtime.',
+    );
+  }
+  const packageRoot = pathMod.resolve(process.cwd(), entry.packageDir);
+  const basePath = pathMod.join(packageRoot, 'config', 'base.json');
+  const envDirCandidate = pathMod.join(
+    packageRoot,
+    'config',
+    'environments',
+    `${entry.environment}.json`,
+  );
+  const directCandidate = pathMod.join(
+    packageRoot,
+    'config',
+    `${entry.environment}.json`,
+  );
+  const overlayPath =
+    !fsMod.existsSync(envDirCandidate) && fsMod.existsSync(directCandidate)
+      ? directCandidate
+      : envDirCandidate;
+  const baseCfg = readJsonConfigFile(basePath, false);
+  const overlayCfg = readJsonConfigFile(overlayPath, true);
+  const hostingMode =
+    hostingModeOverride ??
+    (process.env.PLATFORM_HOSTING_MODE as HostingMode | undefined) ??
+    'multi_tenant';
+  return deepFreeze(
+    loadAndValidateTenantConfig(
+      baseCfg,
+      overlayCfg,
+      entry.environment,
+      hostingMode,
+    ),
+  );
+}
+
 /**
  * Shared configuration-driven helper for non-live demo mode (Rule 6).
  * Returns true only when the tenant environment is non-live (`dev`, `test`,
@@ -779,6 +840,7 @@ const rateOverrideRepositoryInstance = new TenantRateOverrideRepository();
 const registerRepositoryInstance = new TenantRegisterRepository();
 const searchRepositoryInstance = new TenantSearchRepository();
 const jobRunRepositoryInstance = new TenantJobRunRepository();
+const outboxRepositoryInstance = new TenantOutboxRepository();
 const auditRepositoryInstance = new TenantAuditRepository();
 let auditRepositoryOverrideForTesting: TenantAuditRepository | null = null;
 let jobRunRepositoryOverrideForTesting: TenantJobRunRepository | null = null;
@@ -821,6 +883,10 @@ export function getRegisterRepository(): TenantRegisterRepository {
 
 export function getSearchRepository(): TenantSearchRepository {
   return searchRepositoryInstance;
+}
+
+export function getOutboxRepository(): TenantOutboxRepository {
+  return outboxRepositoryInstance;
 }
 
 export function getJobRunRepository(): TenantJobRunRepository {
@@ -1089,6 +1155,7 @@ export {
   TenantIntakeQuoteRepository,
   TenantJobRunRepository,
   TenantMatterRepository,
+  TenantOutboxRepository,
   TenantPartyRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,

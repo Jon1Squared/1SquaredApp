@@ -1132,6 +1132,55 @@ export const TenantConfigurationSchema = z
         pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(
           '[x-reserved:backlog] Two-way Finance/PMS synchronisation settings and field mappings (reserved for backlog)',
         ),
+        email: z
+          .object({
+            provider: z
+              .enum(['disabled', 'dev_catcher', 'graph', 'acs'])
+              .default('disabled'),
+            senderAddress: z.string().email().optional(),
+            replyTo: z.string().email().optional(),
+            outboxContentRetentionDays: z
+              .number()
+              .int()
+              .min(1)
+              .max(3650)
+              .optional(),
+            recipientAllowList: z.array(z.string().trim().min(1)).optional(),
+            recipientAllowListVaultRef: KeyVaultRefSchema.optional(),
+            graph: z
+              .object({
+                tenantId: z.string().trim().min(1),
+                clientId: z.string().trim().min(1),
+                certificateVaultRef: KeyVaultRefSchema,
+                certificateThumbprint: z
+                  .string()
+                  .regex(
+                    /^[A-Fa-f0-9]{40}$/,
+                    'certificateThumbprint must be a 40-hex SHA-1 thumbprint',
+                  ),
+              })
+              .strict()
+              .optional(),
+            acs: z
+              .object({
+                connectionVaultRef: KeyVaultRefSchema,
+              })
+              .strict()
+              .optional(),
+            devCatcher: z
+              .object({
+                host: z.string().trim().min(1),
+                port: z.number().int().min(1).max(65535),
+                secure: z.boolean().optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional()
+          .describe(
+            'Tenant outbound transactional email configuration (ADR 0027, S0-26)',
+          ),
       })
       .strict(),
     customFields: z
@@ -2572,6 +2621,57 @@ export const TenantConfigurationSchema = z
         });
       }
     }
+    if (cfg.integrations?.email) {
+      if (cfg.integrations.email.recipientAllowListVaultRef) {
+        secretRefChecks.push({
+          path: ['integrations', 'email', 'recipientAllowListVaultRef'],
+          ref: cfg.integrations.email.recipientAllowListVaultRef,
+        });
+      }
+      if (cfg.integrations.email.graph?.certificateVaultRef) {
+        secretRefChecks.push({
+          path: ['integrations', 'email', 'graph', 'certificateVaultRef'],
+          ref: cfg.integrations.email.graph.certificateVaultRef,
+        });
+      }
+      if (cfg.integrations.email.acs?.connectionVaultRef) {
+        secretRefChecks.push({
+          path: ['integrations', 'email', 'acs', 'connectionVaultRef'],
+          ref: cfg.integrations.email.acs.connectionVaultRef,
+        });
+      }
+      if (cfg.environment === 'live' && cfg.integrations.email.provider === 'dev_catcher') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['integrations', 'email', 'provider'],
+          message: 'integrations.email.provider "dev_catcher" is forbidden in live environments.',
+        });
+      }
+      if (cfg.integrations.email.provider === 'graph') {
+        if (!cfg.integrations.email.senderAddress) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['integrations', 'email', 'senderAddress'],
+            message: 'integrations.email.senderAddress is required when provider is "graph".',
+          });
+        }
+        if (!cfg.integrations.email.graph) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['integrations', 'email', 'graph'],
+            message: 'integrations.email.graph settings are required when provider is "graph".',
+          });
+        }
+      }
+      if (cfg.integrations.email.provider === 'acs' && !cfg.integrations.email.acs?.connectionVaultRef) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['integrations', 'email', 'acs', 'connectionVaultRef'],
+          message: 'integrations.email.acs.connectionVaultRef is required when provider is "acs".',
+        });
+      }
+    }
+
     for (const check of secretRefChecks) {
       if (!check.ref || (!cfg.keyVault?.vaultName && !cfg.keyVault?.vaultUri)) continue;
       try {
@@ -3147,6 +3247,28 @@ export function loadAndValidateTenantConfig(
   const overlayPmsSync = overlayIntegrations?.pmsSync as
     | Record<string, unknown>
     | undefined;
+  const baseEmail = baseIntegrations?.email as
+    | Record<string, unknown>
+    | undefined;
+  const overlayEmail = overlayIntegrations?.email as
+    | Record<string, unknown>
+    | undefined;
+  const baseEmailGraph = baseEmail?.graph as
+    | Record<string, unknown>
+    | undefined;
+  const overlayEmailGraph = overlayEmail?.graph as
+    | Record<string, unknown>
+    | undefined;
+  const baseEmailAcs = baseEmail?.acs as Record<string, unknown> | undefined;
+  const overlayEmailAcs = overlayEmail?.acs as
+    | Record<string, unknown>
+    | undefined;
+  const baseEmailDevCatcher = baseEmail?.devCatcher as
+    | Record<string, unknown>
+    | undefined;
+  const overlayEmailDevCatcher = overlayEmail?.devCatcher as
+    | Record<string, unknown>
+    | undefined;
 
   const baseMatterCosts = baseConfig.matterCosts as
     | Record<string, unknown>
@@ -3205,6 +3327,38 @@ export function loadAndValidateTenantConfig(
             pmsSync: {
               ...(basePmsSync ?? {}),
               ...(overlayPmsSync ?? {}),
+            },
+          }
+        : {}),
+      ...(baseEmail || overlayEmail
+        ? {
+            email: {
+              ...(baseEmail ?? {}),
+              ...(overlayEmail ?? {}),
+              ...(baseEmailGraph || overlayEmailGraph
+                ? {
+                    graph: {
+                      ...(baseEmailGraph ?? {}),
+                      ...(overlayEmailGraph ?? {}),
+                    },
+                  }
+                : {}),
+              ...(baseEmailAcs || overlayEmailAcs
+                ? {
+                    acs: {
+                      ...(baseEmailAcs ?? {}),
+                      ...(overlayEmailAcs ?? {}),
+                    },
+                  }
+                : {}),
+              ...(baseEmailDevCatcher || overlayEmailDevCatcher
+                ? {
+                    devCatcher: {
+                      ...(baseEmailDevCatcher ?? {}),
+                      ...(overlayEmailDevCatcher ?? {}),
+                    },
+                  }
+                : {}),
             },
           }
         : {}),

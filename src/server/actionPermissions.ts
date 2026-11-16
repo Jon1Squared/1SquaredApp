@@ -896,6 +896,14 @@ export const JOB_PERMISSIONS = {
     description:
       'Dispatch due and periodic review reminders for active firm register records and undertakings once per stage.',
   },
+  'outbox-drain': {
+    kind: 'job',
+    permission: 'notification:drain_outbox',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    description:
+      'Drain due tenant email outbox messages with retry/backoff and scrub expired content past outboxContentRetentionDays (ADR 0027 / ADR 0030 variant).',
+  },
 } as const satisfies Record<string, JobPolicy>;
 
 export type RegisteredJobName = keyof typeof JOB_PERMISSIONS;
