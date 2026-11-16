@@ -335,6 +335,10 @@ export function filterEmploymentForUser(
   teams: Team[] = [],
   orgStructure?: OrgStructureCatalogue,
   options: ResolvePersonPermissionsOptions = {},
+  matterVisibility?: {
+    canViewMatterId: (matterId: string) => boolean;
+    visibleMatterNumberById?: ReadonlyMap<string, string>;
+  },
 ): EmploymentRecord | null {
   return domainFilterEmploymentForUser(
     employment,
@@ -343,6 +347,7 @@ export function filterEmploymentForUser(
     teams,
     orgStructure,
     withActiveTenantRbacOptions(options),
+    matterVisibility,
   );
 }
 

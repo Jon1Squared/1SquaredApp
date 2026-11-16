@@ -17,7 +17,9 @@ export const CONFLICT_SEARCHED_SOURCES = [
   'parties',
   'instructing contacts',
   'billing contacts',
+  'referrer contacts',
   'person–organisation links',
+  'parent organisations',
   'enquiries',
   'directory',
 ] as const;
@@ -146,6 +148,7 @@ export function buildEffectiveConflictParties(params: {
   additionalClientIds?: string[];
   instructingContactId?: string | null;
   billingContactId?: string | null;
+  referrerContactId?: string | null;
   matterParties?: MatterParty[];
   people: Person[];
   organisations: Organisation[];
@@ -214,6 +217,19 @@ export function buildEffectiveConflictParties(params: {
     }
   }
 
+  if (params.referrerContactId) {
+    const info = resolveRecordNameAndType(params.referrerContactId);
+    if (info && !hasPartyForRecord(params.referrerContactId, info.name.trim().toLowerCase())) {
+      result.push({
+        id: 'cp-referrer-1',
+        name: info.name,
+        entityType: info.entityType,
+        role: 'Related party',
+        linkedRecordId: params.referrerContactId,
+      });
+    }
+  }
+
   for (const mp of params.matterParties ?? []) {
     const nameLower = mp.name.trim().toLowerCase();
     if (!nameLower && !mp.linkedRecordId) continue;
@@ -226,6 +242,13 @@ export function buildEffectiveConflictParties(params: {
           (mp.linkedRecordId?.startsWith('P-') ? 'person' : 'organisation'),
         role: (mp.role as ConflictCheckParty['role']) || 'Opponent',
         linkedRecordId: mp.linkedRecordId ?? null,
+        ...(mp.relationshipCode ? { relationshipCode: mp.relationshipCode } : {}),
+        ...(mp.capacityCodes ? { capacityCodes: mp.capacityCodes } : {}),
+        ...(mp.alignment ? { alignment: mp.alignment } : {}),
+        ...(mp.connectedToPartyId !== undefined
+          ? { connectedToPartyId: mp.connectedToPartyId }
+          : {}),
+        ...(mp.identifiers ? { identifiers: mp.identifiers } : {}),
       });
     }
   }
@@ -313,9 +336,46 @@ export function searchMatterConflicts(
     personById.set(p.id, p);
   }
   const orgById = new Map<string, Organisation>();
+  const childrenByParentId = new Map<string, Organisation[]>();
   for (const o of deps.organisations) {
     orgById.set(o.id, o);
+    if (!o.mergedIntoId && o.parentOrganisationId) {
+      const siblings = childrenByParentId.get(o.parentOrganisationId) ?? [];
+      siblings.push(o);
+      childrenByParentId.set(o.parentOrganisationId, siblings);
+    }
   }
+
+  const getCorporateGroupRelatives = (orgId: string): Array<{ org: Organisation; relation: 'Parent organisation' | 'Subsidiary organisation' | 'Group organisation' }> => {
+    const visited = new Set<string>([orgId]);
+    const out: Array<{ org: Organisation; relation: 'Parent organisation' | 'Subsidiary organisation' | 'Group organisation' }> = [];
+
+    // Walk ancestor chain via parentOrganisationId
+    let curr = orgById.get(orgId);
+    let depth = 0;
+    while (curr?.parentOrganisationId && depth < 10) {
+      const parent = orgById.get(curr.parentOrganisationId);
+      if (!parent || parent.mergedIntoId || visited.has(parent.id)) break;
+      visited.add(parent.id);
+      out.push({ org: parent, relation: depth === 0 ? 'Parent organisation' : 'Group organisation' });
+      curr = parent;
+      depth += 1;
+    }
+
+    // Walk direct & indirect subsidiaries
+    const queue: Array<{ id: string; direct: boolean }> = [{ id: orgId, direct: true }];
+    while (queue.length > 0 && out.length < 25) {
+      const next = queue.shift()!;
+      for (const child of childrenByParentId.get(next.id) ?? []) {
+        if (child.mergedIntoId || visited.has(child.id)) continue;
+        visited.add(child.id);
+        out.push({ org: child, relation: next.direct ? 'Subsidiary organisation' : 'Group organisation' });
+        queue.push({ id: child.id, direct: false });
+      }
+    }
+
+    return out;
+  };
 
   const resolveRecord = (
     id: string,
@@ -327,9 +387,217 @@ export function searchMatterConflicts(
     return null;
   };
 
+  const extractPersonNamesLower = (p: Person): string[] => {
+    const candidates = [
+      personDisplayName(p),
+      `${p.firstName} ${p.surname}`,
+      p.preferredName ? `${p.preferredName} ${p.surname}` : '',
+      ...(p.otherNames ?? []).map((n) => n.name),
+    ];
+    return Array.from(new Set(candidates.map((s) => s.trim().toLowerCase()).filter(Boolean)));
+  };
+
+  const extractPersonEmailsLower = (p: Person): string[] =>
+    Array.from(
+      new Set((p.emails ?? []).map((e) => e.address.trim().toLowerCase()).filter(Boolean)),
+    );
+
+  const extractOrgNamesLower = (o: Organisation): string[] =>
+    Array.from(
+      new Set(
+        [o.legalName, ...(o.otherNames ?? []).map((n) => n.name)]
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    );
+
+  const extractOrgEmailsLower = (o: Organisation): string[] =>
+    o.generalEmail?.trim() ? [o.generalEmail.trim().toLowerCase()] : [];
+
+  const normCompanyNo = (s: string | undefined | null): string =>
+    (s ?? '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+
+  const formatMatterPartyLabel = (mp: MatterParty): string => {
+    if (mp.role && mp.role.trim()) return mp.role.trim();
+    const caps = (mp.capacityCodes ?? []).join(', ');
+    if (mp.relationshipCode && caps) return `${mp.relationshipCode} (${caps})`;
+    return mp.relationshipCode || caps || 'Party';
+  };
+
   for (const party of input.parties) {
     const lower = party.name.trim().toLowerCase();
     if (!lower && !party.linkedRecordId) continue;
+
+    const queryLinkedPerson = party.linkedRecordId ? personById.get(party.linkedRecordId) : undefined;
+    const queryLinkedOrg = party.linkedRecordId ? orgById.get(party.linkedRecordId) : undefined;
+    const extraPrevNames = (party.identifiers?.previousNames ?? '')
+      .split(/[,;/\n]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    const queryTermsLower = Array.from(
+      new Set([
+        lower,
+        ...extraPrevNames,
+        ...(queryLinkedPerson ? extractPersonNamesLower(queryLinkedPerson) : []),
+        ...(queryLinkedOrg ? extractOrgNamesLower(queryLinkedOrg) : []),
+      ].filter(Boolean)),
+    );
+    const queryEmailsLower = new Set<string>([
+      ...(lower.includes('@') ? [lower] : []),
+      ...((party.subtitle ?? '').trim().toLowerCase().includes('@')
+        ? [(party.subtitle ?? '').trim().toLowerCase()]
+        : []),
+      ...(queryLinkedPerson ? extractPersonEmailsLower(queryLinkedPerson) : []),
+      ...(queryLinkedOrg ? extractOrgEmailsLower(queryLinkedOrg) : []),
+    ]);
+    const queryCompanyNo = normCompanyNo(party.identifiers?.companyNumber || queryLinkedOrg?.companyNumber);
+
+    type MatchHitResult = {
+      matched: boolean;
+      exact: boolean;
+      via: 'id' | 'name' | 'other_name' | 'email' | 'company_number';
+    };
+
+    const matchNameCandidates = (
+      primaryNamesLower: string[],
+      otherNamesLower: string[],
+    ): MatchHitResult | null => {
+      for (const pn of primaryNamesLower) {
+        if (queryTermsLower.includes(pn)) {
+          return { matched: true, exact: true, via: 'name' };
+        }
+      }
+      for (const on of otherNamesLower) {
+        if (queryTermsLower.includes(on)) {
+          return { matched: true, exact: true, via: 'other_name' };
+        }
+      }
+      for (const q of queryTermsLower) {
+        for (const pn of primaryNamesLower) {
+          if (namesMatch(pn, q)) {
+            return { matched: true, exact: pn === q, via: 'name' };
+          }
+        }
+        for (const on of otherNamesLower) {
+          if (namesMatch(on, q)) {
+            return { matched: true, exact: on === q, via: 'other_name' };
+          }
+        }
+      }
+      return null;
+    };
+
+    const matchesPerson = (p: Person): MatchHitResult => {
+      if (party.linkedRecordId && party.linkedRecordId === p.id) {
+        return { matched: true, exact: true, via: 'id' };
+      }
+      if (queryEmailsLower.size > 0) {
+        for (const em of extractPersonEmailsLower(p)) {
+          if (queryEmailsLower.has(em)) {
+            return { matched: true, exact: true, via: 'email' };
+          }
+        }
+      }
+      const primaryNames = [
+        personDisplayName(p).trim().toLowerCase(),
+        `${p.firstName} ${p.surname}`.trim().toLowerCase(),
+        ...(p.preferredName ? [`${p.preferredName} ${p.surname}`.trim().toLowerCase()] : []),
+      ].filter(Boolean);
+      const otherNames = (p.otherNames ?? [])
+        .map((n) => n.name.trim().toLowerCase())
+        .filter(Boolean);
+      return matchNameCandidates(primaryNames, otherNames) ?? { matched: false, exact: false, via: 'name' };
+    };
+
+    const matchesOrg = (o: Organisation): MatchHitResult => {
+      if (party.linkedRecordId && party.linkedRecordId === o.id) {
+        return { matched: true, exact: true, via: 'id' };
+      }
+      if (queryEmailsLower.size > 0) {
+        for (const em of extractOrgEmailsLower(o)) {
+          if (queryEmailsLower.has(em)) {
+            return { matched: true, exact: true, via: 'email' };
+          }
+        }
+      }
+      if (queryCompanyNo && normCompanyNo(o.companyNumber) === queryCompanyNo) {
+        return { matched: true, exact: true, via: 'company_number' };
+      }
+      const primaryNames = o.legalName.trim() ? [o.legalName.trim().toLowerCase()] : [];
+      const otherNames = (o.otherNames ?? [])
+        .map((n) => n.name.trim().toLowerCase())
+        .filter(Boolean);
+      return matchNameCandidates(primaryNames, otherNames) ?? { matched: false, exact: false, via: 'name' };
+    };
+
+    const matchesRecordOrName = (
+      recordId: string | null | undefined,
+      displayName: string,
+    ): MatchHitResult => {
+      if (recordId) {
+        const recPerson = personById.get(recordId);
+        if (recPerson) {
+          const hit = matchesPerson(recPerson);
+          if (hit.matched) return hit;
+        }
+        const recOrg = orgById.get(recordId);
+        if (recOrg) {
+          const hit = matchesOrg(recOrg);
+          if (hit.matched) return hit;
+        }
+      }
+      const dLower = displayName.trim().toLowerCase();
+      if (dLower) {
+        const hit = matchNameCandidates([dLower], []);
+        if (hit) return hit;
+      }
+      return { matched: false, exact: false, via: 'name' };
+    };
+
+    const emitRestrictedMatterHit = (m: Matter, exact: boolean) => {
+      const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
+      const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
+      pushMatch(
+        {
+          id: redactedId,
+          partyId: party.id,
+          partyName: party.name,
+          matchedRecordId: '',
+          matchedRecordName: 'Match on a restricted matter',
+          matchedRecordType: 'matter',
+          strength: exact ? 'Exact' : 'Close',
+          whereFound: 'Restricted matter: refer to Risk',
+          matterId: null,
+          matterNumber: null,
+          responsiblePartnerId: null,
+          responsiblePartnerName: '',
+          dateLabel: '',
+          matchedOn: 'Restricted matter: refer to Risk',
+          restricted: true,
+          disposition: 'potential_conflict',
+          note: 'Match on a restricted matter — must be referred to Risk & Compliance.',
+        },
+        fallbackKey,
+      );
+    };
+
+    const isOrgPresentOnMatter = (m: Matter, orgId: string, org: Organisation): boolean => {
+      const allMatterClientIds = [m.clientId, ...(m.additionalClientIds ?? [])].filter(Boolean);
+      if (allMatterClientIds.includes(orgId)) return true;
+      if (
+        m.instructingContactId === orgId ||
+        m.billingContactId === orgId ||
+        m.referrerContactId === orgId
+      ) {
+        return true;
+      }
+      const orgNames = extractOrgNamesLower(org);
+      return m.parties.some((mp) => {
+        if (mp.linkedRecordId === orgId) return true;
+        const mpLower = mp.name.trim().toLowerCase();
+        return Boolean(mpLower) && orgNames.some((n) => namesMatch(mpLower, n));
+      });
+    };
 
     // 1. Check all matters in the tenant store (including restricted matters)
     for (const m of deps.matters) {
@@ -349,57 +617,54 @@ export function searchMatterConflicts(
         const cOrg = orgById.get(cid);
         const cPerson = personById.get(cid);
         const cName = cOrg?.legalName || (cPerson ? personDisplayName(cPerson) : '');
-        const cLower = cName.toLowerCase();
-        const linkedMatch = Boolean(party.linkedRecordId && party.linkedRecordId === cid);
-        const nameMatch = namesMatch(cLower, lower);
-        if (linkedMatch || nameMatch) {
+        const hit = matchesRecordOrName(cid, cName);
+        if (hit.matched) {
           matchedClientRecord = {
             id: cid,
             name: cName || cid,
             type: cPerson ? 'person' : 'organisation',
-            exact: linkedMatch || (Boolean(cLower) && cLower === lower),
+            exact: hit.exact,
           };
           break;
         }
       }
 
-      const matchingMatterParties = m.parties.filter((mp) => {
-        const linkedMatch = Boolean(
-          party.linkedRecordId && mp.linkedRecordId && party.linkedRecordId === mp.linkedRecordId,
-        );
-        const mpLower = mp.name.trim().toLowerCase();
-        return linkedMatch || namesMatch(mpLower, lower);
-      });
+      const matchingMatterParties = m.parties
+        .map((mp) => {
+          const mpName = mp.name.trim() || resolveRecord(mp.linkedRecordId ?? '')?.name || '';
+          const hit = matchesRecordOrName(mp.linkedRecordId, mpName);
+          return { mp, mpName, hit };
+        })
+        .filter((entry) => entry.hit.matched);
 
       const matchingMatterContacts: Array<{
         id: string;
         name: string;
         type: 'person' | 'organisation';
         exact: boolean;
-        key: 'instructing' | 'billing';
-        label: 'Instructing contact' | 'Billing contact';
+        key: 'instructing' | 'billing' | 'referrer';
+        label: 'Instructing contact' | 'Billing contact' | 'Referrer contact';
       }> = [];
       const contactSlots: Array<{
         id: string | null | undefined;
-        key: 'instructing' | 'billing';
-        label: 'Instructing contact' | 'Billing contact';
+        key: 'instructing' | 'billing' | 'referrer';
+        label: 'Instructing contact' | 'Billing contact' | 'Referrer contact';
       }> = [
         { id: m.instructingContactId, key: 'instructing', label: 'Instructing contact' },
         { id: m.billingContactId, key: 'billing', label: 'Billing contact' },
+        { id: m.referrerContactId, key: 'referrer', label: 'Referrer contact' },
       ];
       for (const slot of contactSlots) {
         if (!slot.id) continue;
         const resolved = resolveRecord(slot.id);
         const cName = resolved?.name ?? '';
-        const cLower = cName.toLowerCase();
-        const linkedMatch = Boolean(party.linkedRecordId && party.linkedRecordId === slot.id);
-        const nameMatch = namesMatch(cLower, lower);
-        if (linkedMatch || nameMatch) {
+        const hit = matchesRecordOrName(slot.id, cName);
+        if (hit.matched) {
           matchingMatterContacts.push({
             id: slot.id,
             name: cName || slot.id,
             type: resolved?.type ?? 'person',
-            exact: linkedMatch || (Boolean(cLower) && cLower === lower),
+            exact: hit.exact,
             key: slot.key,
             label: slot.label,
           });
@@ -417,36 +682,9 @@ export function searchMatterConflicts(
         // Redacted match for restricted matter (Rule 4 / R162)
         const exact =
           Boolean(matchedClientRecord?.exact) ||
-          matchingMatterParties.some(
-            (mp) =>
-              (party.linkedRecordId && mp.linkedRecordId === party.linkedRecordId) ||
-              mp.name.trim().toLowerCase() === lower,
-          ) ||
+          matchingMatterParties.some((entry) => entry.hit.exact) ||
           matchingMatterContacts.some((mc) => mc.exact);
-        const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
-        const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
-        pushMatch(
-          {
-            id: redactedId,
-            partyId: party.id,
-            partyName: party.name,
-            matchedRecordId: '',
-            matchedRecordName: 'Match on a restricted matter',
-            matchedRecordType: 'matter',
-            strength: exact ? 'Exact' : 'Close',
-            whereFound: 'Restricted matter: refer to Risk',
-            matterId: null,
-            matterNumber: null,
-            responsiblePartnerId: null,
-            responsiblePartnerName: '',
-            dateLabel: '',
-            matchedOn: 'Restricted matter: refer to Risk',
-            restricted: true,
-            disposition: 'potential_conflict',
-            note: 'Match on a restricted matter — must be referred to Risk & Compliance.',
-          },
-          fallbackKey,
-        );
+        emitRestrictedMatterHit(m, exact);
         continue;
       }
 
@@ -485,31 +723,33 @@ export function searchMatterConflicts(
         );
       }
 
-      for (const matchedParty of matchingMatterParties) {
+      for (const { mp: matchedParty, mpName, hit } of matchingMatterParties) {
+        const isClientSideParty =
+          matchedParty.relationshipCode === 'CL' ||
+          matchedParty.relationshipCode === 'JC' ||
+          matchedParty.role === 'Client' ||
+          matchedParty.role === 'Joint client';
         if (
           party.isClientFixed &&
-          (matchedParty.role === 'Client' || matchedParty.role === 'Joint client') &&
+          isClientSideParty &&
           matchedParty.linkedRecordId &&
           matchedParty.linkedRecordId === party.linkedRecordId
         ) {
           continue;
         }
-        const mpExact =
-          Boolean(
-            party.linkedRecordId &&
-              matchedParty.linkedRecordId &&
-              party.linkedRecordId === matchedParty.linkedRecordId,
-          ) || matchedParty.name.trim().toLowerCase() === lower;
+        const displayName = mpName || matchedParty.name;
+        const roleLabel = formatMatterPartyLabel(matchedParty);
+        const mpExact = hit.exact;
         const matchId = `match-${party.id}-${m.id}-${matchedParty.id}`;
-        const whereFound = `${matchedParty.role} on ${m.matterNumber} (${m.title})`;
-        const fallbackKey = `${lower}__${matchedParty.name.toLowerCase()}__${whereFound.toLowerCase()}`;
+        const whereFound = `${roleLabel} on ${m.matterNumber} (${m.title})`;
+        const fallbackKey = `${lower}__${displayName.toLowerCase()}__${whereFound.toLowerCase()}`;
         pushMatch(
           {
             id: matchId,
             partyId: party.id,
             partyName: party.name,
             matchedRecordId: matchedParty.linkedRecordId ?? m.id,
-            matchedRecordName: matchedParty.name,
+            matchedRecordName: displayName,
             matchedRecordType:
               matchedParty.entityType === 'person' ? 'person' : 'organisation',
             strength: mpExact ? 'Exact' : 'Close',
@@ -520,8 +760,8 @@ export function searchMatterConflicts(
             responsiblePartnerName: respPartnerName,
             dateLabel,
             matchedOn: mpExact
-              ? `Exact ${matchedParty.role.toLowerCase()} name on matter`
-              : `Similar ${matchedParty.role.toLowerCase()} name on matter`,
+              ? `Exact ${roleLabel.toLowerCase()} name on matter`
+              : `Similar ${roleLabel.toLowerCase()} name on matter`,
             disposition: null,
             note: '',
           },
@@ -533,14 +773,18 @@ export function searchMatterConflicts(
         input.parties.some(
           (ip) =>
             ip.isClientFixed &&
-            (ip.role === 'Client' || ip.role === 'Joint client') &&
+            (ip.relationshipCode === 'CL' ||
+              ip.relationshipCode === 'JC' ||
+              ip.role === 'Client' ||
+              ip.role === 'Joint client') &&
             ip.linkedRecordId === cid,
         ),
       );
       for (const mc of matchingMatterContacts) {
         if (
+          mc.key !== 'referrer' &&
           party.isClientFixed &&
-          party.role === 'Client contact' &&
+          (party.relationshipCode === 'CC' || party.role === 'Client contact') &&
           sameClientOnInput &&
           party.linkedRecordId === mc.id
         ) {
@@ -575,28 +819,21 @@ export function searchMatterConflicts(
       }
     }
 
-    // 1b. Check person–organisation links (B7, R259: pre-indexed maps)
+    // 1b. Check person–organisation links, including historical links (B7, R259, ADR 0033 §2)
     for (const link of deps.links ?? []) {
-      if (link.isCurrent === false) continue;
       const linkPerson = personById.get(link.personId);
       if (!linkPerson || linkPerson.mergedIntoId || linkPerson.demo) continue;
       const linkOrg = orgById.get(link.organisationId);
       if (!linkOrg || linkOrg.mergedIntoId) continue;
 
       const pName = personDisplayName(linkPerson);
-      const pLower = pName.toLowerCase();
       const oName = linkOrg.legalName;
-      const oLower = oName.toLowerCase();
 
-      const personMatched =
-        Boolean(party.linkedRecordId && party.linkedRecordId === linkPerson.id) ||
-        namesMatch(pLower, lower);
-      const orgMatched =
-        !personMatched &&
-        (Boolean(party.linkedRecordId && party.linkedRecordId === linkOrg.id) ||
-          namesMatch(oLower, lower));
-      if (!personMatched && !orgMatched) continue;
+      const personHit = matchesPerson(linkPerson);
+      const orgHit = personHit.matched ? { matched: false, exact: false, via: 'name' as const } : matchesOrg(linkOrg);
+      if (!personHit.matched && !orgHit.matched) continue;
 
+      const personMatched = personHit.matched;
       const bothFixedInInput =
         input.parties.some((ip) => ip.isClientFixed && ip.linkedRecordId === linkPerson.id) &&
         input.parties.some((ip) => ip.isClientFixed && ip.linkedRecordId === linkOrg.id);
@@ -604,14 +841,14 @@ export function searchMatterConflicts(
       const counterpartId = personMatched ? linkOrg.id : linkPerson.id;
       const counterpartName = personMatched ? oName : pName;
       const counterpartLower = counterpartName.toLowerCase();
+      const counterpartNamesLower = personMatched
+        ? extractOrgNamesLower(linkOrg)
+        : extractPersonNamesLower(linkPerson);
       const counterpartType: 'person' | 'organisation' = personMatched
         ? 'organisation'
         : 'person';
-      const isExact = personMatched
-        ? Boolean(party.linkedRecordId && party.linkedRecordId === linkPerson.id) ||
-          pLower === lower
-        : Boolean(party.linkedRecordId && party.linkedRecordId === linkOrg.id) ||
-          oLower === lower;
+      const isExact = personMatched ? personHit.exact : orgHit.exact;
+      const historicalTag = link.isCurrent === false ? 'Historical ' : '';
 
       for (const m of deps.matters) {
         if (input.currentMatterId && m.id === input.currentMatterId) continue;
@@ -620,38 +857,16 @@ export function searchMatterConflicts(
           allMatterClientIds.includes(counterpartId) ||
           m.instructingContactId === counterpartId ||
           m.billingContactId === counterpartId ||
+          m.referrerContactId === counterpartId ||
           m.parties.some(
             (mp) =>
               mp.linkedRecordId === counterpartId ||
-              namesMatch(mp.name.trim().toLowerCase(), counterpartLower),
+              counterpartNamesLower.some((cn) => namesMatch(mp.name.trim().toLowerCase(), cn)),
           );
         if (!counterpartOnMatter) continue;
 
         if (!deps.canView(m)) {
-          const redactedId = `match-restricted-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${m.id}`)}`;
-          const fallbackKey = `${lower}__match on a restricted matter__restricted matter: refer to risk`;
-          pushMatch(
-            {
-              id: redactedId,
-              partyId: party.id,
-              partyName: party.name,
-              matchedRecordId: '',
-              matchedRecordName: 'Match on a restricted matter',
-              matchedRecordType: 'matter',
-              strength: isExact ? 'Exact' : 'Close',
-              whereFound: 'Restricted matter: refer to Risk',
-              matterId: null,
-              matterNumber: null,
-              responsiblePartnerId: null,
-              responsiblePartnerName: '',
-              dateLabel: '',
-              matchedOn: 'Restricted matter: refer to Risk',
-              restricted: true,
-              disposition: 'potential_conflict',
-              note: 'Match on a restricted matter — must be referred to Risk & Compliance.',
-            },
-            fallbackKey,
-          );
+          emitRestrictedMatterHit(m, isExact);
           continue;
         }
 
@@ -659,7 +874,10 @@ export function searchMatterConflicts(
           (bothFixedInInput && allMatterClientIds.includes(linkOrg.id)) ||
           Boolean(
             party.isClientFixed &&
-              (party.role === 'Client' || party.role === 'Joint client') &&
+              (party.relationshipCode === 'CL' ||
+                party.relationshipCode === 'JC' ||
+                party.role === 'Client' ||
+                party.role === 'Joint client') &&
               party.linkedRecordId &&
               allMatterClientIds.includes(party.linkedRecordId) &&
               (m.instructingContactId === counterpartId ||
@@ -673,7 +891,7 @@ export function searchMatterConflicts(
         const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
         const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
         const matchId = `match-${party.id}-link-${link.id}-${m.id}`;
-        const whereFound = `Linked ${counterpartType} (${counterpartName}) on ${m.matterNumber} (${m.title})`;
+        const whereFound = `${historicalTag}Linked ${counterpartType} (${counterpartName}) on ${m.matterNumber} (${m.title})`;
         const fallbackKey = `${lower}__${counterpartLower}__${whereFound.toLowerCase()}`;
         pushMatch(
           {
@@ -690,12 +908,58 @@ export function searchMatterConflicts(
             responsiblePartnerId: m.responsiblePartnerId || null,
             responsiblePartnerName: respPartnerName,
             dateLabel,
-            matchedOn: 'Person–organisation link on matter',
+            matchedOn:
+              link.isCurrent === false
+                ? 'Historical person–organisation link on matter'
+                : 'Person–organisation link on matter',
             disposition: null,
             note: '',
           },
           fallbackKey,
         );
+      }
+
+      // Check parent/subsidiary corporate group of linkOrg against matters when personMatched
+      if (personMatched) {
+        for (const { org: groupOrg, relation } of getCorporateGroupRelatives(linkOrg.id)) {
+          for (const m of deps.matters) {
+            if (input.currentMatterId && m.id === input.currentMatterId) continue;
+            if (!isOrgPresentOnMatter(m, groupOrg.id, groupOrg)) continue;
+            if (!deps.canView(m)) {
+              emitRestrictedMatterHit(m, isExact);
+              continue;
+            }
+            const respPartner = m.responsiblePartnerId
+              ? personById.get(m.responsiblePartnerId)
+              : undefined;
+            const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
+            const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
+            const matchId = `match-${party.id}-link-${link.id}-group-${groupOrg.id}-${m.id}`;
+            const whereFound = `${historicalTag}${relation} (${groupOrg.legalName}) of linked ${oName} on ${m.matterNumber} (${m.title})`;
+            const fallbackKey = `${lower}__${groupOrg.legalName.toLowerCase()}__${whereFound.toLowerCase()}`;
+            pushMatch(
+              {
+                id: matchId,
+                partyId: party.id,
+                partyName: party.name,
+                matchedRecordId: groupOrg.id,
+                matchedRecordName: groupOrg.legalName,
+                matchedRecordType: 'organisation',
+                strength: isExact ? 'Exact' : 'Close',
+                whereFound,
+                matterId: m.id,
+                matterNumber: m.matterNumber,
+                responsiblePartnerId: m.responsiblePartnerId || null,
+                responsiblePartnerName: respPartnerName,
+                dateLabel,
+                matchedOn: 'Corporate group relationship via person–organisation link',
+                disposition: null,
+                note: '',
+              },
+              fallbackKey,
+            );
+          }
+        }
       }
 
       if (!bothFixedInInput) {
@@ -713,8 +977,8 @@ export function searchMatterConflicts(
         const dateLabel = formatDate(link.startDate || linkOrg.createdAt) || '';
         const matchId = `match-${party.id}-link-${link.id}`;
         const whereFound = personMatched
-          ? `Linked to ${oName} (${link.roleWithinOrganisation || 'Contact link'})`
-          : `Linked person ${pName} at ${oName}`;
+          ? `${historicalTag}Linked to ${oName} (${link.roleWithinOrganisation || 'Contact link'})`
+          : `${historicalTag}Linked person ${pName} at ${oName}`;
         const fallbackKey = `${lower}__${counterpartLower}__${whereFound.toLowerCase()}`;
         pushMatch(
           {
@@ -731,7 +995,10 @@ export function searchMatterConflicts(
             responsiblePartnerId: ownerId,
             responsiblePartnerName: ownerName,
             dateLabel,
-            matchedOn: 'Person–organisation link',
+            matchedOn:
+              link.isCurrent === false
+                ? 'Historical person–organisation link'
+                : 'Person–organisation link',
             disposition: null,
             note: '',
           },
@@ -740,13 +1007,98 @@ export function searchMatterConflicts(
       }
     }
 
+    // 1c. Check parent / subsidiary corporate group organisations via parentOrganisationId (ADR 0033 §2)
+    for (const org of deps.organisations) {
+      if (org.mergedIntoId) continue;
+      const orgHit = matchesOrg(org);
+      if (!orgHit.matched) continue;
+      for (const { org: relatedOrg, relation } of getCorporateGroupRelatives(org.id)) {
+        const relNameLower = relatedOrg.legalName.toLowerCase();
+        for (const m of deps.matters) {
+          if (input.currentMatterId && m.id === input.currentMatterId) continue;
+          if (!isOrgPresentOnMatter(m, relatedOrg.id, relatedOrg)) continue;
+          if (!deps.canView(m)) {
+            emitRestrictedMatterHit(m, orgHit.exact);
+            continue;
+          }
+          const respPartner = m.responsiblePartnerId
+            ? personById.get(m.responsiblePartnerId)
+            : undefined;
+          const respPartnerName = respPartner ? personDisplayName(respPartner) : '';
+          const dateLabel = formatDate(m.openedAt || m.createdAt) || '';
+          const matchId = `match-${party.id}-group-${org.id}-${relatedOrg.id}-${m.id}`;
+          const whereFound = `${relation} (${relatedOrg.legalName}) of ${org.legalName} on ${m.matterNumber} (${m.title})`;
+          const fallbackKey = `${lower}__${relNameLower}__${whereFound.toLowerCase()}`;
+          pushMatch(
+            {
+              id: matchId,
+              partyId: party.id,
+              partyName: party.name,
+              matchedRecordId: relatedOrg.id,
+              matchedRecordName: relatedOrg.legalName,
+              matchedRecordType: 'organisation',
+              strength: orgHit.exact ? 'Exact' : 'Close',
+              whereFound,
+              matterId: m.id,
+              matterNumber: m.matterNumber,
+              responsiblePartnerId: m.responsiblePartnerId || null,
+              responsiblePartnerName: respPartnerName,
+              dateLabel,
+              matchedOn: `${relation} on matter`,
+              disposition: null,
+              note: '',
+            },
+            fallbackKey,
+          );
+        }
+
+        const bothFixedGroup =
+          party.isClientFixed &&
+          input.parties.some((ip) => ip.isClientFixed && ip.linkedRecordId === relatedOrg.id);
+        if (!bothFixedGroup) {
+          const ownerCandidateId = relatedOrg.relationshipPartnerId || relatedOrg.recordOwnerId;
+          const ownerPerson = ownerCandidateId ? personById.get(ownerCandidateId) : undefined;
+          const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
+          const ownerId =
+            ownerPerson?.id ??
+            (relatedOrg.relationshipPartnerId ?? relatedOrg.recordOwnerId ?? null);
+          const dateLabel =
+            formatDate(relatedOrg.relationshipStartedAt || relatedOrg.createdAt) || '';
+          const matchId = `match-${party.id}-group-${org.id}-${relatedOrg.id}`;
+          const whereFound = `${relation} of ${org.legalName} (${relatedOrg.legalName})`;
+          const fallbackKey = `${lower}__${relNameLower}__${whereFound.toLowerCase()}`;
+          pushMatch(
+            {
+              id: matchId,
+              partyId: party.id,
+              partyName: party.name,
+              matchedRecordId: relatedOrg.id,
+              matchedRecordName: relatedOrg.legalName,
+              matchedRecordType: 'organisation',
+              strength: orgHit.exact ? 'Exact' : 'Close',
+              whereFound,
+              matterId: null,
+              matterNumber: null,
+              responsiblePartnerId: ownerId,
+              responsiblePartnerName: ownerName,
+              dateLabel,
+              matchedOn: `${relation} in Organisations directory`,
+              disposition: null,
+              note: '',
+            },
+            fallbackKey,
+          );
+        }
+      }
+    }
+
     // 2. Check enquiries
     if (party.isClientFixed) {
       for (const enq of deps.enquiries) {
         if (enq.anonymisedAt) continue;
         if (input.sourceEnquiryId && enq.id === input.sourceEnquiryId) continue;
-        const ownerPerson = deps.people.find(
-          (p) => p.id === (enq.assignedToId ?? enq.takenById ?? enq.createdById),
+        const ownerPerson = personById.get(
+          (enq.assignedToId ?? enq.takenById ?? enq.createdById) || '',
         );
         const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
         const ownerId =
@@ -758,10 +1110,10 @@ export function searchMatterConflicts(
           .map((s) => s.trim())
           .filter(Boolean);
         const matchedOther = enqOtherEntries.find((op) =>
-          namesMatch(op.toLowerCase(), lower),
+          queryTermsLower.some((q) => namesMatch(op.toLowerCase(), q)),
         );
         if (matchedOther) {
-          const isExact = matchedOther.toLowerCase() === lower;
+          const isExact = queryTermsLower.includes(matchedOther.toLowerCase());
           if (!deps.canViewEnquiry(enq)) {
             const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${enq.id}`)}`;
             const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
@@ -827,16 +1179,27 @@ export function searchMatterConflicts(
       const callerLower = callerName.toLowerCase();
       const behalfName = (enq.callingOnBehalfOf || '').trim();
       const behalfLower = behalfName.toLowerCase();
-      const ownerPerson = deps.people.find(
-        (p) => p.id === (enq.assignedToId ?? enq.takenById ?? enq.createdById),
+      const enqEmailLower = (enq.email || '').trim().toLowerCase();
+      const ownerPerson = personById.get(
+        (enq.assignedToId ?? enq.takenById ?? enq.createdById) || '',
       );
       const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
       const ownerId =
         ownerPerson?.id ?? enq.assignedToId ?? enq.takenById ?? enq.createdById ?? null;
       const dateLabel = formatDate(enq.receivedAt || enq.createdAt) || '';
 
-      const callerMatched = namesMatch(callerLower, lower);
-      const behalfMatched = !callerMatched && namesMatch(behalfLower, lower);
+      const callerHit =
+        (enq.linkedPersonId ? matchesRecordOrName(enq.linkedPersonId, callerName) : null) ??
+        (matchNameCandidates(callerLower ? [callerLower] : [], []) ?? { matched: false, exact: false, via: 'name' as const });
+      const callerEmailMatched = Boolean(enqEmailLower && queryEmailsLower.has(enqEmailLower));
+      const callerMatched = callerHit.matched || callerEmailMatched;
+
+      const behalfHit =
+        !callerMatched &&
+        ((enq.linkedOrganisationId ? matchesRecordOrName(enq.linkedOrganisationId, behalfName) : null) ??
+          (matchNameCandidates(behalfLower ? [behalfLower] : [], []) ?? { matched: false, exact: false, via: 'name' as const }));
+      const behalfMatched = !callerMatched && Boolean(behalfHit && behalfHit.matched);
+
       const enqOtherEntries =
         !callerMatched && !behalfMatched
           ? (enq.otherPartiesNamed ?? '')
@@ -846,16 +1209,16 @@ export function searchMatterConflicts(
           : [];
       const matchedOther =
         !callerMatched && !behalfMatched
-          ? enqOtherEntries.find((op) => namesMatch(op.toLowerCase(), lower))
+          ? enqOtherEntries.find((op) => queryTermsLower.some((q) => namesMatch(op.toLowerCase(), q)))
           : undefined;
 
       if (!callerMatched && !behalfMatched && !matchedOther) continue;
 
       if (!deps.canViewEnquiry(enq)) {
         const isExact =
-          (callerMatched && callerLower === lower) ||
-          (behalfMatched && behalfLower === lower) ||
-          (matchedOther !== undefined && matchedOther.toLowerCase() === lower);
+          (callerMatched && (callerHit.exact || callerEmailMatched)) ||
+          (behalfMatched && Boolean(behalfHit && behalfHit.exact)) ||
+          (matchedOther !== undefined && queryTermsLower.includes(matchedOther.toLowerCase()));
         const redactedId = `match-restricted-enq-${party.id}-${redactRecordId(deps.tenantId, `${party.id}:${enq.id}`)}`;
         const fallbackKey = `${lower}__match on a restricted enquiry__restricted enquiry: refer to risk`;
         pushMatch(
@@ -884,17 +1247,17 @@ export function searchMatterConflicts(
       }
 
       if (callerMatched) {
-        const isExact = callerLower === lower;
+        const isExact = callerHit.exact || callerEmailMatched;
         const matchId = `match-${party.id}-${enq.id}-caller`;
         const whereFound = `Enquirer on ${enq.reference} (${enq.summary})`;
-        const fallbackKey = `${lower}__${callerLower}__${whereFound.toLowerCase()}`;
+        const fallbackKey = `${lower}__${callerLower || enqEmailLower}__${whereFound.toLowerCase()}`;
         pushMatch(
           {
             id: matchId,
             partyId: party.id,
             partyName: party.name,
             matchedRecordId: enq.linkedPersonId ?? enq.id,
-            matchedRecordName: callerName,
+            matchedRecordName: callerName || enqEmailLower,
             matchedRecordType: 'person',
             strength: isExact ? 'Exact' : 'Close',
             whereFound,
@@ -903,16 +1266,18 @@ export function searchMatterConflicts(
             responsiblePartnerId: ownerId,
             responsiblePartnerName: ownerName,
             dateLabel,
-            matchedOn: isExact
-              ? 'Exact enquirer name on enquiry'
-              : 'Similar enquirer name on enquiry',
+            matchedOn: callerEmailMatched
+              ? 'Email match on enquiry'
+              : isExact
+                ? 'Exact enquirer name on enquiry'
+                : 'Similar enquirer name on enquiry',
             disposition: null,
             note: '',
           },
           fallbackKey,
         );
       } else if (behalfMatched) {
-        const isExact = behalfLower === lower;
+        const isExact = Boolean(behalfHit && behalfHit.exact);
         const matchId = `match-${party.id}-${enq.id}-behalf`;
         const whereFound = `Prospective client on ${enq.reference} (${enq.summary})`;
         const fallbackKey = `${lower}__${behalfLower}__${whereFound.toLowerCase()}`;
@@ -940,7 +1305,7 @@ export function searchMatterConflicts(
           fallbackKey,
         );
       } else if (matchedOther) {
-        const isExact = matchedOther.toLowerCase() === lower;
+        const isExact = queryTermsLower.includes(matchedOther.toLowerCase());
         const matchId = `match-${party.id}-${enq.id}-other`;
         const whereFound = `Other party on ${enq.reference} (${enq.summary})`;
         const fallbackKey = `${lower}__${matchedOther.toLowerCase()}__${whereFound.toLowerCase()}`;
@@ -970,27 +1335,21 @@ export function searchMatterConflicts(
       }
     }
 
-    // 3. Check standalone people and organisations if not already matched on a visible record
-    const matchedPerson = deps.people.find((p) => {
-      if (p.demo || p.mergedIntoId) return false;
-      if (party.linkedRecordId && p.id === party.linkedRecordId) return true;
-      const pName = personDisplayName(p).toLowerCase();
-      return namesMatch(pName, lower);
-    });
-    if (
-      matchedPerson &&
-      !generated.some(
-        (g) => g.partyId === party.id && g.matchedRecordId === matchedPerson.id,
-      )
-    ) {
+    // 3. Check standalone people and organisations (including secondary emails, otherNames, company numbers)
+    for (const matchedPerson of deps.people) {
+      if (matchedPerson.demo || matchedPerson.mergedIntoId) continue;
+      const pHit = matchesPerson(matchedPerson);
+      if (!pHit.matched) continue;
+      if (
+        generated.some(
+          (g) => g.partyId === party.id && g.matchedRecordId === matchedPerson.id,
+        )
+      ) {
+        continue;
+      }
       const pDisplay = personDisplayName(matchedPerson);
-      const isExact =
-        (party.linkedRecordId && matchedPerson.id === party.linkedRecordId) ||
-        pDisplay.toLowerCase() === lower;
-      const ownerPerson = deps.people.find(
-        (p) =>
-          p.id ===
-          (matchedPerson.relationshipOwnerId || matchedPerson.recordOwnerId),
+      const ownerPerson = personById.get(
+        (matchedPerson.relationshipOwnerId || matchedPerson.recordOwnerId) || '',
       );
       const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
       const ownerId =
@@ -1013,16 +1372,21 @@ export function searchMatterConflicts(
           matchedRecordId: matchedPerson.id,
           matchedRecordName: pDisplay,
           matchedRecordType: 'person',
-          strength: isExact ? 'Exact' : 'Close',
+          strength: pHit.exact ? 'Exact' : 'Close',
           whereFound,
           matterId: null,
           matterNumber: null,
           responsiblePartnerId: ownerId,
           responsiblePartnerName: ownerName,
           dateLabel,
-          matchedOn: isExact
-            ? 'Exact name match in People directory'
-            : 'Partial name match in People directory',
+          matchedOn:
+            pHit.via === 'email'
+              ? 'Email match in People directory'
+              : pHit.via === 'other_name'
+                ? 'Former/other name match in People directory'
+                : pHit.exact
+                  ? 'Exact name match in People directory'
+                  : 'Partial name match in People directory',
           disposition: null,
           note: '',
         },
@@ -1030,24 +1394,19 @@ export function searchMatterConflicts(
       );
     }
 
-    const matchedOrg = deps.organisations.find((o) => {
-      if (o.mergedIntoId) return false;
-      if (party.linkedRecordId && o.id === party.linkedRecordId) return true;
-      const oLower = o.legalName.toLowerCase();
-      return namesMatch(oLower, lower);
-    });
-    if (
-      matchedOrg &&
-      !generated.some(
-        (g) => g.partyId === party.id && g.matchedRecordId === matchedOrg.id,
-      )
-    ) {
-      const isExact =
-        (party.linkedRecordId && matchedOrg.id === party.linkedRecordId) ||
-        matchedOrg.legalName.toLowerCase() === lower;
-      const ownerPerson = deps.people.find(
-        (p) =>
-          p.id === (matchedOrg.relationshipPartnerId || matchedOrg.recordOwnerId),
+    for (const matchedOrg of deps.organisations) {
+      if (matchedOrg.mergedIntoId) continue;
+      const oHit = matchesOrg(matchedOrg);
+      if (!oHit.matched) continue;
+      if (
+        generated.some(
+          (g) => g.partyId === party.id && g.matchedRecordId === matchedOrg.id,
+        )
+      ) {
+        continue;
+      }
+      const ownerPerson = personById.get(
+        (matchedOrg.relationshipPartnerId || matchedOrg.recordOwnerId) || '',
       );
       const ownerName = ownerPerson ? personDisplayName(ownerPerson) : '';
       const ownerId =
@@ -1068,16 +1427,23 @@ export function searchMatterConflicts(
           matchedRecordId: matchedOrg.id,
           matchedRecordName: matchedOrg.legalName,
           matchedRecordType: 'organisation',
-          strength: isExact ? 'Exact' : 'Close',
+          strength: oHit.exact ? 'Exact' : 'Close',
           whereFound,
           matterId: null,
           matterNumber: null,
           responsiblePartnerId: ownerId,
           responsiblePartnerName: ownerName,
           dateLabel,
-          matchedOn: isExact
-            ? 'Exact legal name in Organisations directory'
-            : 'Partial legal name in Organisations directory',
+          matchedOn:
+            oHit.via === 'email'
+              ? 'Email match in Organisations directory'
+              : oHit.via === 'company_number'
+                ? 'Company number match in Organisations directory'
+                : oHit.via === 'other_name'
+                  ? 'Trading/other name match in Organisations directory'
+                  : oHit.exact
+                    ? 'Exact legal name in Organisations directory'
+                    : 'Partial legal name in Organisations directory',
           disposition: null,
           note: '',
         },

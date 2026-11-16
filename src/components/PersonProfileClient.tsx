@@ -221,18 +221,35 @@ export function PersonProfileClient({
   const mainLink = mainLinkFor(person.id, links);
   const mainOrg = mainLink ? orgById.get(mainLink.organisationId) : undefined;
 
-  // Determine whether this person is a Client (Client contact or Private client)
+  // Determine whether this person is a Client (Client contact or Private client) — stable keys first
   const roleLabels = useMemo(
     () => resolveLabels(values, person.relationshipRoleIds),
     [values, person.relationshipRoleIds],
   );
   const isClientPerson = useMemo(() => {
-    if (roleLabels.some((r) => r.toLowerCase().includes('client'))) return true;
+    const hasClientRole = (person.relationshipRoleIds ?? []).some((id) => {
+      const sk = systemKeyOf(values, id);
+      if (sk) return sk === 'client_contact' || sk === 'private_client';
+      if (id === 'person_role.client_contact' || id === 'person_role.private_client') {
+        return true;
+      }
+      return resolveLabel(values, id).toLowerCase().includes('client');
+    });
+    if (hasClientRole) return true;
     if (
       mainOrg &&
-      resolveLabels(values, mainOrg.relationshipTypeIds).some(
-        (t) => t.toLowerCase() === 'client',
-      )
+      (mainOrg.relationshipTypeIds ?? []).some((id) => {
+        const sk = systemKeyOf(values, id);
+        if (sk) return sk === 'client' || sk === 'former_client';
+        if (
+          id === 'organisation_relationship_type.client' ||
+          id === 'organisation_relationship_type.former_client'
+        ) {
+          return true;
+        }
+        const label = resolveLabel(values, id).toLowerCase();
+        return label === 'client' || label === 'former client';
+      })
     ) {
       return true;
     }
@@ -248,7 +265,7 @@ export function PersonProfileClient({
       return true;
     }
     return false;
-  }, [person, roleLabels, mainOrg, values, matters]);
+  }, [person, mainOrg, values, matters]);
 
   const visibleTabs = useMemo(
     () =>
@@ -467,8 +484,21 @@ export function PersonProfileClient({
   if (isClientPerson) {
     const initials =
       `${person.firstName[0] ?? ''}${person.surname[0] ?? ''}`.toUpperCase() || 'CL';
+    const primaryClientRoleId =
+      (person.relationshipRoleIds ?? []).find((id) => {
+        const sk = systemKeyOf(values, id);
+        return (
+          sk === 'private_client' ||
+          sk === 'client_contact' ||
+          id === 'person_role.private_client' ||
+          id === 'person_role.client_contact'
+        );
+      }) ??
+      (person.relationshipRoleIds ?? []).find((id) =>
+        resolveLabel(values, id).toLowerCase().includes('client'),
+      );
     const primaryRoleBadge =
-      roleLabels.find((r) => r.toLowerCase().includes('client')) ||
+      (primaryClientRoleId ? resolveLabel(values, primaryClientRoleId) : '') ||
       roleLabels[0] ||
       'Client contact';
     const recordStatusLabel = resolveLabel(values, person.recordStatusId) || 'Active';

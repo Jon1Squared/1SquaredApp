@@ -8,7 +8,7 @@
 | Branch | `s0-25-server-side-search` (target `develop`) |
 | Depends on | `S0-17c` (on `develop`; stacked after `S0-24` in `WP5b` for `register_records` & `0018`) |
 | Size | `M` |
-| Backlog IDs | `32` (remains `Partly built` until `S0-26` + `S0-29`; retires `[x-reserved:S0-25]` on `documentAccess.autoRemediateDrift` -> re-tagged `backlog`; cross-cutting `P8`, `P10`, `P11`) |
+| Backlog IDs | `32` (remains `Partly built` until `S0-26` + `S0-29`; verifies `documentAccess.autoRemediateDrift` re-tagged to `backlog` during `S0-23` per owner approval 15 Nov 2026; cross-cutting `P8`, `P10`, `P11`) |
 | Decision record(s) | None required (implements Architecture Standard sections 4, 7 & 10 on top of ADR 0014, ADR 0025, ADR 0028) |
 | Spec / standards references | Architecture Standard sections 4, 7, 10, 12; [ADR 0014](../decisions/0014-restricted-matters.md); [ADR 0028](../decisions/0028-tenant-database-and-repositories.md) |
 
@@ -21,7 +21,7 @@ Replace client-side / snapshot-wide search indexing (`buildSearchIndex`) with **
 - Covers **people, organisations, matters, enquiries, tasks, documents, quotes, key dates and register records** inside each tenant's PostgreSQL database.
 - Enforces every RBAC and matter/enquiry/quote visibility predicate **inside SQL `WHERE` clauses BEFORE ranking (`ORDER BY`), pagination (`LIMIT`/`OFFSET`) and counting (`COUNT(*)` / per-type totals)** — preventing restricted-matter (`isStaffMatter` / `hasEthicalWall`), confidential document, quote, key-date and personal draft enquiry existence leaks.
 - Proves strict two-tenant isolation and restricted-record non-leakage in tests.
-- Re-tags mistakenly assigned `[x-reserved:S0-25]` on `documentAccess.autoRemediateDrift` cleanly to `backlog` (as it belongs to SharePoint drift remediation, not search).
+- Verify `documentAccess.autoRemediateDrift` stays tagged `backlog` (re-tagged cleanly from `[x-reserved:S0-25]` in `S0-23` per owner approval 15 Nov 2026, as it belongs to SharePoint drift remediation, not search).
 
 ---
 

@@ -26,6 +26,8 @@ import {
   getTaskWorkflowRepository,
   runWithAuditStagingScope,
   stageAuditEntry,
+  getStagedAuditWatermark,
+  discardStagedAuditEntriesSince,
   TenantCatalogueRepository,
   TenantJobRunRepository,
   TenantPmsRepository,
@@ -116,6 +118,7 @@ import {
   nextSortOrder,
   reorder,
   resolveLabel,
+  resolveListValueId,
   systemKeyOf,
   valueBySystemKey,
 } from '@/domain/lists';
@@ -563,6 +566,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     (m) =>
       Boolean(
         m.isStaffMatter ||
+          m.hasEthicalWall ||
           (m.restrictedAccessUserIds && m.restrictedAccessUserIds.length > 0),
       ) &&
       canPersonAccessMatter(m, targetPerson.id, targetPerson, {
@@ -1039,6 +1043,108 @@ async function putMatterWithInTxRestrictions(
   });
 }
 
+function buildMatterVisibilityForEmployeeRecord(
+  matters: readonly Matter[],
+  canViewMatter: (matter: Matter) => boolean,
+): {
+  canViewMatterId: (matterId: string) => boolean;
+  visibleMatterNumberById: ReadonlyMap<string, string>;
+} {
+  const matterById = new Map(matters.map((m) => [m.id, m]));
+  const visibleMatterNumberById = new Map<string, string>();
+  for (const m of matters) {
+    if (canViewMatter(m)) {
+      visibleMatterNumberById.set(m.id, m.matterNumber);
+    }
+  }
+  return {
+    canViewMatterId: (matterId: string) => {
+      const m = matterById.get(matterId);
+      return m ? canViewMatter(m) : false;
+    },
+    visibleMatterNumberById,
+  };
+}
+
+function redactRestrictedAuditEntryForViewer(
+  entry: AuditEntry,
+  matters: readonly Matter[],
+  canViewMatter: (matter: Matter) => boolean,
+): AuditEntry {
+  if (entry.recordType !== 'person') return entry;
+  const isConflictOnHire =
+    entry.field?.startsWith('Conflict check on hire') ||
+    (entry.snapshot &&
+      typeof entry.snapshot === 'object' &&
+      (entry.snapshot as { kind?: unknown }).kind === 'conflict_check_on_hire');
+  if (!isConflictOnHire) return entry;
+
+  const matterById = new Map(matters.map((m) => [m.id, m]));
+  const hiddenMatters = matters.filter((m) => !canViewMatter(m));
+  const sanitizeString = (val: string | null): string | null => {
+    if (!val) return val;
+    let out = val;
+    for (const hm of hiddenMatters) {
+      if (hm.matterNumber && out.includes(hm.matterNumber)) {
+        out = out.split(hm.matterNumber).join('[restricted matter redacted]');
+      }
+      if (hm.id && out.includes(hm.id)) {
+        out = out.split(hm.id).join('[restricted matter redacted]');
+      }
+      if (hm.title && out.includes(hm.title)) {
+        out = out.split(hm.title).join('[restricted matter redacted]');
+      }
+    }
+    return out;
+  };
+
+  let nextNewValue = sanitizeString(entry.newValue);
+  let nextSnapshot = entry.snapshot;
+  if (
+    entry.snapshot &&
+    typeof entry.snapshot === 'object' &&
+    (entry.snapshot as { kind?: unknown }).kind === 'conflict_check_on_hire'
+  ) {
+    const snapObj = entry.snapshot as {
+      kind?: string;
+      openMatterIds?: unknown;
+    };
+    const rawIds = Array.isArray(snapObj.openMatterIds)
+      ? snapObj.openMatterIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    const visibleMatters = rawIds
+      .map((id) => matterById.get(id))
+      .filter((m): m is Matter => Boolean(m && canViewMatter(m)));
+    const hiddenCount = rawIds.length - visibleMatters.length;
+    if (hiddenCount > 0) {
+      const summaryParts = [
+        ...visibleMatters.map((m) => m.matterNumber),
+        `${hiddenCount} restricted matter(s) redacted`,
+      ];
+      nextNewValue =
+        visibleMatters.length > 0
+          ? `Person is a party on ${rawIds.length} open matter(s) (${summaryParts.join(', ')}). Flagged to Risk & Compliance to consider an information barrier.`
+          : `Person is a party on ${hiddenCount} restricted open matter(s) (details hidden under ethical wall / staff-matter restriction). Flagged to Risk & Compliance to consider an information barrier.`;
+      nextSnapshot = {
+        kind: 'conflict_check_on_hire',
+        openMatterIds: visibleMatters.map((m) => m.id),
+      };
+    } else if (rawIds.length > 0) {
+      const refs = rawIds
+        .map((id) => matterById.get(id)?.matterNumber ?? id)
+        .join(', ');
+      nextNewValue = `Person is a party on ${rawIds.length} open matter(s) (${refs}). Flagged to Risk & Compliance to consider an information barrier.`;
+    }
+  }
+
+  return {
+    ...entry,
+    oldValue: sanitizeString(entry.oldValue),
+    newValue: nextNewValue,
+    ...(nextSnapshot !== undefined ? { snapshot: nextSnapshot } : {}),
+  };
+}
+
 function mapFirmAuditRecordToAuditEntry(rec: FirmAuditEntryRecord): AuditEntry {
   return {
     id: rec.id,
@@ -1192,7 +1298,13 @@ export async function listAuditEntriesForRecord(
     recordId,
     { limit: options?.limit ?? 200 },
   );
-  return rows.map(mapFirmAuditRecordToAuditEntry);
+  return rows.map((row) =>
+    redactRestrictedAuditEntryForViewer(
+      mapFirmAuditRecordToAuditEntry(row),
+      matters,
+      visibility.canViewMatter,
+    ),
+  );
 }
 
 /**
@@ -1380,7 +1492,13 @@ export async function listFirmAuditEntriesPage(
       : null;
 
   return {
-    entries: collected.map(mapFirmAuditRecordToAuditEntry),
+    entries: collected.map((row) =>
+      redactRestrictedAuditEntryForViewer(
+        mapFirmAuditRecordToAuditEntry(row),
+        matters,
+        visibility.canViewMatter,
+      ),
+    ),
     nextBeforeSeq,
   };
 }
@@ -1477,7 +1595,6 @@ async function getAppSnapshotInScope(
       actorUserId: userId || 'anonymous',
     });
   }
-  const employees = activeEmployees(people, store.values);
   const currentUserRole = resolveUserAppRole(user, teams, store.values, {
     config: { rbac: rbacConfig },
   });
@@ -1503,22 +1620,6 @@ async function getAppSnapshotInScope(
       legalName: getActiveTenantConfiguration().displayName,
     });
 
-  // Filter employment records on people at the API level based on requesting user's permissions
-  const filteredPeople: Person[] = people.map((p) => {
-    if (!p.employment) return p;
-    return {
-      ...p,
-      employment: filterEmploymentForUser(
-        p.employment,
-        user,
-        people,
-        teams,
-        orgStructure,
-        { config: { rbac: rbacConfig } },
-      ),
-    };
-  });
-
   // Never bulk-return sensitive HR records in page snapshots (R63); serve only via audited per-person read service.
   const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
@@ -1535,6 +1636,27 @@ async function getAppSnapshotInScope(
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     rbacConfig,
   });
+  const employeeMatterVisibility = buildMatterVisibilityForEmployeeRecord(
+    matters,
+    prelimVisibility.canViewMatter,
+  );
+  // Filter employment records on people at the API level based on requesting user's permissions and matter visibility
+  const filteredPeople: Person[] = people.map((p) => {
+    if (!p.employment) return p;
+    return {
+      ...p,
+      employment: filterEmploymentForUser(
+        p.employment,
+        user,
+        people,
+        teams,
+        orgStructure,
+        { config: { rbac: rbacConfig } },
+        employeeMatterVisibility,
+      ),
+    };
+  });
+  const employees = activeEmployees(filteredPeople, store.values);
   const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
     snapshotTenantCtx,
     prelimVisibility.hiddenMatterIds,
@@ -2028,9 +2150,10 @@ export async function getEmployeeDetailsForUser(
 }> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const hrRepo = getHrAndRbacRepository();
-  const [store, people, teams, rbacConfig] = await Promise.all([
+  const [store, people, matters, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(ctx),
     getPartyRepository().listAllPeople<Person>(ctx),
+    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
     hrRepo.listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -2111,6 +2234,13 @@ export async function getEmployeeDetailsForUser(
     }
   });
 
+  const matterVisibility = buildMatterVisibilityForEmployeeRecord(matters, (m) =>
+    canPersonAccessMatter(m, byId, user, {
+      allPeople: people,
+      teams,
+      config: { rbac: rbacConfig },
+    }),
+  );
   const employment = filterEmploymentForUser(
     rawEmployment ?? undefined,
     user,
@@ -2118,6 +2248,7 @@ export async function getEmployeeDetailsForUser(
     teams,
     store.orgStructure,
     { config: { rbac: rbacConfig } },
+    matterVisibility,
   );
   // R103 & R130: Only return sensitive HR records when logViewSensitive: true and audit write succeeded in the same transaction
   const sensitive = sensitiveAuditWritten
@@ -3277,20 +3408,43 @@ export async function savePersonRecord(
           });
         }
 
-        const riskOfficerId =
+        const riskOfficer =
           people.find(
             (p) =>
               isWorkingAtFirm(p) &&
               (p.roles?.includes('risk_compliance') ||
                 p.employeeRoleId === 'employee_role.risk_and_compliance'),
-          )?.id ?? opts.byId;
+          ) ?? people.find((p) => p.id === opts.byId) ?? null;
+        const riskOfficerId = riskOfficer?.id ?? opts.byId;
+        const mattersAfterHire = matters.map(
+          (m) => changedMattersOnHire.find((x) => x.matter.id === m.id)?.matter ?? m,
+        );
+        const hireOpenMattersAfter = openMattersOnHire.map(
+          (m) => mattersAfterHire.find((x) => x.id === m.id) ?? m,
+        );
+        const visibleRefsForRisk = hireOpenMattersAfter
+          .filter((m) =>
+            riskOfficer
+              ? canPersonAccessMatter(m, riskOfficer.id, riskOfficer, {
+                  allPeople: people,
+                  teams,
+                  config: { rbac: rbacConfig },
+                })
+              : false,
+          )
+          .map((m) => m.matterNumber);
+        const hiddenCountForRisk = hireOpenMattersAfter.length - visibleRefsForRisk.length;
+        const riskDetailParts = [
+          ...visibleRefsForRisk,
+          ...(hiddenCountForRisk > 0 ? [`${hiddenCountForRisk} restricted open matter(s)`] : []),
+        ];
         const notifId = await getTaskWorkflowRepository().allocateNextNotificationId(personCtx);
         await getTaskWorkflowRepository().putNotification(personCtx, {
           id: notifId,
           recipientId: riskOfficerId,
           kind: 'task_assigned',
           title: `Information barrier review required: ${input.firstName.trim()} ${input.surname.trim()}`,
-          detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${openMattersOnHire.map((m) => m.matterNumber).join(', ')}.`,
+          detail: `${input.firstName.trim()} ${input.surname.trim()} is joining the firm and is a party on open matter(s): ${riskDetailParts.join(', ')}.`,
           href: `/people/${person.id}`,
           recordId: person.id,
           createdAt: now,
@@ -3298,13 +3452,33 @@ export async function savePersonRecord(
           byId: opts.byId,
         });
 
+        const publicRefs = hireOpenMattersAfter
+          .filter(
+            (m) =>
+              !m.isStaffMatter &&
+              !m.hasEthicalWall &&
+              (!m.restrictedAccessUserIds || m.restrictedAccessUserIds.length === 0),
+          )
+          .map((m) => m.matterNumber);
+        const restrictedOpenCount = hireOpenMattersAfter.length - publicRefs.length;
+        const auditSummaryValue =
+          restrictedOpenCount > 0
+            ? publicRefs.length > 0
+              ? `Person is a party on ${hireOpenMattersAfter.length} open matter(s) (${[...publicRefs, `${restrictedOpenCount} restricted matter(s) redacted`].join(', ')}). Flagged to Risk & Compliance to consider an information barrier.`
+              : `Person is a party on ${restrictedOpenCount} restricted open matter(s) (details hidden under ethical wall / staff-matter restriction). Flagged to Risk & Compliance to consider an information barrier.`
+            : person.employment.conflictCheckOnHire.riskNotes;
+
         writeAudit(store, {
           recordType: 'person',
           recordId: person.id,
           action: 'status-change',
           field: 'Conflict check on hire (Risk flag)',
           oldValue: 'External contact / client',
-          newValue: person.employment.conflictCheckOnHire.riskNotes,
+          newValue: auditSummaryValue,
+          snapshot: {
+            kind: 'conflict_check_on_hire',
+            openMatterIds: hireOpenMattersAfter.map((m) => m.id),
+          },
           byId: opts.byId,
           at: now,
         });
@@ -3585,7 +3759,39 @@ export async function savePersonRecord(
       store,
     });
   }
-  return { person };
+  const allPeopleAfterSave = existing
+    ? people.map((p) => (p.id === person.id ? person : p))
+    : [...people, person];
+  const actingPersonAfterSave =
+    allPeopleAfterSave.find((p) => p.id === opts.byId) ?? null;
+  const mattersAfterSave = matters.map(
+    (m) => changedMattersOnHire.find((x) => x.matter.id === m.id)?.matter ?? m,
+  );
+  const actorMatterVisibility = buildMatterVisibilityForEmployeeRecord(
+    mattersAfterSave,
+    (m) =>
+      canPersonAccessMatter(m, opts.byId, actingPersonAfterSave, {
+        allPeople: allPeopleAfterSave,
+        teams,
+        config: { rbac: rbacConfig },
+      }),
+  );
+  const returnedPerson: Person = person.employment
+    ? {
+        ...person,
+        employment:
+          filterEmploymentForUser(
+            person.employment,
+            actingPersonAfterSave,
+            allPeopleAfterSave,
+            teams,
+            store.orgStructure,
+            { config: { rbac: rbacConfig } },
+            actorMatterVisibility,
+          ) ?? null,
+      }
+    : person;
+  return { person: returnedPerson };
   })();
   for (const syncItem of pendingLifecycleSyncs) {
     const syncCorrelationId = `corr-lifecycle-sync-${syncItem.matter.id}-${Date.now()}`;
@@ -4573,6 +4779,101 @@ function buildServerConflictCheckRecord(params: {
   };
 }
 
+function resolveMatterPartyDefaultPersonRoleIds(
+  values: ChoiceValue[],
+  relationshipCode: string | undefined,
+): string[] {
+  switch (relationshipCode) {
+    case 'CL':
+    case 'JC':
+      return [resolveListValueId(values, 'person_role', 'private_client', 'Private client')];
+    case 'CC':
+      return [resolveListValueId(values, 'person_role', 'client_contact', 'Client contact')];
+    case 'OP':
+    case 'CP':
+      return [resolveListValueId(values, 'person_role', 'opposing_party', 'Opposing party')];
+    case 'CO':
+      return [
+        resolveListValueId(
+          values,
+          'person_role',
+          'professional_adviser',
+          'Professional adviser',
+        ),
+      ];
+    default:
+      return [];
+  }
+}
+
+function resolveMatterPartyDefaultOrgRelationshipTypeIds(
+  values: ChoiceValue[],
+  relationshipCode: string | undefined,
+): string[] {
+  switch (relationshipCode) {
+    case 'CL':
+    case 'JC':
+      return [
+        resolveListValueId(values, 'organisation_relationship_type', 'client', 'Client'),
+      ];
+    case 'CO':
+      return [
+        resolveListValueId(
+          values,
+          'organisation_relationship_type',
+          'opposing_solicitors',
+          'Opposing solicitors',
+        ),
+      ];
+    default:
+      return [
+        resolveListValueId(
+          values,
+          'organisation_relationship_type',
+          'counterparty',
+          'Counterparty',
+        ),
+      ];
+  }
+}
+
+async function ensurePersonHasRoleInTx(
+  ctx: TenantContext,
+  store: FirmStore,
+  partyRepo: ReturnType<typeof getPartyRepository>,
+  personId: string | null | undefined,
+  roleId: string,
+  byId: string,
+  now: string,
+): Promise<Person | null> {
+  if (!personId || !personId.startsWith('P-') || !roleId) return null;
+  const existing = await partyRepo.getPersonById<Person>(ctx, personId);
+  if (!existing || existing.mergedIntoId) return null;
+  const currentRoles = existing.relationshipRoleIds ?? [];
+  if (currentRoles.includes(roleId)) return existing;
+  const updated: Person = {
+    ...existing,
+    relationshipRoleIds: [...currentRoles, roleId],
+    updatedAt: now,
+    updatedById: byId,
+  };
+  await partyRepo.putPerson(ctx, updated);
+  stageAuditEntry({
+    recordType: 'person',
+    recordId: updated.id,
+    action: 'update',
+    field: 'Relationship roles',
+    oldValue:
+      currentRoles.map((id) => resolveLabel(store.values, id) || id).join(', ') || null,
+    newValue: updated.relationshipRoleIds
+      .map((id) => resolveLabel(store.values, id) || id)
+      .join(', '),
+    byId,
+    at: now,
+  });
+  return updated;
+}
+
 export async function saveMatterRecord(
   input: Omit<
     Partial<Matter>,
@@ -4936,8 +5237,12 @@ export async function saveMatterRecord(
       return existingFromEnq.id;
     }
     const newPersonId = await partyRepo.allocateNextPersonId(extensionCtx);
-    const activeRecordStatus =
-      valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
+    const activeRecordStatus = resolveListValueId(
+      store.values,
+      'person_record_status',
+      'active',
+      'Active',
+    );
     const newPerson: Person = {
       id: newPersonId,
       recordType: 'person',
@@ -4995,7 +5300,12 @@ export async function saveMatterRecord(
       relationshipStatusId: vid('relationship_status', 'Active'),
       relationshipStandingId: null,
       relationshipRoleIds: [
-        vid('person_role', enq.callingOnBehalfOf ? 'Client contact' : 'Private client'),
+        resolveListValueId(
+          store.values,
+          'person_role',
+          enq.callingOnBehalfOf ? 'client_contact' : 'private_client',
+          enq.callingOnBehalfOf ? 'Client contact' : 'Private client',
+        ),
       ],
       originId: enq.sourceId || null,
       firstKnownAt: today,
@@ -5077,8 +5387,12 @@ export async function saveMatterRecord(
       const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : cleanName;
       const surname = parts.length > 1 ? parts[parts.length - 1] : 'Contact';
       const newPersonId = await partyRepo.allocateNextPersonId(extensionCtx);
-      const activeRecordStatus =
-        valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
+      const activeRecordStatus = resolveListValueId(
+        store.values,
+        'person_record_status',
+        'active',
+        'Active',
+      );
       const newPerson: Person = {
         id: newPersonId,
         recordType: 'person',
@@ -5107,7 +5421,12 @@ export async function saveMatterRecord(
               {
                 id: `ON-${Date.now()}`,
                 name: pt.identifiers.previousNames.trim(),
-                typeId: vid('name_type', 'Former / Maiden Name'),
+                typeId: resolveListValueId(
+                  store.values,
+                  'other_name_type',
+                  'previous_name',
+                  'Previous name',
+                ),
               },
             ]
           : [],
@@ -5124,7 +5443,7 @@ export async function saveMatterRecord(
           ? [
               {
                 id: `ADDR-${Date.now()}`,
-                typeId: vid('address_type', 'Home / Residential'),
+                typeId: resolveListValueId(store.values, 'address_type', 'home', 'Home'),
                 line1: '',
                 line2: '',
                 town: pt.identifiers.town.trim(),
@@ -5139,7 +5458,10 @@ export async function saveMatterRecord(
         relationshipOwnerId: opts.byId,
         relationshipStatusId: vid('relationship_status', 'Active'),
         relationshipStandingId: null,
-        relationshipRoleIds: [],
+        relationshipRoleIds: resolveMatterPartyDefaultPersonRoleIds(
+          store.values,
+          pt.relationshipCode,
+        ),
         originId: null,
         firstKnownAt: today,
         engagementLevelId: null,
@@ -5170,8 +5492,12 @@ export async function saveMatterRecord(
         continue;
       }
       const newOrgId = await partyRepo.allocateNextOrganisationId(extensionCtx);
-      const activeRecordStatus =
-        valueBySystemKey(store.values, 'record_status', 'active')?.id ?? vid('record_status', 'Active');
+      const activeRecordStatus = resolveListValueId(
+        store.values,
+        'organisation_record_status',
+        'active',
+        'Active',
+      );
       const newOrg: Organisation = {
         id: newOrgId,
         recordType: 'organisation',
@@ -5199,7 +5525,12 @@ export async function saveMatterRecord(
         registeredAddress: pt.identifiers?.registeredTown?.trim()
           ? {
               id: `ADDR-${Date.now()}`,
-              typeId: vid('address_type', 'Registered Office'),
+              typeId: resolveListValueId(
+                store.values,
+                'address_type',
+                'registered_office',
+                'Registered office',
+              ),
               line1: '',
               line2: '',
               town: pt.identifiers.registeredTown.trim(),
@@ -5216,7 +5547,10 @@ export async function saveMatterRecord(
         generalEmail: '',
         parentOrganisationId: null,
         relationshipPartnerId: opts.byId,
-        relationshipTypeIds: [vid('relationship_type', 'Other Party / Counterparty')],
+        relationshipTypeIds: resolveMatterPartyDefaultOrgRelationshipTypeIds(
+          store.values,
+          pt.relationshipCode,
+        ),
         relationshipStatusId: vid('relationship_status', 'Active'),
         relationshipStandingId: null,
         sectorId: null,
@@ -5286,6 +5620,36 @@ export async function saveMatterRecord(
       ? input.referrerContactId
       : existing?.referrerContactId ?? null,
   );
+  const privateClientRoleId = resolveListValueId(
+    store.values,
+    'person_role',
+    'private_client',
+    'Private client',
+  );
+  const individualClientPersonIds = Array.from(
+    new Set(
+      [
+        effectiveClientId,
+        ...resolvedAdditionalClientIds,
+        ...resolvedParties
+          .filter(
+            (pt) => pt.relationshipCode === 'CL' || pt.relationshipCode === 'JC',
+          )
+          .map((pt) => pt.linkedRecordId ?? ''),
+      ].filter((id): id is string => Boolean(id && id.startsWith('P-'))),
+    ),
+  );
+  for (const pendingPerson of pendingPeople) {
+    if (
+      individualClientPersonIds.includes(pendingPerson.id) &&
+      !(pendingPerson.relationshipRoleIds ?? []).includes(privateClientRoleId)
+    ) {
+      pendingPerson.relationshipRoleIds = [
+        ...(pendingPerson.relationshipRoleIds ?? []),
+        privateClientRoleId,
+      ];
+    }
+  }
 
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
     allPeople: allPeopleWithPending,
@@ -5307,6 +5671,7 @@ export async function saveMatterRecord(
     additionalClientIds: resolvedAdditionalClientIds,
     instructingContactId: resolvedInstructingContactId,
     billingContactId: resolvedBillingContactId,
+    referrerContactId: resolvedReferrerContactId,
     matterParties: resolvedParties,
     people: allPeopleWithPending,
     organisations: allOrganisationsWithPending,
@@ -5888,6 +6253,8 @@ export async function saveMatterRecord(
   const expectedRowVersionForPut = existing
     ? (opts.expectedRowVersion ?? input.rowVersion ?? existingRowVersion)
     : undefined;
+  const stagedAuditMark = getStagedAuditWatermark();
+  let auditFlushed = false;
   try {
     await matterRepo.withTenantTransaction(extensionCtx, async () => {
       for (const person of pendingPeople) {
@@ -5903,6 +6270,20 @@ export async function saveMatterRecord(
         expectedRowVersion: expectedRowVersionForPut,
       });
       matter = saved;
+
+      const pendingPersonIdSet = new Set(pendingPeople.map((p) => p.id));
+      for (const clientPersonId of individualClientPersonIds) {
+        if (pendingPersonIdSet.has(clientPersonId)) continue;
+        await ensurePersonHasRoleInTx(
+          extensionCtx,
+          store,
+          partyRepo,
+          clientPersonId,
+          privateClientRoleId,
+          opts.byId,
+          now,
+        );
+      }
 
       if (!existing) {
         writeAudit(store, {
@@ -6149,6 +6530,7 @@ export async function saveMatterRecord(
       }
 
       await flushStagedAuditEntries(extensionCtx);
+      auditFlushed = true;
     });
   } catch (err) {
     if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
@@ -6162,6 +6544,10 @@ export async function saveMatterRecord(
       };
     }
     throw err;
+  } finally {
+    if (!auditFlushed) {
+      discardStagedAuditEntriesSince(stagedAuditMark);
+    }
   }
 
   if (previousMatterSnapshot) {
@@ -6723,6 +7109,7 @@ export async function updateMatterConflictRecord(
     additionalClientIds: matter.additionalClientIds,
     instructingContactId: matter.instructingContactId,
     billingContactId: matter.billingContactId,
+    referrerContactId: matter.referrerContactId,
     matterParties: matter.parties,
     people,
     organisations,
@@ -7255,11 +7642,6 @@ function mergeCollidingLinkIntoSurvivor(
   }
 }
 
-function replaceRecordIdPathSegment(href: string, mergedId: string, survivorId: string): string {
-  const escaped = mergedId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return href.replace(new RegExp(`(?<=^|/)${escaped}(?=$|/|\\?|#)`, 'g'), survivorId);
-}
-
 export async function executeMerge(
   recordType: RecordType,
   survivorId: string,
@@ -7268,348 +7650,386 @@ export async function executeMerge(
 ): Promise<MergeHistory & Partial<ActionDenied>> {
   let mergeCtx: TenantContext | null = null;
   return runWithAuditStagingScope(async () => {
-  const prelimCtx = resolveDefaultServiceTenantContext(null, byId);
-  const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
-  const [store, people, organisations, links, notes, matters, teams] = await Promise.all([
-    loadTenantCatalogueStoreView(prelimCtx, { includePmsLinks: true }),
-    partyRepo.listAllPeople<Person>(prelimCtx),
-    partyRepo.listAllOrganisations<Organisation>(prelimCtx),
-    partyRepo.listAllLinks<PersonOrganisationLink>(prelimCtx),
-    partyRepo.listAllNotes<Note>(prelimCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
-    getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (
-    !hasPersonPermission(actor, 'record:merge', {
-      allPeople: people,
-      teams,
-    })
-  ) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'You do not have permission (record:merge) to merge duplicate records.',
-    ) as unknown as MergeHistory & Partial<ActionDenied>;
-  }
-  if (survivorId === mergedId) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Cannot merge a record into itself.',
-    ) as unknown as MergeHistory & Partial<ActionDenied>;
-  }
-  const now = new Date().toISOString();
-  const list: AnyRecord[] = recordType === 'person' ? people : organisations;
-  const survivor = list.find((r) => r.id === survivorId);
-  const merged = list.find((r) => r.id === mergedId);
-  if (!survivor || !merged) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Record not found for merge.',
-    ) as unknown as MergeHistory & Partial<ActionDenied>;
-  }
-  if (isEmployeeOrLeaverRecord(survivor) || isEmployeeOrLeaverRecord(merged)) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Employee and leaver records cannot be merged.',
-    ) as unknown as MergeHistory & Partial<ActionDenied>;
-  }
-  if (survivor.mergedIntoId || merged.mergedIntoId) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Cannot merge a record that has already been merged.',
-    ) as unknown as MergeHistory & Partial<ActionDenied>;
-  }
-
-  // R271 & R272: Resolve verified tenant context before mutating any record
-  mergeCtx = (await resolveTenantContextForStoreUser(store, actor!.id)).ctx;
-  const plan = planMerge(survivor, merged);
-  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
-  const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
-  const statusMerged = valueBySystemKey(
-    store.values,
-    recordType === 'person' ? 'person_record_status' : 'organisation_record_status',
-    'merged',
-  )!.id;
-
-  // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
-  let linksMoved = 0;
-  const nextLinks: PersonOrganisationLink[] = [];
-  const linksToUpsert: PersonOrganisationLink[] = [];
-  const linkIdsToDelete: string[] = [];
-  for (const link of links) {
-    if (recordType === 'person' && link.personId === merged.id) {
-      const existingSurvivorLink =
-        nextLinks.find(
-          (l) =>
-            l.personId === survivor.id &&
-            l.organisationId === link.organisationId,
-        ) ??
-        links.find(
-          (l) =>
-            l !== link &&
-            l.personId === survivor.id &&
-            l.organisationId === link.organisationId,
-        );
-      if (existingSurvivorLink) {
-        mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
-        if (!linksToUpsert.includes(existingSurvivorLink)) {
-          linksToUpsert.push(existingSurvivorLink);
-        }
-        linkIdsToDelete.push(link.id);
-        linksMoved++;
-      } else {
-        link.personId = survivor.id;
-        nextLinks.push(link);
-        linksToUpsert.push(link);
-        linksMoved++;
-      }
-    } else if (
-      recordType === 'organisation' &&
-      link.organisationId === merged.id
-    ) {
-      const existingSurvivorLink =
-        nextLinks.find(
-          (l) =>
-            l.organisationId === survivor.id &&
-            l.personId === link.personId,
-        ) ??
-        links.find(
-          (l) =>
-            l !== link &&
-            l.organisationId === survivor.id &&
-            l.personId === link.personId,
-        );
-      if (existingSurvivorLink) {
-        mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
-        if (!linksToUpsert.includes(existingSurvivorLink)) {
-          linksToUpsert.push(existingSurvivorLink);
-        }
-        linkIdsToDelete.push(link.id);
-        linksMoved++;
-      } else {
-        link.organisationId = survivor.id;
-        nextLinks.push(link);
-        linksToUpsert.push(link);
-        linksMoved++;
-      }
-    } else {
-      nextLinks.push(link);
-    }
-  }
-  if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
-    plan.fieldsTaken.push('Organisation links');
-  }
-
-  // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
-  const repointedSubsidiaries: Organisation[] = [];
-  if (recordType === 'organisation') {
-    for (const org of organisations) {
-      if (org.parentOrganisationId === merged.id && org.id !== survivor.id) {
-        org.parentOrganisationId = survivor.id;
-        repointedSubsidiaries.push(org);
-      }
-    }
-  }
-
-  // 3. Repoint Matter references and conflict check records
-  const repointedMatters: Matter[] = [];
-  const repointConflictRecordObject = (
-    cr:
-      | {
-          parties?: { linkedRecordId: string | null }[];
-          matches?: { matchedRecordId: string }[];
-        }
-      | null
-      | undefined,
-  ): boolean => {
-    if (!cr || typeof cr !== 'object') return false;
-    let changed = false;
-    if (Array.isArray(cr.parties)) {
-      for (const cp of cr.parties) {
-        if (cp && cp.linkedRecordId === merged.id) {
-          cp.linkedRecordId = survivor.id;
-          changed = true;
-        }
-      }
-    }
-    if (Array.isArray(cr.matches)) {
-      for (const match of cr.matches) {
-        if (match && match.matchedRecordId === merged.id) {
-          match.matchedRecordId = survivor.id;
-          changed = true;
-        }
-      }
-    }
-    return changed;
-  };
-
-  for (const matter of matters) {
-    let matterChanged = false;
-    if (matter.clientId === merged.id) {
-      matter.clientId = survivor.id;
-      matterChanged = true;
-    }
+    const prelimCtx = resolveDefaultServiceTenantContext(null, byId);
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const [authStore, authPeople, teams] = await Promise.all([
+      loadTenantCatalogueStoreView(prelimCtx),
+      partyRepo.listAllPeople<Person>(prelimCtx),
+      getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
+    ]);
+    const actor = authPeople.find((p) => p.id === byId) ?? null;
     if (
-      Array.isArray(matter.additionalClientIds) &&
-      matter.additionalClientIds.includes(merged.id)
+      !hasPersonPermission(actor, 'record:merge', {
+        allPeople: authPeople,
+        teams,
+      })
     ) {
-      matter.additionalClientIds = Array.from(
-        new Set(
-          matter.additionalClientIds.map((id) =>
-            id === merged.id ? survivor.id : id,
-          ),
-        ),
-      );
-      matterChanged = true;
+      return buildActionDenied(
+        'FORBIDDEN',
+        'You do not have permission (record:merge) to merge duplicate records.',
+      ) as unknown as MergeHistory & Partial<ActionDenied>;
     }
-    if (matter.instructingContactId === merged.id) {
-      matter.instructingContactId = survivor.id;
-      matterChanged = true;
-    }
-    if (matter.billingContactId === merged.id) {
-      matter.billingContactId = survivor.id;
-      matterChanged = true;
-    }
-    if (matter.referrerContactId === merged.id) {
-      matter.referrerContactId = survivor.id;
-      matterChanged = true;
-    }
-    for (const party of matter.parties ?? []) {
-      if (party.linkedRecordId === merged.id) {
-        party.linkedRecordId = survivor.id;
-        matterChanged = true;
-      }
-    }
-    if (repointConflictRecordObject(matter.conflictCheckRecord)) {
-      matterChanged = true;
-    }
-    if (matter.fieldValues && typeof matter.fieldValues === 'object') {
-      if (
-        repointConflictRecordObject(
-          matter.fieldValues['conflictCheckRecord'] as {
-            parties?: { linkedRecordId: string | null }[];
-            matches?: { matchedRecordId: string }[];
-          },
-        )
-      ) {
-        matterChanged = true;
-      }
-      if (
-        repointConflictRecordObject(
-          matter.fieldValues['conflictCheck'] as {
-            parties?: { linkedRecordId: string | null }[];
-            matches?: { matchedRecordId: string }[];
-          },
-        )
-      ) {
-        matterChanged = true;
-      }
-    }
-    if (matterChanged) {
-      repointedMatters.push(matter);
-    }
-  }
-
-    // 4-6. Enquiries (including conflict_snapshot_json), quotes, tasks (task_linked_records),
-    // notifications, and recently_viewed are repointed atomically inside partyRepo.executeMergeInTransaction.
-
-    // 7. Repoint PMS links (repointed in SQL by partyRepo.executeMergeInTransaction; record conflicts in plan & audit)
-    const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
-    const nextPmsLinks: PmsLink[] = [];
-    for (const pmsLink of store.pmsLinks) {
-      if (pmsLink.onesquaredId === merged.id) {
-        const existingSurvivorPmsLink =
-          store.pmsLinks.find(
-            (other) =>
-              other !== pmsLink &&
-              other.entityType === pmsLink.entityType &&
-              other.onesquaredId === survivor.id,
-          ) ??
-          nextPmsLinks.find(
-            (other) =>
-              other.entityType === pmsLink.entityType &&
-              other.onesquaredId === survivor.id,
-          );
-        if (existingSurvivorPmsLink) {
-          pmsLinkConflicts.push({
-            keptPmsCode: existingSurvivorPmsLink.pmsCode,
-            discardedPmsCode: pmsLink.pmsCode,
-          });
-          const conflictSummary = `PMS link conflict (kept ${existingSurvivorPmsLink.pmsCode}, discarded ${pmsLink.pmsCode})`;
-          if (!plan.fieldsTaken.includes(conflictSummary)) {
-            plan.fieldsTaken.push(conflictSummary);
-          }
-          writeAudit(store, {
-            recordType,
-            recordId: survivor.id,
-            action: 'merge',
-            field: 'PMS link conflict',
-            oldValue: pmsLink.pmsCode,
-            newValue: existingSurvivorPmsLink.pmsCode,
-            byId,
-            at: now,
-          });
-        } else {
-          pmsLink.onesquaredId = survivor.id;
-          nextPmsLinks.push(pmsLink);
-          if (!plan.fieldsTaken.includes('PMS link')) {
-            plan.fieldsTaken.push('PMS link');
-          }
-        }
-      } else {
-        nextPmsLinks.push(pmsLink);
-      }
+    if (survivorId === mergedId) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        'Cannot merge a record into itself.',
+      ) as unknown as MergeHistory & Partial<ActionDenied>;
     }
 
-    // 9. Copy notes to survivor
-    const notesToRepoint: Note[] = [];
-    for (const note of notes) {
-      if (note.recordType === recordType && note.recordId === merged.id) {
-        note.recordId = survivor.id;
-        note.mergedFromId = merged.id;
-        notesToRepoint.push(note);
-      }
-    }
-    if (notesToRepoint.length > 0 && !plan.fieldsTaken.includes('Notes')) {
-      plan.fieldsTaken.push('Notes');
-    }
-
-    // 10. Other references: Person.createdFromEnquiryId (notifications and recentlyViewed are repointed in partyRepo.executeMergeInTransaction)
-    if (recordType === 'person') {
-      const mergedPerson = merged as Person;
-      const survivorPerson = plan.survivor as Person;
-      if (mergedPerson.createdFromEnquiryId) {
-        if (!survivorPerson.createdFromEnquiryId) {
-          survivorPerson.createdFromEnquiryId = mergedPerson.createdFromEnquiryId;
-        }
-        mergedPerson.createdFromEnquiryId = null;
-      }
-    }
-
-    // Update survivor
-    plan.survivor.updatedAt = now;
-    plan.survivor.updatedById = byId;
-    plan.survivor.possibleMatchIds = plan.survivor.possibleMatchIds.filter(
-      (id) => id !== merged.id,
-    );
-    if (plan.survivor.possibleMatchIds.length === 0) {
-      plan.survivor.duplicateStatusId = dupNone;
-    }
-
-    // Mark merged record
-    merged.mergedIntoId = survivor.id;
-    merged.recordStatusId = statusMerged;
-    merged.duplicateStatusId = dupMerged;
-    merged.possibleMatchIds = [];
-    merged.updatedAt = now;
-    merged.updatedById = byId;
-
+    // R271 & R272: Resolve verified tenant context before entering the single merge transaction
+    mergeCtx = (await resolveTenantContextForStoreUser(authStore, actor!.id)).ctx;
     const activeMergeCtx = mergeCtx ?? prelimCtx;
+    const now = new Date().toISOString();
+
     let history!: MergeHistory;
+    let deniedResult: (MergeHistory & Partial<ActionDenied>) | null = null;
     let mergeSqlApplied = false;
     try {
       await partyRepo.withTenantTransaction(activeMergeCtx, async () => {
+        // Load all merge inputs inside the transaction so pre-tx stale reads cannot slip through (ADR 0033 §3)
+        const [store, people, organisations, links, notes, matters] = await Promise.all([
+          loadTenantCatalogueStoreView(activeMergeCtx, { includePmsLinks: true }),
+          partyRepo.listAllPeople<Person>(activeMergeCtx),
+          partyRepo.listAllOrganisations<Organisation>(activeMergeCtx),
+          partyRepo.listAllLinks<PersonOrganisationLink>(activeMergeCtx),
+          partyRepo.listAllNotes<Note>(activeMergeCtx),
+          matterRepo.listAllMattersUnfiltered<Matter>(activeMergeCtx),
+        ]);
+        const list: AnyRecord[] = recordType === 'person' ? people : organisations;
+        const survivor = list.find((r) => r.id === survivorId);
+        const merged = list.find((r) => r.id === mergedId);
+        if (!survivor || !merged) {
+          deniedResult = buildActionDenied(
+            'FORBIDDEN',
+            'Record not found for merge.',
+          ) as unknown as MergeHistory & Partial<ActionDenied>;
+          return;
+        }
+        if (isEmployeeOrLeaverRecord(survivor) || isEmployeeOrLeaverRecord(merged)) {
+          deniedResult = buildActionDenied(
+            'FORBIDDEN',
+            'Employee and leaver records cannot be merged.',
+          ) as unknown as MergeHistory & Partial<ActionDenied>;
+          return;
+        }
+        if (survivor.mergedIntoId || merged.mergedIntoId) {
+          deniedResult = buildActionDenied(
+            'FORBIDDEN',
+            'Cannot merge a record that has already been merged.',
+          ) as unknown as MergeHistory & Partial<ActionDenied>;
+          return;
+        }
+
+        const plan = planMerge(survivor, merged);
+        const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+        const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
+        const statusMerged = valueBySystemKey(
+          store.values,
+          recordType === 'person' ? 'person_record_status' : 'organisation_record_status',
+          'merged',
+        )!.id;
+
+        // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
+        let linksMoved = 0;
+        const linksToUpsert: PersonOrganisationLink[] = [];
+        const linkIdsToDelete: string[] = [];
+        for (const link of links) {
+          if (recordType === 'person' && link.personId === merged.id) {
+            const existingSurvivorLink =
+              linksToUpsert.find(
+                (l) =>
+                  l.personId === survivor.id &&
+                  l.organisationId === link.organisationId,
+              ) ??
+              links.find(
+                (l) =>
+                  l !== link &&
+                  l.personId === survivor.id &&
+                  l.organisationId === link.organisationId,
+              );
+            if (existingSurvivorLink) {
+              mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
+              if (!linksToUpsert.includes(existingSurvivorLink)) {
+                linksToUpsert.push(existingSurvivorLink);
+              }
+              linkIdsToDelete.push(link.id);
+              linksMoved++;
+            } else {
+              link.personId = survivor.id;
+              linksToUpsert.push(link);
+              linksMoved++;
+            }
+          } else if (
+            recordType === 'organisation' &&
+            link.organisationId === merged.id
+          ) {
+            const existingSurvivorLink =
+              linksToUpsert.find(
+                (l) =>
+                  l.organisationId === survivor.id &&
+                  l.personId === link.personId,
+              ) ??
+              links.find(
+                (l) =>
+                  l !== link &&
+                  l.organisationId === survivor.id &&
+                  l.personId === link.personId,
+              );
+            if (existingSurvivorLink) {
+              mergeCollidingLinkIntoSurvivor(existingSurvivorLink, link);
+              if (!linksToUpsert.includes(existingSurvivorLink)) {
+                linksToUpsert.push(existingSurvivorLink);
+              }
+              linkIdsToDelete.push(link.id);
+              linksMoved++;
+            } else {
+              link.organisationId = survivor.id;
+              linksToUpsert.push(link);
+              linksMoved++;
+            }
+          }
+        }
+        if (linksMoved > 0 && !plan.fieldsTaken.includes('Organisation links')) {
+          plan.fieldsTaken.push('Organisation links');
+        }
+
+        // 2. Repoint subsidiary parent links if merging an organisation (relationshipPartnerId is never changed)
+        // Skip both survivor (handled cleanly by planMerge) and merged tombstone to avoid self-parenting.
+        const repointedSubsidiaries: Organisation[] = [];
+        if (recordType === 'organisation') {
+          for (const org of organisations) {
+            if (org.id === survivor.id || org.id === merged.id) continue;
+            if (org.parentOrganisationId === merged.id) {
+              org.parentOrganisationId = survivor.id;
+              repointedSubsidiaries.push(org);
+            }
+          }
+        }
+
+        // 3. Repoint Matter references, same-matter party collisions (preserving distinct capacities), and conflict records
+        const repointedMatters: Matter[] = [];
+        const repointConflictRecordObject = (
+          cr:
+            | {
+                parties?: { id?: string; linkedRecordId: string | null; connectedToPartyId?: string | null }[];
+                matches?: { matchedRecordId: string }[];
+              }
+            | null
+            | undefined,
+        ): boolean => {
+          if (!cr || typeof cr !== 'object') return false;
+          let changed = false;
+          if (Array.isArray(cr.parties)) {
+            for (const cp of cr.parties) {
+              if (cp && cp.linkedRecordId === merged.id) {
+                cp.linkedRecordId = survivor.id;
+                changed = true;
+              }
+              if (cp && cp.connectedToPartyId === `client-${merged.id}`) {
+                cp.connectedToPartyId = `client-${survivor.id}`;
+                changed = true;
+              }
+            }
+          }
+          if (Array.isArray(cr.matches)) {
+            for (const match of cr.matches) {
+              if (match && match.matchedRecordId === merged.id) {
+                match.matchedRecordId = survivor.id;
+                changed = true;
+              }
+            }
+          }
+          return changed;
+        };
+
+        for (const matter of matters) {
+          let matterChanged = false;
+          if (matter.clientId === merged.id) {
+            matter.clientId = survivor.id;
+            matterChanged = true;
+          }
+          if (
+            Array.isArray(matter.additionalClientIds) &&
+            (matter.additionalClientIds.includes(merged.id) ||
+              (matter.clientId === survivor.id &&
+                matter.additionalClientIds.includes(survivor.id)))
+          ) {
+            const nextAdditional: string[] = [];
+            for (const id of matter.additionalClientIds) {
+              const mapped = id === merged.id ? survivor.id : id;
+              if (mapped === matter.clientId) continue;
+              if (!nextAdditional.includes(mapped)) {
+                nextAdditional.push(mapped);
+              }
+            }
+            matter.additionalClientIds = nextAdditional;
+            matterChanged = true;
+          }
+          if (matter.instructingContactId === merged.id) {
+            matter.instructingContactId = survivor.id;
+            matterChanged = true;
+          }
+          if (matter.billingContactId === merged.id) {
+            matter.billingContactId = survivor.id;
+            matterChanged = true;
+          }
+          if (matter.referrerContactId === merged.id) {
+            matter.referrerContactId = survivor.id;
+            matterChanged = true;
+          }
+          let partiesTouched = false;
+          const origParties = matter.parties ?? [];
+          for (const party of origParties) {
+            if (party.linkedRecordId === merged.id) {
+              party.linkedRecordId = survivor.id;
+              partiesTouched = true;
+              matterChanged = true;
+            }
+            if (party.connectedToPartyId === `client-${merged.id}`) {
+              party.connectedToPartyId = `client-${survivor.id}`;
+              partiesTouched = true;
+              matterChanged = true;
+            }
+          }
+          if (partiesTouched) {
+            const partySignature = (party: (typeof origParties)[number]): string | null => {
+              if (party.linkedRecordId !== survivor.id) return null;
+              const capsKey = [...(party.capacityCodes ?? [])].sort().join('|');
+              const relKey = party.relationshipCode ?? '';
+              const roleKey = !party.relationshipCode
+                ? (party.role ?? '').trim().toLowerCase()
+                : '';
+              return `${party.entityType ?? ''}:${party.linkedRecordId}:${relKey}:${capsKey}:${roleKey}`;
+            };
+            const keptBySig = new Map<string, string>();
+            const droppedPartyIds = new Map<string, string>();
+            const dedupedParties: typeof origParties = [];
+            for (const party of origParties) {
+              const sig = partySignature(party);
+              if (sig) {
+                const keptId = keptBySig.get(sig);
+                if (keptId) {
+                  if (party.id) droppedPartyIds.set(party.id, keptId);
+                  continue;
+                }
+                if (party.id) keptBySig.set(sig, party.id);
+              }
+              dedupedParties.push(party);
+            }
+            if (droppedPartyIds.size > 0) {
+              for (const party of dedupedParties) {
+                if (party.connectedToPartyId && droppedPartyIds.has(party.connectedToPartyId)) {
+                  party.connectedToPartyId = droppedPartyIds.get(party.connectedToPartyId)!;
+                }
+              }
+              matter.parties = dedupedParties;
+            }
+          }
+          if (repointConflictRecordObject(matter.conflictCheckRecord)) {
+            matterChanged = true;
+          }
+          if (matter.fieldValues && typeof matter.fieldValues === 'object') {
+            if (
+              repointConflictRecordObject(
+                matter.fieldValues['conflictCheckRecord'] as {
+                  parties?: { id?: string; linkedRecordId: string | null; connectedToPartyId?: string | null }[];
+                  matches?: { matchedRecordId: string }[];
+                },
+              )
+            ) {
+              matterChanged = true;
+            }
+            if (
+              repointConflictRecordObject(
+                matter.fieldValues['conflictCheck'] as {
+                  parties?: { id?: string; linkedRecordId: string | null; connectedToPartyId?: string | null }[];
+                  matches?: { matchedRecordId: string }[];
+                },
+              )
+            ) {
+              matterChanged = true;
+            }
+          }
+          if (matterChanged) {
+            repointedMatters.push(matter);
+          }
+        }
+
+        // 7. Repoint PMS links (repointed in SQL by partyRepo.executeMergeInTransaction; record conflicts in plan & audit)
+        const pmsLinkConflicts: NonNullable<MergeHistory['pmsLinkConflicts']> = [];
+        for (const pmsLink of store.pmsLinks) {
+          if (pmsLink.onesquaredId === merged.id) {
+            const existingSurvivorPmsLink = store.pmsLinks.find(
+              (other) =>
+                other !== pmsLink &&
+                other.entityType === pmsLink.entityType &&
+                other.onesquaredId === survivor.id,
+            );
+            if (existingSurvivorPmsLink) {
+              pmsLinkConflicts.push({
+                keptPmsCode: existingSurvivorPmsLink.pmsCode,
+                discardedPmsCode: pmsLink.pmsCode,
+              });
+              const conflictSummary = `PMS link conflict (kept ${existingSurvivorPmsLink.pmsCode}, discarded ${pmsLink.pmsCode})`;
+              if (!plan.fieldsTaken.includes(conflictSummary)) {
+                plan.fieldsTaken.push(conflictSummary);
+              }
+              writeAudit(store, {
+                recordType,
+                recordId: survivor.id,
+                action: 'merge',
+                field: 'PMS link conflict',
+                oldValue: pmsLink.pmsCode,
+                newValue: existingSurvivorPmsLink.pmsCode,
+                byId,
+                at: now,
+              });
+            } else if (!plan.fieldsTaken.includes('PMS link')) {
+              plan.fieldsTaken.push('PMS link');
+            }
+          }
+        }
+
+        // 9. Copy notes to survivor
+        const notesToRepoint: Note[] = [];
+        for (const note of notes) {
+          if (note.recordType === recordType && note.recordId === merged.id) {
+            note.recordId = survivor.id;
+            note.mergedFromId = merged.id;
+            notesToRepoint.push(note);
+          }
+        }
+        if (notesToRepoint.length > 0 && !plan.fieldsTaken.includes('Notes')) {
+          plan.fieldsTaken.push('Notes');
+        }
+
+        // 10. Other references: Person/Organisation.createdFromEnquiryId
+        if (merged.createdFromEnquiryId) {
+          if (!plan.survivor.createdFromEnquiryId) {
+            plan.survivor.createdFromEnquiryId = merged.createdFromEnquiryId;
+          }
+          merged.createdFromEnquiryId = null;
+        }
+
+        // Update survivor
+        plan.survivor.updatedAt = now;
+        plan.survivor.updatedById = byId;
+        plan.survivor.possibleMatchIds = plan.survivor.possibleMatchIds.filter(
+          (id) => id !== merged.id,
+        );
+        if (plan.survivor.possibleMatchIds.length === 0) {
+          plan.survivor.duplicateStatusId = dupNone;
+        }
+
+        // Mark merged record
+        merged.mergedIntoId = survivor.id;
+        merged.recordStatusId = statusMerged;
+        merged.duplicateStatusId = dupMerged;
+        merged.possibleMatchIds = [];
+        merged.updatedAt = now;
+        merged.updatedById = byId;
+
         // 8. Repoint generated documents and links in the same PostgreSQL transaction (R474)
         const repoDocsUpdated = await repointMergedEntityForTenant(
           activeMergeCtx,
@@ -7701,6 +8121,9 @@ export async function executeMerge(
       throw mergeErr;
     }
 
+    if (deniedResult) {
+      return deniedResult;
+    }
     return history;
   });
 }
@@ -10691,9 +11114,31 @@ export async function prepareEnquiryConversion(
   }
 
   return intakeRepo.withTenantTransaction(enqCtx, async () => {
+    const isBusinessConversion = Boolean(
+      opts.createForBusiness ||
+        enq.callingOnBehalfOf.trim() ||
+        opts.useOrganisationId ||
+        enq.linkedOrganisationId,
+    );
+    const targetPersonRoleId = resolveListValueId(
+      store.values,
+      'person_role',
+      isBusinessConversion ? 'client_contact' : 'private_client',
+      isBusinessConversion ? 'Client contact' : 'Private client',
+    );
     // Link or create Person
     let personId = opts.usePersonId || enq.linkedPersonId;
-    if (!personId) {
+    if (personId) {
+      await ensurePersonHasRoleInTx(
+        enqCtx,
+        store,
+        partyRepo,
+        personId,
+        targetPersonRoleId,
+        byId,
+        nowIso,
+      );
+    } else {
       const createdPerson = await savePersonRecord(
         {
           firstName: enq.firstName,
@@ -10721,9 +11166,7 @@ export async function prepareEnquiryConversion(
           preferredContactMethodId: enq.preferredContactMethodId,
           originId: enq.sourceId,
           relationshipStatusId: vid('relationship_status', 'Prospective'),
-          relationshipRoleIds: [
-            vid('person_role', enq.callingOnBehalfOf ? 'Client contact' : 'Private client'),
-          ],
+          relationshipRoleIds: [targetPersonRoleId],
           relationshipOwnerId: enq.assignedToId || byId,
           sourceId: vid('data_source', 'Manual entry'),
           createdFromEnquiryId: enq.id,
@@ -11920,7 +12363,12 @@ export async function createRecordFromPms(
     const res = await saveOrganisationRecord(
       {
         legalName: client.client_name,
-        organisationTypeId: vid('organisation_type', 'Private Limited Company (Ltd)'),
+        organisationTypeId: resolveListValueId(
+          store.values,
+          'organisation_type',
+          'company',
+          'Company',
+        ),
         relationshipStatusId: vid('relationship_status', 'Active'),
         companyNumber: client.company_number ?? '',
         generalEmail: client.email ?? '',
@@ -11966,7 +12414,9 @@ export async function createRecordFromPms(
         firstName,
         surname,
         isEmployee: false,
-        relationshipRoleIds: [vid('person_relationship_role', 'Client (individual)')],
+        relationshipRoleIds: [
+          resolveListValueId(store.values, 'person_role', 'private_client', 'Private client'),
+        ],
         emails: client.email
           ? [
               {
@@ -14865,6 +15315,7 @@ export async function prepareQuoteConversionRecord(
     submittedParties,
     clientId: orgId || personId || null,
     instructingContactId: orgId ? personId : null,
+    referrerContactId: linkedEnq?.referrerPersonId ?? null,
     people,
     organisations,
   });
@@ -15039,7 +15490,24 @@ export async function prepareQuoteConversionRecord(
   };
 
   return intakeRepo.withTenantTransaction(ctx, async () => {
-    if (!personId && hasPersonName) {
+    const isBusinessQuote = Boolean(orgId || hasOrgName);
+    const targetPersonRoleId = resolveListValueId(
+      store.values,
+      'person_role',
+      isBusinessQuote ? 'client_contact' : 'private_client',
+      isBusinessQuote ? 'Client contact' : 'Private client',
+    );
+    if (personId) {
+      await ensurePersonHasRoleInTx(
+        ctx,
+        store,
+        partyRepo,
+        personId,
+        targetPersonRoleId,
+        byId,
+        nowIso,
+      );
+    } else if (hasPersonName) {
       const parts = quote.prospectName.trim().split(/\s+/);
       const firstName = parts[0] || 'Client';
       const surname = parts.slice(1).join(' ') || 'Contact';
@@ -15068,9 +15536,7 @@ export async function prepareQuoteConversionRecord(
               ]
             : [],
           relationshipStatusId: vid('relationship_status', 'Prospective'),
-          relationshipRoleIds: [
-            vid('person_role', hasOrgName ? 'Client contact' : 'Private client'),
-          ],
+          relationshipRoleIds: [targetPersonRoleId],
           relationshipOwnerId: quote.feeEarnerId || byId,
           sourceId: vid('data_source', 'Manual entry'),
         },

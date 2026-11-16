@@ -670,6 +670,8 @@ export interface Organisation extends RecordBase {
   engagementTermsRef: string;
   reviewDate: string | null;
   reviewerId: string | null;
+  /** If created while converting an enquiry, holds ENQ-xxxxxx */
+  createdFromEnquiryId?: string | null;
 }
 
 export type AnyRecord = Person | Organisation;

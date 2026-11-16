@@ -1000,6 +1000,21 @@ export async function flushStagedAuditEntries(
   return appendTenantAuditEntries(ctx, entries);
 }
 
+/** Returns the current staged audit watermark before opening a PostgreSQL transaction. */
+export function getStagedAuditWatermark(): number {
+  return getAuditStagingStorage()?.current()?.stagedEntries.length ?? 0;
+}
+
+/** Discards audit entries staged inside a PostgreSQL transaction that rolled back. */
+export function discardStagedAuditEntriesSince(watermark: number): void {
+  const activeScope = getAuditStagingStorage()?.current();
+  if (!activeScope) return;
+  const safeWatermark = Math.max(0, Math.floor(watermark));
+  if (activeScope.stagedEntries.length > safeWatermark) {
+    activeScope.stagedEntries.length = safeWatermark;
+  }
+}
+
 export function createVerifiedTenantContext(
   claims: {
     sub: string;

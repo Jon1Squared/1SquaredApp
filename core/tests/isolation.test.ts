@@ -1387,20 +1387,33 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const activeHost = getPlatformExtensionHost();
       let hookMode: 'veto_after_50ms' | 'allow_after_50ms' = 'veto_after_50ms';
       let onHookEntered: (() => void) | null = null;
+      let releaseHookFn: (() => void) | null = null;
+      const releaseCurrentHook = () => {
+        const fn = releaseHookFn;
+        releaseHookFn = null;
+        fn?.();
+      };
       activeHost.registerExtension({
         manifest: {
           id: 'nalf-slow-concurrency-ext',
           name: 'Slow Concurrency Extension',
           version: '1.0.0',
-          description: 'Waits 50ms during beforeMatterOpen',
+          description: 'Waits for concurrent test latch during beforeMatterOpen',
           supportedCoreApiRange: '^1.0.0',
           permissions: ['matter:open:gate'],
           hooks: ['beforeMatterOpen'],
         },
         hooks: {
           beforeMatterOpen: async () => {
+            const releasePromise = new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, 2000);
+              releaseHookFn = () => {
+                clearTimeout(timer);
+                resolve();
+              };
+            });
             onHookEntered?.();
-            await new Promise((r) => setTimeout(r, 50));
+            await releasePromise;
             return {
               allowProceed: hookMode === 'allow_after_50ms',
               requiresPartnerSignOff: hookMode === 'veto_after_50ms',
@@ -1413,7 +1426,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
       });
 
-      // Start slow vetoed save that allocates an inline party ID before awaiting the hook
+      // Start slow vetoed save and wait until it is inside beforeMatterOpen
+      const vetoHookEntered = new Promise<void>((resolve) => {
+        onHookEntered = resolve;
+      });
       const slowVetoPromise = runWithActiveActorSession(actorSession, async () =>
         saveMatterRecord(
           {
@@ -1433,8 +1449,9 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         ),
       );
 
-      // While slowVetoPromise is awaiting the 50ms hook, create a new matter (with an inline party) and update targetMatter's conflict record
-      await new Promise((r) => setTimeout(r, 15));
+      // While slowVetoPromise is awaiting the hook, create a new matter (with an inline party) and update targetMatter's conflict record
+      await vetoHookEntered;
+      onHookEntered = null;
       const { id: _omittedTargetId, ...newMatterTemplate } = targetMatter;
       void _omittedTargetId;
       const concurrentNewMatterRes = await runWithActiveActorSession(
@@ -1493,6 +1510,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(concurrentConflictUpdate.matter).not.toBeNull();
 
+      releaseCurrentHook();
       const slowVetoRes = await slowVetoPromise;
       expect(slowVetoRes.matter).toBeNull();
 
@@ -1573,6 +1591,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(queuedUpdateRes.errors).toBeUndefined();
       expect(queuedUpdateRes.matter).not.toBeNull();
+      releaseCurrentHook();
       const staleSaveRes = await staleSavePromise;
       expect(staleSaveRes.matter).toBeNull();
       expect(staleSaveRes.errors?.conflict).toMatch(
@@ -2042,20 +2061,33 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const hireHookEntered = new Promise<void>((resolve) => {
         hireHookEnteredResolve = resolve;
       });
+      let releaseHireHookFn: (() => void) | null = null;
+      const releaseHireHook = () => {
+        const fn = releaseHireHookFn;
+        releaseHireHookFn = null;
+        fn?.();
+      };
       getPlatformExtensionHost().registerExtension({
         manifest: {
           id: 'nalf-slow-hire-race-ext',
           name: 'Slow Hire Race Extension',
           version: '1.0.0',
-          description: 'Waits 50ms during beforeMatterOpen for client hire race',
+          description: 'Waits for concurrent hire latch during beforeMatterOpen for client hire race',
           supportedCoreApiRange: '^1.0.0',
           permissions: ['matter:open:gate'],
           hooks: ['beforeMatterOpen'],
         },
         hooks: {
           beforeMatterOpen: async () => {
+            const releasePromise = new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, 2000);
+              releaseHireHookFn = () => {
+                clearTimeout(timer);
+                resolve();
+              };
+            });
             hireHookEnteredResolve?.();
-            await new Promise((r) => setTimeout(r, 50));
+            await releasePromise;
             return {
               allowProceed: true,
               requiresPartnerSignOff: false,
@@ -2105,6 +2137,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
       expect(hireRes.errors).toBeUndefined();
       expect(hireRes.person?.isEmployee).toBe(true);
+      releaseHireHook();
       // Hiring the client updates the matter's staff-matter restriction metadata in PostgreSQL
       // (incrementing row_version), so the in-flight saveMatterRecord fails optimistic concurrency
       // control with MATTER_CONCURRENCY_CONFLICT and isStaffMatter remains true.

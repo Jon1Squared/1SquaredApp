@@ -6,7 +6,7 @@ export const duplicateChecks: DocArticle = {
   section: 'people-organisations',
   summary:
     'How the People and Organisation forms warn you about records that may already exist, and how merging duplicate records repoints every reference.',
-  updated: '2026-11-11',
+  updated: '2026-11-15',
   body: `
 When you add or edit a person or organisation, 1Squared checks for existing records in the per-tenant PostgreSQL directory (\`TenantPartyRepository\`: \`public.people\`, \`public.person_emails\`, \`public.organisations\`, \`public.person_organisation_links\`, \`public.notes\`, and \`public.merge_history\`, \`S0-16\`) that might be the same. Matches appear in a warning above the form, so you can open the existing record instead of creating a duplicate.
 
@@ -51,18 +51,19 @@ Firm employees, staff who work at the firm, and leavers (anyone with employment 
 
 In a single operation, the merge copies missing profile fields, emails, phone numbers, addresses, alternative names, tags, and custom fields to the survivor, and repoints every reference across the application:
 
-- **Matters:** \`clientId\`, \`additionalClientIds\` (de-duplicated), \`instructingContactId\`, \`billingContactId\`, \`referrerContactId\`, \`parties[].linkedRecordId\`, and the built-in conflict check record's \`parties[].linkedRecordId\` and \`matches[].matchedRecordId\`.
-- **Enquiries:** \`linkedOrganisationId\`, \`referrerPersonId\`, \`linkedPersonId\`, \`referredToOrganisationId\`, and the stored conflict snapshot hits (\`recordId\`, \`knownPeople\`, and \`knownOrganisations\`).
-- **Quotes:** \`linkedOrganisationId\` and \`linkedPersonId\`.
-- **Tasks:** \`linkedRecords[]\` (de-duplicated if the survivor is already linked to the same task).
+- **Matters:** \`clientId\`, \`additionalClientIds\` (de-duplicated and excluding \`clientId\`), \`instructingContactId\`, \`billingContactId\`, \`referrerContactId\`, \`parties[]\` (preserving distinct \`(matterId, relationshipCode, capacityCodes)\` roles on the same matter whilst removing exact duplicate collisions and remapping \`connectedToPartyId\`), and the built-in conflict check record's \`parties[].linkedRecordId\` and \`matches[].matchedRecordId\`.
+- **Enquiries:** \`linkedOrganisationId\`, \`referrerPersonId\`, \`linkedPersonId\`, \`referredToOrganisationId\`, and the stored conflict snapshot JSONB hits (\`recordId\`, \`knownPeople\`, and \`knownOrganisations\`).
+- **Quotes:** \`linkedOrganisationId\`, \`linkedPersonId\`, \`profile_json\`, and \`conflict_decision_json\`.
+- **Tasks:** \`linkedRecords[]\` across both \`task_linked_records\` and JSONB \`linked_records_json\` / \`profile_json\` (de-duplicated if the survivor is already linked to the same task).
 - **PMS links:** \`onesquaredId\`. If the surviving record already has a PMS link, the survivor's PMS link is kept, no duplicate is created, and the collision is recorded in the merge history and audit trail.
 - **Person–organisation links:** moved to the survivor and de-duplicated—when the survivor is already linked to the same counterpart, the duplicate link on the merged record is deleted rather than left pointing at the merged record.
-- **Organisations:** subsidiary \`parentOrganisationId\` links.
-- **Generated documents:** \`primaryClientId\`, \`recipientPartyId\`, and document links in both the store and the tenant document repository.
-- **Notes and activity:** notes (recording \`mergedFromId\`), \`createdFromEnquiryId\`, recently viewed lists, and notification \`recordId\` / links.
+- **Person emails:** \`person_emails\` rows moved to the survivor and de-duplicated by normalised email address.
+- **Organisations:** subsidiary \`parentOrganisationId\` links (guarding against self-parenting or tombstone cycles on the surviving organisation).
+- **Generated documents:** \`primaryClientId\`, \`recipientPartyId\`, and \`document_links\` (preserving distinct \`link_role\` links whilst deduplicating exact same-role collisions).
+- **Notes and activity:** notes (recording \`mergedFromId\`), \`createdFromEnquiryId\` (inherited by both \`Person\` and \`Organisation\` survivors when blank), recently viewed lists, and notification \`recordId\` / metadata / boundary-safe \`href\` links (so merging \`P-1\` never corrupts \`/people/P-10\`).
 
 ### Tombstone redirect and audit trail
 
-The merged record is not deleted: it is marked as **Merged** with \`mergedIntoId\` pointing to the surviving record, and all PostgreSQL directory (\`people\`, \`organisations\`, \`person_organisation_links\`, \`notes\`, \`merge_history\`), matter (incrementing \`row_version\`), key-date, document-link, intake (\`enquiries\`, \`quotes\`), workflow (\`tasks\`, \`task_linked_records\`, \`notifications\`, \`recently_viewed\`), and \`audit_entries\` writes commit atomically in a single tenant transaction via \`TenantPartyRepository.executeMergeInTransaction\` alongside per-record delta compensation for unmoved JSON collections (\`S0-16\`, \`S0-17a\`, \`R405\`, \`R406\`, \`R409\`). Opening the old record's profile or edit URL automatically redirects to the surviving record, and existing audit entries keep their original \`recordId\` so the historical audit trail remains intact.
+The merged record is not deleted: it is marked as **Merged** with \`mergedIntoId\` pointing to the surviving record, and all PostgreSQL directory (\`people\`, \`person_emails\`, \`organisations\`, \`person_organisation_links\`, \`notes\`, \`merge_history\`), matter (incrementing \`row_version\`), key-date, document, document-link, intake (\`enquiries\`, \`quotes\`), workflow (\`tasks\`, \`task_linked_records\`, \`notifications\`, \`recently_viewed\`), and \`audit_entries\` writes commit atomically inside a single tenant database transaction via \`TenantPartyRepository.executeMergeInTransaction\` (\`S0-16\`, \`S0-17a\`, \`S0-21\`). Opening the old record's profile or edit URL automatically redirects to the surviving record, and existing audit entries keep their original \`recordId\` so the historical audit trail remains intact.
 `,
 };

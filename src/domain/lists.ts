@@ -1,5 +1,5 @@
 /** Choice list resolution. Records store value ids; labels are resolved at render time. */
-import type { ChoiceList, ChoiceValue, ListCatalogue } from './types';
+import { vid, type ChoiceList, type ChoiceValue, type ListCatalogue } from './types';
 
 export interface ResolvedValue {
   id: string;
@@ -60,6 +60,53 @@ export function valueBySystemKey(
 
 export function systemKeyOf(values: ChoiceValue[], id: string | null | undefined): string | undefined {
   return valueById(values, id)?.systemKey;
+}
+
+/**
+ * Resolve a choice value ID by stable `systemKey` first, falling back to
+ * case-insensitive label matching and finally `vid(listKey, fallbackLabel)`.
+ */
+export function resolveListValueId(
+  values: ChoiceValue[],
+  listKey: string,
+  systemKey: string,
+  fallbackLabel: string,
+): string {
+  return (
+    valueBySystemKey(values, listKey, systemKey)?.id ??
+    values.find(
+      (v) =>
+        v.listKey === listKey &&
+        v.label.toLowerCase() === fallbackLabel.toLowerCase(),
+    )?.id ??
+    vid(listKey, fallbackLabel)
+  );
+}
+
+/**
+ * Match multi-select choice IDs by stable `systemKey` first, with safe
+ * fallback to canonical IDs and legacy display labels.
+ */
+export function hasChoiceValueKeyOrLabel(
+  values: ChoiceValue[],
+  ids: readonly string[] | null | undefined,
+  options: {
+    systemKeys: readonly string[];
+    fallbackIds?: readonly string[];
+    fallbackLabels?: readonly string[];
+  },
+): boolean {
+  if (!ids || ids.length === 0) return false;
+  const keySet = new Set(options.systemKeys);
+  const idSet = new Set(options.fallbackIds ?? []);
+  const labelSet = new Set((options.fallbackLabels ?? []).map((l) => l.toLowerCase()));
+  return ids.some((id) => {
+    const sk = systemKeyOf(values, id);
+    if (sk) return keySet.has(sk);
+    if (idSet.has(id)) return true;
+    const label = resolveLabel(values, id).toLowerCase();
+    return Boolean(label && labelSet.has(label));
+  });
 }
 
 export interface TreeNode {

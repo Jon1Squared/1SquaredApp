@@ -2,12 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Slice | `S0-28` (proposed optional split: `S0-28a` `M` negotiated overrides + `0016`; `S0-28b` `M` CFA/DBA & statutory caps) |
+| Slice | `S0-28a` (`M`: negotiated overrides + `0016`) + `S0-28b` (`M`: CFA/DBA & statutory caps) — split from `S0-28` per owner approval 15 Nov 2026 |
 | Stage / Work package | Stage 0C — Make it shared (`WP5b`) |
 | Status | Planned (awaiting build after `WP5a`) |
-| Branch | `s0-28-negotiated-rates-and-cfa-dba` (or stacked `s0-28a-*` + `s0-28b-*`, target `develop`) |
-| Depends on | `S0-23` |
-| Size | `L` (proposed split in stage plan callout: `S0-28a` `M` + `S0-28b` `M`) |
+| Branch | Stacked `s0-28a-negotiated-rates` -> `s0-28b-cfa-dba-and-caps` (target `develop`) |
+| Depends on | `S0-23` (then `S0-28b` depends on `S0-28a`) |
+| Size | `S0-28a`: `M`; `S0-28b`: `M` (split from `L` per owner approval 15 Nov 2026) |
 | Backlog IDs | `30` (`Partly built` -> `Completed`; advances `3`, `F1`; cross-cutting `P8`, `P10`, `P11`) |
 | Decision record(s) | `D10` — [ADR 0034](../decisions/0034-fee-arrangements-and-caps.md) (`Accepted`); [WP5 Owner Decisions](../../../../PlanReviews/WP5-owner-decisions.md) (12 & 15 Nov 2026) |
 | Spec / standards references | Architecture Standard sections 4, 5, 6, 7, 8.7, 10, 12; [RBAC Reference](../rbac-reference.md) |
