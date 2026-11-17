@@ -69,6 +69,16 @@ export const ACTION_PERMISSIONS = {
     reason:
       'Every authenticated user can run global server-side search; TenantSearchRepository enforces per-entity RBAC permissions and record-level visibility inside SQL WHERE clauses before ranking or counting.',
   },
+  getMyNotificationPreferencesAction: {
+    kind: 'permission',
+    key: 'notification:view_own',
+    enforcedBy: 'action',
+  },
+  updateMyNotificationPreferencesAction: {
+    kind: 'permission',
+    key: 'notification:manage_own_preferences',
+    enforcedBy: 'action',
+  },
 
   // ---------------------------------------------------------------------------
   // Enforced at action wrapper level — S0-02 pilot (1)
@@ -902,7 +912,16 @@ export const JOB_PERMISSIONS = {
     jobOnly: true,
     timeoutMs: 120_000,
     description:
-      'Drain due tenant email outbox messages with retry/backoff and scrub expired content past outboxContentRetentionDays (ADR 0027 / ADR 0030 variant).',
+      'Drain due tenant email and Teams activity outbox messages with retry/backoff and scrub expired content past outboxContentRetentionDays (ADR 0027 / ADR 0035 / ADR 0030 variant).',
+  },
+  'notification-digests': {
+    kind: 'job',
+    permission: 'notification:send_digests',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 8,
+    description:
+      'Compile and queue daily and weekly email notification digests per tenant user once per working weekday in tenant timezone (ADR 0035 / ADR 0030).',
   },
 } as const satisfies Record<string, JobPolicy>;
 

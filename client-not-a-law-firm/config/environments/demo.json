@@ -25,6 +25,21 @@
         "certificateVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate",
         "certificateThumbprint": "C5428D7F519AE513A5B8CE027D291876CEDA40D3"
       }
+    },
+    "teams": {
+      "provider": "disabled",
+      "teamsAppId": "76474047-ac1f-49ee-83f3-5a2a58c2b3f8",
+      "recipientAllowList": [
+        "@1squared.co.uk",
+        "@notalawfirm.example"
+      ],
+      "recipientAllowListVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist",
+      "graph": {
+        "tenantId": "f8218d9a-e055-463f-add2-f03679aad7f2",
+        "clientId": "76474047-ac1f-49ee-83f3-5a2a58c2b3f8",
+        "certificateVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/graph-teams-client-cert",
+        "certificateThumbprint": "6A23E571EA3F43D1DB39C187A201B40454159D3B"
+      }
     }
   },
   "documentStores": [

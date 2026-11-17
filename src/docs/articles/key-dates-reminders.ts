@@ -44,5 +44,10 @@ If a stage requires acknowledgement and remains unacknowledged after \`escalatio
 - **Superseding**: When a confirmed key date is superseded by a new date, the superseding date **takes over the same task** rather than creating a new one.
 - **Resolving**: When a key date is resolved as \`met\`, \`missed\`, or \`waived\`, the linked task is automatically closed.
 - **Past due, unresolved**: If a confirmed key date passes its \`dueDate\` without being resolved, it moves to **"Past due, unresolved"**, remains at the top urgency stage, and surfaces in the [Compliance exceptions report](/docs/key-dates-exceptions) until a user resolves it as \`met\` or \`missed\`.
+
+## Delivery cadence (In-app, digests & Microsoft Teams)
+
+- **Daily & weekly digests (\`S4\` defaults)**: Key date reminders created as \`key_date_approaching\` follow each user’s \`key_date_approaching\` channel preference (defaulting to a daily morning email digest at \`08:00\` tenant local time, Monday to Friday, via \`notification-digests\`), whilst urgent assigned reminder tasks follow \`task_assigned\` (immediate email when outbound email is enabled) and respect matter-restriction / ethical-wall re-checks before any digest email is queued.
+- **Microsoft Teams activity alerts**: When a user opts in to Teams notifications and \`integrations.teams.provider\` is enabled, Teams delivers only generic redacted category notices and relative deep links—never confidential matter titles, client names, or limitation notes.
 `,
 };

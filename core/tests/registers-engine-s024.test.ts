@@ -120,7 +120,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
   });
 
   it('1. Migration 0017 version, SignOffKind narrowing, SO-000003 removal & seeded registerRecords contract', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0019');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0020');
     expect(Object.keys(CORE_REGISTER_TYPES)).toEqual([
       'sign_off',
       'undertaking',
@@ -147,10 +147,10 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     );
   });
 
-  it('2. RBAC registry (66 user + 8 job-only = 74), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
-    expect(ALL_PERMISSION_KEYS).toHaveLength(74);
-    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(66);
-    expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(8);
+  it('2. RBAC registry (68 user + 9 job-only = 77), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
+    expect(ALL_PERMISSION_KEYS).toHaveLength(77);
+    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(68);
+    expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(9);
     expect(PERMISSION_REGISTRY['register:configure'].requiresMfa).toBe(true);
     expect(PERMISSION_REGISTRY['register:run_reminders'].jobOnly).toBe(true);
     expect(JOB_PERMISSIONS['register-reminders'].permission).toBe('register:run_reminders');

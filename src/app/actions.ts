@@ -7,7 +7,10 @@ import {
   type ClientRateOverrideClientType,
   type GlobalSearchEntityType,
   type GlobalSearchResponse,
+  type NotificationChannelFrequency,
+  type NotificationKind,
   type RegistersConfiguration,
+  type UserNotificationPreference,
   type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
@@ -62,6 +65,7 @@ import {
   executeMerge,
   flagMatterWriteOff,
   getEmployeeDetailsForUser,
+  getMyNotificationPreferences,
   isDataResetAllowedEnvironment,
   liftMatterRestriction,
   linkPmsRecord,
@@ -150,6 +154,8 @@ import {
   saveMatterRateOverrideRecord,
   deleteMatterRateOverrideRecord,
   resolveApplicableRatesRecord,
+  updateMyNotificationPreferences,
+  type NotificationPreferenceUpdateEntry,
 } from '@/server/services';
 import type {
   KeyDateCalculation,
@@ -1877,6 +1883,89 @@ export async function searchGlobalRecordsAction(input: {
     searchGlobalRecords(input, actor.personId, {
       tenantCtx: actor.tenantContext,
     }),
+  );
+}
+
+export async function getMyNotificationPreferencesAction(
+  targetPersonId?: string,
+): Promise<{
+  readonly preferences: readonly UserNotificationPreference[];
+  readonly error?: string;
+}> {
+  return guardedAction(
+    'getMyNotificationPreferencesAction',
+    async (actor) => {
+      if (targetPersonId && targetPersonId.trim() !== actor.personId) {
+        return {
+          ...buildActionDenied(
+            'FORBIDDEN',
+            'You can only view your own notification preferences.',
+          ),
+          preferences: [],
+          error: 'You can only view your own notification preferences.',
+        };
+      }
+      const preferences = await getMyNotificationPreferences(actor.personId, {
+        actorPersonId: actor.personId,
+        tenantCtx: actor.tenantContext,
+      });
+      return { preferences };
+    },
+  );
+}
+
+export async function updateMyNotificationPreferencesAction(input: {
+  personId?: string;
+  updates: readonly NotificationPreferenceUpdateEntry[];
+  digestDayOfWeek?: number;
+}): Promise<{
+  readonly preferences: readonly UserNotificationPreference[];
+  readonly saved?: boolean;
+  readonly error?: string;
+}> {
+  return guardedAction(
+    'updateMyNotificationPreferencesAction',
+    async (actor) => {
+      const requestedId = input.personId?.trim() || actor.personId;
+      if (requestedId !== actor.personId) {
+        return {
+          ...buildActionDenied(
+            'FORBIDDEN',
+            'You can only modify your own notification preferences.',
+          ),
+          preferences: [],
+          error: 'You can only modify your own notification preferences.',
+        };
+      }
+      try {
+        const preferences = await updateMyNotificationPreferences(
+          {
+            personId: actor.personId,
+            updates: input.updates as Array<{
+              readonly notificationKind: NotificationKind;
+              readonly inAppEnabled?: boolean;
+              readonly emailFrequency?: NotificationChannelFrequency;
+              readonly teamsEnabled?: boolean;
+            }>,
+            digestDayOfWeek: input.digestDayOfWeek,
+          },
+          {
+            actorPersonId: actor.personId,
+            tenantCtx: actor.tenantContext,
+          },
+        );
+        revalidateAll();
+        return { preferences, saved: true };
+      } catch (err) {
+        return {
+          preferences: [],
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Unable to update notification preferences.',
+        };
+      }
+    },
   );
 }
 

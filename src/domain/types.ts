@@ -310,7 +310,8 @@ export type JobOnlyPermissionKey =
   | 'document_generation:purge_usage'
   | 'enquiry:run_retention_anonymise'
   | 'register:run_reminders'
-  | 'notification:drain_outbox';
+  | 'notification:drain_outbox'
+  | 'notification:send_digests';
 
 export type PermissionKey =
   | EmployeePermission
@@ -348,7 +349,9 @@ export type PermissionKey =
   | 'admin:access'
   | 'admin:data_reset'
   | 'rbac:manage_config'
-  | 'rbac:manage_user_overrides';
+  | 'rbac:manage_user_overrides'
+  | 'notification:view_own'
+  | 'notification:manage_own_preferences';
 
 export interface PersonPermissionOverrides {
   grant: PermissionKey[];
@@ -1428,6 +1431,8 @@ export interface NotificationItem {
   detail: string;
   href: string;
   recordId: string;
+  matterId?: string | null;
+  digestSentAt?: string | null;
   createdAt: string;
   read: boolean;
   byId: string;

@@ -430,6 +430,80 @@
             }
           }
         },
+        "teams": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tenant Microsoft Teams Activity Feed delivery configuration (ADR 0035, S0-29)",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": ["disabled", "dev_catcher", "graph"],
+              "default": "disabled",
+              "description": "Teams Activity delivery provider: 'disabled' (default safe no-op), 'dev_catcher' (local HTTP catcher in non-live), or 'graph' (Microsoft Graph TeamsActivity.Send)"
+            },
+            "teamsAppId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Entra / Teams manifest application ID used for deep-link generation"
+            },
+            "recipientAllowList": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "default": [],
+              "description": "Non-live recipient domain suffixes (e.g. '@notalawfirm.example') and permitted person IDs (e.g. 'P-000001'); empty allow-list fails closed in non-live environments"
+            },
+            "recipientAllowListVaultRef": {
+              "type": "string",
+              "pattern": "^kv://[a-zA-Z0-9-]+/[a-zA-Z0-9-]+$",
+              "description": "Optional Key Vault secret reference containing a JSON/CSV allow-list merged with recipientAllowList in non-live environments"
+            },
+            "devCatcher": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["endpointUrl"],
+              "description": "Local Teams Activity HTTP catcher configuration for dev and test environments",
+              "properties": {
+                "endpointUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "HTTP endpoint URL for the local Teams Activity dev catcher"
+                }
+              }
+            },
+            "graph": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tenantId",
+                "clientId",
+                "certificateVaultRef"
+              ],
+              "description": "Microsoft Graph application-only certificate settings for TeamsActivity.Send",
+              "properties": {
+                "tenantId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Microsoft Entra directory (tenant) ID for Graph client-credentials token acquisition"
+                },
+                "clientId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Microsoft Entra application (client) ID holding TeamsActivity.Send"
+                },
+                "certificateVaultRef": {
+                  "type": "string",
+                  "pattern": "^kv://[a-zA-Z0-9-]+/[a-zA-Z0-9-]+$",
+                  "description": "Tenant Key Vault secret reference holding the PFX/PEM client certificate and private key"
+                },
+                "certificateThumbprint": {
+                  "type": "string",
+                  "pattern": "^[A-Fa-f0-9]{40}$",
+                  "description": "40-character hexadecimal SHA-1 thumbprint of the Teams client certificate"
+                }
+              }
+            }
+          }
+        },
         "pmsSync": {
           "type": "object",
           "additionalProperties": false,
@@ -1737,6 +1811,20 @@
               }
             }
           }
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tenant notification digest schedule and delivery settings (ADR 0035, S0-29)",
+      "properties": {
+        "digestHourLocal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "default": 8,
+          "description": "Tenant-local hour (0..23) at or after which daily and weekly notification digests are dispatched on working days (default 8)"
         }
       }
     }

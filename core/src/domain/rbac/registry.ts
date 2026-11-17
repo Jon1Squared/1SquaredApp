@@ -756,6 +756,37 @@ export const PERMISSION_REGISTRY: Readonly<
     jobOnly: true,
     sinceVersion: '1.1.0',
   },
+  'notification:view_own': {
+    key: 'notification:view_own',
+    domain: 'notification',
+    module: 'notifications',
+    description:
+      'View own in-app notifications and own notification delivery preferences (ADR 0035, S0-29).',
+    sensitivity: 'standard',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'notification:manage_own_preferences': {
+    key: 'notification:manage_own_preferences',
+    domain: 'notification',
+    module: 'notifications',
+    description:
+      'Update own in-app, email digest, and Teams activity notification preferences (ADR 0035, S0-29).',
+    sensitivity: 'standard',
+    requiresMfa: false,
+    sinceVersion: '1.1.0',
+  },
+  'notification:send_digests': {
+    key: 'notification:send_digests',
+    domain: 'notification',
+    module: 'notifications',
+    description:
+      'Execute the scheduled daily and weekly notification-digests job across provisioned tenants (ADR 0035; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(
@@ -887,6 +918,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:approve',
       'register:configure',
       'undertaking:manage',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   partner: {
@@ -942,6 +975,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:edit',
       'register:approve',
       'undertaking:manage',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   risk_compliance: {
@@ -989,6 +1024,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:edit',
       'register:approve',
       'register:configure',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   finance: {
@@ -1014,6 +1051,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:view',
       'register:create',
       'register:edit',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   fee_earner: {
@@ -1052,6 +1091,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:create',
       'register:edit',
       'undertaking:manage',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   supervisor: {
@@ -1099,6 +1140,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:edit',
       'register:approve',
       'undertaking:manage',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   legal_secretary: {
@@ -1135,6 +1178,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:view',
       'register:create',
       'register:edit',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   enquiries_coordinator: {
@@ -1163,6 +1208,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'quote:edit',
       'contact:create',
       'contact:edit',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
   intake: {
@@ -1190,6 +1237,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'quote:edit',
       'contact:create',
       'contact:edit',
+      'notification:view_own',
+      'notification:manage_own_preferences',
     ],
   },
 };

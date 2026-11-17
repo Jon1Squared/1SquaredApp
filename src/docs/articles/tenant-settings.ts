@@ -71,6 +71,13 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`integrations.email.graph.*\` | Optional | Active | Microsoft Graph certificate settings (\`tenantId\`, \`clientId\`, \`certificateVaultRef\`, 40-hex SHA-1 \`certificateThumbprint\`) |
 | \`integrations.email.acs.connectionVaultRef\` | Optional | Active | Tenant Key Vault secret ref reserved for the Stage 1 Azure Communication Services adapter |
 | \`integrations.email.devCatcher.*\` | Optional | Active | Local SMTP catcher settings (\`host\`, \`port\`, \`secure\`) for \`dev\` and \`test\` environments (forbidden in \`live\`) |
+| \`integrations.teams.provider\` | \`"disabled"\` | Active | Microsoft Teams Activity Feed delivery provider: \`"disabled"\` (default safe no-op), \`"dev_catcher"\` (non-live HTTP catcher, forbidden in \`live\`), or \`"graph"\` (Microsoft Graph app-only \`TeamsActivity.Send\`) |
+| \`integrations.teams.teamsAppId\` | Optional | Active | Entra / Teams manifest application ID used for Teams entity deep-link \`webUrl\` generation |
+| \`integrations.teams.recipientAllowList\` | \`[]\` | Active | Non-live recipient domain suffixes (e.g. \`@notalawfirm.example\`) and permitted person IDs (\`P-xxxxxx\`); empty allow-list fails closed outside \`live\` |
+| \`integrations.teams.recipientAllowListVaultRef\` | Optional | Active | Tenant Key Vault secret ref (\`kv://...\`) storing non-live permitted Teams recipients without committing PII to git |
+| \`integrations.teams.devCatcher.endpointUrl\` | Optional | Active | HTTP endpoint URL for local Teams Activity catcher testing in \`dev\` and \`test\` (forbidden in \`live\`) |
+| \`integrations.teams.graph.*\` | Optional | Active | Microsoft Graph application-only certificate settings (\`tenantId\`, \`clientId\`, \`certificateVaultRef\`, optional 40-hex \`certificateThumbprint\` required when \`provider === "graph"\`) |
+| \`notifications.digestHourLocal\` | \`8\` | Active | Tenant-local hour (\`0\`–\`23\`, default \`8\`) at or after which the Monday–Friday \`notification-digests\` scheduler job queues daily and weekly email digests across GMT/BST transitions |
 | \`integrations.pmsConnectionSecretVaultRef\` | Required | Reserved (backlog) | Key Vault reference reserved for post-Stage-0 live tenant-scoped PMS database connection secret resolution |
 | \`integrations.companiesHouseApiKeyVaultRef\` | Required | Reserved (backlog, F17) | Key Vault reference reserved for post-Stage-0 live Companies House API integration (\`F17\`) |
 | \`integrations.pmsSync.enabled\` | \`true\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS synchronisation |

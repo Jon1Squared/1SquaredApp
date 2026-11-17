@@ -1,0 +1,99 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "76474047-ac1f-49ee-83f3-5a2a58c2b3f8",
+  "packageName": "uk.co.onesquared.platform",
+  "developer": {
+    "name": "1Squared",
+    "websiteUrl": "https://1squared.co.uk",
+    "privacyUrl": "https://1squared.co.uk/privacy",
+    "termsOfUseUrl": "https://1squared.co.uk/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "1Squared",
+    "full": "1Squared Practice Platform"
+  },
+  "description": {
+    "short": "Redacted practice and compliance activity alerts from 1Squared.",
+    "full": "Delivers redacted task, approval, key date, enquiry, credit control, and compliance register activity notifications from the 1Squared platform into the Microsoft Teams Activity Feed without exposing confidential client or matter content."
+  },
+  "accentColor": "#1E3A5F",
+  "webApplicationInfo": {
+    "id": "76474047-ac1f-49ee-83f3-5a2a58c2b3f8",
+    "resource": "api://76474047-ac1f-49ee-83f3-5a2a58c2b3f8"
+  },
+  "activities": {
+    "activityTypes": [
+      {
+        "type": "taskAssigned",
+        "description": "A task has been assigned to you",
+        "templateText": "{actor} assigned a task to you."
+      },
+      {
+        "type": "teamTaskArrived",
+        "description": "A new task arrived in your team queue",
+        "templateText": "{actor} queued a new task for your team."
+      },
+      {
+        "type": "taskComment",
+        "description": "A new comment was added to a task",
+        "templateText": "{actor} recorded a new task comment."
+      },
+      {
+        "type": "enquiryAssigned",
+        "description": "An enquiry has been assigned to you",
+        "templateText": "{actor} assigned an enquiry to you."
+      },
+      {
+        "type": "taskDueSoon",
+        "description": "A task due date is approaching",
+        "templateText": "{actor} flagged a task that is due soon."
+      },
+      {
+        "type": "taskOverdue",
+        "description": "A task is overdue",
+        "templateText": "{actor} flagged an overdue task."
+      },
+      {
+        "type": "approvalRequested",
+        "description": "An approval or sign-off requires review",
+        "templateText": "{actor} requested your approval or sign-off review."
+      },
+      {
+        "type": "approvalDecided",
+        "description": "An approval request has been decided",
+        "templateText": "{actor} recorded an approval decision."
+      },
+      {
+        "type": "keyDateApproaching",
+        "description": "A key date reminder is due for review",
+        "templateText": "{actor} raised an approaching key date reminder."
+      },
+      {
+        "type": "creditControlEscalation",
+        "description": "A credit control escalation requires review",
+        "templateText": "{actor} raised a credit control escalation for review."
+      },
+      {
+        "type": "registerReviewAssigned",
+        "description": "A register record review has been assigned to you",
+        "templateText": "{actor} assigned a compliance register review to you."
+      },
+      {
+        "type": "registerReminder",
+        "description": "A compliance register reminder requires attention",
+        "templateText": "{actor} raised a compliance register reminder."
+      },
+      {
+        "type": "generalNotification",
+        "description": "General platform notification",
+        "templateText": "{actor} sent you a new notification."
+      }
+    ]
+  }
+}

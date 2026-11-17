@@ -39,6 +39,12 @@ import {
 import { CoreEmailDispatcher, resolveEmailIntegrationConfig } from './adapters';
 import type { GraphAppTokenProvider } from './graphAppTokenProvider';
 import type { FetchLike, KeyVaultSecretReader } from './keyVaultSecretReader';
+import type { TeamsNotifier } from '../../api/index';
+import type { TeamsDevCatcherHandler } from '../teams/adapters';
+import {
+  drainTeamsOutboxForTenant,
+  type TeamsOutboxDrainResult,
+} from '../teams/outboxDrain';
 
 export interface OutboxDrainResult {
   readonly tenantId: string;
@@ -329,5 +335,57 @@ export async function drainEmailOutboxForTenant(
     retriedCount,
     failedPermanentCount,
     scrubbedCount: scrubRes.scrubbedCount,
+  };
+}
+
+export interface CombinedOutboxDrainResult extends OutboxDrainResult {
+  readonly teams: TeamsOutboxDrainResult;
+}
+
+/**
+ * Shared `outbox-drain` entry point draining both `public.email_outbox`
+ * and `public.teams_activity_outbox` for a tenant (ADR 0027 / ADR 0035 §3.1).
+ */
+export async function drainOutboxForTenant(
+  ctx: TenantContext,
+  options: {
+    readonly tenantConfig: TenantConfiguration;
+    readonly outboxRepository?: TenantOutboxRepository;
+    readonly emailSender?: EmailSender;
+    readonly teamsNotifier?: TeamsNotifier;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly graphTokenProvider?: GraphAppTokenProvider;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly fetchFn?: FetchLike;
+    readonly teamsDevCatcherHandler?: TeamsDevCatcherHandler;
+    readonly actorId?: string;
+    readonly batchSize?: number;
+    readonly maxAttempts?: number;
+    readonly baseBackoffSeconds?: number;
+    readonly now?: Date;
+  },
+): Promise<CombinedOutboxDrainResult> {
+  const [emailRes, teamsRes] = await Promise.all([
+    drainEmailOutboxForTenant(ctx, options),
+    drainTeamsOutboxForTenant(ctx, {
+      tenantConfig: options.tenantConfig,
+      outboxRepository: options.outboxRepository,
+      teamsNotifier: options.teamsNotifier,
+      secretReader: options.secretReader,
+      graphTokenProvider: options.graphTokenProvider,
+      fetchFn: options.fetchFn,
+      devCatcherHandler: options.teamsDevCatcherHandler,
+      actorId: options.actorId,
+      batchSize: options.batchSize,
+      maxAttempts: options.maxAttempts,
+      baseBackoffSeconds: options.baseBackoffSeconds,
+      now: options.now,
+    }),
+  ]);
+
+  return {
+    ...emailRes,
+    skippedDisabled: emailRes.skippedDisabled && teamsRes.skippedDisabled,
+    teams: teamsRes,
   };
 }

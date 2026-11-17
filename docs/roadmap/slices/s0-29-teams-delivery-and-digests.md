@@ -131,22 +131,22 @@ Bump `CORE_REQUIRED_SCHEMA_VERSION` from `'0019'` to `'0020'` and add `0020_team
 
 ---
 
-## 9. Manual Setup / External Blockers
+## 9. Manual Setup & Readiness
 
-Live Graph `TeamsActivity.Send` delivery in the demo environment depends on Section 8 manual tasks (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without them):
-- Register Teams App manifest & Azure Entra app permission `TeamsActivity.Send` with tenant admin consent.
-- Upload Teams app package to tenant catalog and set `integrations.teams.teamsAppId` + Key Vault certificate refs in runtime configuration.
+Live Graph `TeamsActivity.Send` delivery in the demo environment relies on Section 8 setup documented in [`docs/runbooks/teams-app-setup.md`](../../runbooks/teams-app-setup.md) (all unit, DST, scrubbing, outbox-drain and mocked Graph tests pass cleanly without live Azure access):
+- **Done (16 November 2026):** Microsoft Entra app `76474047-ac1f-49ee-83f3-5a2a58c2b3f8` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`) has **`TeamsActivity.Send` application permission granted with admin consent** (`User.Read` removed); `core/integrations/teams/app-package/` is packaged, uploaded and allowed in Teams Admin Center with an App Setup Policy assigned to the demo users; PEM certificate `graph-teams-client-cert` (`secretProperties.contentType = "application/x-pem-file"`, SHA-1 thumbprint `6A23E571EA3F43D1DB39C187A201B40454159D3B`) and `teams-recipient-allowlist` are created in `kvnotalawfi2cdo3cw7vuafm` with `.cer` uploaded to Entra; `demo.json` holds `"certificateThumbprint": "6A23E571EA3F43D1DB39C187A201B40454159D3B"` and `"provider": "disabled"`.
+- **Remaining activation step:** After Checkpoint 5c deploys to Azure, run the live Graph verification test and switch `integrations.teams.provider` from `"disabled"` to `"graph"`.
 
 ---
 
 ## 10. Acceptance Criteria
 
-- [ ] Migration `0020_teams_outbox_and_digests_expand` creates `public.teams_activity_outbox` and `notifications.digest_sent_at`; `CORE_REQUIRED_SCHEMA_VERSION === '0020'`.
-- [ ] All **12** `NotificationKind` values are supported end to end with `S4` (`daily_digest`) default, `'notification:view_own'` and `'notification:manage_own_preferences'`.
-- [ ] `notification-digests` runs via `guardedJob` (`'notification:send_digests'`, Bicep `caj-ntf-dig-<env>`), handles GMT/BST transitions accurately, re-verifies `canAccessMatter` and queues digests idempotently.
-- [ ] `TeamsNotifier` resolves `recipientPersonId` -> `entraObjectId`, enforces non-live allow-lists and content-scrubbing, and delivers through `public.teams_activity_outbox` + `outbox-drain`.
-- [ ] Two-tenant isolation tests, GMT/BST tests and `npm run ci` pass.
-- [ ] Help articles (`S4` daily_digest explanation included), `docs/release-notes.md` and `docs/roadmap/feature-list.md` (`32` -> `Completed`) are updated in the same PR.
+- [x] Migration `0020_teams_outbox_and_digests_expand` creates `public.teams_activity_outbox` and `notifications.digest_sent_at`; `CORE_REQUIRED_SCHEMA_VERSION === '0020'`.
+- [x] All **13** canonical `NotificationKind` values (the 12 operational kinds plus `general`) are supported end to end with `S4` (`daily_digest`) default, `'notification:view_own'` and `'notification:manage_own_preferences'`.
+- [x] `notification-digests` runs via `guardedJob` (`'notification:send_digests'`, Bicep `caj-ntf-dig-<env>`), handles GMT/BST transitions accurately, re-verifies `canAccessMatter` and queues digests idempotently.
+- [x] `TeamsNotifier` resolves `recipientPersonId` -> `entraObjectId`, enforces non-live allow-lists and content-scrubbing, delivers through `public.teams_activity_outbox` + `outbox-drain`, and includes a contract-tested `core/integrations/teams/app-package/` (`manifest.json` schema `1.16`, icons, `npm run teams:package`) plus `docs/runbooks/teams-app-setup.md`.
+- [x] Two-tenant isolation tests, GMT/BST tests and `npm run ci` pass.
+- [x] Help articles (`S4` daily_digest explanation included), `docs/runbooks/teams-app-setup.md`, `docs/release-notes.md` and `docs/roadmap/feature-list.md` (`32` -> `Completed`) are updated in the same PR.
 
 ---
 

@@ -13,4 +13,5 @@ export * from './domain/documents/index';
 export * from './domain/registers/index';
 export * from './integrations/document-stores/index';
 export * from './integrations/email/index';
+export * from './integrations/teams/index';
 export * from './observability/telemetry';

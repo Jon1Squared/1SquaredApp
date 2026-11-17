@@ -5,6 +5,7 @@ import {
   findCandidateDuplicatesForRecord,
   getAppSnapshot,
   getClientPmsViewBundle,
+  getMyNotificationPreferences,
   listAuditEntriesForRecord,
   listClientRateOverridesRecord,
   recordRecentlyViewed,
@@ -108,6 +109,19 @@ export default async function PersonProfilePage({
       ).values(),
     );
 
+    const isOwnEmployeeProfile = person.id === userId && Boolean(person.isEmployee);
+    const canViewOwnNotificationPreferences =
+      isOwnEmployeeProfile &&
+      snap.currentUserPermissions.includes('notification:view_own');
+    const canManageOwnNotificationPreferences =
+      isOwnEmployeeProfile &&
+      snap.currentUserPermissions.includes('notification:manage_own_preferences');
+    const initialNotificationPreferences = canViewOwnNotificationPreferences
+      ? await getMyNotificationPreferences(person.id, {
+          actorPersonId: userId,
+        }).catch(() => undefined)
+      : undefined;
+
     return (
       <PersonProfileClient
         person={person}
@@ -139,6 +153,9 @@ export default async function PersonProfilePage({
         initialTab={tab}
         firmName={snap.firm.name}
         orgStructure={snap.orgStructure}
+        canViewOwnNotificationPreferences={canViewOwnNotificationPreferences}
+        canManageOwnNotificationPreferences={canManageOwnNotificationPreferences}
+        initialNotificationPreferences={initialNotificationPreferences}
       />
     );
   });

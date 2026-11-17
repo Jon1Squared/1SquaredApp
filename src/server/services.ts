@@ -258,9 +258,14 @@ import {
   createSignInActorFromVerifiedOidcToken,
 } from './entraAuth';
 import {
+  ALL_NOTIFICATION_KINDS,
+  buildSafeTeamsActivityFromNotification,
   createDefaultFirmFeeArrangementCaps,
+  DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND,
   DEFAULT_REGISTERS_CONFIG,
   drainEmailOutboxForTenant,
+  drainOutboxForTenant,
+  drainTeamsOutboxForTenant,
   evaluateRegisterDueAndReviewReminders,
   executeUsageRetentionPurgeJob,
   FEE_CAP_BASE_MISMATCH_CODE,
@@ -284,6 +289,8 @@ import {
   REGISTER_DOMAIN_ERROR_CODES,
   resolveEffectiveRegisterTypes,
   resolveEmailIntegrationConfig,
+  resolveTeamsIntegrationConfig,
+  resolveTenantIsoWeekday,
   resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
@@ -298,11 +305,15 @@ import {
   validateRegisterTransitionExecution,
   validateWorkTypesConfig,
   type ClientRateOverrideClientType,
+  type CombinedOutboxDrainResult,
   type DocumentStorageProvider,
   type EmailOutboxRecord,
   type EmailSender,
   type KeyVaultSecretReader,
-  type OutboxDrainResult,
+  type NotificationChannelFrequency,
+  type TeamsActivityOutboxRecord,
+  type TeamsDevCatcherHandler,
+  type TeamsNotifier,
   type TenantConfiguration,
   type ClientRateOverrideRecord,
   type ControlledJobRunOutcome,
@@ -325,6 +336,7 @@ import {
   type ResolvedApplicableRatesResult,
   type TenantContext,
   type TenantRegistry,
+  type UserNotificationPreference,
   type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
@@ -1992,19 +2004,30 @@ async function getAppSnapshotInScope(
       !hiddenEnquiryIds.has(id) &&
       !hiddenQuoteIds.has(id),
   );
-  const primaryNotifications = await taskRepo.listNotificationsForUser<NotificationItem>(
-    snapshotTenantCtx,
-    user.id,
-    { includeRestricted: true },
+  const [primaryNotifications, effectivePersonNotifications, userNotifPrefs] =
+    await Promise.all([
+      taskRepo.listNotificationsForUser<NotificationItem>(
+        snapshotTenantCtx,
+        user.id,
+        { includeRestricted: true },
+      ),
+      effectiveWorkPerson.id !== user.id
+        ? taskRepo.listNotificationsForUser<NotificationItem>(
+            snapshotTenantCtx,
+            effectiveWorkPerson.id,
+            { includeRestricted: true },
+          )
+        : Promise.resolve([]),
+      getOutboxRepository().listNotificationPreferencesForUser(
+        snapshotTenantCtx,
+        user.id,
+      ),
+    ]);
+  const inAppDisabledKinds = new Set(
+    userNotifPrefs
+      .filter((p) => !p.inAppEnabled)
+      .map((p) => p.notificationKind),
   );
-  const effectivePersonNotifications =
-    effectiveWorkPerson.id !== user.id
-      ? await taskRepo.listNotificationsForUser<NotificationItem>(
-          snapshotTenantCtx,
-          effectiveWorkPerson.id,
-          { includeRestricted: true },
-        )
-      : [];
   const mergedNotificationsMap = new Map<string, NotificationItem>();
   for (const n of [...primaryNotifications, ...effectivePersonNotifications]) {
     mergedNotificationsMap.set(n.id, n);
@@ -2012,7 +2035,9 @@ async function getAppSnapshotInScope(
   const userNotifications = Array.from(mergedNotificationsMap.values())
     .filter(
       (n) =>
+        !inAppDisabledKinds.has(n.kind) &&
         !(
+          (n.matterId && hiddenMatterIds.has(n.matterId)) ||
           hiddenMatterIds.has(n.recordId) ||
           hiddenTaskIds.has(n.recordId) ||
           hiddenEnquiryIds.has(n.recordId) ||
@@ -10250,6 +10275,80 @@ export async function enqueueNotificationEmailIfImmediate(
   return record;
 }
 
+/**
+ * Enqueues a strictly scrubbed Teams Activity notification into `public.teams_activity_outbox`
+ * when `integrations.teams.provider !== 'disabled'` and the recipient has opted in
+ * (`teamsEnabled === true`) for `item.kind`, followed by a best-effort post-commit drain
+ * when outside an enclosing database transaction (ADR 0035 §3.1).
+ */
+export async function enqueueNotificationTeamsActivityIfEnabled(
+  ctx: TenantContext,
+  item: NotificationItem,
+  options?: {
+    readonly byId?: string | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly teamsNotifier?: TeamsNotifier;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly teamsDevCatcherHandler?: TeamsDevCatcherHandler;
+    readonly drainImmediately?: boolean;
+  },
+): Promise<TeamsActivityOutboxRecord | null> {
+  const tenantConfig = options?.tenantConfig ?? getActiveTenantConfiguration();
+  const teamsCfg = resolveTeamsIntegrationConfig(tenantConfig);
+  if ((teamsCfg.provider ?? 'disabled') === 'disabled') {
+    return null;
+  }
+
+  const outboxRepo = getOutboxRepository();
+  const preference = await outboxRepo.getNotificationPreference(
+    ctx,
+    item.recipientId,
+    item.kind,
+  );
+  if (!preference.teamsEnabled) {
+    return null;
+  }
+
+  const scrubbedActivity = buildSafeTeamsActivityFromNotification({
+    tenantId: ctx.tenantId,
+    notificationId: item.id,
+    recipientPersonId: item.recipientId,
+    kind: item.kind,
+    href: item.href,
+    recordId: item.recordId,
+    correlationId: ctx.correlationId,
+  });
+
+  const { record } = await outboxRepo.enqueueTeamsActivity(ctx, {
+    idempotencyKey: scrubbedActivity.idempotencyKey,
+    recipientPersonId: scrubbedActivity.recipientPersonId,
+    activityType: scrubbedActivity.activityType,
+    previewText: scrubbedActivity.previewText,
+    templateParameters: scrubbedActivity.templateParameters,
+    deepLinkPath: scrubbedActivity.deepLinkPath,
+    correlationId: scrubbedActivity.correlationId,
+    createdByPersonId: options?.byId ?? item.byId ?? null,
+  });
+
+  if (options?.drainImmediately !== false && !hasActiveTenantTransaction(ctx)) {
+    try {
+      await drainTeamsOutboxForTenant(ctx, {
+        tenantConfig,
+        outboxRepository: outboxRepo,
+        teamsNotifier: options?.teamsNotifier,
+        secretReader: options?.secretReader,
+        devCatcherHandler: options?.teamsDevCatcherHandler,
+        actorId: options?.byId ?? 'system:notification-teams',
+        batchSize: 10,
+      });
+    } catch {
+      // Best-effort post-commit drain: outbox row stays pending for outbox-drain.
+    }
+  }
+
+  return record;
+}
+
 async function pushNotification(
   ctx: TenantContext,
   input: {
@@ -10259,6 +10358,7 @@ async function pushNotification(
     detail: string;
     href: string;
     recordId: string;
+    matterId?: string | null;
     byId: string;
     at?: string;
   },
@@ -10267,6 +10367,11 @@ async function pushNotification(
   if (input.recipientId === input.byId && input.kind !== 'task_overdue') return null;
   const taskRepo = getTaskWorkflowRepository();
   const id = await taskRepo.allocateNextNotificationId(ctx);
+  const inferredMatterId =
+    input.matterId ??
+    (input.recordId.startsWith('MAT-')
+      ? input.recordId
+      : /\/matters\/(MAT-[^/?#]+)/.exec(input.href)?.[1] ?? null);
   const item: NotificationItem = {
     id,
     recipientId: input.recipientId,
@@ -10275,12 +10380,14 @@ async function pushNotification(
     detail: input.detail,
     href: input.href,
     recordId: input.recordId,
+    ...(inferredMatterId ? { matterId: inferredMatterId } : {}),
     createdAt: input.at ?? new Date().toISOString(),
     read: false,
     byId: input.byId,
   };
   await taskRepo.putNotification(ctx, item);
   await enqueueNotificationEmailIfImmediate(ctx, item, { byId: input.byId });
+  await enqueueNotificationTeamsActivityIfEnabled(ctx, item, { byId: input.byId });
   return item;
 }
 
@@ -10292,6 +10399,255 @@ export async function markNotificationRead(id: string, userId: string): Promise<
 export async function markAllNotificationsRead(userId: string): Promise<void> {
   const ctx = resolveDefaultServiceTenantContext(null, userId);
   await getTaskWorkflowRepository().markAllNotificationsRead(ctx, userId);
+}
+
+export interface NotificationPreferenceUpdateEntry {
+  readonly notificationKind: NotificationKind;
+  readonly inAppEnabled?: boolean;
+  readonly emailFrequency?: NotificationChannelFrequency;
+  readonly teamsEnabled?: boolean;
+}
+
+function createForbiddenError(message: string): Error {
+  const err = new Error(`FORBIDDEN: ${message}`);
+  (err as Error & { code?: string }).code = 'FORBIDDEN';
+  return err;
+}
+
+function createValidationError(code: string, message: string): Error {
+  const err = new Error(`${code}: ${message}`);
+  (err as Error & { code?: string }).code = code;
+  return err;
+}
+
+/**
+ * Returns all 13 notification preference rows (merged with ADR 0035 S4 defaults)
+ * for the signed-in employee. Rejects any cross-user lookup (`actorPersonId !== personId`).
+ */
+export async function getMyNotificationPreferences(
+  personId: string,
+  options?: {
+    readonly actorPersonId?: string | null;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tokenRoles?: readonly string[];
+  },
+): Promise<readonly UserNotificationPreference[]> {
+  const cleanTargetId = personId?.trim() || '';
+  const fallbackActorId = (
+    options?.actorPersonId ??
+    options?.tenantCtx?.actorId ??
+    ''
+  ).trim();
+  const ctx =
+    options?.tenantCtx ??
+    resolveDefaultServiceTenantContext(null, fallbackActorId || cleanTargetId);
+  const effectiveActorId = (options?.actorPersonId ?? ctx.actorId).trim();
+
+  if (!cleanTargetId || !effectiveActorId || effectiveActorId !== cleanTargetId) {
+    throw createForbiddenError(
+      'Users can only view their own notification preferences.',
+    );
+  }
+
+  const [people, teams, rbacConfig] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actor =
+    people.find((p) => p.id === effectiveActorId && !p.mergedIntoId) ?? null;
+  if (!actor || !actor.isEmployee || isLeaverPerson(actor)) {
+    throw createForbiddenError(
+      'Notification preferences are restricted to active employees.',
+    );
+  }
+  const perms = resolvePersonPermissionSet(actor, {
+    allPeople: people,
+    teams,
+    config: { rbac: rbacConfig },
+    tokenRoles: options?.tokenRoles ?? ctx.actorRoles,
+  });
+  if (!perms.permissions.has('notification:view_own')) {
+    throw createForbiddenError(
+      'Permission "notification:view_own" is required to view notification preferences.',
+    );
+  }
+
+  return getOutboxRepository().listNotificationPreferencesForUser(ctx, actor.id);
+}
+
+/**
+ * Updates self-service notification preferences across one or more notification kinds
+ * and optional working-day weekly digest schedule (`digestDayOfWeek` 1..5 Mon–Fri),
+ * enforcing self-only ownership and same-transaction zero-PII audit logging.
+ */
+export async function updateMyNotificationPreferences(
+  input: {
+    readonly personId: string;
+    readonly updates: readonly NotificationPreferenceUpdateEntry[];
+    readonly digestDayOfWeek?: number;
+  },
+  options?: {
+    readonly actorPersonId?: string | null;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tokenRoles?: readonly string[];
+  },
+): Promise<readonly UserNotificationPreference[]> {
+  const cleanTargetId = input.personId?.trim() || '';
+  const fallbackActorId = (
+    options?.actorPersonId ??
+    options?.tenantCtx?.actorId ??
+    ''
+  ).trim();
+  const ctx =
+    options?.tenantCtx ??
+    resolveDefaultServiceTenantContext(null, fallbackActorId || cleanTargetId);
+  const effectiveActorId = (options?.actorPersonId ?? ctx.actorId).trim();
+
+  if (!cleanTargetId || !effectiveActorId || effectiveActorId !== cleanTargetId) {
+    throw createForbiddenError(
+      'Users can only modify their own notification preferences.',
+    );
+  }
+
+  const validKinds = new Set<string>(ALL_NOTIFICATION_KINDS);
+  const validFrequencies = new Set<string>([
+    'immediate',
+    'daily_digest',
+    'weekly_digest',
+    'none',
+  ]);
+  for (const upd of input.updates ?? []) {
+    if (!validKinds.has(upd.notificationKind)) {
+      throw createValidationError(
+        'NOTIFICATION_PREFERENCE_INVALID',
+        `Unknown notification kind "${String(upd.notificationKind)}".`,
+      );
+    }
+    if (
+      upd.emailFrequency !== undefined &&
+      !validFrequencies.has(upd.emailFrequency)
+    ) {
+      throw createValidationError(
+        'NOTIFICATION_PREFERENCE_INVALID',
+        `Invalid email frequency "${String(upd.emailFrequency)}".`,
+      );
+    }
+  }
+  if (input.digestDayOfWeek !== undefined) {
+    if (
+      !Number.isInteger(input.digestDayOfWeek) ||
+      input.digestDayOfWeek < 1 ||
+      input.digestDayOfWeek > 5
+    ) {
+      throw createValidationError(
+        'NOTIFICATION_PREFERENCE_INVALID',
+        'digestDayOfWeek must be a working weekday integer between 1 (Monday) and 5 (Friday).',
+      );
+    }
+  }
+
+  const [people, teams, rbacConfig] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actor =
+    people.find((p) => p.id === effectiveActorId && !p.mergedIntoId) ?? null;
+  if (!actor || !actor.isEmployee || isLeaverPerson(actor)) {
+    throw createForbiddenError(
+      'Notification preferences are restricted to active employees.',
+    );
+  }
+  const perms = resolvePersonPermissionSet(actor, {
+    allPeople: people,
+    teams,
+    config: { rbac: rbacConfig },
+    tokenRoles: options?.tokenRoles ?? ctx.actorRoles,
+  });
+  if (!perms.permissions.has('notification:manage_own_preferences')) {
+    throw createForbiddenError(
+      'Permission "notification:manage_own_preferences" is required to update notification preferences.',
+    );
+  }
+
+  const outboxRepo = getOutboxRepository();
+  const nowIso = new Date().toISOString();
+
+  return outboxRepo.withTenantTransaction(ctx, async () => {
+    const existingList = await outboxRepo.listNotificationPreferencesForUser(
+      ctx,
+      actor.id,
+    );
+    const existingByKind = new Map(
+      existingList.map((pref) => [pref.notificationKind, pref]),
+    );
+    const updatesByKind = new Map<NotificationKind, NotificationPreferenceUpdateEntry>();
+    for (const upd of input.updates ?? []) {
+      updatesByKind.set(upd.notificationKind, upd);
+    }
+
+    const kindsToPersist = new Set<NotificationKind>(updatesByKind.keys());
+    if (input.digestDayOfWeek !== undefined) {
+      for (const kind of ALL_NOTIFICATION_KINDS) {
+        kindsToPersist.add(kind);
+      }
+    }
+
+    if (kindsToPersist.size > 0) {
+      const changedSummaries: string[] = [];
+      for (const kind of kindsToPersist) {
+        const current = existingByKind.get(kind);
+        const defaults =
+          DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND[kind] ??
+          DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND.general;
+        const patch = updatesByKind.get(kind);
+        const nextInApp = patch?.inAppEnabled ?? current?.inAppEnabled ?? defaults.inAppEnabled;
+        const nextEmailFreq =
+          patch?.emailFrequency ?? current?.emailFrequency ?? defaults.emailFrequency;
+        const nextTeams = patch?.teamsEnabled ?? current?.teamsEnabled ?? defaults.teamsEnabled;
+        const nextDay =
+          input.digestDayOfWeek ?? current?.digestDayOfWeek ?? 1;
+
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: actor.id,
+          notificationKind: kind,
+          inAppEnabled: nextInApp,
+          emailFrequency: nextEmailFreq,
+          teamsEnabled: nextTeams,
+          digestDayOfWeek: nextDay,
+        });
+        if (patch) {
+          changedSummaries.push(
+            `${kind}:inApp=${nextInApp},email=${nextEmailFreq},teams=${nextTeams}`,
+          );
+        }
+      }
+
+      const dayNote =
+        input.digestDayOfWeek !== undefined
+          ? `; digestDayOfWeek=${input.digestDayOfWeek}`
+          : '';
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'notification_preferences',
+          recordId: actor.id,
+          action: 'update',
+          field: 'notificationPreferences',
+          oldValue: null,
+          newValue: `${changedSummaries.length} kind(s) updated${dayNote}`.slice(
+            0,
+            240,
+          ),
+          byId: actor.id,
+          at: nowIso,
+          reason: `Self-service notification preferences updated (${changedSummaries.length} kind(s)${dayNote}).`,
+        },
+      ]);
+    }
+
+    return outboxRepo.listNotificationPreferencesForUser(ctx, actor.id);
+  });
 }
 
 // ------------------------------------------------------------------ Admin: Teams & Settings
@@ -23058,6 +23414,7 @@ export async function executeRegisterRemindersForTenant(
                 detail: `${record.title} — ${kindLabel} (${timingLabel})`,
                 href: `/registers?record=${record.id}`,
                 recordId: record.id,
+                matterId: record.matterId ?? null,
                 byId: options.triggeredById,
                 read: false,
                 createdAt: nowIso,
@@ -23182,13 +23539,14 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
 }
 
 export interface OutboxDrainSweepSummary extends ScheduledTenantJobSweepSummary {
-  readonly resultsByTenant: Record<string, OutboxDrainResult>;
+  readonly resultsByTenant: Record<string, CombinedOutboxDrainResult>;
 }
 
 /**
- * Scheduled `outbox-drain` sweep across every enabled tenant in `TenantRegistry` (ADR 0027 §6.4).
+ * Scheduled `outbox-drain` sweep across every enabled tenant in `TenantRegistry` (ADR 0027 §6.4 / ADR 0035 §3.1).
  * Runs under `guardedJob('outbox-drain', ...)` with `notification:drain_outbox` (`jobOnly: true`)
  * and bypasses `public.job_runs`'s once-per-local-day uniqueness gate.
+ * Drains both `public.email_outbox` and `public.teams_activity_outbox`.
  */
 export async function runScheduledOutboxDrainJobSweep(options?: {
   readonly registry?: TenantRegistry;
@@ -23196,6 +23554,8 @@ export async function runScheduledOutboxDrainJobSweep(options?: {
   readonly guardedJobOptions?: GuardedJobOptions;
   readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
   readonly emailSender?: EmailSender;
+  readonly teamsNotifier?: TeamsNotifier;
+  readonly teamsDevCatcherHandler?: TeamsDevCatcherHandler;
   readonly secretReader?: KeyVaultSecretReader;
   readonly storageProvider?: DocumentStorageProvider;
   readonly batchSize?: number;
@@ -23215,7 +23575,7 @@ export async function runScheduledOutboxDrainJobSweep(options?: {
     readonly tenantId: string;
     readonly errorCode?: string;
   }> = [];
-  const resultsByTenant: Record<string, OutboxDrainResult> = {};
+  const resultsByTenant: Record<string, CombinedOutboxDrainResult> = {};
 
   for (const entry of registry.tenants) {
     if (!entry.enabled) continue;
@@ -23230,10 +23590,12 @@ export async function runScheduledOutboxDrainJobSweep(options?: {
               tenantEntry,
               registry.hostingMode,
             );
-          return drainEmailOutboxForTenant(tenantContext, {
+          return drainOutboxForTenant(tenantContext, {
             tenantConfig,
             outboxRepository: outboxRepo,
             emailSender: options?.emailSender,
+            teamsNotifier: options?.teamsNotifier,
+            teamsDevCatcherHandler: options?.teamsDevCatcherHandler,
             secretReader: options?.secretReader,
             storageProvider: options?.storageProvider,
             actorId: 'system:outbox-drain',
@@ -23251,11 +23613,15 @@ export async function runScheduledOutboxDrainJobSweep(options?: {
       );
 
       resultsByTenant[entry.tenantId] = outcome;
-      if (outcome.skippedDisabled && outcome.scrubbedCount === 0) {
+      if (
+        outcome.skippedDisabled &&
+        outcome.scrubbedCount === 0 &&
+        outcome.teams.scrubbedCount === 0
+      ) {
         skippedTenants.push({
           tenantId: entry.tenantId,
           status: 'skipped',
-          reason: 'email_provider_disabled',
+          reason: 'email_and_teams_providers_disabled',
         });
       } else {
         succeededTenants.push(entry.tenantId);
@@ -23274,6 +23640,617 @@ export async function runScheduledOutboxDrainJobSweep(options?: {
     skippedTenants,
     failedTenants,
     resultsByTenant,
+  };
+}
+
+export interface NotificationDigestsJobSummary {
+  readonly tenantId: string;
+  readonly localDate: string;
+  readonly isoWeekday: number;
+  readonly undigestedExamined: number;
+  readonly digestEmailsQueued: number;
+  readonly digestedNotificationCount: number;
+  readonly suppressedRevokedCount: number;
+  readonly deferredWeeklyCount: number;
+  readonly nonDigestMarkedCount: number;
+}
+
+export type NotificationDigestsJobOutcome =
+  | ControlledJobRunOutcome<NotificationDigestsJobSummary>
+  | {
+      readonly outcome: 'outside_working_days';
+      readonly localDate: string;
+      readonly localHour: number;
+      readonly isoWeekday: number;
+    };
+
+function extractNotificationMatterIds(params: {
+  readonly item: NotificationItem;
+  readonly matterById: ReadonlyMap<string, Matter>;
+  readonly taskById: ReadonlyMap<string, Task>;
+  readonly keyDateById: ReadonlyMap<string, KeyDate>;
+  readonly enquiryById: ReadonlyMap<string, Enquiry>;
+  readonly quoteById: ReadonlyMap<string, Quote>;
+  readonly registerRecordById: ReadonlyMap<string, RegisterRecord>;
+}): {
+  readonly matterIds: readonly string[];
+  readonly hiddenDraftEnquiry: boolean;
+} {
+  const { item } = params;
+  const matterIds = new Set<string>();
+  let hiddenDraftEnquiry = false;
+
+  if (item.matterId?.trim()) {
+    matterIds.add(item.matterId.trim());
+  }
+  if (item.recordId && params.matterById.has(item.recordId)) {
+    matterIds.add(item.recordId);
+  }
+  const hrefMatch = /\/matters\/(MAT-[^/?#]+)/.exec(item.href ?? '');
+  if (hrefMatch?.[1]) {
+    matterIds.add(hrefMatch[1]);
+  }
+
+  const task = item.recordId ? params.taskById.get(item.recordId) : undefined;
+  if (task) {
+    for (const lr of task.linkedRecords ?? []) {
+      if (lr.recordType === 'matter' && lr.recordId) {
+        matterIds.add(lr.recordId);
+      } else if (lr.recordType === 'enquiry' && lr.recordId) {
+        const enq = params.enquiryById.get(lr.recordId);
+        if (enq) {
+          if (enq.status === 'Draft' && enq.createdById !== item.recipientId) {
+            hiddenDraftEnquiry = true;
+          }
+          if (enq.convertedMatterId) {
+            matterIds.add(enq.convertedMatterId);
+          }
+        }
+      } else if (lr.recordType === 'quote' && lr.recordId) {
+        const q = params.quoteById.get(lr.recordId);
+        if (q?.convertedMatterId) matterIds.add(q.convertedMatterId);
+        if (q?.linkedEnquiryId) {
+          const enq = params.enquiryById.get(q.linkedEnquiryId);
+          if (enq?.convertedMatterId) matterIds.add(enq.convertedMatterId);
+        }
+      }
+    }
+    if (task.linkedKeyDateId) {
+      const kd = params.keyDateById.get(task.linkedKeyDateId);
+      if (kd?.matterId) matterIds.add(kd.matterId);
+      if (kd?.enquiryId) {
+        const enq = params.enquiryById.get(kd.enquiryId);
+        if (enq?.convertedMatterId) matterIds.add(enq.convertedMatterId);
+      }
+    }
+  }
+
+  const keyDate = item.recordId ? params.keyDateById.get(item.recordId) : undefined;
+  if (keyDate) {
+    if (keyDate.matterId) matterIds.add(keyDate.matterId);
+    if (keyDate.enquiryId) {
+      const enq = params.enquiryById.get(keyDate.enquiryId);
+      if (enq) {
+        if (enq.status === 'Draft' && enq.createdById !== item.recipientId) {
+          hiddenDraftEnquiry = true;
+        }
+        if (enq.convertedMatterId) matterIds.add(enq.convertedMatterId);
+      }
+    }
+  }
+
+  const enquiry = item.recordId ? params.enquiryById.get(item.recordId) : undefined;
+  if (enquiry) {
+    if (enquiry.status === 'Draft' && enquiry.createdById !== item.recipientId) {
+      hiddenDraftEnquiry = true;
+    }
+    if (enquiry.convertedMatterId) matterIds.add(enquiry.convertedMatterId);
+  }
+
+  const quote = item.recordId ? params.quoteById.get(item.recordId) : undefined;
+  if (quote) {
+    if (quote.convertedMatterId) matterIds.add(quote.convertedMatterId);
+    if (quote.linkedEnquiryId) {
+      const enq = params.enquiryById.get(quote.linkedEnquiryId);
+      if (enq?.convertedMatterId) matterIds.add(enq.convertedMatterId);
+    }
+  }
+
+  const reg = item.recordId ? params.registerRecordById.get(item.recordId) : undefined;
+  if (reg?.matterId) {
+    matterIds.add(reg.matterId);
+  }
+
+  return {
+    matterIds: Array.from(matterIds),
+    hiddenDraftEnquiry,
+  };
+}
+
+function renderDigestEmailContent(params: {
+  readonly tenantDisplayName: string;
+  readonly localDate: string;
+  readonly recipientName: string;
+  readonly dailyItems: readonly NotificationItem[];
+  readonly weeklyItems: readonly NotificationItem[];
+}): {
+  readonly subject: string;
+  readonly htmlBody: string;
+  readonly textBody: string;
+} {
+  const totalCount = params.dailyItems.length + params.weeklyItems.length;
+  const isWeeklyOnly = params.weeklyItems.length > 0 && params.dailyItems.length === 0;
+  const heading = isWeeklyOnly
+    ? 'Weekly notification digest'
+    : params.weeklyItems.length > 0
+      ? 'Daily and weekly notification digest'
+      : 'Daily notification digest';
+  const subject = `[${params.tenantDisplayName}] ${heading} (${params.localDate} — ${totalCount} item${totalCount === 1 ? '' : 's'})`;
+
+  const renderSectionHtml = (title: string, items: readonly NotificationItem[]) => {
+    if (items.length === 0) return '';
+    const rows = items
+      .map(
+        (item) =>
+          `<li><strong>${escapeHtmlTextForEmail(item.title)}</strong>${item.detail ? ` — ${escapeHtmlTextForEmail(item.detail)}` : ''}${item.href ? ` (<code>${escapeHtmlTextForEmail(item.href)}</code>)` : ''}</li>`,
+      )
+      .join('');
+    return `<h3>${escapeHtmlTextForEmail(title)} (${items.length})</h3><ul>${rows}</ul>`;
+  };
+
+  const renderSectionText = (title: string, items: readonly NotificationItem[]) => {
+    if (items.length === 0) return '';
+    const rows = items
+      .map(
+        (item) =>
+          `- ${item.title}${item.detail ? ` — ${item.detail}` : ''}${item.href ? ` (${item.href})` : ''}`,
+      )
+      .join('\n');
+    return `${title} (${items.length}):\n${rows}`;
+  };
+
+  const htmlBody = [
+    `<p>Hello ${escapeHtmlTextForEmail(params.recipientName)},</p>`,
+    `<p>Here is your ${escapeHtmlTextForEmail(heading.toLowerCase())} for ${escapeHtmlTextForEmail(params.localDate)}.</p>`,
+    renderSectionHtml('Daily updates', params.dailyItems),
+    renderSectionHtml('Weekly summary updates', params.weeklyItems),
+  ]
+    .filter(Boolean)
+    .join('');
+
+  const textBody = [
+    `Hello ${params.recipientName},`,
+    `Here is your ${heading.toLowerCase()} for ${params.localDate}.`,
+    renderSectionText('Daily updates', params.dailyItems),
+    renderSectionText('Weekly summary updates', params.weeklyItems),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  return { subject, htmlBody, textBody };
+}
+
+/**
+ * Single-transaction per-tenant daily and weekly email digest compiler (`system:notification-digests`).
+ * Runs Mon–Fri in tenant timezone at or after `notifications.digestHourLocal` (default `08:00`),
+ * re-verifying matter visibility before queuing any item into `public.email_outbox` (ADR 0035 §2).
+ */
+export async function executeNotificationDigestsForTenant(
+  ctx: TenantContext,
+  options: {
+    readonly triggerSource?: 'scheduled' | 'manual';
+    readonly triggeredById?: string;
+    readonly timeZone?: string;
+    readonly digestHourLocal?: number;
+    readonly now?: Date;
+    readonly localDateOverride?: string;
+    readonly statementTimeoutMs?: number;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  } = {},
+): Promise<NotificationDigestsJobOutcome> {
+  const tenantConfig = options.tenantConfig ?? getActiveTenantConfiguration();
+  const effectiveTimeZone =
+    options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
+  const triggeredById =
+    options.triggeredById?.trim() || 'system:notification-digests';
+  const triggerSource = options.triggerSource ?? 'scheduled';
+  const now = options.now ?? new Date();
+  const clock = resolveTenantLocalDateAndHour(now, effectiveTimeZone);
+  const isoWeekday = resolveTenantIsoWeekday(now, effectiveTimeZone);
+  const targetLocalHour =
+    options.digestHourLocal ?? tenantConfig.notifications?.digestHourLocal ?? 8;
+
+  // Mon–Fri only on scheduled runs BEFORE inserting any row into public.job_runs
+  if (triggerSource === 'scheduled' && (isoWeekday === 6 || isoWeekday === 7)) {
+    return {
+      outcome: 'outside_working_days',
+      localDate: options.localDateOverride?.trim() || clock.localDate,
+      localHour: clock.localHour,
+      isoWeekday,
+    };
+  }
+
+  const outboxRepo = getOutboxRepository();
+
+  const outcome = await getJobRunRepository().executeControlledTenantJobRun(
+    ctx,
+    {
+      jobKey: 'notification-digests',
+      triggerSource,
+      triggeredById,
+      timeZone: effectiveTimeZone,
+      targetLocalHour,
+      now,
+      localDateOverride: options.localDateOverride,
+      statementTimeoutMs: options.statementTimeoutMs,
+      work: async ({ tx, localDate, nowIso }) => {
+        const taskRepo = getTaskWorkflowRepository();
+        const partyRepo = getPartyRepository();
+        const hrRepo = getHrAndRbacRepository();
+        const matterRepo = getMatterRepository();
+        const intakeRepo = getIntakeQuoteRepository();
+        const keyDateRepo = getKeyDateRepository();
+        const registerRepo = getRegisterRepository();
+
+        const [
+          undigested,
+          people,
+          teams,
+          matters,
+          enquiries,
+          quotes,
+          tasks,
+          keyDates,
+          registerRecords,
+          storedPrefs,
+        ] = await Promise.all([
+          taskRepo.listUndigestedNotificationsForDigest<NotificationItem>(
+            ctx,
+            { forUpdate: true },
+          ),
+          partyRepo.listAllPeople<Person>(ctx),
+          hrRepo.listAllTeams<Team>(ctx),
+          matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+          intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+          intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+          taskRepo.listAllTasksUnfiltered<Task>(ctx),
+          keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
+          registerRepo.listAllRegisterRecordsUnfiltered(ctx),
+          outboxRepo.listAllNotificationPreferences(ctx),
+        ]);
+
+        const personById = new Map(people.map((p) => [p.id, p]));
+        const matterById = new Map(matters.map((m) => [m.id, m]));
+        const enquiryById = new Map(enquiries.map((e) => [e.id, e]));
+        const quoteById = new Map(quotes.map((q) => [q.id, q]));
+        const taskById = new Map(tasks.map((t) => [t.id, t]));
+        const keyDateById = new Map(keyDates.map((kd) => [kd.id, kd]));
+        const registerRecordById = new Map(
+          registerRecords.map((r) => [r.id, r]),
+        );
+        const prefByPersonKind = new Map(
+          storedPrefs.map((pref) => [
+            `${pref.personId}:${pref.notificationKind}`,
+            pref,
+          ]),
+        );
+
+        const markDigestSentIds: string[] = [];
+        let suppressedRevokedCount = 0;
+        let deferredWeeklyCount = 0;
+        let nonDigestMarkedCount = 0;
+
+        const bucketsByRecipient = new Map<
+          string,
+          {
+            readonly daily: NotificationItem[];
+            readonly weekly: NotificationItem[];
+          }
+        >();
+
+        for (const item of undigested) {
+          const person = personById.get(item.recipientId);
+          if (
+            !person ||
+            person.mergedIntoId ||
+            !person.isEmployee ||
+            isLeaverPerson(person)
+          ) {
+            markDigestSentIds.push(item.id);
+            suppressedRevokedCount += 1;
+            continue;
+          }
+
+          const linked = extractNotificationMatterIds({
+            item,
+            matterById,
+            taskById,
+            keyDateById,
+            enquiryById,
+            quoteById,
+            registerRecordById,
+          });
+          let revoked = linked.hiddenDraftEnquiry;
+          if (!revoked) {
+            for (const mId of linked.matterIds) {
+              const linkedMatter = matterById.get(mId);
+              if (
+                linkedMatter &&
+                !canPersonAccessMatter(linkedMatter, person.id, person, {
+                  allPeople: people,
+                  teams,
+                })
+              ) {
+                revoked = true;
+                break;
+              }
+            }
+          }
+          if (revoked) {
+            markDigestSentIds.push(item.id);
+            suppressedRevokedCount += 1;
+            continue;
+          }
+
+          const storedPref = prefByPersonKind.get(
+            `${person.id}:${item.kind}`,
+          );
+          const defaults =
+            DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND[item.kind] ??
+            DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND.general;
+          const emailFrequency =
+            storedPref?.emailFrequency ?? defaults.emailFrequency;
+          const digestDayOfWeek = storedPref?.digestDayOfWeek ?? 1;
+
+          if (emailFrequency === 'immediate' || emailFrequency === 'none') {
+            markDigestSentIds.push(item.id);
+            nonDigestMarkedCount += 1;
+            continue;
+          }
+
+          if (emailFrequency === 'weekly_digest') {
+            if (digestDayOfWeek !== isoWeekday) {
+              deferredWeeklyCount += 1;
+              continue;
+            }
+            const bucket = bucketsByRecipient.get(person.id) ?? {
+              daily: [],
+              weekly: [],
+            };
+            bucket.weekly.push(item);
+            bucketsByRecipient.set(person.id, bucket);
+            continue;
+          }
+
+          const bucket = bucketsByRecipient.get(person.id) ?? {
+            daily: [],
+            weekly: [],
+          };
+          bucket.daily.push(item);
+          bucketsByRecipient.set(person.id, bucket);
+        }
+
+        let digestEmailsQueued = 0;
+        let digestedNotificationCount = 0;
+
+        for (const [personId, bucket] of bucketsByRecipient.entries()) {
+          const person = personById.get(personId);
+          const recipientAddress = person
+            ? resolvePrimaryActiveEmailForPerson(person)
+            : null;
+          const combinedItems = [...bucket.daily, ...bucket.weekly];
+          if (!person || !recipientAddress) {
+            for (const item of combinedItems) {
+              markDigestSentIds.push(item.id);
+              nonDigestMarkedCount += 1;
+            }
+            continue;
+          }
+
+          bucket.daily.sort((a, b) =>
+            a.createdAt === b.createdAt
+              ? a.id.localeCompare(b.id)
+              : a.createdAt.localeCompare(b.createdAt),
+          );
+          bucket.weekly.sort((a, b) =>
+            a.createdAt === b.createdAt
+              ? a.id.localeCompare(b.id)
+              : a.createdAt.localeCompare(b.createdAt),
+          );
+
+          const templateKey =
+            bucket.weekly.length > 0
+              ? 'notification-digest-weekly'
+              : 'notification-digest-daily';
+          const recipientName =
+            person.preferredName?.trim() ||
+            [person.firstName, person.surname].filter(Boolean).join(' ').trim() ||
+            'Colleague';
+          const rendered = renderDigestEmailContent({
+            tenantDisplayName: tenantConfig.displayName,
+            localDate,
+            recipientName,
+            dailyItems: bucket.daily,
+            weeklyItems: bucket.weekly,
+          });
+
+          await outboxRepo.enqueueEmail(ctx, {
+            idempotencyKey: `digest:${ctx.tenantId}:${person.id}:${localDate}`,
+            templateKey,
+            recipients: { to: [recipientAddress] },
+            subject: rendered.subject,
+            htmlBody: rendered.htmlBody,
+            textBody: rendered.textBody,
+            createdByPersonId: triggeredById,
+            correlationId: ctx.correlationId,
+          });
+
+          digestEmailsQueued += 1;
+          digestedNotificationCount += combinedItems.length;
+          for (const item of combinedItems) {
+            markDigestSentIds.push(item.id);
+          }
+        }
+
+        if (markDigestSentIds.length > 0) {
+          await taskRepo.markNotificationsDigestSentInTx(
+            tx,
+            ctx,
+            markDigestSentIds,
+            nowIso,
+          );
+        }
+
+        if (digestEmailsQueued > 0 || suppressedRevokedCount > 0) {
+          await appendTenantAuditEntries(ctx, [
+            {
+              recordType: 'notification_digest',
+              recordId: `DIGEST-${localDate}`,
+              action: 'notification-digest-queued',
+              field: 'digestQueue',
+              oldValue: null,
+              newValue: `recipients=${digestEmailsQueued}; items=${digestedNotificationCount}; suppressed=${suppressedRevokedCount}; deferred=${deferredWeeklyCount}`,
+              byId: triggeredById,
+              at: nowIso,
+              reason: `Notification digest run (${localDate}, weekday=${isoWeekday}): queued ${digestEmailsQueued} digest email(s) covering ${digestedNotificationCount} notification(s).`,
+            },
+          ]);
+        }
+
+        const summary: NotificationDigestsJobSummary = {
+          tenantId: ctx.tenantId,
+          localDate,
+          isoWeekday,
+          undigestedExamined: undigested.length,
+          digestEmailsQueued,
+          digestedNotificationCount,
+          suppressedRevokedCount,
+          deferredWeeklyCount,
+          nonDigestMarkedCount,
+        };
+
+        return {
+          result: summary,
+          summary: {
+            undigestedExamined: undigested.length,
+            digestEmailsQueued,
+            digestedNotificationCount,
+            suppressedRevokedCount,
+            deferredWeeklyCount,
+            nonDigestMarkedCount,
+          },
+        };
+      },
+    },
+  );
+
+  if (
+    outcome.outcome === 'executed' &&
+    outcome.result.digestEmailsQueued > 0 &&
+    options.drainAfterCommit !== false &&
+    (resolveEmailIntegrationConfig(tenantConfig).provider ?? 'disabled') !==
+      'disabled'
+  ) {
+    try {
+      await drainOutboxForTenant(ctx, {
+        tenantConfig,
+        outboxRepository: outboxRepo,
+        emailSender: options.emailSender,
+        secretReader: options.secretReader,
+        storageProvider: options.storageProvider,
+        actorId: triggeredById,
+        now,
+      });
+    } catch {
+      // Best-effort post-commit drain: queued emails remain durable in email_outbox.
+    }
+  }
+
+  return outcome;
+}
+
+export async function runScheduledNotificationDigestsJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly digestHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
+  readonly emailSender?: EmailSender;
+  readonly secretReader?: KeyVaultSecretReader;
+  readonly storageProvider?: DocumentStorageProvider;
+  readonly now?: Date;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) continue;
+    try {
+      const outcome = await guardedJob(
+        'notification-digests',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeNotificationDigestsForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:notification-digests',
+            timeZone: tenantEntry.timeZone,
+            digestHourLocal: options?.digestHourLocal,
+            statementTimeoutMs: timeoutMs,
+            tenantConfig,
+            emailSender: options?.emailSender,
+            secretReader: options?.secretReader,
+            storageProvider: options?.storageProvider,
+            now: options?.now,
+          });
+        },
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status:
+            outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
   };
 }
 

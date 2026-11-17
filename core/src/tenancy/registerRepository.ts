@@ -827,6 +827,23 @@ export class TenantRegisterRepository extends TenantScopedRepository {
     });
   }
 
+  public async listAllRegisterRecordsUnfiltered(
+    ctx: TenantContext,
+  ): Promise<RegisterRecord[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbRegisterRecordRow>(
+        `SELECT * FROM public.register_records
+         WHERE tenant_id = $1
+         ORDER BY created_at ASC, id ASC`,
+        [ctx.tenantId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'register_records.listAllUnfiltered');
+        return mapRegisterRecordRow(row);
+      });
+    });
+  }
+
   public async listReminderStatesForTenant(
     ctx: TenantContext,
   ): Promise<RegisterReminderState[]> {

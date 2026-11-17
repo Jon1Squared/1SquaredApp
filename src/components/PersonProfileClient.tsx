@@ -3,6 +3,7 @@
 import React, { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { NotificationPreferencesPanel } from './NotificationPreferencesPanel';
 import {
   Check,
   CheckSquare,
@@ -46,7 +47,10 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import type { ClientRateOverrideRecord } from '@platform/core-api';
+import type {
+  ClientRateOverrideRecord,
+  UserNotificationPreference,
+} from '@platform/core-api';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
 import { ClientRateOverridesPanel } from './ClientRateOverridesPanel';
@@ -76,6 +80,7 @@ const TABS = [
   { key: 'organisations', label: 'Organisations' },
   { key: 'relationship', label: 'Relationship' },
   { key: 'compliance', label: 'Compliance' },
+  { key: 'notifications', label: 'Notifications' },
   { key: 'record', label: 'Record' },
 ] as const;
 
@@ -109,6 +114,9 @@ interface Props {
   initialTab?: string;
   firmName?: string;
   orgStructure: OrgStructureCatalogue;
+  canViewOwnNotificationPreferences?: boolean;
+  canManageOwnNotificationPreferences?: boolean;
+  initialNotificationPreferences?: readonly UserNotificationPreference[];
 }
 
 export interface PersonComplianceDisplay {
@@ -184,6 +192,9 @@ export function PersonProfileClient({
   initialTab,
   firmName = 'Firm',
   orgStructure,
+  canViewOwnNotificationPreferences = false,
+  canManageOwnNotificationPreferences = false,
+  initialNotificationPreferences,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -277,6 +288,11 @@ export function PersonProfileClient({
     return false;
   }, [person, mainOrg, values, matters]);
 
+  const showNotificationsTab =
+    person.id === currentUserId &&
+    Boolean(person.isEmployee) &&
+    canViewOwnNotificationPreferences;
+
   const visibleTabs = useMemo(
     () =>
       TABS.filter((t) => {
@@ -287,14 +303,33 @@ export function PersonProfileClient({
         if (t.key === 'finance') {
           return canViewFinance && !person.isEmployee && Boolean(pmsView);
         }
+        if (t.key === 'notifications') {
+          return showNotificationsTab;
+        }
         return true;
       }),
-    [canViewFinance, person.isEmployee, person.employment, pmsView, isClientPerson],
+    [
+      canViewFinance,
+      person.isEmployee,
+      person.employment,
+      pmsView,
+      isClientPerson,
+      showNotificationsTab,
+    ],
   );
   const validTab = visibleTabs.some((t) => t.key === initialTab)
     ? (initialTab as TabKey)
     : 'overview';
   const [tab, setTab] = useState<TabKey>(validTab);
+  const [syncedInitialTab, setSyncedInitialTab] = useState<string | undefined>(
+    initialTab,
+  );
+  if (initialTab !== syncedInitialTab) {
+    setSyncedInitialTab(initialTab);
+    if (initialTab && visibleTabs.some((t) => t.key === initialTab)) {
+      setTab(initialTab as TabKey);
+    }
+  }
   const [noteOpen, setNoteOpen] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<PersonOrganisationLink | null>(null);
@@ -2004,6 +2039,14 @@ export function PersonProfileClient({
           </div>
         )}
 
+        {tab === 'notifications' && showNotificationsTab && (
+          <NotificationPreferencesPanel
+            personId={person.id}
+            initialPreferences={initialNotificationPreferences}
+            canManagePreferences={canManageOwnNotificationPreferences}
+          />
+        )}
+
         {tab === 'record' && (
           <div className="client-card">
             <AuditAndMergeSection
@@ -2964,6 +3007,14 @@ export function PersonProfileClient({
           recordId={person.id}
           notes={notes}
           nameById={nameById}
+        />
+      )}
+
+      {tab === 'notifications' && showNotificationsTab && (
+        <NotificationPreferencesPanel
+          personId={person.id}
+          initialPreferences={initialNotificationPreferences}
+          canManagePreferences={canManageOwnNotificationPreferences}
         />
       )}
 

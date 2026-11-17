@@ -79,7 +79,8 @@ export type JobOnlyPermissionKey =
   | 'document_generation:purge_usage'
   | 'enquiry:run_retention_anonymise'
   | 'register:run_reminders'
-  | 'notification:drain_outbox';
+  | 'notification:drain_outbox'
+  | 'notification:send_digests';
 
 export type PermissionKey =
   | EmployeePermission
@@ -117,7 +118,9 @@ export type PermissionKey =
   | 'admin:access'
   | 'admin:data_reset'
   | 'rbac:manage_config'
-  | 'rbac:manage_user_overrides';
+  | 'rbac:manage_user_overrides'
+  | 'notification:view_own'
+  | 'notification:manage_own_preferences';
 
 export type PermissionDomain =
   | 'employee'
@@ -875,6 +878,7 @@ export interface TenantConfiguration {
     aiProviderChoice: 'azure_openai_uk' | 'anthropic' | 'disabled';
     pmsSync?: PmsIntegrationSyncConfig;
     email?: TenantEmailIntegrationConfig;
+    teams?: TenantTeamsIntegrationConfig;
   };
   customFields: CustomFieldConfigEntry[];
   enabledExtensions: string[];
@@ -890,6 +894,7 @@ export interface TenantConfiguration {
   keyVault?: TenantKeyVaultConfig;
   database?: TenantDatabaseConfig;
   workTypes?: WorkTypesConfiguration;
+  notifications?: TenantNotificationsConfig;
 }
 
 // ------------------------------------------------------------------ Work Type & Departmental Behaviour Configuration (S0-22)
@@ -1818,6 +1823,8 @@ export type FirmAuditRecordType =
   | 'register_record'
   | 'registers_config'
   | 'email_outbox'
+  | 'teams_activity_outbox'
+  | 'notification_digest'
   | 'notification_preferences';
 
 export interface FirmAuditEntryRecord {
@@ -2002,4 +2009,94 @@ export interface UserNotificationPreference {
   readonly digestDayOfWeek: number;
   readonly updatedAt: string;
 }
+
+// ------------------------------------------------------------------ Teams Activity Feed & Digests (ADR 0035, S0-29)
+
+export interface TenantNotificationsConfig {
+  digestHourLocal?: number;
+}
+
+export type TeamsIntegrationProviderId = 'disabled' | 'dev_catcher' | 'graph';
+
+export interface TenantTeamsDevCatcherConfig {
+  endpointUrl: string;
+}
+
+export interface TenantTeamsGraphConfig {
+  tenantId: string;
+  clientId: string;
+  certificateVaultRef: string;
+  certificateThumbprint?: string;
+}
+
+export interface TenantTeamsIntegrationConfig {
+  provider: TeamsIntegrationProviderId;
+  teamsAppId?: string;
+  recipientAllowList?: string[];
+  recipientAllowListVaultRef?: string;
+  devCatcher?: TenantTeamsDevCatcherConfig;
+  graph?: TenantTeamsGraphConfig;
+}
+
+export interface OutgoingTeamsActivityTemplateParameter {
+  readonly name: string;
+  readonly value: string;
+}
+
+export interface OutgoingTeamsActivity {
+  readonly idempotencyKey: string;
+  readonly recipientPersonId: string;
+  readonly activityType: string;
+  readonly previewText: string;
+  readonly templateParameters: readonly OutgoingTeamsActivityTemplateParameter[];
+  readonly deepLinkPath: string;
+  readonly correlationId: string;
+}
+
+export type TeamsSendResult =
+  | { readonly outcome: 'sent'; readonly providerRequestId?: string }
+  | { readonly outcome: 'dropped_unbound' }
+  | { readonly outcome: 'dropped_not_allow_listed'; readonly reason: string };
+
+export interface TeamsNotifier {
+  readonly provider: TeamsIntegrationProviderId;
+  sendActivity(
+    ctx: TenantContext,
+    activity: OutgoingTeamsActivity,
+  ): Promise<TeamsSendResult>;
+}
+
+export type TeamsActivityOutboxStatus =
+  | 'pending'
+  | 'sending'
+  | 'sent'
+  | 'dropped_allowlist'
+  | 'dropped_unbound'
+  | 'failed_permanent';
+
+export interface TeamsActivityOutboxRecord {
+  readonly tenantId: string;
+  readonly id: string;
+  readonly idempotencyKey: string;
+  readonly recipientPersonId: string;
+  readonly entraObjectId: string | null;
+  readonly activityType: string;
+  readonly previewText: string | null;
+  readonly templateParameters: readonly OutgoingTeamsActivityTemplateParameter[];
+  readonly deepLinkPath: string;
+  readonly correlationId: string;
+  readonly status: TeamsActivityOutboxStatus;
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string;
+  readonly claimedAt: string | null;
+  readonly claimToken: string | null;
+  readonly sentAt: string | null;
+  readonly providerRequestId: string | null;
+  readonly lastErrorCode: string | null;
+  readonly contentScrubbedAt: string | null;
+  readonly createdByPersonId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 
