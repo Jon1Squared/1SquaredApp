@@ -8,6 +8,7 @@ import type {
   FeeArrangementCapEntry,
   FeeCapLevel,
   GradeRateResolution,
+  NotificationKind as CoreNotificationKind,
   RbacConfiguration,
   ResolvedRateSource,
   ResolvedRateTier,
@@ -308,7 +309,8 @@ export type JobOnlyPermissionKey =
   | 'keydate:run_reminders'
   | 'document_generation:purge_usage'
   | 'enquiry:run_retention_anonymise'
-  | 'register:run_reminders';
+  | 'register:run_reminders'
+  | 'notification:drain_outbox';
 
 export type PermissionKey =
   | EmployeePermission
@@ -1416,13 +1418,7 @@ export interface TaskSettings {
   templates: AutoTaskTemplateSetting[];
 }
 
-export type NotificationKind =
-  | 'task_assigned'
-  | 'team_task_arrived'
-  | 'task_comment'
-  | 'enquiry_assigned'
-  | 'task_overdue'
-  | 'register_reminder';
+export type NotificationKind = CoreNotificationKind;
 
 export interface NotificationItem {
   id: string; // NTF-000001

@@ -2563,6 +2563,81 @@ DROP INDEX IF EXISTS public.idx_document_links_tenant_document;
 `.trim(),
 };
 
+export const EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019: TenantMigrationDefinition =
+  {
+    version: '0019',
+    name: '0019_email_outbox_and_preferences_expand',
+    description:
+      'Creates tenant-scoped email_outbox queue table and sequence, plus user_notification_preferences table for transactional email delivery, outbox draining, and notification channel preferences (ADR 0027, ADR 0035, S0-26).',
+    tablesChanged: ['email_outbox', 'user_notification_preferences'],
+    dependsOn: ['0018'],
+    upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_email_outbox_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.email_outbox (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  template_key TEXT NOT NULL,
+  correlation_id TEXT NOT NULL,
+  recipients_json JSONB NOT NULL,
+  subject TEXT NULL,
+  html_body TEXT NULL,
+  text_body TEXT NULL,
+  attachments_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'sending', 'sent', 'dropped_allowlist', 'failed_permanent')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  claimed_at TIMESTAMPTZ NULL,
+  claim_token TEXT NULL,
+  sent_at TIMESTAMPTZ NULL,
+  provider_message_id TEXT NULL,
+  last_error_code TEXT NULL,
+  content_scrubbed_at TIMESTAMPTZ NULL,
+  created_by_person_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  UNIQUE (tenant_id, idempotency_key),
+  CHECK (
+    (content_scrubbed_at IS NOT NULL)
+    OR (subject IS NOT NULL AND html_body IS NOT NULL AND text_body IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_outbox_due
+  ON public.email_outbox (tenant_id, status, next_attempt_at)
+  WHERE status IN ('pending', 'sending');
+
+CREATE INDEX IF NOT EXISTS idx_email_outbox_scrub
+  ON public.email_outbox (tenant_id, updated_at)
+  WHERE content_scrubbed_at IS NULL
+    AND status IN ('sent', 'dropped_allowlist', 'failed_permanent');
+
+CREATE TABLE IF NOT EXISTS public.user_notification_preferences (
+  tenant_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  notification_kind TEXT NOT NULL,
+  in_app_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  email_frequency TEXT NOT NULL DEFAULT 'daily_digest'
+    CHECK (email_frequency IN ('immediate', 'daily_digest', 'weekly_digest', 'none')),
+  teams_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  digest_day_of_week SMALLINT NOT NULL DEFAULT 1
+    CHECK (digest_day_of_week BETWEEN 0 AND 6),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, person_id, notification_kind)
+);
+`.trim(),
+    downSql: `
+DROP TABLE IF EXISTS public.user_notification_preferences;
+DROP INDEX IF EXISTS public.idx_email_outbox_scrub;
+DROP INDEX IF EXISTS public.idx_email_outbox_due;
+DROP TABLE IF EXISTS public.email_outbox;
+DROP SEQUENCE IF EXISTS public.tenant_email_outbox_id_seq;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -2582,6 +2657,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   NEGOTIATED_RATES_MIGRATION_0016,
   REGISTERS_ENGINE_MIGRATION_0017,
   TENANT_SEARCH_INDEXES_MIGRATION_0018,
+  EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019,
 ];
 
 export function validateMigrationCatalogueOrder(

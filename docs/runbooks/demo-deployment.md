@@ -311,3 +311,9 @@ To remove all Azure resources in the demo resource group (whilst keeping your Mi
 ```powershell
 az group delete --name rg-onesquared-demo-uksouth --yes --no-wait
 ```
+
+## Outbound Email Certificate & Allow-List Readiness (`S0-26`)
+
+Owner prerequisites completed on **12–16 November 2026**: the `notifications@1squared.co.uk` shared mailbox, Entra app `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`), Exchange Online RBAC scoped strictly to that mailbox, SPF/DKIM/DMARC DNS records for `1squared.co.uk`, the `application/x-pem-file` Key Vault certificate `graph-mail-certificate` in `kvnotalawfi2cdo3cw7vuafm` (SHA-1 thumbprint `C5428D7F519AE513A5B8CE027D291876CEDA40D3`, `.cer` uploaded to Entra and prior version removed), and the `email-recipient-allowlist` secret in `kvnotalawfi2cdo3cw7vuafm`.
+
+`client-not-a-law-firm/config/environments/demo.json` keeps `integrations.email.provider = "disabled"` until Checkpoint 5c is deployed and live Graph delivery is verified. The 5-minute `caj-outbox-drain-demo` job runs harmlessly with no transport calls when disabled. Follow [`docs/runbooks/email-certificate-setup.md`](./email-certificate-setup.md) before switching `"provider"` to `"graph"`.

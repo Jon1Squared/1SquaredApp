@@ -30,6 +30,7 @@ import { guardedJob, type GuardedJobOptions } from '../src/server/authorize';
 import {
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledKeyDateRemindersJobSweep,
+  runScheduledOutboxDrainJobSweep,
   runScheduledRegisterRemindersJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
 } from '../src/server/services';
@@ -89,6 +90,13 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
         'Dispatch due and periodic review reminders for open firm register records and undertakings once per stage',
       mode: 'scheduled',
       schedule: '0 * * * *',
+    },
+    {
+      name: 'outbox-drain',
+      description:
+        'Drain due email outbox rows with exponential backoff and scrub expired terminal content past outboxContentRetentionDays',
+      mode: 'scheduled',
+      schedule: '*/5 * * * *',
     },
   ]);
 
@@ -534,6 +542,19 @@ export async function executeCliJobRunner(
     writeOut(
       `${JSON.stringify({
         event: 'job.register-reminders.completed',
+        succeededCount: summary.succeededTenants.length,
+        skippedCount: summary.skippedTenants.length,
+        failedCount: summary.failedTenants.length,
+      })}\n`,
+    );
+    return summary.exitCode;
+  }
+
+  if (jobName === 'outbox-drain') {
+    const summary = await runScheduledOutboxDrainJobSweep();
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.outbox-drain.completed',
         succeededCount: summary.succeededTenants.length,
         skippedCount: summary.skippedTenants.length,
         failedCount: summary.failedTenants.length,

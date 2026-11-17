@@ -1079,7 +1079,7 @@ describe('S0-28b: CFA & DBA Fee Arrangements, Core Statutory Caps & Work-Type Ov
     const migrationRunner = new TenantMigrationRunner();
     await migrationRunner.applyUp(ctxAlpha);
     await migrationRunner.applyUp(ctxBravo);
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0018');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0019');
 
     const alphaRaw = {
       ...getActiveTenantRawBaseConfig(),

@@ -78,7 +78,8 @@ export type JobOnlyPermissionKey =
   | 'keydate:run_reminders'
   | 'document_generation:purge_usage'
   | 'enquiry:run_retention_anonymise'
-  | 'register:run_reminders';
+  | 'register:run_reminders'
+  | 'notification:drain_outbox';
 
 export type PermissionKey =
   | EmployeePermission
@@ -136,7 +137,8 @@ export type PermissionDomain =
   | 'register'
   | 'contact'
   | 'admin'
-  | 'rbac';
+  | 'rbac'
+  | 'notification';
 
 export type PermissionSensitivity =
   | 'standard'
@@ -872,6 +874,7 @@ export interface TenantConfiguration {
     companiesHouseApiKeyVaultRef: string;
     aiProviderChoice: 'azure_openai_uk' | 'anthropic' | 'disabled';
     pmsSync?: PmsIntegrationSyncConfig;
+    email?: TenantEmailIntegrationConfig;
   };
   customFields: CustomFieldConfigEntry[];
   enabledExtensions: string[];
@@ -1813,7 +1816,9 @@ export type FirmAuditRecordType =
   | 'employee_sensitive'
   | 'key_date'
   | 'register_record'
-  | 'registers_config';
+  | 'registers_config'
+  | 'email_outbox'
+  | 'notification_preferences';
 
 export interface FirmAuditEntryRecord {
   id: string;
@@ -1851,4 +1856,150 @@ export interface FirmAuditPageResult {
 
 export * from '../domain/money/index';
 export * from '../domain/costs/index';
+
+// ------------------------------------------------------------------ Transactional Email & Notification Preferences (ADR 0027, ADR 0035, S0-26)
+
+export type EmailProviderId = 'disabled' | 'dev_catcher' | 'graph' | 'acs';
+
+export interface TenantEmailGraphConfig {
+  tenantId: string;
+  clientId: string;
+  certificateVaultRef: string;
+  certificateThumbprint: string;
+}
+
+export interface TenantEmailAcsConfig {
+  connectionVaultRef: string;
+}
+
+export interface TenantEmailDevCatcherConfig {
+  host: string;
+  port: number;
+  secure?: boolean;
+}
+
+export interface TenantEmailIntegrationConfig {
+  provider: EmailProviderId;
+  senderAddress?: string;
+  replyTo?: string;
+  outboxContentRetentionDays?: number;
+  recipientAllowList?: string[];
+  recipientAllowListVaultRef?: string;
+  graph?: TenantEmailGraphConfig;
+  acs?: TenantEmailAcsConfig;
+  devCatcher?: TenantEmailDevCatcherConfig;
+}
+
+export interface EmailAttachmentRef {
+  readonly blobKey: string;
+  readonly externalId?: string;
+  readonly fileName: string;
+  readonly contentType: string;
+}
+
+export interface EmailRecipientList {
+  readonly to: readonly string[];
+  readonly cc?: readonly string[];
+  readonly bcc?: readonly string[];
+}
+
+export interface OutgoingEmail {
+  readonly idempotencyKey?: string;
+  readonly templateKey: string;
+  readonly recipients: EmailRecipientList;
+  readonly from?: string;
+  readonly replyTo?: string;
+  readonly subject: string;
+  readonly htmlBody: string;
+  readonly textBody: string;
+  readonly attachments?: readonly EmailAttachmentRef[];
+  readonly createdByPersonId?: string | null;
+}
+
+export type EmailSendStatus = 'sent' | 'dropped_allowlist' | 'disabled';
+
+export interface EmailSendResult {
+  readonly status: EmailSendStatus;
+  readonly provider: EmailProviderId;
+  readonly providerMessageId?: string | null;
+  readonly blockedRecipients?: readonly string[];
+  readonly errorCode?: string | null;
+}
+
+export interface EmailAllowListEvaluation {
+  readonly enforced: boolean;
+  readonly allowed: boolean;
+  readonly allowedRecipients: readonly string[];
+  readonly blockedRecipients: readonly string[];
+  readonly reason?: string;
+}
+
+export interface EmailSender {
+  readonly provider: EmailProviderId;
+  send(ctx: TenantContext, message: OutgoingEmail): Promise<EmailSendResult>;
+}
+
+export type EmailOutboxStatus =
+  | 'pending'
+  | 'sending'
+  | 'sent'
+  | 'dropped_allowlist'
+  | 'failed_permanent';
+
+export interface EmailOutboxRecord {
+  readonly tenantId: string;
+  readonly id: string;
+  readonly idempotencyKey: string;
+  readonly templateKey: string;
+  readonly correlationId: string;
+  readonly recipients: EmailRecipientList;
+  readonly subject: string | null;
+  readonly htmlBody: string | null;
+  readonly textBody: string | null;
+  readonly attachments: readonly EmailAttachmentRef[];
+  readonly status: EmailOutboxStatus;
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string;
+  readonly claimedAt: string | null;
+  readonly claimToken: string | null;
+  readonly sentAt: string | null;
+  readonly providerMessageId: string | null;
+  readonly lastErrorCode: string | null;
+  readonly contentScrubbedAt: string | null;
+  readonly createdByPersonId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export type NotificationKind =
+  | 'task_assigned'
+  | 'team_task_arrived'
+  | 'task_comment'
+  | 'enquiry_assigned'
+  | 'task_due_soon'
+  | 'task_overdue'
+  | 'approval_requested'
+  | 'approval_decided'
+  | 'key_date_approaching'
+  | 'credit_control_escalation'
+  | 'register_review_assigned'
+  | 'register_reminder'
+  | 'general';
+
+export type NotificationChannelFrequency =
+  | 'immediate'
+  | 'daily_digest'
+  | 'weekly_digest'
+  | 'none';
+
+export interface UserNotificationPreference {
+  readonly tenantId: string;
+  readonly personId: string;
+  readonly notificationKind: NotificationKind;
+  readonly inAppEnabled: boolean;
+  readonly emailFrequency: NotificationChannelFrequency;
+  readonly teamsEnabled: boolean;
+  readonly digestDayOfWeek: number;
+  readonly updatedAt: string;
+}
 

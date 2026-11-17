@@ -745,6 +745,17 @@ export const PERMISSION_REGISTRY: Readonly<
     jobOnly: true,
     sinceVersion: '1.1.0',
   },
+  'notification:drain_outbox': {
+    key: 'notification:drain_outbox',
+    domain: 'notification',
+    module: 'notifications',
+    description:
+      'Execute the scheduled outbox-drain job across provisioned tenants to deliver queued notifications and scrub expired content (ADR 0027 / ADR 0035; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(

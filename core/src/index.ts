@@ -12,4 +12,5 @@ export * from './domain/document-generation/index';
 export * from './domain/documents/index';
 export * from './domain/registers/index';
 export * from './integrations/document-stores/index';
+export * from './integrations/email/index';
 export * from './observability/telemetry';

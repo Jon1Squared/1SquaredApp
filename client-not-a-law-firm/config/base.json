@@ -99,6 +99,15 @@
     "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-dev/pms-connection-string",
     "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-dev/companies-house-api-key",
     "aiProviderChoice": "anthropic",
+    "email": {
+      "provider": "disabled",
+      "senderAddress": "noreply@notalawfirm.example",
+      "replyTo": "enquiries@notalawfirm.example",
+      "outboxContentRetentionDays": 30,
+      "recipientAllowList": [
+        "@notalawfirm.example"
+      ]
+    },
     "pmsSync": {
       "enabled": true,
       "providerKey": "generic_sql",

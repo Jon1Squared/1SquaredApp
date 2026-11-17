@@ -316,6 +316,120 @@
           "default": "disabled",
           "description": "AI provider for tenant AI features ('anthropic' or 'disabled' active today; 'azure_openai_uk' reserved in the enum for a future UK Azure OpenAI adapter)"
         },
+        "email": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider"],
+          "description": "Tenant outbound transactional email provider, non-live recipient allow-listing, Graph/ACS settings, and outbox retention configuration (ADR 0027, S0-26)",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": ["disabled", "dev_catcher", "graph", "acs"],
+              "default": "disabled",
+              "description": "Email transport provider: 'disabled' (default safe no-op), 'dev_catcher' (local SMTP catcher in non-live), 'graph' (Microsoft Graph client certificate), or 'acs' (fail-closed placeholder until Stage 1)"
+            },
+            "senderAddress": {
+              "type": "string",
+              "minLength": 3,
+              "description": "From mailbox address (and Microsoft Graph target user mailbox for /users/{mailbox}/sendMail)"
+            },
+            "replyTo": {
+              "type": "string",
+              "minLength": 3,
+              "description": "Optional Reply-To mailbox address included on outbound emails"
+            },
+            "outboxContentRetentionDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 30,
+              "description": "Number of days after terminal delivery/failure/drop before email_outbox subject and bodies are scrubbed (default 30 days)"
+            },
+            "recipientAllowList": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "default": [],
+              "description": "Non-live recipient domain suffixes (e.g. '@notalawfirm.example') and permitted synthetic addresses; empty allow-list fails closed in non-live environments"
+            },
+            "recipientAllowListVaultRef": {
+              "type": "string",
+              "pattern": "^kv://[a-zA-Z0-9-]+/[a-zA-Z0-9-]+$",
+              "description": "Optional tenant Key Vault secret reference containing non-live permitted test recipient addresses so personal emails never live in git"
+            },
+            "graph": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tenantId",
+                "clientId",
+                "certificateVaultRef",
+                "certificateThumbprint"
+              ],
+              "description": "Microsoft Graph application-only certificate settings for outbound mail",
+              "properties": {
+                "tenantId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Microsoft Entra directory (tenant) ID for Graph client-credentials token acquisition"
+                },
+                "clientId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Microsoft Entra application (client) ID scoped via Exchange Online RBAC to the sender mailbox"
+                },
+                "certificateVaultRef": {
+                  "type": "string",
+                  "pattern": "^kv://[a-zA-Z0-9-]+/[a-zA-Z0-9-]+$",
+                  "description": "Tenant Key Vault secret reference holding the PFX/PEM client certificate and private key"
+                },
+                "certificateThumbprint": {
+                  "type": "string",
+                  "pattern": "^[A-Fa-f0-9]{40}$",
+                  "description": "SHA-1 hexadecimal thumbprint verified against the Key Vault certificate and emitted as x5t in RS256 client assertions"
+                }
+              }
+            },
+            "acs": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["connectionVaultRef"],
+              "description": "Azure Communication Services email settings (fail-closed placeholder until Stage 1 hosted ACS rollout)",
+              "properties": {
+                "connectionVaultRef": {
+                  "type": "string",
+                  "pattern": "^kv://[a-zA-Z0-9-]+/[a-zA-Z0-9-]+$",
+                  "description": "Tenant Key Vault secret reference for Azure Communication Services connection configuration"
+                }
+              }
+            },
+            "devCatcher": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["host", "port"],
+              "description": "Local SMTP/Mailpit catcher host and port used in dev and test environments",
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1,
+                  "default": "127.0.0.1",
+                  "description": "SMTP catcher hostname"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "default": 1025,
+                  "description": "SMTP catcher TCP port"
+                },
+                "secure": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether the local SMTP catcher uses implicit TLS"
+                }
+              }
+            }
+          }
+        },
         "pmsSync": {
           "type": "object",
           "additionalProperties": false,

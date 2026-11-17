@@ -4,7 +4,7 @@
 |---|---|
 | Slice | `S0-26` |
 | Stage / Work package | Stage 0C — Make it shared (`WP5c`) |
-| Status | Planned (awaiting build after `WP5b`; resized `M -> L` per owner approval 15 Nov 2026) |
+| Status | Implemented (awaiting Key Vault cert import blocker before live demo Graph switch; resized `M -> L` per owner approval 15 Nov 2026) |
 | Branch | `s0-26-email-and-notifications` (target `develop`) |
 | Depends on | `S0-19` (on `develop`; stacked on `0018` in `WP5c` -> adds `0019`) |
 | Size | `L` (resized from `M` per owner approval 15 Nov 2026) |
@@ -47,7 +47,7 @@ Deliver the shared transactional email pipeline and user notification preference
 
 Bump `CORE_REQUIRED_SCHEMA_VERSION` from `'0018'` to `'0019'` and add `0019_email_outbox_and_preferences_expand` (reversible expand migration):
 
-- **`public.email_outbox`**: `id`, `tenant_id`, `idempotency_key UNIQUE`, `status` (`'pending' | 'sending' | 'sent' | 'dead_letter' | 'dropped_not_allow_listed'`), `attempts`, `next_attempt_at`, `to_addresses_jsonb`, `subject`, `template_key`, `body_text`, `body_html`, `attachment_blob_keys_jsonb`, `correlation_id`, `sent_at`, `body_redacted_at`, timestamps.
+- **`public.email_outbox`** (`ADR 0027 §6.1` canonical schema): `(tenant_id, id)` PK (via `tenant_email_outbox_id_seq`), `idempotency_key` (`UNIQUE (tenant_id, idempotency_key)`), `template_key`, `correlation_id`, `recipients_json JSONB`, `subject`, `html_body`, `text_body`, `attachments_json JSONB`, `status` (`'pending' | 'sending' | 'sent' | 'dropped_allowlist' | 'failed_permanent'`), `attempt_count`, `next_attempt_at`, `claimed_at`, `claim_token`, `sent_at`, `provider_message_id`, `last_error_code`, `content_scrubbed_at` (`CHECK ((content_scrubbed_at IS NOT NULL) OR (subject IS NOT NULL AND html_body IS NOT NULL AND text_body IS NOT NULL))`), `created_by_person_id`, `created_at`, `updated_at`.
 - **`public.user_notification_preferences`**: `(tenant_id, person_id, notification_kind)` primary key with `in_app_enabled BOOLEAN DEFAULT TRUE`, `email_frequency TEXT DEFAULT 'daily_digest'`, `teams_enabled BOOLEAN DEFAULT FALSE`, `digest_day_of_week SMALLINT DEFAULT 1`, `updated_at TIMESTAMPTZ`.
 
 ### 4.2 `EmailSender` interface, `GraphAppTokenProvider` & four adapters
@@ -67,10 +67,10 @@ Add additive, backwards-compatible `integrations.email` schema entries in `core/
 
 ### 4.4 Core non-live allow-list pipeline & `outbox-drain` job (`ADR 0030` variant)
 
-- Enforce non-live (`environment !== 'live'`) allow-listing in the shared pipeline **before invoking any adapter** (`dev_catcher`, `graph`, `acs`, `disabled`): recipients matching `recipientAllowList` or `recipientAllowListVaultRef` pass; any disallowed recipient is blocked/dropped cleanly (`dropped_not_allow_listed`), audited without body/PII leakage in logs (`tenantId` + `correlationId` only).
+- Enforce non-live (`environment !== 'live'`) allow-listing in the shared pipeline **before invoking any adapter** (`dev_catcher`, `graph`, `acs`): recipients matching `recipientAllowList` or `recipientAllowListVaultRef` pass; any disallowed recipient is blocked/dropped cleanly (`dropped_allowlist`), audited without body/PII leakage in logs (`tenantId` + `correlationId` only).
 - Wire transactional enqueue on immediate email-enabled notifications + scheduled **`outbox-drain`** job:
-  - Registered under `guardedJob('outbox-drain', ...)` with `jobOnly: true` permission **`'email:drain_outbox'`** (`JOB_PERMISSIONS` in `src/server/actionPermissions.ts`, `MAX_KNOWN_GAPS = 0`, `REGISTERED_CLI_JOBS` in `scripts/run-job.ts`).
-  - Documented `ADR 0030` variant rationale: unlike daily calendar jobs (`key-date-reminders`), `outbox-drain` runs frequently (`*/5` or scheduled interval via Bicep **`caj-outbox-drain-<env>`**) with `pg_try_advisory_xact_lock`, per-row status claiming (`pending` -> `sending` -> `sent` / backoff retry / `dead_letter`), `public.job_runs` run telemetry, and content redaction (`body_redacted_at` nullifying `body_text` / `body_html`) once `sent_at` exceeds `outboxContentRetentionDays` (`default: 30`).
+  - Registered under `guardedJob('outbox-drain', ...)` with `jobOnly: true` permission **`'notification:drain_outbox'`** (`JOB_PERMISSIONS` in `src/server/actionPermissions.ts`, `MAX_KNOWN_GAPS = 0`, `REGISTERED_CLI_JOBS` in `scripts/run-job.ts`, ADR 0027 §6.4 & ADR 0035 §3.4).
+  - Documented `ADR 0030` variant rationale: unlike daily calendar jobs (`key-date-reminders`), `outbox-drain` runs frequently (`*/5 * * * *` via Bicep **`caj-outbox-drain-<env>`**) with `FOR UPDATE SKIP LOCKED` row claiming (`pending` -> `sending` -> `sent` / exponential backoff retry / `failed_permanent` at 5 attempts + `outbox.delivery.failed_permanent` Log Analytics alert), per-tenant `pg_try_advisory_xact_lock` content scrubbing (`content_scrubbed_at` nullifying `subject`, `html_body`, `text_body`, `attachments_json`, and clearing recipient emails once past `outboxContentRetentionDays`, `default: 30`), and zero-PII telemetry.
 - Update `core/tests/infra-bicep-contract.test.ts:327-336` for `caj-outbox-drain-<env>`.
 
 ### 4.5 Out of Scope
@@ -91,9 +91,9 @@ Add additive, backwards-compatible `integrations.email` schema entries in `core/
 
 - Certificate Key Vault references validated via `assertTenantOwnsKeyVaultSecretRef` before token acquisition; PFX/private key material never written to disk or logs.
 - `DocumentStorageProvider.getObjectBytes` rejects cross-tenant blob keys (`assertBlobKeyBelongsToTenant`).
-- `outbox-drain` runs under `guardedJob` with `jobOnly: true` `'email:drain_outbox'`.
+- `outbox-drain` runs under `guardedJob` with `jobOnly: true` `'notification:drain_outbox'` (`actorId: 'system:outbox-drain'`).
 - Logs emit only `tenantId`, `correlationId`, outbox ID, adapter status and error codes — never email subjects, bodies or recipient addresses (`Architecture Standard section 8`).
-- Admin config saves for `integrations.email` require admin permission + `mfaVerified === true`.
+- Outbound `integrations.email` configuration comes exclusively from validated tenant configuration (`base.json` / environment overlays checked by `assertTenantOwnsKeyVaultSecretRef`).
 
 ---
 
@@ -103,7 +103,7 @@ Add additive, backwards-compatible `integrations.email` schema entries in `core/
 2. **All-adapter non-live allow-list tests:** Test **`dev_catcher`**, **`graph`** and **`acs`** (plus `disabled`) under non-live mode against allowed (`@domain` / Key Vault allow-list ref) and disallowed recipients — prove no external transport call is ever made for disallowed addresses on any adapter!
 3. **`acs` fail-closed placeholder test:** Selecting `provider: 'acs'` returns explicit `'EMAIL_PROVIDER_NOT_IMPLEMENTED'` error rather than succeeding silently.
 4. **Attachment isolation test:** `DocumentStorageProvider.getObjectBytes` throws on cross-tenant blob keys before reading storage.
-5. **`outbox-drain` & retention tests:** Retry exponential backoff -> `dead_letter` after max attempts, `idempotency_key` deduplication, `outboxContentRetentionDays` (`30` days default) content redaction sets `body_redacted_at` and clears body columns, and `JOB_PERMISSIONS` / `REGISTERED_CLI_JOBS` / `infra-bicep-contract.test.ts` pass.
+5. **`outbox-drain` & retention tests:** Retry exponential backoff -> `failed_permanent` after max attempts (emitting `outbox.delivery.failed_permanent`), `idempotency_key` deduplication, 5-minute stale `'sending'` reclamation, `outboxContentRetentionDays` (`30` days default) content scrubbing sets `content_scrubbed_at` and clears body/subject/attachments/recipients, and `JOB_PERMISSIONS` / `REGISTERED_CLI_JOBS` / `infra-bicep-contract.test.ts` pass.
 6. **Two-tenant isolation tests (`P8`):** Tampered `outboxId` / `personId` and forged `tenantId` claims cannot drain, read or mutate another tenant's outbox rows, token cache or notification preferences; `node scripts/verify-invented-fixtures.mjs` passes.
 
 ---
@@ -123,23 +123,21 @@ Add additive, backwards-compatible `integrations.email` schema entries in `core/
 
 ## 9. Manual Setup / External Blockers
 
-Live Graph delivery in the demo/pilot environment depends on Section 8 manual tasks documented in `docs/runbooks/email-certificate-setup.md` (automated CI tests pass against mocked Graph & Mailpit `dev_catcher` without them):
-- Provision shared sender mailbox (`noreply@1Squared.co.uk`) and Exchange Online RBAC for Applications scoping app access solely to that mailbox.
-- Create/import PFX client certificate into tenant Azure Key Vault and register public key on the Graph mail Entra app.
-- Populate `recipientAllowListVaultRef` secret in Key Vault with permitted tester addresses.
-- Configure SPF / DKIM DNS records for sender domain.
+Live Graph delivery in the demo/pilot environment depends on Section 8 manual tasks documented in `docs/runbooks/email-certificate-setup.md` (automated CI tests pass against mocked Graph & TCP SMTP `dev_catcher` without them):
+- **Done (12–16 November 2026):** Shared sender mailbox (`notifications@1squared.co.uk`) provisioned; Microsoft Entra app (`fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1`, directory `f8218d9a-e055-463f-add2-f03679aad7f2`) registered and scoped solely to that mailbox via Exchange Online RBAC for Applications; SPF/DKIM/DMARC DNS records configured for `1squared.co.uk`; PEM certificate `graph-mail-certificate` (`secretProperties.contentType = "application/x-pem-file"`, thumbprint `C5428D7F519AE513A5B8CE027D291876CEDA40D3`) created in `kvnotalawfi2cdo3cw7vuafm` with its `.cer` uploaded to Entra (retired certificate removed) and `email-recipient-allowlist` created in `kvnotalawfi2cdo3cw7vuafm`.
+- **Remaining activation step:** After Checkpoint 5c deploys to Azure, run the live Graph verification check and switch `demo.json` `integrations.email.provider` from `"disabled"` to `"graph"`.
 
 ---
 
 ## 10. Acceptance Criteria
 
-- [ ] Migration `0019_email_outbox_and_preferences_expand` creates `public.email_outbox` and `public.user_notification_preferences`; `CORE_REQUIRED_SCHEMA_VERSION === '0019'`.
-- [ ] `EmailSender` supports `dev_catcher`, `graph` (`GraphAppTokenProvider` RS256 + encrypted cache), fail-closed `acs` placeholder and `disabled`.
-- [ ] `DocumentStorageProvider.getObjectBytes` checks `assertBlobKeyBelongsToTenant`.
-- [ ] Non-live allow-list (`recipientAllowList` + `recipientAllowListVaultRef`) blocks disallowed recipients across every adapter (`dev_catcher`, `graph`, `acs`).
-- [ ] `outbox-drain` runs under `guardedJob` with `'email:drain_outbox'`, Bicep job `caj-outbox-drain-<env>` and `outboxContentRetentionDays` redaction (`default: 30`).
-- [ ] Two-tenant isolation tests, fixture verification (`verify-invented-fixtures.mjs`) and `npm run ci` pass.
-- [ ] Help articles, `email-certificate-setup.md` runbook, `docs/release-notes.md` and `docs/roadmap/feature-list.md` (`32` kept `Partly built`) are updated in the same PR.
+- [x] Migration `0019_email_outbox_and_preferences_expand` creates `public.email_outbox` and `public.user_notification_preferences`; `CORE_REQUIRED_SCHEMA_VERSION === '0019'`.
+- [x] `EmailSender` supports `dev_catcher`, `graph` (`GraphAppTokenProvider` RS256 + AES-256-GCM 300s-skew access-token cache), fail-closed `acs` placeholder (`EMAIL_PROVIDER_NOT_IMPLEMENTED`), and `disabled`.
+- [x] `DocumentStorageProvider.getObjectBytes` checks `assertBlobKeyBelongsToTenant`.
+- [x] Non-live allow-list (`recipientAllowList` + `recipientAllowListVaultRef`) blocks disallowed recipients across every active adapter (`dev_catcher`, `graph`, `acs`).
+- [x] `outbox-drain` runs under `guardedJob` with `'notification:drain_outbox'`, Bicep job `caj-outbox-drain-<env>`, `outbox.delivery.failed_permanent` alert query, and `outboxContentRetentionDays` content scrubbing (`default: 30`).
+- [x] Two-tenant isolation tests, fixture verification (`verify-invented-fixtures.mjs`), and `core/tests/email-notifications-s026.test.ts` pass.
+- [x] Help articles, `docs/runbooks/email-certificate-setup.md`, `docs/release-notes.md`, and `docs/roadmap/feature-list.md` (`32` kept `Partly built`) updated in the same PR.
 
 ---
 

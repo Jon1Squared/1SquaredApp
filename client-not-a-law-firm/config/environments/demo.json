@@ -4,10 +4,28 @@
   "featureFlags": {
     "enableDemoMode": true
   },
+  "keyVault": {
+    "vaultName": "kvnotalawfi2cdo3cw7vuafm",
+    "vaultUri": "https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/"
+  },
   "integrations": {
-    "pmsConnectionSecretVaultRef": "kv://kv-notalawfirm-demo/pms-connection-string",
-    "companiesHouseApiKeyVaultRef": "kv://kv-notalawfirm-demo/companies-house-api-key",
-    "aiProviderChoice": "anthropic"
+    "pmsConnectionSecretVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/pms-connection-string",
+    "companiesHouseApiKeyVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/companies-house-api-key",
+    "aiProviderChoice": "anthropic",
+    "email": {
+      "provider": "disabled",
+      "recipientAllowList": [
+        "@1squared.co.uk",
+        "@notalawfirm.example"
+      ],
+      "recipientAllowListVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist",
+      "graph": {
+        "tenantId": "f8218d9a-e055-463f-add2-f03679aad7f2",
+        "clientId": "fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1",
+        "certificateVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/graph-mail-certificate",
+        "certificateThumbprint": "C5428D7F519AE513A5B8CE027D291876CEDA40D3"
+      }
+    }
   },
   "documentStores": [
     {
@@ -20,7 +38,7 @@
         "entraTenantId": "11111111-2222-3333-4444-555555555555",
         "credentialMode": "client_certificate",
         "clientId": "22222222-3333-4444-5555-666666666666",
-        "certificateKeyVaultSecretRef": "kv://kv-notalawfirm-demo/sp-provisioning-cert",
+        "certificateKeyVaultSecretRef": "kv://kvnotalawfi2cdo3cw7vuafm/sp-provisioning-cert",
         "delegatedPermissionScope": "Sites.Selected"
       },
       "sharepoint": {

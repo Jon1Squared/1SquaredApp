@@ -19,6 +19,7 @@ import {
   TenantIntakeQuoteRepository,
   TenantKeyDateRepository,
   TenantMatterRepository,
+  TenantOutboxRepository,
   TenantPartyRepository,
   TenantPmsRepository,
   TenantRateOverrideRepository,
@@ -236,6 +237,8 @@ export async function clearMigratedPostgresModulesForTenant(options: {
   if (modules.includes('tasks')) {
     const taskRepo = new TenantTaskWorkflowRepository();
     await taskRepo.clearTenantData(ctx);
+    const outboxRepo = new TenantOutboxRepository();
+    await outboxRepo.clearTenantData(ctx);
   }
   if (modules.includes('intake') || modules.includes('quotes')) {
     const intakeQuoteRepo = new TenantIntakeQuoteRepository();

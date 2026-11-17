@@ -62,6 +62,15 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | Setting | Default | Status | Notes |
 |---|---|---|---|
 | \`integrations.aiProviderChoice\` | \`"disabled"\` | Active | \`"anthropic"\`, \`"azure_openai_uk"\`, or \`"disabled"\` (ADR-0031) |
+| \`integrations.email.provider\` | \`"disabled"\` | Active | Outbound transactional email provider: \`"disabled"\` (default safe no-op), \`"dev_catcher"\` (non-live SMTP catcher), \`"graph"\` (Microsoft Graph app-only certificate), or \`"acs"\` (fail-closed placeholder returning \`EMAIL_PROVIDER_NOT_IMPLEMENTED\` until Stage 1) |
+| \`integrations.email.senderAddress\` | Optional | Active | Shared mailbox From address (and target Graph \`/users/{mailbox}/sendMail\` mailbox) |
+| \`integrations.email.replyTo\` | Optional | Active | Optional Reply-To mailbox address set on outbound messages |
+| \`integrations.email.outboxContentRetentionDays\` | \`30\` | Active | Days after terminal send/drop/failure before \`email_outbox\` subjects, bodies, attachments, and recipient addresses are scrubbed |
+| \`integrations.email.recipientAllowList\` | \`[]\` | Active | Non-live recipient domain suffixes and permitted synthetic addresses; empty allow-list fails closed outside \`live\` |
+| \`integrations.email.recipientAllowListVaultRef\` | Optional | Active | Tenant Key Vault secret ref (\`kv://...\`) storing non-live permitted tester emails without committing PII to git |
+| \`integrations.email.graph.*\` | Optional | Active | Microsoft Graph certificate settings (\`tenantId\`, \`clientId\`, \`certificateVaultRef\`, 40-hex SHA-1 \`certificateThumbprint\`) |
+| \`integrations.email.acs.connectionVaultRef\` | Optional | Active | Tenant Key Vault secret ref reserved for the Stage 1 Azure Communication Services adapter |
+| \`integrations.email.devCatcher.*\` | Optional | Active | Local SMTP catcher settings (\`host\`, \`port\`, \`secure\`) for \`dev\` and \`test\` environments (forbidden in \`live\`) |
 | \`integrations.pmsConnectionSecretVaultRef\` | Required | Reserved (backlog) | Key Vault reference reserved for post-Stage-0 live tenant-scoped PMS database connection secret resolution |
 | \`integrations.companiesHouseApiKeyVaultRef\` | Required | Reserved (backlog, F17) | Key Vault reference reserved for post-Stage-0 live Companies House API integration (\`F17\`) |
 | \`integrations.pmsSync.enabled\` | \`true\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS synchronisation |
