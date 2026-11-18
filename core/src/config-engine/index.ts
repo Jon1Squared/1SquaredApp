@@ -11,20 +11,21 @@ import { z } from 'zod';
 import keyDatesJsonSchema from '../../schemas/keyDates.config.schema.json';
 import registersJsonSchema from '../../schemas/registers.config.schema.json';
 import tenantConfigJsonSchema from '../../schemas/tenant-config.schema.json';
-import type {
-  DocumentGenerationConfig,
-  DocumentPermission,
-  DocumentStoreConfig,
-  ExtensionManifest,
-  HomeRoleKey,
-  HostingMode,
-  KeyDatesConfiguration,
-  MatterFolderTemplateNode,
-  PermissionKey,
-  PlatformEnvironment,
-  RbacConfiguration,
-  RegistersConfiguration,
-  TenantConfiguration,
+import {
+  ALL_DOCUMENT_PERMISSION_KEYS,
+  type DocumentGenerationConfig,
+  type DocumentPermission,
+  type DocumentStoreConfig,
+  type ExtensionManifest,
+  type HomeRoleKey,
+  type HostingMode,
+  type KeyDatesConfiguration,
+  type MatterFolderTemplateNode,
+  type PermissionKey,
+  type PlatformEnvironment,
+  type RbacConfiguration,
+  type RegistersConfiguration,
+  type TenantConfiguration,
 } from '../api/index';
 import {
   findUnknownPathTokens,
@@ -101,6 +102,52 @@ export const DEFAULT_DOCUMENT_PERMISSION_ROLES: Record<
   'finance:view': ['finance', 'partner', 'managing_partner', 'admin'],
 };
 
+const DOCUMENT_ROLE_DEFAULT_DESCRIPTIONS: Record<DocumentPermission, string> = {
+  'document_template:view':
+    'Deprecated: use rbac.roles instead. Roles permitted to view document templates.',
+  'document_template:build':
+    'Roles permitted to upload templates, map fields, preview, submit for approval, and import/export template packages',
+  'document_template:approve':
+    'Roles permitted to approve, reject, retire, and roll back template versions',
+  'document_template:view_usage':
+    'Roles permitted to view template usage reports at template, practice area, and team level',
+  'document_template:view_usage_by_user':
+    'Roles permitted to view template usage broken down by named user (when showUserLevelDetail is also enabled)',
+  'document_template:configure':
+    'Roles permitted to configure document generation settings',
+  'document:generate':
+    'Roles permitted to generate documents from active templates they have access to',
+  'document:view':
+    'Roles permitted to view generated documents on accessible records',
+  'document:download':
+    'Roles permitted to download generated and stored documents on accessible records',
+  'document:upload':
+    'Roles permitted to upload documents into tenant matter document stores',
+  'document:edit':
+    'Roles permitted to edit or check out documents stored on accessible records',
+  'document:delete': 'Roles permitted to delete generated documents',
+  'document:provision':
+    'Roles permitted to provision or repair SharePoint matter folder structures',
+  'document_store:configure':
+    'Roles permitted to configure external document store connections and routing rules',
+  'document_access:review':
+    'Roles permitted to review document store permission reconciliation findings',
+  'finance:view':
+    'Roles permitted to read Financial-group merge fields in templates and generated documents',
+};
+
+function createDefaultDocumentRoleDefaults(): Record<
+  DocumentPermission,
+  HomeRoleKey[]
+> {
+  return Object.fromEntries(
+    ALL_DOCUMENT_PERMISSION_KEYS.map((permissionKey) => [
+      permissionKey,
+      [...DEFAULT_DOCUMENT_PERMISSION_ROLES[permissionKey]],
+    ]),
+  ) as Record<DocumentPermission, HomeRoleKey[]>;
+}
+
 export const DEFAULT_DOCUMENT_GENERATION_CONFIG: DocumentGenerationConfig = {
   enabled: true,
   maxTemplateSizeMb: 10,
@@ -117,33 +164,7 @@ export const DEFAULT_DOCUMENT_GENERATION_CONFIG: DocumentGenerationConfig = {
     showUserLevelDetail: true,
   },
   permissions: {
-    roleDefaults: {
-      'document_template:view': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:view'],
-      ],
-      'document_template:build': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:build'],
-      ],
-      'document_template:approve': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:approve'],
-      ],
-      'document_template:view_usage': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:view_usage'],
-      ],
-      'document_template:view_usage_by_user': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES[
-          'document_template:view_usage_by_user'
-        ],
-      ],
-      'document:generate': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document:generate'],
-      ],
-      'document:view': [...DEFAULT_DOCUMENT_PERMISSION_ROLES['document:view']],
-      'document:delete': [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document:delete'],
-      ],
-      'finance:view': [...DEFAULT_DOCUMENT_PERMISSION_ROLES['finance:view']],
-    },
+    roleDefaults: createDefaultDocumentRoleDefaults(),
   },
   customDocumentTypes: [],
 };
@@ -520,75 +541,21 @@ export const PermissionKeySchema = z.enum(
   ALL_PERMISSION_KEYS as unknown as [PermissionKey, ...PermissionKey[]],
 );
 
-const DocumentRoleDefaultsSchema = z
-  .object({
-    'document_template:view': z
+const documentRoleDefaultsShape = Object.fromEntries(
+  ALL_DOCUMENT_PERMISSION_KEYS.map((permissionKey) => [
+    permissionKey,
+    z
       .array(HomeRoleKeySchema)
-      .default(() => [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:view'],
-      ])
-      .describe(
-        'Deprecated: use rbac.roles instead. Roles permitted to view document templates.',
-      ),
-    'document_template:build': z
-      .array(HomeRoleKeySchema)
-      .default(() => [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:build'],
-      ])
-      .describe(
-        'Roles permitted to upload templates, map fields, preview, submit for approval, and import/export template packages',
-      ),
-    'document_template:approve': z
-      .array(HomeRoleKeySchema)
-      .default(() => [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:approve'],
-      ])
-      .describe(
-        'Roles permitted to approve, reject, retire, and roll back template versions',
-      ),
-    'document_template:view_usage': z
-      .array(HomeRoleKeySchema)
-      .default(() => [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document_template:view_usage'],
-      ])
-      .describe(
-        'Roles permitted to view template usage reports at template, practice area, and team level',
-      ),
-    'document_template:view_usage_by_user': z
-      .array(HomeRoleKeySchema)
-      .default(() => [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES[
-          'document_template:view_usage_by_user'
-        ],
-      ])
-      .describe(
-        'Roles permitted to view template usage broken down by named user (when showUserLevelDetail is also enabled)',
-      ),
-    'document:generate': z
-      .array(HomeRoleKeySchema)
-      .default(() => [
-        ...DEFAULT_DOCUMENT_PERMISSION_ROLES['document:generate'],
-      ])
-      .describe(
-        'Roles permitted to generate documents from active templates they have access to',
-      ),
-    'document:view': z
-      .array(HomeRoleKeySchema)
-      .default(() => [...DEFAULT_DOCUMENT_PERMISSION_ROLES['document:view']])
-      .describe(
-        'Roles permitted to view and download generated documents on accessible records',
-      ),
-    'document:delete': z
-      .array(HomeRoleKeySchema)
-      .default(() => [...DEFAULT_DOCUMENT_PERMISSION_ROLES['document:delete']])
-      .describe('Roles permitted to delete generated documents'),
-    'finance:view': z
-      .array(HomeRoleKeySchema)
-      .default(() => [...DEFAULT_DOCUMENT_PERMISSION_ROLES['finance:view']])
-      .describe(
-        'Roles permitted to read Financial-group merge fields in templates and generated documents',
-      ),
-  })
+      .default(() => [...DEFAULT_DOCUMENT_PERMISSION_ROLES[permissionKey]])
+      .describe(DOCUMENT_ROLE_DEFAULT_DESCRIPTIONS[permissionKey]),
+  ]),
+) as Record<
+  DocumentPermission,
+  z.ZodDefault<z.ZodArray<typeof HomeRoleKeySchema>>
+>;
+
+export const DocumentRoleDefaultsSchema = z
+  .object(documentRoleDefaultsShape)
   .strict();
 
 export const DocumentGenerationConfigSchema = z

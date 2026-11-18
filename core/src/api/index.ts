@@ -34,23 +34,26 @@ export type EmployeePermission =
   | 'employee:payroll'
   | 'employee:sensitive';
 
-export type DocumentPermission =
-  | 'document_template:view'
-  | 'document_template:build'
-  | 'document_template:approve'
-  | 'document_template:view_usage'
-  | 'document_template:view_usage_by_user'
-  | 'document_template:configure'
-  | 'document:generate'
-  | 'document:view'
-  | 'document:download'
-  | 'document:upload'
-  | 'document:edit'
-  | 'document:delete'
-  | 'document:provision'
-  | 'document_store:configure'
-  | 'document_access:review'
-  | 'finance:view';
+export const ALL_DOCUMENT_PERMISSION_KEYS = [
+  'document_template:view',
+  'document_template:build',
+  'document_template:approve',
+  'document_template:view_usage',
+  'document_template:view_usage_by_user',
+  'document_template:configure',
+  'document:generate',
+  'document:view',
+  'document:download',
+  'document:upload',
+  'document:edit',
+  'document:delete',
+  'document:provision',
+  'document_store:configure',
+  'document_access:review',
+  'finance:view',
+] as const;
+
+export type DocumentPermission = (typeof ALL_DOCUMENT_PERMISSION_KEYS)[number];
 
 import type {
   KeyDateExtensionPermission,

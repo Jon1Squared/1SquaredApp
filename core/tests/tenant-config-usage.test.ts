@@ -3,6 +3,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ALL_DOCUMENT_PERMISSION_KEYS,
   AuthorisationError,
   BasicMergeEngine,
   buildValidDocxArchive,
@@ -11,6 +12,8 @@ import {
   CORE_FIELD_CATALOGUE,
   createDocumentStorageProvider,
   createOrUploadDraftTemplateVersion,
+  DEFAULT_DOCUMENT_PERMISSION_ROLES,
+  DocumentRoleDefaultsSchema,
   loadAndValidateTenantConfig,
   RESERVED_TENANT_CONFIG_SETTINGS,
   resolveTenantFromVerifiedToken,
@@ -18,6 +21,7 @@ import {
   TenantConfigurationSchema,
   TenantDocumentRepository,
   validateTenantConfigWithWarnings,
+  type DocumentPermission,
   type PlatformEnvironment,
 } from '@platform/core';
 import tenantConfigJsonSchema from '../schemas/tenant-config.schema.json';
@@ -36,8 +40,10 @@ import {
   syncMatterCostsRatesFromPms,
 } from '../../src/server/services';
 import {
+  getInitializedDocGenContext,
   uploadTemplateDraftService,
   submitTemplateVersionService,
+  updateDocumentGenerationConfigService,
 } from '../../src/server/documentGenerationServices';
 import {
   createSignedEntraSessionCookie,
@@ -1635,5 +1641,137 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         'multi_tenant',
       ),
     ).toThrow(/Invalid IANA timeZone identifier/);
+  });
+
+  it('B14: saving Document Generation settings with default role grants for all 16 DocumentPermission keys succeeds and persists', async () => {
+    const store = loadCommittedSeedStore();
+    const adminPerson = store.people.find((p) => p.id === 'P-000001')!;
+    const sessionPayload = verifySignedEntraSessionCookie(
+      createSignedEntraSessionCookie({
+        personId: adminPerson.id,
+        tenantId: 'not-a-law-firm',
+        oid:
+          adminPerson.entraObjectId ?? '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: adminPerson.id,
+        email:
+          adminPerson.emails[0]?.address ?? 'aldous.vane@notalawfirm.example',
+        displayName: `${adminPerson.firstName} ${adminPerson.surname}`,
+        entraRoles: ['managing_partner', 'admin'],
+        mappedRoles: ['managing_partner', 'admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    )!;
+
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000001',
+      sessionPayload,
+    );
+    const originalDocGenOverride = await repo.getDocumentGenerationTenantConfig(
+      ctx,
+    );
+    const fullRoleDefaults = Object.fromEntries(
+      ALL_DOCUMENT_PERMISSION_KEYS.map((permissionKey) => [
+        permissionKey,
+        [...DEFAULT_DOCUMENT_PERMISSION_ROLES[permissionKey]],
+      ]),
+    ) as Record<DocumentPermission, string[]>;
+
+    try {
+      const saved = await updateDocumentGenerationConfigService(
+        {
+          permissions: {
+            roleDefaults: fullRoleDefaults,
+          },
+        },
+        'P-000001',
+        sessionPayload,
+      );
+
+      expect(saved.permissions?.roleDefaults).toBeDefined();
+      for (const permissionKey of ALL_DOCUMENT_PERMISSION_KEYS) {
+        expect(saved.permissions?.roleDefaults?.[permissionKey]).toEqual(
+          DEFAULT_DOCUMENT_PERMISSION_ROLES[permissionKey],
+        );
+      }
+
+      const persisted = await repo.getDocumentGenerationTenantConfig(ctx);
+      expect(persisted).not.toBeNull();
+      for (const permissionKey of ALL_DOCUMENT_PERMISSION_KEYS) {
+        expect(persisted?.permissions?.roleDefaults?.[permissionKey]).toEqual(
+          DEFAULT_DOCUMENT_PERMISSION_ROLES[permissionKey],
+        );
+      }
+    } finally {
+      if (originalDocGenOverride) {
+        await repo.putDocumentGenerationTenantConfig(
+          ctx,
+          originalDocGenOverride,
+          'P-000001',
+        );
+      }
+    }
+  });
+
+  it('B14: DocumentRoleDefaultsSchema, tenant-config.schema.json, DEFAULT_DOCUMENT_PERMISSION_ROLES, and ALL_DOCUMENT_PERMISSION_KEYS stay strictly aligned across all 16 keys', () => {
+    const assertKeysMatch = (
+      sourceKeys: readonly string[],
+      targetKeys: readonly string[],
+      label: string,
+    ): void => {
+      expect([...sourceKeys].sort(), `${label} drifted`).toEqual(
+        [...targetKeys].sort(),
+      );
+    };
+
+    const canonicalKeys = [...ALL_DOCUMENT_PERMISSION_KEYS];
+    expect(canonicalKeys).toHaveLength(16);
+    expect(canonicalKeys).toEqual(
+      expect.arrayContaining([
+        'document_template:configure',
+        'document:download',
+        'document:upload',
+        'document:edit',
+        'document:provision',
+        'document_store:configure',
+        'document_access:review',
+      ]),
+    );
+
+    const zodShapeKeys = Object.keys(DocumentRoleDefaultsSchema.shape);
+    const defaultRoleKeys = Object.keys(DEFAULT_DOCUMENT_PERMISSION_ROLES);
+    const jsonSchemaRoleDefaultKeys = Object.keys(
+      tenantConfigJsonSchema.properties.documentGeneration.properties.permissions
+        .properties.roleDefaults.properties,
+    );
+
+    assertKeysMatch(
+      zodShapeKeys,
+      canonicalKeys,
+      'DocumentRoleDefaultsSchema.shape',
+    );
+    assertKeysMatch(
+      defaultRoleKeys,
+      canonicalKeys,
+      'DEFAULT_DOCUMENT_PERMISSION_ROLES',
+    );
+    assertKeysMatch(
+      jsonSchemaRoleDefaultKeys,
+      canonicalKeys,
+      'tenant-config.schema.json roleDefaults.properties',
+    );
+
+    // Drift guard check: removing one key is immediately detected
+    expect(() =>
+      assertKeysMatch(
+        canonicalKeys.slice(0, -1),
+        canonicalKeys,
+        'simulated drift check',
+      ),
+    ).toThrow(/drifted/);
   });
 });

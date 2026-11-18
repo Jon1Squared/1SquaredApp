@@ -853,6 +853,12 @@
                     "type": "string"
                   }
                 },
+                "document_template:configure": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "document:generate": {
                   "type": "array",
                   "items": {
@@ -865,7 +871,43 @@
                     "type": "string"
                   }
                 },
+                "document:download": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document:upload": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document:edit": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "document:delete": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document:provision": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document_store:configure": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "document_access:review": {
                   "type": "array",
                   "items": {
                     "type": "string"
