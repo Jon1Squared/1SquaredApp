@@ -29,9 +29,14 @@ const phoneFieldRe =
 
 const bad = [];
 for (const file of files) {
+  const normalizedFile = file.replace(/\\/g, '/');
   const text = fs.readFileSync(file, 'utf8');
   for (const m of text.matchAll(emailRe)) {
-    if (!allowedDomain.test(m[1])) {
+    const isAllowedPlatformDemoSender =
+      /^client-[^/]+\/config\/environments\/demo\.json$/i.test(
+        normalizedFile,
+      ) && m[0].toLowerCase() === 'notifications@1squared.co.uk';
+    if (!allowedDomain.test(m[1]) && !isAllowedPlatformDemoSender) {
       bad.push(`${file}: non-RFC2606 email ${m[0]}`);
     }
   }

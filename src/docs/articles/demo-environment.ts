@@ -6,7 +6,7 @@ export const demoEnvironmentArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How the standalone Not A Law Firm LLP demo environment is configured, how persona switching and sample document seeding work, and how the demo dataset is seeded and reset.',
-  updated: '2026-11-15',
+  updated: '2026-11-18',
   body: `
 The **Demo environment** (\`environment: "demo"\`) provides a standalone, isolated deployment of **Not A Law Firm LLP** (\`tenantId: "not-a-law-firm"\`) for product walkthroughs and role demonstrations without putting any demo logic, fallback strings, or auto-seeding into live client deployments (ADR 0026, ADR 0028).
 
@@ -41,5 +41,12 @@ Demo data enters a non-live tenant PostgreSQL database through two controlled pa
    - Available under **Administration → Demo data** (\`/admin/demo-data\`, **Load demo dataset**) only when \`isDataResetAllowedEnvironment()\` is \`true\` (non-live environment with \`featureFlags.enableDemoMode: true\`).
    - Requires the \`admin:data_reset\` permission (\`admin\` role only) with verified multi-factor authentication (\`mfaVerified === true\`).
    - Calls \`resetAllDemoData\`, which builds the seeded dataset in memory with fresh relative dates (\`includeSyntheticEntraOids: false\` outside \`PLATFORM_ENVIRONMENT === 'test'\`), preserves \`entraObjectId\` bindings only when the pre-reset database was itself a seeded deployment (\`!prevFirmProfile?.isCleanDeployment\`) and both the person ID and primary email match the seeded persona (so \`--entra-map\` bindings survive a reset without binding a user provisioned after **Clear all data** to a seeded persona), clears and re-imports all per-tenant PostgreSQL modules under the signed-in administrator's own verified tenant context, and writes a \`data-reset\` audit entry in \`public.audit_entries\`. Because the audit log is reloaded from the demo data, audit reference numbers (\`AU-…\`) restart from the demo sequence after every reset.
+
+## 4. Outbound email and Microsoft Teams safeguards
+
+In \`client-not-a-law-firm/config/environments/demo.json\`, outbound email (\`integrations.email.provider = "graph"\`, sending from \`notifications@1squared.co.uk\`) and Microsoft Teams Activity Feed alerts (\`integrations.teams.provider = "graph"\`) are permanently enabled for live demonstrations behind fail-closed non-live allow-lists:
+
+- **Allow-list enforcement**: Outbound email and Teams notifications are permitted only for \`@1squared.co.uk\` addresses and explicit entries in the tenant Key Vault secrets \`email-recipient-allowlist\` and \`teams-recipient-allowlist\` (\`kvnotalawfi2cdo3cw7vuafm\`).
+- **Synthetic demo personas**: Notifications targeting seeded \`@notalawfirm.example\` demo accounts are blocked automatically before calling Microsoft Graph, recording \`status = 'dropped_allowlist'\` and a zero-PII audit entry without sending external traffic or disclosing content in telemetry.
 `.trim(),
 };
