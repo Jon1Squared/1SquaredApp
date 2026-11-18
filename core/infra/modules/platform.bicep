@@ -523,7 +523,7 @@ resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
     appInsights
   ]
   properties: {
-    description: 'Raises an alert whenever a 1Squared Container Apps job (migrate, store-import, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise, register-reminders, outbox-drain) fails, times out, or emits a permanent outbox delivery failure (ADR 0027 §6.4, ADR 0030 §7, ADR 0032).'
+    description: 'Raises an alert whenever a 1Squared Container Apps job (provision, migrate, seed-demo, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise, register-reminders, outbox-drain, notification-digests) fails, times out, or emits a permanent outbox delivery failure (ADR 0027 §6.4, ADR 0030 §7, ADR 0032, ADR 0035).'
     enabled: true
     evaluationFrequency: 'PT5M'
     scopes: [
@@ -541,19 +541,35 @@ union isfuzzy=true
       (datatable(JobName_s:string, Reason_s:string, Log_s:string)[]),
       (ContainerAppSystemLogs_CL)
     | where JobName_s startswith "caj-"
-    | where Reason_s in ("BackOffLimitExceeded", "DeadlineExceeded", "Failed") or Log_s has_any ("Job execution failed", "DeadlineExceeded")
+    | where Reason_s in~ ("BackoffLimitExceeded", "DeadlineExceeded", "Failed")
+        or Log_s has_any ("Job execution failed", "DeadlineExceeded", "exited with status Failed", "reached the specified backoff limit")
   ),
   (
     union isfuzzy=true
-      (datatable(Properties:dynamic)[]),
+      (datatable(ContainerJobName_s:string, Log_s:string)[]),
+      (ContainerAppConsoleLogs_CL)
+    | where ContainerJobName_s startswith "caj-"
+    | where Log_s has_any ("outbox.delivery.failed_permanent", "JOB_RUNNER_FATAL", "JOB_RUNNER_UNKNOWN_JOB", "JOB_RUNNER_USAGE_ERROR")
+        or (Log_s has ".completed" and (toint(parse_json(Log_s).failedCount) > 0 or toint(parse_json(Log_s).failedPermanentCount) > 0))
+  ),
+  (
+    union isfuzzy=true
+      (datatable(Message:string, Properties:dynamic)[]),
       (AppTraces)
-    | where Properties has_any ("job.tenant.failed", "outbox.delivery.failed_permanent")
+    | where Message in ("job.tenant.failed", "outbox.delivery.failed_permanent")
+        or Properties has_any ("job.tenant.failed", "outbox.delivery.failed_permanent")
+  ),
+  (
+    union isfuzzy=true
+      (datatable(Name:string, Properties:dynamic)[]),
+      (AppDependencies)
+    | where Name in ("job.tenant.failed", "outbox.delivery.failed_permanent", "job.provision.tenant_failed", "job.migrate.tenant_failed", "job.seed-demo.tenant_failed")
   ),
   (
     union isfuzzy=true
       (datatable(Properties:dynamic)[]),
       (AppExceptions)
-    | where Properties has "jobKey" or Properties has "outbox.delivery.failed_permanent"
+    | where Properties has_any ("jobKey", "job.tenant.failed", "outbox.delivery.failed_permanent")
   )
 '''
           timeAggregation: 'Count'

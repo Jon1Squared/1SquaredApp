@@ -7,7 +7,9 @@ import {
   initializeAzureMonitorTelemetry,
   PlatformTelemetryRecorder,
   sanitizeTelemetryProperties,
+  shutdownAzureMonitorTelemetry,
 } from '@platform/core';
+import { executeCliJobRunner } from '../../scripts/run-job';
 
 describe('S0-13b: Core Application Insights / OpenTelemetry telemetry emitter & PII scrubber', () => {
   afterEach(() => {
@@ -314,6 +316,198 @@ describe('S0-13b: Core Application Insights / OpenTelemetry telemetry emitter & 
         'TELEMETRY_MANAGED_IDENTITY_REQUIRED: AZURE_CLIENT_ID must name the managed identity used to export telemetry outside dev.',
       );
       expect(useAzureMonitor).not.toHaveBeenCalled();
+      expect(recorder.isAzureMonitorInitialised()).toBe(false);
+    });
+
+    it('flushes and shuts down Azure Monitor only when initialised, swallowing flush errors and timeouts (R485)', async () => {
+      vi.stubEnv('AZURE_CLIENT_ID', '00000000-0000-0000-0000-00000000c1d0');
+      vi.stubEnv('PLATFORM_ENVIRONMENT', 'test');
+      const useAzureMonitor = vi.fn();
+      const shutdownAzureMonitor = vi.fn(async () => {});
+      const loadAzureMonitor = vi.fn(
+        async () =>
+          ({
+            useAzureMonitor,
+            shutdownAzureMonitor,
+          }) as unknown as typeof import('@azure/monitor-opentelemetry'),
+      );
+      const recorder = new PlatformTelemetryRecorder();
+
+      // Not initialised yet -> zero calls
+      const beforeInit = await shutdownAzureMonitorTelemetry({
+        recorder,
+        loadAzureMonitor,
+      });
+      expect(beforeInit).toEqual({ flushed: false });
+      expect(loadAzureMonitor).not.toHaveBeenCalled();
+
+      await initializeAzureMonitorTelemetry({
+        connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+        recorder,
+        loadAzureMonitor,
+      });
+      expect(recorder.isAzureMonitorInitialised()).toBe(true);
+
+      const afterInit = await shutdownAzureMonitorTelemetry({
+        recorder,
+        loadAzureMonitor,
+      });
+      expect(afterInit).toEqual({ flushed: true });
+      expect(shutdownAzureMonitor).toHaveBeenCalledTimes(1);
+      expect(recorder.isAzureMonitorInitialised()).toBe(false);
+
+      // Rejection in shutdownAzureMonitor is swallowed and flag still resets
+      await initializeAzureMonitorTelemetry({
+        connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+        recorder,
+        loadAzureMonitor: async () =>
+          ({
+            useAzureMonitor,
+            shutdownAzureMonitor: async () => {
+              throw new Error('flush failed');
+            },
+          }) as unknown as typeof import('@azure/monitor-opentelemetry'),
+      });
+      const failedFlush = await shutdownAzureMonitorTelemetry({
+        recorder,
+        loadAzureMonitor: async () =>
+          ({
+            useAzureMonitor,
+            shutdownAzureMonitor: async () => {
+              throw new Error('flush failed');
+            },
+          }) as unknown as typeof import('@azure/monitor-opentelemetry'),
+      });
+      expect(failedFlush).toEqual({ flushed: false });
+      expect(recorder.isAzureMonitorInitialised()).toBe(false);
+
+      // Timeout is bounded and resets initialised flag
+      await initializeAzureMonitorTelemetry({
+        connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+        recorder,
+        loadAzureMonitor,
+      });
+      const timedOutFlush = await shutdownAzureMonitorTelemetry({
+        recorder,
+        timeoutMs: 50,
+        loadAzureMonitor: async () =>
+          ({
+            useAzureMonitor,
+            shutdownAzureMonitor: () => new Promise<void>(() => {}),
+          }) as unknown as typeof import('@azure/monitor-opentelemetry'),
+      });
+      expect(timedOutFlush).toEqual({ flushed: false });
+      expect(recorder.isAzureMonitorInitialised()).toBe(false);
+    });
+
+    it('initialises and flushes Azure Monitor around real CLI jobs in executeCliJobRunner whilst skipping --list, and still flushes on fatal errors (R485)', async () => {
+      vi.stubEnv('AZURE_CLIENT_ID', '00000000-0000-0000-0000-00000000c1d0');
+      vi.stubEnv('PLATFORM_ENVIRONMENT', 'test');
+
+      const events: string[] = [];
+      const useAzureMonitor = vi.fn(() => {
+        events.push('useAzureMonitor');
+      });
+      const shutdownAzureMonitor = vi.fn(async () => {
+        events.push('shutdownAzureMonitor');
+      });
+      const loadAzureMonitor = async () =>
+        ({
+          useAzureMonitor,
+          shutdownAzureMonitor,
+        }) as unknown as typeof import('@azure/monitor-opentelemetry');
+      const recorder = new PlatformTelemetryRecorder();
+
+      const stdoutLines: string[] = [];
+      const listExit = await executeCliJobRunner(
+        ['node', 'dist/jobs/run-job.mjs', '--list'],
+        {
+          stdout: (line) => stdoutLines.push(line),
+          telemetryInitOptions: {
+            connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+            recorder,
+            loadAzureMonitor,
+          },
+          telemetryShutdownOptions: {
+            recorder,
+            loadAzureMonitor,
+          },
+        },
+      );
+      expect(listExit).toBe(0);
+      expect(events).toEqual([]);
+
+      // Normal registered job invocation (`outbox-drain` against a disabled invented tenant registry)
+      vi.stubEnv(
+        'PLATFORM_TENANT_REGISTRY_JSON',
+        JSON.stringify({
+          schemaVersion: '1.0.0',
+          environment: 'test',
+          hostingMode: 'multi_tenant',
+          tenants: [
+            {
+              tenantId: 'invented-disabled-firm',
+              slug: 'invented_disabled_firm',
+              environment: 'test',
+              enabled: false,
+              postgresHost: '127.0.0.1',
+              postgresDatabaseName: 'pg_tenant_invented_disabled_firm_test',
+              postgresRoleName: 'role_tenant_invented_disabled_firm_test',
+              keyVaultUri: 'https://kv-inventeddisabled-test.vault.azure.net/',
+              packageDir: 'client-not-a-law-firm',
+              timeZone: 'Europe/London',
+            },
+          ],
+        }),
+      );
+
+      stdoutLines.length = 0;
+      const runExit = await executeCliJobRunner(
+        ['node', 'dist/jobs/run-job.mjs', 'outbox-drain'],
+        {
+          stdout: (line) => {
+            events.push('stdout');
+            stdoutLines.push(line);
+          },
+          telemetryInitOptions: {
+            connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+            recorder,
+            loadAzureMonitor,
+          },
+          telemetryShutdownOptions: {
+            recorder,
+            loadAzureMonitor,
+          },
+        },
+      );
+      expect(runExit).toBe(0);
+      expect(events).toEqual(['useAzureMonitor', 'stdout', 'shutdownAzureMonitor']);
+      expect(JSON.parse(stdoutLines[0]!)).toMatchObject({
+        event: 'job.outbox-drain.completed',
+        succeededCount: 0,
+        skippedCount: 0,
+        failedCount: 0,
+        failedPermanentCount: 0,
+      });
+      expect(recorder.isAzureMonitorInitialised()).toBe(false);
+
+      // Fatal runner error still flushes before rejecting
+      events.length = 0;
+      vi.stubEnv('PLATFORM_TENANT_REGISTRY_JSON', '{invalid-json');
+      await expect(
+        executeCliJobRunner(['node', 'dist/jobs/run-job.mjs', 'migrate'], {
+          telemetryInitOptions: {
+            connectionString: 'InstrumentationKey=00000000-0000-0000-0000-000000000000',
+            recorder,
+            loadAzureMonitor,
+          },
+          telemetryShutdownOptions: {
+            recorder,
+            loadAzureMonitor,
+          },
+        }),
+      ).rejects.toThrow(/TENANT_REGISTRY_ERROR/);
+      expect(events).toEqual(['useAzureMonitor', 'shutdownAzureMonitor']);
       expect(recorder.isAzureMonitorInitialised()).toBe(false);
     });
   });

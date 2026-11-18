@@ -34,6 +34,7 @@ async function bundleJobs() {
       format: 'esm',
       sourcemap: false,
       logLevel: 'warning',
+      external: ['@azure/monitor-opentelemetry', '@opentelemetry/api'],
       banner: {
         js: "import { createRequire as __oneSquaredCreateRequire } from 'node:module'; import { fileURLToPath as __oneSquaredFileURLToPath } from 'node:url'; import { dirname as __oneSquaredDirname } from 'node:path'; const require = __oneSquaredCreateRequire(import.meta.url); const __filename = __oneSquaredFileURLToPath(import.meta.url); const __dirname = __oneSquaredDirname(__filename);",
       },

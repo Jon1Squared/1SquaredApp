@@ -16,8 +16,10 @@ import {
   CORE_TENANT_MIGRATIONS,
   emitTenantTelemetryEvent,
   emitTenantTelemetryException,
+  initializeAzureMonitorTelemetry,
   loadActiveTenantRegistry,
   sanitizeJobErrorCode,
+  shutdownAzureMonitorTelemetry,
   TenantMigrationRunner,
   type TenantMigrationDefinition,
   type TenantRegistry,
@@ -409,6 +411,8 @@ export async function executeCliJobRunner(
   io: {
     stdout?: (msg: string) => void;
     stderr?: (msg: string) => void;
+    telemetryInitOptions?: Parameters<typeof initializeAzureMonitorTelemetry>[0];
+    telemetryShutdownOptions?: Parameters<typeof shutdownAzureMonitorTelemetry>[0];
   } = {},
 ): Promise<number> {
   const writeOut = io.stdout ?? ((msg: string) => process.stdout.write(msg));
@@ -453,138 +457,151 @@ export async function executeCliJobRunner(
     return 1;
   }
 
-  if (jobName === 'provision') {
-    const summary = await runProvisionJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.provision.completed',
-        succeededCount: summary.succeededTenants.length,
-        failedCount: summary.failedTenants.length,
-        databasesProvisionedCount: summary.databasesProvisioned.length,
-        ...(summary.failedTenants.length > 0
-          ? { failedTenants: summary.failedTenants }
-          : {}),
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+  await initializeAzureMonitorTelemetry(io.telemetryInitOptions);
+  try {
+    if (jobName === 'provision') {
+      const summary = await runProvisionJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.provision.completed',
+          succeededCount: summary.succeededTenants.length,
+          failedCount: summary.failedTenants.length,
+          databasesProvisionedCount: summary.databasesProvisioned.length,
+          ...(summary.failedTenants.length > 0
+            ? { failedTenants: summary.failedTenants }
+            : {}),
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'migrate') {
-    const summary = await runMigrateJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.migrate.completed',
-        succeededCount: summary.succeededTenants.length,
-        failedCount: summary.failedTenants.length,
-        ...(summary.failedTenants.length > 0
-          ? { failedTenants: summary.failedTenants }
-          : {}),
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'migrate') {
+      const summary = await runMigrateJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.migrate.completed',
+          succeededCount: summary.succeededTenants.length,
+          failedCount: summary.failedTenants.length,
+          ...(summary.failedTenants.length > 0
+            ? { failedTenants: summary.failedTenants }
+            : {}),
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'seed-demo') {
-    const summary = await runSeedDemoJobSweep({ force: isSeedDemoForceFlag });
-    const firstRes = Object.values(summary.resultsByTenant)[0];
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.seed-demo.completed',
-        succeededCount: summary.succeededTenants.length,
-        failedCount: summary.failedTenants.length,
-        mappedPersonas: firstRes?.mappedEntraPersonas ?? 0,
-        peopleCount: firstRes?.counts.people ?? 0,
-        mattersCount: firstRes?.counts.matters ?? 0,
-        enquiriesCount: firstRes?.counts.enquiries ?? 0,
-        tasksCount: firstRes?.counts.tasks ?? 0,
-        keyDatesCount: firstRes?.counts.keyDates ?? 0,
-        ...(summary.failedTenants.length > 0
-          ? { failedTenants: summary.failedTenants }
-          : {}),
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'seed-demo') {
+      const summary = await runSeedDemoJobSweep({ force: isSeedDemoForceFlag });
+      const firstRes = Object.values(summary.resultsByTenant)[0];
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.seed-demo.completed',
+          succeededCount: summary.succeededTenants.length,
+          failedCount: summary.failedTenants.length,
+          mappedPersonas: firstRes?.mappedEntraPersonas ?? 0,
+          peopleCount: firstRes?.counts.people ?? 0,
+          mattersCount: firstRes?.counts.matters ?? 0,
+          enquiriesCount: firstRes?.counts.enquiries ?? 0,
+          tasksCount: firstRes?.counts.tasks ?? 0,
+          keyDatesCount: firstRes?.counts.keyDates ?? 0,
+          ...(summary.failedTenants.length > 0
+            ? { failedTenants: summary.failedTenants }
+            : {}),
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'key-date-reminders') {
-    const summary = await runScheduledKeyDateRemindersJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.key-date-reminders.completed',
-        succeededCount: summary.succeededTenants.length,
-        skippedCount: summary.skippedTenants.length,
-        failedCount: summary.failedTenants.length,
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'key-date-reminders') {
+      const summary = await runScheduledKeyDateRemindersJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.key-date-reminders.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'usage-retention-purge') {
-    const summary = await runScheduledUsageRetentionPurgeJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.usage-retention-purge.completed',
-        succeededCount: summary.succeededTenants.length,
-        skippedCount: summary.skippedTenants.length,
-        failedCount: summary.failedTenants.length,
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'usage-retention-purge') {
+      const summary = await runScheduledUsageRetentionPurgeJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.usage-retention-purge.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'enquiry-retention-anonymise') {
-    const summary = await runScheduledEnquiryRetentionAnonymisationJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.enquiry-retention-anonymise.completed',
-        succeededCount: summary.succeededTenants.length,
-        skippedCount: summary.skippedTenants.length,
-        failedCount: summary.failedTenants.length,
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'enquiry-retention-anonymise') {
+      const summary = await runScheduledEnquiryRetentionAnonymisationJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.enquiry-retention-anonymise.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'register-reminders') {
-    const summary = await runScheduledRegisterRemindersJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.register-reminders.completed',
-        succeededCount: summary.succeededTenants.length,
-        skippedCount: summary.skippedTenants.length,
-        failedCount: summary.failedTenants.length,
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'register-reminders') {
+      const summary = await runScheduledRegisterRemindersJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.register-reminders.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'outbox-drain') {
-    const summary = await runScheduledOutboxDrainJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.outbox-drain.completed',
-        succeededCount: summary.succeededTenants.length,
-        skippedCount: summary.skippedTenants.length,
-        failedCount: summary.failedTenants.length,
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'outbox-drain') {
+      const summary = await runScheduledOutboxDrainJobSweep();
+      const failedPermanentCount = Object.values(summary.resultsByTenant).reduce(
+        (acc, res) =>
+          acc +
+          (res.failedPermanentCount ?? 0) +
+          (res.teams?.failedPermanentCount ?? 0),
+        0,
+      );
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.outbox-drain.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+          failedPermanentCount,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  if (jobName === 'notification-digests') {
-    const summary = await runScheduledNotificationDigestsJobSweep();
-    writeOut(
-      `${JSON.stringify({
-        event: 'job.notification-digests.completed',
-        succeededCount: summary.succeededTenants.length,
-        skippedCount: summary.skippedTenants.length,
-        failedCount: summary.failedTenants.length,
-      })}\n`,
-    );
-    return summary.exitCode;
-  }
+    if (jobName === 'notification-digests') {
+      const summary = await runScheduledNotificationDigestsJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.notification-digests.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
 
-  return 0;
+    return 0;
+  } finally {
+    await shutdownAzureMonitorTelemetry(io.telemetryShutdownOptions);
+  }
 }
 
 const isDirectEntryPoint =
