@@ -1,5 +1,12 @@
 # 1Squared — Release Notes
 
+## Unreleased — Record Agreed Stage 0 Exit Exception for `P5` Ideal Postcodes Key Rotation (`docs/stage-0-exceptions`)
+
+**Change classification:** Documentation and roadmap only (`docs/roadmap/stage-0-plan.md`, `docs/roadmap/feature-list.md`, `docs/release-notes.md`). **Hosting models:** Applies equally to both single-tenant (Model A) and multi-tenant (Model B) governance documentation; zero code, schema, or database changes (`CORE_REQUIRED_SCHEMA_VERSION = '0020'`). **Rollback:** `git revert` restores the prior unannotated Stage 0 plan and `P5` backlog row.
+
+- **Agreed `P5` Stage 0 Exit Exception (`docs/roadmap/stage-0-plan.md` §§2, 8, 9; `docs/roadmap/feature-list.md` row `P5`):** Recorded the product owner’s 18 November 2026 agreed exception permitting Stage 0 exit without rotating the existing Ideal Postcodes test key immediately (as it will be replaced soon anyway), whilst keeping all three standing conditions explicit (rotate and revoke before any real client data goes in, before anyone else gets repository access, and in any case when the key is replaced) and keeping `P5` at **Partly built**.
+- **Stage 1 Hand-Off (`docs/roadmap/stage-0-plan.md` §9, `docs/roadmap/feature-list.md` row `P5` / item `34`):** Recorded that changing `/api/address-lookup` from `GET` to `POST` with a multi-premise address picker (`R371`) moves to Stage 1 item `34`.
+
 ## Unreleased — Fix Container Apps Job Failure Alert Query & CLI Job OpenTelemetry Flush (`fix/r485-job-failure-alert-and-telemetry`)
 
 **Change classification:** Infrastructure (`core/infra/modules/platform.bicep`), core observability (`core/src/observability/telemetry.ts`), CLI job runner & bundler (`scripts/run-job.ts`, `scripts/build-jobs.mjs`), contract/unit tests (`core/tests/infra-bicep-contract.test.ts`, `core/tests/telemetry.test.ts`), Help & documentation ([Rule 11](../AGENTS.md)), and Stage 0 roadmap status updates (`P12` -> `Completed`). **Hosting models:** Identical behaviour across single-tenant (Model A, opt-in via `APPLICATIONINSIGHTS_CONNECTION_STRING` with zero network calls when unset) and multi-tenant (Model B) deployments; no database schema migration (`CORE_REQUIRED_SCHEMA_VERSION = '0020'`). **Rollback:** Re-deploy prior Bicep alert rule template or `git revert` this branch without database or tenant-configuration changes.
