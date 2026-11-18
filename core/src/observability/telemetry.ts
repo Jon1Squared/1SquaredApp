@@ -239,6 +239,8 @@ export class PlatformTelemetryRecorder {
       'onesquared.correlation_id': frozen.correlationId,
       'onesquared.event_kind': frozen.kind,
       'onesquared.severity': frozen.severity,
+      'onesquared.event_name': frozen.eventName,
+      ...(frozen.errorCode ? { 'onesquared.error_code': frozen.errorCode } : {}),
       ...frozen.properties,
     });
 
@@ -300,6 +302,10 @@ export class PlatformTelemetryRecorder {
 
   public markAzureMonitorInitialised(): void {
     this.azureMonitorInitialised = true;
+  }
+
+  public markAzureMonitorShutdown(): void {
+    this.azureMonitorInitialised = false;
   }
 }
 
@@ -530,4 +536,52 @@ export async function initializeAzureMonitorTelemetry(options?: {
   });
   recorder.markAzureMonitorInitialised();
   return { enabled: true };
+}
+
+/**
+ * Flushes and shuts down `@azure/monitor-opentelemetry` when previously initialised
+ * so short-lived CLI jobs (`scripts/run-job.ts`) export queued spans and exceptions
+ * before process exit. When telemetry was not initialised, performs zero work and
+ * zero network calls. Shutdown errors or timeouts are swallowed so telemetry flush
+ * failure never masks a job's exit code.
+ */
+export async function shutdownAzureMonitorTelemetry(options?: {
+  recorder?: PlatformTelemetryRecorder;
+  loadAzureMonitor?: () => Promise<typeof import('@azure/monitor-opentelemetry')>;
+  timeoutMs?: number;
+}): Promise<{ flushed: boolean }> {
+  const recorder = options?.recorder ?? getPlatformTelemetryRecorder();
+  if (!recorder.isAzureMonitorInitialised()) {
+    return { flushed: false };
+  }
+  const timeoutMs = Math.max(50, Math.trunc(options?.timeoutMs ?? 10_000));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const loader =
+      options?.loadAzureMonitor ??
+      (() =>
+        import(
+          /* webpackIgnore: true */ ['@azure', 'monitor-opentelemetry'].join('/')
+        ) as Promise<typeof import('@azure/monitor-opentelemetry')>);
+    const flushed = await Promise.race<boolean>([
+      (async () => {
+        const mod = await loader();
+        if (typeof mod.shutdownAzureMonitor === 'function') {
+          await mod.shutdownAzureMonitor();
+        }
+        return true;
+      })(),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    return { flushed };
+  } catch {
+    return { flushed: false };
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    recorder.markAzureMonitorShutdown();
+  }
 }

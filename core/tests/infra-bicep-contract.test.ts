@@ -231,10 +231,19 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(pdfBlock).toContain('external: false');
     expect(pdfBlock).toContain('allowInsecure: false');
 
-    // Scheduled query alert rule for job failures & timeouts (ADR 0030 §7, R412)
+    // Scheduled query alert rule for job failures & timeouts (ADR 0030 §7, R412, R485)
     expect(platformBicep).toContain('Microsoft.Insights/scheduledQueryRules');
     expect(platformBicep).toContain('job.tenant.failed');
     expect(platformBicep).toContain('DeadlineExceeded');
+    expect(platformBicep).toContain(
+      'Reason_s in~ ("BackoffLimitExceeded", "DeadlineExceeded", "Failed")',
+    );
+    expect(platformBicep).toContain('exited with status Failed');
+    expect(platformBicep).toContain('ContainerAppConsoleLogs_CL');
+    expect(platformBicep).toContain('failedPermanentCount');
+    expect(platformBicep).toContain('AppTraces');
+    expect(platformBicep).toContain('AppDependencies');
+    expect(platformBicep).toContain('AppExceptions');
   });
 
   it('enforces Key Vault Private Endpoints (publicNetworkAccess Disabled), exports keyVaultName/keyVaultUri, applies tenant cost tags, and contains zero inline secret values (R413, Rule 5)', () => {
