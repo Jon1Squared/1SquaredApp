@@ -438,6 +438,9 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       'kv://kvnotalawfi2cdo3cw7vuafm/companies-house-api-key',
     );
     expect(demoCfg.integrations.email).toMatchObject({
+      provider: 'graph',
+      senderAddress: 'notifications@1squared.co.uk',
+      recipientAllowList: ['@1squared.co.uk'],
       recipientAllowListVaultRef:
         'kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist',
       graph: {
@@ -450,9 +453,9 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       'kv://kvnotalawfi2cdo3cw7vuafm/sp-provisioning-cert',
     );
     expect(demoCfg.integrations.teams).toMatchObject({
-      provider: 'disabled',
+      provider: 'graph',
       teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
-      recipientAllowList: ['@1squared.co.uk', '@notalawfirm.example'],
+      recipientAllowList: ['@1squared.co.uk'],
       recipientAllowListVaultRef: 'kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist',
       graph: {
         clientId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',

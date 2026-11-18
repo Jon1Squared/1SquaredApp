@@ -86,7 +86,7 @@ The initial `graph-mail-certificate` version used Key Vault's default `applicati
 
 In every non-live environment (`dev`, `test`, `training`, `demo`), `evaluateEmailAllowList` fails closed if `recipientAllowListVaultRef` is configured and unreadable, or if any recipient in `to`, `cc`, or `bcc` falls outside the combined allow-list.
 
-`email-recipient-allowlist` was created in `kvnotalawfi2cdo3cw7vuafm` on **16 November 2026**. `client-not-a-law-firm/config/environments/demo.json` keeps `"provider": "disabled"` until the post-deploy live check in Section 5 succeeds.
+`email-recipient-allowlist` was created in `kvnotalawfi2cdo3cw7vuafm` on **16 November 2026**. Following live post-deploy verification on **18 November 2026**, `client-not-a-law-firm/config/environments/demo.json` permanently enables `"provider": "graph"`, sets `"senderAddress": "notifications@1squared.co.uk"`, and restricts static `recipientAllowList` to `["@1squared.co.uk"]` (combined with `email-recipient-allowlist`).
 
 ### Exact Secret Name & Format (`email-recipient-allowlist`)
 
@@ -119,15 +119,13 @@ az keyvault secret set `
 Remove-Item email-allowlist.txt
 ```
 
-## 5. Enable `graph` in the Environment Overlay After the Live Check
+## 5. Active `graph` Configuration & Post-Deploy Verification (`Done`)
 
-Keep `integrations.email.provider = "disabled"` in `client-not-a-law-firm/config/environments/demo.json` until deployment and live Graph verification succeed:
+`client-not-a-law-firm/config/environments/demo.json` has `integrations.email.provider = "graph"` enabled with `senderAddress = "notifications@1squared.co.uk"` (matching the scoped Exchange Online RBAC mailbox):
 
-1. Confirm `integrations.email.graph.certificateThumbprint` is set to `C5428D7F519AE513A5B8CE027D291876CEDA40D3` (already set in `demo.json`).
-2. Ensure `integrations.email.senderAddress` is set to the provisioned mailbox (`notifications@1squared.co.uk` in the live demo deployment config overlay — keep RFC 2606 `@notalawfirm.example` in git config fixtures checked by `verify-invented-fixtures.mjs`).
-3. Deploy the Checkpoint 5c image and trigger a verification email to an allow-listed test recipient via `caj-outbox-drain-demo`, checking logs for `outbox.delivery.sent` (and confirming non-allow-listed addresses stop with `status = 'dropped_allowlist'`).
-4. Once verified, change `integrations.email.provider` from `"disabled"` to `"graph"` and deploy the updated configuration.
-5. Confirm permanent failures (`attempt_count = 5`) raise an alert via Azure Monitor (`outbox.delivery.failed_permanent`).
+1. Confirm `integrations.email.graph.certificateThumbprint` is `C5428D7F519AE513A5B8CE027D291876CEDA40D3` and `recipientAllowList` is `["@1squared.co.uk"]` alongside `email-recipient-allowlist` (`kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist`).
+2. When triggering test notifications via `caj-outbox-drain-demo`, allow-listed `@1squared.co.uk` / Key Vault recipients log `outbox.delivery.sent` whilst seeded `@notalawfirm.example` personas stop safely at `status = 'dropped_allowlist'`.
+3. Confirm permanent failures (`attempt_count = 5`) raise an alert via Azure Monitor (`outbox.delivery.failed_permanent`).
 
 ## 6. Local `dev_catcher` Verification (Development & Test)
 

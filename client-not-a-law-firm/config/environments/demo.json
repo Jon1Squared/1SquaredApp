@@ -13,10 +13,10 @@
     "companiesHouseApiKeyVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/companies-house-api-key",
     "aiProviderChoice": "anthropic",
     "email": {
-      "provider": "disabled",
+      "provider": "graph",
+      "senderAddress": "notifications@1squared.co.uk",
       "recipientAllowList": [
-        "@1squared.co.uk",
-        "@notalawfirm.example"
+        "@1squared.co.uk"
       ],
       "recipientAllowListVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/email-recipient-allowlist",
       "graph": {
@@ -27,11 +27,10 @@
       }
     },
     "teams": {
-      "provider": "disabled",
+      "provider": "graph",
       "teamsAppId": "76474047-ac1f-49ee-83f3-5a2a58c2b3f8",
       "recipientAllowList": [
-        "@1squared.co.uk",
-        "@notalawfirm.example"
+        "@1squared.co.uk"
       ],
       "recipientAllowListVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist",
       "graph": {

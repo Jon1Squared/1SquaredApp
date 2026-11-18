@@ -148,18 +148,16 @@ az keyvault show \
 
 Confirm the final command outputs **`Disabled`**.
 
-## 7. Live Verification Test & Switching `"provider"` from `"disabled"` to `"graph"`
+## 7. Active `graph` Configuration & Live Verification (`Done`)
 
-Keep `integrations.teams.provider = "disabled"` in `client-not-a-law-firm/config/environments/demo.json` until Checkpoint 5c is deployed and live Graph verification succeeds:
+Following Checkpoint 5c deployment and live Graph verification on **18 November 2026**, `client-not-a-law-firm/config/environments/demo.json` enables `integrations.teams.provider = "graph"` with `recipientAllowList = ["@1squared.co.uk"]`:
 
-1. **Test prerequisites:**
+1. **Active prerequisites:**
    - Ensure the target test user has an **Entra `entraObjectId` bound** in PostgreSQL (`people.entra_object_id`), has opted into Teams notifications (`teamsEnabled: true` on their profile's **Notifications** tab), and matches `teams-recipient-allowlist` (`kv://kvnotalawfi2cdo3cw7vuafm/teams-recipient-allowlist`).
-   - Confirm `integrations.teams.graph.certificateThumbprint` is set to `6A23E571EA3F43D1DB39C187A201B40454159D3B` (already set in `demo.json`).
-2. **Deploy Checkpoint 5c and run a live verification check:**
-   - Temporarily test a live notification trigger (for example assigning a task to the allow-listed user) with `integrations.teams.provider = "graph"`, run/wait for `caj-outbox-drain-demo`, and confirm the user receives a redacted Teams Activity Feed notification linking safely back into the platform (`https://teams.microsoft.com/l/entity/<teamsAppId>/home?...`) with zero client names or confidential titles in the card.
-   - Check telemetry/outbox state: `public.teams_activity_outbox` marks the row `'sent'` (`outbox.delivery.sent`), whilst un-bound users stop with `'dropped_unbound'` and non-allow-listed recipients stop with `'dropped_not_allow_listed'` and zero-PII audit entry `'teams-notification-dropped-allowlist'`.
-3. **Promote `demo.json` after the live check:**
-   - Change `integrations.teams.provider` from `"disabled"` to `"graph"` once the live check succeeds.
+   - Confirm `integrations.teams.graph.certificateThumbprint` is `6A23E571EA3F43D1DB39C187A201B40454159D3B` (`graph-teams-client-cert`).
+2. **Expected delivery behaviour:**
+   - `CoreTeamsNotifier` / `caj-outbox-drain-demo` delivers a redacted Teams Activity Feed notification linking safely back into the platform (`https://teams.microsoft.com/l/entity/<teamsAppId>/home?...`) with zero client names or confidential titles in the card.
+   - `public.teams_activity_outbox` marks delivered rows `'sent'`, whilst unbound users stop with `'dropped_unbound'` and non-allow-listed recipients (such as seeded `@notalawfirm.example` accounts) stop with `'dropped_allowlist'`, `outbox.delivery.dropped_allowlist`, and zero-PII audit entry `'teams-notification-dropped-allowlist'`.
 
 ## 8. Common Error Codes & Diagnostics
 

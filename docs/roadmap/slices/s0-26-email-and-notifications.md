@@ -125,7 +125,7 @@ Add additive, backwards-compatible `integrations.email` schema entries in `core/
 
 Live Graph delivery in the demo/pilot environment depends on Section 8 manual tasks documented in `docs/runbooks/email-certificate-setup.md` (automated CI tests pass against mocked Graph & TCP SMTP `dev_catcher` without them):
 - **Done (12–16 November 2026):** Shared sender mailbox (`notifications@1squared.co.uk`) provisioned; Microsoft Entra app (`fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1`, directory `f8218d9a-e055-463f-add2-f03679aad7f2`) registered and scoped solely to that mailbox via Exchange Online RBAC for Applications; SPF/DKIM/DMARC DNS records configured for `1squared.co.uk`; PEM certificate `graph-mail-certificate` (`secretProperties.contentType = "application/x-pem-file"`, thumbprint `C5428D7F519AE513A5B8CE027D291876CEDA40D3`) created in `kvnotalawfi2cdo3cw7vuafm` with its `.cer` uploaded to Entra (retired certificate removed) and `email-recipient-allowlist` created in `kvnotalawfi2cdo3cw7vuafm`.
-- **Remaining activation step:** After Checkpoint 5c deploys to Azure, run the live Graph verification check and switch `demo.json` `integrations.email.provider` from `"disabled"` to `"graph"`.
+- **Done (18 November 2026):** Checkpoint 5c deployed, live Graph verification completed, and `demo.json` permanently enables `integrations.email.provider = "graph"` with `senderAddress = "notifications@1squared.co.uk"` and `recipientAllowList = ["@1squared.co.uk"]`.
 
 ---
 
