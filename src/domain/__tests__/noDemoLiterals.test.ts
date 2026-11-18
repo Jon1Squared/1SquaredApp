@@ -11,6 +11,15 @@ import {
   scanTextForDemoLiterals,
   verifyNoDemoLiterals,
 } from '../../../scripts/verify-no-demo-literals.mjs';
+import {
+  buildConflictCheckPdfLines,
+  buildMatterOpeningPdfLines,
+  buildRiskAssessmentPdfLines,
+  formatRecordPdfHeading,
+  resolveMatterOpeningSnapshot,
+  type MatterOpeningSnapshot,
+  type MatterRiskAssessmentSnapshot,
+} from '../matterOpeningRecord';
 import { resolveMatterIntakeComplianceRows } from '../../components/MatterProfileClient';
 import { resolveOrganisationComplianceDisplay } from '../../components/OrganisationProfileClient';
 import { resolvePersonComplianceDisplay } from '../../components/PersonProfileClient';
@@ -21,7 +30,7 @@ import {
 } from '../companiesHouse';
 import { buildFieldResolutionContextForRecord } from '../documentGeneration';
 import { buildSearchIndex } from '../searchIndex';
-import type { Person } from '../types';
+import type { ConflictCheckRecord, Matter, Person } from '../types';
 
 describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers', () => {
   it('verifyNoDemoLiterals passes on the repository and scanTextForDemoLiterals catches planted demo literals unless allow-listed per file and per literal (R322, R346)', () => {
@@ -496,5 +505,286 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
     expect(normaliseCompaniesHouseOfficerName('MORGAN, Rhian Elin')).toBe(
       'Rhian Elin Morgan',
     );
+  });
+
+  it('scanTextForDemoLiterals catches uppercase and lowercase demo literals, PMS codes, record IDs, and firm-name fragments (P6)', () => {
+    const denyLiterals = buildDemoLiteralsDenyList();
+    expect(denyLiterals).toContain('Pembroke');
+    const pmsCodes = loadPmsDemoCodes();
+
+    const mixedCaseSource = [
+      "const heading = 'NOT A LAW FIRM LLP — CONFLICT CHECK RECORD';",
+      "const note = 'not a law firm internal template';",
+      "const placeholder = 'PEMBROKE\\\\c.evans';",
+      "const lowerPms = 'pen001';",
+      "const lowerFe = 'fe005';",
+      "const lowerMatter = 'abc123-0001';",
+      "const lowerRec = 'p-000001';",
+    ].join('\n');
+
+    const violations = scanTextForDemoLiterals(
+      'src/components/SampleWidget.tsx',
+      mixedCaseSource,
+      denyLiterals,
+      [],
+      pmsCodes,
+    );
+    expect(violations.map((v: { match: string }) => v.match)).toEqual([
+      'NOT A LAW FIRM LLP',
+      'not a law firm',
+      'PEMBROKE',
+      'pen001',
+      'fe005',
+      'abc123-0001',
+      'p-000001',
+    ]);
+
+    // Allow-listing one exact phrase on a line must not hide a second un-allow-listed fragment on the same line
+    const sameLine = "const a = 'Pembroke Vaughan', b = 'PEMBROKE\\\\c.evans';";
+    const sameLineViolations = scanTextForDemoLiterals(
+      'src/components/SampleWidget.tsx',
+      sameLine,
+      denyLiterals,
+      [
+        {
+          file: 'src/components/SampleWidget.tsx',
+          literal: 'Pembroke Vaughan',
+          reason: 'Synthetic allow-list for first literal only',
+        },
+      ],
+      pmsCodes,
+    );
+    expect(sameLineViolations.map((v: { match: string }) => v.match)).toEqual([
+      'PEMBROKE',
+    ]);
+  });
+
+  it('matterOpeningRecord PDF builders use tenant firmName, neutral fallback when unconfigured, and preserve legacy immutable snapshots without demo literals (P6)', () => {
+    const secondTenantFirmName = 'Hargreaves & Co LLP';
+    const sampleConflict: ConflictCheckRecord = {
+      status: 'Cleared',
+      outcomeLabel: 'Cleared by fee earner',
+      declarationConfirmed: true,
+      reviewerMessage: '',
+      lastRunAtDisplay: '12 Oct 2026, 09:00',
+      lastRunById: 'P-100100',
+      lastRunByName: 'Alex Example',
+      parties: [
+        {
+          id: 'PTY-1',
+          entityType: 'organisation',
+          name: 'Oakwood Developments Ltd',
+          role: 'Client',
+          linkedRecordId: 'O-100100',
+        },
+      ],
+      matches: [],
+      runs: [
+        {
+          id: 'RUN-1',
+          runAtDisplay: '12 Oct 2026, 09:00',
+          runById: 'P-100100',
+          runByName: 'Alex Example',
+          searchTerms: ['Oakwood Developments Ltd'],
+          partiesCount: 1,
+          matchesCount: 0,
+          potentialConflictsCount: 0,
+        },
+      ],
+      comments: [],
+    };
+    const sampleRisk: MatterRiskAssessmentSnapshot = {
+      status: 'complete',
+      isMlrInScope: true,
+      overallRisk: 'Low',
+      completedQuestions: 10,
+      totalQuestions: 10,
+      completedAt: '2026-10-12T09:05:00Z',
+      completedById: 'P-100100',
+      completedByName: 'Alex Example',
+      answers: {},
+      followUps: {},
+      customKeyDates: [],
+      sections: [],
+    };
+    const baseMatter = {
+      id: 'M-100100',
+      recordType: 'matter',
+      matterNumber: 'TEN-0001',
+      title: 'Commercial Lease Renewal',
+      shortDescription: 'Renewal of commercial premises lease',
+      clientId: 'O-100100',
+      additionalClientIds: [],
+      parties: [],
+      teamMemberIds: [],
+      createdById: 'P-100100',
+      createdAt: '2026-10-12T09:00:00Z',
+      updatedById: 'P-100100',
+      updatedAt: '2026-10-12T09:10:00Z',
+      openedAt: '2026-10-12T09:10:00Z',
+      conflictCheckStatus: 'Clear',
+      conflictCheckRecord: sampleConflict,
+      fieldValues: {},
+    } as unknown as Matter;
+
+    const secondTenantSnap = resolveMatterOpeningSnapshot(
+      baseMatter,
+      [],
+      [],
+      [],
+      [],
+      [],
+      {
+        riskAssessment: sampleRisk,
+        conflictCheckRecord: sampleConflict,
+        firmName: secondTenantFirmName,
+      },
+    );
+    expect(secondTenantSnap.firmName).toBe(secondTenantFirmName);
+
+    const openingText = buildMatterOpeningPdfLines(secondTenantSnap)
+      .map((l) => l.text)
+      .join('\n');
+    expect(openingText).toContain(
+      'HARGREAVES & CO LLP — COMPLETE MATTER OPENING RECORD (IMMUTABLE SNAPSHOT)',
+    );
+    expect(openingText.toUpperCase()).not.toContain('NOT A LAW FIRM');
+
+    const conflictText = buildConflictCheckPdfLines(
+      'TEN-0001',
+      'Commercial Lease Renewal',
+      sampleConflict,
+      secondTenantFirmName,
+    )
+      .map((l) => l.text)
+      .join('\n');
+    expect(conflictText).toContain('HARGREAVES & CO LLP — CONFLICT CHECK RECORD');
+    expect(conflictText.toUpperCase()).not.toContain('NOT A LAW FIRM');
+
+    const riskText = buildRiskAssessmentPdfLines(
+      'TEN-0001',
+      'Commercial Lease Renewal',
+      sampleRisk,
+      secondTenantFirmName,
+    )
+      .map((l) => l.text)
+      .join('\n');
+    expect(riskText).toContain('HARGREAVES & CO LLP — MATTER RISK ASSESSMENT RECORD');
+    expect(riskText.toUpperCase()).not.toContain('NOT A LAW FIRM');
+
+    // Empty/unconfigured firm name falls back to neutral heading without demo firm name
+    expect(formatRecordPdfHeading('CONFLICT CHECK RECORD', '')).toBe(
+      'CONFLICT CHECK RECORD',
+    );
+    expect(buildConflictCheckPdfLines('TEN-0001', 'Lease', sampleConflict, null)[0]?.text).toBe(
+      'CONFLICT CHECK RECORD',
+    );
+    expect(buildRiskAssessmentPdfLines('TEN-0001', 'Lease', sampleRisk, undefined)[0]?.text).toBe(
+      'MATTER RISK ASSESSMENT RECORD',
+    );
+
+    // Legacy stored snapshot without firmName remains immutable and renders neutral heading
+    const legacySnapshot: MatterOpeningSnapshot = {
+      ...secondTenantSnap,
+    };
+    delete legacySnapshot.firmName;
+    const legacyMatter = {
+      ...baseMatter,
+      fieldValues: { matterOpeningSnapshot: legacySnapshot },
+    } as unknown as Matter;
+    const resolvedLegacy = resolveMatterOpeningSnapshot(
+      legacyMatter,
+      [],
+      [],
+      [],
+      [],
+      [],
+      { firmName: secondTenantFirmName },
+    );
+    expect(resolvedLegacy.firmName).toBeUndefined();
+    expect(buildMatterOpeningPdfLines(resolvedLegacy)[0]?.text).toBe(
+      'COMPLETE MATTER OPENING RECORD (IMMUTABLE SNAPSHOT)',
+    );
+  });
+
+  it('resolvePersonComplianceDisplay and resolveOrganisationComplianceDisplay show Checks pending / Not checked when no conflict search has run (P6)', () => {
+    const uncheckedPerson = resolvePersonComplianceDisplay(
+      { verifiedAt: null, lastVerifiedAt: null },
+      'not_started',
+      null,
+      { hasClearedConflictCheck: false, hasConflictAlert: false },
+    );
+    expect(uncheckedPerson.ableToAct).toEqual({
+      label: 'Checks pending',
+      pillClass: 'client-pill--neutral',
+    });
+
+    const clearedPerson = resolvePersonComplianceDisplay(
+      { verifiedAt: '2026-10-01', lastVerifiedAt: '2026-10-01' },
+      'verified',
+      null,
+      { hasClearedConflictCheck: true, hasConflictAlert: false },
+    );
+    expect(clearedPerson.ableToAct).toEqual({
+      label: 'Yes',
+      pillClass: 'client-pill--green',
+    });
+
+    const conflictedPerson = resolvePersonComplianceDisplay(
+      { verifiedAt: '2026-10-01', lastVerifiedAt: '2026-10-01' },
+      'verified',
+      null,
+      { hasClearedConflictCheck: false, hasConflictAlert: true },
+    );
+    expect(conflictedPerson.ableToAct).toEqual({
+      label: 'Review required',
+      pillClass: 'client-pill--red',
+    });
+
+    const uncheckedOrg = resolveOrganisationComplianceDisplay(
+      { lastVerifiedAt: null, reviewDate: null },
+      'not_started',
+      { conflictStatusId: null, conflictSys: undefined },
+    );
+    expect(uncheckedOrg.conflictCheck).toEqual({
+      label: 'Not checked',
+      tone: 'neutral',
+    });
+    expect(uncheckedOrg.ableToAct).toEqual({
+      label: 'Checks pending',
+      tone: 'neutral',
+    });
+
+    const potentialConflictOrg = resolveOrganisationComplianceDisplay(
+      { lastVerifiedAt: '2026-10-01', reviewDate: null },
+      'verified',
+      {
+        conflictStatusId: 'conflict_status.potential_conflict',
+        conflictSys: 'potential_conflict',
+        conflictLabel: 'Potential conflict',
+      },
+    );
+    expect(potentialConflictOrg.conflictCheck).toEqual({
+      label: 'Potential conflict',
+      tone: 'warning',
+    });
+    expect(potentialConflictOrg.ableToAct).toEqual({
+      label: 'Review required',
+      tone: 'alert',
+    });
+
+    const clearedOrg = resolveOrganisationComplianceDisplay(
+      { lastVerifiedAt: '2026-10-01', reviewDate: null },
+      'verified',
+      {
+        conflictStatusId: 'conflict_status.cleared',
+        conflictSys: 'cleared',
+        conflictLabel: 'Cleared',
+      },
+    );
+    expect(clearedOrg.ableToAct).toEqual({
+      label: 'Yes',
+      tone: 'positive',
+    });
   });
 });

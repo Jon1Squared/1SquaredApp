@@ -120,6 +120,10 @@ interface Props {
 }
 
 export interface PersonComplianceDisplay {
+  ableToAct: {
+    label: 'Yes' | 'Checks pending' | 'Review required';
+    pillClass: 'client-pill--red' | 'client-pill--green' | 'client-pill--neutral';
+  };
   checksLastPerformed: string;
   idVerification: {
     label: string;
@@ -136,6 +140,11 @@ export function resolvePersonComplianceDisplay(
   person: Pick<Person, 'verifiedAt' | 'lastVerifiedAt'>,
   verSys: string | null | undefined,
   mainOrg?: Pick<Organisation, 'lastVerifiedAt'> | null,
+  options?: {
+    recSys?: string;
+    hasClearedConflictCheck?: boolean;
+    hasConflictAlert?: boolean;
+  },
 ): PersonComplianceDisplay {
   const lastCheckDateRaw =
     person.verifiedAt || person.lastVerifiedAt || mainOrg?.lastVerifiedAt || null;
@@ -153,7 +162,20 @@ export function resolvePersonComplianceDisplay(
           ? { label: `Verified ${verifiedFormatted}`, pillClass: 'client-pill--green' }
           : { label: 'Not verified', pillClass: 'client-pill--neutral' };
 
+  const verificationComplete =
+    Boolean(verifiedFormatted) || verSys === 'verified' || verSys === 'not_required';
+  const ableToAct: PersonComplianceDisplay['ableToAct'] =
+    options?.recSys === 'archived' ||
+    options?.recSys === 'deceased' ||
+    verSys === 'expired' ||
+    options?.hasConflictAlert
+      ? { label: 'Review required', pillClass: 'client-pill--red' }
+      : options?.hasClearedConflictCheck && verificationComplete
+        ? { label: 'Yes', pillClass: 'client-pill--green' }
+        : { label: 'Checks pending', pillClass: 'client-pill--neutral' };
+
   return {
+    ableToAct,
     checksLastPerformed,
     idVerification,
     sanctionsAndPep: {
@@ -173,7 +195,7 @@ export function PersonProfileClient({
   tasks = [],
   teams = [],
   enquiries = [],
-  currentUserId = 'P-0001',
+  currentUserId = '',
   currentUserRole = 'admin',
   canTakeByTaskId,
   canViewFinance = false,
@@ -201,7 +223,6 @@ export function PersonProfileClient({
   const [activityFilter, setActivityFilter] = useState<
     'all' | 'emails' | 'meetings' | 'notes' | 'documents'
   >('all');
-  const [ableToActOverride, setAbleToActOverride] = useState<boolean | null>(null);
   const [reminderSent, setReminderSent] = useState(false);
 
   const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -440,12 +461,46 @@ export function PersonProfileClient({
     });
   }, [clientMatters, values, nameById]);
 
-  // Compliance status & Able to Act flag
-  const defaultAbleToAct = verSys !== 'expired' && recSys !== 'archived' && recSys !== 'deceased';
-  const ableToAct = ableToActOverride ?? defaultAbleToAct;
+  // Compliance status & Able to Act derived from stored verification and linked conflict records
+  const hasConflictAlert = useMemo(
+    () =>
+      clientMatters.some(
+        (m) =>
+          m.conflictCheckStatus.toLowerCase().includes('conflict') ||
+          m.conflictCheckRecord?.status === 'Declined',
+      ),
+    [clientMatters],
+  );
+  const hasPendingConflict = useMemo(
+    () =>
+      clientMatters.some(
+        (m) =>
+          m.conflictCheckStatus === 'Pending conflict review' ||
+          m.conflictCheckRecord?.status === 'Referred',
+      ),
+    [clientMatters],
+  );
+  const hasClearedConflictCheck = useMemo(
+    () =>
+      !hasConflictAlert &&
+      !hasPendingConflict &&
+      clientMatters.some(
+        (m) =>
+          m.conflictCheckRecord?.status === 'Cleared' ||
+          m.conflictCheckRecord?.status === 'Approved' ||
+          m.conflictDecision?.outcome === 'Cleared' ||
+          m.conflictCheckStatus === 'Clear',
+      ),
+    [clientMatters, hasConflictAlert, hasPendingConflict],
+  );
   const complianceDisplay = useMemo(
-    () => resolvePersonComplianceDisplay(person, verSys, mainOrg),
-    [person, verSys, mainOrg],
+    () =>
+      resolvePersonComplianceDisplay(person, verSys, mainOrg, {
+        recSys,
+        hasClearedConflictCheck,
+        hasConflictAlert,
+      }),
+    [person, verSys, mainOrg, recSys, hasClearedConflictCheck, hasConflictAlert],
   );
   const lastCheckFormatted = complianceDisplay.checksLastPerformed;
 
@@ -1184,17 +1239,9 @@ export function PersonProfileClient({
 
                 <div className="client-side-row">
                   <span style={{ color: '#64748b' }}>Able to act</span>
-                  <button
-                    type="button"
-                    onClick={() => setAbleToActOverride(!ableToAct)}
-                    title="Click to toggle Able to act flag"
-                    className={`client-pill ${
-                      ableToAct ? 'client-pill--green' : 'client-pill--red'
-                    }`}
-                    style={{ border: 'none', cursor: 'pointer' }}
-                  >
-                    {ableToAct ? 'Yes' : 'No'}
-                  </button>
+                  <span className={`client-pill ${complianceDisplay.ableToAct.pillClass}`}>
+                    {complianceDisplay.ableToAct.label}
+                  </span>
                 </div>
 
                 <div className="client-side-row">
@@ -1984,7 +2031,7 @@ export function PersonProfileClient({
         <>
           <div className="client-card">
             <div className="kv-grid">
-              <KeyValue label="Able to act">{ableToAct ? 'Yes' : 'No'}</KeyValue>
+              <KeyValue label="Able to act">{complianceDisplay.ableToAct.label}</KeyValue>
               <KeyValue label="Checks last performed">{lastCheckFormatted}</KeyValue>
               <KeyValue label="Contact record status">
                 {resolveLabel(values, person.recordStatusId)}

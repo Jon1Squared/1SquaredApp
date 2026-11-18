@@ -7274,6 +7274,12 @@ export async function saveMatterRecord(
         matter.fieldValues['matterOpeningGate'] = draftGateRecord;
       }
 
+      const inTxFirmProfile = await catRepo.getFirmProfile<FirmStore['firm']>(
+        extensionCtx,
+      );
+      const snapshotFirmName =
+        (inTxFirmProfile?.firm?.name || store.firm.name)?.trim() || undefined;
+
       if (!existingHasOpened) {
         // Re-build fresh snapshot until the matter has actually opened (non-prospective status)
         const cleanFieldVals = { ...matter.fieldValues };
@@ -7285,7 +7291,7 @@ export async function saveMatterRecord(
           inTxDbValues,
           enquiries,
           quotes,
-          { riskAssessment: fullRiskAssessment },
+          { riskAssessment: fullRiskAssessment, firmName: snapshotFirmName },
         );
         openingSnapshot.saveMode = isDraftSave
           ? 'draft'
@@ -7310,6 +7316,7 @@ export async function saveMatterRecord(
           inTxDbValues,
           enquiries,
           quotes,
+          { firmName: snapshotFirmName },
         );
         backfilledSnapshot.saveMode = 'backfilled';
         backfilledSnapshot.capturedAt = now;
@@ -8408,6 +8415,7 @@ export async function updateMatterConflictRecord(
           store.values,
           enquiries,
           quotes,
+          { firmName: store.firm.name?.trim() || undefined },
         );
         openingSnapshot.saveMode = 'opened';
         openingSnapshot.capturedAt = now;
@@ -8856,6 +8864,7 @@ export async function signOffMatterCostsRecord(
             store.values,
             enquiries,
             quotes,
+            { firmName: store.firm.name?.trim() || undefined },
           );
           openingSnapshot.saveMode = 'opened';
           openingSnapshot.capturedAt = now;

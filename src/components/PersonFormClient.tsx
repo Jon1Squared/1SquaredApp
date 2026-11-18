@@ -4569,7 +4569,7 @@ export function PersonFormClient({
                               type="text"
                               className="field-input"
                               disabled={!canEditCore}
-                              placeholder="e.g. PEMBROKE\\c.evans"
+                              placeholder="e.g. DOMAIN\\j.smith"
                               value={sysNetworkLogin}
                               onChange={(e) => setSysNetworkLogin(e.target.value)}
                             />
