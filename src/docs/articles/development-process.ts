@@ -6,7 +6,7 @@ export const developmentProcessArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared designs, tests, audits (including independent Claude Code verification on develop), and releases software safely across isolated branches and deployment rings.',
-  updated: '2026-11-13',
+  updated: '2026-11-17',
   body: `
 For a law firm, a software update cannot be a leap of faith. 1Squared is engineered around a **Zero-Trust, Architecture-First Software Development Lifecycle (SDLC)** where every change passes through **six independent quality and security gates** before reaching live production.
 
@@ -55,6 +55,7 @@ Every push and Pull Request triggers the automated **Platform CI** workflow (\`.
 3. **Adversarial Two-Tenant Isolation Suite**: Automatically provisions two separate firms (*Tenant A* and *Tenant B*) and attempts cross-tenant record reads, updates, deletes, and forged \`tenantId\` claim injection. Any boundary failure immediately blocks the Pull Request.
 4. **Clean Production Build (\`npm run build\`)**: Verifies the immutable production build succeeds.
 5. **Browser Role Journey Smoke Tests (\`npm run e2e\`)**: Runs Playwright browser tests against a production \`next start\` server across the eight seeded roles.
+6. **Framework & Dependency Security Patching**: Security advisories (such as Next.js runtime advisories) are patched on isolated \`fix/*\` branches and verified across the full Platform CI and Playwright role-journey suite before promotion.
 
 **Running PostgreSQL-backed tests**: Test files share one local PostgreSQL instance, so run Vitest serially (the default \`npx vitest run\`); running several Vitest processes in parallel can cause deadlocks. Tests that reset demo data should find new audit entries by time window (\`auditEntriesWrittenSince\`), not by \`AU-…\` number, because a demo reset restarts the audit sequence. Every mutation and its \`public.audit_entries\` record commit inside a single PostgreSQL transaction (\`withTenantTransaction\`) under \`SET LOCAL ROLE\`.
 

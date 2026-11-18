@@ -1,5 +1,13 @@
 # 1Squared — Release Notes
 
+## Unreleased — Next.js 16.4.6 Security Advisory Upgrade (`fix/next-security-upgrade`)
+
+**Change classification:** Host web framework and lint toolchain dependency security upgrade (`package.json`, `package-lock.json`, `next.config.ts`) plus engineering governance documentation ([Rule 11](../AGENTS.md)). **Hosting models:** Identical runtime behaviour in single-tenant (client Azure) and multi-tenant (hosted) deployments over per-tenant PostgreSQL (`CORE_REQUIRED_SCHEMA_VERSION = '0020'`, no database migration). **Rollback:** Reversible application-only deployment (`git revert` on this commit restores `next` and `eslint-config-next` `16.4.2` and `experimental.agentUpgrade: false` with zero schema changes).
+
+- **Next.js Security Upgrade (`16.4.2` → `16.4.6`):** Upgraded `next` and `eslint-config-next` to `16.4.6` to remediate advisory `GHSA-mfr8-8qww-v76h` (*Information disclosure across root params when a `'use cache'` function is called through `unstable_cache()`*, affecting `>=16.3.0 <=16.4.4`).
+- **Removed Temporary Build Override:** Removed `experimental.agentUpgrade: false` from `next.config.ts` now that `16.4.6` reports unaffected by known security advisories.
+- **Documentation & Verification (`Rule 11`):** Updated `src/docs/articles/development-process.ts` (`Gate 3`) and verified end-to-end with `npm run ci`.
+
 ## Unreleased — Teams Activity Notifier, Daily/Weekly Digests & Self-Service Notification Preferences (`s0-29-teams-delivery-and-digests`)
 
 **Change classification:** Per-tenant PostgreSQL schema & repository (`0020_teams_outbox_and_digests_expand`, `CORE_REQUIRED_SCHEMA_VERSION = '0020'`), core Teams integration & shared outbox drain (`core/src/integrations/teams/`, `drainOutboxForTenant`), scheduler job (`notification-digests`, `caj-ntf-dig-<env>`), RBAC & guarded server actions, and self-service profile Notifications UI (`S0-29`, [ADR 0035](decisions/0035-digests-and-teams-delivery.md)). **Hosting models:** Identical runtime behaviour in single-tenant (client Azure) and multi-tenant (hosted) deployments over per-tenant PostgreSQL. **Migration & rollback:** Additive expand migration `0020` creates `public.teams_activity_outbox` + sequence and adds `digest_sent_at` + `matter_id` + `idx_notifications_undigested` on `public.notifications`; reversible `down()` drops the new index, columns, table, and sequence cleanly without altering existing notifications data.
