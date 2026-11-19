@@ -36,6 +36,7 @@ import {
 import { createCleanDeploymentStore } from '@/seed/seedStoreBuilder';
 import {
   clearAllDataToCleanDeployment,
+  getAppSnapshot,
   getCatalogueRepository,
   getKeyDateRepository,
   getMatterRepository,
@@ -44,6 +45,13 @@ import {
   isDemoModeEnabled,
   resetAllDemoData,
 } from '@/server/services';
+import { getMyFinanceFigures } from '@/server/financeServices';
+import { getDocumentGenerationSnapshotForUser } from '@/server/documentGenerationServices';
+import { runWithActiveActorSession } from '@/domain/rbac';
+import {
+  createSignedEntraSessionCookie,
+  verifySignedEntraSessionCookie,
+} from '@/server/entraAuth';
 import {
   clearMigratedPostgresModulesForTenant,
   importFirmStoreModulesToPostgres,
@@ -990,6 +998,98 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       );
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('R521: ignores user.showsWorkOfId and skips ensureSeedDocumentTemplates when not in a non-live demo environment', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const people = await getPartyRepository().listAllPeople(makeDemoEnvTenantCtx());
+    const targetPerson = people.find((p) => p.id === 'P-000002')!;
+    const actingAdmin = people.find((p) => p.id === 'P-000004')!;
+
+    // Set demo + showsWorkOfId on P-000004 (who has no own PMS link) pointing to P-000002 (FE002), then run in live
+    const updatedAdmin = {
+      ...actingAdmin,
+      demo: true,
+      showsWorkOfId: targetPerson.id,
+    };
+    const baseCfg = getActiveTenantRawBaseConfig();
+    const activeCfg = getActiveTenantConfiguration();
+    const ctx = createVerifiedTenantContext(
+      {
+        sub: actingAdmin.id,
+        tenantId: 'not-a-law-firm',
+        name: 'Catrin Williams',
+        email: 'catrin@notalawfirm.example',
+        roles: ['admin', 'partner', 'fee_earner'],
+        mfaVerified: true,
+        correlationId: 'corr-r521-test',
+      },
+      { ...activeCfg, tenantId: 'not-a-law-firm', environment: 'test' },
+    );
+    await getPartyRepository().putPerson(ctx, updatedAdmin);
+
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const signedCookie = createSignedEntraSessionCookie({
+      personId: actingAdmin.id,
+      tenantId: 'not-a-law-firm',
+      oid: actingAdmin.entraObjectId ?? '00000000-0000-4000-8000-000000000004',
+      tid: '11111111-2222-3333-4444-000000000000',
+      sub: actingAdmin.id,
+      email: 'catrin@notalawfirm.example',
+      displayName: 'Catrin Williams',
+      entraRoles: ['admin', 'partner', 'fee_earner'],
+      mappedRoles: ['admin', 'partner', 'fee_earner'],
+      entraGroups: [],
+      mfaVerified: true,
+      amr: ['pwd', 'mfa'],
+      authenticatedAt: nowIso,
+      expiresAt,
+    });
+    const verifiedSession = verifySignedEntraSessionCookie(signedCookie)!;
+
+    // Delete any existing docgen templates so ensureSeedDocumentTemplates would seed if unguarded
+    await clearMigratedPostgresModulesForTenant({
+      ctx,
+      modules: ['documents'],
+    }).catch(() => undefined);
+
+    setActiveTenantConfigForTesting(
+      {
+        ...baseCfg,
+        environment: 'live',
+        featureFlags: { ...(baseCfg.featureFlags ?? {}), enableDemoMode: false },
+      },
+      { tenantId: 'not-a-law-firm', environment: 'live' },
+    );
+    try {
+      await runWithActiveActorSession(
+        {
+          personId: actingAdmin.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: ['admin', 'partner', 'fee_earner'],
+          mfaVerified: true,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession,
+        },
+        async () => {
+          const snap = await getAppSnapshot(actingAdmin.id);
+          expect(snap.currentUser.id).toBe(actingAdmin.id);
+          expect(snap.attention).not.toBeNull();
+
+          // In live, showsWorkOfId must be ignored so P-000004 (no FE PMS link) gets null instead of P-000002's FE002
+          const myFigs = await getMyFinanceFigures(actingAdmin.id);
+          expect((myFigs as { denied?: boolean }).denied).not.toBe(true);
+          expect((myFigs as { myFeeEarnerFigures: unknown }).myFeeEarnerFigures).toBeNull();
+
+          const docSnap = await getDocumentGenerationSnapshotForUser(actingAdmin.id);
+          expect(docSnap.templates.filter((t) => t.id.startsWith('TPL-SEED-'))).toEqual([]);
+        },
+      );
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 });

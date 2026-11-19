@@ -618,8 +618,30 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
           testTenantCtx('P-000004'),
         )
       ).find((m) => !m.isStaffMatter)!;
-      const { id: _omittedMatterId, ...matterTemplate } = baseMatter;
+      const { id: _omittedMatterId, ...rawMatterTemplate } = baseMatter;
       void _omittedMatterId;
+      const matterTemplate = {
+        ...rawMatterTemplate,
+        conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+          status: 'Cleared' as const,
+          outcomeLabel: 'Cleared by fee earner' as const,
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '19 Nov 2026',
+          lastRunById: 'P-000004',
+          lastRunByName: 'Catrin Williams',
+          submittedAtDisplay: '19 Nov 2026',
+          submittedById: 'P-000004',
+          submittedByName: 'Catrin Williams',
+          approvedAtDisplay: null,
+          approvedById: null,
+          approvedByName: null,
+          parties: [],
+          matches: [],
+          comments: [],
+          runs: [],
+        },
+      };
       const conversionTitle = `R456 Enquiry Conversion Matter ${Date.now().toString(36)}`;
       const preTasksCount = (
         await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)

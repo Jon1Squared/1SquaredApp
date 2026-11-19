@@ -231,7 +231,6 @@ export function PersonProfileClient({
   const [activityFilter, setActivityFilter] = useState<
     'all' | 'emails' | 'meetings' | 'notes' | 'documents'
   >('all');
-  const [reminderSent, setReminderSent] = useState(false);
   const [syncedPayrollPersonId, setSyncedPayrollPersonId] = useState<string>(person.id);
   const [revealedPayroll, setRevealedPayroll] = useState<EmploymentPayrollDetails | null>(
     person.employment?.payroll ?? null,
@@ -911,13 +910,11 @@ export function PersonProfileClient({
             <button
               type="button"
               className="client-pill-btn"
-              disabled={reminderSent}
-              onClick={() => {
-                setReminderSent(true);
-                showToast('Invoice reminder sent');
-              }}
+              disabled
+              aria-disabled="true"
+              title="Invoice reminders are not yet available"
             >
-              {reminderSent ? 'Reminder sent' : 'Send reminder'}
+              Not yet available
             </button>
           </div>
         ) : null}
@@ -1064,11 +1061,11 @@ export function PersonProfileClient({
                             type="button"
                             className="client-pill-btn"
                             style={{ height: 30, padding: '0 12px', fontSize: 12 }}
-                            onClick={() =>
-                              showToast(`Time entry opened for ${m.matterNumber}`)
-                            }
+                            disabled
+                            aria-disabled="true"
+                            title="Time recording is not yet available"
                           >
-                            Record time
+                            Not yet available
                           </button>
                           <Link
                             href={m.href}
@@ -1899,8 +1896,9 @@ export function PersonProfileClient({
                   {person.employment.contract.workLocationArrangement}
                 </KeyValue>
                 <KeyValue label="Probation">
-                  {formatDate(person.employment.contract.probationEndDate)} (
-                  {person.employment.contract.probationOutcome})
+                  {person.employment.contract.probationEndDate
+                    ? `${formatDate(person.employment.contract.probationEndDate)} (${person.employment.contract.probationOutcome || 'Not recorded'})`
+                    : person.employment.contract.probationOutcome || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Notice period">
                   {person.employment.contract.noticePeriod}
@@ -1919,31 +1917,38 @@ export function PersonProfileClient({
               </div>
               <div className="kv-grid" style={{ marginTop: 10 }}>
                 <KeyValue label="Timekeeper code">
-                  {person.employment.feeEarner.timekeeperCode || '—'}
+                  {person.employment.feeEarner.timekeeperCode || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Charge-out rate">
                   {person.employment.feeEarner.chargeOutRateGbp
-                    ? `£${person.employment.feeEarner.chargeOutRateGbp}/hr (from ${formatDate(person.employment.feeEarner.chargeOutRateEffectiveFrom)})`
-                    : '—'}
+                    ? `£${person.employment.feeEarner.chargeOutRateGbp}/hr${
+                        person.employment.feeEarner.chargeOutRateEffectiveFrom
+                          ? ` (from ${formatDate(person.employment.feeEarner.chargeOutRateEffectiveFrom)})`
+                          : ''
+                      }`
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Chargeable hours target">
                   {person.employment.feeEarner.chargeableHoursTarget
                     ? `${person.employment.feeEarner.chargeableHoursTarget} hrs/yr`
-                    : '—'}
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Billing / write-off approval limit">
                   {person.employment.feeEarner.billingApprovalLimitGbp
                     ? formatGbp(person.employment.feeEarner.billingApprovalLimitGbp)
-                    : '—'}
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="SRA number">
-                  {person.employment.feeEarner.sraNumber || '—'}
+                  {person.employment.feeEarner.sraNumber || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Practising certificate">
-                  {person.employment.feeEarner.practisingCertificateStatus || '—'}{' '}
-                  {person.employment.feeEarner.practisingCertificateRenewalDate
-                    ? `(renews ${formatDate(person.employment.feeEarner.practisingCertificateRenewalDate)})`
-                    : ''}
+                  {person.employment.feeEarner.practisingCertificateStatus
+                    ? `${person.employment.feeEarner.practisingCertificateStatus}${
+                        person.employment.feeEarner.practisingCertificateRenewalDate
+                          ? ` (renews ${formatDate(person.employment.feeEarner.practisingCertificateRenewalDate)})`
+                          : ''
+                      }`
+                    : 'Not recorded'}
                 </KeyValue>
               </div>
             </div>
@@ -1956,22 +1961,32 @@ export function PersonProfileClient({
               </div>
               <div className="kv-grid" style={{ marginTop: 10 }}>
                 <KeyValue label="Right to work check">
-                  {formatDate(person.employment.rightToWork.checkDate)} ·{' '}
-                  {person.employment.rightToWork.method || '—'}
+                  {person.employment.rightToWork.checkDate ||
+                  person.employment.rightToWork.method
+                    ? `${
+                        person.employment.rightToWork.checkDate
+                          ? formatDate(person.employment.rightToWork.checkDate)
+                          : 'Not recorded'
+                      } · ${person.employment.rightToWork.method || 'Not recorded'}`
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Document type">
-                  {person.employment.rightToWork.documentType || '—'}
+                  {person.employment.rightToWork.documentType || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="DBS check">
-                  {person.employment.rightToWork.dbsCheckType || '—'} (
-                  {person.employment.rightToWork.dbsOutcome || '—'})
+                  {person.employment.rightToWork.dbsCheckType ||
+                  person.employment.rightToWork.dbsOutcome
+                    ? `${person.employment.rightToWork.dbsCheckType || 'Not recorded'} (${person.employment.rightToWork.dbsOutcome || 'Not recorded'})`
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="References received">
                   {person.employment.rightToWork.referencesReceived === true
-                    ? `Yes (${formatDate(person.employment.rightToWork.referencesReceivedDate)})`
+                    ? person.employment.rightToWork.referencesReceivedDate
+                      ? `Yes (${formatDate(person.employment.rightToWork.referencesReceivedDate)})`
+                      : 'Yes'
                     : person.employment.rightToWork.referencesReceived === false
                       ? 'No'
-                      : '—'}
+                      : 'Not recorded'}
                 </KeyValue>
               </div>
             </div>
@@ -2003,21 +2018,21 @@ export function PersonProfileClient({
               {effectivePayroll ? (
                 <div className="kv-grid" style={{ marginTop: 10 }}>
                   <KeyValue label="External payroll reference">
-                    {effectivePayroll.externalPayrollReference || '—'}
+                    {effectivePayroll.externalPayrollReference || 'Not recorded'}
                   </KeyValue>
                   <KeyValue label="National Insurance number">
                     {maskNationalInsuranceNumber(
                       effectivePayroll.nationalInsuranceNumber || '',
-                    ) || '—'}
+                    ) || 'Not recorded'}
                   </KeyValue>
                   <KeyValue label="Bank details">
                     {maskBankDetails(
                       effectivePayroll.bankSortCode || '',
                       effectivePayroll.bankAccountNumber || '',
-                    ).accountNumber || '—'}
+                    ).accountNumber || 'Not recorded'}
                   </KeyValue>
                   <KeyValue label="Pension auto-enrolment">
-                    {effectivePayroll.pensionAutoEnrolmentStatus || '—'}
+                    {effectivePayroll.pensionAutoEnrolmentStatus || 'Not recorded'}
                   </KeyValue>
                 </div>
               ) : (
@@ -2038,10 +2053,10 @@ export function PersonProfileClient({
                   {person.employment.systems.networkLogin || '—'}
                 </KeyValue>
                 <KeyValue label="Building pass">
-                  {person.employment.systems.buildingPassNumber || '—'}
+                  {person.employment.systems.buildingPassNumber || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Firm extension">
-                  {person.employment.systems.extension || '—'}
+                  {person.employment.systems.extension || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Mandatory training (DP / AML / InfoSec)">
                   {[
@@ -2056,7 +2071,7 @@ export function PersonProfileClient({
                       : null,
                   ]
                     .filter(Boolean)
-                    .join(' · ') || '—'}
+                    .join(' · ') || 'Not recorded'}
                 </KeyValue>
               </div>
             </div>
@@ -2888,8 +2903,9 @@ export function PersonProfileClient({
                   {person.employment.contract.workLocationArrangement}
                 </KeyValue>
                 <KeyValue label="Probation">
-                  {formatDate(person.employment.contract.probationEndDate)} (
-                  {person.employment.contract.probationOutcome})
+                  {person.employment.contract.probationEndDate
+                    ? `${formatDate(person.employment.contract.probationEndDate)} (${person.employment.contract.probationOutcome || 'Not recorded'})`
+                    : person.employment.contract.probationOutcome || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Notice period">
                   {person.employment.contract.noticePeriod}
@@ -2908,31 +2924,38 @@ export function PersonProfileClient({
               </div>
               <div className="kv-grid" style={{ marginTop: 10 }}>
                 <KeyValue label="Timekeeper code">
-                  {person.employment.feeEarner.timekeeperCode || '—'}
+                  {person.employment.feeEarner.timekeeperCode || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Charge-out rate">
                   {person.employment.feeEarner.chargeOutRateGbp
-                    ? `£${person.employment.feeEarner.chargeOutRateGbp}/hr (from ${formatDate(person.employment.feeEarner.chargeOutRateEffectiveFrom)})`
-                    : '—'}
+                    ? `£${person.employment.feeEarner.chargeOutRateGbp}/hr${
+                        person.employment.feeEarner.chargeOutRateEffectiveFrom
+                          ? ` (from ${formatDate(person.employment.feeEarner.chargeOutRateEffectiveFrom)})`
+                          : ''
+                      }`
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Chargeable hours target">
                   {person.employment.feeEarner.chargeableHoursTarget
                     ? `${person.employment.feeEarner.chargeableHoursTarget} hrs/yr`
-                    : '—'}
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Billing / write-off approval limit">
                   {person.employment.feeEarner.billingApprovalLimitGbp
                     ? formatGbp(person.employment.feeEarner.billingApprovalLimitGbp)
-                    : '—'}
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="SRA number">
-                  {person.employment.feeEarner.sraNumber || '—'}
+                  {person.employment.feeEarner.sraNumber || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Practising certificate">
-                  {person.employment.feeEarner.practisingCertificateStatus || '—'}{' '}
-                  {person.employment.feeEarner.practisingCertificateRenewalDate
-                    ? `(renews ${formatDate(person.employment.feeEarner.practisingCertificateRenewalDate)})`
-                    : ''}
+                  {person.employment.feeEarner.practisingCertificateStatus
+                    ? `${person.employment.feeEarner.practisingCertificateStatus}${
+                        person.employment.feeEarner.practisingCertificateRenewalDate
+                          ? ` (renews ${formatDate(person.employment.feeEarner.practisingCertificateRenewalDate)})`
+                          : ''
+                      }`
+                    : 'Not recorded'}
                 </KeyValue>
               </div>
             </div>
@@ -2945,22 +2968,32 @@ export function PersonProfileClient({
               </div>
               <div className="kv-grid" style={{ marginTop: 10 }}>
                 <KeyValue label="Right to work check">
-                  {formatDate(person.employment.rightToWork.checkDate)} ·{' '}
-                  {person.employment.rightToWork.method || '—'}
+                  {person.employment.rightToWork.checkDate ||
+                  person.employment.rightToWork.method
+                    ? `${
+                        person.employment.rightToWork.checkDate
+                          ? formatDate(person.employment.rightToWork.checkDate)
+                          : 'Not recorded'
+                      } · ${person.employment.rightToWork.method || 'Not recorded'}`
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Document type">
-                  {person.employment.rightToWork.documentType || '—'}
+                  {person.employment.rightToWork.documentType || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="DBS check">
-                  {person.employment.rightToWork.dbsCheckType || '—'} (
-                  {person.employment.rightToWork.dbsOutcome || '—'})
+                  {person.employment.rightToWork.dbsCheckType ||
+                  person.employment.rightToWork.dbsOutcome
+                    ? `${person.employment.rightToWork.dbsCheckType || 'Not recorded'} (${person.employment.rightToWork.dbsOutcome || 'Not recorded'})`
+                    : 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="References received">
                   {person.employment.rightToWork.referencesReceived === true
-                    ? `Yes (${formatDate(person.employment.rightToWork.referencesReceivedDate)})`
+                    ? person.employment.rightToWork.referencesReceivedDate
+                      ? `Yes (${formatDate(person.employment.rightToWork.referencesReceivedDate)})`
+                      : 'Yes'
                     : person.employment.rightToWork.referencesReceived === false
                       ? 'No'
-                      : '—'}
+                      : 'Not recorded'}
                 </KeyValue>
               </div>
             </div>
@@ -2992,21 +3025,21 @@ export function PersonProfileClient({
               {effectivePayroll ? (
                 <div className="kv-grid" style={{ marginTop: 10 }}>
                   <KeyValue label="External payroll reference">
-                    {effectivePayroll.externalPayrollReference || '—'}
+                    {effectivePayroll.externalPayrollReference || 'Not recorded'}
                   </KeyValue>
                   <KeyValue label="National Insurance number">
                     {maskNationalInsuranceNumber(
                       effectivePayroll.nationalInsuranceNumber || '',
-                    ) || '—'}
+                    ) || 'Not recorded'}
                   </KeyValue>
                   <KeyValue label="Bank details">
                     {maskBankDetails(
                       effectivePayroll.bankSortCode || '',
                       effectivePayroll.bankAccountNumber || '',
-                    ).accountNumber || '—'}
+                    ).accountNumber || 'Not recorded'}
                   </KeyValue>
                   <KeyValue label="Pension auto-enrolment">
-                    {effectivePayroll.pensionAutoEnrolmentStatus || '—'}
+                    {effectivePayroll.pensionAutoEnrolmentStatus || 'Not recorded'}
                   </KeyValue>
                 </div>
               ) : (
@@ -3027,10 +3060,10 @@ export function PersonProfileClient({
                   {person.employment.systems.networkLogin || '—'}
                 </KeyValue>
                 <KeyValue label="Building pass">
-                  {person.employment.systems.buildingPassNumber || '—'}
+                  {person.employment.systems.buildingPassNumber || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Firm extension">
-                  {person.employment.systems.extension || '—'}
+                  {person.employment.systems.extension || 'Not recorded'}
                 </KeyValue>
                 <KeyValue label="Mandatory training (DP / AML / InfoSec)">
                   {[
@@ -3045,7 +3078,7 @@ export function PersonProfileClient({
                       : null,
                   ]
                     .filter(Boolean)
-                    .join(' · ') || '—'}
+                    .join(' · ') || 'Not recorded'}
                 </KeyValue>
               </div>
             </div>

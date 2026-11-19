@@ -1215,8 +1215,30 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       expect(grantRes.ok).toBe(true);
 
       // 1. Create a restricted staff matter accessible only to P-000001 and P-000002 (NOT P-000003 and NOT system:key-date-reminders)
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const { id: _omittedId, ...rawMatterTemplate } = baseMatter;
       void _omittedId;
+      const matterTemplate = {
+        ...rawMatterTemplate,
+        conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+          status: 'Cleared' as const,
+          outcomeLabel: 'Cleared by fee earner' as const,
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '19 Nov 2026',
+          lastRunById: 'P-000001',
+          lastRunByName: 'Rhian Morgan',
+          submittedAtDisplay: '19 Nov 2026',
+          submittedById: 'P-000001',
+          submittedByName: 'Rhian Morgan',
+          approvedAtDisplay: null,
+          approvedById: null,
+          approvedByName: null,
+          parties: [],
+          matches: [],
+          comments: [],
+          runs: [],
+        },
+      };
       const staffMatterSave = await runAsTestActor(
         'P-000001',
         async () =>

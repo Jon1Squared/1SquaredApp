@@ -820,7 +820,7 @@ export function DocumentStoresAdminPanel({
               <input
                 className="input"
                 style={{ flex: 1 }}
-                placeholder="https://1squared1.sharepoint.com/sites/NotALawFirm/Not%20A%20Law%20Firm%20Document%20Repository/Forms/AllItems.aspx"
+                placeholder="https://contoso.sharepoint.com/sites/Example/Shared%20Documents/Forms/AllItems.aspx"
                 value={pasteUrlInput}
                 onChange={(e) => setPasteUrlInput(e.target.value)}
               />

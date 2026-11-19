@@ -2517,10 +2517,17 @@ export function MatterFormClient({
         organisations?: Organisation[];
         people?: Person[];
         links?: PersonOrganisationLink[];
-        error?: string;
+        error?: string | { message?: string };
+        message?: string;
       };
       if (!response.ok || !data.extraction) {
-        throw new Error(data.error || 'Could not extract matter data');
+        const msg =
+          typeof data.error === 'string'
+            ? data.error
+            : data.error?.message ||
+              data.message ||
+              'Matter extraction is unavailable at the moment. Enter the details manually.';
+        throw new Error(msg);
       }
       if (data.organisations?.length) {
         setOrganisations((prev) => {

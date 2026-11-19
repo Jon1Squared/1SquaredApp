@@ -5,7 +5,7 @@
  */
 
 export interface PmsExtractInfo {
-  asAtDate: string; // e.g. '2026-10-16'
+  asAtDate: string; // e.g. 'YYYY-MM-DD'
   importedAt: string; // ISO datetime
   sourceFile: string;
 }
@@ -317,8 +317,8 @@ export interface PmsFeeEarnerWeeklyTime {
 }
 
 export interface PmsMonthlyFeesBilled {
-  monthKey: string; // '2026-01'..'2026-10'
-  monthShort: string; // 'Jan'..'Oct'
+  monthKey: string; // YYYY-MM
+  monthShort: string; // 'Jan'..'Dec'
   feesNet: number;
 }
 

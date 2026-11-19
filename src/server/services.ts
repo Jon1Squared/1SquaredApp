@@ -1975,9 +1975,9 @@ async function getAppSnapshotInScope(
     (cs) => visibleKeyDateIdSet.has(cs.keyDateId),
   );
 
-  // If the current user is a demo user with showsWorkOfId, resolve the underlying filtered employee for personal panels
+  // If the current user is a demo user with showsWorkOfId in a non-live demo environment, resolve the underlying filtered employee for personal panels
   const effectiveWorkPerson: Person =
-    user.demo && user.showsWorkOfId
+    isNonLiveDemoEnvironment() && user.demo && user.showsWorkOfId
       ? (filteredPeople.find((p) => p.id === user.showsWorkOfId) ??
         filteredCurrentUser)
       : filteredCurrentUser;
@@ -6575,12 +6575,21 @@ export async function saveMatterRecord(
         : undefined;
 
   if (willOpen && !isPmsImport) {
+    if (!resolvedConflictCheckRecord && !storedConflictRecord) {
+      return {
+        matter: null,
+        errors: {
+          conflict:
+            'Run and record a conflict check before opening this matter.',
+        },
+      };
+    }
     const fallbackStatusFromField =
       opts.saveMode === 'submit_referred'
         ? 'Pending conflict review'
         : isDraftSave
           ? existing?.conflictCheckStatus ?? 'Draft'
-          : existing?.conflictCheckStatus ?? 'Clear';
+          : existing?.conflictCheckStatus ?? 'Not started';
     const inferredConflictStatus = conflictStatusPillFromLegacy(
       fallbackStatusFromField,
     );
@@ -6733,7 +6742,7 @@ export async function saveMatterRecord(
           ? 'Pending conflict review'
           : isDraftSave
             ? existing?.conflictCheckStatus ?? 'Draft'
-            : existing?.conflictCheckStatus ?? 'Clear',
+            : existing?.conflictCheckStatus ?? 'Not started',
     conflictCheckDate: input.conflictCheckDate !== undefined ? input.conflictCheckDate : existing?.conflictCheckDate ?? today,
     conflictClearedById: existing?.conflictClearedById ?? null,
     conflictNotes: input.conflictNotes ?? existing?.conflictNotes ?? '',

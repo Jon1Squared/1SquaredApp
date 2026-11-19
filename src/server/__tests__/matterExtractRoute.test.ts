@@ -551,22 +551,48 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     ).toBe(true);
   });
 
-  it('labels local fallback provenance as local-fallback and hides internal error messages on 500', async () => {
-    // 1. Remote non-auth failure triggers deterministic fallback labelled 'local-fallback'
-    globalThis.fetch = vi.fn(async () => new Response('Server busy', { status: 502 })) as unknown as typeof fetch;
-
-    const fallbackRes = await matterExtractPost(
-      buildExtractRequest('Offline fallback test document.'),
-    );
-    expect(fallbackRes.status).toBe(200);
-    const fallbackData = (await fallbackRes.json()) as {
-      extraction: { modelName: string };
-    };
-    expect(fallbackData.extraction.modelName).toBe('local-fallback');
-
-    // 2. Thrown error returns stable code EXTRACTION_FAILED on 500 without leaking err.message or document text
+  it('R511: fails closed with 503 and sanitized error telemetry when Anthropic fails (never returning local fallback scenarios or invented fields)', async () => {
+    // 1. Remote non-auth failure (502) fails closed with 503 and safe manual-entry message
     clearMatterExtractionCacheForTesting();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    globalThis.fetch = vi.fn(async () => new Response('Server busy — secret upstream body', { status: 502 })) as unknown as typeof fetch;
+
+    const failRes = await matterExtractPost(
+      buildExtractRequest('TopSecretClientInstructionText-CalderbrookFailClosed'),
+    );
+    expect(failRes.status).toBe(503);
+    const failData = (await failRes.json()) as {
+      ok?: boolean;
+      code?: string;
+      error?: string;
+      extraction?: unknown;
+      correlationId?: string;
+    };
+    expect(failData.ok).toBe(false);
+    expect(failData.code).toBe('MATTER_EXTRACTION_UNAVAILABLE');
+    expect(failData.error).toBe(
+      'Matter extraction is unavailable at the moment. Enter the details manually.',
+    );
+    expect(failData.extraction).toBeUndefined();
+    expect(failData.correlationId).toBeTruthy();
+
+    const failLogged = String(errorSpy.mock.calls[0]?.[0] ?? '');
+    expect(failLogged).not.toContain('TopSecretClientInstructionText');
+    expect(failLogged).not.toContain('secret upstream body');
+    const parsedFailLog = JSON.parse(failLogged) as {
+      event?: string;
+      tenantId?: string;
+      correlationId?: string;
+      errorCode?: string;
+    };
+    expect(parsedFailLog.event).toBe('matter_ai_extraction.failed');
+    expect(parsedFailLog.tenantId).toBe('not-a-law-firm');
+    expect(parsedFailLog.correlationId).toBe(failData.correlationId);
+    expect(parsedFailLog.errorCode).toBe('MATTER_EXTRACTION_UNAVAILABLE');
+
+    // 2. Auth/401 thrown error also fails closed without leaking err.message or document text
+    errorSpy.mockClear();
+    clearMatterExtractionCacheForTesting();
     globalThis.fetch = vi.fn(async () =>
       new Response('Sensitive upstream internal detail', { status: 401 }),
     ) as unknown as typeof fetch;
@@ -574,13 +600,16 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     const errRes = await matterExtractPost(
       buildExtractRequest('TopSecretClientInstructionText-DoNotLog'),
     );
-    expect(errRes.status).toBe(500);
+    expect(errRes.status).toBe(503);
     const errJson = (await errRes.json()) as {
       code?: string;
       error?: string;
       correlationId?: string;
     };
     expect(errJson.code).toBe('EXTRACTION_FAILED');
+    expect(errJson.error).toBe(
+      'Matter extraction is unavailable at the moment. Enter the details manually.',
+    );
     expect(errJson.error).not.toContain('Sensitive upstream internal detail');
     expect(errJson.correlationId).toBeTruthy();
 

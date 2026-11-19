@@ -310,7 +310,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'text',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: 'M-000001',
+    sampleValue: 'M-100001',
     resolve: (ctx) => readProp(ctx.matter, 'id', 'matterId'),
   },
   {
@@ -648,7 +648,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'address',
     requiredPermission: 'employee:view_core',
     sinceVersion: '1.0.0',
-    sampleValue: '42 Lincoln’s Inn Fields, London, WC2A 3PE',
+    sampleValue: '1 Example Street, London, EC1A 1BB',
     resolve: (ctx) => resolveAddressObject(ctx.feeEarner, 'officeAddress'),
   },
   {
@@ -718,7 +718,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'text',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: 'SRA-612048',
+    sampleValue: 'SRA-000000',
     resolve: (ctx) => readProp(ctx.firm, 'regulatorNumber', 'sraNumber'),
   },
   {
@@ -729,7 +729,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'text',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: 'OC391042',
+    sampleValue: 'OC000000',
     resolve: (ctx) => readProp(ctx.firm, 'companyNumber', 'registeredNumber'),
   },
   {
@@ -740,7 +740,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'text',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: 'GB 942 1104 22',
+    sampleValue: 'GB 000 0000 00',
     resolve: (ctx) => readProp(ctx.firm, 'vatNumber'),
   },
   {
@@ -751,7 +751,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'address',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: '42 Lincoln’s Inn Fields, London, WC2A 3PE',
+    sampleValue: '1 Example Street, London, EC1A 1BB',
     resolve: (ctx) => resolveAddressObject(ctx.firm, 'headOfficeAddress'),
   },
   {
@@ -762,7 +762,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'text',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: '+44 20 7946 0800',
+    sampleValue: '+44 20 7946 0100',
     resolve: (ctx) => readProp(ctx.firm, 'mainPhone', 'phone', 'telephone'),
   },
   {
@@ -795,7 +795,7 @@ export const CORE_FIELD_CATALOGUE: readonly FieldCatalogueEntry[] = Object.freez
     dataType: 'text',
     requiredPermission: 'document:generate',
     sinceVersion: '1.0.0',
-    sampleValue: 'Marcus Vaughan',
+    sampleValue: 'Alex Example',
     resolve: (ctx) => readProp(ctx.firm, 'complaintsPartnerName', 'colpName'),
   },
 

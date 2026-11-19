@@ -32,6 +32,7 @@ import {
   getMatterRepository,
   getPartyRepository,
   getPmsRepository,
+  isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import { getTenantPmsSource } from '@/pms/pmsSource';
@@ -287,7 +288,7 @@ export async function verifyFinanceActorAndPermission(
     (l) => !(l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId)),
   );
   const effectiveWorkPerson: Person =
-    actor.demo && actor.showsWorkOfId
+    isNonLiveDemoEnvironment() && actor.demo && actor.showsWorkOfId
       ? (people.find((p) => p.id === actor.showsWorkOfId) ?? actor)
       : actor;
 

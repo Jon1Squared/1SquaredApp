@@ -629,7 +629,7 @@ export function MatterDocumentStoreSection({
                 style={{ flex: 1, minWidth: 280 }}
                 value={linkFolderUrl}
                 onChange={(e) => setLinkFolderUrl(e.target.value)}
-                placeholder="Paste SharePoint folder URL (e.g. https://1squared1.sharepoint.com/sites/NotALawFirm/Shared%20Documents/REAL_ESTATE/RES_CONV/...)"
+                placeholder="Paste SharePoint folder URL (e.g. https://contoso.sharepoint.com/sites/Example/Shared%20Documents/REAL_ESTATE/RES_CONV/...)"
               />
               <button type="submit" className="btn btn--primary btn--sm" disabled={linkingFolder}>
                 {linkingFolder ? 'Linking…' : 'Verify & Link Folder'}

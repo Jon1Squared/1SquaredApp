@@ -109,7 +109,7 @@ export class TenantPmsSource implements PmsSource {
       asAtDate: rawAsAt,
       importedAt: snap.extractInfo.importedAt,
       sourceFile:
-        snap.extractInfo.sourceFile || '1Squared_PMS_Demo_Data.xlsx',
+        snap.extractInfo.sourceFile || 'PMS Extract',
     };
   }
 

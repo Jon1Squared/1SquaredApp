@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BasicMergeEngine,
@@ -908,5 +910,50 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       hasPendingConflict: true,
       hasClearedConflictCheck: false,
     });
+  });
+
+  it('R514: removes toast-only placeholder handlers from OrganisationProfileClient and PersonProfileClient', () => {
+    const orgSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/components/OrganisationProfileClient.tsx'),
+      'utf8',
+    );
+    const personSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/components/PersonProfileClient.tsx'),
+      'utf8',
+    );
+    expect(orgSrc).not.toContain('Time entry opened for');
+    expect(personSrc).not.toContain('Time entry opened for');
+    expect(personSrc).not.toContain('Invoice reminder sent');
+  });
+
+  it('R516: demo-literal guard denies NotALawFirm and URL-encoded Not%20A%20Law%20Firm across extended directories', () => {
+    const denyLiterals = buildDemoLiteralsDenyList();
+    expect(denyLiterals).toContain('NotALawFirm');
+    expect(denyLiterals).toContain('Not%20A%20Law%20Firm');
+
+    const urlHit = scanTextForDemoLiterals(
+      'src/server/example.ts',
+      "const u = 'https://contoso.sharepoint.com/sites/NotALawFirm/Not%20A%20Law%20Firm';",
+      denyLiterals,
+      [],
+      new Set(),
+    );
+    expect(urlHit.length).toBeGreaterThanOrEqual(2);
+
+    const scriptSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'scripts/verify-no-demo-literals.mjs'),
+      'utf8',
+    );
+    for (const dir of [
+      'src/components/',
+      'src/domain/',
+      'src/app/',
+      'src/server/',
+      'src/platform/',
+      'src/pms/',
+      'core/src/',
+    ]) {
+      expect(scriptSrc).toContain(dir);
+    }
   });
 });

@@ -6,7 +6,7 @@ export const aiMatterExtractionArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How AI matter extraction pre-fills the matter opening form from uploaded emails and documents, who can use it, how per-tenant settings govern it, and what data flows to the configured AI provider.',
-  updated: '2026-11-07',
+  updated: '2026-11-19',
   body: `## What AI matter extraction does
 
 When opening a new matter, the **Pre-fill from emails & documents (AI)** panel parses uploaded or pasted intake documents (\`.eml\`, \`.msg\`, \`.pdf\`, \`.docx\`, \`.txt\`) and pre-fills:
@@ -16,10 +16,10 @@ When opening a new matter, the **Pre-fill from emails & documents (AI)** panel p
 - **Section 3 (Matter parties):** opposing parties, counterparties, representatives, and third parties for the conflict check.
 - **Section 6 (More details):** short description, fee estimate, agreed fee cap, payment terms, billing basis, client reference, and court/tribunal details.
 
-### Provenance and fallback labelling
+### Provenance and fail-closed behaviour
 
 - When extraction succeeds via Anthropic's Claude API, the panel displays the model identifier used (for example \`claude-sonnet-4-5-20250929\`).
-- If the remote API is unreachable or refuses a document, the server falls back to deterministic local parsing and labels the result \`local-fallback\` (**Local fallback (offline / deterministic)**) so users can see that AI inference was not used.
+- If the remote AI provider is unreachable, misconfigured, or fails to return valid structured output, 1Squared fails closed with HTTP \`503\` and displays **"Matter extraction is unavailable at the moment. Enter the details manually."**—never substituting hard-coded demo scenarios or fabricated party details.
 
 ### Employee records are never created automatically (B10)
 

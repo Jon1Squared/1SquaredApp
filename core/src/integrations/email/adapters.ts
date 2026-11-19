@@ -177,7 +177,7 @@ async function sendSmtpViaTcpCatcher(params: {
   const host = params.devCatcher.host || '127.0.0.1';
   const port = params.devCatcher.port || 1025;
   const secure = params.devCatcher.secure === true;
-  const domain = params.from.split('@')[1] ?? 'notalawfirm.example';
+  const domain = params.from.split('@')[1] ?? 'example.invalid';
   const messageId = `<${randomUUID()}@${domain}>`;
   const envelopeRecipients = [
     ...params.recipients.to,

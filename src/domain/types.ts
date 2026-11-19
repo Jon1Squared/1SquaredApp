@@ -252,7 +252,12 @@ export type ContractType = 'Permanent' | 'Fixed term' | 'Temporary' | 'Zero hour
 
 export type WorkLocationArrangement = 'Office' | 'Hybrid' | 'Remote';
 
-export type ProbationOutcome = 'Pending' | 'Passed' | 'Extended' | 'Failed';
+export type ProbationOutcome =
+  | 'Not recorded'
+  | 'Pending'
+  | 'Passed'
+  | 'Extended'
+  | 'Failed';
 
 export type RightToWorkMethod =
   | 'Manual document check'

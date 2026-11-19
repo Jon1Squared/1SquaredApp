@@ -1043,12 +1043,12 @@ export function applyLeaverEffects(
       workLocationArrangement: employment.contract?.workLocationArrangement ?? 'Hybrid',
       probationPeriodMonths: employment.contract?.probationPeriodMonths ?? 6,
       probationEndDate: employment.contract?.probationEndDate ?? null,
-      probationOutcome: employment.contract?.probationOutcome ?? 'Passed',
+      probationOutcome: employment.contract?.probationOutcome ?? 'Not recorded',
       noticePeriod: employment.contract?.noticePeriod ?? '3 months',
       holidayEntitlementDays: employment.contract?.holidayEntitlementDays ?? 25,
       leavingDate: endDt,
       leavingReasonId: employment.contract?.leavingReasonId ?? null,
-      eligibleForRehire: employment.contract?.eligibleForRehire ?? 'Yes',
+      eligibleForRehire: employment.contract?.eligibleForRehire ?? null,
       keepAsContactOnLeave: keepAsContact,
       hrRetentionUntil,
     },
@@ -1202,7 +1202,6 @@ export function createDefaultEmploymentRecord(opts: {
       ? deptPartnerId || null
       : null;
 
-  const empNumber = generateNextEmployeeNumber(opts.allPeople);
   const startDate = opts.person.createdAt ? opts.person.createdAt.slice(0, 10) : today;
 
   const slugFirst = (opts.person.firstName || 'user')
@@ -1227,6 +1226,7 @@ export function createDefaultEmploymentRecord(opts: {
     )?.address ?? `${slugFirst}.${slugSurname}@${configuredDomain}`;
   const firmPhone = opts.person.phones?.[0]?.number ?? '';
 
+  const empNumber = generateNextEmployeeNumber(opts.allPeople);
   const record: EmploymentRecord = {
     id: `EREC-${opts.person.id}`,
     personId: opts.person.id,
@@ -1297,7 +1297,7 @@ export function createDefaultEmploymentRecord(opts: {
         startDate,
         orgStructure.defaultProbationMonths ?? 6,
       ),
-      probationOutcome: 'Passed',
+      probationOutcome: 'Not recorded',
       noticePeriod: roleType === 'Partner/Member' ? '6 months' : '3 months',
       holidayEntitlementDays: roleType === 'Partner/Member' ? 30 : 25,
       leavingDate: null,
@@ -1309,61 +1309,51 @@ export function createDefaultEmploymentRecord(opts: {
     feeEarner: isFeeEarnerRoleType(roleType)
       ? {
           timekeeperCode: '',
-          chargeOutRateGbp: roleType === 'Partner/Member' ? 350 : roleType === 'Fee earner' ? 260 : 150,
-          chargeOutRateEffectiveFrom: startDate,
-          chargeOutRateHistory: [
-            {
-              id: `rate-${opts.person.id}-1`,
-              rateGbpPerHour:
-                roleType === 'Partner/Member' ? 350 : roleType === 'Fee earner' ? 260 : 150,
-              effectiveFrom: startDate,
-              effectiveTo: null,
-              changedById: opts.byId,
-              changedAt: nowIso,
-            },
-          ],
-          chargeableHoursTarget: roleType === 'Partner/Member' ? 1200 : 1400,
-          billingApprovalLimitGbp: roleType === 'Partner/Member' ? 25000 : 2500,
+          chargeOutRateGbp: null,
+          chargeOutRateEffectiveFrom: null,
+          chargeOutRateHistory: [],
+          chargeableHoursTarget: null,
+          billingApprovalLimitGbp: null,
           sraNumber: '',
-          practisingCertificateStatus: 'Current',
-          practisingCertificateRenewalDate: `${new Date().getFullYear() + 1}-10-31`,
-          admissionDate: startDate,
+          practisingCertificateStatus: '',
+          practisingCertificateRenewalDate: null,
+          admissionDate: null,
         }
       : null,
     rightToWork: {
-      checkDate: startDate,
-      method: 'Manual document check',
-      documentType: 'UK Passport',
+      checkDate: null,
+      method: '',
+      documentType: '',
       expiryDate: null,
       followUpCheckDueDate: null,
-      dbsCheckType: 'Standard DBS',
-      dbsCheckDate: startDate,
-      dbsOutcome: 'Clear',
+      dbsCheckType: '',
+      dbsCheckDate: null,
+      dbsOutcome: '',
       dbsReference: '',
-      referencesReceived: true,
-      referencesReceivedDate: startDate,
+      referencesReceived: null,
+      referencesReceivedDate: null,
     },
     payroll: {
-      externalPayrollReference: `PAY-${empNumber}`,
+      externalPayrollReference: '',
       nationalInsuranceNumber: '',
-      bankAccountName: `${opts.person.firstName} ${opts.person.surname}`.trim(),
+      bankAccountName: '',
       bankSortCode: '',
       bankAccountNumber: '',
       buildingSocietyRollNumber: '',
-      starterDeclarationOrP45: 'P45 received',
-      studentLoanPlan: 'None',
-      pensionAutoEnrolmentStatus: 'Eligible jobholder — enrolled',
+      starterDeclarationOrP45: 'Not recorded',
+      studentLoanPlan: 'Not recorded',
+      pensionAutoEnrolmentStatus: 'Not recorded',
       pensionOptOutDate: null,
     },
     emergencyContacts: [],
     systems: {
       networkLogin: `${slugFirst}.${slugSurname}`,
-      buildingPassNumber: `BP-${opts.person.id.replace(/\D/g, '').slice(-4)}`,
+      buildingPassNumber: '',
       extension: firmPhone,
       firmWorkEmail: firmEmail,
-      dataProtectionTrainingCompletedAt: startDate,
-      amlTrainingCompletedAt: startDate,
-      infoSecTrainingCompletedAt: startDate,
+      dataProtectionTrainingCompletedAt: null,
+      amlTrainingCompletedAt: null,
+      infoSecTrainingCompletedAt: null,
     },
     conflictCheckOnHire: null,
     createdById: opts.byId,
@@ -1520,14 +1510,69 @@ export function migrateEmployeesToEmploymentRecords(
       emp.profitCentreId = resolvedDept.defaultProfitCentreId;
     }
 
+    // Preserve deterministic seed/migration sample HR & fee-earner values on migrated seed fixtures
+    const seedStartDate = emp.contract?.startDate ?? nowIso.slice(0, 10);
+    const seedById = person.updatedById || person.createdById || person.id;
+    if (emp.contract) {
+      emp.contract.probationOutcome = 'Passed';
+    }
+    if (emp.rightToWork) {
+      emp.rightToWork.checkDate = seedStartDate;
+      emp.rightToWork.method = 'Manual document check';
+      emp.rightToWork.documentType = 'UK Passport';
+      emp.rightToWork.dbsCheckType = 'Standard DBS';
+      emp.rightToWork.dbsCheckDate = seedStartDate;
+      emp.rightToWork.dbsOutcome = 'Clear';
+      emp.rightToWork.referencesReceived = true;
+      emp.rightToWork.referencesReceivedDate = seedStartDate;
+    }
+    if (emp.payroll) {
+      emp.payroll.externalPayrollReference = `PAY-${emp.employeeNumber}`;
+      emp.payroll.bankAccountName = `${person.firstName} ${person.surname}`.trim();
+      emp.payroll.starterDeclarationOrP45 = 'P45 received';
+      emp.payroll.studentLoanPlan = 'None';
+      emp.payroll.pensionAutoEnrolmentStatus = 'Eligible jobholder — enrolled';
+    }
+    if (emp.systems) {
+      emp.systems.buildingPassNumber = `BP-${person.id.replace(/\D/g, '').slice(-4)}`;
+      emp.systems.dataProtectionTrainingCompletedAt = seedStartDate;
+      emp.systems.amlTrainingCompletedAt = seedStartDate;
+      emp.systems.infoSecTrainingCompletedAt = seedStartDate;
+    }
+
     // Populate PMS timekeeper code if linked in PMS
     const pmsCode = pmsLinks.find(
       (l) => l.entityType === 'employee' && l.onesquaredId === person.id,
     )?.pmsCode;
     if (emp.feeEarner) {
+      const seedRateGbp =
+        emp.roleType === 'Partner/Member'
+          ? 350
+          : emp.roleType === 'Fee earner'
+            ? 260
+            : 150;
       emp.feeEarner.timekeeperCode =
         pmsCode || `FE-${person.id.replace(/\D/g, '').slice(-3)}`;
+      emp.feeEarner.chargeOutRateGbp = seedRateGbp;
+      emp.feeEarner.chargeOutRateEffectiveFrom = seedStartDate;
+      emp.feeEarner.chargeOutRateHistory = [
+        {
+          id: `rate-${person.id}-1`,
+          rateGbpPerHour: seedRateGbp,
+          effectiveFrom: seedStartDate,
+          effectiveTo: null,
+          changedById: seedById,
+          changedAt: nowIso,
+        },
+      ];
+      emp.feeEarner.chargeableHoursTarget =
+        emp.roleType === 'Partner/Member' ? 1200 : 1400;
+      emp.feeEarner.billingApprovalLimitGbp =
+        emp.roleType === 'Partner/Member' ? 25000 : 2500;
       emp.feeEarner.sraNumber = `SRA-${600000 + parseInt(person.id.replace(/\D/g, '') || '1', 10)}`;
+      emp.feeEarner.practisingCertificateStatus = 'Current';
+      emp.feeEarner.practisingCertificateRenewalDate = `${new Date().getFullYear() + 1}-10-31`;
+      emp.feeEarner.admissionDate = seedStartDate;
     }
 
     const migratedPerson: Person = syncPersonWorkContactFlags(

@@ -35,6 +35,7 @@ import {
 } from '@/platform/tenantRuntime';
 import { guardedRoute } from '@/server/authorize';
 import { hasPersonPermission } from '@/server/rbacRuntime';
+import { emitTenantTelemetryEvent } from '@/server/telemetry';
 import {
   createOrUpdateLink,
   saveOrganisationRecord,
@@ -821,7 +822,7 @@ function parseContactBlock(
   }
 
   // Otherwise parse string or { value, source } like:
-  // "Mark Ellison, HR Director - mark.ellison@calderbrookfreight.co.uk - T 01924 496 0233 / M 07700 900738"
+  // "Alex Example, Legal Director - alex.example@example.invalid - T 01632 960123 / M 07700 900900"
   const { value, sourceDoc, quote } = unwrapVal(raw);
   if (!value) return null;
 
@@ -1445,11 +1446,7 @@ function normaliseClaudeJsonToExtractionResult(
           unwrapVal(rp.town).value || parsedPartyAddr.town || undefined;
 
         // Extract company number from role or name if present e.g. "(company no. 08812001)"
-        let inferredCoNum = coNum;
-        if (!inferredCoNum && pName.toLowerCase().includes('calderbrook holdings')) {
-          const coMatch = (billingObj?.invoiceEntity || '').match(/\b(\d{8})\b/);
-          if (coMatch) inferredCoNum = coMatch[1];
-        }
+        const inferredCoNum = coNum;
 
         const connectedToPartyName =
           unwrapVal(rp.connectedToPartyName ?? rp.connected_to_party_name).value ||
@@ -1722,379 +1719,6 @@ function computeDocumentsCacheKey(
   return `tenant:${tenantId}|actor:${actorId}|${docsPart}`;
 }
 
-/**
- * Deterministic local extractor fallback so demos never fail even if Anthropic is rate-limited,
- * offline, or returns a refusal on sensitive legal case exhibits.
- */
-function buildDeterministicFallbackJson(
-  parsedDocs: Array<{ name: string; kind: string; text: string }>,
-): Record<string, unknown> {
-  const combined = parsedDocs.map((d) => `=== ${d.name} ===\n${d.text}`).join('\n\n');
-  const lower = combined.toLowerCase();
-  const docNames = parsedDocs.map((d) => d.name);
-  const firstDoc = docNames[0] || 'Client instruction';
-
-  // Detect Scenario 2 (Calderbrook Freight / Marcus Adeyemi ET Claim + Depot Redundancy)
-  if (
-    lower.includes('calderbrook') ||
-    lower.includes('adeyemi') ||
-    lower.includes('1804512/2026') ||
-    docNames.some((n) => /^s2[-_]/i.test(n))
-  ) {
-    const eml1 =
-      docNames.find((n) => n.toLowerCase().includes('e01') || n.toLowerCase().includes('instruction')) ||
-      firstDoc;
-    const eml2 =
-      docNames.find((n) => n.toLowerCase().includes('e02') || n.toLowerCase().includes('billing')) ||
-      eml1;
-    const eml3 =
-      docNames.find((n) => n.toLowerCase().includes('e03') || n.toLowerCase().includes('redundancy')) ||
-      eml1;
-    const d01 =
-      docNames.find((n) => n.toLowerCase().includes('d01') || n.toLowerCase().includes('notice')) ||
-      eml1;
-    const d02 =
-      docNames.find((n) => n.toLowerCase().includes('d02') || n.toLowerCase().includes('acas')) ||
-      eml1;
-    const d03 =
-      docNames.find((n) => n.toLowerCase().includes('d03') || n.toLowerCase().includes('disciplinary')) ||
-      eml1;
-
-    const hasSecondMatter =
-      lower.includes('redundancy') ||
-      lower.includes('wakefield') ||
-      docNames.some((n) => n.toLowerCase().includes('e03') || n.toLowerCase().includes('redundancy'));
-
-    const matters: Array<Record<string, unknown>> = [
-      {
-        matter_ref: 'Matter A',
-        title: {
-          value: 'Defence of Employment Tribunal Claim — Marcus Adeyemi (1804512/2026)',
-          source: [eml1, d01],
-        },
-        work_type: 'Employment & HR',
-        sub_type:
-          'Employment Tribunal - defence (unfair dismissal, race discrimination, harassment, victimisation)',
-        client_role: 'Respondent (employer)',
-        client_capacity_code: 'CAP_EMPLOYER',
-        description: {
-          value:
-            'Defence of Leeds Employment Tribunal claim (Case No. 1804512/2026) brought by former HGV driver Marcus Adeyemi against Calderbrook Freight Services Ltd (First Respondent) and Darren Hirst (Second Respondent) for unfair dismissal, direct race discrimination, racial harassment, and victimisation following summary dismissal on 14 August 2026.',
-          source: [eml1, d01, d03],
-        },
-        fee_earner: 'Sarah Pennock (Partner)',
-        tribunal: 'Leeds Employment Tribunal',
-        case_number: { value: '1804512/2026', source: [d01, eml1] },
-        claim_value: {
-          value: 'Claimant schedule estimate in excess of GBP 45,000',
-          source: [eml1],
-        },
-        acas_ec: {
-          certificate: 'R184467/26/91',
-          day_a: '2026-08-24',
-          day_b: '2026-09-21',
-          source: [d02, eml1],
-        },
-        other_parties_for_conflict_check: [
-          {
-            name: 'Marcus Adeyemi',
-            entity_type: 'person',
-            role: 'Claimant (former HGV Class 1 Driver)',
-            relationship_code: 'OP',
-            address: '42 Harehills Lane, Leeds, LS8 4HT',
-            source: [d01, eml1],
-          },
-          {
-            name: 'Bramley & Yates Solicitors LLP',
-            entity_type: 'organisation',
-            role: "Claimant's solicitors (Priya Nair, Ref: PN/ADE/2026/419)",
-            relationship_code: 'CO',
-            address: '14 Park Row, Leeds, LS1 5HU',
-            contact: 'Priya Nair — p.nair@bramleyyates.co.uk',
-            source: [d01, eml1],
-          },
-          {
-            name: 'Darren Hirst',
-            entity_type: 'person',
-            role: 'Second Respondent; Transport Manager at Normanton Depot',
-            relationship_code: 'CC',
-            source: [d01, eml1],
-          },
-          {
-            name: 'Gareth Lindley',
-            entity_type: 'person',
-            role: 'Depot Manager & Dismissing Officer',
-            relationship_code: 'CC',
-            source: [d03, eml1],
-          },
-          {
-            name: 'Chloe Armitage',
-            entity_type: 'person',
-            role: 'HR Advisor & Disciplinary Note Taker',
-            relationship_code: 'CC',
-            source: [d03, eml1],
-          },
-          {
-            name: 'Tomasz Kowalski',
-            entity_type: 'person',
-            role: 'Comparator HGV Driver cited in ET1',
-            relationship_code: 'TP',
-            source: [eml1],
-          },
-          {
-            name: 'Mick Branagan',
-            entity_type: 'person',
-            role: "Claimant's Unite the Union Representative at disciplinary hearing",
-            relationship_code: 'CO',
-            source: [d03, eml1],
-          },
-          {
-            name: 'Albion Specialty Insurance plc',
-            entity_type: 'organisation',
-            role: "Client's EPL Insurer (Policy EPL-UK-904412, notification ref ALB-CLM-2026-88310)",
-            relationship_code: 'TP',
-            source: [eml2],
-          },
-          {
-            name: 'Calderbrook Holdings Group plc',
-            entity_type: 'organisation',
-            role: 'Parent company / paying party under central group legal budget',
-            relationship_code: 'TP',
-            company_number: '08812001',
-            source: [eml2],
-          },
-        ],
-        key_dates: [
-          {
-            date: '2026-11-16',
-            event: 'ET3 Response filing deadline (Leeds Employment Tribunal)',
-            critical: true,
-            source: [d01, eml1],
-          },
-          {
-            date: '2027-01-12T10:00',
-            event: 'Preliminary Hearing (Case Management) at Leeds Employment Tribunal',
-            critical: true,
-            source: [d01, eml1],
-          },
-        ],
-        funding: {
-          type: 'Private (Group parent paying party) with EPL Insurance notification',
-          insurer: 'Albion Specialty Insurance plc',
-          policy_number: 'EPL-UK-904412',
-          excess: 'GBP 10,000',
-          insurer_ref: 'ALB-CLM-2026-88310',
-          po_number: 'PO-CBF-2026-1184',
-          fee_estimate: '15000',
-          source: [eml2],
-        },
-        confidentiality:
-          'Sensitive discrimination allegations against named managers; restrict access to Employment team.',
-        risk_suggestions: [
-          {
-            questionId: 'inScopeMlr',
-            answer: 'No, out of scope',
-            source: [eml1],
-            quote: 'Employment Tribunal defence litigation — out of scope of MLR 2017.',
-          },
-          {
-            questionId: 'clientRelationshipStatus',
-            answer: 'Existing, CDD needs refresh',
-            followUp:
-              'Existing client (2023 warehouse lease & 2024 driver contracts); group parent Calderbrook Holdings Group plc added to billing chain.',
-            source: [eml1, eml2],
-            quote: 'Existing client since 2023; group parent paying invoices.',
-          },
-          {
-            questionId: 'complexOwnershipStructure',
-            answer: 'Yes, with a clear reason',
-            followUp:
-              'Wholly-owned subsidiary of Calderbrook Holdings Group plc (Co. No. 08812001), which settles legal invoices centrally.',
-            source: [eml2],
-            quote: 'Invoices settled centrally by parent Calderbrook Holdings Group plc (08812001).',
-          },
-          {
-            questionId: 'matterFundingSource',
-            answer: 'A third party',
-            followUp:
-              'Funded via group parent Calderbrook Holdings Group plc (08812001) and EPL insurer Albion Specialty Insurance plc (Policy EPL-UK-904412, £10,000 excess).',
-            source: [eml2],
-            quote: 'Group parent paying party + EPL insurer Albion Specialty Insurance plc.',
-          },
-          {
-            questionId: 'imminentDeadlines',
-            answer: 'Yes',
-            followUp:
-              'Statutory ET3 response deadline on 16 November 2026 and Preliminary Hearing on 12 January 2027.',
-            source: [d01, eml1],
-            quote: 'ET3 Response due by 16 November 2026.',
-          },
-          {
-            questionId: 'specialCategoryDataOrConfidentiality',
-            answer: 'Yes',
-            followUp:
-              'Involves special category personal data (race discrimination allegations and trade union representation).',
-            source: [eml1, d03],
-            quote: 'Allegations of direct race discrimination, harassment, and trade union representation.',
-          },
-        ],
-      },
-    ];
-
-    if (hasSecondMatter) {
-      matters.push({
-        matter_ref: 'Matter B',
-        title: {
-          value: 'Project Pennine — Wakefield Satellite Depot Closure & Collective Redundancy Advice',
-          source: [eml3],
-        },
-        work_type: 'Employment & HR',
-        sub_type: 'Redundancy and restructuring',
-        client_role: 'Employer',
-        client_capacity_code: 'CAP_EMPLOYER',
-        description: {
-          value:
-            'Advisory instruction on proposed closure of Wakefield satellite cross-dock depot following non-renewal of Pennine Fresh Retail Ltd logistics contract, affecting ~26 warehouse and shunter staff (collective consultation under s.188 TULRCA, HR1 filing, and Unite the Union consultation).',
-          source: [eml3],
-        },
-        fee_earner: 'Sarah Pennock (Partner)',
-        other_parties_for_conflict_check: [
-          {
-            name: 'Pennine Fresh Retail Ltd',
-            entity_type: 'organisation',
-            role: 'Key customer not renewing Wakefield distribution contract',
-            relationship_code: 'CP',
-            source: [eml3],
-          },
-          {
-            name: 'Unite the Union',
-            entity_type: 'organisation',
-            role: 'Recognised trade union for collective redundancy consultation',
-            relationship_code: 'CO',
-            source: [eml3],
-          },
-        ],
-        key_dates: [
-          {
-            date: '2026-12-01',
-            event: 'Target launch of s.188 collective redundancy consultation & HR1 filing',
-            critical: true,
-            source: [eml3],
-          },
-        ],
-        funding: {
-          type: 'Private (Group parent paying party)',
-          po_number: 'PO-CBF-2026-1184',
-          fee_estimate: '8500',
-          source: [eml2, eml3],
-        },
-        confidentiality:
-          'Strictly confidential Board-level depot closure proposal (Project Pennine) — embargoed until union notification.',
-        risk_suggestions: [
-          {
-            questionId: 'imminentDeadlines',
-            answer: 'Yes',
-            followUp: 'Collective consultation (s.188 / HR1) targeted to launch early December 2026.',
-            source: [eml3],
-            quote: 'Target launch of collective consultation in early December 2026.',
-          },
-          {
-            questionId: 'specialCategoryDataOrConfidentiality',
-            answer: 'Yes',
-            followUp:
-              'Strictly confidential unannounced depot closure affecting ~26 employees and trade union consultation.',
-            source: [eml3],
-            quote: 'Strictly confidential depot closure proposal.',
-          },
-        ],
-      });
-    }
-
-    return {
-      summary:
-        'Instructions from existing client Calderbrook Freight Services Ltd (Mark Ellison, HR Director) across two Employment & HR matters: (1) Defence of Leeds Employment Tribunal claim 1804512/2026 brought by former driver Marcus Adeyemi (ET3 deadline 16 Nov 2026), and (2) Collective redundancy & restructuring advice on the proposed Wakefield depot closure affecting ~26 staff. Invoiced via group parent Calderbrook Holdings Group plc (PO-CBF-2026-1184, £15,000 initial budget cap) with EPL insurer Albion Specialty Insurance plc notified.',
-      client: {
-        type: 'Company',
-        name: { value: 'Calderbrook Freight Services Ltd', source: [eml1] },
-        company_number: { value: '09418273', source: [eml1] },
-        registered_office: {
-          value: 'Unit 4, Calder Park Industrial Estate, Normanton, West Yorkshire, WF6 1TE',
-          source: [eml1],
-        },
-        instructing_contact: {
-          name: 'Mark Ellison',
-          jobTitle: 'HR Director',
-          email: 'mark.ellison@calderbrookfreight.co.uk',
-          phone: '01924 496 0233',
-          mobile: '07700 900738',
-          source: [eml1],
-        },
-        billing_contact: {
-          name: 'helen.barker@calderbrookfreight.co.uk'.includes('@')
-            ? 'Helen Barker'
-            : 'Accounts Payable',
-          jobTitle: 'Group Financial Controller',
-          email: 'ap@calderbrookholdings.co.uk',
-          phone: '01924 496 0200',
-          source: [eml2],
-        },
-        existing_client: {
-          value:
-            'Yes — acted in 2023 on Normanton warehouse lease and in 2024 on HGV driver employment contracts',
-          source: [eml1],
-        },
-      },
-      billing: {
-        invoice_entity: {
-          value: 'Calderbrook Holdings Group plc (Company No. 08812001 — Group Parent)',
-          source: [eml2],
-        },
-        invoice_address:
-          'Group Finance, Calderbrook House, Calder Park, Wakefield, WF2 7UA',
-        invoice_email: 'ap@calderbrookholdings.co.uk',
-        po_number: { value: 'PO-CBF-2026-1184', source: [eml2] },
-        budget: {
-          value: 'Initial budget cap of GBP 15,000 + VAT (notify at GBP 12,000)',
-          source: [eml2],
-        },
-        fee_estimate_gbp: '15000',
-        agreed_fee_cap_gbp: '15000',
-        payment_terms: '45 days from invoice',
-        billing_basis: 'Hourly',
-      },
-      matters,
-    };
-  }
-
-  // Generic deterministic fallback for arbitrary uploaded documents
-  const emailMatch = combined.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
-  const coNumMatch = combined.match(/\b(\d{8})\b/);
-  const caseNoMatch = combined.match(/\b(\d{7}\/20\d{2})\b/);
-  return {
-    summary: `Extracted matter details from ${parsedDocs.length} uploaded document(s): ${docNames.join(', ')}.`,
-    client: {
-      type: 'Company',
-      name: { value: 'Instructing Client', source: [firstDoc] },
-      company_number: { value: coNumMatch ? coNumMatch[1] : '', source: [firstDoc] },
-      instructing_contact: {
-        name: 'Client Contact',
-        email: emailMatch ? emailMatch[0] : '',
-        source: [firstDoc],
-      },
-    },
-    matters: [
-      {
-        matter_ref: 'Matter A',
-        title: { value: `New Instruction (${firstDoc})`, source: [firstDoc] },
-        work_type: 'Employment & HR',
-        sub_type: 'Employment Tribunal',
-        description: { value: combined.slice(0, 400).trim(), source: [firstDoc] },
-        case_number: { value: caseNoMatch ? caseNoMatch[1] : '', source: [firstDoc] },
-      },
-    ],
-  };
-}
-
 async function extractWithClaude(
   documents: IntakeSourceDocument[],
   apiKey: string,
@@ -2102,7 +1726,7 @@ async function extractWithClaude(
   tenantId: string,
   actorId: string,
 ): Promise<MatterAiExtractionResult> {
-  // 1. Check in-memory session cache first for instant, 100% consistent repeat demo runs (scoped by tenantId and actorId)
+  // 1. Check in-memory session cache first (scoped by tenantId and actorId)
   const cacheKey = computeDocumentsCacheKey(tenantId, actorId, documents);
   const cachedHit = extractionResultCache.get(cacheKey);
   if (cachedHit && Date.now() - cachedHit.cachedAt < 30 * 60 * 1000) {
@@ -2110,7 +1734,6 @@ async function extractWithClaude(
   }
 
   const contentBlocks: Array<Record<string, unknown>> = [];
-  const parsedDocsForFallback: Array<{ name: string; kind: string; text: string }> = [];
   let hasRawPdfDocumentBlock = false;
 
   for (const doc of documents) {
@@ -2122,7 +1745,6 @@ async function extractWithClaude(
       // If the PDF contains extractable text (like ET1 notices and ACAS certificates), send it as
       // a fast text block instead of a slow vision PDF block (which adds 6-12s latency).
       if (localPdfText.length >= 40) {
-        parsedDocsForFallback.push({ name: doc.name, kind: doc.kind, text: localPdfText });
         contentBlocks.push({
           type: 'text',
           text: `=== SOURCE DOCUMENT: ${doc.name} (PDF) ===\n${localPdfText}`,
@@ -2161,11 +1783,6 @@ async function extractWithClaude(
     }
 
     if (extractedText.trim()) {
-      parsedDocsForFallback.push({
-        name: doc.name,
-        kind: doc.kind,
-        text: extractedText.trim(),
-      });
       contentBlocks.push({
         type: 'text',
         text: `=== SOURCE DOCUMENT: ${doc.name} (${doc.kind}) ===\n${extractedText}`,
@@ -2367,11 +1984,13 @@ Important rules for speed and accuracy:
     }
   }
 
-  // If all remote models failed (e.g. refusal across models, rate limit, or network hiccup during demo),
-  // use deterministic local document extraction and label provenance accurately as 'local-fallback'.
+  // Fail closed when AI extraction fails across all configured models — never invent fallback scenarios.
   if (!parsedJson) {
-    parsedJson = buildDeterministicFallbackJson(parsedDocsForFallback);
-    usedModel = 'local-fallback';
+    const unavailableErr = new Error('MATTER_EXTRACTION_UNAVAILABLE') as Error & {
+      errorCode?: string;
+    };
+    unavailableErr.errorCode = 'MATTER_EXTRACTION_UNAVAILABLE';
+    throw unavailableErr;
   }
 
   const finalResult = normaliseClaudeJsonToExtractionResult(parsedJson, usedModel);
@@ -2790,25 +2409,39 @@ export const POST = guardedRoute(
           { status: 401 },
         );
       }
+      const errorCode =
+        err instanceof Error &&
+        'errorCode' in err &&
+        typeof (err as { errorCode?: unknown }).errorCode === 'string'
+          ? ((err as { errorCode: string }).errorCode)
+          : 'EXTRACTION_FAILED';
+      emitTenantTelemetryEvent({
+        eventName: 'matter_ai_extraction.failed',
+        severity: 'error',
+        tenantId,
+        correlationId,
+        properties: { errorCode },
+      });
       console.error(
         JSON.stringify({
           level: 'error',
           event: 'matter_ai_extraction.failed',
           correlationId,
           tenantId,
-          errorCode: 'EXTRACTION_FAILED',
-          errorType: err instanceof Error ? err.name : 'UnknownError',
+          errorCode,
         }),
       );
       return NextResponse.json(
         {
           ok: false,
-          code: 'EXTRACTION_FAILED',
-          error: 'Failed to extract matter data from the provided documents.',
-          message: 'Failed to extract matter data from the provided documents.',
+          code: errorCode,
+          error:
+            'Matter extraction is unavailable at the moment. Enter the details manually.',
+          message:
+            'Matter extraction is unavailable at the moment. Enter the details manually.',
           correlationId,
         },
-        { status: 500 },
+        { status: 503 },
       );
     }
   },
