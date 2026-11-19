@@ -4,17 +4,19 @@ import type { KeyDatesConfig } from '../keyDates.types';
 import type { AuditEntry, Enquiry, Matter, Person, Team } from '../types';
 import {
   carryEnquiryKeyDatesToMatter,
-  createOrProposeKeyDate,
   evaluateMatterKeyDateClosureGate,
   evaluateMatterKeyDateOpeningGate,
   proposeProvisionalKeyDate,
-  reassignKeyDateTeamAndOwners,
   recordKeyDateNotApplicable,
   rejectProposedKeyDate,
   resolveKeyDateOutcome,
-  supersedeConfirmedKeyDate,
   verifyProposedKeyDate,
 } from '../keyDates';
+import {
+  createOrProposeKeyDate,
+  reassignKeyDateTeamAndOwners,
+  supersedeConfirmedKeyDate,
+} from '@/server/rbacRuntime';
 
 const config = exampleConfig as unknown as KeyDatesConfig;
 

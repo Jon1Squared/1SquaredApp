@@ -25,6 +25,7 @@ import {
   getActiveTenantConfiguration,
   getIntakeQuoteRepository,
   getMatterRepository,
+  getOutboxRepository,
   getPartyRepository,
   getTaskWorkflowRepository,
   setActiveTenantConfigForTesting,
@@ -37,8 +38,11 @@ import {
 } from '@/server/entraAuth';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import {
+  addTaskCommentRecord,
   approveSignOff,
   discussSignOff,
+  enqueueNotificationEmailIfImmediate,
+  enqueueNotificationTeamsActivityIfEnabled,
   getAppSnapshot,
   listFirmAuditEntriesPage,
   prepareEnquiryConversion,
@@ -47,7 +51,9 @@ import {
   saveMatterRecord,
   saveQuoteRecord,
   saveTaskRecord,
+  saveTeamRecord,
 } from '@/server/services';
+import { isActionDenied } from '@/domain/actionResult';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { setAuditAdapterFailureHookForTesting } from '@/server/testSupport/auditTestSupport';
 import { testDataResetContext } from '@/test/testTenantContexts';
@@ -2157,6 +2163,224 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       await new TenantAuditRepository().resetNonLiveAuditLog(ctxB);
       await resetAllDemoData('P-000001', testDataResetContext());
       await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
+  });
+
+  it('R509: blocks assigning restricted-matter tasks to non-permitted users/teams and suppresses notifications, email_outbox, and teams_activity_outbox for non-permitted recipients', async () => {
+    const ctx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const matterRepo = getMatterRepository();
+      const taskRepo = getTaskWorkflowRepository();
+      const outboxRepo = getOutboxRepository();
+
+      // Enable immediate email & Teams delivery in tenant test config override so any leaked notification would hit email_outbox & teams_activity_outbox
+      const baseCfg = JSON.parse(
+        fs.readFileSync(
+          path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      setActiveTenantConfigForTesting(baseCfg, {
+        integrations: {
+          email: {
+            provider: 'dev_catcher',
+            senderAddress: 'notifications@notalawfirm.example',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { host: '127.0.0.1', port: 1025, secure: false },
+          },
+          teams: {
+            provider: 'dev_catcher',
+            teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { endpointUrl: 'http://127.0.0.1:4125/teams' },
+          },
+        },
+      });
+
+      const activeSession = makeActorSession(
+        'P-000001',
+        ['partner', 'fee_earner'],
+        'not-a-law-firm',
+      );
+      setTestEntraSessionOverride(activeSession.verifiedSession);
+
+      // P-000002 opts into immediate email + Teams for task notifications
+      await outboxRepo.upsertNotificationPreference(ctx, {
+        personId: 'P-000002',
+        notificationKind: 'task_assigned',
+        inAppEnabled: true,
+        emailFrequency: 'immediate',
+        teamsEnabled: true,
+      });
+      await outboxRepo.upsertNotificationPreference(ctx, {
+        personId: 'P-000002',
+        notificationKind: 'team_task_arrived',
+        inAppEnabled: true,
+        emailFrequency: 'immediate',
+        teamsEnabled: true,
+      });
+
+      const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001', {
+        includeRestricted: true,
+      }))!;
+      const wallMatter: Matter = {
+        ...baseMatter,
+        id: 'M-R509-WALL-01',
+        matterNumber: 'MAT-R509-WALL-01',
+        title: 'Confidential R509 Restricted Matter Secret',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001'],
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001'],
+      };
+      await matterRepo.putMatter(ctx, wallMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001'],
+      });
+
+      const emailsBefore = (await outboxRepo.listOutboxRecords(ctx)).length;
+      const teamsBefore = (await outboxRepo.listTeamsOutboxRecords(ctx)).length;
+
+      await runWithActiveActorSession(activeSession, async () => {
+        // 1. Assigning a restricted-matter task directly to unpermitted P-000002 is refused with FORBIDDEN
+        const deniedDirect = await saveTaskRecord(
+          {
+            title: 'Confidential R509 Direct Assignee Secret',
+            dueAt: '2027-02-01',
+            assignedPersonId: 'P-000002',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(deniedDirect)).toBe(true);
+        expect(deniedDirect.code).toBe('FORBIDDEN');
+
+        // 2. Assigning to a team whose members all lack access to wallMatter is refused
+        const adminSession = makeActorSession('P-000004', ['admin'], 'not-a-law-firm');
+        const unpermittedTeamRes = await runWithActiveActorSession(adminSession, () =>
+          saveTeamRecord(
+            {
+              name: 'Unpermitted Only Team R509',
+              description: 'No permitted members on wallMatter',
+              memberIds: ['P-000002', 'P-000006'],
+              leadIds: ['P-000002'],
+              practiceAreaIds: [],
+              active: true,
+            },
+            'P-000004',
+          ),
+        );
+        expect(unpermittedTeamRes.team?.id).toBeTruthy();
+
+        const deniedTeam = await saveTaskRecord(
+          {
+            title: 'Confidential R509 Unpermitted Team Secret',
+            dueAt: '2027-02-01',
+            assignedTeamId: unpermittedTeamRes.team!.id,
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(deniedTeam)).toBe(true);
+        expect(deniedTeam.code).toBe('FORBIDDEN');
+
+        // 3. Mixed team assignment (TM-000001 contains permitted P-000001 AND unpermitted P-000002):
+        //    saveTaskRecord succeeds for permitted P-000001 / team, but suppresses team_task_arrived for P-000002!
+        const mixedTeamTask = await saveTaskRecord(
+          {
+            title: 'Confidential R509 Mixed Team Queue Secret',
+            dueAt: '2027-02-01',
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(mixedTeamTask.error).toBeUndefined();
+
+        // 3b. Commenting on a restricted-matter task: permitted actor's comment notifies only permitted users,
+        //     and even if a legacy task row had unpermitted P-000002 recorded as createdById, task_comment notifications/outbox are suppressed!
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: 'P-000002',
+          notificationKind: 'task_comment',
+          inAppEnabled: true,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+        const legacyRestrictedTask = {
+          ...mixedTeamTask.task!,
+          id: 'TSK-R509-LEGACY-COMMENT',
+          reference: 'TSK-R509-LEGACY-COMMENT',
+          createdById: 'P-000002',
+        };
+        await taskRepo.putTask(ctx, legacyRestrictedTask);
+        const commentRes = await addTaskCommentRecord(
+          legacyRestrictedTask.id,
+          'Confidential comment secret for R509',
+          'P-000001',
+        );
+        expect(commentRes.error).toBeUndefined();
+      });
+
+      const p2NotificationsUnfiltered =
+        await taskRepo.listNotificationsForUser<TenantNotificationRecord>(
+          ctx,
+          'P-000002',
+          { includeRestricted: true },
+        );
+      expect(
+        p2NotificationsUnfiltered.some((n) =>
+          n.title.includes('Confidential') || n.detail.includes('Confidential'),
+        ),
+      ).toBe(false);
+
+      // 4. Direct defence-in-depth calls to outbox helpers for a non-permitted recipient must write zero rows
+      const forgedEmailItem = await enqueueNotificationEmailIfImmediate(
+        ctx,
+        {
+          id: 'NTF-R509-DEFENSE',
+          recipientId: 'P-000002',
+          kind: 'task_assigned',
+          title: 'Secret Matter Alert R509',
+          detail: 'Should never enqueue',
+          href: `/matters/${wallMatter.id}`,
+          recordId: wallMatter.id,
+          matterId: wallMatter.id,
+          createdAt: new Date().toISOString(),
+          read: false,
+          byId: 'P-000001',
+        },
+        { byId: 'P-000001', drainImmediately: false },
+      );
+      expect(forgedEmailItem).toBeNull();
+
+      const forgedTeamsItem = await enqueueNotificationTeamsActivityIfEnabled(
+        ctx,
+        {
+          id: 'NTF-R509-DEFENSE-TEAMS',
+          recipientId: 'P-000002',
+          kind: 'task_assigned',
+          title: 'Secret Matter Alert R509',
+          detail: 'Should never enqueue',
+          href: `/matters/${wallMatter.id}`,
+          recordId: wallMatter.id,
+          matterId: wallMatter.id,
+          createdAt: new Date().toISOString(),
+          read: false,
+          byId: 'P-000001',
+        },
+        { byId: 'P-000001', drainImmediately: false },
+      );
+      expect(forgedTeamsItem).toBeNull();
+
+      expect((await outboxRepo.listOutboxRecords(ctx)).length).toBe(emailsBefore);
+      expect((await outboxRepo.listTeamsOutboxRecords(ctx)).length).toBe(teamsBefore);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 });

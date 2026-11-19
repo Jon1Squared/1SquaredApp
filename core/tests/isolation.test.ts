@@ -101,6 +101,7 @@ import {
   getMatterPmsViewBundle,
   getMatterRepository,
   getPartyRepository,
+  getRegisterRepository,
   getTaskWorkflowRepository,
   liftMatterRestriction,
   listAuditEntriesForRecord,
@@ -118,6 +119,7 @@ import {
   runScheduledUsageRetentionPurgeJobSweep,
   saveMatterRecord,
   savePersonRecord,
+  saveTaskRecord,
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
   updatePersonPermissionOverrides,
@@ -10262,6 +10264,347 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       setTestEntraSessionOverride(null);
       await hrRepo.clearTenantData(ctxA).catch(() => undefined);
       await hrRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+    }
+  });
+
+  it('R509 & R528 two-tenant isolation: allow-list-only restricted matters hide rows across all 5 PostgreSQL repositories, and restricted task assignment denies tampered cross-tenant IDs', async () => {
+    const rawBase = JSON.parse(
+      fs.readFileSync(
+        path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        name: 'Alpha User',
+        email: 'alpha1@tenant-alpha.example',
+        roles: ['partner', 'fee_earner', 'admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r528-r509-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-1',
+        tenantId: 'tenant-bravo',
+        name: 'Bravo User',
+        email: 'bravo1@tenant-bravo.example',
+        roles: ['partner', 'fee_earner', 'admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r528-r509-b',
+    });
+
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const intakeRepo = getIntakeQuoteRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const kdRepo = getKeyDateRepository();
+    const regRepo = getRegisterRepository();
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const allowListMatterId = `M-R528-AL-${suffix}`;
+    const bravoMatterId = `M-BRAVO-AL-${suffix}`;
+    const enqId = `ENQ-R528-${suffix}`;
+    const quoteId = `QT-R528-${suffix}`;
+    const taskId = `TSK-R528-${suffix}`;
+    const signOffId = `SO-R528-${suffix}`;
+    const kdId = `KD-R528-${suffix}`;
+    const regId = `REG-R528-${suffix}`;
+
+    const makePerson = (id: string) => ({
+      id,
+      recordType: 'person' as const,
+      recordOwnerId: id,
+      recordStatusId: 'person_record_status.active',
+      createdById: id,
+      createdAt: '2026-11-19T10:00:00.000Z',
+      updatedById: id,
+      updatedAt: '2026-11-19T10:00:00.000Z',
+      sourceId: null,
+      lastVerifiedAt: '2026-11-19',
+      tags: [],
+      duplicateStatusId: 'duplicate_status.none',
+      notDuplicateOf: [],
+      possibleMatchIds: [],
+      mergedIntoId: null,
+      lastInteractionAt: '2026-11-19',
+      customFields: {},
+      titleId: null,
+      firstName: id,
+      middleNames: '',
+      surname: 'Tester',
+      preferredName: '',
+      dateOfBirth: '1988-01-01',
+      otherNames: [],
+      jobTitle: 'Solicitor',
+      emails: [],
+      phones: [],
+      preferredContactMethodId: null,
+      preferredLanguageId: null,
+      addresses: [],
+      website: '',
+      relationshipOwnerId: null,
+      relationshipStatusId: null,
+      relationshipStandingId: null,
+      relationshipRoleIds: ['person_role.internal_colleague'],
+      originId: null,
+      firstKnownAt: '2026-01-01',
+      engagementLevelId: null,
+      interests: '',
+      relationshipNotes: '',
+      marketingConsentId: null,
+      consentRecord: '',
+      verificationStatusId: null,
+      verifiedAt: null,
+      verificationMethodId: null,
+      verificationReviewerId: null,
+      riskReferences: '',
+      isEmployee: true,
+      employeeRoleId: 'employee_role.solicitor',
+      departmentId: 'DEPT-RE',
+      appRole: 'fee_earner' as const,
+      roles: ['fee_earner' as const],
+    });
+
+    const seed = loadCommittedSeedStore();
+    try {
+      await partyRepo.putPeople(ctxA, [
+        makePerson('P-ALPHA-1'),
+        makePerson('P-ALPHA-2'),
+      ]);
+      await partyRepo.putPeople(ctxB, [makePerson('P-BRAVO-1')]);
+
+      // Seed allow-list-only restricted matter (isStaffMatter: false, hasEthicalWall: false, restrictedAccessUserIds: ['P-ALPHA-1'])
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...structuredClone(seed.matters[0]!),
+          id: allowListMatterId,
+          matterNumber: `MAT-AL-${suffix}`,
+          title: 'Allow-List Only Restricted Matter',
+          clientId: 'P-ALPHA-1',
+          responsiblePartnerId: 'P-ALPHA-1',
+          supervisingPartnerId: 'P-ALPHA-1',
+          leadFeeEarnerId: 'P-ALPHA-1',
+          teamMemberIds: ['P-ALPHA-1'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: ['P-ALPHA-1'],
+          createdById: 'P-ALPHA-1',
+          updatedById: 'P-ALPHA-1',
+        },
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-ALPHA-1'],
+        },
+      );
+
+      await matterRepo.putMatter(
+        ctxB,
+        {
+          ...structuredClone(seed.matters[0]!),
+          id: bravoMatterId,
+          matterNumber: `MAT-BRV-${suffix}`,
+          title: 'Bravo Allow-List Only Matter',
+          clientId: 'P-BRAVO-1',
+          responsiblePartnerId: 'P-BRAVO-1',
+          supervisingPartnerId: 'P-BRAVO-1',
+          leadFeeEarnerId: 'P-BRAVO-1',
+          teamMemberIds: ['P-BRAVO-1'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: ['P-BRAVO-1'],
+          createdById: 'P-BRAVO-1',
+          updatedById: 'P-BRAVO-1',
+        },
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-BRAVO-1'],
+        },
+      );
+
+      await intakeRepo.putEnquiry(ctxA, {
+        ...structuredClone(seed.enquiries[0]!),
+        id: enqId,
+        reference: enqId,
+        takenById: 'P-ALPHA-1',
+        assignedToId: 'P-ALPHA-1',
+        status: 'Converted',
+        convertedMatterId: allowListMatterId,
+        createdById: 'P-ALPHA-1',
+        updatedById: 'P-ALPHA-1',
+      });
+
+      await intakeRepo.putQuote(ctxA, {
+        ...structuredClone(seed.quotes[0]!),
+        id: quoteId,
+        reference: quoteId,
+        linkedEnquiryId: enqId,
+        status: 'Converted',
+        convertedMatterId: allowListMatterId,
+        createdById: 'P-ALPHA-1',
+        updatedById: 'P-ALPHA-1',
+      });
+
+      await taskRepo.putTask(ctxA, {
+        ...structuredClone(seed.tasks[0]!),
+        id: taskId,
+        reference: taskId,
+        title: 'Allow-list Restricted Task',
+        assignedTeamId: null,
+        assignedPersonId: 'P-ALPHA-1',
+        assignedPersonIds: ['P-ALPHA-1'],
+        linkedRecords: [{ recordType: 'matter', recordId: allowListMatterId }],
+        createdById: 'P-ALPHA-1',
+        updatedById: 'P-ALPHA-1',
+      });
+
+      await taskRepo.putSignOff(ctxA, {
+        id: signOffId,
+        kind: 'write_off',
+        title: 'Allow-list Sign-off',
+        matterNumber: `MAT-AL-${suffix}`,
+        matterId: allowListMatterId,
+        subtitle: 'Allow-list Sign-off',
+        requestedById: 'P-ALPHA-1',
+        requestedAt: '2026-11-19T10:00:00.000Z',
+        assignedPartnerId: 'P-ALPHA-1',
+        status: 'Pending',
+      });
+
+      await kdRepo.putKeyDate(ctxA, {
+        id: kdId,
+        matterId: allowListMatterId,
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'Allow-list Key Date',
+        dueDate: '2027-02-01',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-ALPHA-1'],
+        verification: { required: false },
+        createdById: 'P-ALPHA-1',
+        createdAt: '2026-11-19T10:00:00.000Z',
+        updatedById: 'P-ALPHA-1',
+        updatedAt: '2026-11-19T10:00:00.000Z',
+        version: 1,
+      });
+
+      await regRepo.createRegisterRecord(
+        ctxA,
+        {
+          id: regId,
+          registerTypeKey: 'complaint',
+          reference: regId,
+          title: 'Allow-list Complaint Register',
+          status: 'open',
+          matterId: allowListMatterId,
+          enquiryId: null,
+          personId: null,
+          organisationId: null,
+          ownerId: 'P-ALPHA-1',
+          assignedApproverId: null,
+          dueAt: null,
+          reviewAt: null,
+          reminderScheduleDays: [],
+          fieldValues: {},
+          createdById: 'P-ALPHA-1',
+        },
+        { recordInitialTransition: false },
+      );
+
+      // Unlisted P-ALPHA-2 sees ZERO rows across all 5 repositories!
+      expect((await matterRepo.listVisibleMatters(ctxA, 'P-ALPHA-2')).some((m) => m.id === allowListMatterId)).toBe(false);
+      expect(await matterRepo.getMatterById(ctxA, allowListMatterId, { viewerId: 'P-ALPHA-2' })).toBeNull();
+      expect((await intakeRepo.listVisibleEnquiries(ctxA, 'P-ALPHA-2')).some((e) => e.id === enqId)).toBe(false);
+      expect((await intakeRepo.listVisibleQuotes(ctxA, 'P-ALPHA-2')).some((q) => q.id === quoteId)).toBe(false);
+      expect((await taskRepo.listVisibleTasks(ctxA, 'P-ALPHA-2')).some((t) => t.id === taskId)).toBe(false);
+      expect((await taskRepo.listVisibleSignOffs(ctxA, 'P-ALPHA-2')).some((s) => s.id === signOffId)).toBe(false);
+      expect((await kdRepo.listAllVisibleKeyDates(ctxA, 'P-ALPHA-2')).some((k) => k.id === kdId)).toBe(false);
+      expect(await kdRepo.getKeyDateById(ctxA, kdId, 'P-ALPHA-2')).toBeNull();
+      expect(await kdRepo.isMatterVisibleToViewer(ctxA, allowListMatterId, 'P-ALPHA-2')).toBe(false);
+      expect((await regRepo.listVisibleRegisterRecords(ctxA, 'P-ALPHA-2')).some((r) => r.id === regId)).toBe(false);
+
+      // Listed P-ALPHA-1 (positive control) sees ALL rows!
+      expect((await matterRepo.listVisibleMatters(ctxA, 'P-ALPHA-1')).some((m) => m.id === allowListMatterId)).toBe(true);
+      expect((await intakeRepo.listVisibleEnquiries(ctxA, 'P-ALPHA-1')).some((e) => e.id === enqId)).toBe(true);
+      expect((await intakeRepo.listVisibleQuotes(ctxA, 'P-ALPHA-1')).some((q) => q.id === quoteId)).toBe(true);
+      expect((await taskRepo.listVisibleTasks(ctxA, 'P-ALPHA-1')).some((t) => t.id === taskId)).toBe(true);
+      expect((await taskRepo.listVisibleSignOffs(ctxA, 'P-ALPHA-1')).some((s) => s.id === signOffId)).toBe(true);
+      expect((await kdRepo.listAllVisibleKeyDates(ctxA, 'P-ALPHA-1')).some((k) => k.id === kdId)).toBe(true);
+      expect((await regRepo.listVisibleRegisterRecords(ctxA, 'P-ALPHA-1')).some((r) => r.id === regId)).toBe(true);
+
+      // Tampered Tenant Bravo matter ID from Tenant Alpha saveTaskRecord session is rejected
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-alpha', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-alpha', environment: 'test' },
+      );
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const verifiedA = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-ALPHA-1',
+          tenantId: 'tenant-alpha',
+          oid: '00000000-0000-4000-8000-00000000a001',
+          tid: '11111111-2222-4333-8444-555555555555',
+          sub: 'P-ALPHA-1',
+          email: 'alpha1@tenant-alpha.example',
+          displayName: 'Alpha User',
+          entraRoles: ['partner', 'fee_earner'],
+          mappedRoles: ['partner', 'fee_earner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        }),
+      )!;
+      setTestEntraSessionOverride(verifiedA);
+      await runWithActiveActorSession(
+        {
+          personId: 'P-ALPHA-1',
+          tenantId: 'tenant-alpha',
+          tokenRoles: ['partner', 'fee_earner'],
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifiedA,
+        },
+        async () => {
+          const crossTenantTask = await saveTaskRecord(
+            {
+              title: 'Cross-Tenant Tamper Task',
+              dueAt: '2027-02-01',
+              assignedPersonId: 'P-ALPHA-1',
+              linkedRecords: [{ recordType: 'matter', recordId: bravoMatterId }],
+            },
+            'P-ALPHA-1',
+          );
+          expect(isActionDenied(crossTenantTask)).toBe(true);
+          expect(crossTenantTask.code).toBe('FORBIDDEN');
+        },
+      );
+      expect((await taskRepo.listVisibleTasks(ctxB, 'P-BRAVO-1')).length).toBe(0);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await regRepo.clearTenantData(ctxA).catch(() => undefined);
+      await kdRepo.clearTenantData(ctxA).catch(() => undefined);
+      await taskRepo.clearTenantData(ctxA).catch(() => undefined);
+      await taskRepo.clearTenantData(ctxB).catch(() => undefined);
+      await intakeRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
       await partyRepo.clearTenantData(ctxA).catch(() => undefined);
       await partyRepo.clearTenantData(ctxB).catch(() => undefined);
     }

@@ -274,11 +274,14 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     const row = res.rows[0];
     if (!row) return false;
     this.assertRowTenant(ctx, row.tenant_id, 'Matter');
-    const isRestricted = Boolean(row.is_staff_matter) || Boolean(row.has_ethical_wall);
-    if (!isRestricted) return true;
     const allowIds = Array.isArray(row.restricted_access_user_ids_json)
       ? row.restricted_access_user_ids_json
       : [];
+    const isRestricted =
+      Boolean(row.is_staff_matter) ||
+      Boolean(row.has_ethical_wall) ||
+      allowIds.length > 0;
+    if (!isRestricted) return true;
     return allowIds.includes(viewerId);
   }
 
@@ -349,7 +352,14 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       const row = res.rows[0];
       if (!row) return false;
       this.assertRowTenant(ctx, row.tenant_id, 'Matter');
-      return Boolean(row.is_staff_matter) || Boolean(row.has_ethical_wall);
+      const allowIds = Array.isArray(row.restricted_access_user_ids_json)
+        ? row.restricted_access_user_ids_json
+        : [];
+      return (
+        Boolean(row.is_staff_matter) ||
+        Boolean(row.has_ethical_wall) ||
+        allowIds.length > 0
+      );
     });
   }
 
@@ -601,7 +611,11 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
            AND (
              kd.matter_id IS NULL
              OR m.id IS NULL
-             OR (m.is_staff_matter = FALSE AND m.has_ethical_wall = FALSE)
+             OR (
+               m.is_staff_matter = FALSE
+               AND m.has_ethical_wall = FALSE
+               AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+             )
              OR m.restricted_access_user_ids_json ? $2
            )
          ORDER BY kd.due_date ASC, kd.id ASC`,
@@ -704,7 +718,11 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
              OR (
                m.id IS NOT NULL
                AND (
-                 (m.is_staff_matter = FALSE AND m.has_ethical_wall = FALSE)
+                 (
+                   m.is_staff_matter = FALSE
+                   AND m.has_ethical_wall = FALSE
+                   AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+                 )
                  OR m.restricted_access_user_ids_json ? $2
                )
              )
@@ -865,7 +883,11 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
            ON m.tenant_id = na.tenant_id AND m.id = na.matter_id
          WHERE na.tenant_id = $1
            AND (
-             (m.is_staff_matter = FALSE AND m.has_ethical_wall = FALSE)
+             (
+               m.is_staff_matter = FALSE
+               AND m.has_ethical_wall = FALSE
+               AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+             )
              OR m.restricted_access_user_ids_json ? $2
            )
          ORDER BY na.matter_id ASC, na.key_date_type_id ASC`,

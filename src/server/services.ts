@@ -218,6 +218,8 @@ import {
   canUserTakeTask,
   canUserVerifyKeyDate,
   canViewerAccessMatterKeyDates,
+  computeKeyDateExceptions,
+  createOrProposeKeyDate,
   filterEmploymentForUser,
   getActiveActorSession,
   getDefaultTenantRbacConfig,
@@ -230,6 +232,8 @@ import {
   isUserAssignablePermissionKey,
   mergeRbacConfigOverlay,
   PERMISSION_REGISTRY,
+  queryTeamDiaryEntries,
+  reassignKeyDateTeamAndOwners,
   requirePermission,
   resolveConfiguredFirmPrimaryDomain,
   resolveEmployeePermissions,
@@ -238,11 +242,15 @@ import {
   resolvePersonPermissionSet,
   resolvePersonPermissions,
   resolveUserAppRole,
+  runTenantKeyDateReminderJob,
   runWithActiveActorSession,
+  supersedeConfirmedKeyDate,
+  syncReminderForConfirmedKeyDate,
   validateUserOverrideOrRoleMutation,
   type EntraIdRawTokenClaims,
   type PermissionKey,
   type RbacConfiguration,
+  type ResolvePersonPermissionsOptions,
   type VerifiedOidcTokenClaims,
 } from './rbacRuntime';
 import {
@@ -357,17 +365,14 @@ import type {
 import {
   buildKeyDateReminderIdempotencyKey,
   carryEnquiryKeyDatesToMatter,
-  createOrProposeKeyDate,
   evaluateMatterKeyDateClosureGate,
   evaluateMatterKeyDateOpeningGate,
   proposeProvisionalKeyDate,
-  reassignKeyDateTeamAndOwners,
   recordKeyDateNotApplicable,
   rejectProposedKeyDate,
   resolveKeyDateOutcome,
   resolveKeyDateSource,
   resolveSupersedeKeyDateSource,
-  supersedeConfirmedKeyDate,
   validateKeyDateManualEntry,
   verifyProposedKeyDate,
 } from '@/domain/keyDates';
@@ -379,12 +384,8 @@ import {
 import {
   acknowledgeKeyDateReminderStage,
   closeReminderTaskForKeyDate,
-  runTenantKeyDateReminderJob,
-  syncReminderForConfirmedKeyDate,
 } from '@/domain/keyDateReminders';
 import {
-  computeKeyDateExceptions,
-  queryTeamDiaryEntries,
   resolvePermittedDiaryTeamIds,
 } from '@/domain/keyDateDiary';
 import {
@@ -1924,11 +1925,18 @@ async function getAppSnapshotInScope(
   const repoVisibleKeyDates = canViewKeyDates
     ? await keyDateRepo.listAllVisibleKeyDates(snapshotTenantCtx, user.id)
     : [];
+  const snapshotKdRbacOptions: ResolvePersonPermissionsOptions = {
+    allPeople: people,
+    teams,
+    tokenRoles: effectiveTokenRoles,
+    config: { rbac: rbacConfig },
+    tenantId: snapshotTenantCtx.tenantId,
+  };
   const visibleKeyDates: KeyDate[] = repoVisibleKeyDates.filter((kd) => {
     if (!permittedDiaryTeamIds.has(kd.teamId)) return false;
     if (!kd.matterId) return true;
     const m = matterByIdForKd.get(kd.matterId);
-    return canViewerAccessMatterKeyDates(m, user.id, user, people);
+    return canViewerAccessMatterKeyDates(m, user.id, user, people, snapshotKdRbacOptions);
   });
   const visibleKeyDateIdSet = new Set(visibleKeyDates.map((kd) => kd.id));
   const repoVisibleNotApplicable = canViewKeyDates
@@ -1937,7 +1945,7 @@ async function getAppSnapshotInScope(
   const visibleKeyDateNotApplicable: KeyDateNotApplicable[] = repoVisibleNotApplicable.filter(
     (na) => {
       const m = matterByIdForKd.get(na.matterId);
-      return canViewerAccessMatterKeyDates(m, user.id, user, people);
+      return canViewerAccessMatterKeyDates(m, user.id, user, people, snapshotKdRbacOptions);
     },
   );
   const repoReminderStates = canViewKeyDates
@@ -10247,6 +10255,148 @@ function resolvePrimaryActiveEmailForPerson(person: Person): string | null {
 }
 
 /**
+ * Verifies whether `item.recipientId` is an active employee entitled to view every matter
+ * and personal draft enquiry linked to `item` (`R509`).
+ * Checks direct `matterId`, `/matters/<id>` hrefs, linked tasks, key dates, enquiries
+ * (personal drafts, `convertedMatterId`, `matters.sourceEnquiryId`), quotes, and registers.
+ */
+async function canRecipientReceiveNotification(
+  ctx: TenantContext,
+  item: NotificationItem,
+  options?: {
+    readonly tenantConfig?: TenantConfiguration;
+    readonly knownMatterIds?: readonly string[];
+    readonly knownTask?: Task | null;
+    readonly suppressLog?: boolean;
+  },
+): Promise<{
+  readonly allowed: boolean;
+  readonly people: readonly Person[];
+  readonly recipient: Person | null;
+}> {
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const hrRepo = getHrAndRbacRepository();
+  const keyDateRepo = getKeyDateRepository();
+  const registerRepo = getRegisterRepository();
+
+  const [
+    people,
+    teams,
+    matters,
+    enquiries,
+    quotes,
+    keyDates,
+    registerRecords,
+    fetchedTask,
+    effectiveRbac,
+  ] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    hrRepo.listAllTeams<Team>(ctx),
+    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
+    registerRepo.listVisibleRegisterRecords(ctx, item.recipientId, {
+      includeRestricted: true,
+    }),
+    options?.knownTask !== undefined
+      ? Promise.resolve(options.knownTask)
+      : item.recordId
+        ? taskRepo.getTaskById<Task>(ctx, item.recordId, { includeRestricted: true })
+        : Promise.resolve(null),
+    loadEffectiveTenantRbacConfig(ctx, options?.tenantConfig?.rbac ?? undefined),
+  ]);
+
+  const recipient =
+    people.find(
+      (p) =>
+        p.id === item.recipientId &&
+        p.isEmployee &&
+        !p.mergedIntoId &&
+        p.recordStatusId !== 'record_status.archived' &&
+        !isLeaverPerson(p),
+    ) ?? null;
+
+  const deny = async (reasonCode: string): Promise<{
+    readonly allowed: boolean;
+    readonly people: readonly Person[];
+    readonly recipient: Person | null;
+  }> => {
+    if (!options?.suppressLog) {
+      emitTenantTelemetryEvent({
+        eventName: 'notification.restricted_suppressed',
+        tenantId: ctx.tenantId,
+        correlationId: await resolveCurrentRequestCorrelationId(ctx.correlationId),
+        severity: 'warn',
+        properties: {
+          recipientId: item.recipientId,
+          recordId: item.recordId,
+          matterId: item.matterId ?? '',
+          kind: item.kind,
+          reasonCode,
+        },
+      });
+    }
+    return { allowed: false, people, recipient };
+  };
+
+  if (!recipient) {
+    return deny('recipient_ineligible');
+  }
+
+  const matterById = new Map(matters.map((m) => [m.id, m]));
+  const taskById = new Map<string, Task>();
+  if (fetchedTask) {
+    taskById.set(fetchedTask.id, fetchedTask);
+  }
+  const keyDateById = new Map(keyDates.map((kd) => [kd.id, kd]));
+  const enquiryById = new Map(enquiries.map((e) => [e.id, e]));
+  const quoteById = new Map(quotes.map((q) => [q.id, q]));
+  const registerRecordById = new Map(registerRecords.map((r) => [r.id, r]));
+
+  const extracted = extractNotificationMatterIds({
+    item,
+    matterById,
+    taskById,
+    keyDateById,
+    enquiryById,
+    quoteById,
+    registerRecordById,
+  });
+
+  if (extracted.hiddenDraftEnquiry) {
+    return deny('hidden_draft_enquiry');
+  }
+
+  const allMatterIds = new Set<string>(extracted.matterIds);
+  for (const knownId of options?.knownMatterIds ?? []) {
+    if (knownId?.trim()) {
+      allMatterIds.add(knownId.trim());
+    }
+  }
+
+  for (const mId of allMatterIds) {
+    const matter = matterById.get(mId);
+    if (
+      !matter ||
+      !canPersonAccessMatter(matter, recipient.id, recipient, {
+        allPeople: people,
+        teams,
+        config: { rbac: effectiveRbac },
+        tenantId: ctx.tenantId,
+      })
+    ) {
+      return deny(matter ? 'restricted_matter_denied' : 'linked_matter_missing');
+    }
+  }
+
+  return { allowed: true, people, recipient };
+}
+
+/**
  * Enqueues an immediate transactional email into `public.email_outbox` when
  * `integrations.email.provider !== 'disabled'` and the recipient's notification
  * preference resolves to `emailFrequency === 'immediate'`, followed by a best-effort
@@ -10263,12 +10413,26 @@ export async function enqueueNotificationEmailIfImmediate(
     readonly secretReader?: KeyVaultSecretReader;
     readonly storageProvider?: DocumentStorageProvider;
     readonly drainImmediately?: boolean;
+    readonly knownMatterIds?: readonly string[];
+    readonly knownTask?: Task | null;
+    readonly accessAlreadyVerified?: boolean;
   },
 ): Promise<EmailOutboxRecord | null> {
   const tenantConfig = options?.tenantConfig ?? getActiveTenantConfiguration();
   const emailCfg = resolveEmailIntegrationConfig(tenantConfig);
   if ((emailCfg.provider ?? 'disabled') === 'disabled') {
     return null;
+  }
+
+  if (!options?.accessAlreadyVerified) {
+    const access = await canRecipientReceiveNotification(ctx, item, {
+      tenantConfig,
+      knownMatterIds: options?.knownMatterIds,
+      knownTask: options?.knownTask,
+    });
+    if (!access.allowed) {
+      return null;
+    }
   }
 
   const outboxRepo = getOutboxRepository();
@@ -10352,12 +10516,26 @@ export async function enqueueNotificationTeamsActivityIfEnabled(
     readonly secretReader?: KeyVaultSecretReader;
     readonly teamsDevCatcherHandler?: TeamsDevCatcherHandler;
     readonly drainImmediately?: boolean;
+    readonly knownMatterIds?: readonly string[];
+    readonly knownTask?: Task | null;
+    readonly accessAlreadyVerified?: boolean;
   },
 ): Promise<TeamsActivityOutboxRecord | null> {
   const tenantConfig = options?.tenantConfig ?? getActiveTenantConfiguration();
   const teamsCfg = resolveTeamsIntegrationConfig(tenantConfig);
   if ((teamsCfg.provider ?? 'disabled') === 'disabled') {
     return null;
+  }
+
+  if (!options?.accessAlreadyVerified) {
+    const access = await canRecipientReceiveNotification(ctx, item, {
+      tenantConfig,
+      knownMatterIds: options?.knownMatterIds,
+      knownTask: options?.knownTask,
+    });
+    if (!access.allowed) {
+      return null;
+    }
   }
 
   const outboxRepo = getOutboxRepository();
@@ -10420,21 +10598,22 @@ async function pushNotification(
     href: string;
     recordId: string;
     matterId?: string | null;
+    knownMatterIds?: readonly string[];
+    knownTask?: Task | null;
     byId: string;
     at?: string;
   },
 ): Promise<NotificationItem | null> {
   // Don't notify someone about an action they took themselves unless it's an overdue alert
   if (input.recipientId === input.byId && input.kind !== 'task_overdue') return null;
-  const taskRepo = getTaskWorkflowRepository();
-  const id = await taskRepo.allocateNextNotificationId(ctx);
   const inferredMatterId =
     input.matterId ??
-    (input.recordId.startsWith('MAT-')
+    (input.knownMatterIds?.length === 1 ? input.knownMatterIds[0] : undefined) ??
+    (input.recordId.startsWith('MAT-') || input.recordId.startsWith('M-')
       ? input.recordId
-      : /\/matters\/(MAT-[^/?#]+)/.exec(input.href)?.[1] ?? null);
-  const item: NotificationItem = {
-    id,
+      : /\/matters\/([^/?#]+)/.exec(input.href)?.[1] ?? null);
+  const candidateItem: NotificationItem = {
+    id: 'NTF-CHECK',
     recipientId: input.recipientId,
     kind: input.kind,
     title: input.title,
@@ -10446,9 +10625,33 @@ async function pushNotification(
     read: false,
     byId: input.byId,
   };
+  const access = await canRecipientReceiveNotification(ctx, candidateItem, {
+    knownMatterIds: input.knownMatterIds,
+    knownTask: input.knownTask,
+  });
+  if (!access.allowed) {
+    return null;
+  }
+
+  const taskRepo = getTaskWorkflowRepository();
+  const id = await taskRepo.allocateNextNotificationId(ctx);
+  const item: NotificationItem = {
+    ...candidateItem,
+    id,
+  };
   await taskRepo.putNotification(ctx, item);
-  await enqueueNotificationEmailIfImmediate(ctx, item, { byId: input.byId });
-  await enqueueNotificationTeamsActivityIfEnabled(ctx, item, { byId: input.byId });
+  await enqueueNotificationEmailIfImmediate(ctx, item, {
+    byId: input.byId,
+    knownMatterIds: input.knownMatterIds,
+    knownTask: input.knownTask,
+    accessAlreadyVerified: true,
+  });
+  await enqueueNotificationTeamsActivityIfEnabled(ctx, item, {
+    byId: input.byId,
+    knownMatterIds: input.knownMatterIds,
+    knownTask: input.knownTask,
+    accessAlreadyVerified: true,
+  });
   return item;
 }
 
@@ -10979,7 +11182,7 @@ export async function saveTaskRecord(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [store, people, organisations, matters, enquiries, quotes, existing, teams] = await Promise.all([
+  const [store, people, organisations, matters, enquiries, quotes, existing, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(taskCtx),
     partyRepo.listAllPeople<Person>(taskCtx),
     partyRepo.listAllOrganisations<Organisation>(taskCtx),
@@ -10990,6 +11193,7 @@ export async function saveTaskRecord(
       ? taskRepo.getTaskById<Task>(taskCtx, input.id, { includeRestricted: true })
       : Promise.resolve(null),
     getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
+    loadEffectiveTenantRbacConfig(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const prelimVis = buildRecordVisibility(store, actor, {
@@ -10998,6 +11202,7 @@ export async function saveTaskRecord(
     enquiries,
     quotes,
     teams,
+    rbacConfig,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -11010,6 +11215,7 @@ export async function saveTaskRecord(
     enquiries,
     quotes,
     teams,
+    rbacConfig,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
 
@@ -11018,6 +11224,8 @@ export async function saveTaskRecord(
       !hasPersonPermission(actor, 'task:edit', {
         allPeople: people,
         teams,
+        config: { rbac: rbacConfig },
+        tenantId: taskCtx.tenantId,
       })
     ) {
       const msg = 'You do not have permission (task:edit) to create or edit tasks.';
@@ -11084,6 +11292,148 @@ export async function saveTaskRecord(
 
   if (!input.assignedTeamId && cleanPersonIds.length === 0) {
     return { error: 'Task must be assigned to a team, a person, or both.' };
+  }
+
+  // R509: Validate that every target assignee and any restricted-matter target team can access all linked matters & draft enquiries
+  const matterByIdMap = new Map(matters.map((m) => [m.id, m]));
+  const enquiryByIdMap = new Map(enquiries.map((e) => [e.id, e]));
+  const quoteByIdMap = new Map(quotes.map((q) => [q.id, q]));
+  const linkedMatterMap = new Map<string, Matter>();
+  const linkedEnquiriesList: Enquiry[] = [];
+  const collectLinkedEnquiry = (enq: Enquiry | undefined) => {
+    if (!enq) return;
+    linkedEnquiriesList.push(enq);
+    if (enq.convertedMatterId) {
+      const cm = matterByIdMap.get(enq.convertedMatterId);
+      if (cm) linkedMatterMap.set(cm.id, cm);
+    }
+    for (const m of matters) {
+      if (m.sourceEnquiryId === enq.id) {
+        linkedMatterMap.set(m.id, m);
+      }
+    }
+  };
+  const collectLinkedQuote = (q: Quote | undefined) => {
+    if (!q) return;
+    if (q.convertedMatterId) {
+      const qm = matterByIdMap.get(q.convertedMatterId);
+      if (qm) linkedMatterMap.set(qm.id, qm);
+    }
+    for (const m of matters) {
+      if (m.sourceQuoteId === q.id) {
+        linkedMatterMap.set(m.id, m);
+      }
+    }
+    if (q.linkedEnquiryId) {
+      collectLinkedEnquiry(enquiryByIdMap.get(q.linkedEnquiryId));
+    }
+  };
+  for (const lr of candidateLinks) {
+    if (lr.recordType === 'matter') {
+      const m = matterByIdMap.get(lr.recordId);
+      if (m) linkedMatterMap.set(m.id, m);
+    } else if (lr.recordType === 'enquiry') {
+      collectLinkedEnquiry(enquiryByIdMap.get(lr.recordId));
+    } else if (lr.recordType === 'quote') {
+      collectLinkedQuote(quoteByIdMap.get(lr.recordId));
+    }
+  }
+  if (existing?.linkedKeyDateId) {
+    const kd = await getKeyDateRepository().getKeyDateById(taskCtx, existing.linkedKeyDateId, byId);
+    if (kd?.matterId) {
+      const km = matterByIdMap.get(kd.matterId);
+      if (km) linkedMatterMap.set(km.id, km);
+    }
+    if (kd?.enquiryId) {
+      collectLinkedEnquiry(enquiryByIdMap.get(kd.enquiryId));
+    }
+  }
+  const linkedMatters = Array.from(linkedMatterMap.values());
+  const linkedMatterIds = linkedMatters.map((m) => m.id);
+  const singleLinkedMatterId = linkedMatterIds.length === 1 ? linkedMatterIds[0]! : null;
+
+  const targetAssigneeIds =
+    cleanPersonIds.length > 0
+      ? cleanPersonIds
+      : input.assignedPersonId !== undefined
+        ? input.assignedPersonId
+          ? [input.assignedPersonId]
+          : []
+        : existing?.assignedPersonIds ?? (existing?.assignedPersonId ? [existing.assignedPersonId] : []);
+  for (const pid of targetAssigneeIds) {
+    const assignee = people.find((p) => p.id === pid) ?? null;
+    for (const lm of linkedMatters) {
+      if (
+        !canPersonAccessMatter(lm, pid, assignee, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+          tenantId: taskCtx.tenantId,
+        })
+      ) {
+        const msg = `Selected assignee does not have access to restricted matter "${lm.id}".`;
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    }
+    for (const le of linkedEnquiriesList) {
+      if (le.status === 'Draft' && le.createdById !== pid && le.takenById !== pid) {
+        const msg = `Selected assignee does not have access to personal draft enquiry "${le.id}".`;
+        return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+      }
+    }
+  }
+
+  const targetTeamId =
+    input.assignedTeamId !== undefined ? input.assignedTeamId : existing?.assignedTeamId ?? null;
+  const hasRestrictedLink =
+    linkedMatters.some(
+      (m) =>
+        Boolean(m.isStaffMatter) ||
+        Boolean(m.hasEthicalWall) ||
+        (Array.isArray(m.restrictedAccessUserIds) && m.restrictedAccessUserIds.length > 0),
+    ) || linkedEnquiriesList.some((e) => e.status === 'Draft');
+  if (!opts?.internalSystemStep && targetTeamId && hasRestrictedLink) {
+    const targetTeam = teams.find((tm) => tm.id === targetTeamId && tm.active);
+    const candidateMembers = targetTeam
+      ? Array.from(new Set([...targetTeam.memberIds, ...targetTeam.leadIds]))
+      : [];
+    const hasPermittedTeamMember = candidateMembers.some((mid) => {
+      const member = people.find(
+        (p) =>
+          p.id === mid &&
+          p.isEmployee &&
+          !p.mergedIntoId &&
+          p.recordStatusId !== 'record_status.archived' &&
+          !isLeaverPerson(p),
+      );
+      if (!member) return false;
+      if (
+        linkedMatters.some(
+          (lm) =>
+            !canPersonAccessMatter(lm, mid, member, {
+              allPeople: people,
+              teams,
+              config: { rbac: rbacConfig },
+              tenantId: taskCtx.tenantId,
+            }),
+        )
+      ) {
+        return false;
+      }
+      if (
+        linkedEnquiriesList.some(
+          (le) => le.status === 'Draft' && le.createdById !== mid && le.takenById !== mid,
+        )
+      ) {
+        return false;
+      }
+      return true;
+    });
+    if (!hasPermittedTeamMember) {
+      const msg =
+        'The selected team has no permitted members who can access the linked restricted matter.';
+      return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+    }
   }
 
   if (existing && !opts?.viaTakeTask && !opts?.internalSystemStep) {
@@ -11177,6 +11527,9 @@ export async function saveTaskRecord(
           detail: `${separateTask.reference} · Due ${formatDate(separateTask.dueAt)}`,
           href: `/tasks/${separateTask.id}`,
           recordId: separateTask.id,
+          matterId: singleLinkedMatterId,
+          knownMatterIds: linkedMatterIds,
+          knownTask: separateTask,
           byId,
           at: now,
         });
@@ -11250,6 +11603,9 @@ export async function saveTaskRecord(
             detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
             href: `/tasks/${task.id}`,
             recordId: task.id,
+            matterId: singleLinkedMatterId,
+            knownMatterIds: linkedMatterIds,
+            knownTask: task,
             byId,
             at: now,
           });
@@ -11258,6 +11614,20 @@ export async function saveTaskRecord(
         const team = teams.find((tm) => tm.id === task.assignedTeamId);
         if (team) {
           for (const memberId of team.memberIds) {
+            const member = people.find((p) => p.id === memberId) ?? null;
+            if (
+              linkedMatters.some(
+                (lm) =>
+                  !canPersonAccessMatter(lm, memberId, member, {
+                    allPeople: people,
+                    teams,
+                    config: { rbac: rbacConfig },
+                    tenantId: taskCtx.tenantId,
+                  }),
+              )
+            ) {
+              continue;
+            }
             await pushNotification(taskCtx, {
               recipientId: memberId,
               kind: 'team_task_arrived',
@@ -11265,6 +11635,9 @@ export async function saveTaskRecord(
               detail: `${task.reference} — ${task.title}`,
               href: `/tasks/${task.id}`,
               recordId: task.id,
+              matterId: singleLinkedMatterId,
+              knownMatterIds: linkedMatterIds,
+              knownTask: task,
               byId,
               at: now,
             });
@@ -11331,6 +11704,9 @@ export async function saveTaskRecord(
             detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
             href: `/tasks/${task.id}`,
             recordId: task.id,
+            matterId: singleLinkedMatterId,
+            knownMatterIds: linkedMatterIds,
+            knownTask: task,
             byId,
             at: now,
           });
@@ -11396,7 +11772,7 @@ export async function takeTaskRecord(
     const matterRepo = getMatterRepository();
     const intakeRepo = getIntakeQuoteRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const [store, people, matters, enquiries, quotes, existing, teams] = await Promise.all([
+    const [store, people, matters, enquiries, quotes, existing, teams, rbacConfig] = await Promise.all([
       loadTenantCatalogueStoreView(taskCtx),
       partyRepo.listAllPeople<Person>(taskCtx),
       matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
@@ -11404,6 +11780,7 @@ export async function takeTaskRecord(
       intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
       taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
       getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
+      loadEffectiveTenantRbacConfig(taskCtx),
     ]);
     const actor = people.find((p) => p.id === byId) ?? null;
     const prelimVis = buildRecordVisibility(store, actor, {
@@ -11412,6 +11789,7 @@ export async function takeTaskRecord(
       enquiries,
       quotes,
       teams,
+      rbacConfig,
       hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     });
     const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -11424,6 +11802,7 @@ export async function takeTaskRecord(
       enquiries,
       quotes,
       teams,
+      rbacConfig,
       hiddenMatterKeyDateIds: hiddenKdIds,
     });
     if (!existing || !visibility.canViewTask(existing)) {
@@ -11463,7 +11842,7 @@ export async function addTaskCommentRecord(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [store, people, matters, enquiries, quotes, task, teams] = await Promise.all([
+  const [store, people, matters, enquiries, quotes, task, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(taskCtx),
     partyRepo.listAllPeople<Person>(taskCtx),
     matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
@@ -11471,12 +11850,15 @@ export async function addTaskCommentRecord(
     intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
     taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
     getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
+    loadEffectiveTenantRbacConfig(taskCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'task:comment', {
       allPeople: people,
       teams,
+      config: { rbac: rbacConfig },
+      tenantId: taskCtx.tenantId,
     })
   ) {
     const msg = 'You do not have permission (task:comment) to comment on tasks.';
@@ -11488,6 +11870,7 @@ export async function addTaskCommentRecord(
     enquiries,
     quotes,
     teams,
+    rbacConfig,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
   });
   const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
@@ -11500,6 +11883,7 @@ export async function addTaskCommentRecord(
     enquiries,
     quotes,
     teams,
+    rbacConfig,
     hiddenMatterKeyDateIds: hiddenKdIds,
   });
   if (!task || !visibility.canViewTask(task)) {
@@ -11546,6 +11930,7 @@ export async function addTaskCommentRecord(
         detail: `${authorName}: "${trimmed.slice(0, 90)}"`,
         href: `/tasks/${task.id}`,
         recordId: task.id,
+        knownTask: task,
         byId,
         at: now,
       });
@@ -11629,6 +12014,11 @@ async function raiseAutomaticTask(
     at: opts.now,
   });
 
+  const autoLinkedMatterIds = opts.linkedRecords
+    .filter((lr) => lr.recordType === 'matter' && lr.recordId)
+    .map((lr) => lr.recordId);
+  const autoSingleMatterId = autoLinkedMatterIds.length === 1 ? autoLinkedMatterIds[0]! : null;
+
   if (task.assignedPersonId) {
     await pushNotification(ctx, {
       recipientId: task.assignedPersonId,
@@ -11637,13 +12027,41 @@ async function raiseAutomaticTask(
       detail: `${task.reference} · Due ${formatDate(task.dueAt)}`,
       href: `/tasks/${task.id}`,
       recordId: task.id,
+      matterId: autoSingleMatterId,
+      knownMatterIds: autoLinkedMatterIds,
+      knownTask: task,
       byId: opts.byId,
       at: opts.now,
     });
   } else if (task.assignedTeamId) {
-    const team = await getHrAndRbacRepository().getTeamById<Team>(ctx, task.assignedTeamId);
+    const [team, autoPeople, autoTeams, autoMatters, autoRbac] = await Promise.all([
+      getHrAndRbacRepository().getTeamById<Team>(ctx, task.assignedTeamId),
+      getPartyRepository().listAllPeople<Person>(ctx),
+      getHrAndRbacRepository().listAllTeams<Team>(ctx),
+      autoLinkedMatterIds.length > 0
+        ? getMatterRepository().listAllMattersUnfiltered<Matter>(ctx)
+        : Promise.resolve([] as Matter[]),
+      loadEffectiveTenantRbacConfig(ctx),
+    ]);
+    const autoLinkedMatters = autoMatters.filter((m) =>
+      autoLinkedMatterIds.includes(m.id),
+    );
     if (team) {
       for (const memberId of team.memberIds) {
+        const member = autoPeople.find((p) => p.id === memberId) ?? null;
+        if (
+          autoLinkedMatters.some(
+            (lm) =>
+              !canPersonAccessMatter(lm, memberId, member, {
+                allPeople: autoPeople,
+                teams: autoTeams,
+                config: { rbac: autoRbac },
+                tenantId: ctx.tenantId,
+              }),
+          )
+        ) {
+          continue;
+        }
         await pushNotification(ctx, {
           recipientId: memberId,
           kind: 'team_task_arrived',
@@ -11651,6 +12069,9 @@ async function raiseAutomaticTask(
           detail: `${task.reference} — ${task.title}`,
           href: `/tasks/${task.id}`,
           recordId: task.id,
+          matterId: autoSingleMatterId,
+          knownMatterIds: autoLinkedMatterIds,
+          knownTask: task,
           byId: opts.byId,
           at: opts.now,
         });
@@ -18809,6 +19230,7 @@ async function resolveKeyDatesActorAndData(
   people: Person[];
   matters: Matter[];
   teams: Team[];
+  rbacOptions: ResolvePersonPermissionsOptions;
 } | null> {
   if (!byId || !byId.trim()) return null;
   let prelimCtx: TenantContext;
@@ -18819,19 +19241,45 @@ async function resolveKeyDatesActorAndData(
   } catch {
     return null;
   }
-  const [people, matters, teams] = await Promise.all([
+  const [people, matters, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(prelimCtx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(prelimCtx),
     getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
+    loadEffectiveTenantRbacConfig(prelimCtx),
   ]);
   const actor = resolveActorFromPeopleForKeyDates(people, byId);
+  const activeSession = getActiveActorSession();
+  const tokenRoles =
+    actor &&
+    activeSession &&
+    activeSession.tenantId === prelimCtx.tenantId &&
+    activeSession.personId === actor.id
+      ? activeSession.tokenRoles
+      : undefined;
+  const baseRbacOptions: ResolvePersonPermissionsOptions = {
+    allPeople: people,
+    teams,
+    tokenRoles,
+    config: { rbac: rbacConfig },
+    tenantId: prelimCtx.tenantId,
+  };
   if (!actor) {
-    return { ctx: prelimCtx, actor: null, people, matters, teams };
+    return { ctx: prelimCtx, actor: null, people, matters, teams, rbacOptions: baseRbacOptions };
   }
   const ctx = resolveDefaultServiceTenantContext(store, actor.id, {
     tenantCtx: options?.tenantCtx,
   });
-  return { ctx, actor, people, matters, teams };
+  return {
+    ctx,
+    actor,
+    people,
+    matters,
+    teams,
+    rbacOptions: {
+      ...baseRbacOptions,
+      tenantId: ctx.tenantId,
+    },
+  };
 }
 
 function assertKeyDatesModuleEnabled(
@@ -18951,13 +19399,14 @@ export async function getMatterKeyDatesSnapshot(
       canVerifyByKeyDateId: {},
     };
   }
-  const { ctx, actor: user, people, matters, teams } = resolved;
+  const { ctx, actor: user, people, matters, teams, rbacOptions } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: user.id });
   if (
     !hasKeyDatePermission(user, 'keydate:view', {
       config,
       allPeople: people,
       teams,
+      rbac: rbacOptions,
     })
   ) {
     return {
@@ -18969,7 +19418,7 @@ export async function getMatterKeyDatesSnapshot(
     };
   }
   const matter = matters.find((m) => m.id === matterId);
-  if (!matter || !canViewerAccessMatterKeyDates(matter, user.id, user, people)) {
+  if (!matter || !canViewerAccessMatterKeyDates(matter, user.id, user, people, rbacOptions)) {
     return {
       keyDates: [],
       keyDateNotApplicable: [],
@@ -19104,7 +19553,7 @@ export async function createOrProposeKeyDateRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams } = resolved;
+    const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
@@ -19123,7 +19572,7 @@ export async function createOrProposeKeyDateRecord(
 
     if (
       input.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people))
+      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people, rbacOptions))
     ) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
@@ -19172,6 +19621,7 @@ export async function createOrProposeKeyDateRecord(
       config,
       teams,
       people,
+      rbacOptions,
       audit: stagedAudit,
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
@@ -19380,7 +19830,8 @@ async function loadKeyDateForActorOrClassifyError(
   actor: Person,
   people: readonly Person[],
   matters: readonly Matter[],
-  _teams: readonly Team[],
+  teams: readonly Team[],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): Promise<{ kd: KeyDate | null; error?: string; matter: Matter | null; enquiry: Enquiry | null }> {
   const keyDateRepo = getKeyDateRepository();
   const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
@@ -19406,9 +19857,22 @@ async function loadKeyDateForActorOrClassifyError(
         includeRestricted: true,
       })
     : null;
+  const effectiveRbacOptions: ResolvePersonPermissionsOptions = rbacOptions ?? {
+    allPeople: people,
+    teams,
+    config: { rbac: await loadEffectiveTenantRbacConfig(ctx) },
+    tenantId: ctx.tenantId,
+  };
   if (
     kd.matterId &&
-    (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people as Person[]))
+    (!matter ||
+      !canViewerAccessMatterKeyDates(
+        matter,
+        actor.id,
+        actor,
+        people as Person[],
+        effectiveRbacOptions,
+      ))
   ) {
     return { kd: null, error: 'Matter not found or restricted.', matter: null, enquiry: null };
   }
@@ -19939,7 +20403,7 @@ export async function reassignKeyDateTeamRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams } = resolved;
+    const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
@@ -19952,6 +20416,7 @@ export async function reassignKeyDateTeamRecord(
       people,
       matters,
       teams,
+      rbacOptions,
     );
     if (!loaded.kd) {
       return { ok: false, error: loaded.error ?? 'Key date not found.' };
@@ -19979,6 +20444,7 @@ export async function reassignKeyDateTeamRecord(
       tasks: storeTasks,
       teams,
       people,
+      rbacOptions,
       audit: stagedAudit,
       nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
     });
@@ -20031,13 +20497,13 @@ export async function recordKeyDateNotApplicableRecord(
     if (!resolved || !resolved.actor) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams } = resolved;
+    const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
     const config = await getKeyDatesConfig({ ctx, userId: actor.id });
     const disabledErr = assertKeyDatesModuleEnabled(config);
     if (disabledErr) return disabledErr;
 
     const matter = matters.find((m) => m.id === input.matterId);
-    if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people)) {
+    if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people, rbacOptions)) {
       return { ok: false, error: 'Matter not found or restricted.' };
     }
 
@@ -20314,6 +20780,7 @@ export async function executeKeyDateRemindersForTenant(
         reminderStatesWorking,
         notApplicableWorking,
         calendarSyncsWorking,
+        rbacConfig,
       ] = await Promise.all([
         partyRepo.listAllPeople<Person>(ctx),
         matterRepo.listAllMattersUnfiltered<Matter>(ctx),
@@ -20325,7 +20792,15 @@ export async function executeKeyDateRemindersForTenant(
         keyDateRepo.listAllReminderStatesUnfilteredForScheduler(ctx),
         keyDateRepo.listAllNotApplicableUnfilteredForScheduler(ctx),
         keyDateRepo.listAllCalendarSyncsUnfilteredForScheduler(ctx),
+        loadEffectiveTenantRbacConfig(ctx),
       ]);
+      const jobRbacOptions: ResolvePersonPermissionsOptions = {
+        allPeople: people,
+        teams,
+        tokenRoles: ctx.actorRoles,
+        config: { rbac: rbacConfig },
+        tenantId: ctx.tenantId,
+      };
 
       if (options.triggerSource === 'manual') {
         const actorInTx = resolveActorFromPeopleForKeyDates(
@@ -20338,7 +20813,7 @@ export async function executeKeyDateRemindersForTenant(
             config,
             allPeople: people,
             teams,
-            rbac: { tokenRoles: ctx.actorRoles },
+            rbac: jobRbacOptions,
           })
         ) {
           const permErr = new Error(
@@ -20389,6 +20864,7 @@ export async function executeKeyDateRemindersForTenant(
             matters,
             teams,
             people,
+            rbacOptions: jobRbacOptions,
             notifications: createdNotifications,
             audit: stagedAudit,
             nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
@@ -20464,6 +20940,7 @@ export async function executeKeyDateRemindersForTenant(
         matters,
         teams,
         people,
+        rbacOptions: jobRbacOptions,
         values,
       });
 
@@ -20973,7 +21450,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     resolved = null;
   }
   if (!resolved || !resolved.actor) return [];
-  const { ctx, actor: viewer, people, matters, teams } = resolved;
+  const { ctx, actor: viewer, people, matters, teams, rbacOptions } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
   const keyDateRepo = getKeyDateRepository();
   const intakeRepo = getIntakeQuoteRepository();
@@ -20983,10 +21460,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
   ]);
   const visibleMatters = matters.filter((m) =>
-    canPersonAccessMatter(m, viewer.id, viewer, {
-      allPeople: people,
-      teams,
-    }),
+    canPersonAccessMatter(m, viewer.id, viewer, rbacOptions),
   );
   return queryTeamDiaryEntries({
     viewer,
@@ -20999,6 +21473,7 @@ export async function queryKeyDatesTeamDiaryRecord(
     enquiries,
     teams,
     people,
+    rbacOptions,
   });
 }
 
@@ -21014,12 +21489,13 @@ export async function getKeyDateExceptionsReportRecord(
     resolved = null;
   }
   if (!resolved || !resolved.actor) return [];
-  const { ctx, actor: viewer, people, matters, teams } = resolved;
+  const { ctx, actor: viewer, people, matters, teams, rbacOptions } = resolved;
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
   const canConfigure = hasKeyDatePermission(viewer, 'keydate:configure', {
     config,
     allPeople: people,
     teams,
+    rbac: rbacOptions,
   });
   const keyDateRepo = getKeyDateRepository();
   const [keyDates, notApplicable, reminderStates, calendarSyncs, values] =
@@ -21033,10 +21509,7 @@ export async function getKeyDateExceptionsReportRecord(
       getCatalogueRepository().listAllChoiceValues<ChoiceValue>(ctx),
     ]);
   const visibleMatters = matters.filter((m) =>
-    canPersonAccessMatter(m, viewer.id, viewer, {
-      allPeople: people,
-      teams,
-    }),
+    canPersonAccessMatter(m, viewer.id, viewer, rbacOptions),
   );
   return computeKeyDateExceptions({
     viewer,
@@ -21053,6 +21526,7 @@ export async function getKeyDateExceptionsReportRecord(
     values,
     filterTeamIds: filter.teamIds,
     filterKinds: filter.kinds,
+    rbacOptions,
   });
 }
 
@@ -23783,10 +24257,42 @@ function extractNotificationMatterIds(params: {
   if (item.recordId && params.matterById.has(item.recordId)) {
     matterIds.add(item.recordId);
   }
-  const hrefMatch = /\/matters\/(MAT-[^/?#]+)/.exec(item.href ?? '');
+  const hrefMatch = /\/matters\/([^/?#]+)/.exec(item.href ?? '');
   if (hrefMatch?.[1]) {
     matterIds.add(hrefMatch[1]);
   }
+
+  const addEnquiryMatters = (enq: Enquiry | undefined) => {
+    if (!enq) return;
+    if (
+      enq.status === 'Draft' &&
+      enq.createdById !== item.recipientId &&
+      enq.takenById !== item.recipientId
+    ) {
+      hiddenDraftEnquiry = true;
+    }
+    if (enq.convertedMatterId) {
+      matterIds.add(enq.convertedMatterId);
+    }
+    for (const m of params.matterById.values()) {
+      if (m.sourceEnquiryId === enq.id) {
+        matterIds.add(m.id);
+      }
+    }
+  };
+
+  const addQuoteMatters = (q: Quote | undefined) => {
+    if (!q) return;
+    if (q.convertedMatterId) matterIds.add(q.convertedMatterId);
+    for (const m of params.matterById.values()) {
+      if (m.sourceQuoteId === q.id) {
+        matterIds.add(m.id);
+      }
+    }
+    if (q.linkedEnquiryId) {
+      addEnquiryMatters(params.enquiryById.get(q.linkedEnquiryId));
+    }
+  };
 
   const task = item.recordId ? params.taskById.get(item.recordId) : undefined;
   if (task) {
@@ -23794,30 +24300,16 @@ function extractNotificationMatterIds(params: {
       if (lr.recordType === 'matter' && lr.recordId) {
         matterIds.add(lr.recordId);
       } else if (lr.recordType === 'enquiry' && lr.recordId) {
-        const enq = params.enquiryById.get(lr.recordId);
-        if (enq) {
-          if (enq.status === 'Draft' && enq.createdById !== item.recipientId) {
-            hiddenDraftEnquiry = true;
-          }
-          if (enq.convertedMatterId) {
-            matterIds.add(enq.convertedMatterId);
-          }
-        }
+        addEnquiryMatters(params.enquiryById.get(lr.recordId));
       } else if (lr.recordType === 'quote' && lr.recordId) {
-        const q = params.quoteById.get(lr.recordId);
-        if (q?.convertedMatterId) matterIds.add(q.convertedMatterId);
-        if (q?.linkedEnquiryId) {
-          const enq = params.enquiryById.get(q.linkedEnquiryId);
-          if (enq?.convertedMatterId) matterIds.add(enq.convertedMatterId);
-        }
+        addQuoteMatters(params.quoteById.get(lr.recordId));
       }
     }
     if (task.linkedKeyDateId) {
       const kd = params.keyDateById.get(task.linkedKeyDateId);
       if (kd?.matterId) matterIds.add(kd.matterId);
       if (kd?.enquiryId) {
-        const enq = params.enquiryById.get(kd.enquiryId);
-        if (enq?.convertedMatterId) matterIds.add(enq.convertedMatterId);
+        addEnquiryMatters(params.enquiryById.get(kd.enquiryId));
       }
     }
   }
@@ -23826,32 +24318,12 @@ function extractNotificationMatterIds(params: {
   if (keyDate) {
     if (keyDate.matterId) matterIds.add(keyDate.matterId);
     if (keyDate.enquiryId) {
-      const enq = params.enquiryById.get(keyDate.enquiryId);
-      if (enq) {
-        if (enq.status === 'Draft' && enq.createdById !== item.recipientId) {
-          hiddenDraftEnquiry = true;
-        }
-        if (enq.convertedMatterId) matterIds.add(enq.convertedMatterId);
-      }
+      addEnquiryMatters(params.enquiryById.get(keyDate.enquiryId));
     }
   }
 
-  const enquiry = item.recordId ? params.enquiryById.get(item.recordId) : undefined;
-  if (enquiry) {
-    if (enquiry.status === 'Draft' && enquiry.createdById !== item.recipientId) {
-      hiddenDraftEnquiry = true;
-    }
-    if (enquiry.convertedMatterId) matterIds.add(enquiry.convertedMatterId);
-  }
-
-  const quote = item.recordId ? params.quoteById.get(item.recordId) : undefined;
-  if (quote) {
-    if (quote.convertedMatterId) matterIds.add(quote.convertedMatterId);
-    if (quote.linkedEnquiryId) {
-      const enq = params.enquiryById.get(quote.linkedEnquiryId);
-      if (enq?.convertedMatterId) matterIds.add(enq.convertedMatterId);
-    }
-  }
+  addEnquiryMatters(item.recordId ? params.enquiryById.get(item.recordId) : undefined);
+  addQuoteMatters(item.recordId ? params.quoteById.get(item.recordId) : undefined);
 
   const reg = item.recordId ? params.registerRecordById.get(item.recordId) : undefined;
   if (reg?.matterId) {
@@ -24004,6 +24476,7 @@ export async function executeNotificationDigestsForTenant(
           keyDates,
           registerRecords,
           storedPrefs,
+          effectiveRbac,
         ] = await Promise.all([
           taskRepo.listUndigestedNotificationsForDigest<NotificationItem>(
             ctx,
@@ -24018,6 +24491,7 @@ export async function executeNotificationDigestsForTenant(
           keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
           registerRepo.listAllRegisterRecordsUnfiltered(ctx),
           outboxRepo.listAllNotificationPreferences(ctx),
+          loadEffectiveTenantRbacConfig(ctx, tenantConfig.rbac),
         ]);
 
         const personById = new Map(people.map((p) => [p.id, p]));
@@ -24080,6 +24554,8 @@ export async function executeNotificationDigestsForTenant(
                 !canPersonAccessMatter(linkedMatter, person.id, person, {
                   allPeople: people,
                   teams,
+                  config: { rbac: effectiveRbac },
+                  tenantId: ctx.tenantId,
                 })
               ) {
                 revoked = true;

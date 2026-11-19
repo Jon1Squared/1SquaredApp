@@ -1587,15 +1587,15 @@ export class TenantMatterRepository extends TenantScopedRepository {
   // ============================================================================
 
   private canViewerAccessMatterRow(row: DbMatterRow, viewerId: string): boolean {
-    if (!row.is_staff_matter && !row.has_ethical_wall) {
+    const allowed = Array.isArray(row.restricted_access_user_ids_json)
+      ? row.restricted_access_user_ids_json
+      : [];
+    if (!row.is_staff_matter && !row.has_ethical_wall && allowed.length === 0) {
       return true;
     }
     if (!viewerId) {
       return false;
     }
-    const allowed = Array.isArray(row.restricted_access_user_ids_json)
-      ? row.restricted_access_user_ids_json
-      : [];
     return allowed.includes(viewerId);
   }
 
@@ -1676,7 +1676,11 @@ export class TenantMatterRepository extends TenantScopedRepository {
              WHERE tenant_id = $1
                AND client_id <> 'O-KEYDATE-STUB'
                AND (
-                 (is_staff_matter = FALSE AND has_ethical_wall = FALSE)
+                 (
+                   is_staff_matter = FALSE
+                   AND has_ethical_wall = FALSE
+                   AND jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) = 0
+                 )
                  OR restricted_access_user_ids_json ? $2
                )
              ORDER BY id ASC`,

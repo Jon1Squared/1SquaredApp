@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import exampleConfig from '../../../schemas/keyDates.config.example.json';
+import baseTenantConfig from '../../../client-not-a-law-firm/config/base.json';
 import type {
   KeyDate,
   KeyDateCalendarSync,
@@ -9,11 +10,13 @@ import type {
 } from '../keyDates.types';
 import type { Matter, Person, Team } from '../types';
 import {
+  canUserAccessMatter,
+  canViewerAccessMatterKeyDates,
   computeKeyDateExceptions,
   queryTeamDiaryEntries,
-} from '../keyDateDiary';
-import { canUserAccessMatter } from '@/server/rbacRuntime';
-import { canViewerAccessMatterKeyDates } from '../keyDates';
+} from '@/server/rbacRuntime';
+import { canViewerAccessMatterKeyDates as domainCanViewerAccessMatterKeyDates } from '../keyDates';
+import { setActiveTenantConfigForTesting } from '@/platform/tenantRuntime';
 import {
   exportKeyDateExceptionsReportRecord,
   getAppSnapshot,
@@ -953,5 +956,143 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       false,
     );
     expect(snap.keyDates.every((kd) => ownTeamIds.has(kd.teamId))).toBe(true);
+  });
+
+  it('R528: canViewerAccessMatterKeyDates delegates strictly to central RBAC without a hardcoded managing_partner/admin bypass', () => {
+    const customRbac = {
+      roles: {
+        admin: {
+          key: 'admin',
+          label: 'Administrator',
+          permissions: ['admin:access', 'keydate:view', 'keydate:view_any_team'],
+        },
+        managing_partner: {
+          key: 'managing_partner',
+          label: 'Managing Partner',
+          permissions: ['keydate:view', 'keydate:view_any_team'],
+        },
+      },
+    };
+    const staffMatter: Matter = {
+      id: 'MAT-STAFF-R528',
+      reference: 'NALF-STAFF-R528',
+      title: 'Restricted R528 Matter',
+      clientId: 'P-CLI-STAFF',
+      practiceAreaId: 'work_type.dispute_resolution',
+      matterTypeId: 'matter_type.litigation',
+      owningTeamId: 'TM-LIT',
+      isStaffMatter: true,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: ['P-ALLOWED-USER'],
+    } as unknown as Matter;
+    const unlistedAdmin = {
+      id: 'P-UNLISTED-ADM',
+      isEmployee: true,
+      roles: ['admin'],
+      homeRoles: ['admin'],
+      mergedIntoId: null,
+    } as unknown as Person;
+    const unlistedMp = {
+      id: 'P-UNLISTED-MP',
+      isEmployee: true,
+      roles: ['managing_partner'],
+      homeRoles: ['managing_partner'],
+      mergedIntoId: null,
+    } as unknown as Person;
+    const staffKd: KeyDate = {
+      id: 'KD-R528-STAFF',
+      matterId: staffMatter.id,
+      keyDateTypeId: 'limitation',
+      category: 'limitation',
+      title: 'Confidential R528 Staff Limitation',
+      dueDate: '2026-07-01',
+      isCritical: true,
+      status: 'confirmed',
+      source: 'manual',
+      teamId: 'TM-LIT',
+      responsiblePersonIds: ['P-ALLOWED-USER'],
+      verification: { required: false },
+      createdById: 'P-ALLOWED-USER',
+      createdAt: '2026-06-01T00:00:00Z',
+      updatedById: 'P-ALLOWED-USER',
+      updatedAt: '2026-06-01T00:00:00Z',
+      version: 1,
+    };
+
+    try {
+      setActiveTenantConfigForTesting(
+        baseTenantConfig as Record<string, unknown>,
+        {
+          environment: 'test',
+          rbac: {
+            roles: customRbac.roles,
+          },
+        },
+      );
+
+      // 1. With central RBAC config + tenantId, admin and managing_partner without matter:restricted:access are denied
+      expect(
+        domainCanViewerAccessMatterKeyDates(
+          staffMatter,
+          unlistedAdmin.id,
+          unlistedAdmin,
+          [unlistedAdmin, unlistedMp],
+          { config: { rbac: customRbac as never }, tenantId: 'not-a-law-firm' },
+        ),
+      ).toBe(false);
+      expect(
+        domainCanViewerAccessMatterKeyDates(
+          staffMatter,
+          unlistedMp.id,
+          unlistedMp,
+          [unlistedAdmin, unlistedMp],
+          { config: { rbac: customRbac as never }, tenantId: 'not-a-law-firm' },
+        ),
+      ).toBe(false);
+
+      // 2. Pure domain helper without rbacOptions must fail closed (RBAC_CONFIG_REQUIRED) rather than using hardcoded managing_partner/admin bypass
+      expect(() =>
+        domainCanViewerAccessMatterKeyDates(
+          staffMatter,
+          unlistedAdmin.id,
+          unlistedAdmin,
+          [unlistedAdmin],
+        ),
+      ).toThrow(/RBAC_CONFIG_REQUIRED/);
+      expect(() =>
+        domainCanViewerAccessMatterKeyDates(
+          staffMatter,
+          unlistedMp.id,
+          unlistedMp,
+          [unlistedMp],
+        ),
+      ).toThrow(/RBAC_CONFIG_REQUIRED/);
+
+      // 3. Server RBAC-wrapped diary & exceptions queries must not leak the restricted staff matter to unlisted admin/MP
+      const adminDiary = queryTeamDiaryEntries({
+        viewer: unlistedAdmin,
+        query: { teamIds: ['TM-LIT'] },
+        todayIso: '2026-06-15',
+        config,
+        keyDates: [staffKd],
+        matters: [staffMatter],
+        people: [unlistedAdmin, unlistedMp],
+        teams,
+      });
+      expect(adminDiary).toHaveLength(0);
+
+      const mpExceptions = computeKeyDateExceptions({
+        viewer: unlistedMp,
+        todayIso: '2026-06-15',
+        config,
+        keyDates: [staffKd],
+        matters: [staffMatter],
+        people: [unlistedAdmin, unlistedMp],
+        teams,
+      });
+      expect(mpExceptions).toHaveLength(0);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+    }
   });
 });

@@ -22,7 +22,7 @@ import {
 import {
   computeKeyDateExceptions,
   queryTeamDiaryEntries,
-} from '../../src/domain/keyDateDiary';
+} from '../../src/server/rbacRuntime';
 import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import {
   getKeyDateRepository,

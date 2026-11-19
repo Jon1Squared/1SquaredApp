@@ -32,6 +32,7 @@ import type {
   ReminderPriority,
   ReminderScheduleConfig,
 } from './keyDates.types';
+import type { ResolvePersonPermissionsOptions } from './rbac';
 import type {
   AuditEntry,
   Matter,
@@ -162,6 +163,7 @@ export function filterRecipientsForMatterRestriction(
     | null
     | undefined,
   people?: readonly Person[],
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): PersonId[] {
   const unique = Array.from(new Set(candidatePersonIds.filter(Boolean)));
   if (!isMatterRestrictedForKeyDates(matter)) {
@@ -174,6 +176,7 @@ export function filterRecipientsForMatterRestriction(
       pid,
       undefined,
       people,
+      rbacOptions,
     ),
   );
 }
@@ -191,6 +194,7 @@ export function resolveEscalationRecipientIds(
     | Pick<Matter, 'id' | 'isStaffMatter' | 'restrictedAccessUserIds'>
     | null
     | undefined,
+  rbacOptions?: ResolvePersonPermissionsOptions,
 ): PersonId[] {
   if (keyDate.matterId && !matter) {
     return [];
@@ -211,7 +215,7 @@ export function resolveEscalationRecipientIds(
       }
     }
   }
-  return filterRecipientsForMatterRestriction(candidates, matter, people);
+  return filterRecipientsForMatterRestriction(candidates, matter, people, rbacOptions);
 }
 
 export interface SyncReminderForConfirmedKeyDateParams {
@@ -222,6 +226,7 @@ export interface SyncReminderForConfirmedKeyDateParams {
   reminderStates: KeyDateReminderState[];
   matters?: readonly Matter[];
   people?: readonly Person[];
+  rbacOptions?: ResolvePersonPermissionsOptions;
   audit?: AuditEntry[];
   nextAuditId?: () => string;
   todayIso: IsoDate;
@@ -251,6 +256,7 @@ export function syncReminderForConfirmedKeyDate(
     reminderStates,
     matters = [],
     people,
+    rbacOptions,
     audit,
     nextAuditId = () => `AU-KD-${Date.now()}-${Math.random()}`,
     todayIso,
@@ -284,6 +290,7 @@ export function syncReminderForConfirmedKeyDate(
         keyDate.responsiblePersonIds,
         matter,
         people,
+        rbacOptions,
       );
   // R29 & R97: Never fall back to unfiltered responsiblePersonIds on a restricted or missing matter!
   const effectiveAssignees = permittedAssignees;
@@ -543,6 +550,7 @@ export interface RunTenantKeyDateReminderJobInput {
   matters?: readonly Matter[];
   teams?: readonly Team[];
   people?: readonly Person[];
+  rbacOptions?: ResolvePersonPermissionsOptions;
   notifications?: NotificationItem[];
   audit?: AuditEntry[];
   nextTaskId: () => string;
@@ -596,6 +604,7 @@ export function runTenantKeyDateReminderJob(
     matters = [],
     teams = [],
     people = [],
+    rbacOptions,
     notifications = [],
     audit = [],
     nextTaskId,
@@ -663,6 +672,7 @@ export function runTenantKeyDateReminderJob(
         reminderStates,
         matters,
         people,
+        rbacOptions,
         todayIso,
         nowIso,
         actorId: effectiveActorId,
@@ -676,6 +686,7 @@ export function runTenantKeyDateReminderJob(
             keyDate.responsiblePersonIds,
             matter,
             people,
+            rbacOptions,
           );
       if (recipients.length > 0 && synced.task) {
         notifications.push({
@@ -731,6 +742,7 @@ export function runTenantKeyDateReminderJob(
             keyDate.responsiblePersonIds,
             matter,
             people,
+            rbacOptions,
           );
       const isRestrictedWithNoPermitted =
         (isMissingMatter ||
@@ -836,6 +848,7 @@ export function runTenantKeyDateReminderJob(
             teams,
             people,
             matter,
+            rbacOptions,
           );
 
           state.escalationLevel = targetLevel;
@@ -881,6 +894,7 @@ export function runTenantKeyDateReminderJob(
                 keyDate.responsiblePersonIds,
                 matter,
                 people,
+                rbacOptions,
               )[0]);
           if (notifyTarget) {
             notifications.push({

@@ -495,7 +495,11 @@ export const TASK_VISIBLE_SQL_PREDICATE = `(
         AND (
           (
             km.id IS NOT NULL
-            AND (km.is_staff_matter = TRUE OR km.has_ethical_wall = TRUE)
+            AND (
+              km.is_staff_matter = TRUE
+              OR km.has_ethical_wall = TRUE
+              OR jsonb_array_length(COALESCE(km.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+            )
             AND NOT (km.restricted_access_user_ids_json ? $2)
           )
           OR (
@@ -508,7 +512,11 @@ export const TASK_VISIBLE_SQL_PREDICATE = `(
                   SELECT 1 FROM matters kem
                   WHERE kem.tenant_id = ke.tenant_id
                     AND kem.id = ke.converted_matter_id
-                    AND (kem.is_staff_matter = TRUE OR kem.has_ethical_wall = TRUE)
+                    AND (
+                      kem.is_staff_matter = TRUE
+                      OR kem.has_ethical_wall = TRUE
+                      OR jsonb_array_length(COALESCE(kem.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                    )
                     AND NOT (kem.restricted_access_user_ids_json ? $2)
                 )
               )
@@ -525,7 +533,11 @@ export const TASK_VISIBLE_SQL_PREDICATE = `(
     WHERE tlr.tenant_id = t.tenant_id
       AND tlr.task_id = t.id
       AND tlr.record_type = 'matter'
-      AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+      AND (
+        m.is_staff_matter = TRUE
+        OR m.has_ethical_wall = TRUE
+        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+      )
       AND NOT (m.restricted_access_user_ids_json ? $2)
   )
   AND NOT EXISTS (
@@ -559,7 +571,11 @@ export const SIGN_OFF_VISIBLE_SQL_PREDICATE = `(
     SELECT 1 FROM matters m
     WHERE m.tenant_id = s.tenant_id
       AND m.id = s.matter_id
-      AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+      AND (
+        m.is_staff_matter = TRUE
+        OR m.has_ethical_wall = TRUE
+        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+      )
       AND NOT (m.restricted_access_user_ids_json ? $2)
   )
 )`;
@@ -1149,7 +1165,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
                  SELECT 1 FROM matters m
                  WHERE m.tenant_id = n.tenant_id
                    AND (m.id = n.record_id OR m.id = n.matter_id)
-                   AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+                   AND (
+                     m.is_staff_matter = TRUE
+                     OR m.has_ethical_wall = TRUE
+                     OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                   )
                    AND NOT (m.restricted_access_user_ids_json ? $2)
                )
                AND NOT EXISTS (
@@ -1163,7 +1183,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
                    AND (
                      (
                        km.id IS NOT NULL
-                       AND (km.is_staff_matter = TRUE OR km.has_ethical_wall = TRUE)
+                       AND (
+                         km.is_staff_matter = TRUE
+                         OR km.has_ethical_wall = TRUE
+                         OR jsonb_array_length(COALESCE(km.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                       )
                        AND NOT (km.restricted_access_user_ids_json ? $2)
                      )
                      OR (
@@ -1176,7 +1200,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
                              SELECT 1 FROM matters kem
                              WHERE kem.tenant_id = ke.tenant_id
                                AND kem.id = ke.converted_matter_id
-                               AND (kem.is_staff_matter = TRUE OR kem.has_ethical_wall = TRUE)
+                               AND (
+                                 kem.is_staff_matter = TRUE
+                                 OR kem.has_ethical_wall = TRUE
+                                 OR jsonb_array_length(COALESCE(kem.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                               )
                                AND NOT (kem.restricted_access_user_ids_json ? $2)
                            )
                          )
@@ -1704,7 +1732,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       const hiddenRes = await tx.query<{ id: string }>(
         `SELECT m.id FROM matters m
          WHERE m.tenant_id = $1 AND m.id = ANY($3::text[])
-           AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+           AND (
+             m.is_staff_matter = TRUE
+             OR m.has_ethical_wall = TRUE
+             OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+           )
            AND NOT (m.restricted_access_user_ids_json ? $2)
          UNION ALL
          SELECT e.id FROM enquiries e
