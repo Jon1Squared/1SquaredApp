@@ -4,9 +4,20 @@ import path from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_DOCUMENT_GENERATION_CONFIG,
   isRegisteredPermissionKey,
   PERMISSION_REGISTRY,
 } from '@platform/core';
+import {
+  getInitializedDocGenContext,
+  updateDocumentGenerationConfigService,
+} from '@/server/documentGenerationServices';
+import {
+  createSignedEntraSessionCookie,
+  verifySignedEntraSessionCookie,
+} from '@/server/entraAuth';
+import { getPartyRepository } from '@/server/services';
+import type { Person } from '@/domain/types';
 import {
   ACTION_PERMISSIONS,
   JOB_PERMISSIONS,
@@ -865,14 +876,127 @@ export async function overriddenPolicyAction() {
     );
   });
 
-  it('aligns updateDocumentGenerationConfigAction policy with the permissions checked by updateDocumentGenerationConfigService (B16)', () => {
-    expect(ACTION_PERMISSIONS.updateDocumentGenerationConfigAction).toEqual({
-      kind: 'permission',
-      key: {
-        anyOf: ['document_template:build', 'rbac:manage_config', 'admin:access'],
-      },
-      enforcedBy: 'service',
-    });
+  it('R530 (B16): runs updateDocumentGenerationConfigService for each declared key in anyOf and confines admin:access to security-sensitive settings', async () => {
+    const policy = ACTION_PERMISSIONS.updateDocumentGenerationConfigAction;
+    expect(policy.kind).toBe('permission');
+    if (policy.kind !== 'permission' || typeof policy.key === 'string') {
+      throw new Error('Expected updateDocumentGenerationConfigAction to use anyOf policy keys.');
+    }
+    const declaredKeys = [...policy.key.anyOf];
+    expect(declaredKeys).toEqual([
+      'document_template:build',
+      'rbac:manage_config',
+      'admin:access',
+    ]);
+    // Note: R518's generic enforcedBy: 'service' wrapper check in guardedAction also enforces these anyOf keys at action entry.
+
+    const makeSession = (
+      personId: string,
+      roles: string[],
+    ) => {
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+      const cookie = createSignedEntraSessionCookie({
+        personId,
+        oid: `00000000-0000-4000-8000-${personId.replace(/\D/g, '').padStart(12, '0')}`,
+        tid: '00000000-0000-4000-8000-000000000099',
+        tenantId: 'not-a-law-firm',
+        sub: personId,
+        email: `${personId.toLowerCase()}@notalawfirm.example`,
+        displayName: `Actor ${personId}`,
+        entraRoles: roles,
+        mappedRoles: roles,
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      return verifySignedEntraSessionCookie(cookie)!;
+    };
+
+    const bootstrapSession = makeSession('P-000004', ['admin']);
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000004',
+      bootstrapSession,
+    );
+    const partyRepo = getPartyRepository();
+    const origP2 = await partyRepo.getPersonById<Person>(ctx, 'P-000002');
+    const originalDocGenOverride = await repo.getDocumentGenerationTenantConfig(
+      ctx,
+    );
+    expect(origP2).not.toBeNull();
+
+    try {
+      for (const permKey of declaredKeys) {
+        if (permKey === 'document_template:build') {
+          await partyRepo.putPerson(ctx, {
+            ...origP2!,
+            roles: ['fee_earner'],
+            permissionOverrides: { grant: ['document_template:build'], revoke: [] },
+          });
+          const res = await updateDocumentGenerationConfigService(
+            { maxTemplateSizeMb: 19 },
+            'P-000002',
+            makeSession('P-000002', ['fee_earner']),
+          );
+          expect(res.maxTemplateSizeMb).toBe(19);
+        } else if (permKey === 'rbac:manage_config') {
+          await partyRepo.putPerson(ctx, {
+            ...origP2!,
+            roles: ['fee_earner'],
+            permissionOverrides: { grant: ['rbac:manage_config'], revoke: [] },
+          });
+          const res = await updateDocumentGenerationConfigService(
+            {
+              permissions: {
+                roleDefaults:
+                  DEFAULT_DOCUMENT_GENERATION_CONFIG.permissions!.roleDefaults,
+              },
+            },
+            'P-000002',
+            makeSession('P-000002', ['fee_earner']),
+          );
+          expect(res.permissions?.roleDefaults).toBeDefined();
+        } else if (permKey === 'admin:access') {
+          // admin:access applies only to security-sensitive changes (permissions / approval),
+          // not non-security config updates such as maxTemplateSizeMb without document_template:build / rbac:manage_config.
+          await partyRepo.putPerson(ctx, {
+            ...origP2!,
+            roles: ['fee_earner'],
+            permissionOverrides: { grant: ['admin:access'], revoke: [] },
+          });
+          const secSession = makeSession('P-000002', ['fee_earner']);
+          const savedApproval = await updateDocumentGenerationConfigService(
+            {
+              approval: {
+                requireApproval: true,
+                allowSelfApproval: false,
+              },
+            },
+            'P-000002',
+            secSession,
+          );
+          expect(savedApproval.approval.requireApproval).toBe(true);
+          await expect(
+            updateDocumentGenerationConfigService(
+              { maxTemplateSizeMb: 21 },
+              'P-000002',
+              secSession,
+            ),
+          ).rejects.toThrow(/DOCUMENT_PERMISSION_DENIED/);
+        }
+      }
+    } finally {
+      if (origP2) {
+        await partyRepo.putPerson(ctx, origP2);
+      }
+      await repo.putDocumentGenerationTenantConfig(
+        ctx,
+        originalDocGenOverride,
+        'P-000004',
+      );
+    }
   });
 
   it('R518: catches export const actions, re-exported actions, second use-server files, and HEAD/OPTIONS/re-exported API route handlers', () => {

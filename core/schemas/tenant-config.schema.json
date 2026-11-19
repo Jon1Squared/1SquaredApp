@@ -296,7 +296,7 @@
           "type": "string",
           "x-reserved": {
             "for": "backlog",
-            "reason": "Reserved for backlog live external PMS database connection secret resolution."
+            "reason": "Reserved for backlog item F22 live external PMS database connection secret resolution."
           }
         },
         "companiesHouseApiKeyVaultRef": {
@@ -514,7 +514,7 @@
               "default": true,
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS synchronisation."
+                "reason": "Reserved for backlog item F22 live external PMS synchronisation."
               }
             },
             "providerKey": {
@@ -522,7 +522,7 @@
               "default": "generic_sql",
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS adapter selection."
+                "reason": "Reserved for backlog item F22 live external PMS adapter selection."
               }
             },
             "syncMode": {
@@ -534,7 +534,7 @@
               "default": "two_way",
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS sync direction control."
+                "reason": "Reserved for backlog item F22 live external PMS sync direction control."
               }
             },
             "matterCodeAllocation": {
@@ -546,7 +546,7 @@
               "default": "onesquared",
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS matter number allocation."
+                "reason": "Reserved for backlog item F22 live external PMS matter number allocation."
               }
             },
             "clientCodeAllocation": {
@@ -558,7 +558,7 @@
               "default": "onesquared",
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS client code allocation."
+                "reason": "Reserved for backlog item F22 live external PMS client code allocation."
               }
             },
             "pollIntervalMinutes": {
@@ -566,7 +566,7 @@
               "default": 15,
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS delta polling interval."
+                "reason": "Reserved for backlog item F22 live external PMS delta polling interval."
               }
             },
             "fieldMappings": {
@@ -588,7 +588,7 @@
                     "type": "string",
                     "x-reserved": {
                       "for": "backlog",
-                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                      "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
                     }
                   },
                   "entityType": {
@@ -602,21 +602,21 @@
                     ],
                     "x-reserved": {
                       "for": "backlog",
-                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                      "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
                     }
                   },
                   "onesquaredFieldKey": {
                     "type": "string",
                     "x-reserved": {
                       "for": "backlog",
-                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                      "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
                     }
                   },
                   "externalFieldKey": {
                     "type": "string",
                     "x-reserved": {
                       "for": "backlog",
-                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                      "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
                     }
                   },
                   "ownership": {
@@ -629,7 +629,7 @@
                     "default": "onesquared_master",
                     "x-reserved": {
                       "for": "backlog",
-                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                      "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
                     }
                   },
                   "active": {
@@ -637,14 +637,14 @@
                     "default": true,
                     "x-reserved": {
                       "for": "backlog",
-                      "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                      "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
                     }
                   }
                 }
               },
               "x-reserved": {
                 "for": "backlog",
-                "reason": "Reserved for backlog live external PMS field-level synchronisation."
+                "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
               }
             }
           }
@@ -1306,7 +1306,7 @@
           "default": false,
           "x-reserved": {
             "for": "backlog",
-            "reason": "Reserved for future scheduled automatic SharePoint permission drift remediation (backlog item beyond Stage 0)."
+            "reason": "Reserved for backlog item F23 (scheduled automatic SharePoint permission drift remediation beyond Stage 0)."
           }
         },
         "defaultPolicy": {

@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getPlatformTelemetryRecorder } from '@platform/core';
+import { MockSharePointGraphBackend } from '@platform/core/testing';
 import { updateTenantRbacConfigAction } from '@/app/actions';
 import { GET as matterDocumentsGet } from '@/app/api/matters/[id]/documents/route';
+import { clearMatterExtractionCacheForTesting } from '@/app/api/matters/extract/route';
+import { resetAddressLookupNotConfiguredWarningForTests } from '@/server/addressLookupService';
+import {
+  flushDocumentLifecycleSyncForTesting,
+  resetDocumentStoreSingletonsForTesting,
+} from '@/server/documentStoreServices';
 import { isActionDenied } from '@/domain/actionResult';
 import {
   getActiveTenantConfiguration,
@@ -606,6 +613,37 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
       }
       setActiveTenantConfigForTesting(null);
       setTestEntraSessionOverride(undefined);
+    }
+  });
+
+  it('R533: guards test-only helper exports so calling them outside NODE_ENV=test throws', async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const mockBackend = new MockSharePointGraphBackend();
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'development';
+    try {
+      expect(() => clearMatterExtractionCacheForTesting()).toThrow(/test/i);
+      expect(() => resetAddressLookupNotConfiguredWarningForTests()).toThrow(
+        /test/i,
+      );
+      expect(() => resetDocumentStoreSingletonsForTesting()).toThrow(/test/i);
+      await expect(flushDocumentLifecycleSyncForTesting()).rejects.toThrow(
+        /test/i,
+      );
+      expect(() =>
+        mockBackend.injectSharingLinkForTesting({
+          tenantId: 'not-a-law-firm',
+          siteId: 'site-1',
+          driveId: 'drive-1',
+          itemId: 'item-1',
+          link: {
+            linkId: 'lnk-1',
+            scope: 'anonymous',
+            type: 'view',
+          },
+        }),
+      ).toThrow(/test/i);
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = prevNodeEnv;
     }
   });
 });

@@ -80,8 +80,15 @@ function repointJsonIdFieldsInValue(
   value: unknown,
   mergedId: string,
   survivorId: string,
-  options?: { allowDirectIdField?: boolean; extraExcludeClientId?: string },
+  options?: {
+    allowDirectIdField?: boolean;
+    extraExcludeClientId?: string;
+    repointAnyStringValue?: boolean;
+  },
 ): { value: unknown; changed: boolean } {
+  if (typeof value === 'string' && options?.repointAnyStringValue && value === mergedId) {
+    return { value: survivorId, changed: true };
+  }
   if (Array.isArray(value)) {
     let changed = false;
     const mapped = value.map((item) => {
@@ -3653,6 +3660,53 @@ export class TenantPartyRepository extends TenantScopedRepository {
           );
           acceptedSurvivorOverrides.push(mergedOvr);
           repointedOverrideIds.push(mergedOvr.id);
+        }
+      }
+
+      // 12c. Repoint register_records (`R515` / `S0-24`):
+      //      Repoint person_id / organisation_id foreign-reference columns plus any matching JSON IDs in field_values_json.
+      if (recordType === 'person') {
+        await tx.query(
+          `UPDATE public.register_records
+           SET person_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND person_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+      } else {
+        await tx.query(
+          `UPDATE public.register_records
+           SET organisation_id = $2, updated_at = NOW()
+           WHERE tenant_id = $1 AND organisation_id = $3`,
+          [ctx.tenantId, survivorId, mergedId],
+        );
+      }
+      const regRows = await tx.query<{
+        tenant_id: string;
+        id: string;
+        field_values_json: Record<string, unknown> | null;
+      }>(
+        `SELECT tenant_id, id, field_values_json
+         FROM public.register_records
+         WHERE tenant_id = $1
+           AND field_values_json::text LIKE $2 ESCAPE '\\'
+         FOR UPDATE`,
+        [ctx.tenantId, likeMergedPattern],
+      );
+      for (const regRow of regRows.rows) {
+        this.assertRowTenant(ctx, regRow.tenant_id, 'register_records.executeMergeInTransaction');
+        const fv = regRow.field_values_json;
+        if (!fv || typeof fv !== 'object') continue;
+        const repointed = repointJsonIdFieldsInValue(fv, mergedId, survivorId, {
+          allowDirectIdField: false,
+          repointAnyStringValue: true,
+        });
+        if (repointed.changed) {
+          await tx.query(
+            `UPDATE public.register_records
+             SET field_values_json = $3::jsonb, updated_at = NOW()
+             WHERE tenant_id = $1 AND id = $2`,
+            [ctx.tenantId, regRow.id, JSON.stringify(repointed.value ?? {})],
+          );
         }
       }
 

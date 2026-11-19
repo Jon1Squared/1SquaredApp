@@ -830,32 +830,32 @@ const PmsIntegrationSyncConfigSchema = z
       .boolean()
       .default(true)
       .describe(
-        '[x-reserved:backlog] Whether PMS / Finance DB synchronisation is enabled for this tenant (reserved for backlog live external PMS synchronisation)',
+        '[x-reserved:backlog] Whether PMS / Finance DB synchronisation is enabled for this tenant (reserved for backlog item F22 live external PMS synchronisation)',
       ),
     providerKey: z
       .string()
       .min(1)
       .default('generic_sql')
       .describe(
-        '[x-reserved:backlog] Identifier of the connected PMS / Finance adapter (reserved for backlog)',
+        '[x-reserved:backlog] Identifier of the connected PMS / Finance adapter (reserved for backlog item F22)',
       ),
     syncMode: z
       .enum(['read_only', 'two_way'])
       .default('two_way')
       .describe(
-        '[x-reserved:backlog] Whether integration is read-only inbound or two-way (reserved for backlog)',
+        '[x-reserved:backlog] Whether integration is read-only inbound or two-way (reserved for backlog item F22)',
       ),
     matterCodeAllocation: z
       .enum(['onesquared', 'pms_on_open'])
       .default('onesquared')
       .describe(
-        '[x-reserved:backlog] System responsible for allocating canonical matter numbers (reserved for backlog)',
+        '[x-reserved:backlog] System responsible for allocating canonical matter numbers (reserved for backlog item F22)',
       ),
     clientCodeAllocation: z
       .enum(['onesquared', 'pms_on_open'])
       .default('onesquared')
       .describe(
-        '[x-reserved:backlog] System responsible for allocating canonical client codes (reserved for backlog)',
+        '[x-reserved:backlog] System responsible for allocating canonical client codes (reserved for backlog item F22)',
       ),
     pollIntervalMinutes: z
       .number()
@@ -863,13 +863,13 @@ const PmsIntegrationSyncConfigSchema = z
       .positive()
       .default(15)
       .describe(
-        '[x-reserved:backlog] Inbound delta sync polling interval in minutes (reserved for backlog)',
+        '[x-reserved:backlog] Inbound delta sync polling interval in minutes (reserved for backlog item F22)',
       ),
     fieldMappings: z
       .array(PmsFieldMappingEntrySchema)
       .default([])
       .describe(
-        '[x-reserved:backlog] Field-level mappings and System-of-Record ownership rules (reserved for backlog)',
+        '[x-reserved:backlog] Field-level mappings and System-of-Record ownership rules (reserved for backlog item F22)',
       ),
   })
   .strict();
@@ -1087,7 +1087,7 @@ export const TenantConfigurationSchema = z
     integrations: z
       .object({
         pmsConnectionSecretVaultRef: KeyVaultRefSchema.describe(
-          '[x-reserved:backlog] Key Vault reference for live PMS database connection secret resolution (reserved for backlog)',
+          '[x-reserved:backlog] Key Vault reference for live PMS database connection secret resolution (reserved for backlog item F22)',
         ),
         companiesHouseApiKeyVaultRef: KeyVaultRefSchema.describe(
           '[x-reserved:backlog] Key Vault reference for live Companies House API integration (reserved for backlog item F17)',
@@ -1097,7 +1097,7 @@ export const TenantConfigurationSchema = z
           .default('disabled')
           .describe('Configured AI model provider for this tenant'),
         pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(
-          '[x-reserved:backlog] Two-way Finance/PMS synchronisation settings and field mappings (reserved for backlog)',
+          '[x-reserved:backlog] Two-way Finance/PMS synchronisation settings and field mappings (reserved for backlog item F22)',
         ),
         email: z
           .object({
@@ -1660,7 +1660,7 @@ export const TenantConfigurationSchema = z
           .default(false)
           .optional()
           .describe(
-            '[x-reserved:backlog] Whether scheduled permission reconciliation automatically remediates detected drift (default: false; reserved for backlog)',
+            '[x-reserved:backlog] Whether scheduled permission reconciliation automatically remediates detected drift (default: false; reserved for backlog item F23)',
           ),
         defaultPolicy: z
           .object({

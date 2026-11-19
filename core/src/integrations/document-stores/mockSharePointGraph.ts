@@ -880,6 +880,11 @@ export class MockSharePointGraphBackend {
     itemId: string;
     link: DocumentPermissionSharingLink;
   }): void {
+    if (process.env.NODE_ENV !== 'test') {
+      throw new Error(
+        'SECURITY_ERROR: injectSharingLinkForTesting is only permitted when NODE_ENV === "test".',
+      );
+    }
     const { item } = this.getItemOrThrow(
       params.tenantId,
       params.siteId,

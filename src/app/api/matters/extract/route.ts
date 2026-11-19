@@ -1698,6 +1698,11 @@ const extractionResultCache = new Map<
 >();
 
 export function clearMatterExtractionCacheForTesting(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: clearMatterExtractionCacheForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
   extractionResultCache.clear();
   cachedModelsByKeyPrefix.clear();
 }

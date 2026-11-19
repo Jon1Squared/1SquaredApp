@@ -133,6 +133,11 @@ export function getRepositorySingleton(): TenantDocumentStoreRepository {
 }
 
 export function resetDocumentStoreSingletonsForTesting(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: resetDocumentStoreSingletonsForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
   globalThis.__oneSquaredDocStoreRegistry = undefined;
   globalThis.__oneSquaredDocStoreRepo = undefined;
 }
@@ -1069,6 +1074,11 @@ export async function syncMatterLifecycleToDocumentStore(params: {
 const pendingLifecycleSyncPromises = new Set<Promise<void>>();
 
 export async function flushDocumentLifecycleSyncForTesting(): Promise<void> {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: flushDocumentLifecycleSyncForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
   while (pendingLifecycleSyncPromises.size > 0) {
     const batch = Array.from(pendingLifecycleSyncPromises);
     await Promise.allSettled(batch);

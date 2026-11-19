@@ -430,7 +430,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const ctx = makeTestTenantContext('mig-gap-firm');
     const runner = new TenantMigrationRunner();
     for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)].reverse()) {
-      await runner.rollbackVersion(ctx, v);
+      expect(await runner.rollbackVersion(ctx, v)).toBe(true);
     }
     await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
 
@@ -984,7 +984,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const ctx = makeTestTenantContext('mig-checksum-0008');
     const runner = new TenantMigrationRunner();
     for (const v of [...CORE_TENANT_MIGRATIONS.map((m) => m.version)].reverse()) {
-      await runner.rollbackVersion(ctx, v);
+      expect(await runner.rollbackVersion(ctx, v)).toBe(true);
     }
     await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
 
@@ -1018,7 +1018,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         .filter((v) => v > '0008')
         .reverse();
       for (const v of versionsAfter0008) {
-        await runner.rollbackVersion(ctx, v);
+        expect(await runner.rollbackVersion(ctx, v)).toBe(true);
       }
       expect(await runner.rollbackVersion(ctx, '0008')).toBe(true);
       await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
