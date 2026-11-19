@@ -39,6 +39,7 @@ import type {
   VerificationPolicyConfig,
 } from './keyDates.types';
 import {
+  getActiveActorSession,
   IMMUTABLE_EMPLOYEE_ROLE_ID_TO_ROLE_KEY,
   resolvePersonPermissionSet,
   type ResolvePersonPermissionsOptions,
@@ -228,10 +229,24 @@ export function resolveKeyDatePermissions(
         }
       : DEFAULT_KEY_DATE_ROLE_GRANTS;
 
+  const explicitTokenRolesActorId =
+    opts.rbac?.tokenRolesActorId ?? opts.rbac?.context?.actorId;
+  const activeActorSession = !explicitTokenRolesActorId
+    ? getActiveActorSession()
+    : undefined;
+  const canApplyTokenRoles =
+    Boolean(opts.rbac?.tokenRoles?.length) &&
+    (explicitTokenRolesActorId
+      ? explicitTokenRolesActorId === user.id
+      : !activeActorSession ||
+        activeActorSession.tenantId !== opts.rbac?.tenantId ||
+        activeActorSession.personId === user.id);
   const roleKeys = Array.from(
     new Set([
       ...resolveUserRoleKeysForKeyDates(user, teams),
-      ...(opts.rbac?.tokenRoles ?? []).filter(Boolean),
+      ...(canApplyTokenRoles ? opts.rbac?.tokenRoles ?? [] : []).filter(
+        Boolean,
+      ),
     ]),
   );
   const granted = new Set<KeyDatePermission>();
@@ -1034,6 +1049,15 @@ export function createOrProposeKeyDate(
         ? defaultResponsibles
         : [actor.id];
 
+  const targetPersonRbac = (
+    pid: string,
+  ): ResolvePersonPermissionsOptions | undefined =>
+    pid === actor.id
+      ? rbacOptions
+      : rbacOptions
+        ? { ...rbacOptions, tokenRoles: undefined, mfaVerified: undefined }
+        : undefined;
+
   if (people.length > 0) {
     for (const pid of responsiblePersonIds) {
       const person = people.find(
@@ -1049,7 +1073,16 @@ export function createOrProposeKeyDate(
           `KEY_DATE_VALIDATION_ERROR: Responsible person "${pid}" is not an active employee.`,
         );
       }
-      if (matter && !canViewerAccessMatterKeyDates(matter, person, person, people, rbacOptions)) {
+      if (
+        matter &&
+        !canViewerAccessMatterKeyDates(
+          matter,
+          person,
+          person,
+          people,
+          targetPersonRbac(pid),
+        )
+      ) {
         throw new Error(
           `KEY_DATE_VALIDATION_ERROR: Responsible person "${pid}" does not have access to restricted matter "${matter.id}".`,
         );
@@ -1057,7 +1090,15 @@ export function createOrProposeKeyDate(
     }
   } else if (matter) {
     for (const pid of responsiblePersonIds) {
-      if (!canViewerAccessMatterKeyDates(matter, pid, undefined, people, rbacOptions)) {
+      if (
+        !canViewerAccessMatterKeyDates(
+          matter,
+          pid,
+          undefined,
+          people,
+          targetPersonRbac(pid),
+        )
+      ) {
         throw new Error(
           `KEY_DATE_VALIDATION_ERROR: Responsible person "${pid}" does not have access to restricted matter "${matter.id}".`,
         );
@@ -1683,6 +1724,15 @@ export function reassignKeyDateTeamAndOwners(params: {
     );
   }
 
+  const targetPersonRbac = (
+    pid: string,
+  ): ResolvePersonPermissionsOptions | undefined =>
+    pid === actor.id
+      ? rbacOptions
+      : rbacOptions
+        ? { ...rbacOptions, tokenRoles: undefined, mfaVerified: undefined }
+        : undefined;
+
   let nextResponsibles = keyDate.responsiblePersonIds;
   if (responsiblePersonIds && responsiblePersonIds.length > 0) {
     nextResponsibles = Array.from(
@@ -1705,7 +1755,13 @@ export function reassignKeyDateTeamAndOwners(params: {
         }
         if (
           matter &&
-          !canViewerAccessMatterKeyDates(matter, person, person, people, rbacOptions)
+          !canViewerAccessMatterKeyDates(
+            matter,
+            person,
+            person,
+            people,
+            targetPersonRbac(pid),
+          )
         ) {
           throw new Error(
             `KEY_DATE_VALIDATION_ERROR: Responsible person "${pid}" does not have access to restricted matter "${matter.id}".`,
@@ -1714,7 +1770,15 @@ export function reassignKeyDateTeamAndOwners(params: {
       }
     } else if (matter) {
       for (const pid of nextResponsibles) {
-        if (!canViewerAccessMatterKeyDates(matter, pid, undefined, people, rbacOptions)) {
+        if (
+          !canViewerAccessMatterKeyDates(
+            matter,
+            pid,
+            undefined,
+            people,
+            targetPersonRbac(pid),
+          )
+        ) {
           throw new Error(
             `KEY_DATE_VALIDATION_ERROR: Responsible person "${pid}" does not have access to restricted matter "${matter.id}".`,
           );
@@ -1736,7 +1800,13 @@ export function reassignKeyDateTeamAndOwners(params: {
     const permittedTaskAssignees = matter
       ? keyDate.responsiblePersonIds.filter((pid) => {
           const person = people.find((p) => p.id === pid) ?? null;
-          return canViewerAccessMatterKeyDates(matter, pid, person, people, rbacOptions);
+          return canViewerAccessMatterKeyDates(
+            matter,
+            pid,
+            person,
+            people,
+            targetPersonRbac(pid),
+          );
         })
       : [...keyDate.responsiblePersonIds];
     linkedTask.assignedTeamId = keyDate.teamId;

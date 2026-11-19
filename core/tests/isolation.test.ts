@@ -91,6 +91,7 @@ import {
   approveSignOff,
   createOrProposeKeyDateRecord,
   discussSignOff,
+  executeKeyDateRemindersForTenant,
   flagMatterWriteOff,
   getAppSnapshot,
   getClientPmsViewBundle,
@@ -10595,9 +10596,142 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
       );
       expect((await taskRepo.listVisibleTasks(ctxB, 'P-BRAVO-1')).length).toBe(0);
+
+      // R535 two-tenant isolation: admin tokenRoles (matter:restricted:access) in Tenant Alpha must NEVER leak onto other responsible persons or manual reminder recipients, nor touch Tenant Bravo
+      await partyRepo.putPerson(ctxA, {
+        ...makePerson('P-ALPHA-ADM'),
+        roles: ['admin', 'managing_partner'],
+        appRole: 'admin',
+        isEmployee: true,
+      });
+      await getHrAndRbacRepository().putTeam(ctxA, {
+        id: 'TM-000001',
+        name: 'Alpha Property',
+        description: 'Alpha test team',
+        leadIds: ['P-ALPHA-ADM'],
+        memberIds: ['P-ALPHA-1', 'P-ALPHA-2', 'P-ALPHA-ADM'],
+        practiceAreaIds: [],
+        active: true,
+        createdById: 'P-ALPHA-ADM',
+        createdAt: '2026-11-19T10:00:00.000Z',
+        updatedById: 'P-ALPHA-ADM',
+        updatedAt: '2026-11-19T10:00:00.000Z',
+      });
+      const existingAlphaWallMatter = (await matterRepo.getMatterById(
+        ctxA,
+        allowListMatterId,
+        { includeRestricted: true },
+      ))!;
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...existingAlphaWallMatter,
+          teamMemberIds: ['P-ALPHA-1', 'P-ALPHA-ADM'],
+          restrictedAccessUserIds: ['P-ALPHA-1', 'P-ALPHA-ADM'],
+        },
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-ALPHA-1', 'P-ALPHA-ADM'],
+        },
+      );
+      const adminVerifiedA = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-ALPHA-ADM',
+          tenantId: 'tenant-alpha',
+          oid: '00000000-0000-4000-8000-00000000a099',
+          tid: '11111111-2222-4333-8444-555555555555',
+          sub: 'P-ALPHA-ADM',
+          email: 'alpha-adm@tenant-alpha.example',
+          displayName: 'Alpha Admin',
+          entraRoles: ['admin', 'managing_partner'],
+          mappedRoles: ['admin', 'managing_partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        }),
+      )!;
+      setTestEntraSessionOverride(adminVerifiedA);
+      const adminTokenCtxA = resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-ALPHA-ADM',
+          tenantId: 'tenant-alpha',
+          name: 'Alpha Admin',
+          email: 'alpha-adm@tenant-alpha.example',
+          roles: ['admin', 'managing_partner'],
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-r535-alpha-adm',
+      });
+      await runWithActiveActorSession(
+        {
+          personId: 'P-ALPHA-ADM',
+          tenantId: 'tenant-alpha',
+          tokenRoles: ['admin', 'managing_partner'],
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: adminVerifiedA,
+        },
+        async () => {
+          const r535CreateDenied = await createOrProposeKeyDateRecord(
+            {
+              matterId: allowListMatterId,
+              keyDateTypeId: 'limitation',
+              title: 'R535 Alpha Blocked Responsible',
+              dueDate: '2027-02-15',
+              intent: 'propose',
+              teamId: 'TM-000001',
+              responsiblePersonIds: ['P-ALPHA-2'],
+            },
+            'P-ALPHA-ADM',
+          );
+          expect(r535CreateDenied.ok).toBe(false);
+          expect(r535CreateDenied.error).toMatch(/does not have access to restricted matter/i);
+        },
+      );
+
+      // Update allow-list key date to list unpermitted P-ALPHA-2 + permitted P-ALPHA-1 and run manual reminder as admin tokenRoles in Tenant Alpha
+      await kdRepo.putKeyDate(ctxA, {
+        id: kdId,
+        matterId: allowListMatterId,
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'Allow-list Key Date',
+        dueDate: '2027-02-01',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-ALPHA-2', 'P-ALPHA-1'],
+        verification: { required: false },
+        createdById: 'P-ALPHA-1',
+        createdAt: '2026-11-19T10:00:00.000Z',
+        updatedById: 'P-ALPHA-1',
+        updatedAt: '2026-11-19T10:00:00.000Z',
+        version: 2,
+      });
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2027-02-01T10:00:00.000Z'));
+      try {
+        await executeKeyDateRemindersForTenant(adminTokenCtxA, {
+          triggerSource: 'manual',
+          triggeredById: 'P-ALPHA-ADM',
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      const alphaTasksAfterR535 = await taskRepo.listAllTasksUnfiltered<{ assignedPersonId?: string | null; assignedPersonIds?: string[] }>(ctxA);
+      expect(alphaTasksAfterR535.some((t) => t.assignedPersonId === 'P-ALPHA-2' || (t.assignedPersonIds ?? []).includes('P-ALPHA-2'))).toBe(false);
+      expect(alphaTasksAfterR535.some((t) => t.assignedPersonId === 'P-ALPHA-1')).toBe(true);
+      expect((await taskRepo.listAllNotificationsUnfiltered<{ recipientId: string }>(ctxA)).some((n) => n.recipientId === 'P-ALPHA-2')).toBe(false);
+      expect((await taskRepo.listVisibleTasks(ctxB, 'P-BRAVO-1')).length).toBe(0);
     } finally {
       setActiveTenantConfigForTesting(null);
       setTestEntraSessionOverride(null);
+      await getHrAndRbacRepository().clearTenantData(ctxA).catch(() => undefined);
       await regRepo.clearTenantData(ctxA).catch(() => undefined);
       await kdRepo.clearTenantData(ctxA).catch(() => undefined);
       await taskRepo.clearTenantData(ctxA).catch(() => undefined);

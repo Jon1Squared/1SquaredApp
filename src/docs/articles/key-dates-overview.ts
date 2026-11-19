@@ -66,7 +66,7 @@ Key date permissions are granted to roles through tenant configuration (\`keyDat
 
 Key dates, "not applicable" records, reminder stages, Outlook sync state, and the firm's key-date configuration are held in the firm's own PostgreSQL database (one database per firm), not in the application's local working file. Every change to a key date and the matching entry in the firm audit log are saved together in a single database transaction: if either part fails, neither is saved, so the audit log can never disagree with the key date itself.
 
-Staff matters, ethical walls, and explicit per-matter allow-lists are enforced in the PostgreSQL data layer as well as through the central \`canAccessMatter\` RBAC engine (\`canViewerAccessMatterKeyDates\`, \`R528\`), with no hard-coded role bypasses, so a key date on a restricted matter is never returned to someone outside the matter's access policy or holding an unrevoked \`matter:restricted:access\` grant.
+Staff matters, ethical walls, and explicit per-matter allow-lists are enforced in the PostgreSQL data layer as well as through the central \`canAccessMatter\` RBAC engine (\`canViewerAccessMatterKeyDates\`, \`R528\`), with no hard-coded role bypasses, so a key date on a restricted matter is never returned to someone outside the matter's access policy or holding an unrevoked \`matter:restricted:access\` grant. When an administrator or partner creates, reassigns, or runs manual reminders for key dates, each responsible person and reminder recipient is checked strictly against their own stored roles and matter access (\`R535\`) — session \`tokenRoles\` of the acting user never grant restricted-matter access to other people.
 
 ## Related articles in this section
 

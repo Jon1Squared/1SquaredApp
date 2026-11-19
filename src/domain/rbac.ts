@@ -345,6 +345,7 @@ export interface ResolvePersonPermissionsOptions {
     | null;
   mfaVerified?: boolean;
   tokenRoles?: readonly string[];
+  tokenRolesActorId?: string;
 }
 
 /**
@@ -417,8 +418,11 @@ export function resolvePersonPermissionSet(
     ? Boolean(user.supportsIds?.includes(options.targetPersonId))
     : false;
 
-  const isEvaluatingContextActor =
-    !options.context?.actorId || options.context.actorId === user.id;
+  const explicitActorId =
+    options.tokenRolesActorId ?? options.context?.actorId;
+  const isEvaluatingContextActor = explicitActorId
+    ? explicitActorId === user.id
+    : true;
   const activeActorSession = isEvaluatingContextActor
     ? getStoredActorSessionForPerson(user.id, activeTenantId)
     : undefined;
@@ -430,13 +434,23 @@ export function resolvePersonPermissionSet(
         | undefined
     )?.mfaVerified;
   const mfaVerified =
-    options.mfaVerified ??
-    options.context?.mfaVerified ??
+    (isEvaluatingContextActor ? options.mfaVerified : undefined) ??
+    (isEvaluatingContextActor ? options.context?.mfaVerified : undefined) ??
     sessionMfaVerified ??
     false;
   const sessionTokenRoles = activeActorSession?.tokenRoles;
+  const activeInSameTenant = !explicitActorId
+    ? getActiveActorSession()
+    : undefined;
+  const canApplyExplicitTokenRoles =
+    options.tokenRoles !== undefined &&
+    (explicitActorId
+      ? explicitActorId === user.id
+      : !activeInSameTenant ||
+        activeInSameTenant.tenantId !== activeTenantId ||
+        activeInSameTenant.personId === user.id);
   const contextActorRoles =
-    options.tokenRoles ??
+    (canApplyExplicitTokenRoles ? options.tokenRoles : undefined) ??
     (isEvaluatingContextActor
       ? sessionTokenRoles
         ? options.context?.actorRoles

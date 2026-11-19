@@ -1723,6 +1723,57 @@ export class TenantMatterRepository extends TenantScopedRepository {
     });
   }
 
+  public async listMattersUnfilteredByIdsOrSources<
+    TMatter extends TenantMatterRecord = TenantMatterRecord,
+  >(
+    ctx: TenantContext,
+    filters: {
+      ids?: readonly string[];
+      sourceEnquiryIds?: readonly string[];
+      sourceQuoteIds?: readonly string[];
+    },
+  ): Promise<TMatter[]> {
+    const ids = Array.from(new Set((filters.ids ?? []).filter(Boolean)));
+    const sourceEnquiryIds = Array.from(
+      new Set((filters.sourceEnquiryIds ?? []).filter(Boolean)),
+    );
+    const sourceQuoteIds = Array.from(
+      new Set((filters.sourceQuoteIds ?? []).filter(Boolean)),
+    );
+    if (
+      ids.length === 0 &&
+      sourceEnquiryIds.length === 0 &&
+      sourceQuoteIds.length === 0
+    ) {
+      return [];
+    }
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbMatterRow>(
+        `SELECT * FROM public.matters
+         WHERE tenant_id = $1
+           AND client_id <> 'O-KEYDATE-STUB'
+           AND (
+             id = ANY($2::text[])
+             OR source_enquiry_id = ANY($3::text[])
+             OR source_quote_id = ANY($4::text[])
+           )
+         ORDER BY id ASC`,
+        [ctx.tenantId, ids, sourceEnquiryIds, sourceQuoteIds],
+      );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+      }
+      const partiesMap = await this.loadPartiesByMatterIdsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return res.rows.map((row) =>
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+      );
+    });
+  }
+
   /**
    * Locks (`SELECT ... FOR UPDATE`) and returns only the affected matter rows inside an active
    * tenant transaction so restriction metadata (`is_staff_matter`, `has_ethical_wall`,

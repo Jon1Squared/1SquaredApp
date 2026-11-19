@@ -170,13 +170,16 @@ export function filterRecipientsForMatterRestriction(
     return unique;
   }
   if (!matter || !matter.id) return [];
+  const recipientRbac = rbacOptions
+    ? { ...rbacOptions, tokenRoles: undefined, mfaVerified: undefined }
+    : undefined;
   return unique.filter((pid) =>
     canViewerAccessMatterKeyDates(
       matter,
       pid,
       undefined,
       people,
-      rbacOptions,
+      recipientRbac,
     ),
   );
 }

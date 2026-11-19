@@ -23,6 +23,7 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import {
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getMatterRepository,
   getOutboxRepository,
@@ -44,6 +45,7 @@ import {
   enqueueNotificationEmailIfImmediate,
   enqueueNotificationTeamsActivityIfEnabled,
   getAppSnapshot,
+  getKeyDateRepository,
   listFirmAuditEntriesPage,
   prepareEnquiryConversion,
   resetAllDemoData,
@@ -57,7 +59,7 @@ import { isActionDenied } from '@/domain/actionResult';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { setAuditAdapterFailureHookForTesting } from '@/server/testSupport/auditTestSupport';
 import { testDataResetContext } from '@/test/testTenantContexts';
-import type { Matter } from '@/domain/types';
+import type { Matter, Task } from '@/domain/types';
 
 function makeTenantCtx(
   tenantId: string,
@@ -2205,21 +2207,36 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       );
       setTestEntraSessionOverride(activeSession.verifiedSession);
 
-      // P-000002 opts into immediate email + Teams for task notifications
-      await outboxRepo.upsertNotificationPreference(ctx, {
-        personId: 'P-000002',
-        notificationKind: 'task_assigned',
-        inAppEnabled: true,
-        emailFrequency: 'immediate',
-        teamsEnabled: true,
-      });
-      await outboxRepo.upsertNotificationPreference(ctx, {
-        personId: 'P-000002',
-        notificationKind: 'team_task_arrived',
-        inAppEnabled: true,
-        emailFrequency: 'immediate',
-        teamsEnabled: true,
-      });
+      // P-000002 (unpermitted) and P-000010 (permitted positive control, member of TM-000001) opt into immediate email + Teams
+      const hrRepo = getHrAndRbacRepository();
+      const partyRepo = getPartyRepository();
+      const kdRepo = getKeyDateRepository();
+      const allPeopleForR509 = await partyRepo.listAllPeople<TenantPersonRecord & { emails?: Array<{ address: string; isPrimary?: boolean }> }>(ctx);
+      const p2Email = allPeopleForR509.find((p) => p.id === 'P-000002')?.emails?.find((e) => e.isPrimary)?.address.toLowerCase();
+      const p10Email = allPeopleForR509.find((p) => p.id === 'P-000010')?.emails?.find((e) => e.isPrimary)?.address.toLowerCase();
+      expect(p2Email).toBeTruthy();
+      expect(p10Email).toBeTruthy();
+
+      const tm1 = await hrRepo.getTeamById(ctx, 'TM-000001');
+      expect(tm1?.memberIds).toContain('P-000002');
+      expect(tm1?.memberIds).toContain('P-000010');
+
+      for (const pid of ['P-000002', 'P-000010'] as const) {
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: pid,
+          notificationKind: 'task_assigned',
+          inAppEnabled: true,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: pid,
+          notificationKind: 'team_task_arrived',
+          inAppEnabled: true,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+      }
 
       const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001', {
         includeRestricted: true,
@@ -2232,14 +2249,14 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
         responsiblePartnerId: 'P-000001',
         supervisingPartnerId: 'P-000001',
         leadFeeEarnerId: 'P-000001',
-        teamMemberIds: ['P-000001'],
+        teamMemberIds: ['P-000001', 'P-000010'],
         isStaffMatter: true,
         hasEthicalWall: true,
-        restrictedAccessUserIds: ['P-000001'],
+        restrictedAccessUserIds: ['P-000001', 'P-000010'],
       };
       await matterRepo.putMatter(ctx, wallMatter, {
         expectedRowVersion: null,
-        sqlRestrictedAccessUserIds: ['P-000001'],
+        sqlRestrictedAccessUserIds: ['P-000001', 'P-000010'],
       });
 
       const emailsBefore = (await outboxRepo.listOutboxRecords(ctx)).length;
@@ -2258,6 +2275,38 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
         );
         expect(isActionDenied(deniedDirect)).toBe(true);
         expect(deniedDirect.code).toBe('FORBIDDEN');
+
+        // R556: Creating a new task linked only via linkedKeyDateId to a restricted-matter key date MUST also check matter restriction
+        await kdRepo.putKeyDate(ctx, {
+          id: 'KD-R556-WALL',
+          matterId: wallMatter.id,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Confidential R556 Key Date',
+          dueDate: '2027-03-01',
+          isCritical: true,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-000001'],
+          verification: { required: false },
+          createdById: 'P-000001',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-000001',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 1,
+        });
+        const deniedViaKd = await saveTaskRecord(
+          {
+            title: 'Confidential R556 Linked KeyDate Secret',
+            dueAt: '2027-02-01',
+            assignedPersonId: 'P-000002',
+            linkedKeyDateId: 'KD-R556-WALL',
+          } as Parameters<typeof saveTaskRecord>[0],
+          'P-000001',
+        );
+        expect(isActionDenied(deniedViaKd)).toBe(true);
+        expect(deniedViaKd.code).toBe('FORBIDDEN');
 
         // 2. Assigning to a team whose members all lack access to wallMatter is refused
         const adminSession = makeActorSession('P-000004', ['admin'], 'not-a-law-firm');
@@ -2288,8 +2337,8 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
         expect(isActionDenied(deniedTeam)).toBe(true);
         expect(deniedTeam.code).toBe('FORBIDDEN');
 
-        // 3. Mixed team assignment (TM-000001 contains permitted P-000001 AND unpermitted P-000002):
-        //    saveTaskRecord succeeds for permitted P-000001 / team, but suppresses team_task_arrived for P-000002!
+        // 3. Mixed team assignment (TM-000001 contains unpermitted P-000002 AND permitted P-000010):
+        //    saveTaskRecord succeeds, suppresses team_task_arrived for P-000002, and delivers notification + email + Teams outbox to permitted P-000010 (R542)
         const mixedTeamTask = await saveTaskRecord(
           {
             title: 'Confidential R509 Mixed Team Queue Secret',
@@ -2337,6 +2386,27 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
         ),
       ).toBe(false);
 
+      // R542 positive control: permitted team member P-000010 received notification + email_outbox + teams_activity_outbox for mixedTeamTask
+      const p10Notifications =
+        await taskRepo.listNotificationsForUser<TenantNotificationRecord>(
+          ctx,
+          'P-000010',
+          { includeRestricted: true },
+        );
+      expect(
+        p10Notifications.some(
+          (n) => n.kind === 'team_task_arrived' && n.detail.includes('Confidential R509 Mixed Team Queue Secret'),
+        ),
+      ).toBe(true);
+      const allOutboxEmails = await outboxRepo.listOutboxRecords(ctx);
+      expect(allOutboxEmails.some((r) => (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p2Email))).toBe(false);
+      expect(
+        allOutboxEmails.slice(emailsBefore).some((r) => (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p10Email)),
+      ).toBe(true);
+      const allTeamsOutbox = await outboxRepo.listTeamsOutboxRecords(ctx);
+      expect(allTeamsOutbox.some((r) => r.recipientPersonId === 'P-000002')).toBe(false);
+      expect(allTeamsOutbox.slice(teamsBefore).some((r) => r.recipientPersonId === 'P-000010')).toBe(true);
+
       // 4. Direct defence-in-depth calls to outbox helpers for a non-permitted recipient must write zero rows
       const forgedEmailItem = await enqueueNotificationEmailIfImmediate(
         ctx,
@@ -2376,8 +2446,108 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       );
       expect(forgedTeamsItem).toBeNull();
 
-      expect((await outboxRepo.listOutboxRecords(ctx)).length).toBe(emailsBefore);
-      expect((await outboxRepo.listTeamsOutboxRecords(ctx)).length).toBe(teamsBefore);
+      expect(
+        (await outboxRepo.listOutboxRecords(ctx)).filter((r) =>
+          (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p2Email),
+        ),
+      ).toHaveLength(0);
+      expect(
+        (await outboxRepo.listTeamsOutboxRecords(ctx)).filter(
+          (r) => r.recipientPersonId === 'P-000002',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R543: allows editing and reassigning away an existing restricted task after an assignee loses access, while actually removing cleared assignees', async () => {
+    const ctx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const matterRepo = getMatterRepository();
+      const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001', {
+        includeRestricted: true,
+      }))!;
+      const wallMatter: Matter = {
+        ...baseMatter,
+        id: 'M-R543-WALL-01',
+        matterNumber: 'MAT-R543-WALL-01',
+        title: 'Confidential R543 Restricted Matter',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001', 'P-000002'],
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001', 'P-000002'],
+      };
+      await matterRepo.putMatter(ctx, wallMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001', 'P-000002'],
+      });
+      const activeSession = makeActorSession(
+        'P-000001',
+        ['partner', 'fee_earner'],
+        'not-a-law-firm',
+      );
+      setTestEntraSessionOverride(activeSession.verifiedSession);
+
+      await runWithActiveActorSession(activeSession, async () => {
+        const created = await saveTaskRecord(
+          {
+            title: 'R543 Pre-Revocation Restricted Task',
+            dueAt: '2027-02-01',
+            assignedPersonId: 'P-000002',
+            assignedPersonIds: ['P-000002'],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(created.task?.id).toBeTruthy();
+
+        // Revoke P-000002's access to wallMatter
+        await matterRepo.putMatter(
+          ctx,
+          { ...wallMatter, teamMemberIds: ['P-000001'], restrictedAccessUserIds: ['P-000001'] },
+          { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000001'] },
+        );
+
+        // Editing title while keeping existing assignee succeeds
+        const edited = await saveTaskRecord(
+          {
+            id: created.task!.id,
+            title: 'R543 Edited Title Retaining Legacy Assignee',
+            dueAt: '2027-02-02',
+            assignedPersonId: 'P-000002',
+            assignedPersonIds: ['P-000002'],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(edited)).toBe(false);
+        expect(edited.task?.title).toBe('R543 Edited Title Retaining Legacy Assignee');
+
+        // Reassigning away (clearing person assignees onto permitted team) succeeds and removes P-000002
+        const cleared = await saveTaskRecord(
+          {
+            id: created.task!.id,
+            title: 'R543 Cleared Assignee Onto Team',
+            dueAt: '2027-02-02',
+            assignedPersonId: null,
+            assignedPersonIds: [],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(cleared)).toBe(false);
+        expect(cleared.task?.assignedPersonId).toBeNull();
+        expect(cleared.task?.assignedPersonIds ?? []).not.toContain('P-000002');
+      });
     } finally {
       setActiveTenantConfigForTesting(null);
       await resetAllDemoData('P-000001', testDataResetContext());

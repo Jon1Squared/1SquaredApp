@@ -632,6 +632,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     ctx: TenantContext,
     id: KeyDateId,
     viewerId: string = ctx.actorId,
+    options?: { includeRestricted?: boolean },
   ): Promise<KeyDate | null> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbKeyDateRow>(
@@ -642,6 +643,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       if (!row) return null;
       this.assertRowTenant(ctx, row.tenant_id, 'KeyDate');
       if (
+        !options?.includeRestricted &&
         row.matter_id &&
         !(await this.checkMatterVisibleInTx(tx, ctx, row.matter_id, viewerId))
       ) {
