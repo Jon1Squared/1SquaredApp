@@ -45,7 +45,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `document:edit` | `document` | `standard` | No | Rename, move, or co-author documents in a matter's connected external document store |
 | `document:provision` | `document` | `restricted` | No | Retry matter folder provisioning or link an existing external document store folder to a matter |
 | `document_store:configure` | `document` | `critical` | **Yes** | Configure tenant document stores, SharePoint site/library connections, routing rules, and Entra group mappings |
-| `document_template:configure` | `document` | `restricted` | No | Configure tenant matter folder templates and work-type folder inheritance |
+| `document_template:configure` | `document` | `restricted` | **Yes** | Configure tenant matter folder templates and work-type folder inheritance |
 | `document_access:review` | `document` | `restricted` | No | View and remediate document store permission reconciliation findings |
 | `finance:view` | `finance` | `restricted` | No | Access firm-wide Finance workspace, billing/aged-debt queues, and Financial merge fields |
 | `finance:view_matter` | `finance` | `standard` | No | View matter/client financial tabs, WIP, client balances, and financial attention alerts |

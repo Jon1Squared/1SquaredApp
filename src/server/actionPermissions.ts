@@ -263,7 +263,9 @@ export const ACTION_PERMISSIONS = {
   },
   updateDocumentGenerationConfigAction: {
     kind: 'permission',
-    key: 'document_template:configure',
+    key: {
+      anyOf: ['document_template:build', 'rbac:manage_config', 'admin:access'],
+    },
     enforcedBy: 'service',
   },
 

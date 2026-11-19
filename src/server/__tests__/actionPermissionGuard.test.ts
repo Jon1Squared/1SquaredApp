@@ -514,4 +514,14 @@ export async function overriddenPolicyAction() {
       ]),
     );
   });
+
+  it('aligns updateDocumentGenerationConfigAction policy with the permissions checked by updateDocumentGenerationConfigService (B16)', () => {
+    expect(ACTION_PERMISSIONS.updateDocumentGenerationConfigAction).toEqual({
+      kind: 'permission',
+      key: {
+        anyOf: ['document_template:build', 'rbac:manage_config', 'admin:access'],
+      },
+      enforcedBy: 'service',
+    });
+  });
 });

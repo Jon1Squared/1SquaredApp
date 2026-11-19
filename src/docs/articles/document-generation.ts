@@ -50,7 +50,7 @@ To prevent unreviewed precedent changes from reaching fee earners, template vers
 
 - Users with \`document_template:view_usage\` can inspect aggregate 30-day and 90-day generation counts, output format breakdowns, low-use retirement candidates, and blocked-field diagnostics.
 - Viewing per-user generation breakdowns requires both \`document_template:view_usage_by_user\` and \`documentGeneration.usage.showUserLevelDetail: true\` in the tenant configuration.
-- Modifying ordinary tenant-level document generation settings requires \`document_template:build\` or \`rbac:manage_config\`, whilst changes to \`permissions\`, \`approval.requireApproval\`, or \`approval.allowSelfApproval\` require \`rbac:manage_config\` or \`admin:access\`. Saving settings validates all 16 \`DocumentPermission\` keys in \`documentGeneration.permissions.roleDefaults\` (\`ALL_DOCUMENT_PERMISSION_KEYS\`) against both the Zod configuration engine and \`core/schemas/tenant-config.schema.json\`.
+- Modifying ordinary tenant-level document generation settings requires \`document_template:build\` or \`rbac:manage_config\`, whilst changes to \`permissions\`, \`approval.requireApproval\`, or \`approval.allowSelfApproval\` require \`rbac:manage_config\` or \`admin:access\`, and every Document Generation settings change requires a multi-factor authenticated session (\`mfaVerified === true\`). Saving settings validates all 16 \`DocumentPermission\` keys in \`documentGeneration.permissions.roleDefaults\` (\`ALL_DOCUMENT_PERMISSION_KEYS\`) against both the Zod configuration engine and \`core/schemas/tenant-config.schema.json\`.
 
 ## Audit trail
 

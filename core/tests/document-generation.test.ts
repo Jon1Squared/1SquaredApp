@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { describe, expect, it } from 'vitest';
+import { ZodError } from 'zod';
 import {
+  ALL_DOCUMENT_PERMISSION_KEYS,
   approveTemplateVersion,
   BasicMergeEngine,
   buildFullFieldCatalogueForTenant,
@@ -11,6 +13,7 @@ import {
   CORE_FIELD_CATALOGUE,
   CORE_TENANT_MIGRATIONS,
   createOrUploadDraftTemplateVersion,
+  DEFAULT_DOCUMENT_PERMISSION_ROLES,
   deleteGeneratedDocument,
   executeUsageRetentionPurgeJob,
   exportTemplatePackage,
@@ -32,18 +35,31 @@ import {
   retireTemplate,
   rollbackTemplateToVersion,
   submitTemplateVersionForApproval,
+  TenantAuditRepository,
   TenantDocumentRepository,
   TenantMigrationRunner,
   updateDraftTemplateVersion,
   createDocumentStorageProvider,
+  type DocumentGenerationConfig,
+  type DocumentPermission,
   type PlatformExtension,
+  type TenantContext,
 } from '@platform/core';
+import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
+import { updateDocumentGenerationConfigAction } from '@/app/actions';
 import { GET as getDocumentDownloadRoute } from '@/app/api/documents/download/route';
 import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { runWithActiveActorSession } from '@/domain/rbac';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import type { Person } from '@/domain/types';
+import {
+  getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
+  getPartyRepository,
+  setActiveTenantConfigForTesting,
+} from '@/platform/tenantRuntime';
+import { createSeedStore } from '@/seed/seedStoreBuilder';
 import {
   getDocumentGenerationSnapshotForUser,
   getInitializedDocGenContext,
@@ -58,52 +74,93 @@ import {
 } from '@/server/entraAuth';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { getMatterRepository } from '@/server/services';
+import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 
-function buildTestSessionScopeForEmployee(personId: string) {
+function buildSignedTestSession(params: {
+  personId: string;
+  tenantId: string;
+  roles: string[];
+  mfaVerified: boolean;
+  displayName?: string;
+  email?: string;
+  oid?: string;
+}) {
+  const nowIso = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+  const signed = createSignedEntraSessionCookie({
+    personId: params.personId,
+    oid:
+      params.oid ??
+      `00000000-0000-4000-8000-${params.personId.replace(/\D/g, '').padStart(12, '0')}`,
+    tid: '00000000-0000-4000-8000-000000000099',
+    tenantId: params.tenantId,
+    sub: params.personId,
+    email:
+      params.email ??
+      `${params.personId.toLowerCase()}@${params.tenantId === 'not-a-law-firm' ? 'notalawfirm' : params.tenantId}.example`,
+    displayName: params.displayName ?? `Test Actor ${params.personId}`,
+    entraRoles: params.roles,
+    mappedRoles: params.roles,
+    entraGroups: [],
+    mfaVerified: params.mfaVerified,
+    amr: params.mfaVerified ? ['pwd', 'mfa'] : ['pwd'],
+    authenticatedAt: nowIso,
+    expiresAt,
+  });
+  return verifySignedEntraSessionCookie(signed)!;
+}
+
+function buildTestSessionScopeForEmployee(
+  personId: string,
+  options?: { mfaVerified?: boolean; rolesOverride?: string[] },
+) {
   const store = loadCommittedSeedStore();
   const tenantId = getActiveTenantConfiguration().tenantId;
   const emp = store.people.find((p) => p.id === personId);
   if (!emp) return null;
-  const nowIso = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
-  const roles = resolveEmployeeRoles(emp, store.teams);
-  const signed = createSignedEntraSessionCookie({
+  const roles = options?.rolesOverride ?? resolveEmployeeRoles(emp, store.teams);
+  const mfaVerified = options?.mfaVerified ?? true;
+  const verified = buildSignedTestSession({
     personId: emp.id,
-    oid:
-      emp.entraObjectId ??
-      `00000000-0000-4000-8000-${emp.id.replace(/\D/g, '').padStart(12, '0')}`,
-    tid: '00000000-0000-4000-8000-000000000099',
     tenantId,
-    sub: emp.id,
+    roles,
+    mfaVerified,
+    oid: emp.entraObjectId ?? undefined,
     email:
       emp.emails?.[0]?.address ?? `${emp.id.toLowerCase()}@notalawfirm.example`,
     displayName:
       `${emp.firstName ?? ''} ${emp.surname ?? ''}`.trim() || emp.id,
-    entraRoles: roles,
-    mappedRoles: roles,
-    entraGroups: [],
-    mfaVerified: true,
-    amr: ['pwd', 'mfa'],
-    authenticatedAt: nowIso,
-    expiresAt,
   });
-  const verified = verifySignedEntraSessionCookie(signed);
   if (!verified) return null;
   return {
     personId: emp.id,
     tenantId,
     tokenRoles: roles,
-    expiresAtMs: Date.parse(expiresAt),
+    mfaVerified,
+    expiresAtMs: Date.parse(verified.expiresAt),
     verifiedSession: verified,
   };
 }
 
-function runAsTestEmployee<T>(personId: string, fn: () => T): T {
-  const scope = buildTestSessionScopeForEmployee(personId);
+function runAsTestEmployee<T>(
+  personId: string,
+  fn: () => T,
+  options?: { mfaVerified?: boolean; rolesOverride?: string[] },
+): T {
+  const scope = buildTestSessionScopeForEmployee(personId, options);
   if (!scope) return fn();
   return runWithActiveActorSession(scope, fn);
+}
+
+function buildFullRoleDefaults(): Record<DocumentPermission, string[]> {
+  return Object.fromEntries(
+    ALL_DOCUMENT_PERMISSION_KEYS.map((permissionKey) => [
+      permissionKey,
+      [...DEFAULT_DOCUMENT_PERMISSION_ROLES[permissionKey]],
+    ]),
+  ) as Record<DocumentPermission, string[]>;
 }
 
 describe('Document Generation — Unit, Contract, Isolation, Record-Access & Security Suite', () => {
@@ -1502,30 +1559,30 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
 
       const beforeInvalidSave = await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx);
       await expect(
-        runAsTestEmployee('P-000001', () =>
+        runAsTestEmployee('P-000004', () =>
           updateDocumentGenerationConfigService(
             {
               customDocumentTypes: [
-                { key: 'INVALID UPPERCASE KEY!', label: 'Invalid' },
+                { key: '', label: 'Invalid' },
               ],
             },
-            'P-000001',
+            'P-000004',
           ),
         ),
-      ).rejects.toThrow();
+      ).rejects.toThrow(ZodError);
       // R16: Stored PostgreSQL settings remain unchanged when validation rejects the update
       expect(await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx)).toEqual(beforeInvalidSave);
 
       await expect(
-        runAsTestEmployee('P-000001', () =>
+        runAsTestEmployee('P-000004', () =>
           updateDocumentGenerationConfigService(
             {
               storageProvider: 'invalid-provider' as never,
             },
-            'P-000001',
+            'P-000004',
           ),
         ),
-      ).rejects.toThrow();
+      ).rejects.toThrow(ZodError);
       expect(await initCtx.repo.getDocumentGenerationTenantConfig(initCtx.ctx)).toEqual(beforeInvalidSave);
 
       // R22: Excluded user calling GET /api/matters/[id]/documents route handler on a staff matter gets access_denied and empty locations
@@ -1682,6 +1739,524 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       await getMatterRepository().putMatter(initCtx.ctx, origStaffMatter, {
         expectedRowVersion: null,
       });
+    }
+  });
+
+  it('11. B16 #1: Admin (P-000001) without MFA saving approval.requireApproval rejects with MFA_REQUIRED and writes nothing', async () => {
+    const noMfaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      roles: ['managing_partner', 'admin'],
+      mfaVerified: false,
+      displayName: 'Rhian Morgan',
+      email: 'rhian.morgan@notalawfirm.example',
+    });
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000001',
+      noMfaAdminSession,
+    );
+    const beforeOverride = await repo.getDocumentGenerationTenantConfig(ctx);
+    const auditRepo = new TenantAuditRepository();
+    const beforeAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+
+    await expect(
+      updateDocumentGenerationConfigService(
+        {
+          approval: {
+            requireApproval: false,
+            allowSelfApproval: false,
+          },
+        },
+        'P-000001',
+        noMfaAdminSession,
+      ),
+    ).rejects.toThrow(/MFA_REQUIRED/);
+
+    expect(await repo.getDocumentGenerationTenantConfig(ctx)).toEqual(
+      beforeOverride,
+    );
+    const afterAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+    expect(afterAudits).toHaveLength(beforeAudits.length);
+  });
+
+  it('12. B16 #2: Admin (P-000001) without MFA saving permissions.roleDefaults rejects with MFA_REQUIRED and stores nothing', async () => {
+    const noMfaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      roles: ['managing_partner', 'admin'],
+      mfaVerified: false,
+      displayName: 'Rhian Morgan',
+      email: 'rhian.morgan@notalawfirm.example',
+    });
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000001',
+      noMfaAdminSession,
+    );
+    const beforeOverride = await repo.getDocumentGenerationTenantConfig(ctx);
+    const auditRepo = new TenantAuditRepository();
+    const beforeAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+
+    await expect(
+      updateDocumentGenerationConfigService(
+        {
+          permissions: {
+            roleDefaults: buildFullRoleDefaults(),
+          },
+        },
+        'P-000001',
+        noMfaAdminSession,
+      ),
+    ).rejects.toThrow(/MFA_REQUIRED/);
+
+    expect(await repo.getDocumentGenerationTenantConfig(ctx)).toEqual(
+      beforeOverride,
+    );
+    const afterAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+    expect(afterAudits).toHaveLength(beforeAudits.length);
+  });
+
+  it('13. B16 #3: Admin (P-000001) without MFA making an ordinary settings change (maxTemplateSizeMb) rejects with MFA_REQUIRED', async () => {
+    const noMfaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      roles: ['managing_partner', 'admin'],
+      mfaVerified: false,
+      displayName: 'Rhian Morgan',
+      email: 'rhian.morgan@notalawfirm.example',
+    });
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000001',
+      noMfaAdminSession,
+    );
+    const beforeOverride = await repo.getDocumentGenerationTenantConfig(ctx);
+    const auditRepo = new TenantAuditRepository();
+    const beforeAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+
+    await expect(
+      updateDocumentGenerationConfigService(
+        { maxTemplateSizeMb: 15 },
+        'P-000001',
+        noMfaAdminSession,
+      ),
+    ).rejects.toThrow(/MFA_REQUIRED/);
+
+    expect(await repo.getDocumentGenerationTenantConfig(ctx)).toEqual(
+      beforeOverride,
+    );
+    const afterAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+    expect(afterAudits).toHaveLength(beforeAudits.length);
+  });
+
+  it('14. B16 #4: Admin (P-000001) with MFA succeeds on approval, permissions, and ordinary changes and restores the original override', async () => {
+    const mfaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      roles: ['managing_partner', 'admin'],
+      mfaVerified: true,
+      displayName: 'Rhian Morgan',
+      email: 'rhian.morgan@notalawfirm.example',
+    });
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000001',
+      mfaAdminSession,
+    );
+    const originalDocGenOverride = await repo.getDocumentGenerationTenantConfig(
+      ctx,
+    );
+    const fullRoleDefaults = buildFullRoleDefaults();
+
+    try {
+      const savedApproval = await updateDocumentGenerationConfigService(
+        {
+          approval: {
+            requireApproval: false,
+            allowSelfApproval: false,
+          },
+        },
+        'P-000001',
+        mfaAdminSession,
+      );
+      expect(savedApproval.approval.requireApproval).toBe(false);
+      expect(
+        (await repo.getDocumentGenerationTenantConfig(ctx))?.approval
+          ?.requireApproval,
+      ).toBe(false);
+
+      const savedPerms = await updateDocumentGenerationConfigService(
+        {
+          permissions: {
+            roleDefaults: fullRoleDefaults,
+          },
+        },
+        'P-000001',
+        mfaAdminSession,
+      );
+      expect(savedPerms.permissions?.roleDefaults).toEqual(fullRoleDefaults);
+      expect(
+        (await repo.getDocumentGenerationTenantConfig(ctx))?.permissions
+          ?.roleDefaults,
+      ).toEqual(fullRoleDefaults);
+
+      const savedOrdinary = await updateDocumentGenerationConfigService(
+        { maxTemplateSizeMb: 15 },
+        'P-000001',
+        mfaAdminSession,
+      );
+      expect(savedOrdinary.maxTemplateSizeMb).toBe(15);
+      expect(
+        (await repo.getDocumentGenerationTenantConfig(ctx))?.maxTemplateSizeMb,
+      ).toBe(15);
+    } finally {
+      await repo.putDocumentGenerationTenantConfig(
+        ctx,
+        originalDocGenOverride,
+        'P-000001',
+      );
+    }
+  });
+
+  it('15. B16 #5: User with document_template:build only and MFA can save ordinary settings but rejects permissions changes with DOCUMENT_PERMISSION_DENIED', async () => {
+    const mfaAdminSession = buildSignedTestSession({
+      personId: 'P-000004',
+      tenantId: 'not-a-law-firm',
+      roles: ['admin'],
+      mfaVerified: true,
+    });
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000004',
+      mfaAdminSession,
+    );
+    const partyRepo = getPartyRepository();
+    const origP2 = await partyRepo.getPersonById<Person>(ctx, 'P-000002');
+    expect(origP2).not.toBeNull();
+    const originalDocGenOverride = await repo.getDocumentGenerationTenantConfig(
+      ctx,
+    );
+
+    try {
+      await partyRepo.putPerson(ctx, {
+        ...origP2!,
+        roles: ['fee_earner'],
+        permissionOverrides: {
+          grant: ['document_template:build'],
+          revoke: [],
+        },
+      });
+
+      const builderSession = buildSignedTestSession({
+        personId: 'P-000002',
+        tenantId: 'not-a-law-firm',
+        roles: ['fee_earner'],
+        mfaVerified: true,
+        displayName: `${origP2!.firstName} ${origP2!.surname}`,
+        email: 'dafydd.evans@notalawfirm.example',
+      });
+
+      const ordinarySaved = await updateDocumentGenerationConfigService(
+        { maxTemplateSizeMb: 14 },
+        'P-000002',
+        builderSession,
+      );
+      expect(ordinarySaved.maxTemplateSizeMb).toBe(14);
+
+      await expect(
+        updateDocumentGenerationConfigService(
+          {
+            permissions: {
+              roleDefaults: buildFullRoleDefaults(),
+            },
+          },
+          'P-000002',
+          builderSession,
+        ),
+      ).rejects.toThrow(/DOCUMENT_PERMISSION_DENIED/);
+
+      await expect(
+        updateDocumentGenerationConfigService(
+          {
+            approval: {
+              requireApproval: false,
+              allowSelfApproval: false,
+            },
+          },
+          'P-000002',
+          builderSession,
+        ),
+      ).rejects.toThrow(/DOCUMENT_PERMISSION_DENIED/);
+    } finally {
+      if (origP2) {
+        await partyRepo.putPerson(ctx, origP2);
+      }
+      await repo.putDocumentGenerationTenantConfig(
+        ctx,
+        originalDocGenOverride,
+        'P-000004',
+      );
+    }
+  });
+
+  it('16. B16 #6 (Rule 9): enforces two-tenant isolation across tenant-alpha and tenant-bravo and rejects forged tenant claims', async () => {
+    const tenantAlpha = 'tenant-alpha';
+    const tenantBravo = 'tenant-bravo';
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Alpha Admin',
+        email: 'alpha.admin@alpha.example',
+        tenantId: tenantAlpha,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-b16-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Bravo Admin',
+        email: 'bravo.admin@bravo.example',
+        tenantId: tenantBravo,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-b16-bravo',
+    });
+
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const rawBase = getActiveTenantRawBaseConfig();
+    const alphaRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantAlpha,
+      displayName: 'Tenant Alpha LLP',
+    };
+    const bravoRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantBravo,
+      displayName: 'Tenant Bravo LLP',
+    };
+
+    const alphaValidated = loadAndValidateTenantConfig(
+      alphaRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+    const bravoValidated = loadAndValidateTenantConfig(
+      bravoRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+
+    const alphaSeed = createSeedStore();
+    const bravoSeed = createSeedStore();
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: alphaValidated,
+      store: alphaSeed,
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      tenantConfig: bravoValidated,
+      store: bravoSeed,
+      clearFirst: true,
+    });
+
+    const docRepo = new TenantDocumentRepository();
+    const auditRepo = new TenantAuditRepository();
+    const origAlphaOverride: Partial<DocumentGenerationConfig> | null =
+      await docRepo.getDocumentGenerationTenantConfig(ctxAlpha);
+    const origBravoOverride: Partial<DocumentGenerationConfig> | null =
+      await docRepo.getDocumentGenerationTenantConfig(ctxBravo);
+    const origBravoAudits = await auditRepo.listAuditEntriesForRecord(
+      ctxBravo,
+      'matter',
+      'FIRM-DOCGEN-CONFIG',
+    );
+
+    try {
+      setActiveTenantConfigForTesting(alphaRaw);
+      const alphaAdminSession = buildSignedTestSession({
+        personId: 'P-000001',
+        tenantId: tenantAlpha,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+        email: 'admin@alpha.example',
+      });
+
+      const savedAlpha = await updateDocumentGenerationConfigService(
+        {
+          maxTemplateSizeMb: 22,
+          defaultOutputFormat: 'pdf',
+        },
+        'P-000001',
+        alphaAdminSession,
+      );
+      expect(savedAlpha.maxTemplateSizeMb).toBe(22);
+      expect(savedAlpha.defaultOutputFormat).toBe('pdf');
+
+      const storedAlpha = await docRepo.getDocumentGenerationTenantConfig(
+        ctxAlpha,
+      );
+      expect(storedAlpha?.maxTemplateSizeMb).toBe(22);
+      expect(storedAlpha?.defaultOutputFormat).toBe('pdf');
+      expect(await docRepo.getDocumentGenerationTenantConfig(ctxBravo)).toEqual(
+        origBravoOverride,
+      );
+      expect(
+        await auditRepo.listAuditEntriesForRecord(
+          ctxBravo,
+          'matter',
+          'FIRM-DOCGEN-CONFIG',
+        ),
+      ).toHaveLength(origBravoAudits.length);
+
+      expect(() =>
+        resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: 'P-000001',
+            name: 'Forged Actor',
+            email: 'forged@alpha.example',
+            tenantId: tenantAlpha,
+            roles: ['admin'],
+            mfaVerified: true,
+          },
+          untrustedRequestTenantOverride: tenantBravo,
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+          correlationId: 'corr-b16-forged-override',
+        }),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      const bravoAdminSession = buildSignedTestSession({
+        personId: 'P-000001',
+        tenantId: tenantBravo,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+        email: 'admin@bravo.example',
+      });
+      await expect(
+        updateDocumentGenerationConfigService(
+          { maxTemplateSizeMb: 18 },
+          'P-000001',
+          bravoAdminSession,
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      await expect(
+        updateDocumentGenerationConfigService(
+          { maxTemplateSizeMb: 18 },
+          'P-000004',
+          alphaAdminSession,
+        ),
+      ).rejects.toThrow(/TENANCY_ACTOR_MISMATCH/);
+
+      const forgedCtx = Object.freeze({
+        ...ctxAlpha,
+        tenantId: tenantBravo,
+      }) as TenantContext;
+      await expect(
+        docRepo.getDocumentGenerationTenantConfig(forgedCtx),
+      ).rejects.toThrow();
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        origAlphaOverride,
+        'P-000001',
+      );
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxBravo,
+        origBravoOverride,
+        'P-000001',
+      );
+    }
+  }, 30_000);
+
+  it('17. B16 #7: server action updateDocumentGenerationConfigAction without MFA rejects with MFA_REQUIRED and leaves stored config unchanged', async () => {
+    const mfaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      roles: ['managing_partner', 'admin'],
+      mfaVerified: true,
+      displayName: 'Rhian Morgan',
+      email: 'rhian.morgan@notalawfirm.example',
+    });
+    const { ctx, repo } = await getInitializedDocGenContext(
+      'P-000001',
+      mfaAdminSession,
+    );
+    const originalDocGenOverride = await repo.getDocumentGenerationTenantConfig(
+      ctx,
+    );
+    const noMfaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      roles: ['managing_partner', 'admin'],
+      mfaVerified: false,
+      displayName: 'Rhian Morgan',
+      email: 'rhian.morgan@notalawfirm.example',
+    });
+
+    try {
+      setTestEntraSessionOverride(noMfaAdminSession);
+      await expect(
+        updateDocumentGenerationConfigAction({ maxTemplateSizeMb: 19 }),
+      ).rejects.toThrow(/MFA_REQUIRED/);
+
+      expect(await repo.getDocumentGenerationTenantConfig(ctx)).toEqual(
+        originalDocGenOverride,
+      );
+    } finally {
+      setTestEntraSessionOverride(undefined);
+      await repo.putDocumentGenerationTenantConfig(
+        ctx,
+        originalDocGenOverride,
+        'P-000001',
+      );
     }
   });
 });
