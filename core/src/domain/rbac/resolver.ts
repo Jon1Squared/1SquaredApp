@@ -95,7 +95,11 @@ export interface ResolvePermissionsInput {
   > | null;
   readonly config?:
     | Pick<TenantConfiguration, 'rbac'>
-    | { rbac?: RbacConfiguration; documentGeneration?: TenantConfiguration['documentGeneration'] }
+    | {
+        environment?: TenantConfiguration['environment'];
+        rbac?: RbacConfiguration;
+        documentGeneration?: TenantConfiguration['documentGeneration'];
+      }
     | null;
   readonly actor: PermissionResolutionActor | null | undefined;
   readonly relationships?: PermissionRelationshipContext | null;
@@ -508,8 +512,15 @@ export function resolvePermissions(
   }
 
   // 5. Compute MFA-pending permissions when `mfaVerified` is false
-  const requireMfaForAdminPermissions =
-    rbacConfig.identityMapping?.requireMfaForAdminPermissions ?? true;
+  // Owner Decision D3 (`R527`): `live` never permits disabling admin MFA even if overridden in store/config.
+  const explicitEnv =
+    input.config && typeof input.config === 'object' && 'environment' in input.config
+      ? (input.config as { environment?: TenantConfiguration['environment'] }).environment
+      : undefined;
+  const isLiveEnvironment = explicitEnv === 'live';
+  const requireMfaForAdminPermissions = isLiveEnvironment
+    ? true
+    : (rbacConfig.identityMapping?.requireMfaForAdminPermissions ?? true);
   const mfaPendingPermissions = new Set<PermissionKey>();
   if (requireMfaForAdminPermissions && !mfaVerified) {
     for (const perm of finalPermissions) {
@@ -537,7 +548,7 @@ export function resolvePermissions(
   };
 
   if (correlationId) {
-    const cacheKey = `${tenantId}:${correlationId}:${actorUserId}:${authoritativeRoles.join(',')}:${deptIds.join(',')}:${Boolean(rel?.isTeamLeadOfAnyTeam)}:${Boolean(rel?.isTeamLeadOfTargetTeam)}:${effectiveOverrides.grant.join(',')}:${effectiveOverrides.revoke.join(',')}:${mfaVerified}`;
+    const cacheKey = `${tenantId}:${correlationId}:${actorUserId}:${authoritativeRoles.join(',')}:${deptIds.join(',')}:${Boolean(rel?.isTeamLeadOfAnyTeam)}:${Boolean(rel?.isTeamLeadOfTargetTeam)}:${effectiveOverrides.grant.join(',')}:${effectiveOverrides.revoke.join(',')}:${mfaVerified}:${isLiveEnvironment ? 'live' : 'nonlive'}:${requireMfaForAdminPermissions}`;
     if (REQUEST_PERMISSION_CACHE.size >= MAX_CACHE_ENTRIES) {
       const oldestKey = REQUEST_PERMISSION_CACHE.keys().next().value;
       if (oldestKey) REQUEST_PERMISSION_CACHE.delete(oldestKey);

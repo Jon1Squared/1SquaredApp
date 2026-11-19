@@ -1228,8 +1228,8 @@ export async function saveMatterCostsConfigAction(config: MatterCostsConfig) {
 }
 
 export async function syncMatterCostsRatesFromPmsAction() {
-  return guardedAction('syncMatterCostsRatesFromPmsAction', async ({ personId: byId }) => {
-    const res = await syncMatterCostsRatesFromPms(byId);
+  return guardedAction('syncMatterCostsRatesFromPmsAction', async ({ personId: byId, mfaVerified }) => {
+    const res = await syncMatterCostsRatesFromPms(byId, { mfaVerified });
     revalidateAll();
     return res;
   });

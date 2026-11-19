@@ -1306,7 +1306,7 @@ export const TenantConfigurationSchema = z
               .boolean()
               .default(true)
               .describe(
-                'Whether permissions marked requiresMfa in PERMISSION_REGISTRY require mfaVerified=true on TenantContext',
+                'Whether permissions marked requiresMfa in PERMISSION_REGISTRY require mfaVerified=true on TenantContext; cannot be false when environment is "live"',
               ),
             defaultRoleKeys: z
               .array(z.string().min(1))
@@ -2589,6 +2589,17 @@ export const TenantConfigurationSchema = z
         path: ['featureFlags', 'enableDemoMode'],
         message:
           'featureFlags.enableDemoMode cannot be true when environment is "live".',
+      });
+    }
+    if (
+      cfg.environment === 'live' &&
+      cfg.rbac?.identityMapping?.requireMfaForAdminPermissions === false
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['rbac', 'identityMapping', 'requireMfaForAdminPermissions'],
+        message:
+          'rbac.identityMapping.requireMfaForAdminPermissions cannot be false when environment is "live".',
       });
     }
 

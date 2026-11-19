@@ -74,7 +74,9 @@ function assertApprovePermission(
     );
   }
   const requireMfa =
-    config.rbac?.identityMapping?.requireMfaForAdminPermissions ?? true;
+    config.environment === 'live'
+      ? true
+      : (config.rbac?.identityMapping?.requireMfaForAdminPermissions ?? true);
   if (ctx && requireMfa && ctx.mfaVerified === false) {
     throw new Error(
       'MFA_REQUIRED: Multi-factor authentication is required for administrative permission "document_template:approve".',

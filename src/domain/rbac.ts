@@ -326,6 +326,7 @@ export interface ResolvePersonPermissionsOptions {
   config?:
     | Pick<TenantConfiguration, 'rbac'>
     | {
+        environment?: TenantConfiguration['environment'];
         rbac?: RbacConfiguration;
         documentGeneration?: TenantConfiguration['documentGeneration'];
       }

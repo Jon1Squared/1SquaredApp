@@ -28,6 +28,7 @@ interface RbacAdminSectionProps {
   orgStructure: OrgStructureCatalogue;
   entraSession?: EntraSessionPayload | null;
   entraEnvStatus?: EntraEnvStatus;
+  isLiveEnvironment?: boolean;
   authError?: string;
   authSuccess?: boolean;
 }
@@ -44,6 +45,7 @@ export function RbacAdminSection({
   orgStructure,
   entraSession = null,
   entraEnvStatus,
+  isLiveEnvironment = false,
   authError,
   authSuccess,
 }: RbacAdminSectionProps) {
@@ -869,26 +871,37 @@ export function RbacAdminSection({
               </select>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 20 }}>
-              <input
-                type="checkbox"
-                id="require-mfa-admin"
-                checked={localRbac.identityMapping.requireMfaForAdminPermissions}
-                disabled={!canManageConfig || pending}
-                onChange={(e) =>
-                  setLocalRbac((prev) => ({
-                    ...prev,
-                    identityMapping: {
-                      ...prev.identityMapping,
-                      requireMfaForAdminPermissions: e.target.checked,
-                    },
-                  }))
-                }
-              />
-              <label htmlFor="require-mfa-admin" style={{ fontSize: 13, fontWeight: 500 }}>
-                Require Entra MFA claim (<code>amr: mfa / ngcmfa / fido</code>) for
-                critical administrative permissions
-              </label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <input
+                  type="checkbox"
+                  id="require-mfa-admin"
+                  checked={
+                    isLiveEnvironment
+                      ? true
+                      : localRbac.identityMapping.requireMfaForAdminPermissions
+                  }
+                  disabled={isLiveEnvironment || !canManageConfig || pending}
+                  onChange={(e) =>
+                    setLocalRbac((prev) => ({
+                      ...prev,
+                      identityMapping: {
+                        ...prev.identityMapping,
+                        requireMfaForAdminPermissions: e.target.checked,
+                      },
+                    }))
+                  }
+                />
+                <label htmlFor="require-mfa-admin" style={{ fontSize: 13, fontWeight: 500 }}>
+                  Require Entra MFA claim (<code>amr: mfa / ngcmfa / fido</code>) for
+                  critical administrative permissions
+                </label>
+              </div>
+              {isLiveEnvironment && (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Administrative MFA is always enforced in the live environment and cannot be turned off.
+                </div>
+              )}
             </div>
           </div>
 

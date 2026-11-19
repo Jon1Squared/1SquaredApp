@@ -138,7 +138,7 @@ Configured per tenant in `client-<slug>/config/base.json` and validated by `core
 - `rbac.roles`: Built-in roles (starting from `DEFAULT_RBAC_ROLES`) plus optional tenant-defined custom roles.
 - `rbac.departmentGrants`: Maps tenant department IDs (e.g. `DEPT-HR`, `DEPT-FIN`, `DEPT-RISK`) to additional `PermissionKey[]`. Core ships `{}` (zero hardcoded department IDs in core code).
 - `rbac.relationshipGrants`: Configurable relationship grant rules (`team_lead_of_any_team`, `team_lead_of_target_team`, `line_manager_of_target`, `supporting_target_fee_earner`).
-- `rbac.identityMapping`: Configures `authorityMode` (`token_only | hybrid | store_only`), `entraGroupToRoleKey`, `entraAppRoleToRoleKey`, and `requireMfaForAdminPermissions`.
+- `rbac.identityMapping`: Configures `authorityMode` (`token_only | hybrid | store_only`), `entraGroupToRoleKey`, `entraAppRoleToRoleKey`, and `requireMfaForAdminPermissions` (always `true` in `live`; schema validation, `updateTenantRbacConfig`, and `previewRbacOverrides` reject `false` in `live`, and `resolvePermissions` ignores `false` in `live` as defence in depth; configurable only in non-live environments).
 
 ### Deprecation of `documentGeneration.permissions.roleDefaults`
 - `documentGeneration.permissions.roleDefaults` is **deprecated** (`ADR-0011`) and replaced by `rbac.roles`.

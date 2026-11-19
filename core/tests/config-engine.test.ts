@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   loadAndValidateTenantConfig,
   RESERVED_TENANT_CONFIG_SETTINGS,
+  TenantConfigurationSchema,
   validateTenantConfigWithWarnings,
 } from '../src/config-engine';
 
@@ -134,5 +135,86 @@ describe('S0-18: Tenant Configuration Engine — integrations.pmsSync Deep-Merge
         `Expected structuredReservedSettings notice for ${path} -> backlog`,
       ).toBe(true);
     }
+  });
+
+  it('R527 (D3): rejects rbac.identityMapping.requireMfaForAdminPermissions=false when environment is live, while allowing false in dev and test', () => {
+    const devFalse = loadAndValidateTenantConfig(
+      SAMPLE_BASE_CONFIG,
+      {
+        environment: 'dev',
+        rbac: {
+          identityMapping: {
+            requireMfaForAdminPermissions: false,
+          },
+        },
+      },
+    );
+    expect(devFalse.rbac.identityMapping.requireMfaForAdminPermissions).toBe(false);
+
+    const testFalse = loadAndValidateTenantConfig(
+      SAMPLE_BASE_CONFIG,
+      {
+        environment: 'test',
+        rbac: {
+          identityMapping: {
+            requireMfaForAdminPermissions: false,
+          },
+        },
+      },
+    );
+    expect(testFalse.rbac.identityMapping.requireMfaForAdminPermissions).toBe(false);
+
+    const liveTrue = loadAndValidateTenantConfig(
+      SAMPLE_BASE_CONFIG,
+      {
+        environment: 'live',
+        rbac: {
+          identityMapping: {
+            requireMfaForAdminPermissions: true,
+          },
+        },
+      },
+    );
+    expect(liveTrue.rbac.identityMapping.requireMfaForAdminPermissions).toBe(true);
+
+    const liveFalseParsed = TenantConfigurationSchema.safeParse({
+      ...SAMPLE_BASE_CONFIG,
+      environment: 'live',
+      integrations: {
+        ...((SAMPLE_BASE_CONFIG.integrations as Record<string, unknown>) ?? {}),
+        pmsConnectionSecretVaultRef: 'kv://kv-tenant-alpha-live/pms-db-conn',
+        companiesHouseApiKeyVaultRef: 'kv://kv-tenant-alpha-live/companies-house-api-key',
+      },
+      rbac: {
+        identityMapping: {
+          requireMfaForAdminPermissions: false,
+        },
+      },
+    });
+    expect(liveFalseParsed.success).toBe(false);
+    if (!liveFalseParsed.success) {
+      expect(
+        liveFalseParsed.error.issues.some(
+          (issue) =>
+            issue.path.join('.') === 'rbac.identityMapping.requireMfaForAdminPermissions' &&
+            /live/i.test(issue.message),
+        ),
+      ).toBe(true);
+    }
+
+    expect(() =>
+      loadAndValidateTenantConfig(SAMPLE_BASE_CONFIG, {
+        environment: 'live',
+        integrations: {
+          pmsConnectionSecretVaultRef: 'kv://kv-tenant-alpha-live/pms-db-conn',
+          companiesHouseApiKeyVaultRef: 'kv://kv-tenant-alpha-live/companies-house-api-key',
+        },
+        rbac: {
+          identityMapping: {
+            requireMfaForAdminPermissions: false,
+          },
+        },
+      }),
+    ).toThrow(/requireMfaForAdminPermissions.*live/i);
   });
 });

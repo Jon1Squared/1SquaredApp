@@ -14996,20 +14996,24 @@ export interface PmsAdminSnapshot {
   suggestedMatterMatches: PmsSuggestedMatch[];
 }
 
-export async function getPmsAdminSnapshot(byId?: FinanceActorInput): Promise<PmsAdminSnapshot> {
-  const actorId = isTenantContextInput(byId)
-    ? byId.actorId
-    : typeof byId === 'string'
-      ? byId
-      : byId && 'personId' in byId
-        ? byId.personId
-        : getActiveActorSession()?.personId;
-  const ctx = isTenantContextInput(byId)
-    ? byId
-    : resolveDefaultServiceTenantContext(null, actorId);
-  const store = await loadTenantCatalogueStoreView(ctx, { includePmsLinks: true });
-  const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
-  if (isCleanEmpty) {
+export async function getPmsAdminSnapshot(
+  byId?: FinanceActorInput,
+): Promise<PmsAdminSnapshot | ActionDenied> {
+  const auth = await verifyFinanceActorAndPermission(byId, 'finance:manage_links');
+  if (!auth.ok) return auth;
+
+  const {
+    ctx,
+    isCleanDeployment,
+    people,
+    matters,
+    teams,
+    actor,
+    tokenRoles,
+    tenantPmsLinks,
+  } = auth;
+  const store = await loadTenantCatalogueStoreView(ctx);
+  if (isCleanDeployment && tenantPmsLinks.length === 0) {
     const nowIso = new Date().toISOString();
     return {
       extractInfo: {
@@ -15024,28 +15028,21 @@ export async function getPmsAdminSnapshot(byId?: FinanceActorInput): Promise<Pms
       suggestedMatterMatches: [],
     };
   }
-  const [people, matters, teams, pms] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-    getTenantPmsSource(ctx),
-  ]);
-  const actor = actorId ? people.find((p) => p.id === actorId) ?? null : null;
-  const visibleMatters = actorId
-    ? matters.filter((m) =>
-        canPersonAccessMatter(m, actorId, actor, {
-          allPeople: people,
-          teams,
-        }),
-      )
-    : matters;
+  const pms = await getTenantPmsSource(ctx);
+  const visibleMatters = matters.filter((m) =>
+    canPersonAccessMatter(m, actor.id, actor, {
+      allPeople: people,
+      teams,
+      tokenRoles,
+    }),
+  );
   const visibleMatterIdSet = new Set(visibleMatters.map((m) => m.id));
   const hiddenPmsCodes = new Set(
-    store.pmsLinks
+    tenantPmsLinks
       .filter((l) => l.entityType === 'matter' && !visibleMatterIdSet.has(l.onesquaredId))
       .map((l) => l.pmsCode),
   );
-  const visiblePmsLinks = store.pmsLinks.filter(
+  const visiblePmsLinks = tenantPmsLinks.filter(
     (l) => !(l.entityType === 'matter' && !visibleMatterIdSet.has(l.onesquaredId)),
   );
   const extractInfo = pms.getExtractInfo();
@@ -15271,13 +15268,36 @@ export async function createRecordFromPms(
     getTenantPmsSource(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
-  const effectiveMfaVerified = opts.mfaVerified === true;
+  const activeSession = getActiveActorSession();
+  const effectiveMfaVerified =
+    opts.mfaVerified !== undefined
+      ? opts.mfaVerified === true
+      : isTenantContextInput(opts?.tenantCtx)
+        ? opts.tenantCtx.mfaVerified === true
+        : activeSession?.personId === byId
+          ? activeSession.mfaVerified === true
+          : false;
+  const tokenRoles = isTenantContextInput(opts?.tenantCtx)
+    ? opts.tenantCtx.actorRoles
+    : activeSession?.personId === byId
+      ? activeSession.tokenRoles
+      : undefined;
   const actorPerms = resolvePersonPermissionSet(actor, {
     allPeople: people,
     teams,
+    tokenRoles,
     mfaVerified: effectiveMfaVerified,
   });
 
+  if (!actorPerms.permissions.has('finance:manage_links')) {
+    const msg =
+      'FORBIDDEN: Permission "finance:manage_links" is required to create records from PMS.';
+    return {
+      ...buildActionDenied('FORBIDDEN', msg),
+      ok: false,
+      error: msg,
+    };
+  }
   if (!actorPerms.permissions.has('admin:access')) {
     const msg =
       'FORBIDDEN: Permission "admin:access" is required to create records from PMS.';
@@ -15287,9 +15307,12 @@ export async function createRecordFromPms(
       error: msg,
     };
   }
-  if (actorPerms.mfaPendingPermissions.has('admin:access')) {
+  if (
+    actorPerms.mfaPendingPermissions.has('finance:manage_links') ||
+    actorPerms.mfaPendingPermissions.has('admin:access')
+  ) {
     const msg =
-      'MFA_REQUIRED: Multi-factor authentication (MFA) is required for administrative permission "admin:access".';
+      'MFA_REQUIRED: Multi-factor authentication (MFA) is required for administrative permission "admin:access" and "finance:manage_links".';
     return {
       ...buildActionDenied('MFA_REQUIRED', msg),
       ok: false,
@@ -16064,6 +16087,18 @@ export async function previewRbacOverrides(
 
   let validatedRbacConfig: RbacConfiguration | undefined;
   if (draftOverrides.rbacConfig !== undefined) {
+    if (
+      getActiveTenantConfiguration().environment === 'live' &&
+      draftOverrides.rbacConfig.identityMapping?.requireMfaForAdminPermissions === false
+    ) {
+      return {
+        ok: false,
+        code: 'FORBIDDEN',
+        error:
+          'FORBIDDEN: Administrative MFA (requireMfaForAdminPermissions) cannot be disabled in the live environment.',
+        permissions: [],
+      };
+    }
     try {
       validatedRbacConfig = validateRbacConfig(draftOverrides.rbacConfig);
     } catch (err) {
@@ -16364,6 +16399,17 @@ export async function updateTenantRbacConfig(
           }
         }
         if (patch.identityMapping) {
+          if (
+            getActiveTenantConfiguration().environment === 'live' &&
+            patch.identityMapping.requireMfaForAdminPermissions === false
+          ) {
+            return {
+              ok: false,
+              code: 'FORBIDDEN',
+              error:
+                'FORBIDDEN: Administrative MFA (requireMfaForAdminPermissions) cannot be disabled in the live environment.',
+            };
+          }
           for (const [groupKey, rks] of Object.entries(
             patch.identityMapping.entraGroupToRoleKey ?? {},
           )) {
@@ -19483,7 +19529,7 @@ export async function saveMatterCostsConfig(
 
 export async function syncMatterCostsRatesFromPms(
   byId: string,
-  options?: { tenantCtx?: TenantContext | null },
+  options?: { tenantCtx?: TenantContext | null; mfaVerified?: boolean },
 ): Promise<MatterCostsConfig> {
   const tenantCfg = getActiveTenantConfiguration();
   if (!tenantCfg.featureFlags?.enablePmsLiveRateSync) {
@@ -19497,6 +19543,56 @@ export async function syncMatterCostsRatesFromPms(
     });
   }
   const ctx = resolveDefaultServiceTenantContext(null, byId, options);
+  const activeSession = getActiveActorSession();
+  const [syncPeople, syncTeams] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  ]);
+  const syncActor = syncPeople.find((p) => p.id === byId && !p.mergedIntoId) ?? null;
+  const syncMfaVerified =
+    options?.mfaVerified !== undefined
+      ? options.mfaVerified === true
+      : options?.tenantCtx
+        ? options.tenantCtx.mfaVerified === true
+        : activeSession?.personId === byId
+          ? activeSession.mfaVerified === true
+          : false;
+  const syncTokenRoles = options?.tenantCtx?.actorRoles
+    ? options.tenantCtx.actorRoles
+    : activeSession?.personId === byId
+      ? activeSession.tokenRoles
+      : undefined;
+  const syncPermSet = resolvePersonPermissionSet(syncActor, {
+    allPeople: syncPeople,
+    teams: syncTeams,
+    tokenRoles: syncTokenRoles,
+    mfaVerified: syncMfaVerified,
+    context:
+      ctx.tenantId === tenantCfg.tenantId ? (options?.tenantCtx ?? ctx) : undefined,
+  });
+  if (!syncPermSet.permissions.has('admin:access')) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message:
+        'Forbidden: Permission "admin:access" is required to sync PMS fee earner rates.',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      actorUserId: byId,
+    });
+  }
+  if (
+    syncPermSet.mfaPendingPermissions.has('admin:access') &&
+    (options?.mfaVerified !== undefined || Boolean(options?.tenantCtx || activeSession))
+  ) {
+    throw new AuthorisationError({
+      code: 'MFA_REQUIRED',
+      message:
+        'MFA_REQUIRED: Multi-factor authentication (MFA) is required for administrative permission "admin:access".',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      actorUserId: byId,
+    });
+  }
   const catalogueRepo = getCatalogueRepository();
   let next!: MatterCostsConfig;
   await runWithAuditStagingScope(() =>

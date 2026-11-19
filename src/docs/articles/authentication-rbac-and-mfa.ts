@@ -79,7 +79,7 @@ In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_over
 
 1Squared inspects the \`amr\` (Authentication Methods References) claim in the verified Microsoft Entra ID token for \`mfa\`, \`fido\`, \`rsa\`, \`hwk\`, or \`ngcmfa\` (and optionally \`acrs: c1\` only when \`allowAcrsC1AsMfa\` is enabled in tenant configuration).
 
-Even if a user holds an administrative or partner role, **MFA verification (\`mfaVerified === true\`) is strictly required** before the server permits any high-privilege action, including:
+- Even if a user holds an administrative or partner role, **MFA verification (\`mfaVerified === true\`) is strictly required** before the server permits any high-privilege action, and \`rbac.identityMapping.requireMfaForAdminPermissions\` cannot be set to \`false\` when \`environment === 'live'\` (rejected by schema validation, \`updateTenantRbacConfig\`, and \`previewRbacOverrides\`, locked in **Admin → RBAC & Entra ID**, and enforced in the core RBAC resolver and template approval workflow regardless of stored config; configurable only in non-live environments):
 
 - Accessing the \`/admin\` console and saving any administrative configuration (\`admin:access\`, enforced at the action boundary via \`guardedAction\`):
   - **Choice lists & matter stage groups**: adding, updating, or reordering list values (\`addChoiceValueAction\`, \`updateChoiceValueAction\`, \`reorderChoiceValueAction\`) and creating matter stage groups (\`createMatterStageGroupAction\`).
@@ -87,8 +87,8 @@ Even if a user holds an administrative or partner role, **MFA verification (\`mf
   - **Teams & firm settings**: creating or updating teams (\`saveTeamAction\`, which also prevents an administrator from adding themselves to \`leadIds\`), enquiry settings (\`saveEnquirySettingsAction\`), automatic task templates (\`saveTaskSettingsAction\`), and the organisation structure hierarchy (\`saveOrgStructureAction\`).
   - **Matter party taxonomy & work-type profiles**: saving, reordering, or deleting matter party relationships and capacities (\`saveMatterPartyRelationshipAction\`, \`reorderMatterPartyRelationshipAction\`, \`deleteMatterPartyRelationshipAction\`, \`saveMatterPartyCapacityAction\`, \`deleteMatterPartyCapacityAction\`) and updating work-type profile mappings (\`updateWorkTypeProfilesAction\`).
   - **Matter costs & PMS rate sync**: saving matter costs configuration and rate cards (\`saveMatterCostsConfigAction\`) and pulling fee earner rates from the PMS (\`syncMatterCostsRatesFromPmsAction\`).
-  - **Creating 1Squared records from PMS**: \`createRecordFromPmsAction\` requires \`admin:access\` with MFA plus the record-specific creation permission (\`employee:edit_core\` for employees, \`matter:create\` for matters, and \`contact:create\` for people and organisations).
-- Linking, unlinking, or re-running automatic Practice Management System (PMS) record matching (\`linkPmsRecordAction\`, \`unlinkPmsRecordAction\`, and \`rerunAutomaticPmsMatchingAction\`, which require \`finance:manage_links\` with MFA)
+  - **Creating 1Squared records from PMS**: \`createRecordFromPmsAction\` requires \`finance:manage_links\` and \`admin:access\` with MFA plus the record-specific creation permission (\`employee:edit_core\` for employees, \`matter:create\` for matters, and \`contact:create\` for people and organisations).
+- Viewing PMS administration snapshots (\`getPmsAdminSnapshot\`) and linking, unlinking, or re-running automatic Practice Management System (PMS) record matching (\`linkPmsRecordAction\`, \`unlinkPmsRecordAction\`, and \`rerunAutomaticPmsMatchingAction\`) require \`finance:manage_links\` with MFA
 - Resetting or clearing non-live environment data (\`admin:data_reset\`, restricted to \`admin\` only with MFA)
 - Modifying tenant RBAC roles or Entra ID mappings (\`rbac:manage_config\`)
 - Changing an employee’s roles or permission overrides (\`rbac:manage_user_overrides\`)

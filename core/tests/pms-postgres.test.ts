@@ -702,6 +702,8 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     }
 
     const adminSnapA = await getPmsAdminSnapshot(ctxA);
+    expect(isActionDenied(adminSnapA)).toBe(false);
+    if (isActionDenied(adminSnapA)) throw new Error(`Expected PmsAdminSnapshot: ${adminSnapA.message}`);
     expect(adminSnapA.extractInfo.asAtDate).toBe('2026-10-31');
     expect(adminSnapA.pmsClients.map((c) => c.client_code)).toEqual(['CL-A001']);
     expect(adminSnapA.pmsLinks.map((l) => l.id)).toEqual([
@@ -790,6 +792,8 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     }
 
     const adminSnapB = await getPmsAdminSnapshot(ctxB);
+    expect(isActionDenied(adminSnapB)).toBe(false);
+    if (isActionDenied(adminSnapB)) throw new Error(`Expected PmsAdminSnapshot: ${adminSnapB.message}`);
     expect(adminSnapB.extractInfo.asAtDate).toBe('2026-11-15');
     expect(adminSnapB.pmsLinks.map((l) => l.id)).toEqual([
       'PMSL-B-EMP',
@@ -1051,6 +1055,8 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
         const coldClientBundle = await getClientPmsViewBundle('organisation', 'O-000001', ctx);
         expect(isActionDenied(coldClientBundle)).toBe(false);
         const coldAdmin = await getPmsAdminSnapshot(ctx);
+        expect(isActionDenied(coldAdmin)).toBe(false);
+        if (isActionDenied(coldAdmin)) throw new Error(`Expected PmsAdminSnapshot: ${coldAdmin.message}`);
         expect(coldAdmin.pmsLinks.length).toBeGreaterThan(0);
 
         // 2. Two-replica visibility (R466): Replica A writes a PMS link via linkPmsRecord, and Replica B reads it immediately via its own connection pool

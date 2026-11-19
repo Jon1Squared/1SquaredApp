@@ -1063,7 +1063,8 @@
             },
             "requireMfaForAdminPermissions": {
               "type": "boolean",
-              "default": true
+              "default": true,
+              "description": "Whether permissions marked requiresMfa in PERMISSION_REGISTRY require mfaVerified=true on TenantContext; rejected when false in environment 'live'."
             },
             "emailLinking": {
               "type": "object",

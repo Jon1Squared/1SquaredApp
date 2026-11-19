@@ -154,12 +154,17 @@ export function withActiveTenantRbacOptions(
     options.config?.rbac ??
     sessionRbacConfig ??
     getDefaultTenantRbacConfig(activeTenantId);
+  const explicitEnv =
+    options.config && typeof options.config === 'object' && 'environment' in options.config
+      ? (options.config as { environment?: TenantConfiguration['environment'] }).environment
+      : undefined;
+  const environment = explicitEnv ?? getActiveTenantConfiguration().environment;
   return {
     ...options,
     tenantId: activeTenantId,
     config: options.config
-      ? { ...options.config, rbac: rbacConfig }
-      : { rbac: rbacConfig },
+      ? { ...options.config, environment, rbac: rbacConfig }
+      : { environment, rbac: rbacConfig },
     context: options.context
       ? { ...options.context, tenantId: activeTenantId }
       : { tenantId: activeTenantId },
