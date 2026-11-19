@@ -334,7 +334,7 @@ export function filterEmploymentForUser(
   allPeople: Person[] = [],
   teams: Team[] = [],
   orgStructure?: OrgStructureCatalogue,
-  options: ResolvePersonPermissionsOptions = {},
+  options: ResolvePersonPermissionsOptions & { includePayroll?: boolean } = {},
   matterVisibility?: {
     canViewMatterId: (matterId: string) => boolean;
     visibleMatterNumberById?: ReadonlyMap<string, string>;

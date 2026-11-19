@@ -225,6 +225,10 @@ export function redactConflictCheckOnHire(
 /**
  * Strips restricted sections from an EmploymentRecord at the API/service boundary
  * based on the requesting user's permissions and firm configuration.
+ *
+ * `payroll` is always omitted from general snapshots and returns unless
+ * `rbacOptions.includePayroll === true` (used exclusively by audited single-person
+ * payroll reads such as `getEmployeeDetailsForUser`).
  */
 export function filterEmploymentForUser(
   employment: EmploymentRecord | null | undefined,
@@ -232,7 +236,7 @@ export function filterEmploymentForUser(
   allPeople: Person[] = [],
   teams: Team[] = [],
   orgStructure?: OrgStructureCatalogue,
-  rbacOptions?: ResolvePersonPermissionsOptions,
+  rbacOptions?: ResolvePersonPermissionsOptions & { includePayroll?: boolean },
   matterVisibility?: {
     canViewMatterId: (matterId: string) => boolean;
     visibleMatterNumberById?: ReadonlyMap<string, string>;
@@ -254,7 +258,7 @@ export function filterEmploymentForUser(
     delete copy.emergencyContacts;
   }
 
-  if (!perms.has('employee:payroll')) {
+  if (rbacOptions?.includePayroll !== true || !perms.has('employee:payroll')) {
     delete copy.payroll;
   } else if (orgStructure?.externalPayrollOnly && copy.payroll) {
     copy.payroll = {

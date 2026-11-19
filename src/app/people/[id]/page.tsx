@@ -116,6 +116,7 @@ export default async function PersonProfilePage({
     const canManageOwnNotificationPreferences =
       isOwnEmployeeProfile &&
       snap.currentUserPermissions.includes('notification:manage_own_preferences');
+    const canViewPayroll = snap.currentUserPermissions.includes('employee:payroll');
     const initialNotificationPreferences = canViewOwnNotificationPreferences
       ? await getMyNotificationPreferences(person.id, {
           actorPersonId: userId,
@@ -153,6 +154,7 @@ export default async function PersonProfilePage({
         initialTab={tab}
         firmName={snap.firm.name}
         orgStructure={snap.orgStructure}
+        canViewPayroll={canViewPayroll}
         canViewOwnNotificationPreferences={canViewOwnNotificationPreferences}
         canManageOwnNotificationPreferences={canManageOwnNotificationPreferences}
         initialNotificationPreferences={initialNotificationPreferences}

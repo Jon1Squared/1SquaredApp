@@ -273,6 +273,25 @@ export async function logEmployeeRestrictedAccessAction(
   });
 }
 
+export async function revealEmployeePayrollAction(personId: string) {
+  return guardedAction('revealEmployeePayrollAction', async ({ personId: byId }) => {
+    const res = await getEmployeeDetailsForUser(personId, byId, { logViewPayroll: true });
+    if (res.errors?.payrollPermission) {
+      return {
+        ...buildActionDenied('FORBIDDEN', res.errors.payrollPermission),
+        payroll: null,
+        errors: res.errors,
+      };
+    }
+    revalidateAll();
+    return {
+      ok: !res.errors?.notFound,
+      payroll: res.employment?.payroll ?? null,
+      errors: res.errors,
+    };
+  });
+}
+
 export async function revealEmployeeSensitiveRecordAction(personId: string) {
   return guardedAction('revealEmployeeSensitiveRecordAction', async ({ personId: byId }) => {
     const res = await getEmployeeDetailsForUser(personId, byId, { logViewSensitive: true });

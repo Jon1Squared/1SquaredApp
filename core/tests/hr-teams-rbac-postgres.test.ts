@@ -31,16 +31,26 @@ import {
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
   getPartyRepository,
+  listRegistersWorkspaceDataRecord,
   logEmployeeRestrictedAccess,
   previewRbacOverrides,
   reassignLeaverOwnedRecords,
   resetAllDemoData,
   savePersonRecord,
   saveTeamRecord,
+  updatePersonPermissionOverrides,
   updateTenantRbacConfig,
 } from '@/server/services';
+import {
+  auditEntriesForRecord,
+  makeVerifiedTestEntraSession,
+  markAuditPosition,
+  setAuditAdapterFailureHookForTesting,
+} from '@/server/testSupport/auditTestSupport';
+import { revealEmployeePayrollAction } from '@/app/actions';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
+import { isActionDenied } from '@/domain/actionResult';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import type { EmployeeSensitiveRecord, EmploymentRecord, Person } from '@/domain/types';
 
@@ -1558,5 +1568,294 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
 
     const rbacRuntimeMod = await import('@/server/rbacRuntime');
     expect('setRuntimeRbacConfigOverride' in rbacRuntimeMod).toBe(false);
+  });
+
+  it('R508: savePersonRecord returns person: null on every denied or validation-error path and strips payroll on save return & override updates', async () => {
+    const { ctx, actorSession } = makeHostActorAndContext('P-000004');
+    try {
+      await runWithActiveActorSession(actorSession, async () => {
+        await resetAllDemoData('P-000001', ctx);
+        const target = (await getPartyRepository().getPersonById<Person>(
+          ctx,
+          'P-000002',
+        ))!;
+        expect(target.employment?.payroll?.externalPayrollReference).toBeTruthy();
+
+        const feeEarnerCtx = makeHostActorAndContext('P-000006');
+        const nonHrSession = {
+          ...feeEarnerCtx.actorSession,
+          personId: 'P-000006',
+          tokenRoles: ['fee_earner'],
+        };
+
+        // 1. Non-HR caller failing blank-surname validation before permission check must receive person: null (never target.employment.payroll)
+        await runWithActiveActorSession(nonHrSession, async () => {
+          const blankNameRes = await savePersonRecord(
+            { firstName: 'Dafydd', surname: '' },
+            { id: 'P-000002', byId: 'P-000006', worksAtFirm: true },
+          );
+          expect(blankNameRes.errors?.name).toBeTruthy();
+          expect(blankNameRes.person).toBeNull();
+
+          // 2. Permission denial (employee:edit_core) must return person: null
+          const forbiddenRes = await savePersonRecord(
+            { firstName: 'Dafydd', surname: 'Evans' },
+            {
+              id: 'P-000002',
+              byId: 'P-000006',
+              worksAtFirm: true,
+              employmentSubmitted: { jobTitle: 'Blocked Change' },
+            },
+          );
+          expect(forbiddenRes.code).toBe('FORBIDDEN');
+          expect(forbiddenRes.person).toBeNull();
+        });
+
+        // 3. Actor with employee:edit_core (granted via override) but WITHOUT employee:payroll
+        //    must get person: null on payroll denial and validation failures, and stripped payroll on success
+        const coreOnlyTarget = (await getPartyRepository().getPersonById<Person>(
+          ctx,
+          'P-000006',
+        ))!;
+        await getPartyRepository().putPerson(ctx, {
+          ...coreOnlyTarget,
+          permissionOverrides: {
+            grant: ['employee:edit_core'],
+            revoke: ['employee:payroll', 'employee:sensitive'],
+          },
+        });
+        const coreOnlySession = {
+          ...makeHostActorAndContext('P-000006').actorSession,
+          tokenRoles: ['fee_earner'],
+        };
+
+        await runWithActiveActorSession(coreOnlySession, async () => {
+          const payrollDeniedRes = await savePersonRecord(
+            { firstName: 'Dafydd', surname: 'Evans' },
+            {
+              id: 'P-000002',
+              byId: 'P-000006',
+              worksAtFirm: true,
+              employmentSubmitted: {
+                payroll: {
+                  externalPayrollReference: 'PAY-TAMPERED',
+                  nationalInsuranceNumber: '',
+                  bankAccountName: '',
+                  bankSortCode: '',
+                  bankAccountNumber: '',
+                  starterDeclarationOrP45: '',
+                  studentLoanPlan: '',
+                  pensionAutoEnrolmentStatus: '',
+                  pensionOptOutDate: null,
+                },
+              },
+            },
+          );
+          expect(payrollDeniedRes.code).toBe('FORBIDDEN');
+          expect(payrollDeniedRes.person).toBeNull();
+
+          const empValidationFailRes = await savePersonRecord(
+            { firstName: 'Dafydd', surname: 'Evans' },
+            {
+              id: 'P-000002',
+              byId: 'P-000006',
+              worksAtFirm: true,
+              employmentSubmitted: {
+                jobTitle: 'Senior Associate',
+                employeeNumber: '   ',
+              },
+            },
+          );
+          expect(empValidationFailRes.errors?.employeeNumber).toBeTruthy();
+          expect(empValidationFailRes.person).toBeNull();
+
+          const okSaveRes = await savePersonRecord(
+            {
+              firstName: target.firstName,
+              surname: target.surname,
+              preferredName: 'Daf Core Only',
+            },
+            {
+              id: 'P-000002',
+              byId: 'P-000006',
+              worksAtFirm: true,
+            },
+          );
+          expect(okSaveRes.errors).toBeUndefined();
+          expect(okSaveRes.person.employment?.payroll).toBeUndefined();
+        });
+
+        // 4. Even for an employee:payroll holder, savePersonRecord & updatePersonPermissionOverrides never return raw payroll in bulk/save returns
+        const adminSaveRes = await savePersonRecord(
+          {
+            firstName: target.firstName,
+            surname: target.surname,
+            preferredName: 'Daf Admin Save',
+          },
+          {
+            id: 'P-000002',
+            byId: 'P-000004',
+            worksAtFirm: true,
+          },
+        );
+        expect(adminSaveRes.errors).toBeUndefined();
+        expect(adminSaveRes.person.employment?.payroll).toBeUndefined();
+
+        const overrideRes = await updatePersonPermissionOverrides(
+          'P-000002',
+          { grant: [], revoke: [] },
+          'P-000004',
+          { mfaVerified: true },
+        );
+        expect(overrideRes.ok).toBe(true);
+        expect(overrideRes.person?.employment?.payroll).toBeUndefined();
+      });
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001', ctx);
+    }
+  });
+
+  it('R513: omits payroll from getAppSnapshot and listRegistersWorkspaceDataRecord even for payroll holders, preserves stored payroll on non-payroll save, and gates per-person payroll read on view-payroll audit commit', async () => {
+    const { ctx, actorSession } = makeHostActorAndContext('P-000004');
+    try {
+      await runWithActiveActorSession(actorSession, async () => {
+        await resetAllDemoData('P-000001', ctx);
+        const targetBefore = (await getPartyRepository().getPersonById<Person>(
+          ctx,
+          'P-000002',
+        ))!;
+        const expectedPayRef =
+          targetBefore.employment?.payroll?.externalPayrollReference;
+        expect(expectedPayRef).toBeTruthy();
+
+        const auditPosBeforeSnap = await markAuditPosition();
+
+        // 1. Bulk snapshot and registers workspace must NEVER include payroll or write view-payroll audit entries
+        const snap = await getAppSnapshot('P-000004');
+        for (const p of snap.people) {
+          expect(p.employment?.payroll).toBeUndefined();
+        }
+        const regSnap = await listRegistersWorkspaceDataRecord();
+        expect(regSnap.ok).toBe(true);
+        if (regSnap.ok) {
+          for (const p of regSnap.people) {
+            expect(p.employment?.payroll).toBeUndefined();
+          }
+        }
+        const payrollAuditsAfterBulk = (
+          await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
+        ).filter((a) => a.action === 'view-payroll');
+        expect(payrollAuditsAfterBulk).toHaveLength(0);
+
+        // 2. Unrevealed getEmployeeDetailsForUser (without logViewPayroll: true) must NOT return payroll or log view-payroll
+        const unrevealed = await getEmployeeDetailsForUser('P-000002', 'P-000004');
+        expect(unrevealed.employment?.payroll).toBeUndefined();
+        const payrollAuditsAfterUnrevealed = (
+          await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
+        ).filter((a) => a.action === 'view-payroll');
+        expect(payrollAuditsAfterUnrevealed).toHaveLength(0);
+
+        // 3. Forced audit failure on getEmployeeDetailsForUser({ logViewPayroll: true }) rolls back and returns no payroll
+        const hrAuditSpy = vi
+          .spyOn(getHrAndRbacRepository(), 'appendHrAuditEntriesInTx')
+          .mockRejectedValueOnce(new Error('R513_FORCED_PAYROLL_AUDIT_FAILURE'));
+        try {
+          await expect(
+            getEmployeeDetailsForUser('P-000002', 'P-000004', {
+              logViewPayroll: true,
+            }),
+          ).rejects.toThrow('R513_FORCED_PAYROLL_AUDIT_FAILURE');
+        } finally {
+          hrAuditSpy.mockRestore();
+        }
+        const payrollAuditsAfterFailedWrite = (
+          await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
+        ).filter((a) => a.action === 'view-payroll');
+        expect(payrollAuditsAfterFailedWrite).toHaveLength(0);
+
+        // 4. Positive control: getEmployeeDetailsForUser({ logViewPayroll: true }) returns payroll and commits view-payroll audit
+        const revealed = await getEmployeeDetailsForUser('P-000002', 'P-000004', {
+          logViewPayroll: true,
+        });
+        expect(revealed.employment?.payroll?.externalPayrollReference).toBe(
+          expectedPayRef,
+        );
+        const payrollAuditsAfterReveal = (
+          await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
+        ).filter((a) => a.action === 'view-payroll');
+        expect(payrollAuditsAfterReveal).toHaveLength(1);
+
+        // 5. revealEmployeePayrollAction enforces employee:payroll and logs view-payroll for authorised reveal
+        const feeEarnerVerified = makeVerifiedTestEntraSession('P-000002', {
+          roles: ['fee_earner'],
+        });
+        setTestEntraSessionOverride(feeEarnerVerified);
+        await runWithActiveActorSession(
+          {
+            personId: 'P-000002',
+            tenantId: feeEarnerVerified.tenantId,
+            tokenRoles: feeEarnerVerified.mappedRoles,
+            expiresAtMs: Date.parse(feeEarnerVerified.expiresAt),
+            verifiedSession: feeEarnerVerified,
+          },
+          async () => {
+            const deniedActionRes = await revealEmployeePayrollAction('P-000002');
+            expect(isActionDenied(deniedActionRes)).toBe(true);
+            if (isActionDenied(deniedActionRes)) {
+              expect(deniedActionRes.code).toBe('FORBIDDEN');
+            }
+          },
+        );
+        const payrollAuditsAfterDeniedAction = (
+          await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
+        ).filter((a) => a.action === 'view-payroll');
+        expect(payrollAuditsAfterDeniedAction).toHaveLength(1);
+
+        setTestEntraSessionOverride(actorSession.verifiedSession);
+        const revealActionRes = await revealEmployeePayrollAction('P-000002');
+        expect(isActionDenied(revealActionRes)).toBe(false);
+        if (!isActionDenied(revealActionRes)) {
+          expect(revealActionRes.payroll?.externalPayrollReference).toBe(expectedPayRef);
+        }
+        const payrollAuditsAfterAction = (
+          await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
+        ).filter((a) => a.action === 'view-payroll');
+        expect(payrollAuditsAfterAction).toHaveLength(2);
+
+        // 6. Editing non-payroll employment fields using the payroll-stripped snapshot person must preserve stored payroll in PostgreSQL
+        const dafyddFromSnap = snap.people.find((p) => p.id === 'P-000002')!;
+        expect(dafyddFromSnap.employment?.payroll).toBeUndefined();
+        const nonPayrollEdit = await savePersonRecord(
+          {
+            ...dafyddFromSnap,
+            preferredName: 'Daf Non-Payroll Edit',
+          },
+          {
+            id: dafyddFromSnap.id,
+            byId: 'P-000004',
+            worksAtFirm: true,
+            employmentSubmitted: {
+              ...dafyddFromSnap.employment,
+              jobTitle: 'Senior Associate (Updated Non-Payroll)',
+            },
+          },
+        );
+        expect(nonPayrollEdit.errors).toBeUndefined();
+        const storedAfterEdit = (await getPartyRepository().getPersonById<Person>(
+          ctx,
+          'P-000002',
+        ))!;
+        expect(storedAfterEdit.employment?.payroll?.externalPayrollReference).toBe(
+          expectedPayRef,
+        );
+        expect(storedAfterEdit.employment?.jobTitle).toBe(
+          'Senior Associate (Updated Non-Payroll)',
+        );
+      });
+    } finally {
+      setAuditAdapterFailureHookForTesting(null);
+      await resetAllDemoData('P-000001', ctx);
+    }
   });
 });

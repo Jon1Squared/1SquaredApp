@@ -31,6 +31,7 @@ import {
   runTenantBackgroundJob,
   runTenantSharePointHealthCheckJob,
   SharePointDocumentStoreProvider,
+  TenantAuditRepository,
   TenantMigrationRunner,
   TenantScopedEncryptedTokenCache,
   validateExtensionManifest,
@@ -93,6 +94,7 @@ import {
   flagMatterWriteOff,
   getAppSnapshot,
   getClientPmsViewBundle,
+  getEmployeeDetailsForUser,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDateExceptionsReportRecord,
@@ -151,6 +153,7 @@ import {
   reorderCustomFieldAction,
   reopenEnquiryAction,
   requestMatterBillAction,
+  revealEmployeePayrollAction,
   reviseQuoteAction,
   runMatterConflictSearchAction,
   saveCustomFieldAction,
@@ -9955,5 +9958,293 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       bravoScheduledRun.correlationId,
     );
     expect(alphaJobRuns.some((r) => r.id === bravoScheduledRun.id)).toBe(false);
+  });
+
+  it('R508 & R513 two-tenant isolation: savePersonRecord, getEmployeeDetailsForUser, and revealEmployeePayrollAction reject forged claims and block cross-tenant payroll reads/leaks with tampered Tenant B employee IDs', async () => {
+    const rawBase = JSON.parse(
+      fs.readFileSync(
+        path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-ADMIN',
+        tenantId: 'tenant-a',
+        name: 'Alpha Admin',
+        email: 'admin@tenant-a.example',
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r508-r513-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-ADMIN',
+        tenantId: 'tenant-b',
+        name: 'Bravo Admin',
+        email: 'admin@tenant-b.example',
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r508-r513-b',
+    });
+
+    const partyRepo = getPartyRepository();
+    const hrRepo = getHrAndRbacRepository();
+    const auditRepo = new TenantAuditRepository();
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const alphaAdminId = `P-A-ADM-${suffix}`;
+    const bravoEmpId = `P-B-EMP-${suffix}`;
+    const bravoPayRef = `PAY-BRAVO-SECRET-${suffix}`;
+
+    const baseEmpRecord = createDefaultEmploymentRecord({
+      person: {
+        id: alphaAdminId,
+        firstName: 'Alpha',
+        surname: 'Admin',
+        jobTitle: 'Payroll Admin',
+      },
+      allPeople: [],
+      orgStructure: buildDefaultOrgStructure({ legalName: 'Isolation Test Firm' }),
+      byId: alphaAdminId,
+      nowIso: '2026-11-19T12:00:00.000Z',
+      status: 'Active',
+      primaryDomain: 'tenant-a.example',
+    });
+
+    const alphaAdminPerson = {
+      id: alphaAdminId,
+      recordType: 'person' as const,
+      recordOwnerId: alphaAdminId,
+      recordStatusId: 'person_record_status.active',
+      createdById: alphaAdminId,
+      createdAt: '2026-11-19T12:00:00.000Z',
+      updatedById: alphaAdminId,
+      updatedAt: '2026-11-19T12:00:00.000Z',
+      sourceId: null,
+      lastVerifiedAt: '2026-11-19',
+      tags: [],
+      duplicateStatusId: 'duplicate_status.none',
+      notDuplicateOf: [],
+      possibleMatchIds: [],
+      mergedIntoId: null,
+      lastInteractionAt: '2026-11-19',
+      customFields: {},
+      titleId: null,
+      firstName: 'Alpha',
+      middleNames: '',
+      surname: 'Admin',
+      preferredName: '',
+      dateOfBirth: '1985-01-01',
+      otherNames: [],
+      jobTitle: 'Payroll Admin',
+      emails: [
+        {
+          id: `em-${alphaAdminId}`,
+          address: `alpha.${suffix}@tenant-a.example`,
+          typeId: 'email_type.work',
+          isPrimary: true,
+          active: true,
+        },
+      ],
+      phones: [],
+      preferredContactMethodId: null,
+      preferredLanguageId: null,
+      addresses: [],
+      website: '',
+      relationshipOwnerId: null,
+      relationshipStatusId: null,
+      relationshipStandingId: null,
+      relationshipRoleIds: ['person_role.internal_colleague'],
+      originId: null,
+      firstKnownAt: '2026-01-01',
+      engagementLevelId: null,
+      interests: '',
+      relationshipNotes: '',
+      marketingConsentId: null,
+      consentRecord: '',
+      verificationStatusId: null,
+      verifiedAt: null,
+      verificationMethodId: null,
+      verificationReviewerId: null,
+      riskReferences: '',
+      isEmployee: true,
+      employeeRoleId: 'employee_role.system_administrator',
+      departmentId: 'DEPT-HR',
+      appRole: 'admin' as const,
+      roles: ['admin' as const],
+      employment: {
+        ...baseEmpRecord,
+        personId: alphaAdminId,
+        employeeNumber: `EMP-A-${suffix}`,
+        payroll: {
+          ...baseEmpRecord.payroll!,
+          externalPayrollReference: `PAY-ALPHA-${suffix}`,
+        },
+      },
+    };
+
+    const bravoEmpPerson = {
+      ...alphaAdminPerson,
+      id: bravoEmpId,
+      recordOwnerId: bravoEmpId,
+      createdById: bravoEmpId,
+      updatedById: bravoEmpId,
+      firstName: 'Bravo',
+      surname: 'SecretEmployee',
+      emails: [
+        {
+          id: `em-${bravoEmpId}`,
+          address: `bravo.${suffix}@tenant-b.example`,
+          typeId: 'email_type.work',
+          isPrimary: true,
+          active: true,
+        },
+      ],
+      employment: {
+        ...baseEmpRecord,
+        personId: bravoEmpId,
+        employeeNumber: `EMP-B-${suffix}`,
+        payroll: {
+          ...baseEmpRecord.payroll!,
+          externalPayrollReference: bravoPayRef,
+        },
+      },
+    };
+
+    await partyRepo.putPeople(ctxA, [alphaAdminPerson]);
+    await partyRepo.putPeople(ctxB, [bravoEmpPerson]);
+
+    const signSession = (tenantId: 'tenant-a' | 'tenant-b', personId: string) => {
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const verified = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId,
+          tenantId,
+          oid: `00000000-0000-4000-8000-${personId.replace(/[^a-f0-9]/gi, '0').padStart(12, '0').slice(-12)}`,
+          tid: '11111111-2222-4333-8444-555555555555',
+          sub: personId,
+          email: `${personId.toLowerCase()}@${tenantId}.example`,
+          displayName: personId,
+          entraRoles: ['admin'],
+          mappedRoles: ['admin'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        }),
+      )!;
+      setTestEntraSessionOverride(verified);
+      return {
+        personId,
+        tenantId,
+        tokenRoles: ['admin'],
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verified,
+      };
+    };
+
+    try {
+      // Forged tenant claim rejection
+      expect(() =>
+        resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: false as unknown as true,
+            sub: alphaAdminId,
+            tenantId: 'tenant-b',
+            email: 'forged@tenant-a.example',
+            name: 'Forged Actor',
+            roles: ['admin'],
+            mfaVerified: true,
+          },
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+          correlationId: 'corr-forged-r513',
+        }),
+      ).toThrow();
+
+      const baseCfgA = {
+        ...rawBase,
+        tenantId: 'tenant-a',
+        displayName: 'Isolation Tenant Alpha',
+        hostingMode: 'multi_tenant',
+      };
+      const baseCfgB = {
+        ...rawBase,
+        tenantId: 'tenant-b',
+        displayName: 'Isolation Tenant Bravo',
+        hostingMode: 'multi_tenant',
+      };
+      const overlayA = { tenantId: 'tenant-a', environment: 'test' };
+      const overlayB = { tenantId: 'tenant-b', environment: 'test' };
+
+      // Run as Tenant Alpha Payroll Admin and verify tampered Tenant B ID yields no data/leaks
+      setActiveTenantConfigForTesting(baseCfgA, overlayA);
+      const alphaSession = signSession('tenant-a', alphaAdminId);
+
+      await runWithActiveActorSession(alphaSession, async () => {
+        const snapA = await getAppSnapshot(alphaAdminId);
+        for (const p of snapA.people) {
+          expect(p.employment?.payroll).toBeUndefined();
+          expect(p.id).not.toBe(bravoEmpId);
+        }
+
+        const tamperedSave = await savePersonRecord(
+          { firstName: 'Bravo', surname: '' },
+          { id: bravoEmpId, byId: alphaAdminId, worksAtFirm: true },
+        );
+        expect(tamperedSave.person).toBeNull();
+
+        const tamperedDetails = await getEmployeeDetailsForUser(
+          bravoEmpId,
+          alphaAdminId,
+          { logViewPayroll: true, logViewSensitive: true },
+        );
+        expect(tamperedDetails.employment).toBeNull();
+        expect(tamperedDetails.errors?.notFound).toBeTruthy();
+
+        const tamperedAction = await revealEmployeePayrollAction(bravoEmpId);
+        expect(isActionDenied(tamperedAction)).toBe(false);
+        if (!isActionDenied(tamperedAction)) {
+          expect(tamperedAction.ok).toBe(false);
+          expect(tamperedAction.payroll).toBeNull();
+        }
+      });
+
+      const bravoAuditsAfterTamper = await auditRepo.listAuditEntriesForRecord(
+        ctxB,
+        'employee_payroll',
+        bravoEmpId,
+      );
+      expect(bravoAuditsAfterTamper.some((a) => a.byId === alphaAdminId)).toBe(false);
+
+      // Positive control in Tenant Bravo
+      setActiveTenantConfigForTesting(baseCfgB, overlayB);
+      const bravoSession = signSession('tenant-b', bravoEmpId);
+      await runWithActiveActorSession(bravoSession, async () => {
+        const bravoAction = await revealEmployeePayrollAction(bravoEmpId);
+        expect(isActionDenied(bravoAction)).toBe(false);
+        if (!isActionDenied(bravoAction)) {
+          expect(bravoAction.ok).toBe(true);
+          expect(bravoAction.payroll?.externalPayrollReference).toBe(bravoPayRef);
+        }
+      });
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await hrRepo.clearTenantData(ctxA).catch(() => undefined);
+      await hrRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+    }
   });
 });

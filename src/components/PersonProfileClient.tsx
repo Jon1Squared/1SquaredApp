@@ -17,7 +17,8 @@ import {
   Plus,
   Search,
 } from 'lucide-react';
-import { saveTaskAction } from '@/app/actions';
+import { revealEmployeePayrollAction, saveTaskAction } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import { activeDefinitions, formatCustomValue } from '@/domain/customFields';
 import { formatDate } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
@@ -37,6 +38,7 @@ import type {
   AuditEntry,
   ChoiceValue,
   CustomFieldDefinition,
+  EmploymentPayrollDetails,
   Enquiry,
   Matter,
   MergeHistory,
@@ -115,6 +117,7 @@ interface Props {
   initialTab?: string;
   firmName?: string;
   orgStructure: OrgStructureCatalogue;
+  canViewPayroll?: boolean;
   canViewOwnNotificationPreferences?: boolean;
   canManageOwnNotificationPreferences?: boolean;
   initialNotificationPreferences?: readonly UserNotificationPreference[];
@@ -218,6 +221,7 @@ export function PersonProfileClient({
   initialTab,
   firmName = 'Firm',
   orgStructure,
+  canViewPayroll = false,
   canViewOwnNotificationPreferences = false,
   canManageOwnNotificationPreferences = false,
   initialNotificationPreferences,
@@ -228,6 +232,39 @@ export function PersonProfileClient({
     'all' | 'emails' | 'meetings' | 'notes' | 'documents'
   >('all');
   const [reminderSent, setReminderSent] = useState(false);
+  const [syncedPayrollPersonId, setSyncedPayrollPersonId] = useState<string>(person.id);
+  const [revealedPayroll, setRevealedPayroll] = useState<EmploymentPayrollDetails | null>(
+    person.employment?.payroll ?? null,
+  );
+  const [loadingPayroll, setLoadingPayroll] = useState(false);
+  const [payrollLoadError, setPayrollLoadError] = useState<string | null>(null);
+  if (person.id !== syncedPayrollPersonId) {
+    setSyncedPayrollPersonId(person.id);
+    setRevealedPayroll(person.employment?.payroll ?? null);
+    setPayrollLoadError(null);
+  }
+
+  async function handleRevealPayroll() {
+    if (loadingPayroll) return;
+    setLoadingPayroll(true);
+    setPayrollLoadError(null);
+    try {
+      const res = await revealEmployeePayrollAction(person.id);
+      if (isActionDenied(res)) {
+        setPayrollLoadError(res.message);
+        return;
+      }
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setPayrollLoadError(Object.values(res.errors).join(' '));
+        return;
+      }
+      setRevealedPayroll(res.payroll ?? null);
+    } finally {
+      setLoadingPayroll(false);
+    }
+  }
+
+  const effectivePayroll = person.employment?.payroll ?? revealedPayroll;
 
   const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const personById = useMemo(() => new Map(allPeople.map((p) => [p.id, p])), [allPeople]);
@@ -1940,30 +1977,54 @@ export function PersonProfileClient({
             </div>
           ) : null}
 
-          {person.employment.payroll ? (
+          {effectivePayroll || canViewPayroll ? (
             <div className="subcard">
-              <div className="list-section__header">
+              <div
+                className="list-section__header"
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+              >
                 <span className="section-label">Payroll &amp; Benefits (Masked)</span>
+                {!effectivePayroll && canViewPayroll ? (
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    disabled={loadingPayroll}
+                    onClick={() => void handleRevealPayroll()}
+                  >
+                    {loadingPayroll ? 'Loading payroll…' : 'Reveal payroll details (logged to audit)'}
+                  </button>
+                ) : null}
               </div>
-              <div className="kv-grid" style={{ marginTop: 10 }}>
-                <KeyValue label="External payroll reference">
-                  {person.employment.payroll.externalPayrollReference || '—'}
-                </KeyValue>
-                <KeyValue label="National Insurance number">
-                  {maskNationalInsuranceNumber(
-                    person.employment.payroll.nationalInsuranceNumber || '',
-                  ) || '—'}
-                </KeyValue>
-                <KeyValue label="Bank details">
-                  {maskBankDetails(
-                    person.employment.payroll.bankSortCode || '',
-                    person.employment.payroll.bankAccountNumber || '',
-                  ).accountNumber || '—'}
-                </KeyValue>
-                <KeyValue label="Pension auto-enrolment">
-                  {person.employment.payroll.pensionAutoEnrolmentStatus || '—'}
-                </KeyValue>
-              </div>
+              {payrollLoadError ? (
+                <p className="muted" style={{ marginTop: 8, color: 'var(--coral, #d94a27)' }}>
+                  {payrollLoadError}
+                </p>
+              ) : null}
+              {effectivePayroll ? (
+                <div className="kv-grid" style={{ marginTop: 10 }}>
+                  <KeyValue label="External payroll reference">
+                    {effectivePayroll.externalPayrollReference || '—'}
+                  </KeyValue>
+                  <KeyValue label="National Insurance number">
+                    {maskNationalInsuranceNumber(
+                      effectivePayroll.nationalInsuranceNumber || '',
+                    ) || '—'}
+                  </KeyValue>
+                  <KeyValue label="Bank details">
+                    {maskBankDetails(
+                      effectivePayroll.bankSortCode || '',
+                      effectivePayroll.bankAccountNumber || '',
+                    ).accountNumber || '—'}
+                  </KeyValue>
+                  <KeyValue label="Pension auto-enrolment">
+                    {effectivePayroll.pensionAutoEnrolmentStatus || '—'}
+                  </KeyValue>
+                </div>
+              ) : (
+                <p className="muted" style={{ marginTop: 8 }}>
+                  Payroll details are omitted from profile snapshots until revealed (each view is written to the audit log).
+                </p>
+              )}
             </div>
           ) : null}
 
@@ -2905,30 +2966,54 @@ export function PersonProfileClient({
             </div>
           ) : null}
 
-          {person.employment.payroll ? (
+          {effectivePayroll || canViewPayroll ? (
             <div className="subcard">
-              <div className="list-section__header">
+              <div
+                className="list-section__header"
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}
+              >
                 <span className="section-label">Payroll &amp; Benefits (Masked)</span>
+                {!effectivePayroll && canViewPayroll ? (
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    disabled={loadingPayroll}
+                    onClick={() => void handleRevealPayroll()}
+                  >
+                    {loadingPayroll ? 'Loading payroll…' : 'Reveal payroll details (logged to audit)'}
+                  </button>
+                ) : null}
               </div>
-              <div className="kv-grid" style={{ marginTop: 10 }}>
-                <KeyValue label="External payroll reference">
-                  {person.employment.payroll.externalPayrollReference || '—'}
-                </KeyValue>
-                <KeyValue label="National Insurance number">
-                  {maskNationalInsuranceNumber(
-                    person.employment.payroll.nationalInsuranceNumber || '',
-                  ) || '—'}
-                </KeyValue>
-                <KeyValue label="Bank details">
-                  {maskBankDetails(
-                    person.employment.payroll.bankSortCode || '',
-                    person.employment.payroll.bankAccountNumber || '',
-                  ).accountNumber || '—'}
-                </KeyValue>
-                <KeyValue label="Pension auto-enrolment">
-                  {person.employment.payroll.pensionAutoEnrolmentStatus || '—'}
-                </KeyValue>
-              </div>
+              {payrollLoadError ? (
+                <p className="muted" style={{ marginTop: 8, color: 'var(--coral, #d94a27)' }}>
+                  {payrollLoadError}
+                </p>
+              ) : null}
+              {effectivePayroll ? (
+                <div className="kv-grid" style={{ marginTop: 10 }}>
+                  <KeyValue label="External payroll reference">
+                    {effectivePayroll.externalPayrollReference || '—'}
+                  </KeyValue>
+                  <KeyValue label="National Insurance number">
+                    {maskNationalInsuranceNumber(
+                      effectivePayroll.nationalInsuranceNumber || '',
+                    ) || '—'}
+                  </KeyValue>
+                  <KeyValue label="Bank details">
+                    {maskBankDetails(
+                      effectivePayroll.bankSortCode || '',
+                      effectivePayroll.bankAccountNumber || '',
+                    ).accountNumber || '—'}
+                  </KeyValue>
+                  <KeyValue label="Pension auto-enrolment">
+                    {effectivePayroll.pensionAutoEnrolmentStatus || '—'}
+                  </KeyValue>
+                </div>
+              ) : (
+                <p className="muted" style={{ marginTop: 8 }}>
+                  Payroll details are omitted from profile snapshots until revealed (each view is written to the audit log).
+                </p>
+              )}
             </div>
           ) : null}
 
