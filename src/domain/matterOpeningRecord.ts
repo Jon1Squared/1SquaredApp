@@ -9,6 +9,7 @@ import type {
   Enquiry,
   Matter,
   Organisation,
+  OrganisationConflictDecision,
   Person,
   Quote,
 } from './types';
@@ -1234,6 +1235,108 @@ export function legacyConflictStatusFromRecord(
     default:
       return 'Draft';
   }
+}
+
+export interface ClientConflictStateSummary {
+  hasConflictAlert: boolean;
+  hasPendingConflict: boolean;
+  hasClearedConflictCheck: boolean;
+}
+
+const LEGACY_DECLINED_CONFLICT_STATUSES = new Set([
+  'Declined — Conflict of interest',
+  'Declined - Conflict of interest',
+  'Conflict – declined',
+  'Conflict - declined',
+]);
+
+const LEGACY_PENDING_CONFLICT_STATUSES = new Set([
+  'Potential conflict — escalated',
+  'Potential conflict - escalated',
+  'Pending conflict review',
+  'Potential conflict',
+]);
+
+const LEGACY_CLEARED_CONFLICT_STATUSES = new Set([
+  'Clear',
+  'Cleared',
+  'Approved with conditions',
+  'Approved by Risk & Compliance',
+]);
+
+/**
+ * Summarises a client's conflict-check posture across their linked matters
+ * using structured `conflictCheckRecord.status` and `conflictDecision.outcome`
+ * keys first, falling back to exact legacy `conflictCheckStatus` strings only
+ * when no `conflictCheckRecord` is present (`R504`).
+ */
+export function summariseClientConflictState(
+  matters: ReadonlyArray<{
+    conflictCheckRecord?: Pick<ConflictCheckRecord, 'status' | 'outcomeLabel'> | null;
+    conflictDecision?: Partial<Pick<OrganisationConflictDecision, 'outcome'>> | null;
+    conflictCheckStatus?: string | null;
+  }>,
+): ClientConflictStateSummary {
+  let hasConflictAlert = false;
+  let hasPendingConflict = false;
+  let anyCleared = false;
+
+  for (const matter of matters) {
+    if (matter.conflictCheckRecord) {
+      const status = matter.conflictCheckRecord.status;
+      if (status === 'Declined') {
+        hasConflictAlert = true;
+        continue;
+      }
+      if (status === 'Referred') {
+        hasPendingConflict = true;
+        continue;
+      }
+      if (status === 'Cleared' || status === 'Approved') {
+        anyCleared = true;
+        continue;
+      }
+      if (matter.conflictDecision?.outcome === 'Conflict – declined') {
+        hasConflictAlert = true;
+      } else if (matter.conflictDecision?.outcome === 'Potential conflict') {
+        hasPendingConflict = true;
+      } else if (matter.conflictDecision?.outcome === 'Cleared') {
+        anyCleared = true;
+      }
+      continue;
+    }
+
+    if (matter.conflictDecision?.outcome) {
+      if (matter.conflictDecision.outcome === 'Conflict – declined') {
+        hasConflictAlert = true;
+        continue;
+      }
+      if (matter.conflictDecision.outcome === 'Potential conflict') {
+        hasPendingConflict = true;
+        continue;
+      }
+      if (matter.conflictDecision.outcome === 'Cleared') {
+        anyCleared = true;
+        continue;
+      }
+    }
+
+    const legacy = (matter.conflictCheckStatus ?? '').trim();
+    if (LEGACY_DECLINED_CONFLICT_STATUSES.has(legacy)) {
+      hasConflictAlert = true;
+    } else if (LEGACY_PENDING_CONFLICT_STATUSES.has(legacy)) {
+      hasPendingConflict = true;
+    } else if (LEGACY_CLEARED_CONFLICT_STATUSES.has(legacy)) {
+      anyCleared = true;
+    }
+  }
+
+  return {
+    hasConflictAlert,
+    hasPendingConflict,
+    hasClearedConflictCheck:
+      !hasConflictAlert && !hasPendingConflict && anyCleared,
+  };
 }
 
 /**

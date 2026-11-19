@@ -17,6 +17,7 @@ import {
   buildRiskAssessmentPdfLines,
   formatRecordPdfHeading,
   resolveMatterOpeningSnapshot,
+  summariseClientConflictState,
   type MatterOpeningSnapshot,
   type MatterRiskAssessmentSnapshot,
 } from '../matterOpeningRecord';
@@ -785,6 +786,127 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
     expect(clearedOrg.ableToAct).toEqual({
       label: 'Yes',
       tone: 'positive',
+    });
+  });
+
+  it('summariseClientConflictState resolves structured conflictCheckRecord, conflictDecision, and exact legacy statuses without substring matching (R504)', () => {
+    expect(summariseClientConflictState([])).toEqual({
+      hasConflictAlert: false,
+      hasPendingConflict: false,
+      hasClearedConflictCheck: false,
+    });
+
+    // Referred conflictCheckRecord (even when legacy conflictCheckStatus contains "conflict") -> pending, not alert
+    const referredSummary = summariseClientConflictState([
+      {
+        conflictCheckRecord: {
+          status: 'Referred',
+          outcomeLabel: 'Referred to risk for review',
+        },
+        conflictCheckStatus: 'Pending conflict review',
+      },
+    ]);
+    expect(referredSummary).toEqual({
+      hasConflictAlert: false,
+      hasPendingConflict: true,
+      hasClearedConflictCheck: false,
+    });
+    expect(
+      resolvePersonComplianceDisplay(
+        { verifiedAt: '2026-10-01', lastVerifiedAt: '2026-10-01' },
+        'verified',
+        null,
+        referredSummary,
+      ).ableToAct,
+    ).toEqual({
+      label: 'Checks pending',
+      pillClass: 'client-pill--neutral',
+    });
+
+    // Declined conflictCheckRecord -> conflict alert -> Review required
+    const declinedSummary = summariseClientConflictState([
+      {
+        conflictCheckRecord: {
+          status: 'Declined',
+          outcomeLabel: 'Declined by Risk & Compliance',
+        },
+      },
+    ]);
+    expect(declinedSummary).toEqual({
+      hasConflictAlert: true,
+      hasPendingConflict: false,
+      hasClearedConflictCheck: false,
+    });
+    expect(
+      resolvePersonComplianceDisplay(
+        { verifiedAt: '2026-10-01', lastVerifiedAt: '2026-10-01' },
+        'verified',
+        null,
+        declinedSummary,
+      ).ableToAct,
+    ).toEqual({
+      label: 'Review required',
+      pillClass: 'client-pill--red',
+    });
+
+    // Approved with conditions -> cleared
+    expect(
+      summariseClientConflictState([
+        {
+          conflictCheckRecord: {
+            status: 'Approved',
+            outcomeLabel: 'Approved with conditions',
+          },
+        },
+      ]),
+    ).toEqual({
+      hasConflictAlert: false,
+      hasPendingConflict: false,
+      hasClearedConflictCheck: true,
+    });
+
+    // Legacy matter with exact 'Clear' and no conflictCheckRecord -> cleared
+    expect(
+      summariseClientConflictState([
+        { conflictCheckStatus: 'Clear' },
+      ]),
+    ).toEqual({
+      hasConflictAlert: false,
+      hasPendingConflict: false,
+      hasClearedConflictCheck: true,
+    });
+
+    // Legacy matter with exact 'Potential conflict — escalated' and no conflictCheckRecord -> pending
+    expect(
+      summariseClientConflictState([
+        { conflictCheckStatus: 'Potential conflict — escalated' },
+      ]),
+    ).toEqual({
+      hasConflictAlert: false,
+      hasPendingConflict: true,
+      hasClearedConflictCheck: false,
+    });
+
+    // One cleared matter plus one referred matter -> pending dominates, not cleared
+    expect(
+      summariseClientConflictState([
+        {
+          conflictCheckRecord: {
+            status: 'Cleared',
+            outcomeLabel: 'Cleared by fee earner',
+          },
+        },
+        {
+          conflictCheckRecord: {
+            status: 'Referred',
+            outcomeLabel: 'Referred to risk for review',
+          },
+        },
+      ]),
+    ).toEqual({
+      hasConflictAlert: false,
+      hasPendingConflict: true,
+      hasClearedConflictCheck: false,
     });
   });
 });

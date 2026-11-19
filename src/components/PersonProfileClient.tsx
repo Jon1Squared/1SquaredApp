@@ -23,6 +23,7 @@ import { formatDate } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
+import { summariseClientConflictState } from '@/domain/matterOpeningRecord';
 import { personDisplayName, personFullName, primaryEmail } from '@/domain/names';
 import {
   maskBankDetails,
@@ -142,6 +143,7 @@ export function resolvePersonComplianceDisplay(
   mainOrg?: Pick<Organisation, 'lastVerifiedAt'> | null,
   options?: {
     recSys?: string;
+    hasPendingConflict?: boolean;
     hasClearedConflictCheck?: boolean;
     hasConflictAlert?: boolean;
   },
@@ -170,7 +172,9 @@ export function resolvePersonComplianceDisplay(
     verSys === 'expired' ||
     options?.hasConflictAlert
       ? { label: 'Review required', pillClass: 'client-pill--red' }
-      : options?.hasClearedConflictCheck && verificationComplete
+      : !options?.hasPendingConflict &&
+          options?.hasClearedConflictCheck &&
+          verificationComplete
         ? { label: 'Yes', pillClass: 'client-pill--green' }
         : { label: 'Checks pending', pillClass: 'client-pill--neutral' };
 
@@ -462,45 +466,17 @@ export function PersonProfileClient({
   }, [clientMatters, values, nameById]);
 
   // Compliance status & Able to Act derived from stored verification and linked conflict records
-  const hasConflictAlert = useMemo(
-    () =>
-      clientMatters.some(
-        (m) =>
-          m.conflictCheckStatus.toLowerCase().includes('conflict') ||
-          m.conflictCheckRecord?.status === 'Declined',
-      ),
+  const clientConflictState = useMemo(
+    () => summariseClientConflictState(clientMatters),
     [clientMatters],
-  );
-  const hasPendingConflict = useMemo(
-    () =>
-      clientMatters.some(
-        (m) =>
-          m.conflictCheckStatus === 'Pending conflict review' ||
-          m.conflictCheckRecord?.status === 'Referred',
-      ),
-    [clientMatters],
-  );
-  const hasClearedConflictCheck = useMemo(
-    () =>
-      !hasConflictAlert &&
-      !hasPendingConflict &&
-      clientMatters.some(
-        (m) =>
-          m.conflictCheckRecord?.status === 'Cleared' ||
-          m.conflictCheckRecord?.status === 'Approved' ||
-          m.conflictDecision?.outcome === 'Cleared' ||
-          m.conflictCheckStatus === 'Clear',
-      ),
-    [clientMatters, hasConflictAlert, hasPendingConflict],
   );
   const complianceDisplay = useMemo(
     () =>
       resolvePersonComplianceDisplay(person, verSys, mainOrg, {
         recSys,
-        hasClearedConflictCheck,
-        hasConflictAlert,
+        ...clientConflictState,
       }),
-    [person, verSys, mainOrg, recSys, hasClearedConflictCheck, hasConflictAlert],
+    [person, verSys, mainOrg, recSys, clientConflictState],
   );
   const lastCheckFormatted = complianceDisplay.checksLastPerformed;
 

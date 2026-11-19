@@ -95,6 +95,9 @@ export function buildDemoLiteralsDenyList(rootDir = process.cwd()) {
     'Not A Law Firm LLP',
     'Not A Law Firm',
     'Pembroke Vaughan',
+    // Bare firm-name fragment matched case-insensitively across `src/components/` and `src/domain/`.
+    // Genuine non-demo uses (such as real surnames or place names) belong in
+    // `scripts/demo-literals-allowlist.json` with an explicit `reason`.
     'Pembroke',
     'Victoria Pembroke',
     'Marcus Vaughan',

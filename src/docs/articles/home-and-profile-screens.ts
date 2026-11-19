@@ -6,7 +6,7 @@ export const homeAndProfileScreensArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How role-based Home panels, matter intake and compliance cards, and person and organisation compliance displays derive their values from stored records and show honest empty states when a module or screening integration is not yet connected.',
-  updated: '2026-11-18',
+  updated: '2026-11-19',
   body: `
 1Squared displays only stored, tenant-scoped records and practice management system (PMS) figures on every workspace screen. Product screens never fall back to invented client names, hard-coded figures, or fabricated compliance statuses.
 
@@ -46,7 +46,7 @@ On a matter profile (**Overview** tab), the **Intake & compliance** card is deri
 
 On person and organisation profiles, the **Compliance** card is derived from the record’s stored verification and conflict-check fields (\`resolvePersonComplianceDisplay\` and \`resolveOrganisationComplianceDisplay\`):
 
-- **Able to act**: Displays **\`Yes\`** only once both identity/company verification and conflict screening are cleared; shows **\`Checks pending\`** in a neutral badge when no conflict check or verification has been recorded yet, and **\`Review required\`** when a verification record is expired, archived, deceased, or has a potential or declined conflict.
+- **Able to act**: Displays **\`Yes\`** only once both identity/company verification and conflict screening are cleared (with no pending or declined conflict checks); shows **\`Checks pending\`** in a neutral badge when verification or conflict checks have not yet been completed or when a person’s linked matter conflict check is referred and awaiting review (\`Referred\` / \`Potential conflict — escalated\`); and shows **\`Review required\`** when a record is archived or deceased, verification is expired, a person’s linked matter conflict check is declined (\`Declined\`), or an organisation’s stored conflict status is \`Potential conflict\` or \`Conflict – declined\`.
 - **Conflict check**: Displays the stored conflict outcome on organisations (or **\`Not checked\`** in a neutral badge when no conflict search has run).
 - **ID / Company verification**: reflects the stored verification status (\`Verified <date>\`, \`In progress\`, \`Expired\`, or \`Not verified\`).
 - **Sanctions & PEP**: always displays **\`Not checked\`** in a neutral badge until an external sanctions and politically exposed person (PEP) screening provider is connected (tracked under roadmap item 34). The application never displays a hard-coded \`Clear\` status when no screening check has been run.
