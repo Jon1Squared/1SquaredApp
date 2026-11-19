@@ -2827,7 +2827,14 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
       expect(isActionDenied(partnerUpdateRes)).toBe(false);
       expect(partnerUpdateRes.errors).toBeUndefined();
-      expect(partnerUpdateRes.person.entraObjectId).toBe(
+      // R555: non-admin save return omits entraObjectId & permissionOverrides whilst preserving them in PostgreSQL
+      expect(partnerUpdateRes.person.entraObjectId).toBeUndefined();
+      expect(partnerUpdateRes.person.permissionOverrides).toBeUndefined();
+      const reloadedFeeEarner = (await getPartyRepository().getPersonById<Person>(
+        ctx,
+        feeEarner.id,
+      ))!;
+      expect(reloadedFeeEarner.entraObjectId).toBe(
         '00000000-0000-4000-8000-000000000002',
       );
 

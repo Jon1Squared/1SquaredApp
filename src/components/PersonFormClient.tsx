@@ -5,7 +5,6 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, Eye, EyeOff, ShieldAlert } from 'lucide-react';
 import {
-  logEmployeeRestrictedAccessAction,
   reassignLeaverOwnedRecordsAction,
   revealEmployeePayrollAction,
   revealEmployeeSensitiveRecordAction,
@@ -648,7 +647,7 @@ export function PersonFormClient({
   );
   const [payrollMasked, setPayrollMasked] = useState<boolean>(true);
   const [payrollLoaded, setPayrollLoaded] = useState<boolean>(() =>
-    Boolean(!existing || existingEmp?.payroll),
+    Boolean(!existing || !existingEmp || existingEmp?.payroll),
   );
   const [payrollEdited, setPayrollEdited] = useState<boolean>(false);
   const [loadingPayroll, setLoadingPayroll] = useState<boolean>(false);
@@ -821,13 +820,13 @@ export function PersonFormClient({
   };
 
   const handleLoadPayrollForEdit = async () => {
-    if (!existing?.id || !canPayroll || payrollLoaded || loadingPayroll) {
+    if (!existing?.id || !existingEmp || !canPayroll || payrollLoaded || loadingPayroll) {
       return;
     }
     setLoadingPayroll(true);
     setPayrollLoadError(null);
     try {
-      const res = await revealEmployeePayrollAction(existing.id);
+      const res = await revealEmployeePayrollAction(existing.id, { mode: 'full' });
       if (isActionDenied(res)) {
         setPayrollLoadError(res.message);
         return;
@@ -856,17 +855,7 @@ export function PersonFormClient({
   };
 
   const handleTogglePayrollMask = () => {
-    const nextMasked = !payrollMasked;
-    setPayrollMasked(nextMasked);
-    if (!nextMasked && existing?.id) {
-      startTransition(async () => {
-        await logEmployeeRestrictedAccessAction(
-          existing.id,
-          'payroll',
-          'Revealed masked NI and bank details in UI',
-        );
-      });
-    }
+    setPayrollMasked((prev) => !prev);
   };
 
   const handleRevealSensitive = () => {

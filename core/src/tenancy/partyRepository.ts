@@ -713,6 +713,8 @@ function mapPersonRow<TPerson extends TenantPersonRecord = TenantPersonRecord>(
         row.joined_payroll_json !== null
       ) {
         clonedEmp.payroll = structuredClone(row.joined_payroll_json);
+      } else if (row.joined_payroll_json === null) {
+        delete clonedEmp.payroll;
       }
       out.employment = clonedEmp;
     } else {

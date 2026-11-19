@@ -10193,6 +10193,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       await runWithActiveActorSession(alphaSession, async () => {
         const snapA = await getAppSnapshot(alphaAdminId);
+        // R538: snapshot must never include payroll on currentUser, effectiveWorkPerson, or employees
+        expect(snapA.currentUser.employment?.payroll).toBeUndefined();
+        expect(snapA.effectiveWorkPerson.employment?.payroll).toBeUndefined();
+        for (const e of snapA.employees) {
+          expect(e.employment?.payroll).toBeUndefined();
+        }
         for (const p of snapA.people) {
           expect(p.employment?.payroll).toBeUndefined();
           expect(p.id).not.toBe(bravoEmpId);
@@ -10231,11 +10237,24 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       setActiveTenantConfigForTesting(baseCfgB, overlayB);
       const bravoSession = signSession('tenant-b', bravoEmpId);
       await runWithActiveActorSession(bravoSession, async () => {
-        const bravoAction = await revealEmployeePayrollAction(bravoEmpId);
+        const bravoMasked = await revealEmployeePayrollAction(bravoEmpId);
+        expect(isActionDenied(bravoMasked)).toBe(false);
+        if (!isActionDenied(bravoMasked)) {
+          expect(bravoMasked.ok).toBe(true);
+          expect(bravoMasked.payroll?.externalPayrollReference).toBe(bravoPayRef);
+          if (bravoEmpPerson.employment?.payroll?.nationalInsuranceNumber) {
+            expect(bravoMasked.payroll?.nationalInsuranceNumber.startsWith('•')).toBe(true);
+          }
+          expect(bravoMasked.payroll?.bankAccountName).toBe('');
+        }
+        const bravoAction = await revealEmployeePayrollAction(bravoEmpId, { mode: 'full' });
         expect(isActionDenied(bravoAction)).toBe(false);
         if (!isActionDenied(bravoAction)) {
           expect(bravoAction.ok).toBe(true);
           expect(bravoAction.payroll?.externalPayrollReference).toBe(bravoPayRef);
+          expect(bravoAction.payroll?.nationalInsuranceNumber).toBe(
+            bravoEmpPerson.employment?.payroll?.nationalInsuranceNumber,
+          );
         }
       });
     } finally {

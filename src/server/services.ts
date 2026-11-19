@@ -1776,11 +1776,27 @@ async function getAppSnapshotInScope(
         people,
         teams,
         orgStructure,
-        { config: { rbac: rbacConfig } },
+        { tokenRoles: effectiveTokenRoles, config: { rbac: rbacConfig } },
         employeeMatterVisibility,
       ),
     };
   });
+  const filteredCurrentUser: Person =
+    filteredPeople.find((p) => p.id === user.id) ??
+    (user.employment
+      ? {
+          ...user,
+          employment: filterEmploymentForUser(
+            user.employment,
+            user,
+            people,
+            teams,
+            orgStructure,
+            { tokenRoles: effectiveTokenRoles, config: { rbac: rbacConfig } },
+            employeeMatterVisibility,
+          ),
+        }
+      : user);
   const employees = activeEmployees(filteredPeople, store.values);
   const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
     snapshotTenantCtx,
@@ -1937,11 +1953,12 @@ async function getAppSnapshotInScope(
     (cs) => visibleKeyDateIdSet.has(cs.keyDateId),
   );
 
-  // If the current user is a demo user with showsWorkOfId, resolve the underlying employee for personal panels
+  // If the current user is a demo user with showsWorkOfId, resolve the underlying filtered employee for personal panels
   const effectiveWorkPerson: Person =
     user.demo && user.showsWorkOfId
-      ? (people.find((p) => p.id === user.showsWorkOfId) ?? user)
-      : user;
+      ? (filteredPeople.find((p) => p.id === user.showsWorkOfId) ??
+        filteredCurrentUser)
+      : filteredCurrentUser;
 
   const finance: AppFinanceCapabilities = {
     canViewFirm: currentUserPermissions.includes('finance:view'),
@@ -2184,7 +2201,7 @@ async function getAppSnapshotInScope(
     aiProviderChoice: activeTenantCfg.integrations?.aiProviderChoice ?? 'disabled',
     enableMatterCostsGovernance: Boolean(activeTenantCfg.featureFlags?.enableMatterCostsGovernance),
     enablePmsLiveRateSync: Boolean(activeTenantCfg.featureFlags?.enablePmsLiveRateSync),
-    currentUser: user,
+    currentUser: filteredCurrentUser,
     currentUserId: user.id,
     currentUserRole,
     currentUserRoles,
@@ -2362,7 +2379,7 @@ export async function getEmployeeDetailsForUser(
         })
       ) {
         errors.payrollPermission = 'You do not have permission to view payroll details.';
-      } else {
+      } else if (rawEmployment?.payroll) {
         auditInputs.push({
           recordType: 'employee_payroll',
           recordId: personId,
@@ -3960,6 +3977,9 @@ export async function savePersonRecord(
         config: { rbac: rbacConfig },
       }),
   );
+  const canReadRbacSecurityFields =
+    userPerms.has('rbac:manage_user_overrides') ||
+    userPerms.has('rbac:manage_config');
   const returnedPerson: Person = person.employment
     ? {
         ...person,
@@ -3974,7 +3994,11 @@ export async function savePersonRecord(
             actorMatterVisibility,
           ) ?? null,
       }
-    : person;
+    : { ...person };
+  if (!canReadRbacSecurityFields) {
+    delete returnedPerson.permissionOverrides;
+    delete returnedPerson.entraObjectId;
+  }
   return { person: returnedPerson };
   })();
   for (const syncItem of pendingLifecycleSyncs) {

@@ -298,7 +298,9 @@ export function validateNationalInsuranceNumber(nino: string): boolean {
 }
 
 export function maskNationalInsuranceNumber(nino: string): string {
-  const clean = nino.replace(/\s+/g, '').toUpperCase();
+  const trimmed = nino.trim();
+  if (trimmed.startsWith('•')) return trimmed;
+  const clean = trimmed.replace(/\s+/g, '').toUpperCase();
   if (!clean) return '';
   if (clean.length <= 3) return '•••';
   return `${'•'.repeat(clean.length - 3)}${clean.slice(-3)}`;
@@ -308,12 +310,44 @@ export function maskBankDetails(
   sortCode: string,
   accountNumber: string,
 ): { sortCode: string; accountNumber: string } {
-  const cleanSort = sortCode.replace(/[^0-9]/g, '');
-  const cleanAcc = accountNumber.replace(/[^0-9]/g, '');
+  const trimmedSort = sortCode.trim();
+  const trimmedAcc = accountNumber.trim();
+  const cleanSort = trimmedSort.replace(/[^0-9]/g, '');
+  const cleanAcc = trimmedAcc.replace(/[^0-9]/g, '');
   return {
-    sortCode: cleanSort.length >= 2 ? `••-••-${cleanSort.slice(-2)}` : cleanSort ? '••-••-••' : '',
-    accountNumber:
-      cleanAcc.length >= 4 ? `${'•'.repeat(Math.max(4, cleanAcc.length - 4))}${cleanAcc.slice(-4)}` : cleanAcc ? '••••••••' : '',
+    sortCode: trimmedSort.startsWith('•')
+      ? trimmedSort
+      : cleanSort.length >= 2
+        ? `••-••-${cleanSort.slice(-2)}`
+        : cleanSort
+          ? '••-••-••'
+          : '',
+    accountNumber: trimmedAcc.startsWith('•')
+      ? trimmedAcc
+      : cleanAcc.length >= 4
+        ? `${'•'.repeat(Math.max(4, cleanAcc.length - 4))}${cleanAcc.slice(-4)}`
+        : cleanAcc
+          ? '••••••••'
+          : '',
+  };
+}
+
+export function maskPayrollDetails(
+  payroll: EmploymentPayrollDetails,
+): EmploymentPayrollDetails {
+  const maskedBank = maskBankDetails(
+    payroll.bankSortCode || '',
+    payroll.bankAccountNumber || '',
+  );
+  return {
+    ...payroll,
+    nationalInsuranceNumber: maskNationalInsuranceNumber(
+      payroll.nationalInsuranceNumber || '',
+    ),
+    bankAccountName: '',
+    bankSortCode: maskedBank.sortCode,
+    bankAccountNumber: maskedBank.accountNumber,
+    buildingSocietyRollNumber: '',
   };
 }
 

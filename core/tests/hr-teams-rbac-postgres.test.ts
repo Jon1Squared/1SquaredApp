@@ -16,6 +16,7 @@ import {
 } from '@platform/core';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
@@ -1683,9 +1684,85 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
           );
           expect(okSaveRes.errors).toBeUndefined();
           expect(okSaveRes.person.employment?.payroll).toBeUndefined();
+
+          // R539 (case 2): no-HR user passing forbidden security fields on existing employee gets person: null and zero sensitive leaks
+          const permOverrideDeniedRes = await savePersonRecord(
+            {
+              firstName: 'Dafydd',
+              surname: 'Evans',
+              permissionOverrides: { grant: ['admin:access'], revoke: [] },
+            },
+            {
+              id: 'P-000002',
+              byId: 'P-000006',
+              worksAtFirm: true,
+            },
+          );
+          expect(permOverrideDeniedRes.code).toBe('FORBIDDEN');
+          expect(permOverrideDeniedRes.person).toBeNull();
+          expect(JSON.stringify(permOverrideDeniedRes)).not.toContain('externalPayrollReference');
+          expect(JSON.stringify(permOverrideDeniedRes)).not.toContain('admin:access');
+
+          const entraOidDeniedRes = await savePersonRecord(
+            {
+              firstName: 'Dafydd',
+              surname: 'Evans',
+              entraObjectId: '00000000-0000-4000-8000-000000000999',
+            },
+            {
+              id: 'P-000002',
+              byId: 'P-000006',
+              worksAtFirm: true,
+            },
+          );
+          expect(entraOidDeniedRes.code).toBe('FORBIDDEN');
+          expect(entraOidDeniedRes.person).toBeNull();
+          expect(JSON.stringify(entraOidDeniedRes)).not.toContain('00000000-0000-4000-8000-000000000999');
         });
 
-        // 4. Even for an employee:payroll holder, savePersonRecord & updatePersonPermissionOverrides never return raw payroll in bulk/save returns
+        // 4. Even for an employee:payroll holder, savePersonRecord & updatePersonPermissionOverrides never return raw payroll in bulk/save returns,
+        //    and R555 strips permissionOverrides/entraObjectId for HR editors lacking rbac:manage_user_overrides/rbac:manage_config
+        const p2WithRbacFields = (await getPartyRepository().getPersonById<Person>(ctx, 'P-000002'))!;
+        p2WithRbacFields.permissionOverrides = { grant: ['document:view'], revoke: [] };
+        p2WithRbacFields.entraObjectId = '00000000-0000-4000-8000-000000000222';
+        await getPartyRepository().putPerson(ctx, p2WithRbacFields);
+
+        const nonRbacPartnerSession = makeVerifiedTestEntraSession('P-000001', { roles: ['partner'] });
+        setTestEntraSessionOverride(nonRbacPartnerSession);
+        await runWithActiveActorSession(
+          {
+            personId: 'P-000001',
+            tenantId: nonRbacPartnerSession.tenantId,
+            tokenRoles: nonRbacPartnerSession.mappedRoles,
+            expiresAtMs: Date.parse(nonRbacPartnerSession.expiresAt),
+            verifiedSession: nonRbacPartnerSession,
+          },
+          async () => {
+            const partnerSaveRes = await savePersonRecord(
+              {
+                firstName: target.firstName,
+                surname: target.surname,
+                preferredName: 'Daf Partner Save',
+              },
+              {
+                id: 'P-000002',
+                byId: 'P-000001',
+                worksAtFirm: true,
+              },
+            );
+            expect(partnerSaveRes.errors).toBeUndefined();
+            expect(partnerSaveRes.person.permissionOverrides).toBeUndefined();
+            expect(partnerSaveRes.person.entraObjectId).toBeUndefined();
+            const storedAfterPartner = (await getPartyRepository().getPersonById<Person>(ctx, 'P-000002'))!;
+            expect(storedAfterPartner.permissionOverrides).toEqual({
+              grant: ['document:view'],
+              revoke: [],
+            });
+            expect(storedAfterPartner.entraObjectId).toBe('00000000-0000-4000-8000-000000000222');
+          },
+        );
+        setTestEntraSessionOverride(actorSession.verifiedSession);
+
         const adminSaveRes = await savePersonRecord(
           {
             firstName: target.firstName,
@@ -1700,6 +1777,11 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
         );
         expect(adminSaveRes.errors).toBeUndefined();
         expect(adminSaveRes.person.employment?.payroll).toBeUndefined();
+        expect(adminSaveRes.person.permissionOverrides).toEqual({
+          grant: ['document:view'],
+          revoke: [],
+        });
+        expect(adminSaveRes.person.entraObjectId).toBe('00000000-0000-4000-8000-000000000222');
 
         const overrideRes = await updatePersonPermissionOverrides(
           'P-000002',
@@ -1731,10 +1813,53 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
 
         const auditPosBeforeSnap = await markAuditPosition();
 
-        // 1. Bulk snapshot and registers workspace must NEVER include payroll or write view-payroll audit entries
+        // 1. Bulk snapshot and registers workspace must NEVER include payroll (including currentUser, effectiveWorkPerson, employees) or write view-payroll audit entries
         const snap = await getAppSnapshot('P-000004');
+        expect(snap.currentUser.employment?.payroll).toBeUndefined();
+        expect(snap.effectiveWorkPerson.employment?.payroll).toBeUndefined();
+        for (const e of snap.employees) {
+          expect(e.employment?.payroll).toBeUndefined();
+        }
         for (const p of snap.people) {
           expect(p.employment?.payroll).toBeUndefined();
+        }
+        // R538: effectiveWorkPerson resolved via demo showsWorkOfId must also carry filtered employment without payroll
+        const adminPersonBefore = (await getPartyRepository().getPersonById<Person>(ctx, 'P-000004'))!;
+        const rawBaseForShowsWork = structuredClone(
+          getActiveTenantRawBaseConfig() as Record<string, unknown>,
+        );
+        try {
+          setActiveTenantConfigForTesting(
+            {
+              ...rawBaseForShowsWork,
+              environment: 'test',
+              hostingMode: 'multi_tenant',
+              featureFlags: {
+                ...((rawBaseForShowsWork.featureFlags as Record<string, unknown>) ?? {}),
+                enableDemoMode: true,
+              },
+            },
+            {
+              tenantId: 'not-a-law-firm',
+              environment: 'test',
+              hostingMode: 'multi_tenant',
+              featureFlags: {
+                ...((rawBaseForShowsWork.featureFlags as Record<string, unknown>) ?? {}),
+                enableDemoMode: true,
+              },
+            },
+          );
+          await getPartyRepository().putPerson(ctx, {
+            ...adminPersonBefore,
+            demo: true,
+            showsWorkOfId: 'P-000002',
+          });
+          const snapWithShowsWork = await getAppSnapshot('P-000004');
+          expect(snapWithShowsWork.effectiveWorkPerson.id).toBe('P-000002');
+          expect(snapWithShowsWork.effectiveWorkPerson.employment?.payroll).toBeUndefined();
+        } finally {
+          setActiveTenantConfigForTesting(null);
+          await getPartyRepository().putPerson(ctx, adminPersonBefore);
         }
         const regSnap = await listRegistersWorkspaceDataRecord();
         expect(regSnap.ok).toBe(true);
@@ -1813,15 +1938,88 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
         expect(payrollAuditsAfterDeniedAction).toHaveLength(1);
 
         setTestEntraSessionOverride(actorSession.verifiedSession);
-        const revealActionRes = await revealEmployeePayrollAction('P-000002');
+        const expectedNino = 'AB123456C';
+        const expectedBankAccount = '87654321';
+        await getHrAndRbacRepository().putEmployeeSensitiveRecord(ctx, {
+          personId: 'P-000002',
+          payroll: {
+            ...targetBefore.employment!.payroll!,
+            nationalInsuranceNumber: expectedNino,
+            bankAccountName: 'Dafydd Evans',
+            bankSortCode: '12-34-56',
+            bankAccountNumber: expectedBankAccount,
+            buildingSocietyRollNumber: 'BSR-123',
+          },
+          updatedById: 'P-000004',
+          updatedAt: new Date().toISOString(),
+        });
+
+        // R553: default mode returns server-masked NI/bank details for profile viewing
+        const revealMaskedRes = await revealEmployeePayrollAction('P-000002');
+        expect(isActionDenied(revealMaskedRes)).toBe(false);
+        if (!isActionDenied(revealMaskedRes)) {
+          expect(revealMaskedRes.payroll?.externalPayrollReference).toBe(expectedPayRef);
+          expect(revealMaskedRes.payroll?.nationalInsuranceNumber.startsWith('•')).toBe(true);
+          expect(revealMaskedRes.payroll?.nationalInsuranceNumber).not.toBe(expectedNino);
+          expect(revealMaskedRes.payroll?.bankAccountNumber.startsWith('•')).toBe(true);
+          expect(revealMaskedRes.payroll?.bankAccountNumber).not.toBe(expectedBankAccount);
+          expect(revealMaskedRes.payroll?.bankAccountName).toBe('');
+          expect(revealMaskedRes.payroll?.buildingSocietyRollNumber).toBe('');
+        }
+
+        // R553: full mode returns raw NI/bank details for editing
+        const revealActionRes = await revealEmployeePayrollAction('P-000002', {
+          mode: 'full',
+        });
         expect(isActionDenied(revealActionRes)).toBe(false);
         if (!isActionDenied(revealActionRes)) {
           expect(revealActionRes.payroll?.externalPayrollReference).toBe(expectedPayRef);
+          expect(revealActionRes.payroll?.nationalInsuranceNumber).toBe(expectedNino);
+          expect(revealActionRes.payroll?.bankAccountNumber).toBe(expectedBankAccount);
         }
         const payrollAuditsAfterAction = (
           await auditEntriesForRecord('employee_payroll', 'P-000002', auditPosBeforeSnap)
         ).filter((a) => a.action === 'view-payroll');
-        expect(payrollAuditsAfterAction).toHaveLength(2);
+        expect(payrollAuditsAfterAction).toHaveLength(3);
+
+        // R540: Non-employee contact and employee with null payroll must NOT write false view-payroll audit entries
+        const allPeopleBeforeR540 = await getPartyRepository().listAllPeople<Person>(ctx);
+        const externalContact = allPeopleBeforeR540.find(
+          (p) => !p.isEmployee && !p.employment && !p.mergedIntoId,
+        )!;
+        expect(externalContact).toBeDefined();
+        const r540Mark = await markAuditPosition();
+        const contactReveal = await getEmployeeDetailsForUser(externalContact.id, 'P-000004', {
+          logViewPayroll: true,
+        });
+        expect(contactReveal.employment).toBeNull();
+        expect(
+          (await auditEntriesForRecord('employee_payroll', externalContact.id, r540Mark)).filter(
+            (a) => a.action === 'view-payroll',
+          ),
+        ).toHaveLength(0);
+
+        const noPayrollEmpDetails = await getEmployeeDetailsForUser('P-000010', 'P-000004', {
+          logViewPayroll: true,
+        });
+        // Check a person whose sensitive payroll_json is explicitly cleared
+        await getHrAndRbacRepository().putEmployeeSensitiveRecord(ctx, {
+          personId: 'P-000010',
+          payroll: null,
+          updatedById: 'P-000004',
+          updatedAt: new Date().toISOString(),
+        });
+        const r540NullPayMark = await markAuditPosition();
+        const nullPayReveal = await getEmployeeDetailsForUser('P-000010', 'P-000004', {
+          logViewPayroll: true,
+        });
+        expect(nullPayReveal.employment?.payroll).toBeUndefined();
+        expect(
+          (await auditEntriesForRecord('employee_payroll', 'P-000010', r540NullPayMark)).filter(
+            (a) => a.action === 'view-payroll',
+          ),
+        ).toHaveLength(0);
+        void noPayrollEmpDetails;
 
         // 6. Editing non-payroll employment fields using the payroll-stripped snapshot person must preserve stored payroll in PostgreSQL
         const dafyddFromSnap = snap.people.find((p) => p.id === 'P-000002')!;

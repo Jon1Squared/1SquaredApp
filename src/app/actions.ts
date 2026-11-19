@@ -165,6 +165,7 @@ import type {
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
 import { buildActionDenied } from '@/domain/actionResult';
+import { maskPayrollDetails } from '@/domain/employment';
 import {
   getActiveTenantConfiguration,
   getMatterRepository,
@@ -273,7 +274,10 @@ export async function logEmployeeRestrictedAccessAction(
   });
 }
 
-export async function revealEmployeePayrollAction(personId: string) {
+export async function revealEmployeePayrollAction(
+  personId: string,
+  options?: { mode?: 'masked' | 'full' },
+) {
   return guardedAction('revealEmployeePayrollAction', async ({ personId: byId }) => {
     const res = await getEmployeeDetailsForUser(personId, byId, { logViewPayroll: true });
     if (res.errors?.payrollPermission) {
@@ -283,10 +287,14 @@ export async function revealEmployeePayrollAction(personId: string) {
         errors: res.errors,
       };
     }
-    revalidateAll();
+    const rawPayroll = res.employment?.payroll ?? null;
+    const payroll =
+      rawPayroll && options?.mode !== 'full'
+        ? maskPayrollDetails(rawPayroll)
+        : rawPayroll;
     return {
       ok: !res.errors?.notFound,
-      payroll: res.employment?.payroll ?? null,
+      payroll,
       errors: res.errors,
     };
   });
