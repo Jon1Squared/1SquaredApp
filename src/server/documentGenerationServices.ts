@@ -1608,21 +1608,32 @@ export async function updateDocumentGenerationConfigService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<DocumentGenerationConfig> {
-  const { ctx, user, config, repo } = await getInitializedDocGenContext(
-    userId,
-    session,
-  );
+  const { ctx, user, people, teams, config, repo } =
+    await getInitializedDocGenContext(userId, session);
+  if (ctx.mfaVerified !== true) {
+    throw new Error(
+      'MFA_REQUIRED: Multi-factor authentication is required to change document generation settings.',
+    );
+  }
   const actor = buildDocumentActorFromPerson(user, ctx);
 
   const isSecuritySensitivePatch =
     patch.permissions !== undefined ||
     patch.approval?.requireApproval !== undefined ||
     patch.approval?.allowSelfApproval !== undefined;
+  const personPermOptions = {
+    allPeople: people,
+    teams,
+    config,
+    context: ctx,
+    mfaVerified: ctx.mfaVerified,
+    enforceMfa: true,
+  };
   const canUpdateConfig = isSecuritySensitivePatch
-    ? hasPersonPermission(user, 'rbac:manage_config', { config }) ||
-      hasPersonPermission(user, 'admin:access', { config })
+    ? hasPersonPermission(user, 'rbac:manage_config', personPermOptions) ||
+      hasPersonPermission(user, 'admin:access', personPermOptions)
     : hasDocumentPermission(actor, 'document_template:build', config) ||
-      hasPersonPermission(user, 'rbac:manage_config', { config });
+      hasPersonPermission(user, 'rbac:manage_config', personPermOptions);
 
   if (!canUpdateConfig) {
     throw new Error(

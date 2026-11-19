@@ -6,7 +6,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How Microsoft Entra ID OIDC sign-in and sign-out work in 1Squared, how role-based access control (RBAC) and Entra identity mapping are configured, and which administrative actions require multi-factor authentication (MFA).',
-  updated: '2026-11-16',
+  updated: '2026-11-19',
   body: `
 1Squared authenticates every user through **Microsoft Entra ID (OpenID Connect with PKCE)** and evaluates access on every server action and API route through the central **Role-Based Access Control (RBAC)** engine in \`@platform/core\`.
 
@@ -96,6 +96,7 @@ Even if a user holds an administrative or partner role, **MFA verification (\`mf
 - Viewing or editing payroll and sensitive HR records (\`employee:payroll\`, \`employee:sensitive\`)
 - Accessing staff or restricted matters (\`matter:restricted:access\`), or lifting a staff/ethical-wall restriction on a matter (\`liftMatterRestriction\`, requiring \`matter:restriction:lift\`, \`mfaVerified === true\`, and a mandatory audit reason)
 - Approving document templates or configuring SharePoint stores (\`document_template:approve\`, \`document_template:configure\`, \`document_store:configure\`)
+- Saving Document Generation settings (\`updateDocumentGenerationConfigAction\` under **Administration → Document Templates → Settings**, alongside \`document_template:build\`, \`rbac:manage_config\`, or \`admin:access\`)
 - Overriding limitation calculations, waiving key dates, or changing key date rules (\`keydate:override_calculation\`, \`keydate:waive\`, \`keydate:configure\`)
 `,
 };

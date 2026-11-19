@@ -38,6 +38,7 @@ import {
 import {
   buildValidDocxArchive,
   findUnmappedPlaceholders,
+  type DocumentGenerationConfig,
   type DocumentOutputFormat,
   type DocumentTemplateRecord,
   type DocumentTemplateVersionRecord,
@@ -630,6 +631,29 @@ export function DocumentTemplatesAdminPanel({
     } finally {
       setBusy(false);
       e.target.value = '';
+    }
+  }
+
+  async function handleUpdateConfig(patch: Partial<DocumentGenerationConfig>) {
+    setBusy(true);
+    setBanner(null);
+    try {
+      await updateDocumentGenerationConfigAction(patch);
+      await loadData();
+    } catch (err) {
+      const rawMessage = err instanceof Error ? err.message : '';
+      const text = rawMessage.includes('MFA_REQUIRED')
+        ? 'You need to sign in with multi-factor authentication to change these settings.'
+        : rawMessage.includes('DOCUMENT_PERMISSION_DENIED')
+          ? 'You do not have permission to change these settings.'
+          : rawMessage || 'Failed to update document generation settings.';
+      await loadData();
+      setBanner({
+        tone: 'error',
+        text,
+      });
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -2065,10 +2089,9 @@ export function DocumentTemplatesAdminPanel({
                 className="input"
                 value={snapshot.config.storageProvider}
                 onChange={async (e) => {
-                  await updateDocumentGenerationConfigAction({
+                  await handleUpdateConfig({
                     storageProvider: e.target.value as StorageProviderId,
                   });
-                  await loadData();
                 }}
               >
                 <option value="local-fs">
@@ -2095,11 +2118,10 @@ export function DocumentTemplatesAdminPanel({
                 className="input"
                 value={snapshot.config.defaultOutputFormat}
                 onChange={async (e) => {
-                  await updateDocumentGenerationConfigAction({
+                  await handleUpdateConfig({
                     defaultOutputFormat: e.target
                       .value as DocumentOutputFormat,
                   });
-                  await loadData();
                 }}
               >
                 <option value="docx">Word Document (.docx)</option>
@@ -2119,10 +2141,9 @@ export function DocumentTemplatesAdminPanel({
                 type="checkbox"
                 checked={snapshot.config.allowUserFormatOverride}
                 onChange={async (e) => {
-                  await updateDocumentGenerationConfigAction({
+                  await handleUpdateConfig({
                     allowUserFormatOverride: e.target.checked,
                   });
-                  await loadData();
                 }}
               />
               <span>
@@ -2143,13 +2164,12 @@ export function DocumentTemplatesAdminPanel({
                 type="checkbox"
                 checked={snapshot.config.approval.allowSelfApproval}
                 onChange={async (e) => {
-                  await updateDocumentGenerationConfigAction({
+                  await handleUpdateConfig({
                     approval: {
                       ...snapshot.config.approval,
                       allowSelfApproval: e.target.checked,
                     },
                   });
-                  await loadData();
                 }}
               />
               <span>
@@ -2169,13 +2189,12 @@ export function DocumentTemplatesAdminPanel({
                 type="checkbox"
                 checked={snapshot.config.usage.showUserLevelDetail}
                 onChange={async (e) => {
-                  await updateDocumentGenerationConfigAction({
+                  await handleUpdateConfig({
                     usage: {
                       ...snapshot.config.usage,
                       showUserLevelDetail: e.target.checked,
                     },
                   });
-                  await loadData();
                 }}
               />
               <span>
