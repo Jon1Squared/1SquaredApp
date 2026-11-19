@@ -37,6 +37,7 @@ import {
   resolveDocumentPermissions,
   retireTemplate,
   rollbackTemplateToVersion,
+  sanitizeTelemetryProperties,
   submitTemplateVersionForApproval,
   TenantDocumentRepository,
   updateDraftTemplateVersion,
@@ -85,6 +86,7 @@ import type {
   Person,
   Team,
 } from '@/domain/types';
+import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { resolveRequestCorrelationId } from './correlationId';
 import {
   appendTenantAuditEntries,
@@ -147,6 +149,7 @@ export interface DocumentGenerationClientSnapshot {
 declare global {
   var __oneSquaredDocRepo: TenantDocumentRepository | undefined;
   var __oneSquaredDocStorage: DocumentStorageProvider | undefined;
+  var __oneSquaredDocStorageKey: string | undefined;
   var __oneSquaredDevBlobKey: string | undefined;
   var __oneSquaredDevBlobKeyWarned: boolean | undefined;
 }
@@ -155,11 +158,21 @@ function isTestEnv(): boolean {
   return Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
 }
 
-function resolveDevFallbackSigningKey(): string {
-  if (process.env.NODE_ENV !== 'development') {
+function isLiveBlobEnvironment(environment?: string): boolean {
+  if (environment === 'live') return true;
+  if (environment !== undefined) return false;
+  return (
+    process.env.PLATFORM_ENVIRONMENT === 'live' ||
+    getActiveTenantConfiguration().environment === 'live'
+  );
+}
+
+function resolveDevFallbackSigningKey(environment?: string): string {
+  if (isLiveBlobEnvironment(environment) || process.env.NODE_ENV !== 'development') {
     return '';
   }
-  const tenantEnv = getActiveTenantConfiguration().environment;
+  const tenantCfg = getActiveTenantConfiguration();
+  const tenantEnv = tenantCfg.environment;
   if (tenantEnv !== 'dev' && tenantEnv !== 'test') {
     return '';
   }
@@ -177,34 +190,47 @@ function resolveDevFallbackSigningKey(): string {
     emitPlatformStartupTelemetry({
       eventName: 'blob_signing_ephemeral_dev_key_in_use',
       severity: 'warn',
-      hostingMode: getActiveTenantConfiguration().hostingMode,
-      configuredTenantId: getActiveTenantConfiguration().tenantId,
+      hostingMode: tenantCfg.hostingMode,
+      configuredTenantId: tenantCfg.tenantId,
       correlationId: blobKeyCorrelationId,
-      properties: {
+      properties: sanitizeTelemetryProperties({
         environment: tenantEnv,
-      },
+      }),
     });
     console.warn(
-      JSON.stringify({
-        level: 'warn',
-        event: 'blob_signing_ephemeral_dev_key_in_use',
-        correlationId: blobKeyCorrelationId,
-        environment: tenantEnv,
-        message:
-          'PLATFORM_BLOB_SIGNING_KEY is unset; using an ephemeral per-process development signing key.',
-      }),
+      JSON.stringify(
+        sanitizeTelemetryProperties({
+          level: 'warn',
+          event: 'blob_signing_ephemeral_dev_key_in_use',
+          tenantId: tenantCfg.tenantId,
+          correlationId: blobKeyCorrelationId,
+          environment: tenantEnv,
+          message:
+            'PLATFORM_BLOB_SIGNING_KEY is unset; using an ephemeral per-process development signing key.',
+        }),
+      ),
     );
   }
   return g.__oneSquaredDevBlobKey;
 }
 
-export function resolveTenantBlobSigningKey(tenantId: string): string {
-  const baseSecret =
-    process.env.PLATFORM_BLOB_SIGNING_KEY?.trim() ||
-    (isTestEnv()
-      ? 'test-host-blob-signing-key-from-vault'
-      : resolveDevFallbackSigningKey());
-  if (!baseSecret || (baseSecret.startsWith('<') && baseSecret.endsWith('>'))) {
+export function resolveTenantBlobSigningKey(
+  tenantId: string,
+  environment?: string,
+): string {
+  const isLive = isLiveBlobEnvironment(environment);
+  const configuredSecret = process.env.PLATFORM_BLOB_SIGNING_KEY?.trim() || '';
+  const baseSecret = configuredSecret
+    ? configuredSecret
+    : isLive
+      ? ''
+      : isTestEnv()
+        ? 'test-host-blob-signing-key-from-vault'
+        : resolveDevFallbackSigningKey(environment);
+  if (
+    !baseSecret ||
+    (baseSecret.startsWith('<') && baseSecret.endsWith('>'))
+  ) {
     throw new Error(
       'STORAGE_CONFIG_ERROR: PLATFORM_BLOB_SIGNING_KEY must be configured in Key Vault / environment.',
     );
@@ -218,14 +244,26 @@ export function resolveTenantBlobSigningKey(tenantId: string): string {
 export function getDocumentStorage(
   config: TenantConfiguration,
 ): DocumentStorageProvider {
-  if (!global.__oneSquaredDocStorage) {
+  const isLive = isLiveBlobEnvironment(config.environment);
+  const cacheKey = `${config.tenantId}:${config.environment}:${config.documentGeneration.storageProvider}`;
+  const signingKey = resolveTenantBlobSigningKey(
+    config.tenantId,
+    config.environment,
+  );
+  if (
+    !global.__oneSquaredDocStorage ||
+    global.__oneSquaredDocStorageKey !== cacheKey ||
+    isLive
+  ) {
     global.__oneSquaredDocStorage = createDocumentStorageProvider(
       config.documentGeneration.storageProvider,
       {
-        inMemoryOnly: isTestEnv(),
-        tokenSigningKey: resolveTenantBlobSigningKey(config.tenantId),
+        inMemoryOnly: !isLive && isTestEnv(),
+        environment: isLive ? 'live' : config.environment,
+        tokenSigningKey: signingKey,
       },
     );
+    global.__oneSquaredDocStorageKey = cacheKey;
   }
   return global.__oneSquaredDocStorage;
 }
@@ -758,10 +796,16 @@ export async function getInitializedDocGenContext(
 export async function getDocumentGenerationSnapshotForUser(
   userId: string,
   session?: VerifiedEntraSessionPayload,
-): Promise<DocumentGenerationClientSnapshot> {
+): Promise<DocumentGenerationClientSnapshot | ActionDenied> {
   const { store, ctx, user, matters, config, repo } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
+  if (!hasDocumentPermission(actor, 'document_template:view', config)) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'Permission "document_template:view" is required to view document templates and generated documents.',
+    );
+  }
   const userPermissions = resolveDocumentPermissions(actor, config);
   const fullCatalogue = buildFullCatalogueFromStoreCustomFields(
     store.customFields,

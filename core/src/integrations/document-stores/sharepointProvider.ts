@@ -970,6 +970,14 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
     context: ProvisioningAccessContext,
   ): Promise<DocumentStoreConnectionTestResult> {
     const provCtx = this.assertProvisioningContext(context);
+    if (this.tenantContext.environment === 'live') {
+      throw createMockGraphError(
+        'misconfigured',
+        'SharePoint live connection not yet available.',
+      );
+    }
+    const simulatedNotice =
+      'Simulated connection (non-live environment): results come from MockSharePointGraphBackend, not Microsoft Graph.';
     const startMs = Date.now();
     try {
       const caller = await this.resolveCallerIdentity(provCtx, undefined, true);
@@ -981,6 +989,8 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           storeId: this.storeId,
           checkedAt: new Date().toISOString(),
           latencyMs: Math.max(1, Date.now() - startMs),
+          simulated: true,
+          warnings: [simulatedNotice],
           errorCode: 'misconfigured',
           errorReason: 'SharePoint site and library settings are missing.',
           checks: {
@@ -1031,9 +1041,11 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           storeId: this.storeId,
           checkedAt: new Date().toISOString(),
           latencyMs: Math.max(1, Date.now() - startMs),
+          simulated: true,
           roleVerificationStatus: 'not_verified',
           warnings: [
             `SharePoint site permission grant role could not be verified because GET /sites/${siteId}/permissions returned 403 Forbidden. Confirm that the site grant includes "fullcontrol" before provisioning folder permissions.`,
+            simulatedNotice,
           ],
           checks: {
             credentialsValid: true,
@@ -1062,6 +1074,8 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
           storeId: this.storeId,
           checkedAt: new Date().toISOString(),
           latencyMs: Math.max(1, Date.now() - startMs),
+          simulated: true,
+          warnings: [simulatedNotice],
           errorCode: 'access_denied',
           errorReasonCode: 'site_grant_role_insufficient',
           roleVerificationStatus: 'insufficient',
@@ -1087,6 +1101,8 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
         storeId: this.storeId,
         checkedAt: new Date().toISOString(),
         latencyMs: Math.max(1, Date.now() - startMs),
+        simulated: true,
+        warnings: [simulatedNotice],
         roleVerificationStatus: 'verified',
         checks: {
           credentialsValid: true,
@@ -1119,6 +1135,8 @@ export class SharePointDocumentStoreProvider implements DocumentStoreProvider {
         storeId: this.storeId,
         checkedAt: new Date().toISOString(),
         latencyMs: Math.max(1, Date.now() - startMs),
+        simulated: true,
+        warnings: [simulatedNotice],
         errorCode: code,
         ...(reasonCode ? { errorReasonCode: reasonCode } : {}),
         errorReason: reason,

@@ -10,6 +10,8 @@ import 'server-only';
 import {
   collectStructuredConfigReservedSettings,
   emitPlatformStartupTelemetry,
+  emitTenantTelemetryEvent,
+  sanitizeTelemetryString,
   CORE_API_VERSION,
   CORE_VERSION,
   ExtensionHost,
@@ -364,13 +366,25 @@ function loadTenantPackageExtensions(
     if (!fs.existsSync(manifestPath)) {
       if (enabledSet.size > 0) {
         const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
-        const message = `EXTENSION_MANIFEST_NOT_FOUND: manifest.json is missing in "${extDir}".`;
+        const rawMessage = `EXTENSION_MANIFEST_NOT_FOUND: manifest.json is missing in "${extDir}".`;
+        const safeMessage = sanitizeTelemetryString(rawMessage);
         loadErrors.push({
           tenantId: tenantConfig.tenantId,
           extensionDir: extDirName,
           extensionId: extDirName,
           declaredHooks: null,
-          error: message,
+          error: safeMessage,
+        });
+        emitTenantTelemetryEvent({
+          eventName: 'extension_load_failed',
+          severity: 'error',
+          tenantId: tenantConfig.tenantId,
+          correlationId: loadCorrelationId,
+          properties: {
+            extensionDir: extDirName,
+            extensionId: extDirName,
+            errorCode: 'EXTENSION_MANIFEST_NOT_FOUND',
+          },
         });
         console.error(
           JSON.stringify({
@@ -380,7 +394,8 @@ function loadTenantPackageExtensions(
             correlationId: loadCorrelationId,
             extensionDir: extDirName,
             extensionId: extDirName,
-            error: message,
+            errorCode: 'EXTENSION_MANIFEST_NOT_FOUND',
+            error: safeMessage,
           }),
         );
       }
@@ -462,14 +477,28 @@ function loadTenantPackageExtensions(
         host.registerExtension(exportedValue);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const errorCode =
+        rawMessage.match(/^([A-Z0-9_]+):/)?.[1] ?? 'EXTENSION_LOAD_FAILED';
+      const safeMessage = sanitizeTelemetryString(rawMessage);
       const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
       loadErrors.push({
         tenantId: tenantConfig.tenantId,
         extensionDir: extDirName,
         extensionId: resolvedExtensionId,
         declaredHooks,
-        error: message,
+        error: safeMessage,
+      });
+      emitTenantTelemetryEvent({
+        eventName: 'extension_load_failed',
+        severity: 'error',
+        tenantId: tenantConfig.tenantId,
+        correlationId: loadCorrelationId,
+        properties: {
+          extensionDir: extDirName,
+          extensionId: resolvedExtensionId,
+          errorCode,
+        },
       });
       console.error(
         JSON.stringify({
@@ -479,7 +508,8 @@ function loadTenantPackageExtensions(
           correlationId: loadCorrelationId,
           extensionDir: extDirName,
           extensionId: resolvedExtensionId,
-          error: message,
+          errorCode,
+          error: safeMessage,
         }),
       );
     }
@@ -499,13 +529,25 @@ function loadTenantPackageExtensions(
       )
     ) {
       const loadCorrelationId = `ext-load-${nodeCrypto.randomUUID()}`;
-      const message = `EXTENSION_NOT_REGISTERED: Enabled extension "${enabledId}" was not found or failed to register.`;
+      const rawMessage = `EXTENSION_NOT_REGISTERED: Enabled extension "${enabledId}" was not found or failed to register.`;
+      const safeMessage = sanitizeTelemetryString(rawMessage);
       loadErrors.push({
         tenantId: tenantConfig.tenantId,
         extensionDir: enabledId,
         extensionId: enabledId,
         declaredHooks: null,
-        error: message,
+        error: safeMessage,
+      });
+      emitTenantTelemetryEvent({
+        eventName: 'extension_load_failed',
+        severity: 'error',
+        tenantId: tenantConfig.tenantId,
+        correlationId: loadCorrelationId,
+        properties: {
+          extensionDir: enabledId,
+          extensionId: enabledId,
+          errorCode: 'EXTENSION_NOT_REGISTERED',
+        },
       });
       console.error(
         JSON.stringify({
@@ -515,7 +557,8 @@ function loadTenantPackageExtensions(
           correlationId: loadCorrelationId,
           extensionDir: enabledId,
           extensionId: enabledId,
-          error: message,
+          errorCode: 'EXTENSION_NOT_REGISTERED',
+          error: safeMessage,
         }),
       );
     }

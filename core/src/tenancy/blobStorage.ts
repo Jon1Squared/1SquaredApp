@@ -108,6 +108,8 @@ export interface TenantStorageProviderOptions {
   inMemoryOnly?: boolean;
   /** Secret key used to sign short-lived scoped download tokens. */
   tokenSigningKey?: string;
+  /** Active tenant environment (`live` forbids in-memory storage and test fallback keys). */
+  environment?: string;
 }
 
 abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
@@ -121,9 +123,17 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
   constructor(options?: TenantStorageProviderOptions | string) {
     const resolvedOptions: TenantStorageProviderOptions | undefined =
       typeof options === 'string' ? { tokenSigningKey: options } : options;
+    const isLive =
+      resolvedOptions?.environment === 'live' ||
+      process.env.PLATFORM_ENVIRONMENT === 'live';
     this.rootDir =
       resolvedOptions?.rootDir ?? path.join(process.cwd(), 'data', 'storage');
     this.inMemoryOnly = resolvedOptions?.inMemoryOnly ?? false;
+    if (isLive && this.inMemoryOnly) {
+      throw new Error(
+        'STORAGE_CONFIG_ERROR: In-memory blob storage is forbidden when tenant environment is "live".',
+      );
+    }
     if (resolvedOptions && 'tokenSigningKey' in resolvedOptions) {
       const explicitKey = resolvedOptions.tokenSigningKey?.trim() ?? '';
       if (explicitKey.length < 16) {
@@ -132,7 +142,10 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
         );
       }
       this.tokenSigningKey = explicitKey;
-    } else if (Boolean(process.env.VITEST || process.env.NODE_ENV === 'test')) {
+    } else if (
+      !isLive &&
+      Boolean(process.env.VITEST || process.env.NODE_ENV === 'test')
+    ) {
       this.tokenSigningKey = 'test-only-ephemeral-blob-signing-key-not-for-prod';
     } else {
       throw new Error(

@@ -306,6 +306,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
       },
     );
 
+    setTestEntraSessionOverride(makeSession());
     const customRes = await wrapped(
       new Request('http://localhost:3000/api/matters/MAT-999/documents'),
       { params: Promise.resolve({ id: 'MAT-999' }) },
@@ -437,5 +438,63 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
         }),
       ).toThrow(/permission to access this matter/i);
     });
+  });
+
+  it('R518: guardedRoute rejects unauthenticated callers for service routes, and both wrappers enforce declared service policy keys without blocking non-MFA calls', async () => {
+    // 1. Unauthenticated call to an enforcedBy: 'service' route returns 401 without calling handler
+    setTestEntraSessionOverride(undefined);
+    const serviceRouteHandler = vi.fn(() => NextResponse.json({ ok: true }));
+    const wrappedServiceRoute = guardedRoute(
+      'GET /api/document-stores',
+      serviceRouteHandler,
+    );
+    const unauthRouteRes = await wrappedServiceRoute(
+      new NextRequest('http://localhost:3000/api/document-stores'),
+    );
+    expect(serviceRouteHandler).not.toHaveBeenCalled();
+    expect(unauthRouteRes.status).toBe(401);
+
+    // 2. Authenticated fee_earner (P-000002) lacks all keys on GET /api/document-stores -> 403 without calling handler
+    setTestEntraSessionOverride(makeSession());
+    const forbiddenRouteRes = await wrappedServiceRoute(
+      new NextRequest('http://localhost:3000/api/document-stores'),
+    );
+    expect(serviceRouteHandler).not.toHaveBeenCalled();
+    expect(forbiddenRouteRes.status).toBe(403);
+
+    // 3. Authenticated finance user (P-000009) lacks matter:create/matter:edit on saveMatterAction ('service') -> FORBIDDEN before fn runs
+    setTestEntraSessionOverride(
+      makeSession({
+        personId: 'P-000009',
+        sub: 'P-000009',
+        email: 'finance@notalawfirm.example',
+        displayName: 'Finance Manager',
+        mappedRoles: ['finance'],
+      }),
+    );
+    const saveMatterFn = vi.fn(() => ({ matter: null }));
+    const deniedServiceAction = await guardedAction('saveMatterAction', saveMatterFn);
+    expect(saveMatterFn).not.toHaveBeenCalled();
+    expect(isActionDenied(deniedServiceAction)).toBe(true);
+    if (isActionDenied(deniedServiceAction)) {
+      expect(deniedServiceAction.code).toBe('FORBIDDEN');
+    }
+
+    // 4. Coarse service pre-check allows non-MFA calls through when actor holds a declared key (leaving MFA checks to the service)
+    setTestEntraSessionOverride(
+      makeSession({
+        personId: 'P-000004',
+        sub: 'P-000004',
+        mappedRoles: ['admin'],
+        mfaVerified: false,
+      }),
+    );
+    const docGenFn = vi.fn(() => ({ passedToService: true }));
+    const forwardedToService = await guardedAction(
+      'updateDocumentGenerationConfigAction',
+      docGenFn,
+    );
+    expect(docGenFn).toHaveBeenCalledTimes(1);
+    expect(forwardedToService).toEqual({ passedToService: true });
   });
 });

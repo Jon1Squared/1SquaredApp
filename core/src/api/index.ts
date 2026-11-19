@@ -1144,6 +1144,7 @@ export interface DocumentStoreConnectionTestResult {
   readonly storeId: string;
   readonly checkedAt: string;
   readonly latencyMs: number;
+  readonly simulated?: boolean;
   readonly errorCode?: DocumentStoreErrorCode;
   readonly errorReason?: string;
   readonly errorReasonCode?: DocumentStoreErrorReason;

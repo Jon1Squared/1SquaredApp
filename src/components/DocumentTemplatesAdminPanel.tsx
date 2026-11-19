@@ -35,6 +35,7 @@ import {
   updateTemplateDraftAction,
   uploadTemplateDraftAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   buildValidDocxArchive,
   findUnmappedPlaceholders,
@@ -160,6 +161,11 @@ export function DocumentTemplatesAdminPanel({
   const loadData = useCallback(async () => {
     try {
       const snap = await getDocumentGenerationSnapshotAction();
+      if (isActionDenied(snap)) {
+        setSnapshot(null);
+        setUsageReport(null);
+        return;
+      }
       setSnapshot(snap);
       if (
         snap.userPermissions.includes('document_template:view_usage')

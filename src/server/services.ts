@@ -5238,6 +5238,24 @@ async function runMatterOpeningGate(params: {
       rawWarning.startsWith('Hook "beforeMatterOpen" in extension ') ||
       rawWarning.startsWith('[Extension isolated error:');
     if (isInternalHookFailure) {
+      const extMatch = rawWarning.match(
+        /Hook "beforeMatterOpen" in extension "([^"]+)"/,
+      );
+      const extensionId = extMatch?.[1] ?? 'unknown';
+      const errorCode = rawWarning.startsWith('[Extension isolated error:')
+        ? 'EXTENSION_ISOLATED_ERROR'
+        : 'EXTENSION_HOOK_FAILED';
+      emitTenantTelemetryEvent({
+        eventName: 'extension.before_matter_open_hook_failed',
+        severity: 'error',
+        tenantId: extensionCtx.tenantId,
+        correlationId: extensionCtx.correlationId,
+        properties: {
+          matterId: matter.id,
+          extensionId,
+          errorCode,
+        },
+      });
       console.error(
         JSON.stringify({
           level: 'error',
@@ -5245,7 +5263,8 @@ async function runMatterOpeningGate(params: {
           tenantId: extensionCtx.tenantId,
           correlationId: extensionCtx.correlationId,
           matterId: matter.id,
-          errorMessage: rawWarning,
+          extensionId,
+          errorCode,
         }),
       );
     }
@@ -16763,13 +16782,19 @@ export async function requestMatterBill(
   const assignedPersonId = targetMatter.leadFeeEarnerId ?? null;
   const assignedTeamId = targetMatter.owningTeamId ?? null;
   if (!assignedPersonId) {
-    const tenantCfg = getActiveTenantConfiguration();
+    emitTenantTelemetryEvent({
+      eventName: 'finance.draft_bill_approval_task_unassigned',
+      severity: 'warn',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      properties: { matterId: targetMatter.id },
+    });
     console.warn(
       JSON.stringify({
         level: 'warn',
         event: 'draft_bill_approval_task_unassigned',
-        tenantId: tenantCfg.tenantId,
-        correlationId: `corr-bill-task-${Date.now()}`,
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
       }),
     );
   }
@@ -16843,13 +16868,19 @@ export async function flagMatterWriteOff(
   const assignedPartnerId =
     matter.supervisingPartnerId ?? matter.responsiblePartnerId ?? null;
   if (!assignedPartnerId) {
-    const tenantCfg = getActiveTenantConfiguration();
+    emitTenantTelemetryEvent({
+      eventName: 'finance.write_off_signoff_unassigned',
+      severity: 'warn',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      properties: { matterId: matter.id },
+    });
     console.warn(
       JSON.stringify({
         level: 'warn',
         event: 'write_off_signoff_unassigned',
-        tenantId: tenantCfg.tenantId,
-        correlationId: `corr-writeoff-${Date.now()}`,
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
       }),
     );
   }
@@ -16898,13 +16929,19 @@ export async function remindTeamLeadOverdueCompliance(
   }
   const leadId = team.leadIds[0] ?? null;
   if (!leadId) {
-    const tenantCfg = getActiveTenantConfiguration();
+    emitTenantTelemetryEvent({
+      eventName: 'compliance.reminder_no_team_lead',
+      severity: 'warn',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      properties: { teamId: team.id },
+    });
     console.warn(
       JSON.stringify({
         level: 'warn',
         event: 'compliance_reminder_no_team_lead',
-        tenantId: tenantCfg.tenantId,
-        correlationId: `corr-compliance-remind-${Date.now()}`,
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
         teamId: team.id,
       }),
     );
@@ -17027,13 +17064,19 @@ export async function recordInvoiceCreditControlAction(
       matter.responsiblePartnerId ?? matter.supervisingPartnerId ?? null;
     const assignedTeamId = matter.owningTeamId ?? null;
     if (!partnerId) {
-      const tenantCfg = getActiveTenantConfiguration();
+      emitTenantTelemetryEvent({
+        eventName: 'finance.credit_control_escalation_task_unassigned',
+        severity: 'warn',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        properties: { matterId: matter.id },
+      });
       console.warn(
         JSON.stringify({
           level: 'warn',
           event: 'credit_control_escalation_task_unassigned',
-          tenantId: tenantCfg.tenantId,
-          correlationId: `corr-credit-escalate-${Date.now()}`,
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
         }),
       );
     }

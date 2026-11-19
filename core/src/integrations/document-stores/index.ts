@@ -157,6 +157,7 @@ export class DocumentStoreProviderRegistry {
   >();
   private readonly tokenService: DocumentStoreTokenService;
   private readonly backend: MockSharePointGraphBackend;
+  private hasCustomSharePointFactory = false;
 
   public constructor(options?: {
     tokenService?: DocumentStoreTokenService;
@@ -170,6 +171,7 @@ export class DocumentStoreProviderRegistry {
       'sharepoint',
       (params) => new SharePointDocumentStoreProvider(params),
     );
+    this.hasCustomSharePointFactory = false;
   }
 
   public getTokenService(): DocumentStoreTokenService {
@@ -184,6 +186,9 @@ export class DocumentStoreProviderRegistry {
     providerType: DocumentStoreProviderType,
     factory: DocumentStoreProviderFactory,
   ): void {
+    if (providerType === 'sharepoint') {
+      this.hasCustomSharePointFactory = true;
+    }
     this.factories.set(providerType, factory);
   }
 
@@ -196,6 +201,17 @@ export class DocumentStoreProviderRegistry {
         code: 'misconfigured',
         message:
           'TENANCY_ISOLATION_ERROR: Cannot instantiate DocumentStoreProvider without a TenantContext.',
+      });
+    }
+
+    if (
+      storeConfig.providerType === 'sharepoint' &&
+      tenantContext.environment === 'live' &&
+      !this.hasCustomSharePointFactory
+    ) {
+      throw normaliseDocumentStoreError({
+        code: 'misconfigured',
+        message: 'SharePoint live connection not yet available.',
       });
     }
 

@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BasicMergeEngine,
   canActorAccessGeneratedDocument,
+  createDocumentStorageProvider,
   loadAndValidateTenantConfig,
   resolveDocumentPermissions,
 } from '@platform/core';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   buildDocumentActorFromPerson,
   buildFieldResolutionContextForRecord,
@@ -19,8 +21,11 @@ import {
   downloadGeneratedDocumentService,
   generateDocumentService,
   getDocumentGenerationSnapshotForUser,
+  getDocumentStorage,
   getTemplateUsageReportService,
+  resolveTenantBlobSigningKey,
 } from '@/server/documentGenerationServices';
+import { getPartyRepository } from '@/server/services';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { runWithActiveActorSession } from '@/domain/rbac';
 import {
@@ -169,6 +174,8 @@ describe('Host Document Generation Domain & Server Services', () => {
         },
         async () => {
           const snap = await getDocumentGenerationSnapshotForUser('P-000001');
+          expect(isActionDenied(snap)).toBe(false);
+          if (isActionDenied(snap)) throw new Error(snap.message);
           expect(snap.templates.length).toBeGreaterThanOrEqual(2);
           const clientCareTpl = snap.templates.find((t) => t.code === 'CCL-ENG-01');
           expect(clientCareTpl).toBeDefined();
@@ -341,5 +348,96 @@ describe('Host Document Generation Domain & Server Services', () => {
         buildDocumentActorFromPerson(samplePerson),
       ),
     ).toThrow(/RBAC_TENANT_REQUIRED/);
+  });
+
+  it('R519: getDocumentGenerationSnapshotForUser refuses an actor whose document_template:view permission is revoked', async () => {
+    const store = loadCommittedSeedStore();
+    const fe = store.people.find((p) => p.id === 'P-000002')!;
+    const cfg = getActiveTenantConfiguration();
+    const ctx = {
+      tenantId: cfg.tenantId,
+      actorId: 'P-000002',
+      actorName: 'Dafydd Evans',
+      actorEmail: 'dafydd.evans@notalawfirm.example',
+      actorRoles: ['fee_earner'],
+      mfaVerified: true,
+      hostingMode: cfg.hostingMode,
+      environment: cfg.environment,
+      correlationId: 'corr-r519',
+      postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
+      blobContainerName: 'tenant-not-a-law-firm-docs',
+      keyVaultSecretPrefix: 'kv-not-a-law-firm-test',
+    };
+    const origOverrides = fe.permissionOverrides;
+    try {
+      await getPartyRepository().putPerson(ctx, {
+        ...fe,
+        permissionOverrides: {
+          grant: [],
+          revoke: ['document_template:view'],
+          reason: 'R519 test revoke',
+        },
+      });
+      const cookie = createSignedEntraSessionCookie({
+        personId: 'P-000002',
+        tenantId: cfg.tenantId,
+        oid: '00000000-0000-4000-8000-000000000002',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000002',
+        email: 'dafydd.evans@notalawfirm.example',
+        displayName: 'Dafydd Evans',
+        entraRoles: ['fee_earner'],
+        mappedRoles: ['fee_earner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const session = verifySignedEntraSessionCookie(cookie)!;
+      const denied = await getDocumentGenerationSnapshotForUser('P-000002', session);
+      expect(isActionDenied(denied)).toBe(true);
+      if (isActionDenied(denied)) {
+        expect(denied.code).toBe('FORBIDDEN');
+        expect(denied.message).toContain('document_template:view');
+      }
+    } finally {
+      await getPartyRepository().putPerson(ctx, {
+        ...fe,
+        permissionOverrides: origOverrides,
+      });
+    }
+  });
+
+  it('R520: refuses deterministic test signing keys and in-memory storage in live even when VITEST is set', () => {
+    const baseCfg = getActiveTenantConfiguration();
+    // Warm up test storage singleton first to prove getDocumentStorage never reuses a test instance for live
+    getDocumentStorage(baseCfg);
+
+    vi.stubEnv('VITEST', 'true');
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('PLATFORM_ENVIRONMENT', 'live');
+    vi.stubEnv('PLATFORM_BLOB_SIGNING_KEY', '');
+    try {
+      expect(() =>
+        createDocumentStorageProvider('local-fs', {
+          inMemoryOnly: true,
+          environment: 'live',
+        } as never),
+      ).toThrow(/STORAGE_CONFIG_ERROR/);
+
+      expect(() => resolveTenantBlobSigningKey('not-a-law-firm')).toThrow(
+        /STORAGE_CONFIG_ERROR/,
+      );
+
+      expect(() =>
+        getDocumentStorage({
+          ...baseCfg,
+          environment: 'live',
+        }),
+      ).toThrow(/STORAGE_CONFIG_ERROR/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

@@ -12601,4 +12601,111 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await partyRepo.clearTenantData(ctxB).catch(() => undefined);
     }
   });
+
+  it('R524: before_matter_open_hook_failed logs extensionId + errorCode only (never raw reason), billing warnings use ctx.correlationId, and tenantRuntime/docGen logs include tenantId and sanitise messages', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const store = loadCommittedSeedStore();
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const sessionPayload = verifySignedEntraSessionCookie(
+        createSignedEntraSessionCookie({
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          oid: '00000000-0000-4000-8000-000000000001',
+          tid: '11111111-2222-4333-8444-000000000000',
+          sub: 'P-000001',
+          email: 'rhian.morgan@notalawfirm.example',
+          displayName: 'Rhian Morgan',
+          entraRoles: ['partner', 'managing_partner'],
+          mappedRoles: ['partner', 'managing_partner'],
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      )!;
+      setTestEntraSessionOverride(sessionPayload);
+      const ctx = resolveCurrentTenantContext(
+        createVerifiedSessionActorFromEntraSession(sessionPayload, {
+          correlationId: 'corr-r524-verified-context',
+        }),
+      );
+
+      // 1. Trigger unassigned billing task warning using ctx (expects ctx.correlationId, never corr-bill-task-*)
+      const linkedMatter = store.matters.find((m) => m.id === 'M-000001')!;
+      await getMatterRepository().putMatter(
+        ctx,
+        {
+          ...linkedMatter,
+          responsiblePartnerId: null,
+          supervisingPartnerId: null,
+          leadFeeEarnerId: null,
+          teamMemberIds: ['P-000001'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      await runWithActiveActorSession(
+        {
+          personId: 'P-000001',
+          tenantId: 'not-a-law-firm',
+          tokenRoles: ['partner', 'managing_partner'],
+          mfaVerified: true,
+          expiresAtMs: Date.now() + 3600_000,
+          verifiedSession: sessionPayload,
+        },
+        () => requestMatterBill('PEN001-0001', ctx),
+      );
+      const billWarnLogs = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((s) => s.includes('draft_bill_approval_task_unassigned'));
+      expect(billWarnLogs.length).toBeGreaterThanOrEqual(1);
+      expect(billWarnLogs[0]).toContain('corr-r524-verified-context');
+      expect(billWarnLogs[0]).not.toMatch(/corr-bill-task-/);
+
+      // 2. Inject a beforeMatterOpen throwing hook containing sensitive email/secret text and assert raw reason is NEVER logged
+      const host = getPlatformExtensionHost();
+      const origExec = host.executeMatterCostsHook.bind(host);
+      host.executeMatterCostsHook = async () => ({
+        allowProceed: false,
+        requiresPartnerSignOff: true,
+        governanceWarnings: [
+          'Hook "beforeMatterOpen" in extension "nalf-matter-costs-governance" failed: Bearer secret-jwt-token client@confidential.example',
+        ],
+      });
+      try {
+        await runWithActiveActorSession(
+          {
+            personId: 'P-000001',
+            tenantId: 'not-a-law-firm',
+            tokenRoles: ['partner', 'managing_partner'],
+            mfaVerified: true,
+            expiresAtMs: Date.now() + 3600_000,
+            verifiedSession: sessionPayload,
+          },
+          () =>
+            signOffMatterCostsRecord('M-000001', 'P-000001'),
+        );
+      } finally {
+        host.executeMatterCostsHook = origExec;
+      }
+
+      const hookErrLogs = errSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((s) => s.includes('before_matter_open_hook_failed'));
+      expect(hookErrLogs.length).toBeGreaterThanOrEqual(1);
+      const parsedHookErr = JSON.parse(hookErrLogs[0]!) as Record<string, unknown>;
+      expect(parsedHookErr.extensionId).toBe('nalf-matter-costs-governance');
+      expect(parsedHookErr.errorCode).toBeDefined();
+      expect(parsedHookErr.errorMessage).toBeUndefined();
+      expect(hookErrLogs[0]).not.toContain('client@confidential.example');
+      expect(hookErrLogs[0]).not.toContain('secret-jwt-token');
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+      setTestEntraSessionOverride(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
 });

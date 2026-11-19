@@ -137,7 +137,7 @@ export const ACTION_PERMISSIONS = {
   },
   updateMatterConflictRecordAction: {
     kind: 'permission',
-    key: 'matter:edit',
+    key: { anyOf: ['matter:edit', 'matter:create', 'risk:view'] },
     enforcedBy: 'service',
   },
   updateMatterLifecycleStatusAction: {
@@ -146,10 +146,10 @@ export const ACTION_PERMISSIONS = {
     enforcedBy: 'service',
   },
 
-  // Tasks — claiming a task checks canUserTakeTask / task:claim_any (1)
+  // Tasks — claiming a task checks canUserTakeTask / task:edit (1)
   takeTaskAction: {
     kind: 'permission',
-    key: 'task:claim_any',
+    key: { anyOf: ['task:edit', 'task:claim_any'] },
     enforcedBy: 'service',
   },
 
@@ -181,7 +181,7 @@ export const ACTION_PERMISSIONS = {
   },
   previewRbacOverridesAction: {
     kind: 'permission',
-    key: 'rbac:manage_user_overrides',
+    key: { anyOf: ['admin:access', 'rbac:manage_user_overrides', 'rbac:manage_config'] },
     enforcedBy: 'service',
   },
   updatePersonPermissionOverridesAction: {
@@ -243,7 +243,7 @@ export const ACTION_PERMISSIONS = {
   },
   previewTemplateAction: {
     kind: 'permission',
-    key: 'document:generate',
+    key: { anyOf: ['document_template:view', 'document_template:build', 'document:generate'] },
     enforcedBy: 'service',
   },
   generateDocumentAction: {
@@ -307,7 +307,7 @@ export const ACTION_PERMISSIONS = {
   },
   resolveKeyDateOutcomeAction: {
     kind: 'permission',
-    key: 'keydate:resolve',
+    key: { anyOf: ['keydate:resolve', 'keydate:waive'] },
     enforcedBy: 'service',
   },
   reassignKeyDateTeamAction: {
@@ -786,7 +786,7 @@ export const ROUTE_PERMISSIONS = {
   },
   'GET /api/documents/download': {
     kind: 'permission',
-    key: 'document:download',
+    key: { anyOf: ['document:download', 'document:view'] },
     enforcedBy: 'service',
   },
   'GET /api/document-stores': {
@@ -824,6 +824,7 @@ export const ROUTE_PERMISSIONS = {
         'document:edit',
         'document:delete',
         'document:provision',
+        'matter:edit',
       ],
     },
     enforcedBy: 'service',

@@ -12,6 +12,7 @@ import {
   downloadGeneratedDocumentAction,
   getDocumentGenerationSnapshotAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import type { GeneratedDocumentRecord } from '@/domain/documentGeneration';
 import type {
   ChoiceValue,
@@ -78,6 +79,10 @@ export function DocumentListSection({
   const loadSnapshot = useCallback(async () => {
     try {
       const snap = await getDocumentGenerationSnapshotAction();
+      if (isActionDenied(snap)) {
+        setErrorMsg(snap.message);
+        return;
+      }
       setSnapshot(snap);
     } catch (err) {
       setErrorMsg(
