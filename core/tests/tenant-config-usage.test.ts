@@ -1707,13 +1707,11 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         );
       }
     } finally {
-      if (originalDocGenOverride) {
-        await repo.putDocumentGenerationTenantConfig(
-          ctx,
-          originalDocGenOverride,
-          'P-000001',
-        );
-      }
+      await repo.putDocumentGenerationTenantConfig(
+        ctx,
+        originalDocGenOverride,
+        'P-000001',
+      );
     }
   });
 
