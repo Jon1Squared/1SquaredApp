@@ -158,6 +158,7 @@ export default async function MatterProfilePage({
         canLiftRestriction={snap.currentUserPermissions.includes('matter:restriction:lift')}
         canEditMatter={snap.currentUserPermissions.includes('matter:edit')}
         pmsView={pmsView}
+        firmName={snap.firm.name}
         notes={snap.notes.filter((n) => n.recordType === 'matter' && n.recordId === matter.id)}
         audit={matterAudit}
       />

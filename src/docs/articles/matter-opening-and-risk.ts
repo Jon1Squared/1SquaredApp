@@ -6,7 +6,7 @@ export const matterOpeningAndRiskArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the five-step Matter Opening wizard works, how the seven-section risk questionnaire is scored, and how the server validates answers and derives the matter risk rating.',
-  updated: '2026-11-15',
+  updated: '2026-11-18',
   body: `
 This guide explains the **Matter Opening wizard** (\`/matters/new\` and \`/matters/[id]/edit\`), how the **Matter Risk Assessment** questionnaire is structured and completed, how the server validates answers, calculates the risk snapshot, and sets the matter's risk rating, and how matter numbers and optimistic concurrency (\`row_version\`) are enforced in PostgreSQL (\`S0-16\`).
 
@@ -67,5 +67,6 @@ The questionnaire is defined in \`MATTER_RISK_SECTIONS\` (\`src/domain/matterOpe
 - **Dynamic work-type risk questions**: Selecting a practice area and work type displays that work type's active schema-driven risk questions (for example cross-border complexity in Corporate M&A or environmental and source-of-funds checks in Property). Administrators manage these questions in **Admin → Work types** (\`admin:access\` + MFA required).
 - **Server-side weighting and validation**: On matter submission, the server enforces any question flagged \`required\`, ignores any client-submitted scores or section summaries, multiplies each option score by its configured weight, derives the overall risk rating (\`Low\`, \`Medium\`, or \`High\`), and stores the immutable snapshot in both \`fieldValues.__riskAssessmentSnapshot\` and \`public.matters.risk_assessment_json\`.
 - **Automatic opening tasks**: Once a matter opens — either directly on \`submit_cleared\`, upon Risk & Compliance approval of a referred conflict review, through enquiry/quote conversion, or upon high-value partner costs sign-off — the server idempotently creates each configured \`matter_open\` task template in PostgreSQL inside the opening transaction (resolving \`workTypeId\` → \`practiceAreaId\` → firm \`defaults\`, mapping \`ownerRoleKey\` to the matter's team, and inheriting restricted/staff-matter visibility rules).
+- **PDF opening, conflict check & risk assessment exports**: Immutable opening snapshots capture the tenant’s configured firm name (\`firmProfile.firm.name\`) when the snapshot is taken, and PDF exports (\`buildMatterOpeningPdfLines\`, \`buildConflictCheckPdfLines\`, \`buildRiskAssessmentPdfLines\`) head each document with the tenant’s firm name or a neutral title with no firm name when unconfigured or rendering legacy snapshots captured without a firm name.
 `,
 };

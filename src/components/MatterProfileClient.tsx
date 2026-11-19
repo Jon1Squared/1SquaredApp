@@ -123,6 +123,7 @@ interface MatterProfileClientProps {
   canLiftRestriction?: boolean;
   canEditMatter?: boolean;
   pmsView?: MatterPmsViewBundle;
+  firmName?: string;
   notes: Note[];
   audit: AuditEntry[];
 }
@@ -297,7 +298,7 @@ export function MatterProfileClient({
   teams = [],
   enquiries = [],
   quotes = [],
-  currentUserId = 'P-0001',
+  currentUserId = '',
   currentUserRole = 'admin',
   currentUser,
   employees,
@@ -318,6 +319,7 @@ export function MatterProfileClient({
   canLiftRestriction = false,
   canEditMatter = false,
   pmsView,
+  firmName,
   notes,
   audit,
 }: MatterProfileClientProps) {
@@ -414,6 +416,7 @@ export function MatterProfileClient({
           conflictCheckRecord: resolvedConflictRecord,
           nameMap,
           sourceEnquiry,
+          firmName,
         },
       ),
     [
@@ -427,6 +430,7 @@ export function MatterProfileClient({
       resolvedConflictRecord,
       nameMap,
       sourceEnquiry,
+      firmName,
     ],
   );
 
@@ -2694,6 +2698,7 @@ export function MatterProfileClient({
                           matter.matterNumber,
                           matter.title,
                           rec,
+                          firmName,
                         );
                         showToast(
                           `Exported PDF: Conflict-Check-Record-${matter.matterNumber}.pdf`,
@@ -3085,6 +3090,7 @@ export function MatterProfileClient({
                           matter.matterNumber,
                           matter.title,
                           riskSnap,
+                          firmName,
                         );
                         showToast(
                           `Exported PDF: Matter-Risk-Assessment-${matter.matterNumber}.pdf`,
@@ -3636,6 +3642,7 @@ export function MatterProfileClient({
                             matter.matterNumber,
                             matter.title,
                             rec,
+                            firmName,
                           );
                           showToast(
                             `Exported PDF: Conflict-Check-Record-${matter.matterNumber}.pdf`,
@@ -3844,6 +3851,7 @@ export function MatterProfileClient({
                             matter.matterNumber,
                             matter.title,
                             riskSnap,
+                            firmName,
                           );
                           showToast(
                             `Exported PDF: Matter-Risk-Assessment-${matter.matterNumber}.pdf`,

@@ -132,8 +132,59 @@ function shortPracticeBadge(practiceArea: string, fallbackBadge?: string): strin
   return fallbackBadge || practiceArea || 'Matter';
 }
 
+export type OrganisationConflictState =
+  | 'cleared'
+  | 'conflict'
+  | 'potential'
+  | 'in_progress'
+  | 'not_checked';
+
+/**
+ * Resolves the canonical organisation conflict state from either a list `systemKey`
+ * or seeded `conflict_status.*` choice value IDs.
+ */
+export function resolveOrganisationConflictState(
+  conflictStatusId: string | null | undefined,
+  conflictSys?: string,
+): OrganisationConflictState {
+  if (
+    conflictSys === 'cleared' ||
+    conflictSys === 'cleared_with_consent' ||
+    conflictStatusId === 'conflict_status.cleared' ||
+    conflictStatusId === 'conflict_status.cleared_with_consent'
+  ) {
+    return 'cleared';
+  }
+  if (
+    conflictSys === 'conflict' ||
+    conflictSys === 'conflict_declined' ||
+    conflictStatusId === 'conflict_status.conflict__declined'
+  ) {
+    return 'conflict';
+  }
+  if (
+    conflictSys === 'potential' ||
+    conflictSys === 'potential_conflict' ||
+    conflictStatusId === 'conflict_status.potential_conflict'
+  ) {
+    return 'potential';
+  }
+  if (
+    conflictSys === 'in_progress' ||
+    conflictStatusId === 'conflict_status.in_progress'
+  ) {
+    return 'in_progress';
+  }
+  return 'not_checked';
+}
+
 export interface OrganisationComplianceDisplay {
+  ableToAct: {
+    label: 'Yes' | 'Checks pending' | 'Review required';
+    tone: 'positive' | 'alert' | 'neutral';
+  };
   checksLastPerformed: string;
+  conflictCheck: { label: string; tone: 'positive' | 'warning' | 'alert' | 'neutral' };
   companyVerification: { label: string; tone: 'positive' | 'warning' | 'alert' | 'neutral' };
   sanctionsAndPep: { label: string; tone: 'positive' | 'warning' | 'alert' | 'neutral' };
   recheckDue: string;
@@ -142,6 +193,12 @@ export interface OrganisationComplianceDisplay {
 export function resolveOrganisationComplianceDisplay(
   organisation: Pick<Organisation, 'lastVerifiedAt' | 'reviewDate'>,
   verSys: string | undefined,
+  options?: {
+    conflictStatusId?: string | null;
+    conflictSys?: string;
+    conflictLabel?: string;
+    recSys?: string;
+  },
 ): OrganisationComplianceDisplay {
   const verifiedDateLabel = organisation.lastVerifiedAt
     ? formatDate(organisation.lastVerifiedAt) || null
@@ -159,6 +216,33 @@ export function resolveOrganisationComplianceDisplay(
     companyVerification = { label: 'Not verified', tone: 'neutral' };
   }
 
+  const conflictState = resolveOrganisationConflictState(
+    options?.conflictStatusId,
+    options?.conflictSys,
+  );
+  const conflictCheck: OrganisationComplianceDisplay['conflictCheck'] =
+    conflictState === 'cleared'
+      ? { label: options?.conflictLabel || 'Cleared', tone: 'positive' }
+      : conflictState === 'conflict'
+        ? { label: options?.conflictLabel || 'Conflict – declined', tone: 'alert' }
+        : conflictState === 'potential'
+          ? { label: options?.conflictLabel || 'Potential conflict', tone: 'warning' }
+          : conflictState === 'in_progress'
+            ? { label: options?.conflictLabel || 'In progress', tone: 'warning' }
+            : { label: 'Not checked', tone: 'neutral' };
+
+  const verificationComplete =
+    Boolean(verifiedDateLabel) || verSys === 'verified' || verSys === 'not_required';
+  const ableToAct: OrganisationComplianceDisplay['ableToAct'] =
+    options?.recSys === 'archived' ||
+    verSys === 'expired' ||
+    conflictState === 'conflict' ||
+    conflictState === 'potential'
+      ? { label: 'Review required', tone: 'alert' }
+      : conflictState === 'cleared' && verificationComplete
+        ? { label: 'Yes', tone: 'positive' }
+        : { label: 'Checks pending', tone: 'neutral' };
+
   const sanctionsAndPep: OrganisationComplianceDisplay['sanctionsAndPep'] = {
     label: 'Not checked',
     tone: 'neutral',
@@ -169,7 +253,9 @@ export function resolveOrganisationComplianceDisplay(
     : 'Not set';
 
   return {
+    ableToAct,
     checksLastPerformed,
+    conflictCheck,
     companyVerification,
     sanctionsAndPep,
     recheckDue,
@@ -406,9 +492,17 @@ export function OrganisationProfileClient({
   };
 
   // Compliance sidebar derived values
-  const ableToAct =
-    conflictSys !== 'conflict' && verSys !== 'expired' && recSys !== 'archived';
-  const complianceDisplay = resolveOrganisationComplianceDisplay(organisation, verSys);
+  const conflictState = resolveOrganisationConflictState(
+    organisation.conflictStatusId,
+    conflictSys,
+  );
+  const conflictStatusLabel = resolveLabel(values, organisation.conflictStatusId);
+  const complianceDisplay = resolveOrganisationComplianceDisplay(organisation, verSys, {
+    conflictStatusId: organisation.conflictStatusId,
+    conflictSys,
+    conflictLabel: conflictStatusLabel,
+    recSys,
+  });
   const lastVerifiedDisplay = complianceDisplay.checksLastPerformed;
   const recheckDueDisplay = complianceDisplay.recheckDue;
 
@@ -509,9 +603,9 @@ export function OrganisationProfileClient({
                 tone="neutral"
               />
             ) : null}
-            {conflictSys === 'potential' || conflictSys === 'conflict' ? (
+            {conflictState === 'potential' || conflictState === 'conflict' ? (
               <StatusPill
-                label={conflictSys === 'conflict' ? 'Conflict identified' : 'Potential conflict'}
+                label={conflictState === 'conflict' ? 'Conflict identified' : 'Potential conflict'}
                 tone="alert"
               />
             ) : null}
@@ -1117,8 +1211,22 @@ export function OrganisationProfileClient({
                     </div>
                     <div className="worklist-right">
                       <StatusPill
-                        label={ableToAct ? 'Yes' : 'Review required'}
-                        tone={ableToAct ? 'positive' : 'alert'}
+                        label={complianceDisplay.ableToAct.label}
+                        tone={complianceDisplay.ableToAct.tone}
+                      />
+                    </div>
+                  </li>
+
+                  <li className="worklist-row">
+                    <div className="worklist-main">
+                      <span style={{ color: 'var(--text-secondary)', fontSize: 13.5 }}>
+                        Conflict check
+                      </span>
+                    </div>
+                    <div className="worklist-right">
+                      <StatusPill
+                        label={complianceDisplay.conflictCheck.label}
+                        tone={complianceDisplay.conflictCheck.tone}
                       />
                     </div>
                   </li>
@@ -1815,7 +1923,7 @@ export function OrganisationProfileClient({
                   {resolveLabel(values, organisation.onboardingStatusId)}
                 </KeyValue>
                 <KeyValue label="Conflict check status">
-                  {resolveLabel(values, organisation.conflictStatusId)}
+                  {conflictStatusLabel || 'Not checked'}
                 </KeyValue>
                 <KeyValue label="Conflict check reference">
                   {organisation.conflictReference}

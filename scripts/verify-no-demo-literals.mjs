@@ -4,8 +4,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
 
-const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/g;
-const MATTER_CODE_RE = /\b(?<!#)[A-Z]{3}\d{3}-\d{4}\b/g;
+const RECORD_ID_RE = /\b(?:P|O|M|TM)-0000\d\d\b/gi;
+const MATTER_CODE_RE = /\b(?<!#)[A-Z]{3}\d{3}-\d{4}\b/gi;
 const PMS_HARDCODED_MONTH_RE = /['"`]20\d\d-\d\d['"`]/g;
 const FAKE_SANCTIONS_CLEAR_RE =
   /(?:Sanctions\s*(?:&(?:amp;)?|and|\/|\+)\s*PEP|PEP\s*(?:&(?:amp;)?|and|\/|\+)\s*Sanctions)[\s\S]{0,160}?['"`>:\u2013\u2014-](?:[\s\u00A0]|&nbsp;)*(?:all(?:[\s\u00A0]|&nbsp;)+)?clear(?:ed)?\b(?:(?:[\s\u00A0]|&nbsp;)*['"`<])?/gi;
@@ -84,7 +84,7 @@ export function buildPmsCodeRegex(pmsCodes = loadPmsDemoCodes()) {
   if (parts.length === 0) {
     return null;
   }
-  return new RegExp(`\\b(?<!#)(?:${parts.join('|')})\\b`, 'g');
+  return new RegExp(`\\b(?<!#)(?:${parts.join('|')})\\b`, 'gi');
 }
 
 /**
@@ -95,6 +95,10 @@ export function buildDemoLiteralsDenyList(rootDir = process.cwd()) {
     'Not A Law Firm LLP',
     'Not A Law Firm',
     'Pembroke Vaughan',
+    // Bare firm-name fragment matched case-insensitively across `src/components/` and `src/domain/`.
+    // Genuine non-demo uses (such as real surnames or place names) belong in
+    // `scripts/demo-literals-allowlist.json` with an explicit `reason`.
+    'Pembroke',
     'Victoria Pembroke',
     'Marcus Vaughan',
     '42 Lincoln',
@@ -175,10 +179,11 @@ export function loadDemoLiteralsAllowList(rootDir = process.cwd()) {
 }
 
 function isAllowListed(allowList, file, literal) {
-  if (!literal || literal === 'Sanctions & PEP: Clear' || literal === '*') {
+  if (!literal || literal.toLowerCase() === 'sanctions & pep: clear' || literal === '*') {
     return false;
   }
   const normalizedFile = file.replace(/\\/g, '/');
+  const normalizedLiteral = literal.toLowerCase();
   return allowList.some(
     (entry) =>
       entry &&
@@ -187,9 +192,9 @@ function isAllowListed(allowList, file, literal) {
       entry.file.replace(/\\/g, '/') === normalizedFile &&
       typeof entry.literal === 'string' &&
       entry.literal.trim().length > 0 &&
-      entry.literal !== 'Sanctions & PEP: Clear' &&
+      entry.literal.toLowerCase() !== 'sanctions & pep: clear' &&
       entry.literal !== '*' &&
-      entry.literal === literal &&
+      entry.literal.toLowerCase() === normalizedLiteral &&
       typeof entry.reason === 'string' &&
       entry.reason.trim().length > 0,
   );
@@ -211,12 +216,17 @@ export function scanTextForDemoLiterals(
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const lowerLine = line.toLowerCase();
     const lineNo = i + 1;
     const reportedOnLine = new Set();
+    const coveredSpans = [];
+
+    const isSpanCovered = (start, end) =>
+      coveredSpans.some(([s, e]) => start >= s && end <= e);
 
     const recordViolation = (match, reason) => {
-      if (reportedOnLine.has(match)) return;
-      reportedOnLine.add(match);
+      if (reportedOnLine.has(match.toLowerCase())) return;
+      reportedOnLine.add(match.toLowerCase());
       violations.push({
         file,
         line: lineNo,
@@ -226,12 +236,20 @@ export function scanTextForDemoLiterals(
     };
 
     for (const lit of denyLiterals) {
-      if (line.includes(lit) && !isAllowListed(allowList, file, lit)) {
-        // Avoid substring match when a shorter literal is part of an already-reported longer literal on the same line
-        if ([...reportedOnLine].some((prev) => prev.includes(lit))) {
+      const lowerLit = lit.toLowerCase();
+      let searchFrom = 0;
+      let matchIdx = -1;
+      while ((matchIdx = lowerLine.indexOf(lowerLit, searchFrom)) !== -1) {
+        const end = matchIdx + lit.length;
+        searchFrom = matchIdx + 1;
+        if (isSpanCovered(matchIdx, end)) {
           continue;
         }
-        recordViolation(lit, `demo literal "${lit}"`);
+        const matched = line.slice(matchIdx, end);
+        coveredSpans.push([matchIdx, end]);
+        if (!isAllowListed(allowList, file, lit) && !isAllowListed(allowList, file, matched)) {
+          recordViolation(matched, `demo literal "${matched}"`);
+        }
       }
     }
 
@@ -253,7 +271,9 @@ export function scanTextForDemoLiterals(
       for (const pmsCodeMatch of line.matchAll(pmsCodeRegex)) {
         const token = pmsCodeMatch[0];
         if (!isAllowListed(allowList, file, token)) {
-          const label = pmsCodes.has(token) ? `PMS demo code "${token}"` : `PMS-style code "${token}"`;
+          const label = pmsCodes.has(token.toUpperCase())
+            ? `PMS demo code "${token}"`
+            : `PMS-style code "${token}"`;
           recordViolation(token, label);
         }
       }

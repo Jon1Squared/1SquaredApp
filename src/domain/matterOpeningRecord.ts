@@ -9,6 +9,7 @@ import type {
   Enquiry,
   Matter,
   Organisation,
+  OrganisationConflictDecision,
   Person,
   Quote,
 } from './types';
@@ -375,6 +376,7 @@ export interface MatterOpeningSnapshot {
     | 'opened'
     | 'backfilled';
   captureNote?: string;
+  firmName?: string;
   matterId: string;
   matterNumber: string;
   title: string;
@@ -1235,6 +1237,108 @@ export function legacyConflictStatusFromRecord(
   }
 }
 
+export interface ClientConflictStateSummary {
+  hasConflictAlert: boolean;
+  hasPendingConflict: boolean;
+  hasClearedConflictCheck: boolean;
+}
+
+const LEGACY_DECLINED_CONFLICT_STATUSES = new Set([
+  'Declined — Conflict of interest',
+  'Declined - Conflict of interest',
+  'Conflict – declined',
+  'Conflict - declined',
+]);
+
+const LEGACY_PENDING_CONFLICT_STATUSES = new Set([
+  'Potential conflict — escalated',
+  'Potential conflict - escalated',
+  'Pending conflict review',
+  'Potential conflict',
+]);
+
+const LEGACY_CLEARED_CONFLICT_STATUSES = new Set([
+  'Clear',
+  'Cleared',
+  'Approved with conditions',
+  'Approved by Risk & Compliance',
+]);
+
+/**
+ * Summarises a client's conflict-check posture across their linked matters
+ * using structured `conflictCheckRecord.status` and `conflictDecision.outcome`
+ * keys first, falling back to exact legacy `conflictCheckStatus` strings only
+ * when no `conflictCheckRecord` is present (`R504`).
+ */
+export function summariseClientConflictState(
+  matters: ReadonlyArray<{
+    conflictCheckRecord?: Pick<ConflictCheckRecord, 'status' | 'outcomeLabel'> | null;
+    conflictDecision?: Partial<Pick<OrganisationConflictDecision, 'outcome'>> | null;
+    conflictCheckStatus?: string | null;
+  }>,
+): ClientConflictStateSummary {
+  let hasConflictAlert = false;
+  let hasPendingConflict = false;
+  let anyCleared = false;
+
+  for (const matter of matters) {
+    if (matter.conflictCheckRecord) {
+      const status = matter.conflictCheckRecord.status;
+      if (status === 'Declined') {
+        hasConflictAlert = true;
+        continue;
+      }
+      if (status === 'Referred') {
+        hasPendingConflict = true;
+        continue;
+      }
+      if (status === 'Cleared' || status === 'Approved') {
+        anyCleared = true;
+        continue;
+      }
+      if (matter.conflictDecision?.outcome === 'Conflict – declined') {
+        hasConflictAlert = true;
+      } else if (matter.conflictDecision?.outcome === 'Potential conflict') {
+        hasPendingConflict = true;
+      } else if (matter.conflictDecision?.outcome === 'Cleared') {
+        anyCleared = true;
+      }
+      continue;
+    }
+
+    if (matter.conflictDecision?.outcome) {
+      if (matter.conflictDecision.outcome === 'Conflict – declined') {
+        hasConflictAlert = true;
+        continue;
+      }
+      if (matter.conflictDecision.outcome === 'Potential conflict') {
+        hasPendingConflict = true;
+        continue;
+      }
+      if (matter.conflictDecision.outcome === 'Cleared') {
+        anyCleared = true;
+        continue;
+      }
+    }
+
+    const legacy = (matter.conflictCheckStatus ?? '').trim();
+    if (LEGACY_DECLINED_CONFLICT_STATUSES.has(legacy)) {
+      hasConflictAlert = true;
+    } else if (LEGACY_PENDING_CONFLICT_STATUSES.has(legacy)) {
+      hasPendingConflict = true;
+    } else if (LEGACY_CLEARED_CONFLICT_STATUSES.has(legacy)) {
+      anyCleared = true;
+    }
+  }
+
+  return {
+    hasConflictAlert,
+    hasPendingConflict,
+    hasClearedConflictCheck:
+      !hasConflictAlert && !hasPendingConflict && anyCleared,
+  };
+}
+
 /**
  * Resolves the ConflictCheckRecord for a Matter (using the saved record or constructing a consistent default for seeded matters).
  */
@@ -1363,6 +1467,19 @@ export interface MatterOpeningSnapshotPrecomputed {
   nameMap?: ReadonlyMap<string, string>;
   sourceEnquiry?: Enquiry | null;
   sourceQuote?: Quote | null;
+  firmName?: string;
+}
+
+/**
+ * Formats an uppercase PDF record heading prefixed with the tenant's firm name
+ * when configured, falling back to a neutral heading with no firm name.
+ */
+export function formatRecordPdfHeading(
+  documentTitle: string,
+  firmName?: string | null,
+): string {
+  const cleanFirm = firmName?.trim();
+  return cleanFirm ? `${cleanFirm.toUpperCase()} — ${documentTitle}` : documentTitle;
 }
 
 export function resolveMatterOpeningSnapshot(
@@ -1484,6 +1601,9 @@ export function resolveMatterOpeningSnapshot(
     capturedById: matter.createdById,
     capturedByName: nameMap.get(matter.createdById) ?? matter.createdById,
     saveMode: 'opened',
+    ...(precomputed?.firmName?.trim()
+      ? { firmName: precomputed.firmName.trim() }
+      : {}),
     matterId: matter.id,
     matterNumber: matter.matterNumber,
     title: matter.title,
@@ -1773,7 +1893,10 @@ export function generatePdfBytesFromLines(title: string, rawLines: PdfLine[]): U
 export function buildMatterOpeningPdfLines(snap: MatterOpeningSnapshot): PdfLine[] {
   const lines: PdfLine[] = [
     {
-      text: 'NOT A LAW FIRM LLP — COMPLETE MATTER OPENING RECORD (IMMUTABLE SNAPSHOT)',
+      text: formatRecordPdfHeading(
+        'COMPLETE MATTER OPENING RECORD (IMMUTABLE SNAPSHOT)',
+        snap.firmName,
+      ),
       bold: true,
       size: 13,
       spacingAfter: 3,
@@ -2042,14 +2165,18 @@ export function downloadMatterOpeningPdf(snap: MatterOpeningSnapshot): void {
   triggerPdfDownload(`Matter-Opening-Record-${safeRef}.pdf`, bytes);
 }
 
-export function downloadConflictCheckPdf(
+/**
+ * Builds the PDF line items for a matter conflict check record export.
+ */
+export function buildConflictCheckPdfLines(
   matterNumber: string,
   matterTitle: string,
   cc: ConflictCheckRecord,
-): void {
-  const lines: PdfLine[] = [
+  firmName?: string | null,
+): PdfLine[] {
+  return [
     {
-      text: 'NOT A LAW FIRM LLP — CONFLICT CHECK RECORD',
+      text: formatRecordPdfHeading('CONFLICT CHECK RECORD', firmName),
       bold: true,
       size: 13,
       spacingAfter: 3,
@@ -2109,20 +2236,32 @@ export function downloadConflictCheckPdf(
       size: 8.5,
     })),
   ];
+}
 
+export function downloadConflictCheckPdf(
+  matterNumber: string,
+  matterTitle: string,
+  cc: ConflictCheckRecord,
+  firmName?: string | null,
+): void {
+  const lines = buildConflictCheckPdfLines(matterNumber, matterTitle, cc, firmName);
   const bytes = generatePdfBytesFromLines(`Conflict Check — ${matterNumber}`, lines);
   const safeRef = (matterNumber || 'Matter').replace(/[^A-Za-z0-9_-]/g, '_');
   triggerPdfDownload(`Conflict-Check-Record-${safeRef}.pdf`, bytes);
 }
 
-export function downloadRiskAssessmentPdf(
+/**
+ * Builds the PDF line items for a matter risk assessment record export.
+ */
+export function buildRiskAssessmentPdfLines(
   matterNumber: string,
   matterTitle: string,
   ra: MatterRiskAssessmentSnapshot,
-): void {
-  const lines: PdfLine[] = [
+  firmName?: string | null,
+): PdfLine[] {
+  return [
     {
-      text: 'NOT A LAW FIRM LLP — MATTER RISK ASSESSMENT RECORD',
+      text: formatRecordPdfHeading('MATTER RISK ASSESSMENT RECORD', firmName),
       bold: true,
       size: 13,
       spacingAfter: 3,
@@ -2163,7 +2302,15 @@ export function downloadRiskAssessmentPdf(
       ]),
     ]),
   ];
+}
 
+export function downloadRiskAssessmentPdf(
+  matterNumber: string,
+  matterTitle: string,
+  ra: MatterRiskAssessmentSnapshot,
+  firmName?: string | null,
+): void {
+  const lines = buildRiskAssessmentPdfLines(matterNumber, matterTitle, ra, firmName);
   const bytes = generatePdfBytesFromLines(`Risk Assessment — ${matterNumber}`, lines);
   const safeRef = (matterNumber || 'Matter').replace(/[^A-Za-z0-9_-]/g, '_');
   triggerPdfDownload(`Matter-Risk-Assessment-${safeRef}.pdf`, bytes);
