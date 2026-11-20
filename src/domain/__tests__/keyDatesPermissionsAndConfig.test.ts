@@ -43,9 +43,9 @@ import {
   testTenantCtx,
 } from '@/server/testSupport/auditTestSupport';
 import notALawFirmBaseConfig from '../../../client-not-a-law-firm/config/base.json';
+import { canViewerAccessMatterKeyDates } from '@/server/rbacRuntime';
 import {
   canUserVerifyKeyDate,
-  canViewerAccessMatterKeyDates,
   evaluateMatterKeyDateClosureGate,
   evaluateMatterKeyDateOpeningGate,
   hasKeyDatePermission,

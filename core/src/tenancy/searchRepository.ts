@@ -200,6 +200,16 @@ function buildQuoteAccessibleSql(alias: string): string {
   )`;
 }
 
+function buildLinkedKeyDateInaccessibleSql(
+  matterAlias: string,
+  enqAlias: string,
+): string {
+  return `(
+    (${matterAlias}.id IS NOT NULL AND NOT ${buildMatterAccessibleSql(matterAlias)})
+    OR (${enqAlias}.id IS NOT NULL AND NOT ${buildEnquiryAccessibleSql(enqAlias)})
+  )`;
+}
+
 function buildTaskAccessibleSql(alias: string): string {
   return `(
     (
@@ -212,11 +222,21 @@ function buildTaskAccessibleSql(alias: string): string {
           ON ke_t.tenant_id = kd_t.tenant_id AND ke_t.id = kd_t.enquiry_id
         WHERE kd_t.tenant_id = ${alias}.tenant_id
           AND kd_t.id = ${alias}.linked_key_date_id
-          AND (
-            (km_t.id IS NOT NULL AND NOT ${buildMatterAccessibleSql('km_t')})
-            OR (ke_t.id IS NOT NULL AND NOT ${buildEnquiryAccessibleSql('ke_t')})
-          )
+          AND ${buildLinkedKeyDateInaccessibleSql('km_t', 'ke_t')}
       )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM public.task_linked_records tlr_kd
+      JOIN public.key_dates kd_tlr
+        ON kd_tlr.tenant_id = tlr_kd.tenant_id AND kd_tlr.id = tlr_kd.record_id
+      LEFT JOIN public.matters km_tlr
+        ON km_tlr.tenant_id = kd_tlr.tenant_id AND km_tlr.id = kd_tlr.matter_id
+      LEFT JOIN public.enquiries ke_tlr
+        ON ke_tlr.tenant_id = kd_tlr.tenant_id AND ke_tlr.id = kd_tlr.enquiry_id
+      WHERE tlr_kd.tenant_id = ${alias}.tenant_id
+        AND tlr_kd.task_id = ${alias}.id
+        AND tlr_kd.record_type = 'key_date'
+        AND ${buildLinkedKeyDateInaccessibleSql('km_tlr', 'ke_tlr')}
     )
     AND NOT EXISTS (
       SELECT 1 FROM public.task_linked_records tlr_m

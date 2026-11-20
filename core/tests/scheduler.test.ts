@@ -39,6 +39,7 @@ import {
   executeUsageRetentionPurgeForTenant,
   getKeyDateRepository,
   getKeyDatesConfig,
+  reassignKeyDateTeamRecord,
   recordKeyDateNotApplicableRecord,
   resetAllDemoData,
   runKeyDateReminderSchedulerRecord,
@@ -62,6 +63,7 @@ import {
 import { setTestEntraSessionOverride } from '../../src/server/entraAuth';
 import { isActionDenied } from '../../src/domain/actionResult';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
+import type { KeyDate } from '../../src/domain/keyDates.types';
 import type { Matter, NotificationItem, Person, Task } from '../../src/domain/types';
 
 async function withFakeClock<T>(
@@ -1560,6 +1562,173 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         walkDir(dir);
       }
       expect(hookHits).toEqual([]);
+    });
+
+    it('R535: does not leak actor tokenRoles (admin matter:restricted:access) onto other responsible persons or manual reminder recipients on a staff matter', async () => {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const setupCtx = testTenantCtx('P-000004', {
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      });
+      await getJobRunRepository().clearTenantJobRuns(setupCtx);
+
+      const people = await getPartyRepository().listAllPeople<Person>(setupCtx);
+      const matters = await getMatterRepository().listAllMattersUnfiltered<Matter>(setupCtx);
+      const staffClient = people.find(
+        (p) => p.isEmployee && !['P-000001', 'P-000002', 'P-000004', 'P-000010'].includes(p.id),
+      )!;
+      const baseMatter = matters.find((m) => !m.isStaffMatter)!;
+      const { id: _omitId, ...matterTemplate } = baseMatter;
+      void _omitId;
+
+      // Save staff matter restricted ONLY to P-000001, P-000004 (acting admin), and P-000010 (explicitly excluding P-000002)
+      const staffMatterSave = await runAsTestActor(
+        'P-000001',
+        () =>
+          saveMatterRecord(
+            {
+              ...matterTemplate,
+              title: 'R535 Confidential Staff Matter',
+              clientId: staffClient.id,
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000010',
+              teamMemberIds: ['P-000001', 'P-000004', 'P-000010'],
+              agreedFeeCapGbp: 5000,
+              feeEstimateGbp: 5000,
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      const staffMatter = staffMatterSave.matter!;
+      expect(staffMatter.isStaffMatter).toBe(true);
+      await getMatterRepository().putMatter(
+        setupCtx,
+        {
+          ...staffMatter,
+          isStaffMatter: true,
+          restrictedAccessUserIds: ['P-000001', 'P-000004', 'P-000010'],
+        },
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-000001', 'P-000004', 'P-000010'],
+        },
+      );
+
+      // P-000002 has fee_earner (no matter:restricted:access). Ensure P-000004 acts with admin tokenRoles (holding matter:restricted:access).
+      // 1. Admin assigning unpermitted P-000002 on staff matter key date create MUST be refused
+      await runAsTestActor(
+        'P-000004',
+        async () => {
+          const createDenied = await createOrProposeKeyDateRecord(
+            {
+              matterId: staffMatter.id,
+              keyDateTypeId: 'limitation',
+              title: 'R535 Staff Key Date Blocked Assignee',
+              dueDate: '2027-10-15',
+              intent: 'propose',
+              responsiblePersonIds: ['P-000002'],
+            },
+            'P-000004',
+          );
+          expect(createDenied.ok).toBe(false);
+          expect(createDenied.error).toMatch(/does not have access to restricted matter/i);
+
+          // Permitted responsible person succeeds, then reassigning to unpermitted P-000002 MUST also be refused
+          const createOk = await createOrProposeKeyDateRecord(
+            {
+              matterId: staffMatter.id,
+              keyDateTypeId: 'limitation',
+              title: 'R535 Staff Key Date Permitted Assignee',
+              dueDate: '2027-11-20',
+              intent: 'propose',
+              responsiblePersonIds: ['P-000010'],
+            },
+            'P-000004',
+          );
+          expect(createOk.ok).toBe(true);
+          const reassignDenied = await reassignKeyDateTeamRecord(
+            createOk.keyDate!.id,
+            {
+              teamId: createOk.keyDate!.teamId,
+              responsiblePersonIds: ['P-000002'],
+            },
+            'P-000004',
+          );
+          expect(reassignDenied.ok).toBe(false);
+          expect(reassignDenied.error).toMatch(/does not have access to restricted matter/i);
+        },
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+
+      // 2. Manual reminder run by admin with due staff-matter key date listing BOTH unpermitted P-000002 and permitted P-000010:
+      //    P-000002 must receive ZERO tasks and ZERO notifications, while permitted P-000010 receives the reminder.
+      const dueStaffKd: KeyDate = {
+        id: 'KD-R535-MANUAL-DUE',
+        matterId: staffMatter.id,
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'R535 Manual Reminder Staff Secret',
+        dueDate: '2027-10-15',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-000002', 'P-000010'],
+        verification: { required: false },
+        createdById: 'P-000001',
+        createdAt: '2027-01-01T00:00:00.000Z',
+        updatedById: 'P-000001',
+        updatedAt: '2027-01-01T00:00:00.000Z',
+        version: 1,
+      };
+      await getKeyDateRepository().putKeyDate(setupCtx, dueStaffKd);
+
+      const adminRunCtx = testTenantCtx('P-000004', {
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      });
+      const manualRes = await withFakeClock('2027-10-15T10:00:00.000Z', async () =>
+        runAsTestActor(
+          'P-000004',
+          async () =>
+            runKeyDateReminderSchedulerRecord({
+              tenantCtx: adminRunCtx,
+              byId: 'P-000004',
+              mfaVerified: true,
+            }),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+      );
+      expect(manualRes.ok).toBe(true);
+
+      const expectedReminderKey = buildKeyDateReminderIdempotencyKey(
+        dueStaffKd.id,
+        setupCtx.tenantId,
+      );
+      const allTasksAfter = await getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(setupCtx);
+      const reminderTask = allTasksAfter.find((t) => t.idempotencyKey === expectedReminderKey);
+      expect(reminderTask).toBeDefined();
+      expect(reminderTask?.assignedPersonId).toBe('P-000010');
+      expect(reminderTask?.assignedPersonIds ?? []).not.toContain('P-000002');
+      expect(reminderTask?.assignedPersonIds ?? []).toContain('P-000010');
+
+      const allNotifsAfter =
+        await getTaskWorkflowRepository().listAllNotificationsUnfiltered<NotificationItem>(setupCtx);
+      const p2SecretNotifs = allNotifsAfter.filter(
+        (n) =>
+          n.recipientId === 'P-000002' &&
+          (n.title.includes(dueStaffKd.title) || n.recordId === dueStaffKd.id || n.recordId === reminderTask?.id),
+      );
+      expect(p2SecretNotifs).toHaveLength(0);
+
+      const p10PositiveNotifs = allNotifsAfter.filter(
+        (n) =>
+          n.recipientId === 'P-000010' &&
+          (n.title.includes(dueStaffKd.title) || n.recordId === dueStaffKd.id || n.recordId === reminderTask?.id),
+      );
+      expect(p10PositiveNotifs.length).toBeGreaterThanOrEqual(1);
     });
   });
 });

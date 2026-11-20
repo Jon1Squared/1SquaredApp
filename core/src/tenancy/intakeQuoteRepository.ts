@@ -782,7 +782,11 @@ export const ENQUIRY_VISIBLE_SQL_PREDICATE = `(
     SELECT 1 FROM matters m
     WHERE m.tenant_id = e.tenant_id
       AND (m.id = e.converted_matter_id OR m.source_enquiry_id = e.id)
-      AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+      AND (
+        m.is_staff_matter = TRUE
+        OR m.has_ethical_wall = TRUE
+        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+      )
       AND NOT (m.restricted_access_user_ids_json ? $2)
   )
 )`;
@@ -798,7 +802,11 @@ export const QUOTE_VISIBLE_SQL_PREDICATE = `(
     SELECT 1 FROM matters m
     WHERE m.tenant_id = q.tenant_id
       AND (m.id = q.converted_matter_id OR m.source_quote_id = q.id)
-      AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+      AND (
+        m.is_staff_matter = TRUE
+        OR m.has_ethical_wall = TRUE
+        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+      )
       AND NOT (m.restricted_access_user_ids_json ? $2)
   )
   AND NOT EXISTS (
@@ -830,7 +838,11 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       `SELECT tenant_id, id
        FROM matters
        WHERE tenant_id = $1
-         AND (is_staff_matter = TRUE OR has_ethical_wall = TRUE)
+         AND (
+           is_staff_matter = TRUE
+           OR has_ethical_wall = TRUE
+           OR jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) > 0
+         )
          AND NOT (restricted_access_user_ids_json ? $2)`,
       [ctx.tenantId, viewerId],
     );

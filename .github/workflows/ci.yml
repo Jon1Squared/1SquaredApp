@@ -98,6 +98,8 @@ jobs:
           pool_mode = transaction
           max_client_conn = 200
           default_pool_size = 5
+          max_user_connections = 60
+          server_idle_timeout = 15
           admin_users = postgres
           EOF
           cat <<EOF | sudo tee /etc/pgbouncer/userlist.txt > /dev/null
@@ -210,6 +212,8 @@ jobs:
           pool_mode = transaction
           max_client_conn = 200
           default_pool_size = 5
+          max_user_connections = 60
+          server_idle_timeout = 15
           admin_users = postgres
           EOF
           cat <<EOF | sudo tee /etc/pgbouncer/userlist.txt > /dev/null

@@ -42,7 +42,11 @@ export const REGISTER_RECORD_VISIBLE_SQL_PREDICATE = `(
     SELECT 1 FROM public.matters m
     WHERE m.tenant_id = r.tenant_id
       AND m.id = r.matter_id
-      AND (m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE)
+      AND (
+        m.is_staff_matter = TRUE
+        OR m.has_ethical_wall = TRUE
+        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+      )
       AND NOT (m.restricted_access_user_ids_json ? $2)
   )
 )`;

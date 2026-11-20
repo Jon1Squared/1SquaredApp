@@ -40,10 +40,27 @@ import type {
 import {
   canUserVerifyKeyDate as domainCanUserVerifyKeyDate,
   canViewerAccessMatterKeyDates as domainCanViewerAccessMatterKeyDates,
+  createOrProposeKeyDate as domainCreateOrProposeKeyDate,
   hasKeyDatePermission as domainHasKeyDatePermission,
+  reassignKeyDateTeamAndOwners as domainReassignKeyDateTeamAndOwners,
   resolveKeyDatePermissions as domainResolveKeyDatePermissions,
+  supersedeConfirmedKeyDate as domainSupersedeConfirmedKeyDate,
   type ResolveKeyDatePermissionsOptions,
 } from '@/domain/keyDates';
+import {
+  computeKeyDateExceptions as domainComputeKeyDateExceptions,
+  queryTeamDiaryEntries as domainQueryTeamDiaryEntries,
+  type ComputeKeyDateExceptionsParams,
+  type QueryTeamDiaryParams,
+} from '@/domain/keyDateDiary';
+import {
+  filterRecipientsForMatterRestriction as domainFilterRecipientsForMatterRestriction,
+  resolveEscalationRecipientIds as domainResolveEscalationRecipientIds,
+  runTenantKeyDateReminderJob as domainRunTenantKeyDateReminderJob,
+  syncReminderForConfirmedKeyDate as domainSyncReminderForConfirmedKeyDate,
+  type RunTenantKeyDateReminderJobInput,
+  type SyncReminderForConfirmedKeyDateParams,
+} from '@/domain/keyDateReminders';
 import {
   canUserViewFinance as domainCanUserViewFinance,
 } from '@/domain/pms';
@@ -557,6 +574,107 @@ export function canViewerAccessMatterKeyDates(
     people,
     withActiveTenantRbacOptions(options),
   );
+}
+
+export function queryTeamDiaryEntries(
+  params: QueryTeamDiaryParams,
+) {
+  return domainQueryTeamDiaryEntries({
+    ...params,
+    rbacOptions: withActiveTenantRbacOptions(params.rbacOptions),
+  });
+}
+
+export function computeKeyDateExceptions(
+  params: ComputeKeyDateExceptionsParams,
+) {
+  return domainComputeKeyDateExceptions({
+    ...params,
+    rbacOptions: withActiveTenantRbacOptions(params.rbacOptions),
+  });
+}
+
+export function filterRecipientsForMatterRestriction(
+  candidatePersonIds: readonly PersonId[],
+  matter:
+    | Pick<Matter, 'id' | 'isStaffMatter' | 'restrictedAccessUserIds'>
+    | null
+    | undefined,
+  people?: readonly Person[],
+  options: ResolvePersonPermissionsOptions = {},
+): PersonId[] {
+  return domainFilterRecipientsForMatterRestriction(
+    candidatePersonIds,
+    matter,
+    people,
+    withActiveTenantRbacOptions(options),
+  );
+}
+
+export function resolveEscalationRecipientIds(
+  levelSpec: string,
+  keyDate: Pick<KeyDate, 'teamId'> & { matterId?: string },
+  teams: readonly Team[],
+  people: readonly Person[],
+  matter:
+    | Pick<Matter, 'id' | 'isStaffMatter' | 'restrictedAccessUserIds'>
+    | null
+    | undefined,
+  options: ResolvePersonPermissionsOptions = {},
+): PersonId[] {
+  return domainResolveEscalationRecipientIds(
+    levelSpec,
+    keyDate,
+    teams,
+    people,
+    matter,
+    withActiveTenantRbacOptions(options),
+  );
+}
+
+export function syncReminderForConfirmedKeyDate(
+  params: SyncReminderForConfirmedKeyDateParams,
+) {
+  return domainSyncReminderForConfirmedKeyDate({
+    ...params,
+    rbacOptions: withActiveTenantRbacOptions(params.rbacOptions),
+  });
+}
+
+export function runTenantKeyDateReminderJob(
+  input: RunTenantKeyDateReminderJobInput,
+) {
+  return domainRunTenantKeyDateReminderJob({
+    ...input,
+    rbacOptions: withActiveTenantRbacOptions(input.rbacOptions),
+  });
+}
+
+export function createOrProposeKeyDate(
+  input: Parameters<typeof domainCreateOrProposeKeyDate>[0],
+) {
+  return domainCreateOrProposeKeyDate({
+    ...input,
+    rbacOptions: withActiveTenantRbacOptions(input.rbacOptions),
+  });
+}
+
+export function supersedeConfirmedKeyDate(
+  params: Parameters<typeof domainSupersedeConfirmedKeyDate>[0],
+) {
+  return domainSupersedeConfirmedKeyDate({
+    ...params,
+    rbacOptions: withActiveTenantRbacOptions(params.rbacOptions),
+  });
+}
+
+export function reassignKeyDateTeamAndOwners(
+  params: Parameters<typeof domainReassignKeyDateTeamAndOwners>[0],
+) {
+  return domainReassignKeyDateTeamAndOwners({
+    ...params,
+    rbacOptions: withActiveTenantRbacOptions(params.rbacOptions),
+  });
 }
 
 export * from '@/domain/rbac';

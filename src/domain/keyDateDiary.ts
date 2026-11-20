@@ -33,6 +33,7 @@ import type {
   TeamId,
 } from './keyDates.types';
 export type { TeamDiaryEntry, TeamDiaryQuery };
+import type { ResolvePersonPermissionsOptions } from './rbac';
 import type { ChoiceValue, Enquiry, Matter, Person, Team } from './types';
 
 const STABLE_ACTIVE_MATTER_STATUS_KEYS = new Set([
@@ -161,6 +162,7 @@ export interface QueryTeamDiaryParams {
   enquiries?: readonly Enquiry[];
   teams: readonly Team[];
   people?: readonly Person[];
+  rbacOptions?: ResolvePersonPermissionsOptions;
 }
 
 /**
@@ -183,6 +185,7 @@ export function queryTeamDiaryEntries(
     enquiries = [],
     teams,
     people = [],
+    rbacOptions,
   } = params;
 
   if (!config?.enabled || !viewer) {
@@ -193,6 +196,7 @@ export function queryTeamDiaryEntries(
     config,
     allPeople: people,
     teams,
+    rbac: rbacOptions,
   };
   if (!hasKeyDatePermission(viewer, 'keydate:view', permOpts)) {
     return [];
@@ -238,7 +242,7 @@ export function queryTeamDiaryEntries(
     // Data-layer staff matter & missing matter exclusion: omit completely with no placeholder (R82)
     if (
       kd.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people))
+      (!matter || !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people, rbacOptions))
     ) {
       continue;
     }
@@ -310,6 +314,7 @@ export interface ComputeKeyDateExceptionsParams {
   people?: readonly Person[];
   filterTeamIds?: readonly TeamId[];
   filterKinds?: readonly KeyDateExceptionKind[];
+  rbacOptions?: ResolvePersonPermissionsOptions;
 }
 
 /**
@@ -334,6 +339,7 @@ export function computeKeyDateExceptions(
     people = [],
     filterTeamIds,
     filterKinds,
+    rbacOptions,
   } = params;
 
   if (!config?.enabled || !viewer) {
@@ -344,6 +350,7 @@ export function computeKeyDateExceptions(
     config,
     allPeople: people,
     teams,
+    rbac: rbacOptions,
   };
   if (!hasKeyDatePermission(viewer, 'keydate:view_any_team', permOpts)) {
     return [];
@@ -389,7 +396,7 @@ export function computeKeyDateExceptions(
   // 1 & 4. Matter-level checks: `matter_missing_required_date` and `closed_matter_open_dates`
   for (const matter of matters) {
     // Enforce restricted (staff) matter omission in the data layer
-    if (!canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people)) {
+    if (!canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people, rbacOptions)) {
       continue;
     }
 
@@ -473,7 +480,7 @@ export function computeKeyDateExceptions(
     if (
       kd.matterId &&
       matter &&
-      !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people)
+      !canViewerAccessMatterKeyDates(matter, viewer.id, viewer, people, rbacOptions)
     ) {
       continue;
     }

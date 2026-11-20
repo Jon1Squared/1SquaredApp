@@ -3,6 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getGlobalTenantPostgresPoolManager,
+  getActiveTenantTransactionState,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
   TenantIntakeQuoteRepository,
@@ -10,6 +11,7 @@ import {
   TenantMatterRepository,
   TenantPartyRepository,
   TenantPostgresPoolManager,
+  TenantSearchRepository,
   TenantTaskWorkflowRepository,
   type TenantContext,
   type TenantEnquiryRecord,
@@ -23,8 +25,11 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import {
   getActiveTenantConfiguration,
+  getHrAndRbacRepository,
   getIntakeQuoteRepository,
+  getJobRunRepository,
   getMatterRepository,
+  getOutboxRepository,
   getPartyRepository,
   getTaskWorkflowRepository,
   setActiveTenantConfigForTesting,
@@ -37,9 +42,14 @@ import {
 } from '@/server/entraAuth';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import {
+  addTaskCommentRecord,
   approveSignOff,
   discussSignOff,
+  enqueueNotificationEmailIfImmediate,
+  enqueueNotificationTeamsActivityIfEnabled,
+  executeNotificationDigestsForTenant,
   getAppSnapshot,
+  getKeyDateRepository,
   listFirmAuditEntriesPage,
   prepareEnquiryConversion,
   resetAllDemoData,
@@ -47,11 +57,13 @@ import {
   saveMatterRecord,
   saveQuoteRecord,
   saveTaskRecord,
+  saveTeamRecord,
 } from '@/server/services';
+import { isActionDenied } from '@/domain/actionResult';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { setAuditAdapterFailureHookForTesting } from '@/server/testSupport/auditTestSupport';
 import { testDataResetContext } from '@/test/testTenantContexts';
-import type { Matter } from '@/domain/types';
+import type { Matter, Task } from '@/domain/types';
 
 function makeTenantCtx(
   tenantId: string,
@@ -2157,6 +2169,861 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       await new TenantAuditRepository().resetNonLiveAuditLog(ctxB);
       await resetAllDemoData('P-000001', testDataResetContext());
       await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
+  });
+
+  it('R509: blocks assigning restricted-matter tasks to non-permitted users/teams and suppresses notifications, email_outbox, and teams_activity_outbox for non-permitted recipients', async () => {
+    const ctx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const matterRepo = getMatterRepository();
+      const taskRepo = getTaskWorkflowRepository();
+      const outboxRepo = getOutboxRepository();
+
+      // Enable immediate email & Teams delivery in tenant test config override so any leaked notification would hit email_outbox & teams_activity_outbox
+      const baseCfg = JSON.parse(
+        fs.readFileSync(
+          path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      setActiveTenantConfigForTesting(baseCfg, {
+        integrations: {
+          email: {
+            provider: 'dev_catcher',
+            senderAddress: 'notifications@notalawfirm.example',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { host: '127.0.0.1', port: 1025, secure: false },
+          },
+          teams: {
+            provider: 'dev_catcher',
+            teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { endpointUrl: 'http://127.0.0.1:4125/teams' },
+          },
+        },
+      });
+
+      const activeSession = makeActorSession(
+        'P-000001',
+        ['partner', 'fee_earner'],
+        'not-a-law-firm',
+      );
+      setTestEntraSessionOverride(activeSession.verifiedSession);
+
+      // P-000002 (unpermitted) and P-000010 (permitted positive control, member of TM-000001) opt into immediate email + Teams
+      const hrRepo = getHrAndRbacRepository();
+      const partyRepo = getPartyRepository();
+      const kdRepo = getKeyDateRepository();
+      const allPeopleForR509 = await partyRepo.listAllPeople<TenantPersonRecord & { emails?: Array<{ address: string; isPrimary?: boolean }> }>(ctx);
+      const p2Email = allPeopleForR509.find((p) => p.id === 'P-000002')?.emails?.find((e) => e.isPrimary)?.address.toLowerCase();
+      const p10Email = allPeopleForR509.find((p) => p.id === 'P-000010')?.emails?.find((e) => e.isPrimary)?.address.toLowerCase();
+      expect(p2Email).toBeTruthy();
+      expect(p10Email).toBeTruthy();
+
+      const tm1 = await hrRepo.getTeamById(ctx, 'TM-000001');
+      expect(tm1?.memberIds).toContain('P-000002');
+      expect(tm1?.memberIds).toContain('P-000010');
+
+      for (const pid of ['P-000002', 'P-000010'] as const) {
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: pid,
+          notificationKind: 'task_assigned',
+          inAppEnabled: true,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: pid,
+          notificationKind: 'team_task_arrived',
+          inAppEnabled: true,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+      }
+
+      const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001', {
+        includeRestricted: true,
+      }))!;
+      const wallMatter: Matter = {
+        ...baseMatter,
+        id: 'M-R509-WALL-01',
+        matterNumber: 'MAT-R509-WALL-01',
+        title: 'Confidential R509 Restricted Matter Secret',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001', 'P-000010'],
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001', 'P-000010'],
+      };
+      await matterRepo.putMatter(ctx, wallMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001', 'P-000010'],
+      });
+
+      const emailsBefore = (await outboxRepo.listOutboxRecords(ctx)).length;
+      const teamsBefore = (await outboxRepo.listTeamsOutboxRecords(ctx)).length;
+
+      await runWithActiveActorSession(activeSession, async () => {
+        // 1. Assigning a restricted-matter task directly to unpermitted P-000002 is refused with FORBIDDEN
+        const deniedDirect = await saveTaskRecord(
+          {
+            title: 'Confidential R509 Direct Assignee Secret',
+            dueAt: '2027-02-01',
+            assignedPersonId: 'P-000002',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(deniedDirect)).toBe(true);
+        expect(deniedDirect.code).toBe('FORBIDDEN');
+
+        // R556: Creating a new task linked only via linkedKeyDateId to a restricted-matter key date MUST also check matter restriction
+        await kdRepo.putKeyDate(ctx, {
+          id: 'KD-R556-WALL',
+          matterId: wallMatter.id,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Confidential R556 Key Date',
+          dueDate: '2027-03-01',
+          isCritical: true,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-000001'],
+          verification: { required: false },
+          createdById: 'P-000001',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-000001',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 1,
+        });
+        const deniedViaKd = await saveTaskRecord(
+          {
+            title: 'Confidential R556 Linked KeyDate Secret',
+            dueAt: '2027-02-01',
+            assignedPersonId: 'P-000002',
+            linkedKeyDateId: 'KD-R556-WALL',
+          } as Parameters<typeof saveTaskRecord>[0],
+          'P-000001',
+        );
+        expect(isActionDenied(deniedViaKd)).toBe(true);
+        expect(deniedViaKd.code).toBe('FORBIDDEN');
+
+        // 2. Assigning to a team whose members all lack access to wallMatter is refused
+        const adminSession = makeActorSession('P-000004', ['admin'], 'not-a-law-firm');
+        const unpermittedTeamRes = await runWithActiveActorSession(adminSession, () =>
+          saveTeamRecord(
+            {
+              name: 'Unpermitted Only Team R509',
+              description: 'No permitted members on wallMatter',
+              memberIds: ['P-000002', 'P-000006'],
+              leadIds: ['P-000002'],
+              practiceAreaIds: [],
+              active: true,
+            },
+            'P-000004',
+          ),
+        );
+        expect(unpermittedTeamRes.team?.id).toBeTruthy();
+
+        const deniedTeam = await saveTaskRecord(
+          {
+            title: 'Confidential R509 Unpermitted Team Secret',
+            dueAt: '2027-02-01',
+            assignedTeamId: unpermittedTeamRes.team!.id,
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(deniedTeam)).toBe(true);
+        expect(deniedTeam.code).toBe('FORBIDDEN');
+
+        // 3. Mixed team assignment (TM-000001 contains unpermitted P-000002 AND permitted P-000010):
+        //    saveTaskRecord succeeds, suppresses team_task_arrived for P-000002, and delivers notification + email + Teams outbox to permitted P-000010 (R542)
+        const mixedTeamTask = await saveTaskRecord(
+          {
+            title: 'Confidential R509 Mixed Team Queue Secret',
+            dueAt: '2027-02-01',
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(mixedTeamTask.error).toBeUndefined();
+
+        // 3b. Commenting on a restricted-matter task: permitted actor's comment notifies only permitted users,
+        //     and even if a legacy task row had unpermitted P-000002 recorded as createdById, task_comment notifications/outbox are suppressed!
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: 'P-000002',
+          notificationKind: 'task_comment',
+          inAppEnabled: true,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+        const legacyRestrictedTask = {
+          ...mixedTeamTask.task!,
+          id: 'TSK-R509-LEGACY-COMMENT',
+          reference: 'TSK-R509-LEGACY-COMMENT',
+          createdById: 'P-000002',
+        };
+        await taskRepo.putTask(ctx, legacyRestrictedTask);
+        const commentRes = await addTaskCommentRecord(
+          legacyRestrictedTask.id,
+          'Confidential comment secret for R509',
+          'P-000001',
+        );
+        expect(commentRes.error).toBeUndefined();
+      });
+
+      const p2NotificationsUnfiltered =
+        await taskRepo.listNotificationsForUser<TenantNotificationRecord>(
+          ctx,
+          'P-000002',
+          { includeRestricted: true },
+        );
+      expect(
+        p2NotificationsUnfiltered.some((n) =>
+          n.title.includes('Confidential') || n.detail.includes('Confidential'),
+        ),
+      ).toBe(false);
+
+      // R542 positive control: permitted team member P-000010 received notification + email_outbox + teams_activity_outbox for mixedTeamTask
+      const p10Notifications =
+        await taskRepo.listNotificationsForUser<TenantNotificationRecord>(
+          ctx,
+          'P-000010',
+          { includeRestricted: true },
+        );
+      expect(
+        p10Notifications.some(
+          (n) => n.kind === 'team_task_arrived' && n.detail.includes('Confidential R509 Mixed Team Queue Secret'),
+        ),
+      ).toBe(true);
+      const allOutboxEmails = await outboxRepo.listOutboxRecords(ctx);
+      expect(allOutboxEmails.some((r) => (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p2Email))).toBe(false);
+      expect(
+        allOutboxEmails.slice(emailsBefore).some((r) => (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p10Email)),
+      ).toBe(true);
+      const allTeamsOutbox = await outboxRepo.listTeamsOutboxRecords(ctx);
+      expect(allTeamsOutbox.some((r) => r.recipientPersonId === 'P-000002')).toBe(false);
+      expect(allTeamsOutbox.slice(teamsBefore).some((r) => r.recipientPersonId === 'P-000010')).toBe(true);
+
+      // 4. Direct defence-in-depth calls to outbox helpers for a non-permitted recipient must write zero rows
+      const forgedEmailItem = await enqueueNotificationEmailIfImmediate(
+        ctx,
+        {
+          id: 'NTF-R509-DEFENSE',
+          recipientId: 'P-000002',
+          kind: 'task_assigned',
+          title: 'Secret Matter Alert R509',
+          detail: 'Should never enqueue',
+          href: `/matters/${wallMatter.id}`,
+          recordId: wallMatter.id,
+          matterId: wallMatter.id,
+          createdAt: new Date().toISOString(),
+          read: false,
+          byId: 'P-000001',
+        },
+        { byId: 'P-000001', drainImmediately: false },
+      );
+      expect(forgedEmailItem).toBeNull();
+
+      const forgedTeamsItem = await enqueueNotificationTeamsActivityIfEnabled(
+        ctx,
+        {
+          id: 'NTF-R509-DEFENSE-TEAMS',
+          recipientId: 'P-000002',
+          kind: 'task_assigned',
+          title: 'Secret Matter Alert R509',
+          detail: 'Should never enqueue',
+          href: `/matters/${wallMatter.id}`,
+          recordId: wallMatter.id,
+          matterId: wallMatter.id,
+          createdAt: new Date().toISOString(),
+          read: false,
+          byId: 'P-000001',
+        },
+        { byId: 'P-000001', drainImmediately: false },
+      );
+      expect(forgedTeamsItem).toBeNull();
+
+      expect(
+        (await outboxRepo.listOutboxRecords(ctx)).filter((r) =>
+          (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p2Email),
+        ),
+      ).toHaveLength(0);
+      expect(
+        (await outboxRepo.listTeamsOutboxRecords(ctx)).filter(
+          (r) => r.recipientPersonId === 'P-000002',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R543: allows editing and reassigning away an existing restricted task after an assignee loses access, while actually removing cleared assignees', async () => {
+    const ctx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const matterRepo = getMatterRepository();
+      const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001', {
+        includeRestricted: true,
+      }))!;
+      const wallMatter: Matter = {
+        ...baseMatter,
+        id: 'M-R543-WALL-01',
+        matterNumber: 'MAT-R543-WALL-01',
+        title: 'Confidential R543 Restricted Matter',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001', 'P-000002'],
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001', 'P-000002'],
+      };
+      await matterRepo.putMatter(ctx, wallMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001', 'P-000002'],
+      });
+      const activeSession = makeActorSession(
+        'P-000001',
+        ['partner', 'fee_earner'],
+        'not-a-law-firm',
+      );
+      setTestEntraSessionOverride(activeSession.verifiedSession);
+
+      await runWithActiveActorSession(activeSession, async () => {
+        const created = await saveTaskRecord(
+          {
+            title: 'R543 Pre-Revocation Restricted Task',
+            dueAt: '2027-02-01',
+            assignedPersonId: 'P-000002',
+            assignedPersonIds: ['P-000002'],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(created.task?.id).toBeTruthy();
+
+        // Revoke P-000002's access to wallMatter
+        await matterRepo.putMatter(
+          ctx,
+          { ...wallMatter, teamMemberIds: ['P-000001'], restrictedAccessUserIds: ['P-000001'] },
+          { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000001'] },
+        );
+
+        // Editing title while keeping existing assignee succeeds
+        const edited = await saveTaskRecord(
+          {
+            id: created.task!.id,
+            title: 'R543 Edited Title Retaining Legacy Assignee',
+            dueAt: '2027-02-02',
+            assignedPersonId: 'P-000002',
+            assignedPersonIds: ['P-000002'],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(edited)).toBe(false);
+        expect(edited.task?.title).toBe('R543 Edited Title Retaining Legacy Assignee');
+
+        // R569: Adding a new inaccessible assignee (P-000006) while keeping legacy assignee P-000002 MUST fail with FORBIDDEN
+        const addNewInaccessible = await saveTaskRecord(
+          {
+            id: created.task!.id,
+            title: 'R543 Attempt Add New Inaccessible Assignee',
+            dueAt: '2027-02-02',
+            assignedPersonId: 'P-000002',
+            assignedPersonIds: ['P-000002', 'P-000006'],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(addNewInaccessible)).toBe(true);
+        expect(addNewInaccessible.code).toBe('FORBIDDEN');
+
+        // Reassigning away (clearing person assignees onto mixed-access team TM-000001 — permitted P-000001 alongside unpermitted P-000002) succeeds and removes P-000002
+        const cleared = await saveTaskRecord(
+          {
+            id: created.task!.id,
+            title: 'R543 Cleared Assignee Onto Team',
+            dueAt: '2027-02-02',
+            assignedPersonId: null,
+            assignedPersonIds: [],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(cleared)).toBe(false);
+        expect(cleared.task?.assignedPersonId).toBeNull();
+        expect(cleared.task?.assignedPersonIds ?? []).not.toContain('P-000002');
+
+        // Re-adding now-inaccessible P-000002 after clearing assignees MUST also fail with FORBIDDEN
+        const reAddInaccessible = await saveTaskRecord(
+          {
+            id: created.task!.id,
+            title: 'R543 Attempt Re-Add Inaccessible Assignee',
+            dueAt: '2027-02-02',
+            assignedPersonId: 'P-000002',
+            assignedPersonIds: ['P-000002'],
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [{ recordType: 'matter', recordId: wallMatter.id }],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(reAddInaccessible)).toBe(true);
+        expect(reAddInaccessible.code).toBe('FORBIDDEN');
+      });
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R568 & R573: refuses client changes to linkedKeyDateId on existing tasks, checks every key_date in linkedRecords across notifications/digests/visibility/SQL/search, and runs R556 key-date lookup inside the task transaction', async () => {
+    const ctx = makeTenantCtx('not-a-law-firm', 'P-000001');
+    const matterRepo = getMatterRepository();
+    const kdRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const outboxRepo = getOutboxRepository();
+    const partyRepo = getPartyRepository();
+    const searchRepo = new TenantSearchRepository();
+    let getKdSpy: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const baseCfg = JSON.parse(
+        fs.readFileSync(
+          path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      setActiveTenantConfigForTesting(baseCfg, {
+        integrations: {
+          email: {
+            provider: 'dev_catcher',
+            senderAddress: 'notifications@notalawfirm.example',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { host: '127.0.0.1', port: 1025, secure: false },
+          },
+          teams: {
+            provider: 'dev_catcher',
+            teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { endpointUrl: 'http://127.0.0.1:4125/teams' },
+          },
+        },
+      });
+      const activeCfg = getActiveTenantConfiguration();
+
+      const allPeople = await partyRepo.listAllPeople<
+        TenantPersonRecord & { emails?: Array<{ address: string; isPrimary?: boolean }> }
+      >(ctx);
+      const p2Email = allPeople
+        .find((p) => p.id === 'P-000002')
+        ?.emails?.find((e) => e.isPrimary)
+        ?.address.toLowerCase();
+      const p10Email = allPeople
+        .find((p) => p.id === 'P-000010')
+        ?.emails?.find((e) => e.isPrimary)
+        ?.address.toLowerCase();
+      expect(p2Email).toBeTruthy();
+      expect(p10Email).toBeTruthy();
+
+      for (const pid of ['P-000002', 'P-000010'] as const) {
+        for (const kind of [
+          'team_task_arrived',
+          'task_assigned',
+          'task_comment',
+        ] as const) {
+          await outboxRepo.upsertNotificationPreference(ctx, {
+            personId: pid,
+            notificationKind: kind,
+            inAppEnabled: true,
+            emailFrequency: 'immediate',
+            teamsEnabled: true,
+          });
+        }
+      }
+
+      const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001', {
+        includeRestricted: true,
+      }))!;
+      const wallMatter: Matter = {
+        ...baseMatter,
+        id: 'M-R568-WALL-01',
+        matterNumber: 'MAT-R568-WALL-01',
+        title: 'Confidential R568 Second KeyDate Restricted Matter',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001', 'P-000010'],
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001', 'P-000010'],
+      };
+      await matterRepo.putMatter(ctx, wallMatter, {
+        expectedRowVersion: null,
+        sqlRestrictedAccessUserIds: ['P-000001', 'P-000010'],
+      });
+
+      const kdOpenId = 'KD-R568-OPEN';
+      const kdWallId = 'KD-R568-WALL';
+      await kdRepo.putKeyDate(ctx, {
+        id: kdOpenId,
+        matterId: 'M-000001',
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'Unrestricted First Key Date R568',
+        dueDate: '2027-04-01',
+        isCritical: false,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-000001'],
+        verification: { required: false },
+        createdById: 'P-000001',
+        createdAt: '2026-11-19T10:00:00.000Z',
+        updatedById: 'P-000001',
+        updatedAt: '2026-11-19T10:00:00.000Z',
+        version: 1,
+      });
+      await kdRepo.putKeyDate(ctx, {
+        id: kdWallId,
+        matterId: wallMatter.id,
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'Restricted Second Key Date R568 Secret',
+        dueDate: '2027-04-15',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-000001', 'P-000010'],
+        verification: { required: false },
+        createdById: 'P-000001',
+        createdAt: '2026-11-19T10:00:00.000Z',
+        updatedById: 'P-000001',
+        updatedAt: '2026-11-19T10:00:00.000Z',
+        version: 1,
+      });
+
+      const p1Session = makeActorSession(
+        'P-000001',
+        ['partner', 'fee_earner'],
+        'not-a-law-firm',
+      );
+      setTestEntraSessionOverride(p1Session.verifiedSession);
+
+      // R573 spy: capture transaction state when getKeyDateRepository().getKeyDateById runs inside saveTaskRecord
+      const kdLookupTxStates: Array<{
+        kdId: string;
+        txState: ReturnType<typeof getActiveTenantTransactionState>;
+      }> = [];
+      const kdRepoForSpy = getKeyDateRepository();
+      const origGetKdById = kdRepoForSpy.getKeyDateById.bind(kdRepoForSpy);
+      getKdSpy = vi
+        .spyOn(kdRepoForSpy, 'getKeyDateById')
+        .mockImplementation(async (c, id, viewerId, opts) => {
+          kdLookupTxStates.push({
+            kdId: id,
+            txState: getActiveTenantTransactionState(),
+          });
+          return origGetKdById(c, id, viewerId, opts);
+        });
+
+      const twoKdToken = 'ConfidentialR568TwoKdSecret';
+      let kdLockedTaskId = '';
+      let twoKdTaskId = '';
+
+      await runWithActiveActorSession(p1Session, async () => {
+        // Sub-case A: client cannot pass linkedKeyDateId: null (or change it) to drop a task's key-date link
+        const createdKdTask = await saveTaskRecord(
+          {
+            title: 'R568 Locked KeyDate Task Secret',
+            dueAt: '2027-04-15',
+            assignedPersonId: 'P-000001',
+            linkedKeyDateId: kdWallId,
+          },
+          'P-000001',
+        );
+        expect(createdKdTask.task?.id).toBeTruthy();
+        kdLockedTaskId = createdKdTask.task!.id;
+
+        // R573: getKeyDateById lookup during saveTaskRecord must have run inside a writable tenant transaction
+        const r573Lookup = kdLookupTxStates.find((x) => x.kdId === kdWallId);
+        expect(r573Lookup).toBeDefined();
+        expect(r573Lookup!.txState).not.toBeNull();
+        expect(r573Lookup!.txState!.tenantId).toBe('not-a-law-firm');
+        expect(r573Lookup!.txState!.readOnly).toBe(false);
+
+        const unlinkAttempt = await saveTaskRecord(
+          {
+            id: kdLockedTaskId,
+            title: 'R568 Unlink Attempt',
+            dueAt: '2027-04-16',
+            assignedPersonId: 'P-000001',
+            linkedKeyDateId: null,
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(unlinkAttempt)).toBe(true);
+        expect(unlinkAttempt.code).toBe('FORBIDDEN');
+
+        const swapAttempt = await saveTaskRecord(
+          {
+            id: kdLockedTaskId,
+            title: 'R568 Swap KeyDate Attempt',
+            dueAt: '2027-04-16',
+            assignedPersonId: 'P-000001',
+            linkedKeyDateId: kdOpenId,
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(swapAttempt)).toBe(true);
+        expect(swapAttempt.code).toBe('FORBIDDEN');
+
+        const persistedAfterRefusal = await taskRepo.getTaskById<Task>(
+          ctx,
+          kdLockedTaskId,
+          { includeRestricted: true },
+        );
+        expect(persistedAfterRefusal?.linkedKeyDateId).toBe(kdWallId);
+
+        // Editing without specifying linkedKeyDateId (e.g. changing linkedRecords) keeps existing.linkedKeyDateId intact
+        const omittedKdEdit = await saveTaskRecord(
+          {
+            id: kdLockedTaskId,
+            title: 'R568 Preserved KeyDate Title',
+            dueAt: '2027-04-16',
+            assignedPersonId: 'P-000001',
+            linkedRecords: [
+              { recordType: 'key_date', recordId: kdOpenId },
+            ] as unknown as Task['linkedRecords'],
+          },
+          'P-000001',
+        );
+        expect(isActionDenied(omittedKdEdit)).toBe(false);
+        expect(omittedKdEdit.task?.linkedKeyDateId).toBe(kdWallId);
+
+        // Sub-case B: task with TWO key_date links where the SECOND (kdWallId) is on a restricted matter
+        const twoKdRes = await saveTaskRecord(
+          {
+            title: `${twoKdToken} Dual KeyDate Task`,
+            dueAt: '2027-04-15',
+            assignedTeamId: 'TM-000001',
+            linkedRecords: [
+              { recordType: 'key_date', recordId: kdOpenId },
+              { recordType: 'key_date', recordId: kdWallId },
+            ] as unknown as Task['linkedRecords'],
+          },
+          'P-000001',
+        );
+        expect(twoKdRes.error).toBeUndefined();
+        expect(twoKdRes.task?.id).toBeTruthy();
+        twoKdTaskId = twoKdRes.task!.id;
+
+        // Also exercise unpreloaded addTaskCommentRecord path with two key_date links (legacy createdById: 'P-000002')
+        const commentTask = {
+          ...twoKdRes.task!,
+          id: 'TSK-R568-TWO-KD-COMMENT',
+          reference: 'TSK-R568-TWO-KD-COMMENT',
+          createdById: 'P-000002',
+        };
+        await taskRepo.putTask(ctx, commentTask);
+        const commentRes = await addTaskCommentRecord(
+          commentTask.id,
+          `Comment on ${twoKdToken}`,
+          'P-000001',
+        );
+        expect(commentRes.error).toBeUndefined();
+
+        // Direct unpreloaded email & Teams outbox hooks targeting the dual-key-date task for unpermitted P-000002
+        const directEmailOutbox = await enqueueNotificationEmailIfImmediate(
+          ctx,
+          {
+            id: 'NTF-R568-UNPRELOADED-EMAIL',
+            recipientId: 'P-000002',
+            kind: 'task_assigned',
+            title: `Direct ${twoKdToken} Notice`,
+            detail: 'Should be suppressed by second key_date link',
+            href: `/tasks/${twoKdTaskId}`,
+            recordId: twoKdTaskId,
+            createdAt: new Date().toISOString(),
+            read: false,
+            byId: 'P-000001',
+          },
+          { byId: 'P-000001', drainImmediately: false },
+        );
+        expect(directEmailOutbox).toBeNull();
+
+        const directTeamsOutbox = await enqueueNotificationTeamsActivityIfEnabled(
+          ctx,
+          {
+            id: 'NTF-R568-UNPRELOADED-TEAMS',
+            recipientId: 'P-000002',
+            kind: 'task_assigned',
+            title: `Direct ${twoKdToken} Notice`,
+            detail: 'Should be suppressed by second key_date link',
+            href: `/tasks/${twoKdTaskId}`,
+            recordId: twoKdTaskId,
+            createdAt: new Date().toISOString(),
+            read: false,
+            byId: 'P-000001',
+          },
+          { byId: 'P-000001', drainImmediately: false },
+        );
+        expect(directTeamsOutbox).toBeNull();
+      });
+
+      // Assert P-000002 received ZERO notifications, email outbox rows, or Teams outbox rows, while P-000010 received the team notification
+      const p2Notifs = await taskRepo.listNotificationsForUser<TenantNotificationRecord>(
+        ctx,
+        'P-000002',
+        { includeRestricted: true },
+      );
+      expect(p2Notifs.some((n) => n.title.includes(twoKdToken) || n.detail.includes(twoKdToken))).toBe(false);
+
+      const p10Notifs = await taskRepo.listNotificationsForUser<TenantNotificationRecord>(
+        ctx,
+        'P-000010',
+        { includeRestricted: true },
+      );
+      expect(
+        p10Notifs.some((n) => n.kind === 'team_task_arrived' && n.detail.includes(twoKdToken)),
+      ).toBe(true);
+
+      const allOutboxEmails = await outboxRepo.listOutboxRecords(ctx);
+      expect(
+        allOutboxEmails.some((r) => (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p2Email)),
+      ).toBe(false);
+      expect(
+        allOutboxEmails.some((r) => (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p10Email)),
+      ).toBe(true);
+
+      const allTeamsOutbox = await outboxRepo.listTeamsOutboxRecords(ctx);
+      expect(allTeamsOutbox.some((r) => r.recipientPersonId === 'P-000002')).toBe(false);
+      expect(allTeamsOutbox.some((r) => r.recipientPersonId === 'P-000010')).toBe(true);
+
+      // Assert snapshot visibility, SQL listVisibleTasks, and Global Search hide twoKdTaskId from P-000002 and show it to P-000001
+      const p2Session = makeActorSession('P-000002', ['fee_earner'], 'not-a-law-firm');
+      setTestEntraSessionOverride(p2Session.verifiedSession);
+      const p2Snap = await runWithActiveActorSession(p2Session, () => getAppSnapshot('P-000002'));
+      expect(p2Snap.tasks.some((t) => t.id === twoKdTaskId)).toBe(false);
+
+      setTestEntraSessionOverride(p1Session.verifiedSession);
+      const p1Snap = await runWithActiveActorSession(p1Session, () => getAppSnapshot('P-000001'));
+      expect(p1Snap.tasks.some((t) => t.id === twoKdTaskId)).toBe(true);
+
+      expect((await taskRepo.listVisibleTasks(ctx, 'P-000002')).some((t) => t.id === twoKdTaskId)).toBe(false);
+      expect((await taskRepo.listVisibleTasks(ctx, 'P-000001')).some((t) => t.id === twoKdTaskId)).toBe(true);
+
+      const p2Search = await searchRepo.searchRecords(ctx, {
+        query: twoKdToken,
+        entityTypes: ['task'],
+        actor: {
+          actorId: 'P-000002',
+          hasRestrictedMatterAccess: false,
+          canViewDocuments: true,
+          canViewQuotes: true,
+          canViewFinance: false,
+          canViewKeyDates: true,
+          permittedDiaryTeamIds: ['TM-000001'],
+          canViewRegisters: true,
+          canManageUndertakings: true,
+        },
+      });
+      expect(p2Search.hits.some((h) => h.id === twoKdTaskId)).toBe(false);
+
+      const p1Search = await searchRepo.searchRecords(ctx, {
+        query: twoKdToken,
+        entityTypes: ['task'],
+        actor: {
+          actorId: 'P-000001',
+          hasRestrictedMatterAccess: false,
+          canViewDocuments: true,
+          canViewQuotes: true,
+          canViewFinance: false,
+          canViewKeyDates: true,
+          permittedDiaryTeamIds: ['TM-000001'],
+          canViewRegisters: true,
+          canManageUndertakings: true,
+        },
+      });
+      expect(p1Search.hits.some((h) => h.id === twoKdTaskId)).toBe(true);
+
+      // Assert extractNotificationMatterIds + executeNotificationDigestsForTenant suppress digest delivery for legacy undigested notifications on twoKdTaskId
+      for (const pid of ['P-000002', 'P-000010'] as const) {
+        await outboxRepo.upsertNotificationPreference(ctx, {
+          personId: pid,
+          notificationKind: 'task_assigned',
+          inAppEnabled: true,
+          emailFrequency: 'daily_digest',
+          teamsEnabled: false,
+        });
+      }
+      await taskRepo.putNotification(ctx, {
+        id: 'NTF-R568-DIGEST-P2',
+        recipientId: 'P-000002',
+        kind: 'task_assigned',
+        title: `Digest ${twoKdToken} P2 Secret`,
+        detail: 'Must be suppressed from P-000002 digest',
+        href: `/tasks/${twoKdTaskId}`,
+        recordId: twoKdTaskId,
+        createdAt: '2026-03-30T06:00:00.000Z',
+        read: false,
+        byId: 'P-000001',
+      });
+      await taskRepo.putNotification(ctx, {
+        id: 'NTF-R568-DIGEST-P10',
+        recipientId: 'P-000010',
+        kind: 'task_assigned',
+        title: `Digest ${twoKdToken} P10 Allowed`,
+        detail: 'Allowed in P-000010 digest',
+        href: `/tasks/${twoKdTaskId}`,
+        recordId: twoKdTaskId,
+        createdAt: '2026-03-30T06:00:00.000Z',
+        read: false,
+        byId: 'P-000001',
+      });
+
+      await getJobRunRepository().clearTenantJobRuns(ctx);
+      const digestOutcome = await executeNotificationDigestsForTenant(ctx, {
+        tenantConfig: activeCfg,
+        now: new Date('2026-03-30T07:00:00.000Z'),
+        drainAfterCommit: false,
+      });
+      expect(digestOutcome.outcome).toBe('executed');
+      const emailsAfterDigest = await outboxRepo.listOutboxRecords(ctx);
+      expect(
+        emailsAfterDigest.some(
+          (r) =>
+            r.templateKey === 'notification-digest-daily' &&
+            (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p2Email),
+        ),
+      ).toBe(false);
+      expect(
+        emailsAfterDigest.some(
+          (r) =>
+            r.templateKey === 'notification-digest-daily' &&
+            (r.recipients?.to ?? []).some((e) => e.toLowerCase() === p10Email),
+        ),
+      ).toBe(true);
+    } finally {
+      getKdSpy?.mockRestore();
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await getJobRunRepository().clearTenantJobRuns(ctx).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 });

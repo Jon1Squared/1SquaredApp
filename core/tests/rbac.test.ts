@@ -8604,5 +8604,61 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         configBeforeBadEnabled,
       );
     });
+
+    it('R571: resolvePersonPermissionSet ignores options.tokenRoles when no explicit actor ID is supplied and no session is active, and applies options.tokenRoles only when explicit actor ID matches', async () => {
+      const store = loadCommittedSeedStore();
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      expect(feeEarner.roles).toEqual(['fee_earner']);
+      const rbacConfig = getDefaultTenantRbacConfig();
+
+      // 1. Outside any active session and with no explicit tokenRolesActorId / context.actorId,
+      //    options.tokenRoles must NOT apply (even for ['admin', 'risk_compliance']).
+      const unattributed = domainResolvePersonPermissionSet(feeEarner, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: rbacConfig },
+        tokenRoles: ['admin', 'risk_compliance'],
+        mfaVerified: true,
+      });
+      expect(unattributed.permissions.has('admin:access')).toBe(false);
+      expect(unattributed.permissions.has('matter:restricted:access')).toBe(false);
+
+      // 2. Mismatched explicit tokenRolesActorId must also NOT apply options.tokenRoles.
+      const mismatched = domainResolvePersonPermissionSet(feeEarner, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: rbacConfig },
+        tokenRoles: ['admin', 'risk_compliance'],
+        tokenRolesActorId: 'P-000004',
+        mfaVerified: true,
+      });
+      expect(mismatched.permissions.has('admin:access')).toBe(false);
+      expect(mismatched.permissions.has('matter:restricted:access')).toBe(false);
+
+      // 3. Matching explicit tokenRolesActorId applies options.tokenRoles cleanly.
+      const matchedExplicit = domainResolvePersonPermissionSet(feeEarner, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: rbacConfig },
+        tokenRoles: ['admin', 'risk_compliance'],
+        tokenRolesActorId: feeEarner.id,
+        mfaVerified: true,
+      });
+      expect(matchedExplicit.permissions.has('admin:access')).toBe(true);
+      expect(matchedExplicit.permissions.has('matter:restricted:access')).toBe(true);
+
+      // 4. Matching context.actorId also applies options.tokenRoles cleanly.
+      const matchedViaContext = domainResolvePersonPermissionSet(feeEarner, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: rbacConfig },
+        tokenRoles: ['admin', 'risk_compliance'],
+        context: {
+          tenantId: 'not-a-law-firm',
+          correlationId: 'corr-r571-match',
+          actorId: feeEarner.id,
+          actorRoles: [],
+          mfaVerified: true,
+        },
+      });
+      expect(matchedViaContext.permissions.has('admin:access')).toBe(true);
+      expect(matchedViaContext.permissions.has('matter:restricted:access')).toBe(true);
+    });
   });
 });
