@@ -12708,4 +12708,167 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
+
+  it('R515 two-tenant isolation: merge repoints register_records in verified tenant only and rejects forged tenant claims', async () => {
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-ADM',
+        tenantId: 'tenant-alpha',
+        name: 'Alpha Admin',
+        email: 'alpha-admin@tenant-alpha.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r515-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-ADM',
+        tenantId: 'tenant-bravo',
+        name: 'Bravo Admin',
+        email: 'bravo-admin@tenant-bravo.example',
+        roles: ['admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r515-b',
+    });
+
+    const partyRepo = getPartyRepository();
+    const regRepo = getRegisterRepository();
+    const store = loadCommittedSeedStore();
+    const contactTemplate = store.people.find((p) => !p.isEmployee)!;
+    const orgTemplate = store.organisations[0]!;
+
+    try {
+      await regRepo.clearTenantData(ctxA).catch(() => undefined);
+      await regRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+
+      const pSurv = { ...contactTemplate, id: 'P-R515-SURV', isEmployee: false, employment: null };
+      const pLose = { ...contactTemplate, id: 'P-R515-LOSE', isEmployee: false, employment: null };
+      const oSurv = { ...orgTemplate, id: 'O-R515-SURV', legalName: 'R515 Survivor Org Ltd' };
+      const oLose = { ...orgTemplate, id: 'O-R515-LOSE', legalName: 'R515 Duplicate Org Ltd' };
+
+      await partyRepo.putPeople(ctxA, [pSurv, pLose]);
+      await partyRepo.putOrganisation(ctxA, oSurv);
+      await partyRepo.putOrganisation(ctxA, oLose);
+
+      await partyRepo.putPeople(ctxB, [pSurv, pLose]);
+      await partyRepo.putOrganisation(ctxB, oSurv);
+      await partyRepo.putOrganisation(ctxB, oLose);
+
+      await regRepo.createRegisterRecord(
+        ctxA,
+        {
+          id: 'REG-R515-ISO-1',
+          registerTypeKey: 'complaint',
+          reference: 'CMP-R515-A',
+          title: 'Alpha Register Record',
+          status: 'open',
+          matterId: null,
+          enquiryId: null,
+          personId: 'P-R515-LOSE',
+          organisationId: 'O-R515-LOSE',
+          ownerId: 'P-ALPHA-ADM',
+          assignedApproverId: null,
+          dueAt: null,
+          reviewAt: null,
+          reminderScheduleDays: [],
+          fieldValues: {
+            complainantPersonId: 'P-R515-LOSE',
+            nestedParty: { id: 'P-R515-LOSE' },
+          },
+          createdById: 'P-ALPHA-ADM',
+        },
+        { recordInitialTransition: false },
+      );
+
+      await regRepo.createRegisterRecord(
+        ctxB,
+        {
+          id: 'REG-R515-ISO-1',
+          registerTypeKey: 'complaint',
+          reference: 'CMP-R515-B',
+          title: 'Bravo Register Record',
+          status: 'open',
+          matterId: null,
+          enquiryId: null,
+          personId: 'P-R515-LOSE',
+          organisationId: 'O-R515-LOSE',
+          ownerId: 'P-BRAVO-ADM',
+          assignedApproverId: null,
+          dueAt: null,
+          reviewAt: null,
+          reminderScheduleDays: [],
+          fieldValues: {
+            complainantPersonId: 'P-R515-LOSE',
+            nestedParty: { id: 'P-R515-LOSE' },
+          },
+          createdById: 'P-BRAVO-ADM',
+        },
+        { recordInitialTransition: false },
+      );
+
+      await partyRepo.executeMergeInTransaction(ctxA, {
+        recordType: 'person',
+        survivor: pSurv,
+        merged: pLose,
+      });
+      await partyRepo.executeMergeInTransaction(ctxA, {
+        recordType: 'organisation',
+        survivor: oSurv,
+        merged: oLose,
+      });
+
+      const alphaRec = await regRepo.getRegisterRecordById(ctxA, 'REG-R515-ISO-1', {
+        includeRestricted: true,
+      });
+      const bravoRec = await regRepo.getRegisterRecordById(ctxB, 'REG-R515-ISO-1', {
+        includeRestricted: true,
+      });
+      expect(alphaRec?.personId).toBe('P-R515-SURV');
+      expect(alphaRec?.organisationId).toBe('O-R515-SURV');
+      expect(alphaRec?.fieldValues.complainantPersonId).toBe('P-R515-SURV');
+      expect(alphaRec?.fieldValues.nestedParty).toEqual({ id: 'P-R515-SURV' });
+      expect(alphaRec?.rowVersion).toBeGreaterThan(1);
+      await expect(
+        regRepo.updateRegisterRecordDetails(ctxA, {
+          recordId: 'REG-R515-ISO-1',
+          expectedRowVersion: 1,
+          title: 'Stale pre-merge write in Alpha',
+          updatedById: 'P-ALPHA-ADM',
+        }),
+      ).rejects.toThrow(/modified concurrently/);
+      // Bravo remains untouched on its own tenant DB
+      expect(bravoRec?.personId).toBe('P-R515-LOSE');
+      expect(bravoRec?.organisationId).toBe('O-R515-LOSE');
+      expect(bravoRec?.fieldValues.complainantPersonId).toBe('P-R515-LOSE');
+      expect(bravoRec?.fieldValues.nestedParty).toEqual({ id: 'P-R515-LOSE' });
+      expect(bravoRec?.rowVersion).toBe(1);
+
+      // Forged tenant claim fails at PostgreSQL pool/ROLE boundary
+      await expect(
+        partyRepo.executeMergeInTransaction(
+          Object.freeze({ ...ctxA, tenantId: 'tenant-bravo' }),
+          {
+            recordType: 'person',
+            survivor: pSurv,
+            merged: pLose,
+          },
+        ),
+      ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED|42501/i);
+    } finally {
+      await regRepo.clearTenantData(ctxA).catch(() => undefined);
+      await regRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+    }
+  });
 });

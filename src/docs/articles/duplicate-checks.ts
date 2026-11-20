@@ -6,7 +6,7 @@ export const duplicateChecks: DocArticle = {
   section: 'people-organisations',
   summary:
     'How the People and Organisation forms warn you about records that may already exist, and how merging duplicate records repoints every reference.',
-  updated: '2026-11-15',
+  updated: '2026-11-20',
   body: `
 When you add or edit a person or organisation, 1Squared checks for existing records in the per-tenant PostgreSQL directory (\`TenantPartyRepository\`: \`public.people\`, \`public.person_emails\`, \`public.organisations\`, \`public.person_organisation_links\`, \`public.notes\`, and \`public.merge_history\`, \`S0-16\`) that might be the same. Matches appear in a warning above the form, so you can open the existing record instead of creating a duplicate.
 
@@ -60,10 +60,11 @@ In a single operation, the merge copies missing profile fields, emails, phone nu
 - **Person emails:** \`person_emails\` rows moved to the survivor and de-duplicated by normalised email address.
 - **Organisations:** subsidiary \`parentOrganisationId\` links (guarding against self-parenting or tombstone cycles on the surviving organisation).
 - **Generated documents:** \`primaryClientId\`, \`recipientPartyId\`, and \`document_links\` (preserving distinct \`link_role\` links whilst deduplicating exact same-role collisions).
+- **Registers:** \`public.register_records\` (\`person_id\`, \`organisation_id\`, and flat or nested \`{ id }\` party ID references inside \`field_values_json\`, incrementing \`row_version\` inside the merge transaction, \`R515\`, \`R551\`, \`R565\`).
 - **Notes and activity:** notes (recording \`mergedFromId\`), \`createdFromEnquiryId\` (inherited by both \`Person\` and \`Organisation\` survivors when blank), recently viewed lists, and notification \`recordId\` / metadata / boundary-safe \`href\` links (so merging \`P-1\` never corrupts \`/people/P-10\`).
 
 ### Tombstone redirect and audit trail
 
-The merged record is not deleted: it is marked as **Merged** with \`mergedIntoId\` pointing to the surviving record, and all PostgreSQL directory (\`people\`, \`person_emails\`, \`organisations\`, \`person_organisation_links\`, \`notes\`, \`merge_history\`), matter (incrementing \`row_version\`), key-date, document, document-link, intake (\`enquiries\`, \`quotes\`), workflow (\`tasks\`, \`task_linked_records\`, \`notifications\`, \`recently_viewed\`), and \`audit_entries\` writes commit atomically inside a single tenant database transaction via \`TenantPartyRepository.executeMergeInTransaction\` (\`S0-16\`, \`S0-17a\`, \`S0-21\`). Opening the old record's profile or edit URL automatically redirects to the surviving record, and existing audit entries keep their original \`recordId\` so the historical audit trail remains intact.
+The merged record is not deleted: it is marked as **Merged** with \`mergedIntoId\` pointing to the surviving record, and all PostgreSQL directory (\`people\`, \`person_emails\`, \`organisations\`, \`person_organisation_links\`, \`notes\`, \`merge_history\`), matter (incrementing \`row_version\`), register (\`register_records\`, incrementing \`row_version\`), \`pms_links\`, \`client_rate_overrides\`, document, document-link, intake (\`enquiries\`, \`quotes\`), workflow (\`tasks\`, \`task_linked_records\`, \`notifications\`, \`recently_viewed\`), and \`audit_entries\` writes commit atomically inside a single tenant database transaction via \`TenantPartyRepository.executeMergeInTransaction\` (\`S0-16\`, \`S0-17a\`, \`S0-21\`, \`R552\`). Opening the old record's profile or edit URL automatically redirects to the surviving record, and existing audit entries keep their original \`recordId\` so the historical audit trail remains intact.
 `,
 };

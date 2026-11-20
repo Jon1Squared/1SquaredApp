@@ -78,15 +78,15 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`integrations.teams.devCatcher.endpointUrl\` | Optional | Active | HTTP endpoint URL for local Teams Activity catcher testing in \`dev\` and \`test\` (forbidden in \`live\`) |
 | \`integrations.teams.graph.*\` | Optional | Active | Microsoft Graph application-only certificate settings (\`tenantId\`, \`clientId\`, \`certificateVaultRef\`, optional 40-hex \`certificateThumbprint\` required when \`provider === "graph"\`) |
 | \`notifications.digestHourLocal\` | \`8\` | Active | Tenant-local hour (\`0\`–\`23\`, default \`8\`) at or after which the Monday–Friday \`notification-digests\` scheduler job queues daily and weekly email digests across GMT/BST transitions |
-| \`integrations.pmsConnectionSecretVaultRef\` | Required | Reserved (backlog) | Key Vault reference reserved for post-Stage-0 live tenant-scoped PMS database connection secret resolution |
+| \`integrations.pmsConnectionSecretVaultRef\` | Required | Reserved (backlog, F22) | Key Vault reference reserved for post-Stage-0 live tenant-scoped PMS database connection secret resolution (\`F22\`) |
 | \`integrations.companiesHouseApiKeyVaultRef\` | Required | Reserved (backlog, F17) | Key Vault reference reserved for post-Stage-0 live Companies House API integration (\`F17\`) |
-| \`integrations.pmsSync.enabled\` | \`true\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS synchronisation |
-| \`integrations.pmsSync.providerKey\` | \`"generic_sql"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS adapter selection |
-| \`integrations.pmsSync.syncMode\` | \`"two_way"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS sync direction control |
-| \`integrations.pmsSync.matterCodeAllocation\` | \`"onesquared"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS matter number allocation |
-| \`integrations.pmsSync.clientCodeAllocation\` | \`"onesquared"\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS client code allocation |
-| \`integrations.pmsSync.pollIntervalMinutes\` | \`15\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS delta polling interval |
-| \`integrations.pmsSync.fieldMappings\` | \`[]\` | Reserved (backlog) | Post-Stage-0 live tenant-scoped PMS field-level synchronisation |
+| \`integrations.pmsSync.enabled\` | \`true\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS synchronisation (\`F22\`) |
+| \`integrations.pmsSync.providerKey\` | \`"generic_sql"\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS adapter selection (\`F22\`) |
+| \`integrations.pmsSync.syncMode\` | \`"two_way"\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS sync direction control (\`F22\`) |
+| \`integrations.pmsSync.matterCodeAllocation\` | \`"onesquared"\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS matter number allocation (\`F22\`) |
+| \`integrations.pmsSync.clientCodeAllocation\` | \`"onesquared"\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS client code allocation (\`F22\`) |
+| \`integrations.pmsSync.pollIntervalMinutes\` | \`15\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS delta polling interval (\`F22\`) |
+| \`integrations.pmsSync.fieldMappings\` | \`[]\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS field-level synchronisation (\`F22\`) |
 
 ### Custom fields, extensions, RBAC, documents and key dates
 
@@ -106,7 +106,7 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`documentAccess.departmentEntraGroups\` | \`{}\` | Active | Department to Entra security group mappings |
 | \`documentAccess.teamEntraGroups\` | \`{}\` | Active | Team to Entra security group mappings |
 | \`documentAccess.uniqueScopeWarningThreshold\` | \`4000\` | Active | Warning threshold for unique SharePoint permission scopes per library |
-| \`documentAccess.autoRemediateDrift\` | \`false\` | Reserved (backlog) | Reserved for future scheduled automatic SharePoint permission drift remediation (backlog item beyond Stage 0) |
+| \`documentAccess.autoRemediateDrift\` | \`false\` | Reserved (backlog, F23) | Reserved for future scheduled automatic SharePoint permission drift remediation (\`F23\`, beyond Stage 0) |
 | \`documentAccess.defaultPolicy\` / \`policiesByStore\` | Built-in policy | Active | Inheritance-based document access policies |
 | \`matterFolderTemplates.*\` | Required \`default\` | Active | Versioned matter folder templates with work-type and department inheritance |
 | \`keyDates.*\` | Enabled | Active | Key dates, limitation rule sets (marking a rule set \`reviewed\` records the saving actor's person ID in \`reviewedBy\` and today's ISO date in \`reviewedOn\` on the server, rejects invalid \`reviewStatus\` values, and clears \`reviewedBy\` / \`reviewedOn\` when unmarked), key date types (\`allowManualEntry: false\` disables the Manual Date Entry button, switches to the limitation calculator when \`allowCalculation\` is enabled or displays a notice when neither is enabled, and returns \`ActionDenied\` (\`FORBIDDEN\`) on manual creation, manual supersede, or spoofed system sources), verification rules, reminder schedules, and calendar sync |

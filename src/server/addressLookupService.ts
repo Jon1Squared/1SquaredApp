@@ -16,6 +16,11 @@ export interface AddressLookupLogContext {
 let loggedNotConfiguredWarning = false;
 
 export function resetAddressLookupNotConfiguredWarningForTests(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: resetAddressLookupNotConfiguredWarningForTests is only permitted when NODE_ENV === "test".',
+    );
+  }
   loggedNotConfiguredWarning = false;
 }
 

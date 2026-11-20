@@ -93,8 +93,10 @@ import {
   getMatterRepository,
   getPartyRepository,
   getPmsAdminSnapshot,
+  getRegisterRepository,
   getTaskWorkflowRepository,
   linkPmsRecord,
+  listFirmAuditEntriesPage,
   logEmployeeRestrictedAccess,
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
@@ -147,6 +149,7 @@ import {
   auditEntriesWrittenSince,
   makeVerifiedTestEntraSession,
   runAsTestActor,
+  setTestActorSession,
   testTenantCtx,
 } from '../../src/server/testSupport/auditTestSupport';
 import {
@@ -166,6 +169,7 @@ import {
 import {
   addChoiceValueAction,
   addHomeRoleAction,
+  anonymiseExpiredEnquiriesAction,
   clearAllDataAction,
   createMatterStageGroupAction,
   createRecordFromPmsAction,
@@ -3280,6 +3284,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(snapFeeEarner.tasks.some((t) => t.id === wallTask.id)).toBe(false);
 
         // B9: P-000002 cannot comment on a task linked to a restricted matter
+        const initialCommentCount = wallTask.comments?.length ?? 0;
         const commentDenied = await runAsTestActor('P-000002', () =>
           addTaskCommentRecord(
             wallTask.id,
@@ -3288,6 +3293,17 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           ),
         );
         expect(isActionDenied(commentDenied)).toBe(true);
+        if (isActionDenied(commentDenied)) {
+          expect(commentDenied.code).toBe('FORBIDDEN');
+          expect(commentDenied.message).toBe('Task not found or access denied.');
+        }
+        const wallTaskAfterCommentAttempt = await getTaskWorkflowRepository().getTaskById<Task>(
+          ctx,
+          wallTask.id,
+        );
+        expect(wallTaskAfterCommentAttempt?.comments?.length ?? 0).toBe(
+          initialCommentCount,
+        );
 
         // P-000002 cannot link a new task to the restricted matter
         const linkRestrictedDenied = await runAsTestActor('P-000002', () =>
@@ -3390,6 +3406,33 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           reopenEnquiryRecord(closedEnq.id, nonLeadFeeEarner.id),
         );
         expect(isActionDenied(reopenByNonLead)).toBe(true);
+        if (isActionDenied(reopenByNonLead)) {
+          expect(reopenByNonLead.code).toBe('FORBIDDEN');
+          expect(reopenByNonLead.message).toBe(
+            'Only the assignee, the team lead for the enquiry team, or an administrator may reopen this enquiry.',
+          );
+        }
+
+        // R529: Intake / coordinator user (not assignee, not team lead, not admin) is also denied with the aligned message
+        const intakeProbe = allPeople.find((p) => p.id === 'P-000042')!;
+        intakeProbe.roles = ['intake'];
+        intakeProbe.permissionOverrides = {
+          grant: ['enquiry:reopen'],
+          revoke: [],
+        };
+        await getPartyRepository().putPerson(ctx, intakeProbe);
+        const reopenByIntake = await runAsTestActor(
+          intakeProbe.id,
+          () => reopenEnquiryRecord(closedEnq.id, intakeProbe.id),
+          { roles: ['intake'] },
+        );
+        expect(isActionDenied(reopenByIntake)).toBe(true);
+        if (isActionDenied(reopenByIntake)) {
+          expect(reopenByIntake.code).toBe('FORBIDDEN');
+          expect(reopenByIntake.message).toBe(
+            'Only the assignee, the team lead for the enquiry team, or an administrator may reopen this enquiry.',
+          );
+        }
 
         // Team lead with enquiry:reopen revoked is refused (R267)
         const teamLeadPerson = allPeople.find((p) => p.id === teamLeadId)!;
@@ -3402,6 +3445,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           reopenEnquiryRecord(closedEnq.id, teamLeadId),
         );
         expect(isActionDenied(reopenNoPerm)).toBe(true);
+        if (isActionDenied(reopenNoPerm)) {
+          expect(reopenNoPerm.code).toBe('FORBIDDEN');
+          expect(reopenNoPerm.message.trim().length).toBeGreaterThan(0);
+        }
         teamLeadPerson.permissionOverrides = undefined;
         await getPartyRepository().putPerson(ctx, teamLeadPerson);
 
@@ -4405,8 +4452,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           const declinedOrgConv = await prepareQuoteConversionRecord(declinedOrgQuote.id, 'P-000001');
           expect(declinedOrgConv.ok).toBe(false);
           expect(declinedOrgConv.conflictBlocked).toBe(true);
-          expect(declinedOrg.conflictStatusId).toBe(declinedStatusId);
-          expect(declinedOrg.conflictReference).toBe('CR-KEEP-DECLINED');
+          const declinedOrgAfter = (await getPartyRepository().getOrganisationById<
+            import('@/domain/types').Organisation
+          >(ctx, declinedOrg.id))!;
+          expect(declinedOrgAfter).toBeDefined();
+          expect(declinedOrgAfter.conflictStatusId).toBe(declinedStatusId);
+          expect(declinedOrgAfter.conflictReference).toBe('CR-KEEP-DECLINED');
 
           // 2c. R254: An existing organisation set to "Cleared with consent" keeps its status after a successful quote conversion
           const consentOrg = (await saveOrganisationRecord(
@@ -4430,8 +4481,12 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           )).quote!;
           const consentOrgConv = await prepareQuoteConversionRecord(consentOrgQuote.id, 'P-000001');
           expect(consentOrgConv.ok).toBe(true);
-          expect(consentOrg.conflictStatusId).toBe(clearedWithConsentStatusId);
-          expect(consentOrg.conflictReference).toBe('CR-KEEP-CONSENT');
+          const consentOrgAfter = (await getPartyRepository().getOrganisationById<
+            import('@/domain/types').Organisation
+          >(ctx, consentOrg.id))!;
+          expect(consentOrgAfter).toBeDefined();
+          expect(consentOrgAfter.conflictStatusId).toBe(clearedWithConsentStatusId);
+          expect(consentOrgAfter.conflictReference).toBe('CR-KEEP-CONSENT');
           expect(
             (await auditSinceTestStart()).some(
               (a) =>
@@ -6049,6 +6104,172 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           const entry = postMergeMergedPersonAudit.find((a) => a.id === auditId)!;
           expect(entry.recordId).toBe(mergedPerson.id);
         }
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        await resetAllDemoData('P-000001', testDataResetContext());
+      }
+    });
+
+    it('9b. R515: Repoints register_records person_id, organisation_id, and field_values_json party references inside executeMergeInTransaction', async () => {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      try {
+        setVerifiedAdminMergeSession();
+        const survivorPerson = (await savePersonRecord(
+          { firstName: 'Seren', surname: 'RegSurvivor', isEmployee: false },
+          { byId: 'P-000004' },
+        )).person!;
+        const mergedPerson = (await savePersonRecord(
+          { firstName: 'Seren', surname: 'RegDuplicate', isEmployee: false },
+          { byId: 'P-000004' },
+        )).person!;
+        const survivorOrg = (await saveOrganisationRecord(
+          { legalName: 'Cwmni Register Survivor Ltd' },
+          { byId: 'P-000004' },
+        )).organisation!;
+        const mergedOrg = (await saveOrganisationRecord(
+          { legalName: 'Cwmni Register Duplicate Ltd' },
+          { byId: 'P-000004' },
+        )).organisation!;
+
+        const ctx = testDataResetContext();
+        const regRepo = getRegisterRepository();
+        const regIdPersonOnly = 'REG-R515-MERGE-1';
+        const regIdOrgOnly = 'REG-R515-MERGE-2';
+        const regIdJsonNested = 'REG-R515-MERGE-3';
+        await regRepo.createRegisterRecord(
+          ctx,
+          {
+            id: regIdPersonOnly,
+            registerTypeKey: 'complaint',
+            reference: 'CMP-R515-1',
+            title: 'Complaint tied to merged person column only',
+            status: 'open',
+            matterId: null,
+            enquiryId: null,
+            personId: mergedPerson.id,
+            organisationId: null,
+            ownerId: 'P-000001',
+            assignedApproverId: null,
+            dueAt: null,
+            reviewAt: null,
+            reminderScheduleDays: [],
+            fieldValues: {},
+            createdById: 'P-000004',
+          },
+          { recordInitialTransition: false },
+        );
+        await regRepo.createRegisterRecord(
+          ctx,
+          {
+            id: regIdOrgOnly,
+            registerTypeKey: 'complaint',
+            reference: 'CMP-R515-2',
+            title: 'Complaint tied to merged organisation column only',
+            status: 'open',
+            matterId: null,
+            enquiryId: null,
+            personId: null,
+            organisationId: mergedOrg.id,
+            ownerId: 'P-000001',
+            assignedApproverId: null,
+            dueAt: null,
+            reviewAt: null,
+            reminderScheduleDays: [],
+            fieldValues: {},
+            createdById: 'P-000004',
+          },
+          { recordInitialTransition: false },
+        );
+        await regRepo.createRegisterRecord(
+          ctx,
+          {
+            id: regIdJsonNested,
+            registerTypeKey: 'complaint',
+            reference: 'CMP-R515-3',
+            title: 'Complaint tied to field_values_json flat and nested id references',
+            status: 'open',
+            matterId: null,
+            enquiryId: null,
+            personId: null,
+            organisationId: null,
+            ownerId: 'P-000001',
+            assignedApproverId: null,
+            dueAt: null,
+            reviewAt: null,
+            reminderScheduleDays: [],
+            fieldValues: {
+              complainantPersonId: mergedPerson.id,
+              relatedOrganisationId: mergedOrg.id,
+              nestedParty: { id: mergedPerson.id, label: 'Nested Person' },
+              nestedOrgList: [{ id: mergedOrg.id }],
+            },
+            createdById: 'P-000004',
+          },
+          { recordInitialTransition: false },
+        );
+
+        const initialPersonReg = await regRepo.getRegisterRecordById(ctx, regIdPersonOnly, {
+          includeRestricted: true,
+        });
+        const initialOrgReg = await regRepo.getRegisterRecordById(ctx, regIdOrgOnly, {
+          includeRestricted: true,
+        });
+        const initialJsonReg = await regRepo.getRegisterRecordById(ctx, regIdJsonNested, {
+          includeRestricted: true,
+        });
+        expect(initialPersonReg?.rowVersion).toBe(1);
+        expect(initialOrgReg?.rowVersion).toBe(1);
+        expect(initialJsonReg?.rowVersion).toBe(1);
+
+        await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
+        await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
+
+        const updatedPersonReg = await regRepo.getRegisterRecordById(ctx, regIdPersonOnly, {
+          includeRestricted: true,
+        });
+        const updatedOrgReg = await regRepo.getRegisterRecordById(ctx, regIdOrgOnly, {
+          includeRestricted: true,
+        });
+        const updatedJsonReg = await regRepo.getRegisterRecordById(ctx, regIdJsonNested, {
+          includeRestricted: true,
+        });
+        expect(updatedPersonReg).not.toBeNull();
+        expect(updatedPersonReg!.personId).toBe(survivorPerson.id);
+        expect(updatedPersonReg!.rowVersion).toBeGreaterThan(1);
+
+        expect(updatedOrgReg).not.toBeNull();
+        expect(updatedOrgReg!.organisationId).toBe(survivorOrg.id);
+        expect(updatedOrgReg!.rowVersion).toBeGreaterThan(1);
+
+        expect(updatedJsonReg).not.toBeNull();
+        expect(updatedJsonReg!.fieldValues.complainantPersonId).toBe(survivorPerson.id);
+        expect(updatedJsonReg!.fieldValues.relatedOrganisationId).toBe(survivorOrg.id);
+        // R565: nested { id: <mergedId> } values inside field_values_json are repointed too
+        expect(updatedJsonReg!.fieldValues.nestedParty).toEqual({
+          id: survivorPerson.id,
+          label: 'Nested Person',
+        });
+        expect(updatedJsonReg!.fieldValues.nestedOrgList).toEqual([
+          { id: survivorOrg.id },
+        ]);
+        expect(updatedJsonReg!.rowVersion).toBeGreaterThan(1);
+
+        // R551: a stale save using pre-merge expectedRowVersion=1 is rejected across all three UPDATE paths
+        for (const staleId of [regIdPersonOnly, regIdOrgOnly, regIdJsonNested]) {
+          await expect(
+            regRepo.updateRegisterRecordDetails(ctx, {
+              recordId: staleId,
+              expectedRowVersion: 1,
+              title: 'Stale pre-merge overwrite attempt',
+              updatedById: 'P-000004',
+              fieldValues: { complainantPersonId: mergedPerson.id },
+            }),
+          ).rejects.toThrow(/modified concurrently/);
+        }
+        const persistedJsonReg = await regRepo.getRegisterRecordById(ctx, regIdJsonNested, {
+          includeRestricted: true,
+        });
+        expect(persistedJsonReg!.fieldValues.complainantPersonId).toBe(survivorPerson.id);
       } finally {
         setTestEntraSessionOverride(undefined);
         await resetAllDemoData('P-000001', testDataResetContext());
@@ -8827,9 +9048,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       };
 
       const prevPlatformEnv = process.env.PLATFORM_ENVIRONMENT;
+      const prevAuthSecret = process.env.AUTH_SECRET;
       try {
         await resetAllDemoData('P-000001', testDataResetContext());
         process.env.PLATFORM_ENVIRONMENT = 'live';
+        process.env.AUTH_SECRET = 'test-auth-secret-32-bytes-minimum-length';
         setActiveTenantConfigForTesting(liveRawConfig, { environment: 'live' });
         const activeRbac = getDefaultTenantRbacConfig();
 
@@ -9000,6 +9223,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         } else {
           process.env.PLATFORM_ENVIRONMENT = prevPlatformEnv;
         }
+        if (prevAuthSecret === undefined) {
+          delete process.env.AUTH_SECRET;
+        } else {
+          process.env.AUTH_SECRET = prevAuthSecret;
+        }
         setActiveTenantConfigForTesting(null);
         setTestEntraSessionOverride(undefined);
         clearPermissionRequestCache();
@@ -9165,6 +9393,56 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             expect(allowSet.has(pid)).toBe(true);
           }
         }
+      }
+    });
+  });
+
+  describe('R532: MFA enforcement on listFirmAuditEntriesPage and anonymiseExpiredEnquiriesAction', () => {
+    it('requires verified MFA for listFirmAuditEntriesPage and anonymiseExpiredEnquiriesAction while allowing verified MFA calls', async () => {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      try {
+        // 1. listFirmAuditEntriesPage denies admin with mfaVerified: false -> MFA_REQUIRED
+        const auditDeniedNoMfa = await runAsTestActor(
+          'P-000004',
+          () => listFirmAuditEntriesPage('P-000004'),
+          { roles: ['admin'], mfaVerified: false },
+        );
+        expect(isActionDenied(auditDeniedNoMfa)).toBe(true);
+        if (isActionDenied(auditDeniedNoMfa)) {
+          expect(auditDeniedNoMfa.code).toBe('MFA_REQUIRED');
+        }
+        expect(auditDeniedNoMfa.entries).toEqual([]);
+
+        const auditAllowedMfa = await runAsTestActor(
+          'P-000004',
+          () => listFirmAuditEntriesPage('P-000004', { limit: 5 }),
+          { roles: ['admin'], mfaVerified: true },
+        );
+        expect(isActionDenied(auditAllowedMfa)).toBe(false);
+
+        // 2. anonymiseExpiredEnquiriesAction denies risk_compliance with mfaVerified: false -> MFA_REQUIRED
+        setTestActorSession('P-000003', { roles: ['risk_compliance'], mfaVerified: false });
+        const anonDeniedNoMfa = await runAsTestActor(
+          'P-000003',
+          () => anonymiseExpiredEnquiriesAction(),
+          { roles: ['risk_compliance'], mfaVerified: false },
+        );
+        expect(isActionDenied(anonDeniedNoMfa)).toBe(true);
+        if (isActionDenied(anonDeniedNoMfa)) {
+          expect(anonDeniedNoMfa.code).toBe('MFA_REQUIRED');
+        }
+
+        setTestActorSession('P-000003', { roles: ['risk_compliance'], mfaVerified: true });
+        const anonAllowedMfa = await runAsTestActor(
+          'P-000003',
+          () => anonymiseExpiredEnquiriesAction(),
+          { roles: ['risk_compliance'], mfaVerified: true },
+        );
+        expect(isActionDenied(anonAllowedMfa)).toBe(false);
+      } finally {
+        setTestActorSession(null);
+        setTestEntraSessionOverride(undefined);
+        await resetAllDemoData('P-000001', testDataResetContext());
       }
     });
   });

@@ -187,9 +187,13 @@ export function getSigningSecret(): string {
   if (secret && !isPlaceholder(secret)) {
     return secret;
   }
-  if (process.env.NODE_ENV === 'production') {
+  const platformEnv = process.env.PLATFORM_ENVIRONMENT?.trim();
+  if (
+    process.env.NODE_ENV === 'production' ||
+    (platformEnv !== 'dev' && platformEnv !== 'test')
+  ) {
     throw new Error(
-      'AUTH_SECRET environment variable is required in production and must not be a placeholder.',
+      'AUTH_SECRET environment variable is required outside dev/test environments and must not be a placeholder.',
     );
   }
   return crypto

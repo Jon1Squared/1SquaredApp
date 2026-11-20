@@ -68,7 +68,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `enquiry:assign` | `enquiry` | `standard` | No | Assign or reassign accessible enquiries to a fee earner or team |
 | `enquiry:close` | `enquiry` | `standard` | No | Decline or close accessible enquiries |
 | `enquiry:reopen` | `enquiry` | `standard` | No | Reopen closed unconverted enquiries on accessible records |
-| `enquiry:anonymise` | `enquiry` | `restricted` | No | Anonymise personal details on closed unconverted enquiries past the retention period |
+| `enquiry:anonymise` | `enquiry` | `restricted` | **Yes** | Anonymise personal details on closed unconverted enquiries past the retention period |
 | `quote:view` | `quote` | `standard` | No | View fee quotes on accessible enquiries and matters |
 | `quote:edit` | `quote` | `standard` | No | Create, edit, send, revise, log follow-ups, and record outcomes on accessible fee quotes |
 | `signoff:approve` | `signoff` | `restricted` | No | Approve or request discussion on partner sign-off items for accessible matters |

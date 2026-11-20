@@ -444,7 +444,7 @@ export const PERMISSION_REGISTRY: Readonly<
     description:
       'Anonymise personal data on closed unconverted enquiries that have passed their retention period.',
     sensitivity: 'restricted',
-    requiresMfa: false,
+    requiresMfa: true,
     sinceVersion: '1.1.0',
   },
   'quote:view': {

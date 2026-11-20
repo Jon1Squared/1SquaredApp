@@ -312,6 +312,13 @@ To remove all Azure resources in the demo resource group (whilst keeping your Mi
 az group delete --name rg-onesquared-demo-uksouth --yes --no-wait
 ```
 
+### Production Go-Live Configuration Notes
+
+- **Verified-domain email linking default (`rbac.identityMapping.emailLinking.enabled`):** `rbac.identityMapping.emailLinking.enabled` defaults to `true` across tenant configurations (restricted to verified tokens matching `emailLinking.domains` or `branding.primaryDomain`, and always refusing privileged/ambiguous targets per B13 / S0-30). For production client go-live deployments that require strict pre-bound `entraObjectId`-only sign-in before provisioning or reject all automatic first-sign-in email matching, set `rbac.identityMapping.emailLinking.enabled: false` (or confirm `emailLinking.domains`) in the tenant's live configuration before cut-over (`R534`).
+- **Session & blob signing secrets:** Set dedicated Key Vault-backed `AUTH_SECRET` and `PLATFORM_BLOB_SIGNING_KEY` secrets on every live Container App revision; `getSigningSecret()` (`R532`) and `resolveTenantBlobSigningKey()` (`R520`) refuse fallback development keys outside non-live `dev`/`test` configurations.
+
+---
+
 ## Outbound Email Certificate & Allow-List Readiness (`S0-26`)
 
 Owner prerequisites completed on **12–16 November 2026**: the `notifications@1squared.co.uk` shared mailbox, Entra app `fcdf1a96-eb5d-4ee9-8b7b-4cf6c88c64a1` (directory `f8218d9a-e055-463f-add2-f03679aad7f2`), Exchange Online RBAC scoped strictly to that mailbox, SPF/DKIM/DMARC DNS records for `1squared.co.uk`, the `application/x-pem-file` Key Vault certificate `graph-mail-certificate` in `kvnotalawfi2cdo3cw7vuafm` (SHA-1 thumbprint `C5428D7F519AE513A5B8CE027D291876CEDA40D3`, `.cer` uploaded to Entra and prior version removed), and the `email-recipient-allowlist` secret in `kvnotalawfi2cdo3cw7vuafm`.

@@ -3606,6 +3606,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
                 { id: 'M-000001', byId: 'P-000001' },
               ),
             );
+            // Restore NODE_ENV before invoking the test-only flush helper (R533).
+            (process.env as Record<string, string | undefined>).NODE_ENV =
+              prevNodeEnvForR112;
             await flushDocumentLifecycleSyncForTesting();
           } finally {
             await r112Repo.putDocumentStoreTenantConfig(r112Ctx, prevDocStoreOverride, 'P-000001');

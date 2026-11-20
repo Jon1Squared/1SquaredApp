@@ -10,6 +10,7 @@ import {
   ENTRA_SESSION_COOKIE,
   exchangeCodeForVerifiedEntraClaims,
   getEntraSession,
+  getSigningSecret,
   setTestEntraSessionOverride,
   shouldUseSecureCookies,
   verifyEntraJwtSignatureAndClaims,
@@ -616,6 +617,22 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
         expiresAt: new Date(Date.now() + 3600_000).toISOString(),
       }),
     ).toThrow(/AUTH_SECRET/i);
+
+    // R532: Missing AUTH_SECRET is also rejected outside dev/test PLATFORM_ENVIRONMENT even when NODE_ENV=development
+    const prevPlatformEnv = process.env.PLATFORM_ENVIRONMENT;
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = 'development';
+      for (const nonDevTestEnv of ['live', 'staging', '']) {
+        process.env.PLATFORM_ENVIRONMENT = nonDevTestEnv;
+        expect(() => getSigningSecret()).toThrow(/AUTH_SECRET/i);
+      }
+      for (const localEnv of ['dev', 'test']) {
+        process.env.PLATFORM_ENVIRONMENT = localEnv;
+        expect(typeof getSigningSecret()).toBe('string');
+      }
+    } finally {
+      process.env.PLATFORM_ENVIRONMENT = prevPlatformEnv;
+    }
   });
 
   it('prevents the onesquared_user cookie escalation attack, enforces requireAuthenticatedActor, and blocks GET logout & non-admin /admin (R50, R51, R62, R73)', async () => {

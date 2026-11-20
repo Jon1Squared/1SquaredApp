@@ -1482,20 +1482,30 @@ export async function listFirmAuditEntriesPage(
     (viewer && activeSession?.personId === viewer.id
       ? activeSession.tokenRoles
       : undefined);
-  if (
-    !viewer ||
-    !hasPersonPermission(viewer, 'admin:access', {
-      allPeople: people,
-      teams,
-      tokenRoles: effectiveTokenRoles,
-      tokenRolesActorId: viewer.id,
-      config: { rbac: rbacConfig },
-    })
-  ) {
+  const permSet = resolvePersonPermissionSet(viewer ?? null, {
+    allPeople: people,
+    teams,
+    tokenRoles: effectiveTokenRoles,
+    tokenRolesActorId: viewer?.id,
+    config: { ...getActiveTenantConfiguration(), rbac: rbacConfig },
+    context: ctx,
+    mfaVerified: ctx.mfaVerified,
+  });
+  if (!viewer || !permSet.permissions.has('admin:access')) {
     return {
       ...buildActionDenied(
         'FORBIDDEN',
         'You need "admin:access" permission to view the firm audit log.',
+      ),
+      entries: [],
+      nextBeforeSeq: null,
+    };
+  }
+  if (permSet.mfaPendingPermissions.has('admin:access')) {
+    return {
+      ...buildActionDenied(
+        'MFA_REQUIRED',
+        'Multi-factor authentication (MFA) is required to view the firm audit log.',
       ),
       entries: [],
       nextBeforeSeq: null,
@@ -13861,7 +13871,7 @@ export async function reopenEnquiryRecord(
   }
   if (!canUserReopenEnquiry(byId, enq, teams, people, store.values)) {
     const msg =
-      'Only the assignee, the team lead for the enquiry team, Intake, or an administrator may reopen this enquiry.';
+      'Only the assignee, the team lead for the enquiry team, or an administrator may reopen this enquiry.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
 
