@@ -2431,9 +2431,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
 
   /**
    * Atomically executes a person or organisation merge in a single PostgreSQL transaction (`S0-16`, `S0-17a`),
-   * repointing all references across `people`, `organisations`, `person_organisation_links`, `notes`,
-   * `matters`, `matter_parties`, `key_dates`, `document_links`, `enquiries`, `quotes`, `tasks`,
-   * `task_linked_records`, `notifications`, `sign_offs`, `recently_viewed`, `merge_history`, and `audit_entries`.
+   * repointing all client/party references across `people`, `person_emails`, `organisations`,
+   * `person_organisation_links`, `notes`, `matters` (incrementing `row_version`), `matter_parties`,
+   * `documents`, `document_links`, `enquiries`, `quotes`, `tasks`, `task_linked_records`, `notifications`,
+   * `recently_viewed`, `teams`, `employee_sensitive_records`, `employee_employment_records`, `pms_links`,
+   * `client_rate_overrides`, `register_records` (incrementing `row_version`), `merge_history`, and
+   * `audit_entries`.
    */
   public async executeMergeInTransaction(
     ctx: TenantContext,
@@ -3663,19 +3666,20 @@ export class TenantPartyRepository extends TenantScopedRepository {
         }
       }
 
-      // 12c. Repoint register_records (`R515` / `S0-24`):
-      //      Repoint person_id / organisation_id foreign-reference columns plus any matching JSON IDs in field_values_json.
+      // 12c. Repoint register_records (`R515` / `R551` / `R565` / `S0-24`):
+      //      Repoint person_id / organisation_id foreign-reference columns plus any matching JSON IDs
+      //      (including nested `{ id: <mergedId> }` objects) in field_values_json, bumping row_version.
       if (recordType === 'person') {
         await tx.query(
           `UPDATE public.register_records
-           SET person_id = $2, updated_at = NOW()
+           SET person_id = $2, row_version = row_version + 1, updated_at = NOW()
            WHERE tenant_id = $1 AND person_id = $3`,
           [ctx.tenantId, survivorId, mergedId],
         );
       } else {
         await tx.query(
           `UPDATE public.register_records
-           SET organisation_id = $2, updated_at = NOW()
+           SET organisation_id = $2, row_version = row_version + 1, updated_at = NOW()
            WHERE tenant_id = $1 AND organisation_id = $3`,
           [ctx.tenantId, survivorId, mergedId],
         );
@@ -3697,13 +3701,13 @@ export class TenantPartyRepository extends TenantScopedRepository {
         const fv = regRow.field_values_json;
         if (!fv || typeof fv !== 'object') continue;
         const repointed = repointJsonIdFieldsInValue(fv, mergedId, survivorId, {
-          allowDirectIdField: false,
+          allowDirectIdField: true,
           repointAnyStringValue: true,
         });
         if (repointed.changed) {
           await tx.query(
             `UPDATE public.register_records
-             SET field_values_json = $3::jsonb, updated_at = NOW()
+             SET field_values_json = $3::jsonb, row_version = row_version + 1, updated_at = NOW()
              WHERE tenant_id = $1 AND id = $2`,
             [ctx.tenantId, regRow.id, JSON.stringify(repointed.value ?? {})],
           );

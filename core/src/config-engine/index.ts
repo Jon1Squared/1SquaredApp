@@ -661,7 +661,7 @@ export const DocumentGenerationConfigSchema = z
       )
       .default([])
       .describe(
-        'Additional tenant-configured document classification types beyond core defaults [x-reserved:backlog]',
+        'Additional tenant-configured document classification types beyond core defaults (reserved for backlog item F20) [x-reserved:backlog]',
       ),
   })
   .strict();
@@ -1901,7 +1901,7 @@ export const TenantConfigurationSchema = z
             .string()
             .optional()
             .describe(
-              'Optional category or cause-of-action label for the rule [x-reserved:backlog]',
+              'Optional category or cause-of-action label for the rule (reserved for backlog item F19) [x-reserved:backlog]',
             ),
           guidanceNote: z.string().optional(),
           trigger: z.union([
@@ -1970,7 +1970,7 @@ export const TenantConfigurationSchema = z
                 .enum(['matter_owning_team'])
                 .default('matter_owning_team')
                 .describe(
-                  'How the team diary is chosen for a new key date [x-reserved:backlog]',
+                  'How the team diary is chosen for a new key date (reserved for backlog item F19) [x-reserved:backlog]',
                 ),
             })
             .strict()
@@ -2015,7 +2015,7 @@ export const TenantConfigurationSchema = z
                     .array(z.string())
                     .default([])
                     .describe(
-                      'Limitation rule set IDs offered by default for matters of this type [x-reserved:backlog]',
+                      'Limitation rule set IDs offered by default for matters of this type (reserved for backlog item F19) [x-reserved:backlog]',
                     ),
                   verification: VerificationPolicySchema.optional(),
                   calendarSync: CalendarSyncPolicySchema.optional(),
@@ -2136,7 +2136,7 @@ export const TenantConfigurationSchema = z
                 .enum(['microsoft_graph'])
                 .default('microsoft_graph')
                 .describe(
-                  'External calendar provider adapter [x-reserved:backlog]',
+                  'External calendar provider adapter (reserved for backlog item F19) [x-reserved:backlog]',
                 ),
               targets: z
                 .array(z.enum(['responsible_persons', 'team_calendar']))

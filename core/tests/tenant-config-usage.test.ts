@@ -675,6 +675,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
       const matchingLeaves = leaves.filter((l) => l.path === expectedPath);
       expect(matchingLeaves).toHaveLength(1);
       expect(matchingLeaves[0]!.reserved?.for).toBe(expectedSlice);
+      if (expectedSlice === 'backlog') {
+        expect(matchingLeaves[0]!.reserved?.reason).toMatch(/\bF\d+\b/);
+      }
     }
 
     const reservedLeaves = leaves.filter((l) => Boolean(l.reserved));
@@ -807,9 +810,14 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     for (const [expectedPath, expectedSlice] of Object.entries(
       expectedReservedByPath,
     )) {
-      expect(
-        getZodDescriptionByPath(TenantConfigurationSchema, expectedPath),
-      ).toContain(`[x-reserved:${expectedSlice}]`);
+      const zodDesc = getZodDescriptionByPath(
+        TenantConfigurationSchema,
+        expectedPath,
+      );
+      expect(zodDesc).toContain(`[x-reserved:${expectedSlice}]`);
+      if (expectedSlice === 'backlog') {
+        expect(zodDesc).toMatch(/\bF\d+\b/);
+      }
     }
   });
 

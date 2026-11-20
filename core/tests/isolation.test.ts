@@ -12781,7 +12781,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           dueAt: null,
           reviewAt: null,
           reminderScheduleDays: [],
-          fieldValues: { complainantPersonId: 'P-R515-LOSE' },
+          fieldValues: {
+            complainantPersonId: 'P-R515-LOSE',
+            nestedParty: { id: 'P-R515-LOSE' },
+          },
           createdById: 'P-ALPHA-ADM',
         },
         { recordInitialTransition: false },
@@ -12804,7 +12807,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           dueAt: null,
           reviewAt: null,
           reminderScheduleDays: [],
-          fieldValues: { complainantPersonId: 'P-R515-LOSE' },
+          fieldValues: {
+            complainantPersonId: 'P-R515-LOSE',
+            nestedParty: { id: 'P-R515-LOSE' },
+          },
           createdById: 'P-BRAVO-ADM',
         },
         { recordInitialTransition: false },
@@ -12830,10 +12836,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(alphaRec?.personId).toBe('P-R515-SURV');
       expect(alphaRec?.organisationId).toBe('O-R515-SURV');
       expect(alphaRec?.fieldValues.complainantPersonId).toBe('P-R515-SURV');
+      expect(alphaRec?.fieldValues.nestedParty).toEqual({ id: 'P-R515-SURV' });
+      expect(alphaRec?.rowVersion).toBeGreaterThan(1);
+      await expect(
+        regRepo.updateRegisterRecordDetails(ctxA, {
+          recordId: 'REG-R515-ISO-1',
+          expectedRowVersion: 1,
+          title: 'Stale pre-merge write in Alpha',
+          updatedById: 'P-ALPHA-ADM',
+        }),
+      ).rejects.toThrow(/modified concurrently/);
       // Bravo remains untouched on its own tenant DB
       expect(bravoRec?.personId).toBe('P-R515-LOSE');
       expect(bravoRec?.organisationId).toBe('O-R515-LOSE');
       expect(bravoRec?.fieldValues.complainantPersonId).toBe('P-R515-LOSE');
+      expect(bravoRec?.fieldValues.nestedParty).toEqual({ id: 'P-R515-LOSE' });
+      expect(bravoRec?.rowVersion).toBe(1);
 
       // Forged tenant claim fails at PostgreSQL pool/ROLE boundary
       await expect(

@@ -3295,7 +3295,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(isActionDenied(commentDenied)).toBe(true);
         if (isActionDenied(commentDenied)) {
           expect(commentDenied.code).toBe('FORBIDDEN');
-          expect(commentDenied.message.trim().length).toBeGreaterThan(0);
+          expect(commentDenied.message).toBe('Task not found or access denied.');
         }
         const wallTaskAfterCommentAttempt = await getTaskWorkflowRepository().getTaskById<Task>(
           ctx,
@@ -6133,19 +6133,65 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
         const ctx = testDataResetContext();
         const regRepo = getRegisterRepository();
-        const regId = 'REG-R515-MERGE-1';
+        const regIdPersonOnly = 'REG-R515-MERGE-1';
+        const regIdOrgOnly = 'REG-R515-MERGE-2';
+        const regIdJsonNested = 'REG-R515-MERGE-3';
         await regRepo.createRegisterRecord(
           ctx,
           {
-            id: regId,
+            id: regIdPersonOnly,
             registerTypeKey: 'complaint',
             reference: 'CMP-R515-1',
-            title: 'Complaint tied to merged person and org',
+            title: 'Complaint tied to merged person column only',
             status: 'open',
             matterId: null,
             enquiryId: null,
             personId: mergedPerson.id,
+            organisationId: null,
+            ownerId: 'P-000001',
+            assignedApproverId: null,
+            dueAt: null,
+            reviewAt: null,
+            reminderScheduleDays: [],
+            fieldValues: {},
+            createdById: 'P-000004',
+          },
+          { recordInitialTransition: false },
+        );
+        await regRepo.createRegisterRecord(
+          ctx,
+          {
+            id: regIdOrgOnly,
+            registerTypeKey: 'complaint',
+            reference: 'CMP-R515-2',
+            title: 'Complaint tied to merged organisation column only',
+            status: 'open',
+            matterId: null,
+            enquiryId: null,
+            personId: null,
             organisationId: mergedOrg.id,
+            ownerId: 'P-000001',
+            assignedApproverId: null,
+            dueAt: null,
+            reviewAt: null,
+            reminderScheduleDays: [],
+            fieldValues: {},
+            createdById: 'P-000004',
+          },
+          { recordInitialTransition: false },
+        );
+        await regRepo.createRegisterRecord(
+          ctx,
+          {
+            id: regIdJsonNested,
+            registerTypeKey: 'complaint',
+            reference: 'CMP-R515-3',
+            title: 'Complaint tied to field_values_json flat and nested id references',
+            status: 'open',
+            matterId: null,
+            enquiryId: null,
+            personId: null,
+            organisationId: null,
             ownerId: 'P-000001',
             assignedApproverId: null,
             dueAt: null,
@@ -6154,23 +6200,76 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             fieldValues: {
               complainantPersonId: mergedPerson.id,
               relatedOrganisationId: mergedOrg.id,
+              nestedParty: { id: mergedPerson.id, label: 'Nested Person' },
+              nestedOrgList: [{ id: mergedOrg.id }],
             },
             createdById: 'P-000004',
           },
           { recordInitialTransition: false },
         );
 
+        const initialPersonReg = await regRepo.getRegisterRecordById(ctx, regIdPersonOnly, {
+          includeRestricted: true,
+        });
+        const initialOrgReg = await regRepo.getRegisterRecordById(ctx, regIdOrgOnly, {
+          includeRestricted: true,
+        });
+        const initialJsonReg = await regRepo.getRegisterRecordById(ctx, regIdJsonNested, {
+          includeRestricted: true,
+        });
+        expect(initialPersonReg?.rowVersion).toBe(1);
+        expect(initialOrgReg?.rowVersion).toBe(1);
+        expect(initialJsonReg?.rowVersion).toBe(1);
+
         await executeMerge('person', survivorPerson.id, mergedPerson.id, 'P-000004');
         await executeMerge('organisation', survivorOrg.id, mergedOrg.id, 'P-000004');
 
-        const updatedReg = await regRepo.getRegisterRecordById(ctx, regId, {
+        const updatedPersonReg = await regRepo.getRegisterRecordById(ctx, regIdPersonOnly, {
           includeRestricted: true,
         });
-        expect(updatedReg).not.toBeNull();
-        expect(updatedReg!.personId).toBe(survivorPerson.id);
-        expect(updatedReg!.organisationId).toBe(survivorOrg.id);
-        expect(updatedReg!.fieldValues.complainantPersonId).toBe(survivorPerson.id);
-        expect(updatedReg!.fieldValues.relatedOrganisationId).toBe(survivorOrg.id);
+        const updatedOrgReg = await regRepo.getRegisterRecordById(ctx, regIdOrgOnly, {
+          includeRestricted: true,
+        });
+        const updatedJsonReg = await regRepo.getRegisterRecordById(ctx, regIdJsonNested, {
+          includeRestricted: true,
+        });
+        expect(updatedPersonReg).not.toBeNull();
+        expect(updatedPersonReg!.personId).toBe(survivorPerson.id);
+        expect(updatedPersonReg!.rowVersion).toBeGreaterThan(1);
+
+        expect(updatedOrgReg).not.toBeNull();
+        expect(updatedOrgReg!.organisationId).toBe(survivorOrg.id);
+        expect(updatedOrgReg!.rowVersion).toBeGreaterThan(1);
+
+        expect(updatedJsonReg).not.toBeNull();
+        expect(updatedJsonReg!.fieldValues.complainantPersonId).toBe(survivorPerson.id);
+        expect(updatedJsonReg!.fieldValues.relatedOrganisationId).toBe(survivorOrg.id);
+        // R565: nested { id: <mergedId> } values inside field_values_json are repointed too
+        expect(updatedJsonReg!.fieldValues.nestedParty).toEqual({
+          id: survivorPerson.id,
+          label: 'Nested Person',
+        });
+        expect(updatedJsonReg!.fieldValues.nestedOrgList).toEqual([
+          { id: survivorOrg.id },
+        ]);
+        expect(updatedJsonReg!.rowVersion).toBeGreaterThan(1);
+
+        // R551: a stale save using pre-merge expectedRowVersion=1 is rejected across all three UPDATE paths
+        for (const staleId of [regIdPersonOnly, regIdOrgOnly, regIdJsonNested]) {
+          await expect(
+            regRepo.updateRegisterRecordDetails(ctx, {
+              recordId: staleId,
+              expectedRowVersion: 1,
+              title: 'Stale pre-merge overwrite attempt',
+              updatedById: 'P-000004',
+              fieldValues: { complainantPersonId: mergedPerson.id },
+            }),
+          ).rejects.toThrow(/modified concurrently/);
+        }
+        const persistedJsonReg = await regRepo.getRegisterRecordById(ctx, regIdJsonNested, {
+          includeRestricted: true,
+        });
+        expect(persistedJsonReg!.fieldValues.complainantPersonId).toBe(survivorPerson.id);
       } finally {
         setTestEntraSessionOverride(undefined);
         await resetAllDemoData('P-000001', testDataResetContext());
