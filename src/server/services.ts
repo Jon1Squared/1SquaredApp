@@ -14774,6 +14774,7 @@ export async function getMatterPmsViewBundle(
       allPeople: people,
       teams,
       tokenRoles,
+      tokenRolesActorId: actor.id,
     })
   ) {
     return buildActionDenied(
@@ -15034,6 +15035,7 @@ export async function getPmsAdminSnapshot(
       allPeople: people,
       teams,
       tokenRoles,
+      tokenRolesActorId: actor.id,
     }),
   );
   const visibleMatterIdSet = new Set(visibleMatters.map((m) => m.id));
@@ -15286,6 +15288,7 @@ export async function createRecordFromPms(
     allPeople: people,
     teams,
     tokenRoles,
+    tokenRolesActorId: byId,
     mfaVerified: effectiveMfaVerified,
   });
 
@@ -16748,6 +16751,7 @@ export async function requestMatterBill(
       allPeople: people,
       teams,
       tokenRoles,
+      tokenRolesActorId: actor.id,
     })
   ) {
     return buildActionDenied(
@@ -16820,6 +16824,7 @@ export async function flagMatterWriteOff(
       allPeople: people,
       teams,
       tokenRoles,
+      tokenRolesActorId: actor.id,
     })
   ) {
     return buildActionDenied(
@@ -16975,6 +16980,7 @@ export async function recordInvoiceCreditControlAction(
       allPeople: people,
       teams,
       tokenRoles,
+      tokenRolesActorId: actor.id,
     })
   ) {
     return buildActionDenied(
@@ -19566,6 +19572,7 @@ export async function syncMatterCostsRatesFromPms(
     allPeople: syncPeople,
     teams: syncTeams,
     tokenRoles: syncTokenRoles,
+    tokenRolesActorId: byId,
     mfaVerified: syncMfaVerified,
     context:
       ctx.tenantId === tenantCfg.tenantId ? (options?.tenantCtx ?? ctx) : undefined,

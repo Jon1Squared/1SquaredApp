@@ -1,4 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { createSeedStore } from '../../src/seed/seedStoreBuilder';
 import {
   ALL_BUILTIN_ROLE_KEYS,
   ALL_JOB_ONLY_PERMISSION_KEYS,
@@ -9031,8 +9034,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         true,
       );
 
-      // 2. Null-user branch in resolvePersonPermissionSet fails closed (empty set, requireMfaForAdminPermissions: true),
-      //    while admin user without environment defaults to live MFA enforcement and explicit 'test' honours false
+      // 2. Null-user branch in resolvePersonPermissionSet always fails closed
+      //    (empty set, requireMfaForAdminPermissions: true even when environment is 'test')
       const nullUserOmitted = domainResolvePersonPermissionSet(null, {
         tenantId: 'not-a-law-firm',
         config: { rbac: forcedRbacFalse },
@@ -9045,6 +9048,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(nullUserExplicitTest.requireMfaForAdminPermissions).toBe(true);
       expect(nullUserExplicitTest.permissions.size).toBe(0);
+
+      //    For a real admin user, omitted environment defaults to live MFA enforcement (true)
+      //    while explicit 'test' honours requireMfaForAdminPermissions: false
       const adminPerson = makeTestPerson({ id: 'P-000004', roles: ['admin'] });
       const adminOmittedEnv = domainResolvePersonPermissionSet(adminPerson, {
         tenantId: 'not-a-law-firm',
@@ -9099,6 +9105,67 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         config: { environment: 'live', rbac: forcedRbacFalse },
       });
       expect(liveRail.admin).toBe(true);
+    });
+
+    it('R570: documents decisive restrictedAccessUserIds precedence in canAccessMatter docstring, ADR 0014 and rbac-reference, and verifies seed restricted-matter allow-lists', () => {
+      const repoRoot = path.resolve(__dirname, '../..');
+      const resolverSrc = fs.readFileSync(
+        path.join(repoRoot, 'core/src/domain/rbac/resolver.ts'),
+        'utf8',
+      );
+      const adr0014 = fs.readFileSync(
+        path.join(
+          repoRoot,
+          'docs/decisions/0014-staff-matter-access-by-permission.md',
+        ),
+        'utf8',
+      );
+      const rbacRef = fs.readFileSync(
+        path.join(repoRoot, 'docs/rbac-reference.md'),
+        'utf8',
+      );
+
+      expect(resolverSrc).not.toMatch(/plus named matter participants/i);
+      expect(resolverSrc).toMatch(
+        /decisive when non-empty[\s\S]*restrictedAccessUserIds|non-empty `restrictedAccessUserIds`[\s\S]*decisive/i,
+      );
+
+      expect(adr0014).not.toMatch(/plus the matter's named participants/i);
+      expect(adr0014).not.toMatch(/plus named matter participants/i);
+      expect(adr0014).toMatch(/restrictedAccessUserIds[\s\S]*decisive/i);
+
+      expect(rbacRef).not.toMatch(/plus named matter participants/i);
+      expect(rbacRef).toMatch(/decisive/i);
+      expect(rbacRef).toMatch(/hasEthicalWall/);
+
+      // Audit both committed seed JSON and dynamically built seed store:
+      // every restricted matter allow-list must cover partner, supervisor, fee earner, and team.
+      for (const seedStore of [loadCommittedSeedStore(), createSeedStore()]) {
+        const restrictedMatters = seedStore.matters.filter(
+          (m) =>
+            Boolean(m.isStaffMatter) ||
+            Boolean(m.hasEthicalWall) ||
+            (Array.isArray(m.restrictedAccessUserIds) &&
+              m.restrictedAccessUserIds.length > 0),
+        );
+        for (const m of restrictedMatters) {
+          const allowSet = new Set(m.restrictedAccessUserIds ?? []);
+          const owningTeam = m.owningTeamId
+            ? seedStore.teams.find((t) => t.id === m.owningTeamId)
+            : undefined;
+          const expectedIds = [
+            m.responsiblePartnerId,
+            m.supervisingPartnerId,
+            m.leadFeeEarnerId,
+            m.relationshipPartnerId,
+            ...(m.teamMemberIds ?? []),
+            ...(owningTeam?.memberIds ?? []),
+          ].filter((id): id is string => Boolean(id));
+          for (const pid of expectedIds) {
+            expect(allowSet.has(pid)).toBe(true);
+          }
+        }
+      }
     });
   });
 });

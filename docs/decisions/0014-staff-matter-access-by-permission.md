@@ -20,19 +20,21 @@ This design has four serious flaws:
 
 ## Decision
 
-### 1. Dynamic Permission Check (`matter:restricted:access`) + Named Matter Participants
+### 1. Dynamic Permission Check (`matter:restricted:access`) and Decisive Allow-List Precedence (`R546`, `R570`)
 
-Access to a restricted staff matter (`matter.isStaffMatter === true`) is evaluated dynamically by a single core helper `canAccessMatter(resolvedPermissions, actorUserId, matter)`:
+Access to a restricted matter (`matter.isStaffMatter === true`, `matter.hasEthicalWall === true`, or a non-empty `matter.restrictedAccessUserIds` allow-list) is evaluated dynamically across the entire platform by a single core helper `canAccessMatter(resolvedPermissions, actorUserId, matter)`:
 
-A user may access a restricted staff matter if and only if **at least one** of the following holds:
+A user may access a restricted matter if and only if **at least one** of the following holds:
 1. **Oversight Permission:** `hasPermission(resolvedPermissions, 'matter:restricted:access')` is `true` (granted by default to `admin`, `managing_partner`, and `risk_compliance`, and configurable per tenant via `rbac.roles`).
-2. **Named Matter Participant:** `actorUserId` is one of the matter's active named participants:
-   - `matter.responsiblePartnerId`
+2. **Explicit Allow-List (`restrictedAccessUserIds`, decisive when non-empty):** When `matter.restrictedAccessUserIds` is populated (non-empty), that allow-list is **decisive** for all non-oversight users (matching the SQL repository predicates across matters, tasks, enquiries, quotes, key dates, registers, search, and finance); omitted named participant fields or `teamMemberIds` do not grant access (`R546`, `R570`).
+3. **Empty-Allow-List Fallback (`B12`):** Only when `matter.restrictedAccessUserIds` is empty on a staff or ethical-wall matter, access falls back to active named participants on the matter record:
+   - `matter.responsiblePartnerId` / `matter.responsibleSolicitorId`
    - `matter.supervisingPartnerId`
    - `matter.leadFeeEarnerId`
    - `matter.originatingSolicitorId`
-   - `matter.teamMemberIds` (an explicit member of the matter's team array)
-   - `matter.restrictedAccessUserIds` (which now stores **only** explicit per-matter participant/exception user IDs, never role holders).
+   - `matter.teamMemberIds` (an explicit member of the matter's team array).
+
+*(Note: `computeStaffMatterStatus` seeds `restrictedAccessUserIds` with named matter participants plus `teamMemberIds` when marking a staff matter, and ethical-wall configuration sets the matter's explicit participant allow-list; oversight role holders are never stored in `restrictedAccessUserIds`.)*
 
 ### 2. Clean Up `restrictedAccessUserIds` and Recompute on Matter / Employment Changes
 

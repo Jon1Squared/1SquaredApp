@@ -633,8 +633,12 @@ export function requirePermission(
 }
 
 /**
- * Evaluates whether an actor can access a matter record, enforcing restricted staff-matter rules
- * via the `matter:restricted:access` permission plus named matter participants (ADR-0014).
+ * Evaluates whether an actor can access a matter record (`ADR-0014`, `B12`, `R546`, `R570`).
+ *
+ * When a matter is restricted (`isStaffMatter`, `hasEthicalWall`, or non-empty `restrictedAccessUserIds`),
+ * `matter:restricted:access` grants oversight access; otherwise, a non-empty `restrictedAccessUserIds`
+ * allow-list is decisive (falling back to named matter participants and `teamMemberIds` only when
+ * `restrictedAccessUserIds` is empty).
  */
 export function canAccessMatter(
   resolvedOrInput: ResolvedPermissionSet | ResolvePermissionsInput,

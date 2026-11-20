@@ -55,7 +55,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `matter:create` | `matter` | `standard` | No | Create and open new matters, including draft conflict checks and enquiry/quote conversions |
 | `matter:edit` | `matter` | `standard` | No | Edit matter details, participants, conflict check records, and commercial fields on accessible matters |
 | `matter:reassign_ownership` | `matter` | `restricted` | No | Change the owning department or owning team/practice group on an existing matter (re-permissioning linked document store folders) |
-| `matter:restricted:access` | `matter` | `confidential` | No | Oversight access to restricted staff matters (`isStaffMatter`) and linked documents |
+| `matter:restricted:access` | `matter` | `confidential` | No | Oversight access to restricted matters (`isStaffMatter`, `hasEthicalWall`, or non-empty `restrictedAccessUserIds`) and linked records |
 | `matter:restriction:lift` | `matter` | `restricted` | **Yes** | Lift a staff-matter or information-barrier restriction on a matter with a mandatory audited reason |
 | `matter:costs:sign_off` | `matter` | `restricted` | No | Sign off matter fee estimates that exceed the configured partner cost sign-off threshold |
 | `task:claim_any` | `task` | `standard` | No | Take or claim unassigned tasks across any team |
@@ -190,12 +190,12 @@ Implemented in `core/src/domain/rbac/resolver.ts` (and bridged for host entities
 
 ---
 
-## 7. Dynamic Staff-Matter & Linked-Document Access (`canAccessMatter`)
+## 7. Dynamic Staff-Matter, Ethical-Wall & Linked-Record Access (`canAccessMatter`)
 
-- When an active firm employee is a client on a matter (`isStaffMatter: true`), `computeStaffMatterStatus` populates `restrictedAccessUserIds` **only** with the named matter participants (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
-- When `restrictedAccessUserIds` is populated on a staff matter or ethical-wall matter, `canAccessMatter` treats that allow-list as authoritative (falling back to named matter participants only when `restrictedAccessUserIds` is empty), so excluded `teamMemberIds` entries cannot access the matter (`R546`).
+- When an active firm employee is a client on a matter (`isStaffMatter: true`), `computeStaffMatterStatus` populates `restrictedAccessUserIds` **only** with the named matter participants (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `originatingSolicitorId`, `teamMemberIds`).
+- Across the entire platform (not only finance), whenever `restrictedAccessUserIds` is populated (non-empty) on a staff (`isStaffMatter`), ethical-wall (`hasEthicalWall`), or allow-list-restricted matter, `canAccessMatter` treats `restrictedAccessUserIds` as **decisive** for non-oversight users (matching SQL repository predicates across matters, tasks, enquiries, quotes, key dates, registers, search, and finance), so excluded `teamMemberIds` or named participant fields cannot access the matter (`R546`, `R570`). Named participant fields (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `originatingSolicitorId`, `teamMemberIds`) act as a fallback only when `restrictedAccessUserIds` is empty (`B12`).
 - Oversight access is evaluated dynamically via `matter:restricted:access` (`risk_compliance`, `managing_partner`, `admin`), so role changes take effect immediately without stale stored user IDs.
-- Generated documents linked to a restricted staff matter inherit the restriction on both Matter and Client (`person` / `organisation`) screens via `canActorAccessGeneratedDocument`.
+- Generated documents and linked records (enquiries, quotes, tasks, key dates, register records) referencing a restricted matter inherit the restriction across both Matter and Client screens via `canActorAccessGeneratedDocument` and `canAccessMatter`.
 
 ---
 

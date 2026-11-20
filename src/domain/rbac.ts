@@ -532,8 +532,10 @@ export function requirePersonPermission(
 }
 
 /**
- * Evaluates whether a `Person` can access a `Matter` record, enforcing restricted staff-matter rules
- * via `matter:restricted:access` + named matter participants (ADR-0014).
+ * Evaluates whether a `Person` can access a `Matter` record (`ADR-0014`, `R546`, `R570`):
+ * `matter:restricted:access` grants oversight access, while a non-empty `restrictedAccessUserIds`
+ * allow-list is decisive when populated (falling back to named participants and `teamMemberIds`
+ * only when `restrictedAccessUserIds` is empty).
  */
 export function canPersonAccessMatter(
   matter: Pick<
