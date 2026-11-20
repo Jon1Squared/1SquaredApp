@@ -1792,7 +1792,7 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       expect(p10PositiveNotifs.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('R522: guardedJob fails closed when loadActiveTenantRegistry fails instead of fabricating a client-not-a-law-firm fallback', async () => {
+    it('R522 & R550: guardedJob fails closed with the specific registry-load error when loadActiveTenantRegistry fails instead of fabricating a fallback', async () => {
       const missingRegistryPath = path.join(
         os.tmpdir(),
         `missing-registry-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
@@ -1801,7 +1801,11 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       try {
         await expect(
           guardedJob('usage-retention-purge', 'not-a-law-firm', async () => 'ran'),
-        ).rejects.toThrow();
+        ).rejects.toThrow(/ENOENT/);
+        vi.stubEnv('PLATFORM_TENANT_REGISTRY_JSON', '{invalid-json');
+        await expect(
+          guardedJob('usage-retention-purge', 'not-a-law-firm', async () => 'ran'),
+        ).rejects.toThrow(/TENANT_REGISTRY_ERROR/);
       } finally {
         vi.unstubAllEnvs();
       }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import {
   isRegisteredPermissionKey,
@@ -159,6 +160,152 @@ export interface RouteHandlerSourceEntry {
   method: string;
   routePath: string;
   fileContent: string;
+  forbiddenModuleReexport?: string;
+}
+
+export interface ForbiddenModuleReexport {
+  kind: 'star' | 'named';
+  exportedNames: string[];
+  moduleSpecifier: string;
+  line: number;
+}
+
+export function findForbiddenModuleReexports(
+  source: string,
+  fileName: string = 'source.ts',
+): ForbiddenModuleReexport[] {
+  const scriptKind = fileName.endsWith('.tsx')
+    ? ts.ScriptKind.TSX
+    : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind,
+  );
+  const reexports: ForbiddenModuleReexport[] = [];
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isExportDeclaration(stmt) || !stmt.moduleSpecifier || stmt.isTypeOnly) {
+      continue;
+    }
+    const moduleSpecifier = ts.isStringLiteral(stmt.moduleSpecifier)
+      ? stmt.moduleSpecifier.text
+      : stmt.moduleSpecifier.getText(sourceFile);
+    const line =
+      sourceFile.getLineAndCharacterOfPosition(stmt.getStart(sourceFile)).line +
+      1;
+    if (!stmt.exportClause) {
+      reexports.push({
+        kind: 'star',
+        exportedNames: [],
+        moduleSpecifier,
+        line,
+      });
+      continue;
+    }
+    if (ts.isNamespaceExport(stmt.exportClause)) {
+      reexports.push({
+        kind: 'star',
+        exportedNames: [stmt.exportClause.name.text],
+        moduleSpecifier,
+        line,
+      });
+      continue;
+    }
+    if (ts.isNamedExports(stmt.exportClause)) {
+      const exportedNames = stmt.exportClause.elements
+        .filter((el) => !el.isTypeOnly)
+        .map((el) => el.name.text);
+      if (exportedNames.length > 0) {
+        reexports.push({
+          kind: 'named',
+          exportedNames,
+          moduleSpecifier,
+          line,
+        });
+      }
+    }
+  }
+  return reexports;
+}
+
+function isDirectiveStringLiteralStatement(
+  stmt: ts.Statement,
+): stmt is ts.ExpressionStatement & { expression: ts.StringLiteral } {
+  return (
+    ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)
+  );
+}
+
+export function findInlineUseServerDirectives(
+  files: ActionSourceFileEntry[],
+): string[] {
+  const findings: string[] = [];
+  for (const file of files) {
+    const scriptKind = file.fileLabel.endsWith('.tsx')
+      ? ts.ScriptKind.TSX
+      : ts.ScriptKind.TS;
+    const sourceFile = ts.createSourceFile(
+      file.fileLabel,
+      file.source,
+      ts.ScriptTarget.Latest,
+      true,
+      scriptKind,
+    );
+    const allowedPrologueStatements = new Set<ts.Statement>();
+    for (const stmt of sourceFile.statements) {
+      if (!isDirectiveStringLiteralStatement(stmt)) {
+        break;
+      }
+      allowedPrologueStatements.add(stmt);
+    }
+
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isExpressionStatement(node) &&
+        ts.isStringLiteral(node.expression) &&
+        node.expression.text === 'use server' &&
+        !allowedPrologueStatements.has(node)
+      ) {
+        const line =
+          sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+            .line + 1;
+        findings.push(
+          `Inline or non-prologue 'use server' directive in ${file.fileLabel}:${line}. All Server Actions must be exported directly from src/app/actions.ts and wrapped with guardedAction().`,
+        );
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return findings;
+}
+
+export function findNonTestSrcFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (
+        entry.name === 'node_modules' ||
+        entry.name === '.next' ||
+        entry.name === '.git' ||
+        entry.name === '__tests__'
+      ) {
+        continue;
+      }
+      files.push(...findNonTestSrcFiles(fullPath));
+    } else if (
+      entry.isFile() &&
+      /\.(ts|tsx)$/.test(entry.name) &&
+      !/\.test\.(ts|tsx)$/.test(entry.name)
+    ) {
+      files.push(fullPath);
+    }
+  }
+  return files.sort();
 }
 
 function walkRouteFiles(dir: string): string[] {
@@ -215,6 +362,33 @@ export function parseExportedRoutesFromFiles(
           routePath,
           fileContent: content,
         });
+      }
+    }
+
+    const moduleReexports = findForbiddenModuleReexports(content, filePath);
+    for (const reexport of moduleReexports) {
+      if (reexport.kind === 'star') {
+        const starLabel =
+          reexport.exportedNames.length > 0
+            ? `export * as ${reexport.exportedNames[0]} from '${reexport.moduleSpecifier}'`
+            : `export * from '${reexport.moduleSpecifier}'`;
+        handlers.push({
+          routeKey: `* ${routePath}`,
+          method: '*',
+          routePath,
+          fileContent: content,
+          forbiddenModuleReexport: starLabel,
+        });
+      } else {
+        for (const exportedName of reexport.exportedNames) {
+          handlers.push({
+            routeKey: `${exportedName} ${routePath}`,
+            method: exportedName,
+            routePath,
+            fileContent: content,
+            forbiddenModuleReexport: `export { ${exportedName} } from '${reexport.moduleSpecifier}'`,
+          });
+        }
       }
     }
   }
@@ -353,6 +527,20 @@ export function validateActionAndRouteGuard(params: {
   // 1. Every exported action has a policy and calls guardedAction('<ownName>', fn) with at most 2 arguments
   const seenActionNames = new Set<string>();
   for (const actionFile of sourceFiles) {
+    const reexports = findForbiddenModuleReexports(
+      actionFile.source,
+      actionFile.fileLabel,
+    );
+    for (const reexport of reexports) {
+      const desc =
+        reexport.kind === 'star'
+          ? `export * from "${reexport.moduleSpecifier}"`
+          : `export { ${reexport.exportedNames.join(', ')} } from "${reexport.moduleSpecifier}"`;
+      errors.push(
+        `Action file "${actionFile.fileLabel}" line ${reexport.line} contains forbidden module re-export (${desc}). Export server actions directly and wrap them with guardedAction().`,
+      );
+    }
+
     const actions = parseExportedActionsFromSource(actionFile.source);
     for (const act of actions) {
       seenActionNames.add(act.name);
@@ -395,6 +583,12 @@ export function validateActionAndRouteGuard(params: {
   // 3. Every route handler has a policy and calls guardedRoute('<METHOD> /api/...', handler) with at most 2 arguments
   const seenRouteKeys = new Set<string>();
   for (const rte of params.routeHandlers) {
+    if (rte.forbiddenModuleReexport) {
+      errors.push(
+        `Route file "${rte.routeKey}" contains forbidden module re-export (${rte.forbiddenModuleReexport}). Export route handlers directly with guardedRoute('${rte.routeKey}', ...).`,
+      );
+      continue;
+    }
     seenRouteKeys.add(rte.routeKey);
     if (!(rte.routeKey in params.routePolicies)) {
       errors.push(
@@ -753,5 +947,128 @@ export { optionsImpl as OPTIONS };
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it('R560: aligns updateMatterConflictRecordAction policy to matter:edit', () => {
+    expect(ACTION_PERMISSIONS.updateMatterConflictRecordAction).toEqual({
+      kind: 'permission',
+      key: 'matter:edit',
+      enforcedBy: 'service',
+    });
+  });
+
+  it('R548: rejects module re-exports (export ... from / export *) in use-server and route files', () => {
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r548-guard-'));
+    try {
+      const reexportActionFile = path.join(tmpDir, 'reexportActions.ts');
+      const starActionFile = path.join(tmpDir, 'starActions.ts');
+      const reexportRouteDir = path.join(tmpDir, 'api', 'reexport-route');
+      const starRouteDir = path.join(tmpDir, 'api', 'star-route');
+      fs.mkdirSync(reexportRouteDir, { recursive: true });
+      fs.mkdirSync(starRouteDir, { recursive: true });
+
+      const reexportActionSrc = `'use server';
+export { sneakyAction } from './helperActions';
+`;
+      const starActionSrc = `'use server';
+export * from './helperActions';
+`;
+      const reexportRouteFile = path.join(reexportRouteDir, 'route.ts');
+      const starRouteFile = path.join(starRouteDir, 'route.ts');
+      fs.writeFileSync(reexportActionFile, reexportActionSrc, 'utf8');
+      fs.writeFileSync(starActionFile, starActionSrc, 'utf8');
+      fs.writeFileSync(
+        reexportRouteFile,
+        `export { GET } from './handler';\n`,
+        'utf8',
+      );
+      fs.writeFileSync(
+        starRouteFile,
+        `export * from './handler';\n`,
+        'utf8',
+      );
+
+      const guardErrors = validateActionAndRouteGuard({
+        actionFiles: [
+          { fileLabel: 'reexportActions.ts', source: reexportActionSrc },
+          { fileLabel: 'starActions.ts', source: starActionSrc },
+        ],
+        routeHandlers: parseExportedRoutesFromFiles(
+          [reexportRouteFile, starRouteFile],
+          tmpDir,
+        ),
+        actionPolicies: {},
+        routePolicies: {},
+        maxKnownGaps: 0,
+      });
+
+      expect(guardErrors).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('reexportActions.ts'),
+          expect.stringContaining('starActions.ts'),
+          expect.stringContaining('GET /api/reexport-route'),
+          expect.stringContaining('/api/star-route'),
+        ]),
+      );
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('R563: rejects inline "use server" directives inside function bodies across src/ and fixtures', () => {
+    const repoSrcFiles: ActionSourceFileEntry[] = findNonTestSrcFiles(
+      path.join(REPO_ROOT, 'src'),
+    ).map((file) => ({
+      fileLabel: path.relative(REPO_ROOT, file).split(path.sep).join('/'),
+      source: fs.readFileSync(file, 'utf8'),
+    }));
+    expect(findInlineUseServerDirectives(repoSrcFiles)).toEqual([]);
+
+    const fixtureFindings = findInlineUseServerDirectives([
+      {
+        fileLabel: 'inlineFn.tsx',
+        source: `export function Panel() {
+  async function sneakyInlineAction() {
+    'use server';
+    return 'ok';
+  }
+  return sneakyInlineAction;
+}
+`,
+      },
+      {
+        fileLabel: 'inlineArrow.ts',
+        source: `export const sneakyArrow = async () => {
+  "use server";
+  return 42;
+};
+`,
+      },
+      {
+        fileLabel: 'validTopLevel.ts',
+        source: `'use server';
+export async function validAction() {
+  return 'ok';
+}
+`,
+      },
+      {
+        fileLabel: 'safeString.ts',
+        source: `export function renderHelp() {
+  const hint = "'use server'";
+  return hint;
+}
+`,
+      },
+    ]);
+
+    expect(fixtureFindings).toHaveLength(2);
+    expect(fixtureFindings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('inlineFn.tsx:3'),
+        expect.stringContaining('inlineArrow.ts:2'),
+      ]),
+    );
   });
 });

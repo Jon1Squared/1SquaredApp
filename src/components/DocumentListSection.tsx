@@ -120,8 +120,10 @@ export function DocumentListSection({
     });
   }, [snapshot, entityType, entityId]);
 
-  const canGenerate =
-    snapshot?.userPermissions.includes('document:generate') ?? true;
+  const canGenerate = Boolean(
+    snapshot?.userPermissions.includes('document:generate') &&
+      snapshot?.userPermissions.includes('document_template:view'),
+  );
   const canDelete =
     snapshot?.userPermissions.includes('document:delete') ?? false;
 

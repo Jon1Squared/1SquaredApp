@@ -137,7 +137,7 @@ export const ACTION_PERMISSIONS = {
   },
   updateMatterConflictRecordAction: {
     kind: 'permission',
-    key: { anyOf: ['matter:edit', 'matter:create', 'risk:view'] },
+    key: 'matter:edit',
     enforcedBy: 'service',
   },
   updateMatterLifecycleStatusAction: {
@@ -193,7 +193,7 @@ export const ACTION_PERMISSIONS = {
   // Document Generation (16)
   getDocumentGenerationSnapshotAction: {
     kind: 'permission',
-    key: 'document_template:view',
+    key: { anyOf: ['document:view', 'document_template:view'] },
     enforcedBy: 'service',
   },
   uploadTemplateDraftAction: {

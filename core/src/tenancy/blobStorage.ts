@@ -112,6 +112,20 @@ export interface TenantStorageProviderOptions {
   environment?: string;
 }
 
+/**
+ * Canonical live-environment check for document storage and blob signing (`R520`, `R562`):
+ * if ANY supplied environment source or `process.env.PLATFORM_ENVIRONMENT` is `'live'`,
+ * the runtime is treated as live (forbidding in-memory storage and test fallback signing keys).
+ */
+export function isLiveBlobStorageEnvironment(
+  ...environments: Array<string | null | undefined>
+): boolean {
+  if (process.env.PLATFORM_ENVIRONMENT === 'live') {
+    return true;
+  }
+  return environments.some((env) => env === 'live');
+}
+
 abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
   public abstract readonly providerId: StorageProviderId;
   protected readonly rootDir: string;
@@ -123,9 +137,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
   constructor(options?: TenantStorageProviderOptions | string) {
     const resolvedOptions: TenantStorageProviderOptions | undefined =
       typeof options === 'string' ? { tokenSigningKey: options } : options;
-    const isLive =
-      resolvedOptions?.environment === 'live' ||
-      process.env.PLATFORM_ENVIRONMENT === 'live';
+    const isLive = isLiveBlobStorageEnvironment(resolvedOptions?.environment);
     this.rootDir =
       resolvedOptions?.rootDir ?? path.join(process.cwd(), 'data', 'storage');
     this.inMemoryOnly = resolvedOptions?.inMemoryOnly ?? false;

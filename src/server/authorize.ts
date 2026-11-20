@@ -11,6 +11,7 @@ import {
   AuthorisationError,
   canAccessMatter,
   isJobOnlyPermissionKey,
+  isUserAssignablePermissionKey,
   loadActiveTenantRegistry,
   requirePermission,
   sanitizeJobErrorCode,
@@ -249,15 +250,38 @@ async function actorSatisfiesCoarseServicePolicy(
     return true;
   }
   const allPeople = guardedActor.allPeople ?? [];
-  if (
-    candidates.some(
-      (perm) => perm === 'employee:view_core' || perm === 'employee:edit_core',
-    ) &&
-    allPeople.some(
-      (person) => person.employment?.lineManagerId === guardedActor.personId,
-    )
-  ) {
-    return true;
+  const teams = guardedActor.teams ?? [];
+  const isTeamLeadOfAnyTeam = teams.some(
+    (team) => team.active && team.leadIds.includes(guardedActor.personId),
+  );
+  const isLineManagerOfAny = allPeople.some(
+    (person) =>
+      person.employment?.lineManagerId === guardedActor.personId ||
+      person.employment?.supervisingPartnerId === guardedActor.personId,
+  );
+  const isSupportingAnyFeeEarner =
+    (guardedActor.person.supportsIds?.length ?? 0) > 0 &&
+    allPeople.some((person) =>
+      guardedActor.person.supportsIds?.includes(person.id),
+    );
+  for (const rule of guardedActor.rbacConfig.relationshipGrants ?? []) {
+    const matchesRule =
+      ((rule.relationship === 'is_team_lead_of_any_team' ||
+        rule.relationship === 'is_team_lead_of_target_team') &&
+        isTeamLeadOfAnyTeam) ||
+      (rule.relationship === 'is_line_manager_of_target' &&
+        isLineManagerOfAny) ||
+      (rule.relationship === 'is_supporting_target_fee_earner' &&
+        isSupportingAnyFeeEarner);
+    if (
+      matchesRule &&
+      rule.permissions.some(
+        (perm) =>
+          isUserAssignablePermissionKey(perm) && candidates.includes(perm),
+      )
+    ) {
+      return true;
+    }
   }
   if (candidates.some((perm) => perm.startsWith('keydate:'))) {
     const keyDatesConfig: KeyDatesConfig = await getKeyDatesConfig({

@@ -30,6 +30,7 @@ import {
   hasDocumentPermission,
   hasPermission,
   importTemplatePackage,
+  isLiveBlobStorageEnvironment,
   normaliseActorHomeRoles,
   previewTemplateVersion,
   queryTemplateUsageReport,
@@ -159,11 +160,9 @@ function isTestEnv(): boolean {
 }
 
 function isLiveBlobEnvironment(environment?: string): boolean {
-  if (environment === 'live') return true;
-  if (environment !== undefined) return false;
-  return (
-    process.env.PLATFORM_ENVIRONMENT === 'live' ||
-    getActiveTenantConfiguration().environment === 'live'
+  return isLiveBlobStorageEnvironment(
+    environment,
+    getActiveTenantConfiguration().environment,
   );
 }
 
@@ -245,21 +244,26 @@ export function getDocumentStorage(
   config: TenantConfiguration,
 ): DocumentStorageProvider {
   const isLive = isLiveBlobEnvironment(config.environment);
-  const cacheKey = `${config.tenantId}:${config.environment}:${config.documentGeneration.storageProvider}`;
+  const effectiveEnvironment = isLive ? 'live' : config.environment;
   const signingKey = resolveTenantBlobSigningKey(
     config.tenantId,
-    config.environment,
+    effectiveEnvironment,
   );
+  const keyDigest = crypto
+    .createHash('sha256')
+    .update(signingKey)
+    .digest('hex')
+    .slice(0, 12);
+  const cacheKey = `${config.tenantId}:${effectiveEnvironment}:${config.documentGeneration.storageProvider}:${keyDigest}`;
   if (
     !global.__oneSquaredDocStorage ||
-    global.__oneSquaredDocStorageKey !== cacheKey ||
-    isLive
+    global.__oneSquaredDocStorageKey !== cacheKey
   ) {
     global.__oneSquaredDocStorage = createDocumentStorageProvider(
       config.documentGeneration.storageProvider,
       {
         inMemoryOnly: !isLive && isTestEnv(),
-        environment: isLive ? 'live' : config.environment,
+        environment: effectiveEnvironment,
         tokenSigningKey: signingKey,
       },
     );
@@ -800,24 +804,31 @@ export async function getDocumentGenerationSnapshotForUser(
   const { store, ctx, user, matters, config, repo } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
-  if (!hasDocumentPermission(actor, 'document_template:view', config)) {
+  const canViewTemplates = hasDocumentPermission(
+    actor,
+    'document_template:view',
+    config,
+  );
+  const canViewDocuments = hasDocumentPermission(actor, 'document:view', config);
+  if (!canViewTemplates && !canViewDocuments) {
     return buildActionDenied(
       'FORBIDDEN',
-      'Permission "document_template:view" is required to view document templates and generated documents.',
+      'Permission "document:view" or "document_template:view" is required to view document generation metadata.',
     );
   }
   const userPermissions = resolveDocumentPermissions(actor, config);
-  const fullCatalogue = buildFullCatalogueFromStoreCustomFields(
-    store.customFields,
-  );
-  const readableFields = getReadableCatalogueFieldsForActor(
-    actor,
-    fullCatalogue,
-    config,
-  );
 
-  const serializableCatalogue: SerializableCatalogueField[] =
-    readableFields.map((f) => ({
+  let serializableCatalogue: SerializableCatalogueField[] = [];
+  if (canViewTemplates) {
+    const fullCatalogue = buildFullCatalogueFromStoreCustomFields(
+      store.customFields,
+    );
+    const readableFields = getReadableCatalogueFieldsForActor(
+      actor,
+      fullCatalogue,
+      config,
+    );
+    serializableCatalogue = readableFields.map((f) => ({
       key: f.key,
       displayName: f.displayName,
       description: f.description,
@@ -827,66 +838,74 @@ export async function getDocumentGenerationSnapshotForUser(
       sinceVersion: f.sinceVersion,
       sampleValue: f.sampleValue,
     }));
-
-  const [templates, versions, allDocs, allLinks] = await Promise.all([
-    repo.listTemplates(ctx),
-    repo.listAllTemplateVersions(ctx),
-    repo.listDocuments(ctx),
-    repo.listAllDocumentLinks(ctx),
-  ]);
-  const pendingApprovalsCount = versions.filter(
-    (v) => v.status === 'Submitted',
-  ).length;
-
-  const mattersById = new Map(
-    matters.map((m) => [m.id, toMatterAccessSubject(m)!]),
-  );
-
-  const linksByDocId = new Map<string, DocumentLinkRecord[]>();
-  for (const link of allLinks) {
-    const bucket = linksByDocId.get(link.documentId);
-    if (bucket) {
-      bucket.push(link);
-    } else {
-      linksByDocId.set(link.documentId, [link]);
-    }
   }
 
-  const accessibleDocs = allDocs.filter((doc) => {
-    const linkedMatters = [];
-    if (doc.primaryMatterId && mattersById.has(doc.primaryMatterId)) {
-      linkedMatters.push(mattersById.get(doc.primaryMatterId)!);
-    }
-    for (const l of linksByDocId.get(doc.id) ?? []) {
-      if (l.entityType === 'matter' && mattersById.has(l.entityId)) {
-        const m = mattersById.get(l.entityId)!;
-        if (!linkedMatters.some((x) => x.id === m.id)) {
-          linkedMatters.push(m);
-        }
+  const [templates, versions, allDocs, allLinks] = await Promise.all([
+    canViewTemplates ? repo.listTemplates(ctx) : Promise.resolve([]),
+    canViewTemplates ? repo.listAllTemplateVersions(ctx) : Promise.resolve([]),
+    canViewDocuments ? repo.listDocuments(ctx) : Promise.resolve([]),
+    canViewDocuments ? repo.listAllDocumentLinks(ctx) : Promise.resolve([]),
+  ]);
+  const pendingApprovalsCount = canViewTemplates
+    ? versions.filter((v) => v.status === 'Submitted').length
+    : 0;
+
+  let accessibleDocs: GeneratedDocumentRecord[] = [];
+  let documentLinks: DocumentLinkRecord[] = [];
+  if (canViewDocuments) {
+    const mattersById = new Map(
+      matters.map((m) => [m.id, toMatterAccessSubject(m)!]),
+    );
+
+    const linksByDocId = new Map<string, DocumentLinkRecord[]>();
+    for (const link of allLinks) {
+      const bucket = linksByDocId.get(link.documentId);
+      if (bucket) {
+        bucket.push(link);
+      } else {
+        linksByDocId.set(link.documentId, [link]);
       }
     }
-    return canActorAccessGeneratedDocument(actor, doc, linkedMatters, config);
-  });
 
-  const accessibleDocIds = new Set(accessibleDocs.map((d) => d.id));
-  const documentLinks = allLinks.filter((l) =>
-    accessibleDocIds.has(l.documentId),
-  );
+    accessibleDocs = allDocs.filter((doc) => {
+      const linkedMatters = [];
+      if (doc.primaryMatterId && mattersById.has(doc.primaryMatterId)) {
+        linkedMatters.push(mattersById.get(doc.primaryMatterId)!);
+      }
+      for (const l of linksByDocId.get(doc.id) ?? []) {
+        if (l.entityType === 'matter' && mattersById.has(l.entityId)) {
+          const m = mattersById.get(l.entityId)!;
+          if (!linkedMatters.some((x) => x.id === m.id)) {
+            linkedMatters.push(m);
+          }
+        }
+      }
+      return canActorAccessGeneratedDocument(actor, doc, linkedMatters, config);
+    });
 
-  const versionById = new Map(versions.map((v) => [v.id, v]));
-  const permittedTemplateIds = templates
-    .filter((t) => {
-      const activeVer = t.activeVersionId
-        ? versionById.get(t.activeVersionId)
-        : null;
-      return isTemplateAvailableInContext({
-        template: t,
-        version: activeVer,
-        actor,
-        config,
-      }).available;
-    })
-    .map((t) => t.id);
+    const accessibleDocIds = new Set(accessibleDocs.map((d) => d.id));
+    documentLinks = allLinks.filter((l) =>
+      accessibleDocIds.has(l.documentId),
+    );
+  }
+
+  let permittedTemplateIds: string[] = [];
+  if (canViewTemplates) {
+    const versionById = new Map(versions.map((v) => [v.id, v]));
+    permittedTemplateIds = templates
+      .filter((t) => {
+        const activeVer = t.activeVersionId
+          ? versionById.get(t.activeVersionId)
+          : null;
+        return isTemplateAvailableInContext({
+          template: t,
+          version: activeVer,
+          actor,
+          config,
+        }).available;
+      })
+      .map((t) => t.id);
+  }
 
   return {
     config: config.documentGeneration,
