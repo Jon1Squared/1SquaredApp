@@ -33,6 +33,7 @@ import {
   SharePointDocumentStoreProvider,
   TenantAuditRepository,
   TenantMigrationRunner,
+  TenantSearchRepository,
   TenantScopedEncryptedTokenCache,
   validateExtensionManifest,
   validateMigrationCatalogueOrder,
@@ -10728,6 +10729,116 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(alphaTasksAfterR535.some((t) => t.assignedPersonId === 'P-ALPHA-1')).toBe(true);
       expect((await taskRepo.listAllNotificationsUnfiltered<{ recipientId: string }>(ctxA)).some((n) => n.recipientId === 'P-ALPHA-2')).toBe(false);
       expect((await taskRepo.listVisibleTasks(ctxB, 'P-BRAVO-1')).length).toBe(0);
+
+      // R568 two-tenant isolation: a task linked to TWO key dates where the second key_date belongs to allowListMatterId
+      // must be hidden from unpermitted P-ALPHA-2 in SQL task visibility and global search while visible to P-ALPHA-1 and leaving Bravo isolated
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...structuredClone(seed.matters[0]!),
+          id: `MAT-R568-OPEN-${suffix}`,
+          matterNumber: `MAT-R568-OPEN-${suffix}`,
+          title: 'Alpha Unrestricted Matter R568',
+          clientId: 'P-ALPHA-1',
+          responsiblePartnerId: 'P-ALPHA-1',
+          supervisingPartnerId: 'P-ALPHA-1',
+          leadFeeEarnerId: 'P-ALPHA-1',
+          teamMemberIds: ['P-ALPHA-1', 'P-ALPHA-2'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: [],
+          createdById: 'P-ALPHA-1',
+          updatedById: 'P-ALPHA-1',
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      await kdRepo.putKeyDate(ctxA, {
+        id: `KD-R568-OPEN-${suffix}`,
+        matterId: `MAT-R568-OPEN-${suffix}`,
+        keyDateTypeId: 'limitation',
+        category: 'limitation',
+        title: 'R568 Alpha Open KeyDate',
+        dueDate: '2027-02-01',
+        isCritical: false,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-ALPHA-1'],
+        verification: { required: false },
+        createdById: 'P-ALPHA-1',
+        createdAt: '2026-11-19T10:00:00.000Z',
+        updatedById: 'P-ALPHA-1',
+        updatedAt: '2026-11-19T10:00:00.000Z',
+        version: 1,
+      });
+      const r568TwoKdTaskId = `TSK-R568-ISO-${suffix}`;
+      await taskRepo.putTask(ctxA, {
+        ...structuredClone(seed.tasks[0]!),
+        id: r568TwoKdTaskId,
+        reference: r568TwoKdTaskId,
+        title: `DualKdSecretR568 ${suffix}`,
+        assignedTeamId: null,
+        assignedPersonId: 'P-ALPHA-1',
+        assignedPersonIds: ['P-ALPHA-1'],
+        linkedKeyDateId: `KD-R568-OPEN-${suffix}`,
+        linkedRecords: [
+          { recordType: 'key_date', recordId: `KD-R568-OPEN-${suffix}` },
+          { recordType: 'key_date', recordId: kdId },
+        ] as unknown as Parameters<typeof taskRepo.putTask>[1]['linkedRecords'],
+        createdById: 'P-ALPHA-1',
+        updatedById: 'P-ALPHA-1',
+      });
+      expect((await taskRepo.listVisibleTasks(ctxA, 'P-ALPHA-2')).some((t) => t.id === r568TwoKdTaskId)).toBe(false);
+      expect((await taskRepo.listVisibleTasks(ctxA, 'P-ALPHA-1')).some((t) => t.id === r568TwoKdTaskId)).toBe(true);
+      const searchRepo = new TenantSearchRepository();
+      const alphaP2Search = await searchRepo.searchRecords(ctxA, {
+        query: `DualKdSecretR568`,
+        entityTypes: ['task'],
+        actor: {
+          actorId: 'P-ALPHA-2',
+          hasRestrictedMatterAccess: false,
+          canViewDocuments: true,
+          canViewQuotes: true,
+          canViewFinance: false,
+          canViewKeyDates: true,
+          permittedDiaryTeamIds: ['TM-000001'],
+          canViewRegisters: true,
+          canManageUndertakings: true,
+        },
+      });
+      expect(alphaP2Search.hits.some((h) => h.id === r568TwoKdTaskId)).toBe(false);
+      const alphaP1Search = await searchRepo.searchRecords(ctxA, {
+        query: `DualKdSecretR568`,
+        entityTypes: ['task'],
+        actor: {
+          actorId: 'P-ALPHA-1',
+          hasRestrictedMatterAccess: false,
+          canViewDocuments: true,
+          canViewQuotes: true,
+          canViewFinance: false,
+          canViewKeyDates: true,
+          permittedDiaryTeamIds: ['TM-000001'],
+          canViewRegisters: true,
+          canManageUndertakings: true,
+        },
+      });
+      expect(alphaP1Search.hits.some((h) => h.id === r568TwoKdTaskId)).toBe(true);
+      const bravoSearch = await searchRepo.searchRecords(ctxB, {
+        query: `DualKdSecretR568`,
+        entityTypes: ['task'],
+        actor: {
+          actorId: 'P-BRAVO-1',
+          hasRestrictedMatterAccess: true,
+          canViewDocuments: true,
+          canViewQuotes: true,
+          canViewFinance: false,
+          canViewKeyDates: true,
+          permittedDiaryTeamIds: ['TM-000001'],
+          canViewRegisters: true,
+          canManageUndertakings: true,
+        },
+      });
+      expect(bravoSearch.hits).toHaveLength(0);
     } finally {
       setActiveTenantConfigForTesting(null);
       setTestEntraSessionOverride(null);

@@ -42,6 +42,7 @@ export function buildRecordVisibility(
       allPeople,
       teams: [...allTeams],
       tokenRoles: opts.tokenRoles,
+      tokenRolesActorId: userId,
       ...(opts.rbacConfig ? { config: { rbac: opts.rbacConfig } } : {}),
     });
 
@@ -114,7 +115,9 @@ export function buildRecordVisibility(
       (lr) =>
         (lr.recordType === 'matter' && hiddenMatterIds.has(lr.recordId)) ||
         (lr.recordType === 'enquiry' && hiddenEnquiryIds.has(lr.recordId)) ||
-        (lr.recordType === 'quote' && hiddenQuoteIds.has(lr.recordId)),
+        (lr.recordType === 'quote' && hiddenQuoteIds.has(lr.recordId)) ||
+        ((lr as { recordType: string }).recordType === 'key_date' &&
+          hiddenMatterKeyDateIds.has(lr.recordId)),
     );
     return !linksToHidden;
   };

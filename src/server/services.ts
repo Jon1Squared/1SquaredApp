@@ -643,6 +643,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
     teams,
     mfaVerified: actor.mfaVerified,
     tokenRoles: actor.session.mappedRoles,
+    tokenRolesActorId: actor.personId,
     config: { rbac: rbacConfig },
   });
   const targetPerms = resolvePersonPermissionSet(targetPerson, {
@@ -682,6 +683,7 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
         allPeople: people,
         teams,
         tokenRoles: actor.session.mappedRoles,
+        tokenRolesActorId: actor.personId,
         config: { rbac: rbacConfig },
       }),
   );
@@ -1485,6 +1487,7 @@ export async function listFirmAuditEntriesPage(
       allPeople: people,
       teams,
       tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: viewer.id,
       config: { rbac: rbacConfig },
     })
   ) {
@@ -1738,6 +1741,7 @@ async function getAppSnapshotInScope(
     allPeople: people,
     teams,
     tokenRoles: effectiveTokenRoles,
+    tokenRolesActorId: user.id,
     config: { rbac: rbacConfig },
   });
   const orgStructure =
@@ -1777,7 +1781,11 @@ async function getAppSnapshotInScope(
         people,
         teams,
         orgStructure,
-        { tokenRoles: effectiveTokenRoles, config: { rbac: rbacConfig } },
+        {
+          tokenRoles: effectiveTokenRoles,
+          tokenRolesActorId: user.id,
+          config: { rbac: rbacConfig },
+        },
         employeeMatterVisibility,
       ),
     };
@@ -1793,7 +1801,11 @@ async function getAppSnapshotInScope(
             people,
             teams,
             orgStructure,
-            { tokenRoles: effectiveTokenRoles, config: { rbac: rbacConfig } },
+            {
+              tokenRoles: effectiveTokenRoles,
+              tokenRolesActorId: user.id,
+              config: { rbac: rbacConfig },
+            },
             employeeMatterVisibility,
           ),
         }
@@ -2347,6 +2359,7 @@ export async function getEmployeeDetailsForUser(
     user && activeSession?.personId === user.id ? activeSession.tokenRoles : undefined;
   const perms = resolveEmployeePermissions(user, people, teams, {
     tokenRoles: effectiveTokenRoles,
+    tokenRolesActorId: byId,
     config: { rbac: rbacConfig },
   });
   const errors: Record<string, string> = {};
@@ -2385,6 +2398,7 @@ export async function getEmployeeDetailsForUser(
       if (
         !hasEmployeePermission(user, 'employee:payroll', people, teams, {
           tokenRoles: effectiveTokenRoles,
+          tokenRolesActorId: byId,
           config: { rbac: rbacConfig },
         })
       ) {
@@ -2408,6 +2422,7 @@ export async function getEmployeeDetailsForUser(
       if (
         !hasEmployeePermission(user, 'employee:sensitive', people, teams, {
           tokenRoles: effectiveTokenRoles,
+          tokenRolesActorId: byId,
           config: { rbac: rbacConfig },
         })
       ) {
@@ -2442,6 +2457,7 @@ export async function getEmployeeDetailsForUser(
       allPeople: people,
       teams,
       tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: byId,
       config: { rbac: rbacConfig },
     }),
   );
@@ -2453,6 +2469,7 @@ export async function getEmployeeDetailsForUser(
     store.orgStructure,
     {
       tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: byId,
       config: { rbac: rbacConfig },
       includePayroll: payrollAuditWritten,
     },
@@ -10403,6 +10420,27 @@ async function canRecipientReceiveNotification(
     if (fetchedTask?.linkedKeyDateId && !keyDateById.has(fetchedTask.linkedKeyDateId)) {
       missingKdIds.add(fetchedTask.linkedKeyDateId);
     }
+    for (const lr of fetchedTask?.linkedRecords ?? []) {
+      if (
+        (lr as { recordType: string }).recordType === 'key_date' &&
+        lr.recordId &&
+        !keyDateById.has(lr.recordId)
+      ) {
+        missingKdIds.add(lr.recordId);
+      }
+    }
+    const hrefKdPreMatch = /\/key-dates\/([^/?#]+)/.exec(item.href ?? '');
+    if (hrefKdPreMatch?.[1] && !keyDateById.has(hrefKdPreMatch[1])) {
+      missingKdIds.add(hrefKdPreMatch[1]);
+    }
+    const preRecId = item.recordId?.trim();
+    if (
+      preRecId &&
+      (preRecId.startsWith('KD-') || item.kind.startsWith('keydate_')) &&
+      !keyDateById.has(preRecId)
+    ) {
+      missingKdIds.add(preRecId);
+    }
     if (missingKdIds.size > 0) {
       const kdMap = new Map(keyDateById);
       const extraKds = await Promise.all(
@@ -10979,6 +11017,7 @@ export async function getMyNotificationPreferences(
     teams,
     config: { rbac: rbacConfig },
     tokenRoles: options?.tokenRoles ?? ctx.actorRoles,
+    tokenRolesActorId: actor.id,
   });
   if (!perms.permissions.has('notification:view_own')) {
     throw createForbiddenError(
@@ -11077,6 +11116,7 @@ export async function updateMyNotificationPreferences(
     teams,
     config: { rbac: rbacConfig },
     tokenRoles: options?.tokenRoles ?? ctx.actorRoles,
+    tokenRolesActorId: actor.id,
   });
   if (!perms.permissions.has('notification:manage_own_preferences')) {
     throw createForbiddenError(
@@ -11432,6 +11472,7 @@ export async function saveTaskRecord(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
+  return taskRepo.withTenantTransaction(taskCtx, async () => {
   const [store, people, organisations, matters, enquiries, quotes, existing, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(taskCtx),
     partyRepo.listAllPeople<Person>(taskCtx),
@@ -11495,13 +11536,24 @@ export async function saveTaskRecord(
   const candidateLinks = input.linkedRecords ?? existing?.linkedRecords ?? [];
   const explicitInputKeyDateId =
     input.linkedKeyDateId !== undefined ? input.linkedKeyDateId?.trim() || null : undefined;
+  if (
+    existing &&
+    !opts?.internalSystemStep &&
+    explicitInputKeyDateId !== undefined &&
+    explicitInputKeyDateId !== (existing.linkedKeyDateId ?? null)
+  ) {
+    const msg = 'Cannot modify or unlink a task key-date link.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
   const linkedRecordKeyDateIds = candidateLinks
     .filter((lr) => (lr as { recordType: string }).recordType === 'key_date' && lr.recordId)
     .map((lr) => lr.recordId);
   const effectiveLinkedKeyDateId =
-    explicitInputKeyDateId !== undefined
-      ? explicitInputKeyDateId
-      : linkedRecordKeyDateIds[0] ?? existing?.linkedKeyDateId ?? null;
+    existing && !opts?.internalSystemStep
+      ? existing.linkedKeyDateId ?? null
+      : explicitInputKeyDateId !== undefined
+        ? explicitInputKeyDateId
+        : linkedRecordKeyDateIds[0] ?? existing?.linkedKeyDateId ?? null;
   const allCandidateKeyDateIds = Array.from(
     new Set(
       [effectiveLinkedKeyDateId, existing?.linkedKeyDateId, ...linkedRecordKeyDateIds].filter(
@@ -12149,6 +12201,7 @@ export async function saveTaskRecord(
 
   return { task };
   });
+  });
 }
 
 export async function takeTaskRecord(
@@ -12307,11 +12360,27 @@ export async function addTaskCommentRecord(
     });
 
     const authorName = formatContext(store, { people, matters }).nameOf(byId);
-    const commentLinkedKd = task.linkedKeyDateId
-      ? await getKeyDateRepository().getKeyDateById(taskCtx, task.linkedKeyDateId, byId, {
-          includeRestricted: true,
-        })
-      : null;
+    const commentKdIds = Array.from(
+      new Set(
+        [
+          task.linkedKeyDateId,
+          ...(task.linkedRecords ?? [])
+            .filter(
+              (lr) => (lr as { recordType: string }).recordType === 'key_date',
+            )
+            .map((lr) => lr.recordId),
+        ].filter((id): id is string => Boolean(id)),
+      ),
+    );
+    const commentLinkedKeyDates = (
+      await Promise.all(
+        commentKdIds.map((kdId) =>
+          getKeyDateRepository().getKeyDateById(taskCtx, kdId, byId, {
+            includeRestricted: true,
+          }),
+        ),
+      )
+    ).filter((kd): kd is KeyDate => Boolean(kd));
     const commentPreloaded = buildNotificationAccessContext({
       people,
       teams,
@@ -12319,7 +12388,7 @@ export async function addTaskCommentRecord(
       matters,
       enquiries,
       quotes,
-      keyDates: commentLinkedKd ? [commentLinkedKd] : undefined,
+      keyDates: commentLinkedKeyDates.length > 0 ? commentLinkedKeyDates : undefined,
     });
     const recipients = new Set<string>();
     if (task.assignedPersonId) recipients.add(task.assignedPersonId);
@@ -23500,6 +23569,7 @@ async function resolveRegisterActorAndConfig(
     allPeople: people,
     teams,
     tokenRoles: effectiveTokenRoles,
+    tokenRolesActorId: actor.id,
     mfaVerified: effectiveMfa,
     config: { ...tenantCfg, rbac: rbacConfig },
   });
@@ -24833,6 +24903,19 @@ function extractNotificationMatterIds(params: {
     }
   };
 
+  const addKeyDateMatters = (kd: KeyDate | undefined) => {
+    if (!kd) return;
+    if (kd.matterId) matterIds.add(kd.matterId);
+    if (kd.enquiryId) {
+      addEnquiryMatters(params.enquiryById.get(kd.enquiryId));
+    }
+  };
+
+  const hrefKdMatch = /\/key-dates\/([^/?#]+)/.exec(item.href ?? '');
+  if (hrefKdMatch?.[1]) {
+    addKeyDateMatters(params.keyDateById.get(hrefKdMatch[1]));
+  }
+
   const task = item.recordId ? params.taskById.get(item.recordId) : undefined;
   if (task) {
     for (const lr of task.linkedRecords ?? []) {
@@ -24842,24 +24925,16 @@ function extractNotificationMatterIds(params: {
         addEnquiryMatters(params.enquiryById.get(lr.recordId));
       } else if (lr.recordType === 'quote' && lr.recordId) {
         addQuoteMatters(params.quoteById.get(lr.recordId));
+      } else if ((lr as { recordType: string }).recordType === 'key_date' && lr.recordId) {
+        addKeyDateMatters(params.keyDateById.get(lr.recordId));
       }
     }
     if (task.linkedKeyDateId) {
-      const kd = params.keyDateById.get(task.linkedKeyDateId);
-      if (kd?.matterId) matterIds.add(kd.matterId);
-      if (kd?.enquiryId) {
-        addEnquiryMatters(params.enquiryById.get(kd.enquiryId));
-      }
+      addKeyDateMatters(params.keyDateById.get(task.linkedKeyDateId));
     }
   }
 
-  const keyDate = item.recordId ? params.keyDateById.get(item.recordId) : undefined;
-  if (keyDate) {
-    if (keyDate.matterId) matterIds.add(keyDate.matterId);
-    if (keyDate.enquiryId) {
-      addEnquiryMatters(params.enquiryById.get(keyDate.enquiryId));
-    }
-  }
+  addKeyDateMatters(item.recordId ? params.keyDateById.get(item.recordId) : undefined);
 
   addEnquiryMatters(item.recordId ? params.enquiryById.get(item.recordId) : undefined);
   addQuoteMatters(item.recordId ? params.quoteById.get(item.recordId) : undefined);

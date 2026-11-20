@@ -238,6 +238,7 @@ export async function verifyFinanceActorAndPermission(
     allPeople: people,
     teams,
     tokenRoles,
+    tokenRolesActorId: actor.id,
   });
   if (!permSet.permissions.has(requiredPermission)) {
     return buildActionDenied(
@@ -351,6 +352,7 @@ export async function getMatterFinanceRows(
           allPeople: people,
           teams,
           tokenRoles,
+          tokenRolesActorId: actor.id,
         })
       ) {
         return buildActionDenied(

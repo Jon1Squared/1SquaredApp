@@ -231,16 +231,9 @@ export function resolveKeyDatePermissions(
 
   const explicitTokenRolesActorId =
     opts.rbac?.tokenRolesActorId ?? opts.rbac?.context?.actorId;
-  const activeActorSession = !explicitTokenRolesActorId
-    ? getActiveActorSession()
-    : undefined;
   const canApplyTokenRoles =
     Boolean(opts.rbac?.tokenRoles?.length) &&
-    (explicitTokenRolesActorId
-      ? explicitTokenRolesActorId === user.id
-      : !activeActorSession ||
-        activeActorSession.tenantId !== opts.rbac?.tenantId ||
-        activeActorSession.personId === user.id);
+    Boolean(explicitTokenRolesActorId && explicitTokenRolesActorId === user.id);
   const roleKeys = Array.from(
     new Set([
       ...resolveUserRoleKeysForKeyDates(user, teams),

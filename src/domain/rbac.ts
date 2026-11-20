@@ -439,16 +439,9 @@ export function resolvePersonPermissionSet(
     sessionMfaVerified ??
     false;
   const sessionTokenRoles = activeActorSession?.tokenRoles;
-  const activeInSameTenant = !explicitActorId
-    ? getActiveActorSession()
-    : undefined;
   const canApplyExplicitTokenRoles =
     options.tokenRoles !== undefined &&
-    (explicitActorId
-      ? explicitActorId === user.id
-      : !activeInSameTenant ||
-        activeInSameTenant.tenantId !== activeTenantId ||
-        activeInSameTenant.personId === user.id);
+    Boolean(explicitActorId && explicitActorId === user.id);
   const contextActorRoles =
     (canApplyExplicitTokenRoles ? options.tokenRoles : undefined) ??
     (isEvaluatingContextActor

@@ -48,7 +48,7 @@ Administrators can configure \`rbac.identityMapping.authorityMode\` in **Admin �
 
 | Authority Mode | How Roles Are Resolved |
 | --- | --- |
-| \`hybrid\` (default) | Combines roles mapped from the current Entra ID token (\`groups\` and \`roles\` claims) with the roles stored on the employee’s 1Squared profile, resolved strictly from the active \`AsyncLocalStorage\` request scope (\`runWithActiveActorSession\`) for that exact \`(tenantId, personId)\` (honouring the verified session’s expiry), with no server-wide mutable session map and without permanently overwriting stored 1Squared roles or leaking across concurrent requests. |
+| \`hybrid\` (default) | Combines roles mapped from the current Entra ID token (\`groups\` and \`roles\` claims) with the roles stored on the employee’s 1Squared profile, resolved strictly from the active \`AsyncLocalStorage\` request scope (\`runWithActiveActorSession\`) for that exact \`(tenantId, personId)\` (honouring the verified session’s expiry), with explicit \`options.tokenRoles\` applied only when bound to a matching \`tokenRolesActorId\` / \`context.actorId\` (\`R571\`), no server-wide mutable session map, and without permanently overwriting stored 1Squared roles or leaking across concurrent requests. |
 | \`token_only\` | Uses exclusively the roles mapped from the Microsoft Entra ID token on each sign-in (including replacing stored roles with \`[]\` if all Entra roles are removed). |
 
 ## 3. Roles, permissions & per-person overrides
