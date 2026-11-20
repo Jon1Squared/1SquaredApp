@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BasicMergeEngine,
@@ -16,11 +18,13 @@ import {
   buildMatterOpeningPdfLines,
   buildRiskAssessmentPdfLines,
   formatRecordPdfHeading,
+  isPmsImportedWithoutLocalConflictCheck,
   resolveMatterOpeningSnapshot,
   summariseClientConflictState,
   type MatterOpeningSnapshot,
   type MatterRiskAssessmentSnapshot,
 } from '../matterOpeningRecord';
+import { matterOpeningAndRiskArticle } from '../../docs/articles/matter-opening-and-risk';
 import { resolveMatterIntakeComplianceRows } from '../../components/MatterProfileClient';
 import { resolveOrganisationComplianceDisplay } from '../../components/OrganisationProfileClient';
 import { resolvePersonComplianceDisplay } from '../../components/PersonProfileClient';
@@ -308,6 +312,38 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
         detail: '0/10 answered',
       },
     });
+
+    const pmsImportedRows = resolveMatterIntakeComplianceRows(
+      {
+        isPmsImport: true,
+        conflictCheckStatus: 'Not started',
+        conflictDecision: undefined,
+        conflictCheckDate: '',
+        amlCompletedAt: '',
+        amlStatus: '',
+        engagementLetterSignedAt: '',
+        engagementLetterStatus: '',
+      },
+      {
+        overallRisk: null,
+        completedQuestions: 0,
+        totalQuestions: 10,
+      },
+    );
+    expect(pmsImportedRows.conflictCheck.label).toBe(
+      'Imported from PMS: conflict check recorded in the source system',
+    );
+    expect(pmsImportedRows.conflictCheck.cleared).toBe(false);
+
+    // R572: Legacy/seeded matters without isPmsImport: true keep "Not started" until a local conflict check is recorded,
+    // and the Help article documents pms:import, seeded demo matters, and pre-R545 imports.
+    expect(
+      isPmsImportedWithoutLocalConflictCheck({
+        conflictCheckStatus: 'Not started',
+      }),
+    ).toBe(false);
+    expect(matterOpeningAndRiskArticle.body).toMatch(/pms:import/i);
+    expect(matterOpeningAndRiskArticle.body).toMatch(/without `isPmsImport: true`/);
 
     const populatedRows = resolveMatterIntakeComplianceRows(
       {
@@ -908,5 +944,50 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       hasPendingConflict: true,
       hasClearedConflictCheck: false,
     });
+  });
+
+  it('R514: removes toast-only placeholder handlers from OrganisationProfileClient and PersonProfileClient', () => {
+    const orgSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/components/OrganisationProfileClient.tsx'),
+      'utf8',
+    );
+    const personSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/components/PersonProfileClient.tsx'),
+      'utf8',
+    );
+    expect(orgSrc).not.toContain('Time entry opened for');
+    expect(personSrc).not.toContain('Time entry opened for');
+    expect(personSrc).not.toContain('Invoice reminder sent');
+  });
+
+  it('R516: demo-literal guard denies NotALawFirm and URL-encoded Not%20A%20Law%20Firm across extended directories', () => {
+    const denyLiterals = buildDemoLiteralsDenyList();
+    expect(denyLiterals).toContain('NotALawFirm');
+    expect(denyLiterals).toContain('Not%20A%20Law%20Firm');
+
+    const urlHit = scanTextForDemoLiterals(
+      'src/server/example.ts',
+      "const u = 'https://contoso.sharepoint.com/sites/NotALawFirm/Not%20A%20Law%20Firm';",
+      denyLiterals,
+      [],
+      new Set(),
+    );
+    expect(urlHit.length).toBeGreaterThanOrEqual(2);
+
+    const scriptSrc = fs.readFileSync(
+      path.resolve(process.cwd(), 'scripts/verify-no-demo-literals.mjs'),
+      'utf8',
+    );
+    for (const dir of [
+      'src/components/',
+      'src/domain/',
+      'src/app/',
+      'src/server/',
+      'src/platform/',
+      'src/pms/',
+      'core/src/',
+    ]) {
+      expect(scriptSrc).toContain(dir);
+    }
   });
 });

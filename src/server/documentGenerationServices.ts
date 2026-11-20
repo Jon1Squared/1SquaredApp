@@ -94,6 +94,7 @@ import {
   getHrAndRbacRepository,
   getMatterRepository,
   getPartyRepository,
+  isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
 import {
@@ -394,7 +395,7 @@ async function ensureSeedDocumentTemplates(
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
 ): Promise<void> {
-  if (store.isCleanDeployment) {
+  if (store.isCleanDeployment || !isNonLiveDemoEnvironment(getActiveTenantConfiguration())) {
     return;
   }
   const inflightKey = `${ctx.tenantId}::${ctx.postgresDatabaseName}`;
@@ -425,7 +426,7 @@ async function ensureSeedDocumentTemplatesInner(
   repo: TenantDocumentRepository,
   storage: DocumentStorageProvider,
 ): Promise<void> {
-  if (store.isCleanDeployment) {
+  if (store.isCleanDeployment || !isNonLiveDemoEnvironment(getActiveTenantConfiguration())) {
     return;
   }
   const existingTemplates = await repo.listTemplates(ctx);

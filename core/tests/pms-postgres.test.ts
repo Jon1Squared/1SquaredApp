@@ -1246,8 +1246,30 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
         const baseMatter = (
           await getMatterRepository().listAllMattersUnfiltered<import('@/domain/types').Matter>(ctx)
         ).find((m) => !m.isStaffMatter)!;
-        const { id: _unusedId, ...matterTemplate } = baseMatter;
+        const { id: _unusedId, ...rawMatterTemplate } = baseMatter;
         void _unusedId;
+        const matterTemplate = {
+          ...rawMatterTemplate,
+          conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+            status: 'Cleared' as const,
+            outcomeLabel: 'Cleared by fee earner' as const,
+            declarationConfirmed: true,
+            reviewerMessage: '',
+            lastRunAtDisplay: '19 Nov 2026',
+            lastRunById: 'P-000001',
+            lastRunByName: 'Rhian Morgan',
+            submittedAtDisplay: '19 Nov 2026',
+            submittedById: 'P-000001',
+            submittedByName: 'Rhian Morgan',
+            approvedAtDisplay: null,
+            approvedById: null,
+            approvedByName: null,
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+        };
         const matterTitle = 'R474 Single-Tx Matter Rollback';
 
         setAuditAdapterFailureHookForTesting(({ entries }) => {

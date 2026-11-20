@@ -504,6 +504,22 @@ export function isClosedOrArchivedMatterStatus(
   return statusId === 'matter_status.archived';
 }
 
+export function isProspectiveMatterStatus(
+  statusId: string | null | undefined,
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[] = [],
+): boolean {
+  if (!statusId) return false;
+  const cv =
+    values.find((v) => v.listKey === 'matter_status' && v.id === statusId) ??
+    values.find((v) => v.id === statusId);
+  if (cv) {
+    return cv.systemKey
+      ? cv.systemKey === 'prospective'
+      : cv.id === 'matter_status.prospective';
+  }
+  return statusId === 'matter_status.prospective';
+}
+
 /**
  * Resolves a tenant's active matter status by stable `systemKey` (or canonical ID
  * when `systemKey` is absent). Never matches display labels and never falls back to a

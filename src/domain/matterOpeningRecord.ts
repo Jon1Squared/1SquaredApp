@@ -1166,6 +1166,31 @@ export function resolveMatterRiskAssessment(
   });
 }
 
+export const PMS_IMPORTED_CONFLICT_STATUS_LABEL =
+  'Imported from PMS: conflict check recorded in the source system';
+
+export function isPmsImportedWithoutLocalConflictCheck(
+  matter: Pick<Matter, 'isPmsImport' | 'conflictCheckRecord' | 'conflictDecision'> & {
+    conflictCheckStatus?: string | null;
+  },
+): boolean {
+  if (matter.isPmsImport !== true) return false;
+  if (
+    matter.conflictCheckRecord &&
+    matter.conflictCheckRecord.status !== 'Not started'
+  ) {
+    return false;
+  }
+  if (matter.conflictDecision?.outcome) return false;
+  const trimmed = (matter.conflictCheckStatus ?? '').trim();
+  return (
+    !trimmed ||
+    trimmed === 'Not started' ||
+    trimmed === 'Draft' ||
+    trimmed === 'Not checked'
+  );
+}
+
 const CLEAR_LEGACY_CONFLICT_STATUSES = new Set(['Clear', 'Cleared']);
 
 export function conflictStatusPillFromLegacy(
@@ -1426,7 +1451,7 @@ export function resolveMatterConflictCheckRecord(
             },
           ]
         : []),
-      ...matter.parties.map((pt, i) => ({
+      ...(matter.parties ?? []).map((pt, i) => ({
         id: pt.id || `cp-pt-${i}`,
         name: pt.name,
         entityType:
@@ -1447,9 +1472,9 @@ export function resolveMatterConflictCheckRecord(
         searchTerms: [
           clientLabel,
           ...(instructingName ? [instructingName] : []),
-          ...matter.parties.map((p) => p.name),
+          ...(matter.parties ?? []).map((p) => p.name),
         ].filter(Boolean),
-        partiesCount: 1 + (instructingName ? 1 : 0) + matter.parties.length,
+        partiesCount: 1 + (instructingName ? 1 : 0) + (matter.parties ?? []).length,
         matchesCount: 0,
         potentialConflictsCount: 0,
       },

@@ -1059,8 +1059,30 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
         const baseMatter = (
           await freshMatterRepo.listAllMattersUnfiltered<Matter>(ctx)
         ).find((m) => !m.isStaffMatter)!;
-        const { id: _omittedMatterId, ...matterTemplate } = baseMatter;
+        const { id: _omittedMatterId, ...rawMatterTemplate } = baseMatter;
         void _omittedMatterId;
+        const matterTemplate = {
+          ...rawMatterTemplate,
+          conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+            status: 'Cleared' as const,
+            outcomeLabel: 'Cleared by fee earner' as const,
+            declarationConfirmed: true,
+            reviewerMessage: '',
+            lastRunAtDisplay: '19 Nov 2026',
+            lastRunById: 'P-000001',
+            lastRunByName: 'Rhian Morgan',
+            submittedAtDisplay: '19 Nov 2026',
+            submittedById: 'P-000001',
+            submittedByName: 'Rhian Morgan',
+            approvedAtDisplay: null,
+            approvedById: null,
+            approvedByName: null,
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+        };
 
         const mattersBeforeConv = (
           await freshMatterRepo.listAllMattersUnfiltered(ctx)

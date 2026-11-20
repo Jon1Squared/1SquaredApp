@@ -426,8 +426,30 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
     const feeEarner = seed.people.find((p) => p.id === 'P-000002')!;
     const partner = seed.people.find((p) => p.id === 'P-000001')!;
     const templateMatter = seed.matters.find((m) => m.id === 'M-000011')!;
-    const { id: _omitId, ...matterBase } = templateMatter;
+    const { id: _omitId, ...rawMatterBase } = templateMatter;
     void _omitId;
+    const matterBase = {
+      ...rawMatterBase,
+      conflictCheckRecord: rawMatterBase.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: feeEarner.id,
+        lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: feeEarner.id,
+        submittedByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     await runAsActionActor(
       'P-000004',
@@ -712,8 +734,30 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
 
     const templateMatter = seed.matters.find((m) => m.id === 'M-000011')!;
     const partner = seed.people.find((p) => p.id === 'P-000004')!;
-    const { id: _omitId, ...matterBase } = templateMatter;
+    const { id: _omitId, ...rawMatterBase } = templateMatter;
     void _omitId;
+    const matterBase = {
+      ...rawMatterBase,
+      conflictCheckRecord: rawMatterBase.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: partner.id,
+        lastRunByName: `${partner.firstName} ${partner.surname}`,
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: partner.id,
+        submittedByName: `${partner.firstName} ${partner.surname}`,
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     await runAsActionActor(
       'P-000004',

@@ -63,6 +63,7 @@ import {
   legacyConflictStatusFromRecord,
   resolveMatterConflictCheckRecord,
 } from '../../src/domain/matterOpeningRecord';
+import { resolveMatterIntakeComplianceRows } from '../../src/components/MatterProfileClient';
 import { buildDefaultOrgStructure } from '../../src/domain/orgStructure';
 import {
   getDefaultTenantRbacConfig,
@@ -91,6 +92,7 @@ import {
 import {
   approveSignOff,
   createOrProposeKeyDateRecord,
+  createRecordFromPms,
   discussSignOff,
   executeKeyDateRemindersForTenant,
   flagMatterWriteOff,
@@ -124,6 +126,7 @@ import {
   saveTaskRecord,
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
+  updateMatterLifecycleStatusRecord,
   updatePersonPermissionOverrides,
 } from '../../src/server/services';
 import { guardedJob } from '../../src/server/authorize';
@@ -834,6 +837,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               ...baseMatter,
               agreedFeeCapGbp: 30000,
               feeEstimateGbp: 30000,
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: carys.id,
+                lastRunByName: `${carys.firstName} ${carys.surname}`,
+                submittedAtDisplay: '19 Nov 2026',
+                submittedById: carys.id,
+                submittedByName: `${carys.firstName} ${carys.surname}`,
+                approvedAtDisplay: '19 Nov 2026',
+                approvedById: carys.id,
+                approvedByName: `${carys.firstName} ${carys.surname}`,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
               parties: [
                 ...(baseMatter.parties ?? []),
                 {
@@ -1080,6 +1102,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...baseMatter,
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: carys.id,
+                lastRunByName: `${carys.firstName} ${carys.surname}`,
+                submittedAtDisplay: '19 Nov 2026',
+                submittedById: carys.id,
+                submittedByName: `${carys.firstName} ${carys.surname}`,
+                approvedAtDisplay: '19 Nov 2026',
+                approvedById: carys.id,
+                approvedByName: `${carys.firstName} ${carys.surname}`,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
             },
             { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
           ),
@@ -1147,6 +1188,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             saveMatterRecord(
               {
                 ...baseMatter,
+                conflictCheckRecord: {
+                  status: 'Cleared',
+                  outcomeLabel: 'Cleared by fee earner',
+                  declarationConfirmed: true,
+                  reviewerMessage: '',
+                  lastRunAtDisplay: '19 Nov 2026',
+                  lastRunById: carys.id,
+                  lastRunByName: `${carys.firstName} ${carys.surname}`,
+                  submittedAtDisplay: '19 Nov 2026',
+                  submittedById: carys.id,
+                  submittedByName: `${carys.firstName} ${carys.surname}`,
+                  approvedAtDisplay: '19 Nov 2026',
+                  approvedById: carys.id,
+                  approvedByName: `${carys.firstName} ${carys.surname}`,
+                  parties: [],
+                  matches: [],
+                  comments: [],
+                  runs: [],
+                },
               },
               { id: baseMatter.id, byId: 'P-000001', saveMode: 'submit_cleared' },
             ),
@@ -1441,6 +1501,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         saveMatterRecord(
           {
             ...targetMatter,
+            conflictCheckRecord: {
+              status: 'Cleared',
+              outcomeLabel: 'Cleared by fee earner',
+              declarationConfirmed: true,
+              reviewerMessage: '',
+              lastRunAtDisplay: '19 Nov 2026',
+              lastRunById: carys.id,
+              lastRunByName: `${carys.firstName} ${carys.surname}`,
+              submittedAtDisplay: '19 Nov 2026',
+              submittedById: carys.id,
+              submittedByName: `${carys.firstName} ${carys.surname}`,
+              approvedAtDisplay: '19 Nov 2026',
+              approvedById: carys.id,
+              approvedByName: `${carys.firstName} ${carys.surname}`,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
             parties: [
               ...(targetMatter.parties ?? []),
               {
@@ -1798,8 +1877,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession,
       };
 
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const { id: _omittedId, ...rawMatterTemplate } = baseMatter;
       void _omittedId;
+      const matterTemplate = {
+        ...rawMatterTemplate,
+        conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+          status: 'Cleared' as const,
+          outcomeLabel: 'Cleared by fee earner' as const,
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '19 Nov 2026',
+          lastRunById: carys.id,
+          lastRunByName: 'Carys Hughes',
+          submittedAtDisplay: '19 Nov 2026',
+          submittedById: carys.id,
+          submittedByName: 'Carys Hughes',
+          approvedAtDisplay: null,
+          approvedById: null,
+          approvedByName: null,
+          parties: [],
+          matches: [],
+          comments: [],
+          runs: [],
+        },
+      };
 
       // Create a staff matter and an ethical-wall matter owned by Carys (outsiderFeeEarner is NOT a participant)
       const staffRes = await runWithActiveActorSession(carysSession, async () =>
@@ -2053,6 +2154,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             clientId: externalClient.id,
             agreedFeeCapGbp: 5000,
             feeEstimateGbp: 5000,
+            conflictCheckRecord: {
+              status: 'In progress',
+              outcomeLabel: 'Pending',
+              declarationConfirmed: false,
+              reviewerMessage: '',
+              lastRunAtDisplay: '19 Nov 2026',
+              lastRunById: carys.id,
+              lastRunByName: `${carys.firstName} ${carys.surname}`,
+              submittedAtDisplay: null,
+              submittedById: null,
+              submittedByName: null,
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
           },
           { byId: carys.id, saveMode: 'draft' },
         ),
@@ -2560,8 +2680,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession,
       };
 
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const { id: _omittedId, ...rawMatterTemplate } = baseMatter;
       void _omittedId;
+      const matterTemplate = {
+        ...rawMatterTemplate,
+        conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+          status: 'Cleared' as const,
+          outcomeLabel: 'Cleared by fee earner' as const,
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '19 Nov 2026',
+          lastRunById: carys.id,
+          lastRunByName: 'Carys Hughes',
+          submittedAtDisplay: '19 Nov 2026',
+          submittedById: carys.id,
+          submittedByName: 'Carys Hughes',
+          approvedAtDisplay: null,
+          approvedById: null,
+          approvedByName: null,
+          parties: [],
+          matches: [],
+          comments: [],
+          runs: [],
+        },
+      };
       const staffMatterRes = await runWithActiveActorSession(carysSession, async () =>
         saveMatterRecord(
           {
@@ -2698,6 +2840,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...baseMatter,
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: carys.id,
+                lastRunByName: `${carys.firstName} ${carys.surname}`,
+                submittedAtDisplay: '19 Nov 2026',
+                submittedById: carys.id,
+                submittedByName: `${carys.firstName} ${carys.surname}`,
+                approvedAtDisplay: '19 Nov 2026',
+                approvedById: carys.id,
+                approvedByName: `${carys.firstName} ${carys.surname}`,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
             },
             { id: baseMatter.id, byId: carys.id, saveMode: 'submit_cleared' },
           ),
@@ -2958,8 +3119,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession: verifySignedEntraSessionCookie(feCookie)!,
       };
 
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const { id: _omittedId, ...rawMatterTemplate } = baseMatter;
       void _omittedId;
+      const matterTemplate = {
+        ...rawMatterTemplate,
+        conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+          status: 'Cleared' as const,
+          outcomeLabel: 'Cleared by fee earner' as const,
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '19 Nov 2026',
+          lastRunById: carys.id,
+          lastRunByName: 'Carys Hughes',
+          submittedAtDisplay: '19 Nov 2026',
+          submittedById: carys.id,
+          submittedByName: 'Carys Hughes',
+          approvedAtDisplay: null,
+          approvedById: null,
+          approvedByName: null,
+          parties: [],
+          matches: [],
+          comments: [],
+          runs: [],
+        },
+      };
 
       // Carys opens a restricted staff matter where staffClient is the client and feeEarner is NOT a participant
       const staffRes = await runWithActiveActorSession(carysSession, async () =>
@@ -3512,6 +3695,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             teamMemberIds: [feeEarner.id, partner.id],
             feeEstimateGbp: 75000,
             agreedFeeCapGbp: 75000,
+            conflictCheckRecord: {
+              status: 'In progress',
+              outcomeLabel: 'Pending',
+              declarationConfirmed: false,
+              reviewerMessage: '',
+              lastRunAtDisplay: '19 Nov 2026',
+              lastRunById: feeEarner.id,
+              lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+              submittedAtDisplay: null,
+              submittedById: null,
+              submittedByName: null,
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
             ...( { conflictClearedById: partner.id } as Record<string, unknown> ),
             fieldValues: {
               partnerCostSignOffCompleted: true,
@@ -4930,6 +5132,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // 1. Brand-new matter (and existing Prospective fixture M-000008) whose matterTypeId requires 'limitation' is refused on submit_cleared without the required key date
       const fixtureM8 = store.matters.find((m) => m.id === 'M-000008')!;
+      const r179ClearedConflict = {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: partner.id,
+        lastRunByName: `${partner.firstName} ${partner.surname}`,
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: partner.id,
+        submittedByName: `${partner.firstName} ${partner.surname}`,
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      };
       const fixtureM8OpenWithoutKd = await runWithActiveActorSession(
         partnerSession,
         async () =>
@@ -4937,6 +5158,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             {
               ...fixtureM8,
               matterTypeId: 'matter_type.litigation',
+              conflictCheckRecord: r179ClearedConflict,
             },
             { id: fixtureM8.id, byId: partner.id, saveMode: 'submit_cleared' },
           ),
@@ -4962,6 +5184,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               feeEstimateGbp: 10000,
               agreedFeeCapGbp: 10000,
               parties: [],
+              conflictCheckRecord: r179ClearedConflict,
             },
             { byId: partner.id, saveMode: 'submit_cleared' },
           ),
@@ -4986,6 +5209,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             feeEstimateGbp: 10000,
             agreedFeeCapGbp: 10000,
             parties: [],
+            conflictCheckRecord: {
+              ...r179ClearedConflict,
+              status: 'In progress',
+              outcomeLabel: 'Pending',
+              declarationConfirmed: false,
+            },
           },
           { byId: partner.id, saveMode: 'draft' },
         ),
@@ -6211,6 +6440,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               leadFeeEarnerId: feeEarner.id,
               feeEstimateGbp: 5000,
               matterStatusId: activeStatusId,
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: feeEarner.id,
+                lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+                submittedAtDisplay: '19 Nov 2026',
+                submittedById: feeEarner.id,
+                submittedByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+                approvedAtDisplay: null,
+                approvedById: null,
+                approvedByName: null,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
             },
             {
               byId: feeEarner.id,
@@ -6525,6 +6773,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               supervisingPartnerId: templateMatter.supervisingPartnerId,
               leadFeeEarnerId: feeEarner.id,
               feeEstimateGbp: 4500,
+              conflictCheckRecord: {
+                status: 'In progress',
+                outcomeLabel: 'Pending',
+                declarationConfirmed: false,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: feeEarner.id,
+                lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+                submittedAtDisplay: null,
+                submittedById: null,
+                submittedByName: null,
+                approvedAtDisplay: null,
+                approvedById: null,
+                approvedByName: null,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
             },
             { byId: feeEarner.id, saveMode: 'draft' },
           ),
@@ -6576,6 +6843,25 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               supervisingPartnerId: templateMatter.supervisingPartnerId,
               leadFeeEarnerId: feeEarner.id,
               feeEstimateGbp: 4500,
+              conflictCheckRecord: {
+                status: 'In progress',
+                outcomeLabel: 'Pending',
+                declarationConfirmed: false,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: feeEarner.id,
+                lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+                submittedAtDisplay: null,
+                submittedById: null,
+                submittedByName: null,
+                approvedAtDisplay: null,
+                approvedById: null,
+                approvedByName: null,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
             },
             { byId: feeEarner.id, saveMode: 'draft' },
           ),
@@ -6786,8 +7072,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       // Create an ethical-wall matter owned by namedPartner (P-000005) and explicitly clear restrictedAccessUserIds to []
       const baseMatter = store.matters.find((m) => m.id === 'M-000011')!;
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const { id: _omittedId, ...rawMatterTemplate } = baseMatter;
       void _omittedId;
+      const matterTemplate = {
+        ...rawMatterTemplate,
+        conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+          status: 'Cleared' as const,
+          outcomeLabel: 'Cleared by fee earner' as const,
+          declarationConfirmed: true,
+          reviewerMessage: '',
+          lastRunAtDisplay: '19 Nov 2026',
+          lastRunById: namedPartner.id,
+          lastRunByName: 'Named Partner',
+          submittedAtDisplay: '19 Nov 2026',
+          submittedById: namedPartner.id,
+          submittedByName: 'Named Partner',
+          approvedAtDisplay: null,
+          approvedById: null,
+          approvedByName: null,
+          parties: [],
+          matches: [],
+          comments: [],
+          runs: [],
+        },
+      };
 
       const nowIso = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
@@ -10380,6 +10688,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
     const seed = loadCommittedSeedStore();
     try {
+      // Ensure pre-existing test runs (such as s021) do not leave stale rows in tenant-alpha/tenant-bravo.
+      await regRepo.clearTenantData(ctxA).catch(() => undefined);
+      await kdRepo.clearTenantData(ctxA).catch(() => undefined);
+      await taskRepo.clearTenantData(ctxA).catch(() => undefined);
+      await taskRepo.clearTenantData(ctxB).catch(() => undefined);
+      await intakeRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+
       await partyRepo.putPeople(ctxA, [
         makePerson('P-ALPHA-1'),
         makePerson('P-ALPHA-2'),
@@ -10852,6 +11169,1002 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await matterRepo.clearTenantData(ctxB).catch(() => undefined);
       await partyRepo.clearTenantData(ctxA).catch(() => undefined);
       await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+    }
+  });
+
+  it('R510 (B20): refuses opening a new matter without a conflictCheckRecord while preserving normal clearance, referred blocking, stored Not started/In progress submit_cleared, PMS import, and two-tenant isolation', async () => {
+    const rawBase = JSON.parse(
+      fs.readFileSync(
+        path.join(process.cwd(), 'client-not-a-law-firm', 'config', 'base.json'),
+        'utf8',
+      ),
+    ) as import('../src/api').TenantConfiguration;
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        name: 'Alpha Partner',
+        email: 'alpha510@tenant-alpha.example',
+        roles: ['partner', 'fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r510-alpha',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-1',
+        tenantId: 'tenant-bravo',
+        name: 'Bravo Partner',
+        email: 'bravo510@tenant-bravo.example',
+        roles: ['partner', 'fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r510-bravo',
+    });
+    const matterRepo = getMatterRepository();
+    const partyRepo = getPartyRepository();
+    const intakeRepo = getIntakeQuoteRepository();
+    const hrRepo = getHrAndRbacRepository();
+    const taskRepo = getTaskWorkflowRepository();
+
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const store = loadCommittedSeedStore();
+      const feeEarner = store.people.find((p) => p.id === 'P-000002')!;
+      const adminUser = store.people.find((p) => p.id === 'P-000004')!;
+      const clientOrg = store.organisations.find((o) => o.id === 'O-000001')!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+
+      const makeSession = (
+        person: typeof feeEarner,
+        roles: string[],
+        email: string,
+      ) => {
+        const cookie = createSignedEntraSessionCookie({
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          oid: person.entraObjectId ?? `00000000-0000-4000-8000-${person.id.replace(/\D/g, '').padStart(12, '0')}`,
+          tid: '11111111-2222-3333-4444-000000000000',
+          sub: person.id,
+          email,
+          displayName: `${person.firstName} ${person.surname}`,
+          entraRoles: roles,
+          mappedRoles: roles,
+          entraGroups: [],
+          mfaVerified: true,
+          amr: ['pwd', 'mfa'],
+          authenticatedAt: nowIso,
+          expiresAt,
+        });
+        return {
+          personId: person.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: roles,
+          mfaVerified: true,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verifySignedEntraSessionCookie(cookie)!,
+        };
+      };
+
+      const feSession = makeSession(feeEarner, ['fee_earner'], 'fe-r510@notalawfirm.example');
+      const adminSession = makeSession(adminUser, ['admin'], 'admin-r510@notalawfirm.example');
+
+      const baseNewInput = {
+        title: 'R510 Invented Matter Without Conflict Check',
+        clientId: clientOrg.id,
+        practiceAreaId: 'work_type.real_estate_and_property',
+        workTypeSubcategoryId: 'work_type.real_estate_and_property_commercial_property',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: feeEarner.id,
+        teamMemberIds: [feeEarner.id, 'P-000001'],
+        agreedFeeCapGbp: 5000,
+        feeEstimateGbp: 5000,
+      };
+
+      // (a) Bypass test: brand-new matter with saveMode: 'submit_cleared' and NO conflictCheckRecord must NOT open
+      const bypassSubmitCleared = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput },
+          { byId: feeEarner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(bypassSubmitCleared.matter).toBeNull();
+      expect(bypassSubmitCleared.errors?.conflict).toBe(
+        'Run and record a conflict check before opening this matter.',
+      );
+
+      // (a2) Plain save (saveMode omitted) requesting open status without conflictCheckRecord must also fail
+      const bypassPlainOpen = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput, matterStatusId: 'matter_status.active' },
+          { byId: feeEarner.id },
+        ),
+      );
+      expect(bypassPlainOpen.matter).toBeNull();
+      expect(bypassPlainOpen.errors?.conflict).toBe(
+        'Run and record a conflict check before opening this matter.',
+      );
+
+      // (b) Normal clearance with a recorded ConflictCheckRecord opens
+      const clearedRecord = {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: 'Conflicts searched and cleared.',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: feeEarner.id,
+        lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: feeEarner.id,
+        submittedByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      };
+      const normalOpen = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            title: 'R510 Cleared Opening',
+            conflictCheckRecord: clearedRecord,
+          },
+          { byId: feeEarner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(normalOpen.errors).toBeUndefined();
+      expect(normalOpen.matter).not.toBeNull();
+      expect(normalOpen.matter?.matterStatusId).not.toBe('matter_status.prospective');
+      expect(normalOpen.matter?.conflictCheckRecord?.status).toBe('Cleared');
+
+      // (c) Referred conflict record blocks fee earner from opening
+      const referredSave = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            title: 'R510 Referred Matter',
+            conflictCheckRecord: {
+              ...clearedRecord,
+              status: 'Referred',
+              outcomeLabel: 'Referred to risk for review',
+            },
+          },
+          { byId: feeEarner.id, saveMode: 'submit_referred' },
+        ),
+      );
+      expect(referredSave.errors).toBeUndefined();
+      expect(referredSave.matter).not.toBeNull();
+      const referredReopen = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput, title: 'R510 Referred Matter' },
+          { id: referredSave.matter!.id, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(referredReopen.matter).toBeNull();
+      expect(referredReopen.errors?.conflict).toContain('referred to Risk');
+
+      // (d) Stored 'Not started' and 'In progress' conflictCheckRecord + submit_cleared still opens (owner decision)
+      for (const initialStatus of ['Not started', 'In progress'] as const) {
+        const draftRes = await runWithActiveActorSession(feSession, async () =>
+          saveMatterRecord(
+            {
+              ...baseNewInput,
+              title: `R510 Stored ${initialStatus} Draft`,
+              conflictCheckRecord: {
+                ...clearedRecord,
+                status: initialStatus,
+                outcomeLabel: 'Pending',
+              },
+            },
+            { byId: feeEarner.id, saveMode: 'draft' },
+          ),
+        );
+        expect(draftRes.errors).toBeUndefined();
+        expect(draftRes.matter?.conflictCheckRecord?.status).toBe(initialStatus);
+
+        const promotedOpen = await runWithActiveActorSession(feSession, async () =>
+          saveMatterRecord(
+            {
+              ...baseNewInput,
+              title: `R510 Stored ${initialStatus} Draft`,
+            },
+            { id: draftRes.matter!.id, byId: feeEarner.id, saveMode: 'submit_cleared' },
+          ),
+        );
+        expect(promotedOpen.errors).toBeUndefined();
+        expect(promotedOpen.matter).not.toBeNull();
+        expect(promotedOpen.matter?.conflictCheckRecord?.status).toBe('Cleared');
+      }
+
+      // (e) PMS import path still opens without conflictCheckRecord and records 'Not started' (not 'Clear')
+      const pmsBundle = await runWithActiveActorSession(adminSession, async () =>
+        getMatterPmsViewBundle('M-000001', adminUser.id),
+      );
+      expect(isActionDenied(pmsBundle)).toBe(false);
+      if (isActionDenied(pmsBundle) || pmsBundle.allUnlinkedPmsMatters.length === 0) {
+        throw new Error('Expected at least one unlinked PMS matter in seed workbook.');
+      }
+      const unlinkedCode = pmsBundle.allUnlinkedPmsMatters[0]!.matter_code;
+      const pmsImportRes = await runWithActiveActorSession(adminSession, async () =>
+        createRecordFromPms('matter', unlinkedCode, adminUser.id, { mfaVerified: true }),
+      );
+      expect(pmsImportRes.ok).toBe(true);
+      expect(pmsImportRes.createdId).toBeDefined();
+      const importedMatter = await matterRepo.getMatterById<import('../../src/domain/types').Matter>(
+        testTenantCtx(adminUser.id),
+        pmsImportRes.createdId!,
+        { includeRestricted: true },
+      );
+      expect(importedMatter).not.toBeNull();
+      expect((importedMatter as { conflictCheckStatus?: string })?.conflictCheckStatus).not.toBe('Clear');
+      expect((importedMatter as { isPmsImport?: boolean })?.isPmsImport).toBe(true);
+      const pmsComplianceRows = resolveMatterIntakeComplianceRows(importedMatter!, {
+        overallRisk: null,
+        completedQuestions: 0,
+        totalQuestions: 0,
+      });
+      expect(pmsComplianceRows.conflictCheck.label).toBe(
+        'Imported from PMS: conflict check recorded in the source system',
+      );
+
+      // (f) Two-tenant variant: cross-tenant opts.id from Tenant Bravo cannot be opened or read in Tenant Alpha
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-bravo', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      );
+      await partyRepo.putPerson(ctxB, {
+        ...feeEarner,
+        id: 'P-BRAVO-1',
+        firstName: 'Bravo',
+        surname: 'Partner',
+        roles: ['partner', 'fee_earner'],
+        isEmployee: true,
+        isLeaver: false,
+      });
+      await partyRepo.putOrganisation(ctxB, {
+        ...clientOrg,
+        id: 'O-BRAVO-1',
+        legalName: 'Bravo Invented Holdings Ltd',
+      });
+      const bravoMatterSeed = store.matters.find((m) => m.id === 'M-000001')!;
+      const bravoMatterId = 'M-BRAVO-R510';
+      await matterRepo.putMatter(
+        ctxB,
+        {
+          ...bravoMatterSeed,
+          id: bravoMatterId,
+          matterNumber: 'BRV510-0001',
+          title: 'Bravo Prospective Matter',
+          clientId: 'O-BRAVO-1',
+          matterStatusId: 'matter_status.prospective',
+          conflictCheckStatus: 'Not started',
+          conflictCheckRecord: {
+            ...clearedRecord,
+            status: 'Not started',
+            outcomeLabel: 'Pending',
+          },
+          responsiblePartnerId: 'P-BRAVO-1',
+          supervisingPartnerId: 'P-BRAVO-1',
+          leadFeeEarnerId: 'P-BRAVO-1',
+          teamMemberIds: ['P-BRAVO-1'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-alpha', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-alpha', environment: 'test' },
+      );
+      await partyRepo.putPerson(ctxA, {
+        ...feeEarner,
+        id: 'P-ALPHA-1',
+        firstName: 'Alpha',
+        surname: 'Partner',
+        roles: ['partner', 'fee_earner'],
+        isEmployee: true,
+        isLeaver: false,
+      });
+      await partyRepo.putOrganisation(ctxA, {
+        ...clientOrg,
+        id: 'O-ALPHA-1',
+        legalName: 'Alpha Invented Holdings Ltd',
+      });
+      const alphaSession = {
+        personId: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        tokenRoles: ['partner', 'fee_earner'],
+        mfaVerified: true,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: 'P-ALPHA-1',
+            tenantId: 'tenant-alpha',
+            oid: '00000000-0000-4000-8000-00000000a510',
+            tid: '11111111-2222-4333-8444-555555555555',
+            sub: 'P-ALPHA-1',
+            email: 'alpha510@tenant-alpha.example',
+            displayName: 'Alpha Partner',
+            entraRoles: ['partner', 'fee_earner'],
+            mappedRoles: ['partner', 'fee_earner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: nowIso,
+            expiresAt,
+          }),
+        )!,
+      };
+      setTestEntraSessionOverride(alphaSession.verifiedSession);
+      const crossTenantOpen = await runWithActiveActorSession(alphaSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            clientId: 'O-ALPHA-1',
+            responsiblePartnerId: 'P-ALPHA-1',
+            supervisingPartnerId: 'P-ALPHA-1',
+            leadFeeEarnerId: 'P-ALPHA-1',
+            teamMemberIds: ['P-ALPHA-1'],
+            conflictCheckRecord: clearedRecord,
+          },
+          { id: bravoMatterId, byId: 'P-ALPHA-1', saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(crossTenantOpen.matter).toBeNull();
+      expect(crossTenantOpen.errors?.access).toBeDefined();
+      const bravoAfter = await matterRepo.getMatterById<import('../../src/domain/types').Matter>(
+        ctxB,
+        bravoMatterId,
+        { includeRestricted: true },
+      );
+      expect(bravoAfter?.matterStatusId).toBe('matter_status.prospective');
+      expect(bravoAfter?.conflictCheckRecord?.status).toBe('Not started');
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await taskRepo.clearTenantData(ctxA).catch(() => undefined);
+      await intakeRepo.clearTenantData(ctxA).catch(() => undefined);
+      await hrRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R536: refuses submit_cleared after draft with no persisted conflictCheckRecord and for unopened legacy-only Clear matters, allows submit_referred and persisted In progress -> submit_cleared, and isolates across two tenants', async () => {
+    const rawBase = JSON.parse(JSON.stringify(notALawFirmBaseConfig));
+    setActiveTenantConfigForTesting(rawBase, {
+      tenantId: 'not-a-law-firm',
+      environment: 'test',
+    });
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        name: 'Alpha Partner',
+        email: 'alpha@tenant-alpha.example',
+        roles: ['partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r536-alpha',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-1',
+        tenantId: 'tenant-bravo',
+        name: 'Bravo Partner',
+        email: 'bravo@tenant-bravo.example',
+        roles: ['partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r536-bravo',
+    });
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const hrRepo = getHrAndRbacRepository();
+    const intakeRepo = getIntakeQuoteRepository();
+    const taskRepo = getTaskWorkflowRepository();
+
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const seed = loadCommittedSeedStore();
+      const feeEarner = seed.people.find((p) => p.id === 'P-000002')!;
+      const clientOrg = seed.organisations.find((o) => !o.mergedIntoId)!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const feSession = {
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['fee_earner'],
+        mfaVerified: true,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: feeEarner.id,
+            tenantId: 'not-a-law-firm',
+            oid: feeEarner.entraObjectId ?? '00000000-0000-4000-8000-000000000002',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: feeEarner.id,
+            email: 'fe-r536@notalawfirm.example',
+            displayName: `${feeEarner.firstName} ${feeEarner.surname}`,
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: nowIso,
+            expiresAt,
+          }),
+        )!,
+      };
+      const baseNewInput = {
+        title: 'R536 Draft Then Submit Cleared Bypass',
+        clientId: clientOrg.id,
+        practiceAreaId: 'work_type.real_estate_and_property',
+        workTypeSubcategoryId: 'work_type.real_estate_and_property_commercial_property',
+        responsiblePartnerId: 'P-000001',
+        supervisingPartnerId: 'P-000001',
+        leadFeeEarnerId: feeEarner.id,
+        teamMemberIds: [feeEarner.id, 'P-000001'],
+        agreedFeeCapGbp: 5000,
+        feeEstimateGbp: 5000,
+      };
+
+      // 1. Draft with NO conflictCheckRecord, then save same ID with submit_cleared MUST be refused
+      setTestEntraSessionOverride(feSession.verifiedSession);
+      const draftNoRecord = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord({ ...baseNewInput }, { byId: feeEarner.id, saveMode: 'draft' }),
+      );
+      expect(draftNoRecord.matter).not.toBeNull();
+      const draftId = draftNoRecord.matter!.id;
+      const draftReFetched = await matterRepo.getMatterById<import('../../src/domain/types').Matter>(
+        testTenantCtx(feeEarner.id),
+        draftId,
+        { includeRestricted: true },
+      );
+      expect(draftReFetched?.conflictCheckRecord).toBeUndefined();
+
+      const bypassAfterDraft = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput, title: 'R536 Bypass After Draft' },
+          { id: draftId, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(bypassAfterDraft.matter).toBeNull();
+      expect(bypassAfterDraft.errors?.conflict).toBe(
+        'Run and record a conflict check before opening this matter.',
+      );
+
+      // 2. Draft with no record -> submit_referred is allowed (stays Prospective / Referred)
+      const referFromDraft = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput, title: 'R536 Referred After Draft' },
+          { id: draftId, byId: feeEarner.id, saveMode: 'submit_referred' },
+        ),
+      );
+      expect(referFromDraft.matter).not.toBeNull();
+      expect(referFromDraft.matter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      expect(referFromDraft.matter?.conflictCheckRecord?.status).toBe('Referred');
+
+      // 3. Persisted In progress record -> submit_cleared opens
+      const inProgressDraft = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            title: 'R536 Persisted In Progress',
+            conflictCheckRecord: {
+              status: 'In progress',
+              outcomeLabel: 'Pending',
+              declarationConfirmed: false,
+              reviewerMessage: '',
+              lastRunAtDisplay: '19 Nov 2026',
+              lastRunById: feeEarner.id,
+              lastRunByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+              submittedAtDisplay: '19 Nov 2026',
+              submittedById: feeEarner.id,
+              submittedByName: `${feeEarner.firstName} ${feeEarner.surname}`,
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
+          },
+          { byId: feeEarner.id, saveMode: 'draft' },
+        ),
+      );
+      expect(inProgressDraft.matter?.conflictCheckRecord?.status).toBe('In progress');
+      const openPersisted = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput, title: 'R536 Persisted In Progress' },
+          { id: inProgressDraft.matter!.id, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(openPersisted.matter).not.toBeNull();
+      expect(openPersisted.matter?.conflictCheckRecord?.status).toBe('Cleared');
+      expect(openPersisted.matter?.matterStatusId).not.toBe('matter_status.prospective_enquiry');
+      expect(openPersisted.matter?.openedAt).toBeTruthy();
+
+      // 4. Legacy-only Prospective matter (conflictCheckStatus: 'Clear', no persisted conflictCheckRecord, openedAt: null) -> refused on submit_cleared
+      const legacyOnlyMatterId = 'M-R536-LEGACY-CLEAR';
+      const templateMatter = seed.matters.find((m) => m.id === 'M-000001')!;
+      await matterRepo.putMatter(
+        testTenantCtx(feeEarner.id),
+        {
+          ...structuredClone(templateMatter),
+          id: legacyOnlyMatterId,
+          matterNumber: 'MAT-R536-LEG',
+          title: 'R536 Legacy Clear Only Unopened',
+          clientId: clientOrg.id,
+          matterStatusId: 'matter_status.prospective',
+          openedAt: null,
+          conflictCheckStatus: 'Clear',
+          conflictCheckRecord: undefined,
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          leadFeeEarnerId: feeEarner.id,
+          teamMemberIds: [feeEarner.id, 'P-000001'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      const legacyOpenDenied = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          { ...baseNewInput, title: 'R536 Legacy Clear Only Unopened' },
+          { id: legacyOnlyMatterId, byId: feeEarner.id, saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(legacyOpenDenied.matter).toBeNull();
+      expect(legacyOpenDenied.errors?.conflict).toBe(
+        'Run and record a conflict check before opening this matter.',
+      );
+
+      // 5. Two-tenant variant in Tenant Alpha vs Tenant Bravo
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-bravo', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      );
+      await partyRepo.putPerson(ctxB, { ...feeEarner, id: 'P-BRAVO-1', firstName: 'Bravo', surname: 'User' });
+      await partyRepo.putOrganisation(ctxB, { ...clientOrg, id: 'O-BRAVO-1', legalName: 'Bravo Corp Ltd' });
+      await matterRepo.putMatter(
+        ctxB,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-BRAVO-R536',
+          matterNumber: 'BRV-536',
+          title: 'Bravo Unopened Legacy Clear',
+          clientId: 'O-BRAVO-1',
+          matterStatusId: 'matter_status.prospective',
+          openedAt: null,
+          conflictCheckStatus: 'Clear',
+          conflictCheckRecord: undefined,
+          responsiblePartnerId: 'P-BRAVO-1',
+          supervisingPartnerId: 'P-BRAVO-1',
+          leadFeeEarnerId: 'P-BRAVO-1',
+          teamMemberIds: ['P-BRAVO-1'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-alpha', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-alpha', environment: 'test' },
+      );
+      await partyRepo.putPerson(ctxA, {
+        ...feeEarner,
+        id: 'P-ALPHA-1',
+        firstName: 'Alpha',
+        surname: 'FeeEarner',
+        roles: ['fee_earner'],
+      });
+      await partyRepo.putOrganisation(ctxA, { ...clientOrg, id: 'O-ALPHA-1', legalName: 'Alpha Corp Ltd' });
+      const alphaSession = {
+        personId: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        tokenRoles: ['fee_earner'],
+        mfaVerified: true,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: 'P-ALPHA-1',
+            tenantId: 'tenant-alpha',
+            oid: '00000000-0000-4000-8000-00000000a536',
+            tid: '11111111-2222-4333-8444-555555555555',
+            sub: 'P-ALPHA-1',
+            email: 'alpha536@tenant-alpha.example',
+            displayName: 'Alpha FeeEarner',
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: nowIso,
+            expiresAt,
+          }),
+        )!,
+      };
+      setTestEntraSessionOverride(alphaSession.verifiedSession);
+      const alphaDraft = await runWithActiveActorSession(alphaSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            title: 'Alpha R536 Draft',
+            clientId: 'O-ALPHA-1',
+            responsiblePartnerId: 'P-ALPHA-1',
+            supervisingPartnerId: 'P-ALPHA-1',
+            leadFeeEarnerId: 'P-ALPHA-1',
+            teamMemberIds: ['P-ALPHA-1'],
+          },
+          { byId: 'P-ALPHA-1', saveMode: 'draft' },
+        ),
+      );
+      expect(alphaDraft.matter).not.toBeNull();
+      const alphaSubmitDenied = await runWithActiveActorSession(alphaSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            title: 'Alpha R536 Submit Cleared',
+            clientId: 'O-ALPHA-1',
+            responsiblePartnerId: 'P-ALPHA-1',
+            supervisingPartnerId: 'P-ALPHA-1',
+            leadFeeEarnerId: 'P-ALPHA-1',
+            teamMemberIds: ['P-ALPHA-1'],
+          },
+          { id: alphaDraft.matter!.id, byId: 'P-ALPHA-1', saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(alphaSubmitDenied.matter).toBeNull();
+      expect(alphaSubmitDenied.errors?.conflict).toBe(
+        'Run and record a conflict check before opening this matter.',
+      );
+      const crossTenantDenied = await runWithActiveActorSession(alphaSession, async () =>
+        saveMatterRecord(
+          {
+            ...baseNewInput,
+            title: 'Forged Cross-Tenant Bypass',
+            clientId: 'O-ALPHA-1',
+            responsiblePartnerId: 'P-ALPHA-1',
+            supervisingPartnerId: 'P-ALPHA-1',
+            leadFeeEarnerId: 'P-ALPHA-1',
+            teamMemberIds: ['P-ALPHA-1'],
+          },
+          { id: 'M-BRAVO-R536', byId: 'P-ALPHA-1', saveMode: 'submit_cleared' },
+        ),
+      );
+      expect(crossTenantDenied.matter).toBeNull();
+      expect(crossTenantDenied.errors?.access).toBeDefined();
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await taskRepo.clearTenantData(ctxA).catch(() => undefined);
+      await intakeRepo.clearTenantData(ctxA).catch(() => undefined);
+      await hrRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R537: refuses closing an unopened or Prospective matter (preventing close -> reopen -> Active bypass), allows closing/reopening an opened matter, and isolates across two tenants', async () => {
+    const rawBase = JSON.parse(JSON.stringify(notALawFirmBaseConfig));
+    setActiveTenantConfigForTesting(rawBase, {
+      tenantId: 'not-a-law-firm',
+      environment: 'test',
+    });
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        name: 'Alpha User',
+        email: 'alpha@tenant-alpha.example',
+        roles: ['fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r537-alpha',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-1',
+        tenantId: 'tenant-bravo',
+        name: 'Bravo User',
+        email: 'bravo@tenant-bravo.example',
+        roles: ['fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r537-bravo',
+    });
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const hrRepo = getHrAndRbacRepository();
+    const intakeRepo = getIntakeQuoteRepository();
+    const taskRepo = getTaskWorkflowRepository();
+
+    try {
+      await resetAllDemoData('P-000001', testDataResetContext());
+      const seed = loadCommittedSeedStore();
+      const feeEarner = seed.people.find((p) => p.id === 'P-000002')!;
+      const clientOrg = seed.organisations.find((o) => !o.mergedIntoId)!;
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+      const feSession = {
+        personId: feeEarner.id,
+        tenantId: 'not-a-law-firm',
+        tokenRoles: ['fee_earner'],
+        mfaVerified: true,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: feeEarner.id,
+            tenantId: 'not-a-law-firm',
+            oid: feeEarner.entraObjectId ?? '00000000-0000-4000-8000-000000000002',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: feeEarner.id,
+            email: 'fe-r537@notalawfirm.example',
+            displayName: `${feeEarner.firstName} ${feeEarner.surname}`,
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: nowIso,
+            expiresAt,
+          }),
+        )!,
+      };
+      setTestEntraSessionOverride(feSession.verifiedSession);
+
+      // Seed a Prospective matter that has no conflictCheckRecord (even with an openedAt placeholder date, e.g. seeded Prospective matter)
+      const prospectiveMatterId = 'M-R537-PROSPECTIVE';
+      const templateMatter = seed.matters.find((m) => m.id === 'M-000001')!;
+      await matterRepo.putMatter(
+        testTenantCtx(feeEarner.id),
+        {
+          ...structuredClone(templateMatter),
+          id: prospectiveMatterId,
+          matterNumber: 'MAT-R537-PROS',
+          title: 'R537 Prospective Without Conflict Record',
+          clientId: clientOrg.id,
+          matterStatusId: 'matter_status.prospective',
+          openedAt: '2026-01-10',
+          conflictCheckStatus: 'Draft',
+          conflictCheckRecord: undefined,
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          leadFeeEarnerId: feeEarner.id,
+          teamMemberIds: [feeEarner.id, 'P-000001'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+
+      // 1. Attempt close -> reopen bypass on Prospective matter MUST be refused on close and must NEVER become Active
+      const closeProspectiveRes = await runWithActiveActorSession(feSession, async () =>
+        updateMatterLifecycleStatusRecord(
+          prospectiveMatterId,
+          'close',
+          { closedAt: '2026-11-19', reason: 'Bypass test' },
+          feeEarner.id,
+        ),
+      );
+      expect(closeProspectiveRes.matter).toBeNull();
+      expect(closeProspectiveRes.errors?.matterStatusId).toBe(
+        'This matter has not been opened. Delete or abandon it instead of closing it.',
+      );
+      const afterCloseAttempt = await matterRepo.getMatterById<import('../../src/domain/types').Matter>(
+        testTenantCtx(feeEarner.id),
+        prospectiveMatterId,
+        { includeRestricted: true },
+      );
+      expect(afterCloseAttempt?.matterStatusId).toBe('matter_status.prospective');
+      const reopenProspectiveRes = await runWithActiveActorSession(feSession, async () =>
+        updateMatterLifecycleStatusRecord(
+          prospectiveMatterId,
+          'reopen',
+          { reason: 'Bypass reopen check' },
+          feeEarner.id,
+        ),
+      );
+      expect(reopenProspectiveRes.matter).toBeNull();
+
+      // 2. Also test draft matter with openedAt: null
+      const draftNullOpened = await runWithActiveActorSession(feSession, async () =>
+        saveMatterRecord(
+          {
+            title: 'R537 Draft With Null OpenedAt',
+            clientId: clientOrg.id,
+            practiceAreaId: 'work_type.real_estate_and_property',
+            workTypeSubcategoryId: 'work_type.real_estate_and_property_commercial_property',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: feeEarner.id,
+            teamMemberIds: [feeEarner.id, 'P-000001'],
+          },
+          { byId: feeEarner.id, saveMode: 'draft' },
+        ),
+      );
+      const closeDraftRes = await runWithActiveActorSession(feSession, async () =>
+        updateMatterLifecycleStatusRecord(
+          draftNullOpened.matter!.id,
+          'close',
+          { closedAt: '2026-11-19', reason: 'Close draft' },
+          feeEarner.id,
+        ),
+      );
+      expect(closeDraftRes.matter).toBeNull();
+      expect(closeDraftRes.errors?.matterStatusId).toBe(
+        'This matter has not been opened. Delete or abandon it instead of closing it.',
+      );
+
+      // 3. Normal opened Active matter (with no blocking open key dates) still closes and reopens cleanly
+      const openMatterId = 'M-R537-OPEN';
+      await matterRepo.putMatter(
+        testTenantCtx(feeEarner.id),
+        {
+          ...structuredClone(templateMatter),
+          id: openMatterId,
+          matterNumber: 'MAT-R537-OPEN',
+          title: 'R537 Opened Active Matter',
+          clientId: clientOrg.id,
+          matterStatusId: 'matter_status.active',
+          openedAt: '2026-01-10',
+          amlStatus: 'Verified',
+          conflictCheckStatus: 'Clear',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          leadFeeEarnerId: feeEarner.id,
+          teamMemberIds: [feeEarner.id, 'P-000001'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      const closeOpenedRes = await runWithActiveActorSession(feSession, async () =>
+        updateMatterLifecycleStatusRecord(
+          openMatterId,
+          'close',
+          { reason: 'Normal close' },
+          feeEarner.id,
+        ),
+      );
+      expect(closeOpenedRes.matter?.matterStatusId).toBe('matter_status.closed');
+      const reopenOpenedRes = await runWithActiveActorSession(feSession, async () =>
+        updateMatterLifecycleStatusRecord(
+          openMatterId,
+          'reopen',
+          { reason: 'Normal reopen' },
+          feeEarner.id,
+        ),
+      );
+      expect(reopenOpenedRes.matter?.matterStatusId).toBe('matter_status.active');
+
+      // 4. Two-tenant isolation: cross-tenant close/reopen from Tenant Alpha targeting Tenant Bravo's matter fails closed
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-bravo', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      );
+      await partyRepo.putPerson(ctxB, { ...feeEarner, id: 'P-BRAVO-1', firstName: 'Bravo', surname: 'User' });
+      await partyRepo.putOrganisation(ctxB, { ...clientOrg, id: 'O-BRAVO-1', legalName: 'Bravo Corp Ltd' });
+      await matterRepo.putMatter(
+        ctxB,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-BRAVO-R537',
+          matterNumber: 'BRV-537',
+          title: 'Bravo Prospective Matter',
+          clientId: 'O-BRAVO-1',
+          matterStatusId: 'matter_status.prospective',
+          openedAt: '2026-01-10',
+          conflictCheckRecord: undefined,
+          responsiblePartnerId: 'P-BRAVO-1',
+          supervisingPartnerId: 'P-BRAVO-1',
+          leadFeeEarnerId: 'P-BRAVO-1',
+          teamMemberIds: ['P-BRAVO-1'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-alpha', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-alpha', environment: 'test' },
+      );
+      await partyRepo.putPerson(ctxA, {
+        ...feeEarner,
+        id: 'P-ALPHA-1',
+        firstName: 'Alpha',
+        surname: 'User',
+        roles: ['fee_earner'],
+      });
+      await partyRepo.putOrganisation(ctxA, { ...clientOrg, id: 'O-ALPHA-1', legalName: 'Alpha Corp Ltd' });
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-ALPHA-R537',
+          matterNumber: 'ALP-537',
+          title: 'Alpha Prospective Matter',
+          clientId: 'O-ALPHA-1',
+          matterStatusId: 'matter_status.prospective',
+          openedAt: '2026-01-10',
+          conflictCheckRecord: undefined,
+          responsiblePartnerId: 'P-ALPHA-1',
+          supervisingPartnerId: 'P-ALPHA-1',
+          leadFeeEarnerId: 'P-ALPHA-1',
+          teamMemberIds: ['P-ALPHA-1'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      const alphaSession = {
+        personId: 'P-ALPHA-1',
+        tenantId: 'tenant-alpha',
+        tokenRoles: ['fee_earner'],
+        mfaVerified: true,
+        expiresAtMs: Date.parse(expiresAt),
+        verifiedSession: verifySignedEntraSessionCookie(
+          createSignedEntraSessionCookie({
+            personId: 'P-ALPHA-1',
+            tenantId: 'tenant-alpha',
+            oid: '00000000-0000-4000-8000-00000000a537',
+            tid: '11111111-2222-4333-8444-555555555555',
+            sub: 'P-ALPHA-1',
+            email: 'alpha537@tenant-alpha.example',
+            displayName: 'Alpha User',
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: true,
+            amr: ['pwd', 'mfa'],
+            authenticatedAt: nowIso,
+            expiresAt,
+          }),
+        )!,
+      };
+      setTestEntraSessionOverride(alphaSession.verifiedSession);
+      const alphaCloseOwn = await runWithActiveActorSession(alphaSession, async () =>
+        updateMatterLifecycleStatusRecord('M-ALPHA-R537', 'close', { reason: 'Close' }, 'P-ALPHA-1'),
+      );
+      expect(alphaCloseOwn.matter).toBeNull();
+      expect(alphaCloseOwn.errors?.matterStatusId).toBe(
+        'This matter has not been opened. Delete or abandon it instead of closing it.',
+      );
+      const crossClose = await runWithActiveActorSession(alphaSession, async () =>
+        updateMatterLifecycleStatusRecord('M-BRAVO-R537', 'close', { reason: 'Cross' }, 'P-ALPHA-1'),
+      );
+      expect(crossClose.matter).toBeNull();
+      expect(crossClose.code).toBe('NOT_FOUND');
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await taskRepo.clearTenantData(ctxA).catch(() => undefined);
+      await intakeRepo.clearTenantData(ctxA).catch(() => undefined);
+      await hrRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 });

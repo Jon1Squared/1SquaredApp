@@ -512,7 +512,7 @@ export function PersonFormClient({
       '',
   );
   const [empProbationOutcome, setEmpProbationOutcome] = useState<ProbationOutcome>(
-    existingEmp?.contract?.probationOutcome ?? 'Pending',
+    existingEmp?.contract?.probationOutcome ?? 'Not recorded',
   );
   const [empNoticePeriod, setEmpNoticePeriod] = useState<string>(
     existingEmp?.contract?.noticePeriod ?? '3 months',
@@ -528,7 +528,7 @@ export function PersonFormClient({
   );
   const [empEligibleForRehire, setEmpEligibleForRehire] = useState<
     'Yes' | 'No' | 'Conditional' | null
-  >(existingEmp?.contract?.eligibleForRehire ?? 'Yes');
+  >(existingEmp?.contract?.eligibleForRehire ?? null);
   const [empKeepAsContactOnLeave, setEmpKeepAsContactOnLeave] = useState<boolean>(
     existingEmp?.contract?.keepAsContactOnLeave ?? true,
   );
@@ -544,26 +544,26 @@ export function PersonFormClient({
       : '',
   );
   const [feRateEffectiveFrom, setFeRateEffectiveFrom] = useState<string>(
-    existingEmp?.feeEarner?.chargeOutRateEffectiveFrom ?? todayStr,
+    existingEmp?.feeEarner?.chargeOutRateEffectiveFrom ?? '',
   );
   const [feChargeableHoursTarget, setFeChargeableHoursTarget] = useState<string>(
     existingEmp?.feeEarner?.chargeableHoursTarget !== null &&
       existingEmp?.feeEarner?.chargeableHoursTarget !== undefined
       ? String(existingEmp.feeEarner.chargeableHoursTarget)
-      : '1400',
+      : '',
   );
   const [feBillingApprovalLimit, setFeBillingApprovalLimit] = useState<string>(
     existingEmp?.feeEarner?.billingApprovalLimitGbp !== null &&
       existingEmp?.feeEarner?.billingApprovalLimitGbp !== undefined
       ? String(existingEmp.feeEarner.billingApprovalLimitGbp)
-      : '2500',
+      : '',
   );
   const [feSraNumber, setFeSraNumber] = useState<string>(
     existingEmp?.feeEarner?.sraNumber ?? '',
   );
   const [fePractisingCertStatus, setFePractisingCertStatus] = useState<
     'Current' | 'Pending renewal' | 'Conditions attached' | 'Suspended' | 'Not applicable' | ''
-  >(existingEmp?.feeEarner?.practisingCertificateStatus ?? 'Current');
+  >(existingEmp?.feeEarner?.practisingCertificateStatus ?? '');
   const [fePractisingCertRenewalDate, setFePractisingCertRenewalDate] = useState<string>(
     existingEmp?.feeEarner?.practisingCertificateRenewalDate ?? '',
   );
@@ -589,7 +589,7 @@ export function PersonFormClient({
     existingEmp?.rightToWork?.followUpCheckDueDate ?? '',
   );
   const [dbsCheckType, setDbsCheckType] = useState<string>(
-    existingEmp?.rightToWork?.dbsCheckType ?? 'Standard DBS',
+    existingEmp?.rightToWork?.dbsCheckType ?? '',
   );
   const [dbsCheckDate, setDbsCheckDate] = useState<string>(
     existingEmp?.rightToWork?.dbsCheckDate ?? '',
@@ -616,7 +616,7 @@ export function PersonFormClient({
     Boolean(orgStructure.externalPayrollOnly),
   );
   const [payExternalRef, setPayExternalRef] = useState<string>(
-    existingEmp?.payroll?.externalPayrollReference ?? `PAY-${empNumber}`,
+    existingEmp?.payroll?.externalPayrollReference ?? '',
   );
   const [payNiNumber, setPayNiNumber] = useState<string>(
     existingEmp?.payroll?.nationalInsuranceNumber ?? '',
@@ -634,13 +634,13 @@ export function PersonFormClient({
     existingEmp?.payroll?.buildingSocietyRollNumber ?? '',
   );
   const [payStarterDecl, setPayStarterDecl] = useState<string>(
-    existingEmp?.payroll?.starterDeclarationOrP45 ?? 'P45 received',
+    existingEmp?.payroll?.starterDeclarationOrP45 ?? 'Not recorded',
   );
   const [payStudentLoan, setPayStudentLoan] = useState<string>(
-    existingEmp?.payroll?.studentLoanPlan ?? 'None',
+    existingEmp?.payroll?.studentLoanPlan ?? 'Not recorded',
   );
   const [payPensionStatus, setPayPensionStatus] = useState<string>(
-    existingEmp?.payroll?.pensionAutoEnrolmentStatus ?? 'Eligible jobholder — enrolled',
+    existingEmp?.payroll?.pensionAutoEnrolmentStatus ?? 'Not recorded',
   );
   const [payPensionOptOutDate, setPayPensionOptOutDate] = useState<string>(
     existingEmp?.payroll?.pensionOptOutDate ?? '',
@@ -1414,7 +1414,9 @@ export function PersonFormClient({
                     chargeOutRateGbp: feChargeOutRate.trim()
                       ? Number(feChargeOutRate)
                       : null,
-                    chargeOutRateEffectiveFrom: feRateEffectiveFrom || todayStr,
+                    chargeOutRateEffectiveFrom: feChargeOutRate.trim()
+                      ? feRateEffectiveFrom || todayStr
+                      : null,
                     chargeOutRateHistory:
                       existingEmp?.feeEarner?.chargeOutRateHistory ?? [],
                     chargeableHoursTarget: feChargeableHoursTarget.trim()
@@ -3615,6 +3617,7 @@ export function PersonFormClient({
                                 setEmpProbationOutcome(e.target.value as ProbationOutcome)
                               }
                             >
+                              <option value="Not recorded">Not recorded</option>
                               <option value="Pending">Pending</option>
                               <option value="Passed">Passed</option>
                               <option value="Extended">Extended</option>
@@ -4298,6 +4301,7 @@ export function PersonFormClient({
                                       setPayrollEdited(true);
                                     }}
                                   >
+                                    <option value="Not recorded">Not recorded</option>
                                     <option value="P45 received">P45 received</option>
                                     <option value="Starter Declaration A">
                                       Starter Declaration A
@@ -4326,6 +4330,7 @@ export function PersonFormClient({
                                       setPayrollEdited(true);
                                     }}
                                   >
+                                    <option value="Not recorded">Not recorded</option>
                                     <option value="None">None</option>
                                     <option value="Plan 1">Plan 1</option>
                                     <option value="Plan 2">Plan 2</option>
@@ -4349,6 +4354,7 @@ export function PersonFormClient({
                                       setPayrollEdited(true);
                                     }}
                                   >
+                                    <option value="Not recorded">Not recorded</option>
                                     <option value="Eligible jobholder — enrolled">
                                       Eligible jobholder — enrolled
                                     </option>

@@ -339,8 +339,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const ctx = testTenantCtx('P-000004');
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignored, ...matterTemplate } = baseMatter;
+    const { id: _ignored, ...rawMatterTemplate } = baseMatter;
     void _ignored;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     const twRepo = getTaskWorkflowRepository();
 
@@ -613,8 +635,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const ctx = testTenantCtx('P-000004');
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignored, ...matterTemplate } = baseMatter;
+    const { id: _ignored, ...rawMatterTemplate } = baseMatter;
     void _ignored;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     const workTypesCfg = cloneBaseWorkTypesConfig();
     const maQuestions = resolveWorkTypeRiskQuestions(workTypesCfg, {
@@ -756,8 +800,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const matterRepo = getMatterRepository();
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignored, ...matterTemplate } = baseMatter;
+    const { id: _ignored, ...rawMatterTemplate } = baseMatter;
     void _ignored;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     await runAsTestActor('P-000001', async () => {
       // Key Dates closure gate blocks closing M-000001 because KD-000001 is open/confirmed
@@ -1271,10 +1337,32 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         );
         expect(cfgSave.ok).toBe(true);
 
-        const { id: _omitted, ...m4Template } = alphaSeed.matters.find(
+        const { id: _omitted, ...rawM4Template } = alphaSeed.matters.find(
           (m) => m.id === 'M-000004',
         )!;
         void _omitted;
+        const m4Template = {
+          ...rawM4Template,
+          conflictCheckRecord: rawM4Template.conflictCheckRecord ?? {
+            status: 'Cleared' as const,
+            outcomeLabel: 'Cleared by fee earner' as const,
+            declarationConfirmed: true,
+            reviewerMessage: '',
+            lastRunAtDisplay: '19 Nov 2026',
+            lastRunById: 'P-000004',
+            lastRunByName: 'Catrin Williams',
+            submittedAtDisplay: '19 Nov 2026',
+            submittedById: 'P-000004',
+            submittedByName: 'Catrin Williams',
+            approvedAtDisplay: null,
+            approvedById: null,
+            approvedByName: null,
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+        };
 
         const openAlpha = await saveMatterRecord(
           {
@@ -1401,8 +1489,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const ctx = testTenantCtx('P-000001');
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    const { id: _ignoredId, ...rawMatterTemplate } = baseMatter;
     void _ignoredId;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     setTestActorSession('P-000001', { mfaVerified: true });
     await runAsTestActor('P-000001', async () => {
@@ -1641,8 +1751,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const ctx = testTenantCtx('P-000001');
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    const { id: _ignoredId, ...rawMatterTemplate } = baseMatter;
     void _ignoredId;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
     const catRepo = getCatalogueRepository();
 
     setTestActorSession('P-000001', { mfaVerified: true });
@@ -1747,8 +1879,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const ctx = testTenantCtx('P-000001');
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    const { id: _ignoredId, ...rawMatterTemplate } = baseMatter;
     void _ignoredId;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
     const kdRepo = getKeyDateRepository();
     const catRepo = getCatalogueRepository();
 
@@ -1908,8 +2062,30 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     const ctx = testTenantCtx('P-000001');
     const seed = loadCommittedSeedStore();
     const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-    const { id: _ignoredId, ...matterTemplate } = baseMatter;
+    const { id: _ignoredId, ...rawMatterTemplate } = baseMatter;
     void _ignoredId;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
+        status: 'Cleared' as const,
+        outcomeLabel: 'Cleared by fee earner' as const,
+        declarationConfirmed: true,
+        reviewerMessage: '',
+        lastRunAtDisplay: '19 Nov 2026',
+        lastRunById: 'P-000001',
+        lastRunByName: 'Rhian Morgan',
+        submittedAtDisplay: '19 Nov 2026',
+        submittedById: 'P-000001',
+        submittedByName: 'Rhian Morgan',
+        approvedAtDisplay: null,
+        approvedById: null,
+        approvedByName: null,
+        parties: [],
+        matches: [],
+        comments: [],
+        runs: [],
+      },
+    };
 
     setTestActorSession('P-000001', { mfaVerified: true });
     await runAsTestActor('P-000001', async () => {

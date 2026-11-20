@@ -2960,6 +2960,25 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           title: 'Matter Without Owning Team',
           owningDepartmentId: 'DEPT-RE',
           leadFeeEarnerId: 'P-000002',
+          conflictCheckRecord: targetMatterA.conflictCheckRecord ?? {
+            status: 'Cleared' as const,
+            outcomeLabel: 'Cleared by fee earner' as const,
+            declarationConfirmed: true,
+            reviewerMessage: '',
+            lastRunAtDisplay: '19 Nov 2026',
+            lastRunById: 'P-000002',
+            lastRunByName: 'Dafydd Evans',
+            submittedAtDisplay: '19 Nov 2026',
+            submittedById: 'P-000002',
+            submittedByName: 'Dafydd Evans',
+            approvedAtDisplay: null,
+            approvedById: null,
+            approvedByName: null,
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
         };
         delete (rawUnsetTeamMatter as { id?: string }).id;
         delete (rawUnsetTeamMatter as { owningTeamId?: string | null }).owningTeamId;

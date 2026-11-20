@@ -23,7 +23,10 @@ import {
 } from '@/server/documentGenerationServices';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { runWithActiveActorSession } from '@/domain/rbac';
-import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
+import {
+  getActiveTenantConfiguration,
+  setActiveTenantConfigForTesting,
+} from '@/platform/tenantRuntime';
 import {
   createSignedEntraSessionCookie,
   verifySignedEntraSessionCookie,
@@ -151,68 +154,76 @@ describe('Host Document Generation Domain & Server Services', () => {
     });
     const verified = verifySignedEntraSessionCookie(signed)!;
 
-    await runWithActiveActorSession(
-      {
-        personId: emp.id,
-        tenantId,
-        tokenRoles: roles,
-        expiresAtMs: Date.parse(expiresAt),
-        verifiedSession: verified,
-      },
-      async () => {
-        const snap = await getDocumentGenerationSnapshotForUser('P-000001');
-        expect(snap.templates.length).toBeGreaterThanOrEqual(2);
-        const clientCareTpl = snap.templates.find((t) => t.code === 'CCL-ENG-01');
-        expect(clientCareTpl).toBeDefined();
+    setActiveTenantConfigForTesting(null, {
+      environment: 'demo',
+      featureFlags: { enableDemoMode: true },
+    });
+    try {
+      await runWithActiveActorSession(
+        {
+          personId: emp.id,
+          tenantId,
+          tokenRoles: roles,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession: verified,
+        },
+        async () => {
+          const snap = await getDocumentGenerationSnapshotForUser('P-000001');
+          expect(snap.templates.length).toBeGreaterThanOrEqual(2);
+          const clientCareTpl = snap.templates.find((t) => t.code === 'CCL-ENG-01');
+          expect(clientCareTpl).toBeDefined();
 
-        // Generate DOCX
-        const docxRes = await generateDocumentService(
-          {
-            templateId: clientCareTpl!.id,
-            sourceEntityType: 'matter',
-            matterId: matter.id,
-            promptedValues: {
-              specialScopeNotes: 'Advising on commercial lease renewal.',
+          // Generate DOCX
+          const docxRes = await generateDocumentService(
+            {
+              templateId: clientCareTpl!.id,
+              sourceEntityType: 'matter',
+              matterId: matter.id,
+              promptedValues: {
+                specialScopeNotes: 'Advising on commercial lease renewal.',
+              },
+              outputFormat: 'docx',
             },
-            outputFormat: 'docx',
-          },
-          'P-000001',
-        );
-        expect(docxRes.status).toBe('generated');
-        expect(docxRes.document?.outputFormat).toBe('docx');
+            'P-000001',
+          );
+          expect(docxRes.status).toBe('generated');
+          expect(docxRes.document?.outputFormat).toBe('docx');
 
-        // Generate PDF (day-one PDF conversion active)
-        const pdfRes = await generateDocumentService(
-          {
-            templateId: clientCareTpl!.id,
-            sourceEntityType: 'matter',
-            matterId: matter.id,
-            promptedValues: {
-              specialScopeNotes: 'Advising on commercial lease renewal.',
+          // Generate PDF (day-one PDF conversion active)
+          const pdfRes = await generateDocumentService(
+            {
+              templateId: clientCareTpl!.id,
+              sourceEntityType: 'matter',
+              matterId: matter.id,
+              promptedValues: {
+                specialScopeNotes: 'Advising on commercial lease renewal.',
+              },
+              outputFormat: 'pdf',
             },
-            outputFormat: 'pdf',
-          },
-          'P-000001',
-        );
-        expect(pdfRes.status).toBe('generated');
-        expect(pdfRes.document?.outputFormat).toBe('pdf');
-        expect(pdfRes.document?.fileName.endsWith('.pdf')).toBe(true);
+            'P-000001',
+          );
+          expect(pdfRes.status).toBe('generated');
+          expect(pdfRes.document?.outputFormat).toBe('pdf');
+          expect(pdfRes.document?.fileName.endsWith('.pdf')).toBe(true);
 
-        // Download generated PDF via scoped token verification
-        const dlRes = await downloadGeneratedDocumentService(
-          pdfRes.document!.id,
-          'P-000001',
-        );
-        expect(dlRes.mimeType).toBe('application/pdf');
-        expect(dlRes.downloadToken).toBeDefined();
-        expect(dlRes.fileBase64.length).toBeGreaterThan(100);
+          // Download generated PDF via scoped token verification
+          const dlRes = await downloadGeneratedDocumentService(
+            pdfRes.document!.id,
+            'P-000001',
+          );
+          expect(dlRes.mimeType).toBe('application/pdf');
+          expect(dlRes.downloadToken).toBeDefined();
+          expect(dlRes.fileBase64.length).toBeGreaterThan(100);
 
-        // Verify usage report recorded both generations
-        const usage = await getTemplateUsageReportService({}, 'P-000001');
-        expect(usage.totalGeneratedCount).toBeGreaterThanOrEqual(2);
-        expect(usage.csvContent).toContain('Template Code');
-      },
-    );
+          // Verify usage report recorded both generations
+          const usage = await getTemplateUsageReportService({}, 'P-000001');
+          expect(usage.totalGeneratedCount).toBeGreaterThanOrEqual(2);
+          expect(usage.csvContent).toContain('Template Code');
+        },
+      );
+    } finally {
+      setActiveTenantConfigForTesting(null);
+    }
   });
 
   it('enforces R119 & R122: requires actor.tenantId (rejecting empty or mismatched tenantId) and honours hybrid tokenRoles in resolveDocumentPermissions and canActorAccessGeneratedDocument', () => {

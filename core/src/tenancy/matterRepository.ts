@@ -131,6 +131,7 @@ export interface TenantMatterRecord {
   fieldValues: Record<string, unknown>;
   conflictCheckRecord?: unknown;
   conflictDecision?: unknown;
+  isPmsImport?: boolean;
   isStaffMatter?: boolean;
   hasEthicalWall?: boolean;
   restrictedAccessUserIds?: string[];
@@ -441,6 +442,9 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
       opening.restrictionLift as Record<string, unknown>,
     );
   }
+  if (opening.isPmsImport === true) {
+    out.isPmsImport = true;
+  }
   if (row.department_id !== null || opening.hasOwningDepartmentId === true) {
     out.owningDepartmentId = row.department_id;
   }
@@ -556,6 +560,7 @@ function buildMatterDbParameters(
     ...(matter.restrictionLift !== undefined
       ? { restrictionLift: matter.restrictionLift }
       : {}),
+    ...(matter.isPmsImport === true ? { isPmsImport: true } : {}),
   };
 
   const riskAssessmentJson =

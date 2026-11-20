@@ -1170,7 +1170,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return {
       asAtDate: rawAsAt,
       importedAt,
-      sourceFile: row.source_name || '1Squared_PMS_Demo_Data.xlsx',
+      sourceFile: row.source_name || 'PMS Extract',
     };
   }
 
@@ -1196,7 +1196,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
     }
     return this.withTenantTransaction(ctx, async (tx) => {
       const importedIso = safePgTimestampIso(info.importedAt);
-      const sourceName = info.sourceFile?.trim() || '1Squared_PMS_Demo_Data.xlsx';
+      const sourceName = info.sourceFile?.trim() || 'PMS Extract';
       const res = await tx.query<DbPmsExtractMetadataRow>(
         `INSERT INTO public.pms_extract_metadata (
            tenant_id, as_at_date, source_name, imported_at, metadata_json
@@ -1412,7 +1412,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       dataset.extractInfo.importedAt || `${asAtDate}T09:00:00.000Z`,
     );
     const sourceFile =
-      dataset.extractInfo.sourceFile?.trim() || '1Squared_PMS_Demo_Data.xlsx';
+      dataset.extractInfo.sourceFile?.trim() || 'PMS Extract';
 
     const invoiceBalances = computeDerivedInvoiceBalances({
       asAtDate,

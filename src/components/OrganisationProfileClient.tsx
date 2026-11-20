@@ -795,11 +795,11 @@ export function OrganisationProfileClient({
                           <button
                             type="button"
                             className="btn btn--secondary btn--sm"
-                            onClick={() =>
-                              showToast(`Time entry opened for ${m.matterNumber}`)
-                            }
+                            disabled
+                            aria-disabled="true"
+                            title="Time recording is not yet available"
                           >
-                            Record time
+                            Not yet available
                           </button>
                           <Link href={m.href} className="btn btn--secondary btn--sm">
                             Open matter
@@ -1569,9 +1569,11 @@ export function OrganisationProfileClient({
                       <button
                         type="button"
                         className="btn btn--secondary btn--sm"
-                        onClick={() => showToast(`Time entry opened for ${m.matterNumber}`)}
+                        disabled
+                        aria-disabled="true"
+                        title="Time recording is not yet available"
                       >
-                        Record time
+                        Not yet available
                       </button>
                       <Link href={m.href} className="btn btn--secondary btn--sm">
                         Open matter

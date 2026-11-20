@@ -6,6 +6,7 @@ import {
   calculateHrRetentionDate,
   calculateProbationEndDate,
   computeStaffMatterStatus,
+  createDefaultEmploymentRecord,
   emptyDiversityAnswers,
   filterEmployeesForMatterDepartment,
   findOpenMattersWherePersonIsParty,
@@ -454,6 +455,25 @@ describe('Employee section, conversion paths, migration & permissions', () => {
               supervisingPartnerId: 'P-000001',
               leadFeeEarnerId: 'P-000001',
               teamMemberIds: [],
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '19 Nov 2026',
+                lastRunById: 'P-000001',
+                lastRunByName: 'Rhian Morgan',
+                submittedAtDisplay: '19 Nov 2026',
+                submittedById: 'P-000001',
+                submittedByName: 'Rhian Morgan',
+                approvedAtDisplay: null,
+                approvedById: null,
+                approvedByName: null,
+                parties: [],
+                matches: [],
+                comments: [],
+                runs: [],
+              },
             },
             { byId: 'P-000001' },
           ),
@@ -968,6 +988,93 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(pcPeople.map((p) => p.id)).toContain('P-000005'); // Siân Llewellyn
       expect(pcPeople.map((p) => p.id)).not.toContain('P-000001'); // Rhian Morgan (Real Estate)
       expect(pcPeople.map((p) => p.id)).not.toContain('P-000002'); // Dafydd Evans (Real Estate)
+    });
+  });
+
+  describe('R512: New employee records do not fabricate compliance, vetting, payroll, or rate facts', () => {
+    it('R512: createDefaultEmploymentRecord and savePersonRecord without employment payload default compliance/HR/payroll/feeEarner facts to null, empty, or Not recorded', async () => {
+      const def = createDefaultEmploymentRecord({
+        person: {
+          id: 'P-999',
+          firstName: 'Test',
+          surname: 'Joiner',
+          employeeRoleId: 'employee_role.solicitor',
+          departmentId: 'DEPT-RE',
+        },
+        allPeople: [],
+        byId: 'P-000001',
+        nowIso: '2026-11-19T10:00:00.000Z',
+        primaryDomain: 'notalawfirm.example',
+      });
+
+      expect(def.contract?.probationOutcome).toBe('Not recorded');
+      expect(def.contract?.eligibleForRehire).toBeNull();
+
+      expect(def.feeEarner?.chargeOutRateGbp).toBeNull();
+      expect(def.feeEarner?.chargeOutRateEffectiveFrom).toBeNull();
+      expect(def.feeEarner?.chargeOutRateHistory).toEqual([]);
+      expect(def.feeEarner?.chargeableHoursTarget).toBeNull();
+      expect(def.feeEarner?.billingApprovalLimitGbp).toBeNull();
+      expect(def.feeEarner?.practisingCertificateStatus).toBe('');
+      expect(def.feeEarner?.practisingCertificateRenewalDate).toBeNull();
+      expect(def.feeEarner?.admissionDate).toBeNull();
+
+      expect(def.rightToWork?.checkDate).toBeNull();
+      expect(def.rightToWork?.method).toBe('');
+      expect(def.rightToWork?.documentType).toBe('');
+      expect(def.rightToWork?.dbsCheckType).toBe('');
+      expect(def.rightToWork?.dbsCheckDate).toBeNull();
+      expect(def.rightToWork?.dbsOutcome).toBe('');
+      expect(def.rightToWork?.referencesReceived).toBeNull();
+      expect(def.rightToWork?.referencesReceivedDate).toBeNull();
+
+      expect(def.payroll?.externalPayrollReference).toBe('');
+      expect(def.payroll?.bankAccountName).toBe('');
+      expect(def.payroll?.starterDeclarationOrP45).toBe('Not recorded');
+      expect(def.payroll?.studentLoanPlan).toBe('Not recorded');
+      expect(def.payroll?.pensionAutoEnrolmentStatus).toBe('Not recorded');
+
+      expect(def.systems?.buildingPassNumber).toBe('');
+      expect(def.systems?.dataProtectionTrainingCompletedAt).toBeNull();
+      expect(def.systems?.amlTrainingCompletedAt).toBeNull();
+      expect(def.systems?.infoSecTrainingCompletedAt).toBeNull();
+
+      // End-to-end savePersonRecord without an explicit employment payload (as an HR & payroll admin)
+      const saveRes = await runAsTestActor(
+        'P-000004',
+        () =>
+          savePersonRecord(
+            {
+              firstName: 'Siobhan',
+              surname: 'Newstarter',
+              isEmployee: true,
+              employeeRoleId: 'employee_role.solicitor',
+              departmentId: 'DEPT-RE',
+            },
+            { byId: 'P-000004', mfaVerified: true },
+          ),
+        { roles: ['admin'], mfaVerified: true },
+      );
+      expect(saveRes.errors).toBeUndefined();
+      expect(saveRes.person).not.toBeNull();
+      const details = await runAsTestActor(
+        'P-000004',
+        () =>
+          getEmployeeDetailsForUser(saveRes.person!.id, 'P-000004', {
+            logViewPayroll: true,
+          }),
+        { roles: ['admin'], mfaVerified: true },
+      );
+      expect(details.employment?.contract?.probationOutcome).toBe('Not recorded');
+      expect(details.employment?.contract?.eligibleForRehire).toBeNull();
+      expect(details.employment?.rightToWork?.dbsOutcome).toBe('');
+      expect(details.employment?.rightToWork?.dbsCheckDate).toBeNull();
+      expect(details.employment?.rightToWork?.referencesReceived).toBeNull();
+      expect(details.employment?.rightToWork?.documentType).toBe('');
+      expect(details.employment?.payroll?.starterDeclarationOrP45).toBe('Not recorded');
+      expect(details.employment?.payroll?.pensionAutoEnrolmentStatus).toBe('Not recorded');
+      expect(details.employment?.feeEarner?.chargeOutRateGbp).toBeNull();
+      expect(details.employment?.systems?.dataProtectionTrainingCompletedAt).toBeNull();
     });
   });
 });

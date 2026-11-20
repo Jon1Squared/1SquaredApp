@@ -38,6 +38,8 @@ import {
   isHighOrCriticalRiskRating,
   isMatterConflictCheckAwaitingDecision,
   isMatterOpeningInProgress,
+  isPmsImportedWithoutLocalConflictCheck,
+  PMS_IMPORTED_CONFLICT_STATUS_LABEL,
 } from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
@@ -2554,7 +2556,13 @@ export function HomeClient({
                           <div className="onboarding-steps">
                             <div className={`onb-step ${conflictDone ? 'done' : 'warn'}`}>
                               <span>1. Conflict check</span>
-                              <span>{conflictDone ? '✓ Cleared' : m.conflictCheckStatus || 'Not recorded'}</span>
+                              <span>
+                                {conflictDone
+                                  ? '✓ Cleared'
+                                  : isPmsImportedWithoutLocalConflictCheck(m)
+                                    ? PMS_IMPORTED_CONFLICT_STATUS_LABEL
+                                    : m.conflictCheckStatus || 'Not recorded'}
+                              </span>
                             </div>
                             <div className={`onb-step ${amlDone ? 'done' : 'warn'}`}>
                               <span>2. AML / CDD</span>

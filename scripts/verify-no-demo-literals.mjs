@@ -94,6 +94,8 @@ export function buildDemoLiteralsDenyList(rootDir = process.cwd()) {
   const literals = new Set([
     'Not A Law Firm LLP',
     'Not A Law Firm',
+    'NotALawFirm',
+    'Not%20A%20Law%20Firm',
     'Pembroke Vaughan',
     // Bare firm-name fragment matched case-insensitively across `src/components/` and `src/domain/`.
     // Genuine non-demo uses (such as real surnames or place names) belong in
@@ -307,7 +309,7 @@ export function scanTextForDemoLiterals(
 }
 
 /**
- * Scans git-tracked files under `src/components/` and `src/domain/`, excluding `*.test.ts` and `__tests__/`.
+ * Scans git-tracked product code directories, excluding `*.test.*` and `__tests__/`.
  */
 export function verifyNoDemoLiterals(rootDir = process.cwd()) {
   const denyLiterals = buildDemoLiteralsDenyList(rootDir);
@@ -316,7 +318,16 @@ export function verifyNoDemoLiterals(rootDir = process.cwd()) {
 
   const trackedFiles = execFileSync(
     'git',
-    ['ls-files', 'src/components/', 'src/domain/'],
+    [
+      'ls-files',
+      'src/components/',
+      'src/domain/',
+      'src/app/',
+      'src/server/',
+      'src/platform/',
+      'src/pms/',
+      'core/src/',
+    ],
     {
       cwd: rootDir,
       encoding: 'utf8',
