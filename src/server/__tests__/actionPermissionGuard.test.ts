@@ -1005,10 +1005,18 @@ export * from './helperActions';
 
       expect(guardErrors).toEqual(
         expect.arrayContaining([
-          expect.stringContaining('reexportActions.ts'),
-          expect.stringContaining('starActions.ts'),
-          expect.stringContaining('GET /api/reexport-route'),
-          expect.stringContaining('/api/star-route'),
+          expect.stringMatching(
+            /Action file "reexportActions\.ts" line \d+ contains forbidden module re-export/,
+          ),
+          expect.stringMatching(
+            /Action file "starActions\.ts" line \d+ contains forbidden module re-export/,
+          ),
+          expect.stringMatching(
+            /Route file "GET \/api\/reexport-route" contains forbidden module re-export/,
+          ),
+          expect.stringMatching(
+            /Route file ".*\/api\/star-route" contains forbidden module re-export/,
+          ),
         ]),
       );
     } finally {
