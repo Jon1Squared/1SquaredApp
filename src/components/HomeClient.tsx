@@ -217,7 +217,7 @@ export function HomeClient({
     let active = true;
     void getDocumentGenerationSnapshotAction()
       .then((snap) => {
-        if (!active) return;
+        if (!active || isActionDenied(snap)) return;
         setPendingTemplateApprovalsCount(snap.pendingApprovalsCount);
         setCanApproveTemplates(
           snap.userPermissions.includes('document_template:approve'),

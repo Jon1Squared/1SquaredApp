@@ -49,6 +49,7 @@ import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgr
 import { updateDocumentGenerationConfigAction } from '@/app/actions';
 import { GET as getDocumentDownloadRoute } from '@/app/api/documents/download/route';
 import { GET as getMatterDocumentsRoute } from '@/app/api/matters/[id]/documents/route';
+import { isActionDenied } from '@/domain/actionResult';
 import { toMatterAccessSubject } from '@/domain/documentGeneration';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { runWithActiveActorSession } from '@/domain/rbac';
@@ -1528,6 +1529,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       const excludedSnap = await runAsTestEmployee('P-000007', () =>
         getDocumentGenerationSnapshotForUser('P-000007'),
       );
+      if (isActionDenied(excludedSnap)) {
+        throw new Error(excludedSnap.message);
+      }
       expect(
         excludedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
       ).toBe(false);
@@ -1536,6 +1540,9 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       const allowedSnap = await runAsTestEmployee('P-000001', () =>
         getDocumentGenerationSnapshotForUser('P-000001'),
       );
+      if (isActionDenied(allowedSnap)) {
+        throw new Error(allowedSnap.message);
+      }
       expect(
         allowedSnap.documents.some((d) => d.id === 'DOC-WALL-R11'),
       ).toBe(true);

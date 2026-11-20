@@ -11,6 +11,7 @@ import {
   AuthorisationError,
   canAccessMatter,
   isJobOnlyPermissionKey,
+  isUserAssignablePermissionKey,
   loadActiveTenantRegistry,
   requirePermission,
   sanitizeJobErrorCode,
@@ -59,15 +60,20 @@ import {
   resolvePersonPermissionSet,
 } from './rbacRuntime';
 import {
+  getKeyDatesConfig,
   requireAuthenticatedActor,
   type AuthenticatedActorContext,
 } from './services';
+import { resolveKeyDatePermissions } from '@/domain/keyDates';
+import type { KeyDatePermission, KeyDatesConfig } from '@/domain/keyDates.types';
 import type { Person, Team } from '@/domain/types';
 
 export interface GuardedActorContext extends AuthenticatedActorContext {
   readonly tenantContext: TenantContext;
   readonly permissions: ResolvedPermissionSet;
   readonly rbacConfig: RbacConfiguration;
+  readonly allPeople?: readonly Person[];
+  readonly teams?: readonly Team[];
 }
 
 export type AuthorizableResource =
@@ -217,7 +223,87 @@ export async function buildGuardedActorContext(
     tenantContext,
     permissions,
     rbacConfig: effectiveRbacConfig,
+    allPeople,
+    teams,
   };
+}
+
+/**
+ * Coarse wrapper check for `enforcedBy: 'service'` policies (`R518`):
+ * verifies the actor holds at least one declared permission key (without
+ * blocking non-MFA sessions at the wrapper boundary so services keep ownership
+ * of fine-grained / target-conditional MFA checks), including line-manager
+ * and key-date module permissions.
+ */
+async function actorSatisfiesCoarseServicePolicy(
+  guardedActor: GuardedActorContext,
+  requirement: PolicyPermissionRequirement,
+): Promise<boolean> {
+  const candidates =
+    typeof requirement === 'string' ? [requirement] : requirement.anyOf;
+  if (candidates.length === 0) {
+    return false;
+  }
+  if (
+    candidates.some((perm) => guardedActor.permissions.permissions.has(perm))
+  ) {
+    return true;
+  }
+  const allPeople = guardedActor.allPeople ?? [];
+  const teams = guardedActor.teams ?? [];
+  const isTeamLeadOfAnyTeam = teams.some(
+    (team) => team.active && team.leadIds.includes(guardedActor.personId),
+  );
+  const isLineManagerOfAny = allPeople.some(
+    (person) =>
+      person.employment?.lineManagerId === guardedActor.personId ||
+      person.employment?.supervisingPartnerId === guardedActor.personId,
+  );
+  const isSupportingAnyFeeEarner =
+    (guardedActor.person.supportsIds?.length ?? 0) > 0 &&
+    allPeople.some((person) =>
+      guardedActor.person.supportsIds?.includes(person.id),
+    );
+  for (const rule of guardedActor.rbacConfig.relationshipGrants ?? []) {
+    const matchesRule =
+      ((rule.relationship === 'is_team_lead_of_any_team' ||
+        rule.relationship === 'is_team_lead_of_target_team') &&
+        isTeamLeadOfAnyTeam) ||
+      (rule.relationship === 'is_line_manager_of_target' &&
+        isLineManagerOfAny) ||
+      (rule.relationship === 'is_supporting_target_fee_earner' &&
+        isSupportingAnyFeeEarner);
+    if (
+      matchesRule &&
+      rule.permissions.some(
+        (perm) =>
+          isUserAssignablePermissionKey(perm) && candidates.includes(perm),
+      )
+    ) {
+      return true;
+    }
+  }
+  if (candidates.some((perm) => perm.startsWith('keydate:'))) {
+    const keyDatesConfig: KeyDatesConfig = await getKeyDatesConfig({
+      ctx: guardedActor.tenantContext,
+    });
+    const kdPerms = resolveKeyDatePermissions(guardedActor.person, {
+      config: keyDatesConfig,
+      allPeople: [...allPeople],
+      teams: [...(guardedActor.teams ?? [])],
+      rbac: { config: { rbac: guardedActor.rbacConfig } },
+    });
+    if (
+      candidates.some(
+        (perm) =>
+          perm.startsWith('keydate:') &&
+          kdPerms.includes(perm as KeyDatePermission),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -249,6 +335,8 @@ export async function guardedAction<R>(
   const correlationId = await resolveCurrentRequestCorrelationId('corr-act');
   const isEnforcedByAction =
     policy.kind === 'permission' && policy.enforcedBy === 'action';
+  const isEnforcedByService =
+    policy.kind === 'permission' && policy.enforcedBy === 'service';
 
   let actor: AuthenticatedActorContext;
   try {
@@ -304,6 +392,33 @@ export async function guardedAction<R>(
         }
       }
 
+      if (isEnforcedByService) {
+        const allowed = await actorSatisfiesCoarseServicePolicy(
+          guardedActor,
+          policy.key,
+        );
+        if (!allowed) {
+          const firstKey =
+            typeof policy.key === 'string' ? policy.key : policy.key.anyOf[0];
+          const deniedErr = new AuthorisationError({
+            code: 'FORBIDDEN',
+            message: `Missing required permission "${firstKey}" (${name}).`,
+            tenantId: guardedActor.tenantContext.tenantId,
+            correlationId: guardedActor.tenantContext.correlationId,
+            actorUserId: guardedActor.personId,
+            requiredPermission: firstKey,
+          });
+          logAuthorisationDenial({
+            correlationId: guardedActor.tenantContext.correlationId,
+            tenantId: guardedActor.tenantContext.tenantId,
+            action: name,
+            code: deniedErr.code,
+            requiredPermission: deniedErr.requiredPermission,
+          });
+          return mapAuthorisationErrorToActionDenied(deniedErr) as unknown as R;
+        }
+      }
+
       return await fn(guardedActor);
     },
   );
@@ -343,10 +458,7 @@ export function guardedRoute<
       );
     }
 
-    const isEnforcedByAction =
-      policy.kind === 'permission' && policy.enforcedBy === 'action';
-
-    if (!isEnforcedByAction) {
+    if (policy.kind === 'public' || policy.kind === 'gap') {
       return await handler(request as Req, context as Ctx);
     }
 
@@ -367,11 +479,38 @@ export function guardedRoute<
         },
         async () => {
           const guardedActor = await buildGuardedActorContext(actor, correlationId);
-          requirePermissionForPolicy(
-            guardedActor.permissions,
-            policy.key,
-            name,
-          );
+          if (
+            policy.kind === 'permission' &&
+            policy.enforcedBy === 'action'
+          ) {
+            requirePermissionForPolicy(
+              guardedActor.permissions,
+              policy.key,
+              name,
+            );
+          } else if (
+            policy.kind === 'permission' &&
+            policy.enforcedBy === 'service'
+          ) {
+            const allowed = await actorSatisfiesCoarseServicePolicy(
+              guardedActor,
+              policy.key,
+            );
+            if (!allowed) {
+              const firstKey =
+                typeof policy.key === 'string'
+                  ? policy.key
+                  : policy.key.anyOf[0];
+              throw new AuthorisationError({
+                code: 'FORBIDDEN',
+                message: `Missing required permission "${firstKey}" (${name}).`,
+                tenantId: guardedActor.tenantContext.tenantId,
+                correlationId: guardedActor.tenantContext.correlationId,
+                actorUserId: guardedActor.personId,
+                requiredPermission: firstKey,
+              });
+            }
+          }
           return await handler(request as Req, context as Ctx, guardedActor);
         },
       );
@@ -385,11 +524,17 @@ export function guardedRoute<
           requiredPermission: err.requiredPermission,
         });
         const status = err.code === 'UNAUTHENTICATED' ? 401 : 403;
+        const responseCode =
+          err.code === 'UNAUTHENTICATED' &&
+          policy.kind === 'permission' &&
+          policy.enforcedBy === 'service'
+            ? 'reauthentication_required'
+            : err.code;
         return NextResponse.json(
           {
             ok: false,
             denied: true,
-            code: err.code,
+            code: responseCode,
             message: err.message,
             error: `${err.code}: ${err.message}`,
           },
@@ -470,35 +615,7 @@ function resolveJobRegistryOrFallback(
   if (providedRegistry) {
     return providedRegistry;
   }
-  try {
-    return loadActiveTenantRegistry();
-  } catch {
-    const activeCfg = getActiveTenantConfiguration();
-    const slug = activeCfg.tenantId.toLowerCase().replace(/[^a-z0-9]/g, '_');
-    return {
-      schemaVersion: '1.0',
-      environment: activeCfg.environment,
-      hostingMode: activeCfg.hostingMode,
-      tenants: [
-        {
-          tenantId: activeCfg.tenantId,
-          slug,
-          environment: activeCfg.environment,
-          enabled: true,
-          postgresHost:
-            activeCfg.database?.dedicatedServerHost ??
-            `${activeCfg.tenantId}-pg-${activeCfg.environment}.postgres.database.azure.com`,
-          postgresDatabaseName: `pg_tenant_${slug}_${activeCfg.environment}`,
-          postgresRoleName: `role_tenant_${slug}_${activeCfg.environment}`,
-          keyVaultUri:
-            activeCfg.keyVault?.vaultUri ??
-            `https://kv-${activeCfg.tenantId}-${activeCfg.environment}.vault.azure.net/`,
-          packageDir: 'client-not-a-law-firm',
-          timeZone: activeCfg.timeZone || 'Europe/London',
-        },
-      ],
-    };
-  }
+  return loadActiveTenantRegistry();
 }
 
 /**

@@ -24,7 +24,7 @@ Users with the \`document:generate\` permission can generate letters, attendance
 
 Generated documents are stored in the tenant’s isolated document storage container and linked to the originating Matter or Client record, while all template, version, generated document, link, usage, and tenant configuration records live exclusively in the firm’s isolated PostgreSQL database (\`TenantDocumentRepository\`, running every read and write inside a transaction with \`SET LOCAL ROLE\`):
 
-- Viewing generated document metadata requires \`document:view\` and access to the underlying Matter or Client record (including \`matter:restricted:access\` or allow-list membership on restricted staff matters).
+- Viewing generated document metadata requires \`document:view\` and access to the underlying Matter or Client record (including \`matter:restricted:access\` or allow-list membership on restricted staff matters). Roles holding \`document:view\` without \`document_template:view\` can still view generated documents linked to accessible matters via \`getDocumentGenerationSnapshotAction\` (template definitions and Field Catalogue metadata remain omitted unless \`document_template:view\` is also held). Generating new documents requires both \`document:generate\` and \`document_template:view\`.
 - Downloading a generated file requires \`document:download\`. 1Squared issues a short-lived, HMAC-signed scoped download token bound to your \`tenantId\`, user \`sub\`, \`documentId\`, and \`blobKey\`. When the download endpoint is called, 1Squared verifies both the token signature and your live session permissions before streaming the file.
 - Deleting a generated document requires \`document:delete\` and is recorded in the audit log.
 

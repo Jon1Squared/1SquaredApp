@@ -48,6 +48,7 @@ import {
   resetAllDemoData,
 } from '@/server/services';
 import { getMyFinanceFigures } from '@/server/financeServices';
+import { isActionDenied } from '@/domain/actionResult';
 import { getDocumentGenerationSnapshotForUser } from '@/server/documentGenerationServices';
 import { runWithActiveActorSession } from '@/domain/rbac';
 import {
@@ -1130,6 +1131,8 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
           expect((myFigs as { myFeeEarnerFigures: unknown }).myFeeEarnerFigures).toBeNull();
 
           const docSnap = await getDocumentGenerationSnapshotForUser(actingAdmin.id);
+          expect(isActionDenied(docSnap)).toBe(false);
+          if (isActionDenied(docSnap)) throw new Error(docSnap.message);
           expect(docSnap.templates.filter((t) => t.id.startsWith('TPL-SEED-'))).toEqual([]);
         },
       );

@@ -5,8 +5,11 @@ import { updateTenantRbacConfigAction } from '@/app/actions';
 import { GET as matterDocumentsGet } from '@/app/api/matters/[id]/documents/route';
 import { isActionDenied } from '@/domain/actionResult';
 import {
-  setActiveTenantConfigForTesting,
+  getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
+  getHrAndRbacRepository,
+  getPartyRepository,
+  setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
 import {
   authorizeResource,
@@ -306,6 +309,7 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
       },
     );
 
+    setTestEntraSessionOverride(makeSession());
     const customRes = await wrapped(
       new Request('http://localhost:3000/api/matters/MAT-999/documents'),
       { params: Promise.resolve({ id: 'MAT-999' }) },
@@ -437,5 +441,171 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
         }),
       ).toThrow(/permission to access this matter/i);
     });
+  });
+
+  it('R518: guardedRoute rejects unauthenticated callers for service routes, and both wrappers enforce declared service policy keys without blocking non-MFA calls', async () => {
+    // 1. Unauthenticated call to an enforcedBy: 'service' route returns 401 without calling handler
+    setTestEntraSessionOverride(undefined);
+    const serviceRouteHandler = vi.fn(() => NextResponse.json({ ok: true }));
+    const wrappedServiceRoute = guardedRoute(
+      'GET /api/document-stores',
+      serviceRouteHandler,
+    );
+    const unauthRouteRes = await wrappedServiceRoute(
+      new NextRequest('http://localhost:3000/api/document-stores'),
+    );
+    expect(serviceRouteHandler).not.toHaveBeenCalled();
+    expect(unauthRouteRes.status).toBe(401);
+
+    // 2. Authenticated fee_earner (P-000002) lacks all keys on GET /api/document-stores -> 403 without calling handler
+    setTestEntraSessionOverride(makeSession());
+    const forbiddenRouteRes = await wrappedServiceRoute(
+      new NextRequest('http://localhost:3000/api/document-stores'),
+    );
+    expect(serviceRouteHandler).not.toHaveBeenCalled();
+    expect(forbiddenRouteRes.status).toBe(403);
+
+    // 3. Authenticated finance user (P-000009) lacks matter:create/matter:edit on saveMatterAction ('service') -> FORBIDDEN before fn runs
+    setTestEntraSessionOverride(
+      makeSession({
+        personId: 'P-000009',
+        sub: 'P-000009',
+        email: 'finance@notalawfirm.example',
+        displayName: 'Finance Manager',
+        mappedRoles: ['finance'],
+      }),
+    );
+    const saveMatterFn = vi.fn(() => ({ matter: null }));
+    const deniedServiceAction = await guardedAction('saveMatterAction', saveMatterFn);
+    expect(saveMatterFn).not.toHaveBeenCalled();
+    expect(isActionDenied(deniedServiceAction)).toBe(true);
+    if (isActionDenied(deniedServiceAction)) {
+      expect(deniedServiceAction.code).toBe('FORBIDDEN');
+    }
+
+    // 4. Coarse service pre-check allows non-MFA calls through when actor holds a declared key (leaving MFA checks to the service)
+    setTestEntraSessionOverride(
+      makeSession({
+        personId: 'P-000004',
+        sub: 'P-000004',
+        mappedRoles: ['admin'],
+        mfaVerified: false,
+      }),
+    );
+    const docGenFn = vi.fn(() => ({ passedToService: true }));
+    const forwardedToService = await guardedAction(
+      'updateDocumentGenerationConfigAction',
+      docGenFn,
+    );
+    expect(docGenFn).toHaveBeenCalledTimes(1);
+    expect(forwardedToService).toEqual({ passedToService: true });
+  });
+
+  it('R561: guardedAction coarse service pre-check reads rbacConfig.relationshipGrants dynamically rather than hard-coding lineManagerId', async () => {
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const seedStore = loadCommittedSeedStore();
+    const partyRepo = getPartyRepository();
+    const hrRepo = getHrAndRbacRepository();
+    const tenantCfg = getActiveTenantConfiguration();
+    const setupCtx = {
+      tenantId: tenantCfg.tenantId,
+      actorId: 'P-000004',
+      actorName: 'Huw Pritchard',
+      actorEmail: 'huw.pritchard@notalawfirm.example',
+      actorRoles: ['admin'],
+      mfaVerified: true,
+      hostingMode: tenantCfg.hostingMode,
+      environment: tenantCfg.environment,
+      correlationId: 'corr-r561-setup',
+      postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
+      blobContainerName: 'tenant-not-a-law-firm-docs',
+      keyVaultSecretPrefix: 'kv-not-a-law-firm-test',
+    };
+    const p9Orig = structuredClone(seedStore.people.find((p) => p.id === 'P-000009')!);
+    const p10Orig = structuredClone(seedStore.people.find((p) => p.id === 'P-000010')!);
+    const origRbacOverride = await hrRepo.getRbacConfigOverride<
+      Record<string, unknown>
+    >(setupCtx);
+
+    try {
+      // 1. P-000009 (finance role, lacks employee:edit_core / contact:*) IS lineManagerId for P-000010,
+      //    but configured rbac.relationshipGrants is [] -> must be FORBIDDEN when line-manager grant is removed
+      await partyRepo.putPerson(setupCtx, {
+        ...p10Orig,
+        employment: {
+          ...p10Orig.employment!,
+          lineManagerId: 'P-000009',
+        },
+      });
+      await hrRepo.putRbacConfigOverride(setupCtx, { relationshipGrants: [] });
+      setActiveTenantConfigForTesting({
+        ...rawBase,
+        rbac: {
+          ...((rawBase.rbac as Record<string, unknown>) ?? {}),
+          relationshipGrants: [],
+        },
+      });
+
+      setTestEntraSessionOverride(
+        makeSession({
+          personId: 'P-000009',
+          sub: 'P-000009',
+          email: 'finance@notalawfirm.example',
+          displayName: 'Finance Manager',
+          mappedRoles: ['finance'],
+        }),
+      );
+
+      const deniedFn = vi.fn(() => ({ reached: true }));
+      const deniedRes = await guardedAction('savePersonAction', deniedFn);
+      expect(deniedFn).not.toHaveBeenCalled();
+      expect(isActionDenied(deniedRes)).toBe(true);
+      if (isActionDenied(deniedRes)) {
+        expect(deniedRes.code).toBe('FORBIDDEN');
+      }
+
+      // 2. Configure relationshipGrants with is_supporting_target_fee_earner -> ['employee:edit_core']
+      //    and remove lineManagerId, giving P-000009 supportsIds: ['P-000010'] -> must be allowed
+      await partyRepo.putPerson(setupCtx, p10Orig);
+      await partyRepo.putPerson(setupCtx, {
+        ...p9Orig,
+        supportsIds: ['P-000010'],
+      });
+      const supportGrant = [
+        {
+          relationship: 'is_supporting_target_fee_earner',
+          permissions: ['employee:edit_core'],
+        },
+      ];
+      await hrRepo.putRbacConfigOverride(setupCtx, {
+        relationshipGrants: supportGrant as never,
+      });
+      setActiveTenantConfigForTesting({
+        ...rawBase,
+        rbac: {
+          ...((rawBase.rbac as Record<string, unknown>) ?? {}),
+          relationshipGrants: supportGrant,
+        },
+      });
+
+      const allowedFn = vi.fn(() => ({ reached: true }));
+      const allowedRes = await guardedAction('savePersonAction', allowedFn);
+      expect(allowedFn).toHaveBeenCalledTimes(1);
+      expect(allowedRes).toEqual({ reached: true });
+    } finally {
+      await partyRepo.putPerson(setupCtx, p9Orig).catch(() => undefined);
+      await partyRepo.putPerson(setupCtx, p10Orig).catch(() => undefined);
+      if (origRbacOverride) {
+        await hrRepo
+          .putRbacConfigOverride(setupCtx, origRbacOverride)
+          .catch(() => undefined);
+      } else {
+        await hrRepo.deleteRbacConfigOverride(setupCtx).catch(() => undefined);
+      }
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+    }
   });
 });

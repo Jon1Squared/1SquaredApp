@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import ts from 'typescript';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1789,6 +1790,25 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
           (n.title.includes(dueStaffKd.title) || n.recordId === dueStaffKd.id || n.recordId === reminderTask?.id),
       );
       expect(p10PositiveNotifs.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('R522 & R550: guardedJob fails closed with the specific registry-load error when loadActiveTenantRegistry fails instead of fabricating a fallback', async () => {
+      const missingRegistryPath = path.join(
+        os.tmpdir(),
+        `missing-registry-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
+      );
+      vi.stubEnv('PLATFORM_TENANT_REGISTRY_PATH', missingRegistryPath);
+      try {
+        await expect(
+          guardedJob('usage-retention-purge', 'not-a-law-firm', async () => 'ran'),
+        ).rejects.toThrow(/ENOENT/);
+        vi.stubEnv('PLATFORM_TENANT_REGISTRY_JSON', '{invalid-json');
+        await expect(
+          guardedJob('usage-retention-purge', 'not-a-law-firm', async () => 'ran'),
+        ).rejects.toThrow(/TENANT_REGISTRY_ERROR/);
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
   });
 });

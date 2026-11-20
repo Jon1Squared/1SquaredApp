@@ -15,6 +15,7 @@ import {
   getDocumentGenerationSnapshotAction,
   previewTemplateAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import {
   isTemplateAvailableInContext,
   listPartyCandidatesForRecord,
@@ -134,6 +135,10 @@ export function DocumentGenerationModal({
       getDocumentGenerationSnapshotAction()
         .then((snap) => {
           if (cancelled) return;
+          if (isActionDenied(snap)) {
+            setErrorMsg(snap.message);
+            return;
+          }
           setSnapshot(snap);
           setOutputFormat(snap.config.defaultOutputFormat);
         })

@@ -209,8 +209,8 @@ export function DocumentStoresAdminPanel({
         setBannerMessage({
           kind: json.result.ok ? 'success' : 'error',
           text: json.result.ok
-            ? `Connection to "${storeId}" verified (${json.result.latencyMs}ms).`
-            : `Connection check failed: ${json.result.errorReason}`,
+            ? `Connection to "${storeId}" verified${json.result.simulated ? ' (Simulated — non-live harness)' : ''} (${json.result.latencyMs}ms).`
+            : `Connection check failed${json.result.simulated ? ' (Simulated — non-live harness)' : ''}: ${json.result.errorReason}`,
         });
       }
     } finally {
@@ -753,7 +753,8 @@ export function DocumentStoresAdminPanel({
                     >
                       <strong>
                         Connection Test ({testRes.latencyMs}ms at{' '}
-                        {new Date(testRes.checkedAt).toLocaleTimeString()}):
+                        {new Date(testRes.checkedAt).toLocaleTimeString()})
+                        {testRes.simulated ? ' · Simulated — non-live harness' : ''}:
                       </strong>
                       <div
                         style={{

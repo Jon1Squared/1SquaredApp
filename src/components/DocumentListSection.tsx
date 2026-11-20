@@ -12,6 +12,7 @@ import {
   downloadGeneratedDocumentAction,
   getDocumentGenerationSnapshotAction,
 } from '@/app/actions';
+import { isActionDenied } from '@/domain/actionResult';
 import type { GeneratedDocumentRecord } from '@/domain/documentGeneration';
 import type {
   ChoiceValue,
@@ -78,6 +79,10 @@ export function DocumentListSection({
   const loadSnapshot = useCallback(async () => {
     try {
       const snap = await getDocumentGenerationSnapshotAction();
+      if (isActionDenied(snap)) {
+        setErrorMsg(snap.message);
+        return;
+      }
       setSnapshot(snap);
     } catch (err) {
       setErrorMsg(
@@ -115,8 +120,10 @@ export function DocumentListSection({
     });
   }, [snapshot, entityType, entityId]);
 
-  const canGenerate =
-    snapshot?.userPermissions.includes('document:generate') ?? true;
+  const canGenerate = Boolean(
+    snapshot?.userPermissions.includes('document:generate') &&
+      snapshot?.userPermissions.includes('document_template:view'),
+  );
   const canDelete =
     snapshot?.userPermissions.includes('document:delete') ?? false;
 

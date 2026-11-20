@@ -4942,5 +4942,71 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         resetDocumentStoreSingletonsForTesting();
       }
     });
+
+    it('R523: refuses MockSharePointGraphBackend in live with "SharePoint live connection not yet available" and marks non-live testConnection results simulated: true', async () => {
+      const reg = new DocumentStoreProviderRegistry();
+      const storeCfg: DocumentStoreConfig = {
+        storeId: 'store-r523',
+        displayName: 'R523 Store',
+        providerType: 'sharepoint',
+        isDefault: true,
+        enabled: true,
+        auth: {
+          entraTenantId: '11111111-2222-3333-4444-555555555555',
+          credentialMode: 'client_certificate',
+          clientId: '22222222-3333-4444-5555-666666666666',
+          certificateKeyVaultSecretRef: 'kv://kv-notalawfirm-test/sp-cert',
+          delegatedPermissionScope: 'Sites.Selected',
+        },
+        sharepoint: {
+          hostname: 'example.sharepoint.com',
+          siteRelativePath: '/sites/TestSite',
+          siteId: 'site-r523',
+          libraries: [
+            {
+              libraryId: 'lib-r523',
+              displayName: 'Matter Documents',
+              libraryUrlSegment: 'Matter Documents',
+              driveId: 'drive-r523',
+            },
+          ],
+        },
+      };
+
+      const testCtx = makeTenantContext({
+        tenantId: 'not-a-law-firm',
+        actorId: 'P-000004',
+        actorRoles: ['admin'],
+        mfaVerified: true,
+      });
+      const provider = reg.createProvider(testCtx, storeCfg);
+      const nonLiveResult = await provider.testConnection({
+        kind: 'provisioning',
+        tenantContext: testCtx,
+        triggeredByUserId: 'P-000004',
+        triggerEvent: 'r523.test',
+      });
+      expect(nonLiveResult.ok).toBe(true);
+      expect(nonLiveResult.simulated).toBe(true);
+      expect(nonLiveResult.warnings?.some((w) => /simulated/i.test(w))).toBe(true);
+
+      const liveCtx = resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-000004',
+          tenantId: 'not-a-law-firm',
+          name: 'Admin User',
+          email: 'admin@notalawfirm.example',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'live',
+        correlationId: 'corr-r523-live',
+      });
+      expect(() => reg.createProvider(liveCtx, storeCfg)).toThrow(
+        /SharePoint live connection not yet available/i,
+      );
+    });
   });
 });
