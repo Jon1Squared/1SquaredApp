@@ -311,6 +311,28 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       },
     });
 
+    const pmsImportedRows = resolveMatterIntakeComplianceRows(
+      {
+        isPmsImport: true,
+        conflictCheckStatus: 'Not started',
+        conflictDecision: undefined,
+        conflictCheckDate: '',
+        amlCompletedAt: '',
+        amlStatus: '',
+        engagementLetterSignedAt: '',
+        engagementLetterStatus: '',
+      },
+      {
+        overallRisk: null,
+        completedQuestions: 0,
+        totalQuestions: 10,
+      },
+    );
+    expect(pmsImportedRows.conflictCheck.label).toBe(
+      'Imported from PMS: conflict check recorded in the source system',
+    );
+    expect(pmsImportedRows.conflictCheck.cleared).toBe(false);
+
     const populatedRows = resolveMatterIntakeComplianceRows(
       {
         conflictDecision: {

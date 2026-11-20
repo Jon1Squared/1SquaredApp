@@ -20,6 +20,7 @@ import {
   isMatterOpeningInProgress,
 } from '@/domain/matterOpeningRecord';
 import { isPrivilegedPersonForEmailLinking } from '@/domain/rbac';
+import { selectHomeCandidateTasks } from '@/domain/homeTasks';
 import { isComplianceOrOnboardingTask } from '@/domain/tasks';
 import {
   createVerifiedTenantContext,
@@ -41,6 +42,7 @@ import {
   getKeyDateRepository,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
   isDataResetAllowedEnvironment,
   isDemoModeEnabled,
   resetAllDemoData,
@@ -1029,6 +1031,29 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
     );
     await getPartyRepository().putPerson(ctx, updatedAdmin);
 
+    // Give P-000002 (targetPerson) a distinct overdue task so effectiveWorkPerson divergence is observable in attention & candidate tasks
+    await getTaskWorkflowRepository().putTask(ctx, {
+      id: 'TSK-R544-OVERDUE',
+      reference: 'TSK-R544-OVERDUE',
+      title: 'R544 Target Person Overdue Task',
+      description: 'Assigned only to targetPerson',
+      taskTypeId: 'task_type.general',
+      priorityId: 'task_priority.urgent',
+      dueAt: '2020-01-01',
+      assignedTeamId: null,
+      assignedPersonId: targetPerson.id,
+      assignedPersonIds: [targetPerson.id],
+      status: 'To do',
+      linkedRecords: [],
+      createdById: actingAdmin.id,
+      createdAt: '2026-01-01T10:00:00.000Z',
+      updatedById: actingAdmin.id,
+      updatedAt: '2026-01-01T10:00:00.000Z',
+      completedById: null,
+      completedAt: null,
+      comments: [],
+    });
+
     const nowIso = new Date().toISOString();
     const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
     const signedCookie = createSignedEntraSessionCookie({
@@ -1076,7 +1101,28 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
         async () => {
           const snap = await getAppSnapshot(actingAdmin.id);
           expect(snap.currentUser.id).toBe(actingAdmin.id);
+          expect(snap.effectiveWorkPerson.id).toBe(actingAdmin.id);
           expect(snap.attention).not.toBeNull();
+          expect(
+            snap.attention.some(
+              (item) => item.kind === 'overdue_task' && item.recordId === 'TSK-R544-OVERDUE',
+            ),
+          ).toBe(false);
+          const candidateTasksLive = selectHomeCandidateTasks({
+            tasks: snap.tasks,
+            currentUserId: snap.currentUser.id,
+            effectiveWorkPersonId: snap.effectiveWorkPerson.id,
+            myTeamIds: new Set(
+              snap.teams
+                .filter(
+                  (t) =>
+                    t.memberIds.includes(snap.effectiveWorkPerson.id) ||
+                    t.leadIds.includes(snap.effectiveWorkPerson.id),
+                )
+                .map((t) => t.id),
+            ),
+          });
+          expect(candidateTasksLive.some((t) => t.id === 'TSK-R544-OVERDUE')).toBe(false);
 
           // In live, showsWorkOfId must be ignored so P-000004 (no FE PMS link) gets null instead of P-000002's FE002
           const myFigs = await getMyFinanceFigures(actingAdmin.id);
@@ -1085,6 +1131,51 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
 
           const docSnap = await getDocumentGenerationSnapshotForUser(actingAdmin.id);
           expect(docSnap.templates.filter((t) => t.id.startsWith('TPL-SEED-'))).toEqual([]);
+        },
+      );
+
+      // Positive control: in non-live demo mode, showsWorkOfId IS honoured
+      setActiveTenantConfigForTesting(
+        {
+          ...baseCfg,
+          environment: 'demo',
+          featureFlags: { ...(baseCfg.featureFlags ?? {}), enableDemoMode: true },
+        },
+        { tenantId: 'not-a-law-firm', environment: 'demo' },
+      );
+      await runWithActiveActorSession(
+        {
+          personId: actingAdmin.id,
+          tenantId: 'not-a-law-firm',
+          tokenRoles: ['admin', 'partner', 'fee_earner'],
+          mfaVerified: true,
+          expiresAtMs: Date.parse(expiresAt),
+          verifiedSession,
+        },
+        async () => {
+          const demoSnap = await getAppSnapshot(actingAdmin.id);
+          expect(demoSnap.currentUser.id).toBe(actingAdmin.id);
+          expect(demoSnap.effectiveWorkPerson.id).toBe(targetPerson.id);
+          expect(
+            demoSnap.attention.some(
+              (item) => item.kind === 'overdue_task' && item.recordId === 'TSK-R544-OVERDUE',
+            ),
+          ).toBe(true);
+          const candidateTasksDemo = selectHomeCandidateTasks({
+            tasks: demoSnap.tasks,
+            currentUserId: demoSnap.currentUser.id,
+            effectiveWorkPersonId: demoSnap.effectiveWorkPerson.id,
+            myTeamIds: new Set(
+              demoSnap.teams
+                .filter(
+                  (t) =>
+                    t.memberIds.includes(demoSnap.effectiveWorkPerson.id) ||
+                    t.leadIds.includes(demoSnap.effectiveWorkPerson.id),
+                )
+                .map((t) => t.id),
+            ),
+          });
+          expect(candidateTasksDemo.some((t) => t.id === 'TSK-R544-OVERDUE')).toBe(true);
         },
       );
     } finally {

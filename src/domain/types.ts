@@ -1021,6 +1021,8 @@ export interface Matter extends RecordBase {
   conflictCheckRecord?: ConflictCheckRecord;
   /** Pre-conversion conflict decision carried across when converted from an enquiry or quote */
   conflictDecision?: OrganisationConflictDecision | null;
+  /** True when this matter was created via server-side PMS import (`createRecordFromPms`). */
+  isPmsImport?: boolean;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
   /** True when an ethical wall / information barrier applies to this matter. */

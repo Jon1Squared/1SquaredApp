@@ -9,6 +9,7 @@ import {
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
 import {
   getIntakeQuoteRepository,
+  getMatterRepository,
   getPartyRepository,
   resetAllDemoData,
 } from '@/server/services';
@@ -558,7 +559,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     globalThis.fetch = vi.fn(async () => new Response('Server busy — secret upstream body', { status: 502 })) as unknown as typeof fetch;
 
     const failRes = await matterExtractPost(
-      buildExtractRequest('TopSecretClientInstructionText-CalderbrookFailClosed'),
+      buildExtractRequest('TopSecretClientInstructionText-FailClosed'),
     );
     expect(failRes.status).toBe(503);
     const failData = (await failRes.json()) as {
@@ -625,6 +626,27 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     expect(parsedLog.event).toBe('matter_ai_extraction.failed');
     expect(parsedLog.tenantId).toBe('not-a-law-firm');
     expect(parsedLog.errorCode).toBe('EXTRACTION_FAILED');
+
+    // 3. Unexpected non-upstream programming errors return 500 INTERNAL_ERROR (not 503 upstream unavailable)
+    errorSpy.mockClear();
+    clearMatterExtractionCacheForTesting();
+    const internalSpy = vi
+      .spyOn(getMatterRepository(), 'listAllMattersUnfiltered')
+      .mockRejectedValueOnce(new TypeError('Unexpected internal programming failure'));
+    try {
+      const internalErrRes = await matterExtractPost(
+        buildExtractRequest('TopSecretClientInstructionText-InternalBug'),
+      );
+      expect(internalErrRes.status).toBe(500);
+      const internalErrJson = (await internalErrRes.json()) as {
+        code?: string;
+        error?: string;
+      };
+      expect(internalErrJson.code).toBe('INTERNAL_ERROR');
+      expect(internalErrJson.error).not.toContain('Unexpected internal programming failure');
+    } finally {
+      internalSpy.mockRestore();
+    }
   });
 
   it('enforces two-tenant cache isolation and rejects a forged tenant claim', async () => {

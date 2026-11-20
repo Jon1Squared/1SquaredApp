@@ -36,7 +36,7 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime } from '@/domain/dates';
-import { isClosedMatterStatus } from '@/domain/workTypeConfig';
+import { isClosedMatterStatus, isProspectiveMatterStatus } from '@/domain/workTypeConfig';
 import { resolveLabel, resolveLabels } from '@/domain/lists';
 import {
   extractCriticalDates,
@@ -54,6 +54,8 @@ import {
   downloadRiskAssessmentPdf,
   formatRiskQuestionPill,
   formatRiskSectionPill,
+  isPmsImportedWithoutLocalConflictCheck,
+  PMS_IMPORTED_CONFLICT_STATUS_LABEL,
   resolveMatterConflictCheckRecord,
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
@@ -215,19 +217,23 @@ export function resolveMatterIntakeComplianceRows(
     | 'amlStatus'
     | 'engagementLetterSignedAt'
     | 'engagementLetterStatus'
-  >,
+  > &
+    Partial<Pick<Matter, 'conflictCheckRecord' | 'conflictCheckStatus' | 'isPmsImport'>>,
   resolvedRiskAssessment: {
     overallRisk: string | null;
     completedQuestions: number;
     totalQuestions: number;
   },
 ): MatterIntakeComplianceRows {
+  const pmsImportedNoLocal = isPmsImportedWithoutLocalConflictCheck(matter);
   const conflictCleared = matter.conflictDecision?.outcome === 'Cleared';
   const conflictLabel = conflictCleared
     ? 'Conflict check cleared'
     : matter.conflictDecision?.outcome
       ? `Conflict check: ${matter.conflictDecision.outcome}`
-      : 'Conflict check not recorded';
+      : pmsImportedNoLocal
+        ? PMS_IMPORTED_CONFLICT_STATUS_LABEL
+        : 'Conflict check not recorded';
   const conflictDetail = formatShortDayMonth(
     matter.conflictDecision?.decidedAt ?? matter.conflictCheckDate,
   );
@@ -1132,7 +1138,11 @@ export function MatterProfileClient({
             <MessageSquarePlus size={16} />
             <span>Add note</span>
           </button>
-          {canEditMatter ? (
+          {canEditMatter &&
+          (isMatterCurrentlyClosed ||
+            (!isProspectiveMatterStatus(matter.matterStatusId, values) &&
+              Boolean(matter.openedAt?.trim()) &&
+              !matter.matterNumber.startsWith('DRAFT'))) ? (
             <button
               type="button"
               className="btn btn--secondary"
@@ -2615,7 +2625,11 @@ export function MatterProfileClient({
                     <ShieldCheck size={16} color="var(--pill-positive-fg)" />
                     <h2 className="panel-title">Conflict check record</h2>
                     <StatusPill
-                      label={rec.status}
+                      label={
+                        isPmsImportedWithoutLocalConflictCheck(matter)
+                          ? 'Imported from PMS'
+                          : rec.status
+                      }
                       tone={
                         rec.status === 'Cleared' || rec.status === 'Approved'
                           ? 'positive'
@@ -2626,13 +2640,14 @@ export function MatterProfileClient({
                               : 'neutral'
                       }
                     />
-                    {conflictRecordMinimised ? (
+                    {conflictRecordMinimised || isPmsImportedWithoutLocalConflictCheck(matter) ? (
                       <span
                         className="muted"
                         style={{ fontSize: 12.5, fontWeight: 500, marginLeft: 4 }}
                       >
-                        {rec.outcomeLabel} · {rec.parties.length} parties checked ·{' '}
-                        {rec.matches.length} {rec.matches.length === 1 ? 'match' : 'matches'}
+                        {isPmsImportedWithoutLocalConflictCheck(matter)
+                          ? PMS_IMPORTED_CONFLICT_STATUS_LABEL
+                          : `${rec.outcomeLabel} · ${rec.parties.length} parties checked · ${rec.matches.length} ${rec.matches.length === 1 ? 'match' : 'matches'}`}
                       </span>
                     ) : null}
                   </div>
@@ -3328,7 +3343,11 @@ export function MatterProfileClient({
               <div className="kv-grid">
                 <div className="kv-item">
                   <span className="kv-label">Conflict check status (CORE-033)</span>
-                  <span className="kv-value">{matter.conflictCheckStatus}</span>
+                  <span className="kv-value">
+                    {isPmsImportedWithoutLocalConflictCheck(matter)
+                      ? PMS_IMPORTED_CONFLICT_STATUS_LABEL
+                      : matter.conflictCheckStatus}
+                  </span>
                 </div>
                 <div className="kv-item">
                   <span className="kv-label">Conflict check date (CORE-034)</span>
@@ -3608,21 +3627,31 @@ export function MatterProfileClient({
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <StatusPill
-                        label={`Conflict Check · ${rec.status}`}
+                        label={
+                          isPmsImportedWithoutLocalConflictCheck(matter)
+                            ? 'Conflict Check · Imported from PMS'
+                            : `Conflict Check · ${rec.status}`
+                        }
                         tone={
-                          rec.status === 'Cleared' || rec.status === 'Approved'
-                            ? 'positive'
-                            : rec.status === 'Referred'
-                              ? 'warning'
-                              : 'alert'
+                          isPmsImportedWithoutLocalConflictCheck(matter)
+                            ? 'neutral'
+                            : rec.status === 'Cleared' || rec.status === 'Approved'
+                              ? 'positive'
+                              : rec.status === 'Referred'
+                                ? 'warning'
+                                : 'alert'
                         }
                       />
                       <strong style={{ fontSize: 14 }}>
-                        Conflict check record — {rec.outcomeLabel}
+                        {isPmsImportedWithoutLocalConflictCheck(matter)
+                          ? PMS_IMPORTED_CONFLICT_STATUS_LABEL
+                          : `Conflict check record — ${rec.outcomeLabel}`}
                       </strong>
-                      <span className="muted" style={{ fontSize: 12.5 }}>
-                        · Submitted {rec.submittedAtDisplay} by {rec.submittedByName}
-                      </span>
+                      {isPmsImportedWithoutLocalConflictCheck(matter) ? null : (
+                        <span className="muted" style={{ fontSize: 12.5 }}>
+                          · Submitted {rec.submittedAtDisplay} by {rec.submittedByName}
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <button

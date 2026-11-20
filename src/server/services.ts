@@ -179,6 +179,7 @@ import {
 } from '@/domain/orgStructure';
 import {
   isClosedOrArchivedMatterStatus,
+  isProspectiveMatterStatus,
   resolveEffectiveWorkTypesConfig,
   resolveMatterLifecycleTargetStatusId,
   resolveWorkTypeFeeArrangementSettings,
@@ -5277,13 +5278,30 @@ function resolveProspectiveStatusId(store: FirmStore): string {
   );
 }
 
+function isMatterStatusProspectiveOrDraftLike(
+  statusId: string | null | undefined,
+  prospectiveStatusId: string,
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[] = [],
+): boolean {
+  if (!statusId) return false;
+  return (
+    statusId === prospectiveStatusId ||
+    statusId === 'matter_status.prospective' ||
+    isProspectiveMatterStatus(statusId, values)
+  );
+}
+
 function matterHasOpened(
   matter: Pick<Matter, 'matterStatusId' | 'matterNumber'>,
   prospectiveStatusId: string,
+  values: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[] = [],
 ): boolean {
   return (
-    matter.matterStatusId !== prospectiveStatusId &&
-    !matter.matterNumber.startsWith('DRAFT')
+    !isMatterStatusProspectiveOrDraftLike(
+      matter.matterStatusId,
+      prospectiveStatusId,
+      values,
+    ) && !matter.matterNumber.startsWith('DRAFT')
   );
 }
 
@@ -5294,6 +5312,7 @@ function resolveNextMatterStatusId(params: {
   saveMode: 'draft' | 'submit_cleared' | 'submit_referred' | undefined;
   prospectiveStatus: string;
   cmiIncompleteStatus: string;
+  values?: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[];
 }): string {
   const {
     input,
@@ -5302,10 +5321,13 @@ function resolveNextMatterStatusId(params: {
     saveMode,
     prospectiveStatus,
     cmiIncompleteStatus,
+    values = [],
   } = params;
+  const isProspective = (id: string | null | undefined) =>
+    isMatterStatusProspectiveOrDraftLike(id, prospectiveStatus, values);
   if (existingHasOpened && existing) {
     const requested = input.matterStatusId;
-    return requested && requested !== prospectiveStatus
+    return requested && !isProspective(requested)
       ? requested
       : existing.matterStatusId;
   }
@@ -5313,7 +5335,7 @@ function resolveNextMatterStatusId(params: {
     return prospectiveStatus;
   }
   if (saveMode === 'submit_cleared') {
-    return input.matterStatusId && input.matterStatusId !== prospectiveStatus
+    return input.matterStatusId && !isProspective(input.matterStatusId)
       ? input.matterStatusId
       : cmiIncompleteStatus;
   }
@@ -6453,9 +6475,10 @@ export async function saveMatterRecord(
     | { saveMode?: string; capturedAt?: string }
     | undefined;
   const existingHasOpened = Boolean(
-    existing && matterHasOpened(existing, prospectiveStatus),
+    existing && matterHasOpened(existing, prospectiveStatus, store.values),
   );
   const isPmsImport = opts.source === 'pms_import';
+  const persistedIsPmsImport = Boolean(isPmsImport || existing?.isPmsImport);
   if (existingHasOpened && !isPmsImport) {
     if (opts.saveMode === 'draft') {
       return {
@@ -6465,7 +6488,13 @@ export async function saveMatterRecord(
         },
       };
     }
-    if (input.matterStatusId === prospectiveStatus) {
+    if (
+      isMatterStatusProspectiveOrDraftLike(
+        input.matterStatusId,
+        prospectiveStatus,
+        store.values,
+      )
+    ) {
       return {
         matter: null,
         errors: {
@@ -6481,22 +6510,30 @@ export async function saveMatterRecord(
     saveMode: opts.saveMode,
     prospectiveStatus,
     cmiIncompleteStatus,
+    values: store.values,
   });
-  const willOpen = !existingHasOpened && nextStatusId !== prospectiveStatus;
+  const willOpen =
+    !existingHasOpened &&
+    !isMatterStatusProspectiveOrDraftLike(
+      nextStatusId,
+      prospectiveStatus,
+      store.values,
+    );
 
-  const storedConflictRecord =
-    existing?.conflictCheckRecord ??
-    (existing
+  const persistedConflictRecord = existing?.conflictCheckRecord ?? null;
+  const legacyFallbackConflictRecord =
+    existing && !persistedConflictRecord
       ? resolveMatterConflictCheckRecord(
           existing,
           allPeopleWithPending,
           allOrganisationsWithPending,
         )
-      : null);
+      : null;
+  const effectiveReferredSource = persistedConflictRecord ?? legacyFallbackConflictRecord;
 
   if (
     !isPmsImport &&
-    storedConflictRecord?.status === 'Referred' &&
+    effectiveReferredSource?.status === 'Referred' &&
     !actorHasRiskView &&
     (opts.saveMode === 'submit_cleared' ||
       submittedConflictRecord?.status === 'Cleared')
@@ -6512,7 +6549,7 @@ export async function saveMatterRecord(
 
   const hasUnapprovedRestrictedMatch = hasUnapprovedRestrictedMatches(
     reconciledConflictMatches,
-    storedConflictRecord?.approvedRestrictedMatchIds,
+    effectiveReferredSource?.approvedRestrictedMatchIds,
   );
   const isApprovedByRiskInThisSave =
     actorHasRiskView && submittedConflictRecord?.status === 'Approved';
@@ -6536,11 +6573,17 @@ export async function saveMatterRecord(
   }
 
   const actorDisplayName = personDisplayName(actingUser);
+  const storedRecordForServerBuilder =
+    persistedConflictRecord ??
+    (existing &&
+    (existingHasOpened || legacyFallbackConflictRecord?.status === 'Referred')
+      ? legacyFallbackConflictRecord
+      : null);
   const resolvedConflictCheckRecord =
     submittedConflictRecord !== undefined
       ? buildServerConflictCheckRecord({
           submitted: submittedConflictRecord,
-          stored: storedConflictRecord,
+          stored: storedRecordForServerBuilder,
           storedMatterHasOpened: existingHasOpened,
           parties: effectiveConflictParties,
           matches: reconciledConflictMatches,
@@ -6550,9 +6593,9 @@ export async function saveMatterRecord(
           nowDisplay: now,
           saveMode: opts.saveMode,
         })
-      : storedConflictRecord
+      : persistedConflictRecord
         ? {
-            ...storedConflictRecord,
+            ...persistedConflictRecord,
             ...(opts.saveMode === 'submit_referred'
               ? {
                   status: 'Referred' as const,
@@ -6562,8 +6605,8 @@ export async function saveMatterRecord(
                   approvedByName: null,
                 }
               : opts.saveMode === 'submit_cleared' &&
-                  (storedConflictRecord.status === 'In progress' ||
-                    storedConflictRecord.status === 'Not started')
+                  (persistedConflictRecord.status === 'In progress' ||
+                    persistedConflictRecord.status === 'Not started')
                 ? {
                     status: 'Cleared' as const,
                     outcomeLabel: 'Cleared by fee earner' as const,
@@ -6572,10 +6615,41 @@ export async function saveMatterRecord(
             parties: effectiveConflictParties,
             matches: reconciledConflictMatches,
           }
-        : undefined;
+        : opts.saveMode === 'submit_referred'
+          ? {
+              ...(legacyFallbackConflictRecord ??
+                resolveMatterConflictCheckRecord(
+                  {
+                    id: existing?.id ?? 'NEW_MATTER',
+                    title: (input.title || existing?.title || 'Untitled').trim(),
+                    clientId: effectiveClientId,
+                    conflictCheckStatus: 'Pending conflict review',
+                    leadFeeEarnerId: effectiveLeadFeeEarnerId,
+                    conflictClearedById: existing?.conflictClearedById ?? null,
+                    instructingContactId: resolvedInstructingContactId,
+                    parties: resolvedParties,
+                  } as Matter,
+                  allPeopleWithPending,
+                  allOrganisationsWithPending,
+                )),
+              status: 'Referred' as const,
+              outcomeLabel: 'Referred to risk for review' as const,
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: effectiveConflictParties,
+              matches: reconciledConflictMatches,
+            }
+          : existingHasOpened && !persistedIsPmsImport && legacyFallbackConflictRecord
+            ? {
+                ...legacyFallbackConflictRecord,
+                parties: effectiveConflictParties,
+                matches: reconciledConflictMatches,
+              }
+            : undefined;
 
   if (willOpen && !isPmsImport) {
-    if (!resolvedConflictCheckRecord && !storedConflictRecord) {
+    if (!resolvedConflictCheckRecord && !persistedConflictRecord) {
       return {
         matter: null,
         errors: {
@@ -6584,19 +6658,10 @@ export async function saveMatterRecord(
         },
       };
     }
-    const fallbackStatusFromField =
-      opts.saveMode === 'submit_referred'
-        ? 'Pending conflict review'
-        : isDraftSave
-          ? existing?.conflictCheckStatus ?? 'Draft'
-          : existing?.conflictCheckStatus ?? 'Not started';
-    const inferredConflictStatus = conflictStatusPillFromLegacy(
-      fallbackStatusFromField,
-    );
     const nextConflictStatus =
       resolvedConflictCheckRecord?.status ??
-      storedConflictRecord?.status ??
-      inferredConflictStatus;
+      persistedConflictRecord?.status ??
+      'Not started';
     const conflictAllowsOpening =
       (nextConflictStatus === 'Cleared' || nextConflictStatus === 'Approved') &&
       (!hasUnapprovedRestrictedMatch || isApprovedByRiskInThisSave);
@@ -6734,9 +6799,9 @@ export async function saveMatterRecord(
     referrerContactId: resolvedReferrerContactId,
     parties: resolvedParties,
     conflictCheckStatus:
-      resolvedConflictCheckRecord ?? storedConflictRecord
+      resolvedConflictCheckRecord ?? persistedConflictRecord
         ? legacyConflictStatusFromRecord(
-            (resolvedConflictCheckRecord ?? storedConflictRecord)!,
+            (resolvedConflictCheckRecord ?? persistedConflictRecord)!,
           )
         : opts.saveMode === 'submit_referred'
           ? 'Pending conflict review'
@@ -6790,6 +6855,7 @@ export async function saveMatterRecord(
     ...(existing?.conflictDecision
       ? { conflictDecision: existing.conflictDecision }
       : {}),
+    ...(persistedIsPmsImport ? { isPmsImport: true } : {}),
     owningDepartmentId: nextOwningDepartmentId,
     owningTeamId: nextOwningTeamId,
     isStaffMatter: effectiveIsStaffMatter,
@@ -6800,10 +6866,15 @@ export async function saveMatterRecord(
       : {}),
   };
 
-  // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted
-  if (!matter.conflictCheckRecord) {
+  // Ensure full conflict check record, risk assessment snapshot, and immutable matter opening snapshot are persisted for opened or referred matters only
+  if (
+    !matter.conflictCheckRecord &&
+    ((existingHasOpened && !persistedIsPmsImport) ||
+      legacyFallbackConflictRecord?.status === 'Referred')
+  ) {
     matter.conflictCheckRecord =
-      storedConflictRecord ??
+      persistedConflictRecord ??
+      legacyFallbackConflictRecord ??
       resolveMatterConflictCheckRecord(
         matter,
         allPeopleWithPending,
@@ -7394,7 +7465,9 @@ export async function saveMatterRecord(
           {
             ...matter,
             conflictCheckRecord:
-              storedConflictRecord ?? matter.conflictCheckRecord,
+              persistedConflictRecord ??
+              legacyFallbackConflictRecord ??
+              matter.conflictCheckRecord,
             conflictCheckStatus:
               inTxExisting?.conflictCheckStatus ?? matter.conflictCheckStatus,
             fieldValues: cleanFieldVals,
@@ -7456,16 +7529,18 @@ export async function saveMatterRecord(
           byId: opts.byId,
           at: now,
         });
-        writeAudit(store, {
-          recordType: 'matter',
-          recordId: matter.id,
-          action: 'create',
-          field: 'Conflict check record',
-          oldValue: null,
-          newValue: `${matter.conflictCheckRecord!.status} (${matter.conflictCheckRecord!.outcomeLabel}) · ${matter.conflictCheckRecord!.parties.length} parties checked`,
-          byId: opts.byId,
-          at: now,
-        });
+        if (matter.conflictCheckRecord) {
+          writeAudit(store, {
+            recordType: 'matter',
+            recordId: matter.id,
+            action: 'create',
+            field: 'Conflict check record',
+            oldValue: null,
+            newValue: `${matter.conflictCheckRecord.status} (${matter.conflictCheckRecord.outcomeLabel}) · ${matter.conflictCheckRecord.parties.length} parties checked`,
+            byId: opts.byId,
+            at: now,
+          });
+        }
         writeAudit(store, {
           recordType: 'matter',
           recordId: matter.id,
@@ -8304,7 +8379,7 @@ export async function updateMatterConflictRecord(
     matter.conflictCheckRecord ??
     resolveMatterConflictCheckRecord(matter, people, organisations);
   const prospectiveStatusId = resolveProspectiveStatusId(store);
-  const opened = matterHasOpened(matter, prospectiveStatusId);
+  const opened = matterHasOpened(matter, prospectiveStatusId, store.values);
   if (
     storedConflictRecord.status === 'Referred' &&
     record.status === 'Cleared' &&
@@ -22607,6 +22682,20 @@ export async function updateMatterLifecycleStatusRecord(
               errors: { closedAt: msg },
             };
           }
+          if (
+            !existing.openedAt?.trim() ||
+            isProspectiveMatterStatus(existing.matterStatusId, dbMatterStatusValues) ||
+            existing.matterNumber.startsWith('DRAFT')
+          ) {
+            const msg =
+              'This matter has not been opened. Delete or abandon it instead of closing it.';
+            return {
+              matter: null,
+              code: 'MATTER_NOT_OPENED',
+              message: msg,
+              errors: { matterStatusId: msg },
+            };
+          }
           if (!currentlyClosedOrArchived) {
             const msg =
               'MATTER_NOT_CLOSED: Only closed or archived matters can be reopened.';
@@ -22617,15 +22706,31 @@ export async function updateMatterLifecycleStatusRecord(
               errors: { matterStatusId: msg },
             };
           }
-        } else if (currentlyClosedOrArchived) {
-          const msg =
-            'MATTER_ALREADY_CLOSED: Matter is already closed; reopen it before recording a new closure date.';
-          return {
-            matter: null,
-            code: 'MATTER_ALREADY_CLOSED',
-            message: msg,
-            errors: { matterStatusId: msg },
-          };
+        } else {
+          if (currentlyClosedOrArchived) {
+            const msg =
+              'MATTER_ALREADY_CLOSED: Matter is already closed; reopen it before recording a new closure date.';
+            return {
+              matter: null,
+              code: 'MATTER_ALREADY_CLOSED',
+              message: msg,
+              errors: { matterStatusId: msg },
+            };
+          }
+          if (
+            !existing.openedAt?.trim() ||
+            isProspectiveMatterStatus(existing.matterStatusId, dbMatterStatusValues) ||
+            existing.matterNumber.startsWith('DRAFT')
+          ) {
+            const msg =
+              'This matter has not been opened. Delete or abandon it instead of closing it.';
+            return {
+              matter: null,
+              code: 'MATTER_NOT_OPENED',
+              message: msg,
+              errors: { matterStatusId: msg },
+            };
+          }
         }
 
         // R496: Resolve target status strictly by systemKey / canonical ID, never display label; fail closed if absent/inactive

@@ -5469,16 +5469,8 @@ export function MatterFormClient({
                   </h2>
                   {aiExtractionResult ? (
                     <StatusPill
-                      label={
-                        aiExtractionResult.modelName === 'local-fallback'
-                          ? '✓ Pre-filled (local fallback)'
-                          : '✓ Pre-filled (Claude AI)'
-                      }
-                      tone={
-                        aiExtractionResult.modelName === 'local-fallback'
-                          ? 'warning'
-                          : 'positive'
-                      }
+                      label="✓ Pre-filled (Claude AI)"
+                      tone="positive"
                     />
                   ) : stagedDocs.length > 0 ? (
                     <StatusPill
@@ -5900,10 +5892,7 @@ export function MatterFormClient({
                             Extraction Applied to Form
                           </span>
                           <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                            ·{' '}
-                            {aiExtractionResult.modelName === 'local-fallback'
-                              ? 'Local fallback (offline / deterministic)'
-                              : aiExtractionResult.modelName}
+                            · {aiExtractionResult.modelName}
                           </span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

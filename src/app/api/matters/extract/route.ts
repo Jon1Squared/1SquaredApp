@@ -1659,7 +1659,7 @@ function normaliseClaudeJsonToExtractionResult(
 
   return {
     engine: 'claude',
-    modelName: modelId === 'local-fallback' ? 'local-fallback' : `Claude (${modelId})`,
+    modelName: `Claude (${modelId})`,
     summary: generatedSummary,
     extractedAt: new Date().toISOString(),
     client: clientObj,
@@ -1947,7 +1947,12 @@ Important rules for speed and accuracy:
         // If invalid API key (401/403), stop trying other models
         if (response.status === 401 || response.status === 403) {
           const authErr = await response.text();
-          throw new Error(`Invalid Claude API key (${response.status}): ${authErr}`);
+          const upstreamAuthErr = new Error(
+            `Invalid Claude API key (${response.status}): ${authErr}`,
+          ) as Error & { errorCode?: string; upstreamFailure?: boolean };
+          upstreamAuthErr.errorCode = 'EXTRACTION_FAILED';
+          upstreamAuthErr.upstreamFailure = true;
+          throw upstreamAuthErr;
         }
         continue;
       }
@@ -1988,8 +1993,10 @@ Important rules for speed and accuracy:
   if (!parsedJson) {
     const unavailableErr = new Error('MATTER_EXTRACTION_UNAVAILABLE') as Error & {
       errorCode?: string;
+      upstreamFailure?: boolean;
     };
     unavailableErr.errorCode = 'MATTER_EXTRACTION_UNAVAILABLE';
+    unavailableErr.upstreamFailure = true;
     throw unavailableErr;
   }
 
@@ -2409,12 +2416,18 @@ export const POST = guardedRoute(
           { status: 401 },
         );
       }
-      const errorCode =
+      const taggedCode =
         err instanceof Error &&
         'errorCode' in err &&
         typeof (err as { errorCode?: unknown }).errorCode === 'string'
-          ? ((err as { errorCode: string }).errorCode)
-          : 'EXTRACTION_FAILED';
+          ? (err as { errorCode: string }).errorCode
+          : null;
+      const isUpstreamFailure =
+        err instanceof Error &&
+        ((err as { upstreamFailure?: boolean }).upstreamFailure === true ||
+          taggedCode === 'MATTER_EXTRACTION_UNAVAILABLE' ||
+          taggedCode === 'EXTRACTION_FAILED');
+      const errorCode = isUpstreamFailure ? taggedCode ?? 'EXTRACTION_FAILED' : 'INTERNAL_ERROR';
       emitTenantTelemetryEvent({
         eventName: 'matter_ai_extraction.failed',
         severity: 'error',
@@ -2435,13 +2448,15 @@ export const POST = guardedRoute(
         {
           ok: false,
           code: errorCode,
-          error:
-            'Matter extraction is unavailable at the moment. Enter the details manually.',
-          message:
-            'Matter extraction is unavailable at the moment. Enter the details manually.',
+          error: isUpstreamFailure
+            ? 'Matter extraction is unavailable at the moment. Enter the details manually.'
+            : 'An unexpected error occurred during matter extraction. Enter the details manually.',
+          message: isUpstreamFailure
+            ? 'Matter extraction is unavailable at the moment. Enter the details manually.'
+            : 'An unexpected error occurred during matter extraction. Enter the details manually.',
           correlationId,
         },
-        { status: 503 },
+        { status: isUpstreamFailure ? 503 : 500 },
       );
     }
   },
