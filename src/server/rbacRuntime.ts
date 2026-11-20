@@ -154,12 +154,17 @@ export function withActiveTenantRbacOptions(
     options.config?.rbac ??
     sessionRbacConfig ??
     getDefaultTenantRbacConfig(activeTenantId);
+  const explicitEnv =
+    options.config && typeof options.config === 'object' && 'environment' in options.config
+      ? (options.config as { environment?: TenantConfiguration['environment'] }).environment
+      : undefined;
+  const environment = explicitEnv ?? getActiveTenantConfiguration().environment;
   return {
     ...options,
     tenantId: activeTenantId,
     config: options.config
-      ? { ...options.config, rbac: rbacConfig }
-      : { rbac: rbacConfig },
+      ? { ...options.config, environment, rbac: rbacConfig }
+      : { environment, rbac: rbacConfig },
     context: options.context
       ? { ...options.context, tenantId: activeTenantId }
       : { tenantId: activeTenantId },
@@ -295,6 +300,7 @@ export function resolvePersonForEntraClaims(params: {
   tenantId?: string;
   rbacConfig?: RbacConfiguration;
   primaryDomain?: string;
+  environment?: TenantConfiguration['environment'];
 }): {
   person: Person | null;
   matchedByEmailOnly?: boolean;
@@ -312,6 +318,7 @@ export function resolvePersonForEntraClaims(params: {
     tenantId: activeTenantId,
     rbacConfig,
     primaryDomain: params.primaryDomain ?? serverConfig.branding.primaryDomain,
+    environment: params.environment ?? getActiveTenantConfiguration().environment,
   });
 }
 
@@ -386,7 +393,10 @@ export function getLeftRailVisibility(
   activeRole: string,
   userRoles: string[] = [activeRole],
   options: {
-    config?: { rbac?: RbacConfiguration };
+    config?: {
+      environment?: TenantConfiguration['environment'];
+      rbac?: RbacConfiguration;
+    };
     tenantId?: string;
   } = {},
 ): LeftRailVisibility {
@@ -400,9 +410,11 @@ export function getLeftRailVisibility(
     options.config?.rbac ??
     sessionRbacConfig ??
     getDefaultTenantRbacConfig(activeTenantId);
+  const environment =
+    options.config?.environment ?? getActiveTenantConfiguration().environment;
   return domainGetLeftRailVisibility(activeRole, userRoles, {
     tenantId: activeTenantId,
-    config: { rbac: rbacConfig },
+    config: { environment, rbac: rbacConfig },
   });
 }
 

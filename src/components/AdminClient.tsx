@@ -210,6 +210,7 @@ interface Props {
   authError?: string;
   authSuccess?: boolean;
   firmName?: string;
+  isLiveEnvironment?: boolean;
 }
 
 export function AdminClient({
@@ -253,6 +254,7 @@ export function AdminClient({
   authError,
   authSuccess,
   firmName = 'Firm',
+  isLiveEnvironment = false,
 }: Props) {
   const { showToast } = useToast();
   const [tab, setTab] = useState<AdminTab>(initialTab);
@@ -1471,6 +1473,7 @@ export function AdminClient({
           orgStructure={orgCatalogue}
           entraSession={entraSession}
           entraEnvStatus={entraEnvStatus}
+          isLiveEnvironment={isLiveEnvironment}
           authError={authError}
           authSuccess={authSuccess}
         />

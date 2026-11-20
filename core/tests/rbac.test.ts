@@ -1,4 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { createSeedStore } from '../../src/seed/seedStoreBuilder';
 import {
   ALL_BUILTIN_ROLE_KEYS,
   ALL_JOB_ONLY_PERMISSION_KEYS,
@@ -29,6 +32,7 @@ import {
   validateTenantConfigWithWarnings,
   validateUserOverrideOrRoleMutation,
   type PermissionKey,
+  type RbacConfiguration,
   type TenantConfiguration,
   type TenantContext,
 } from '../src/index';
@@ -88,6 +92,7 @@ import {
   getMatterPmsViewBundle,
   getMatterRepository,
   getPartyRepository,
+  getPmsAdminSnapshot,
   getTaskWorkflowRepository,
   linkPmsRecord,
   logEmployeeRestrictedAccess,
@@ -113,6 +118,7 @@ import {
   saveQuoteRecord,
   saveTaskRecord,
   sendEnquiryEmailRecord,
+  syncMatterCostsRatesFromPms,
   updateEmployeeRolesAndSupports,
   updateEmployeeRoleSetting,
   updatePersonPermissionOverrides,
@@ -206,6 +212,7 @@ import {
   searchMatterConflicts,
 } from '../../src/domain/matterConflicts';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
+import { resolveMatterDefaultResponsiblePersonIds } from '../../src/domain/keyDates';
 import PersonProfilePage from '../../src/app/people/[id]/page';
 import EditPersonPage from '../../src/app/people/[id]/edit/page';
 import OrganisationProfilePage from '../../src/app/organisations/[id]/page';
@@ -8659,6 +8666,506 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(matchedViaContext.permissions.has('admin:access')).toBe(true);
       expect(matchedViaContext.permissions.has('matter:restricted:access')).toBe(true);
+    });
+  });
+
+  describe('Stage 0 Exit Round 1 — Finance Permissions & Live Admin MFA (R525, R526, R527)', () => {
+    it('R525: getPmsAdminSnapshot and createRecordFromPms require finance:manage_links, and syncMatterCostsRatesFromPms requires admin:access + MFA', async () => {
+      try {
+        await resetAllDemoData('P-000001', testDataResetContext());
+        const ctx = testDataResetContext();
+        const partyRepo = getPartyRepository();
+        const partner = (await partyRepo.getPersonById<Person>(ctx, 'P-000001'))!;
+        const prevOverrides = partner.permissionOverrides;
+
+        // Give P-000001 admin:access and contact:create, but NOT finance:manage_links
+        partner.permissionOverrides = {
+          grant: ['admin:access', 'contact:create'],
+          revoke: ['finance:manage_links'],
+          reason: 'R525 test: admin:access without finance:manage_links',
+        };
+        await partyRepo.putPerson(ctx, partner);
+
+        const adminWithoutLinksDenied = await runAsTestActor('P-000001', () =>
+          getPmsAdminSnapshot('P-000001'),
+        );
+        expect(isActionDenied(adminWithoutLinksDenied)).toBe(true);
+        if (isActionDenied(adminWithoutLinksDenied)) {
+          expect(adminWithoutLinksDenied.code).toBe('FORBIDDEN');
+          expect(adminWithoutLinksDenied.message).toContain('finance:manage_links');
+        }
+
+        const createWithoutLinksDenied = await runAsTestActor('P-000001', () =>
+          createRecordFromPms('organisation', 'CL001', 'P-000001', {
+            mfaVerified: true,
+          }),
+        );
+        expect(isActionDenied(createWithoutLinksDenied)).toBe(true);
+        if (isActionDenied(createWithoutLinksDenied)) {
+          expect(createWithoutLinksDenied.code).toBe('FORBIDDEN');
+          expect(createWithoutLinksDenied.message).toContain('finance:manage_links');
+        }
+
+        // Actor without admin:access cannot call syncMatterCostsRatesFromPms
+        await expect(
+          runAsTestActor('P-000002', () =>
+            syncMatterCostsRatesFromPms('P-000002'),
+          ),
+        ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+        // Positive control: P-000004 (admin with MFA + finance:manage_links) succeeds on getPmsAdminSnapshot
+        partner.permissionOverrides = prevOverrides;
+        await partyRepo.putPerson(ctx, partner);
+
+        const adminAllowed = await runAsTestActor('P-000004', () =>
+          getPmsAdminSnapshot('P-000004'),
+        );
+        expect(isActionDenied(adminAllowed)).toBe(false);
+      } finally {
+        setTestEntraSessionOverride(undefined);
+        await resetAllDemoData('P-000001', testDataResetContext());
+      }
+    });
+
+    it('R526 (D2): scopes getMatterFinanceRows to own/team matters without finance:view, preserves partner full access, and leaves getMatterPmsViewBundle unchanged', async () => {
+      try {
+        await resetAllDemoData('P-000001', testDataResetContext());
+        const ctx = testDataResetContext();
+        const [matters, links] = await Promise.all([
+          getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+          getPmsRepository().listPmsLinks<import('@/domain/types').PmsLink>(ctx),
+        ]);
+        const linkByMatterId = new Map(
+          links
+            .filter((l) => l.entityType === 'matter')
+            .map((l) => [l.onesquaredId, l.pmsCode]),
+        );
+
+        const ownLinkedCodes = new Set<string>();
+        const otherUnrestrictedLinkedMatters: Matter[] = [];
+        for (const m of matters) {
+          if (m.mergedIntoId) continue;
+          const pmsCode = linkByMatterId.get(m.id);
+          if (!pmsCode) continue;
+          if (m.isStaffMatter || m.hasEthicalWall || (m.restrictedAccessUserIds?.length ?? 0) > 0) {
+            continue;
+          }
+          if (resolveMatterDefaultResponsiblePersonIds(m).includes('P-000002')) {
+            ownLinkedCodes.add(pmsCode);
+          } else {
+            otherUnrestrictedLinkedMatters.push(m);
+          }
+        }
+        expect(ownLinkedCodes.size).toBeGreaterThan(0);
+        expect(otherUnrestrictedLinkedMatters.length).toBeGreaterThan(0);
+        const nonTeamMatter = otherUnrestrictedLinkedMatters[0]!;
+        const nonTeamPmsCode = linkByMatterId.get(nonTeamMatter.id)!;
+
+        // Fee earner P-000002 (finance:view_matter only) sees ONLY own/team linked matters
+        const feRows = await runAsTestActor('P-000002', () =>
+          getMatterFinanceRows('P-000002'),
+        );
+        expect(isActionDenied(feRows)).toBe(false);
+        if (!isActionDenied(feRows)) {
+          const returnedCodes = new Set(feRows.allMatterFins.map((f) => f.matter_code));
+          expect(returnedCodes.size).toBe(ownLinkedCodes.size);
+          for (const code of returnedCodes) {
+            expect(ownLinkedCodes.has(code)).toBe(true);
+          }
+          expect(returnedCodes.has(nonTeamPmsCode)).toBe(false);
+          expect(feRows.allMatterFins.some((f) => f.matter_code === nonTeamPmsCode)).toBe(false);
+          expect(feRows.pmsInvoices.some((i) => i.matter_code === nonTeamPmsCode)).toBe(false);
+          expect(feRows.pmsAgedDebt.some((d) => d.matter_code === nonTeamPmsCode)).toBe(false);
+        }
+
+        // Explicit matterIds targeting a non-team matter is also denied without finance:view
+        const feExplicitOtherDenied = await runAsTestActor('P-000002', () =>
+          getMatterFinanceRows('P-000002', [nonTeamMatter.id]),
+        );
+        expect(isActionDenied(feExplicitOtherDenied)).toBe(true);
+        if (isActionDenied(feExplicitOtherDenied)) {
+          expect(feExplicitOtherDenied.code).toBe('FORBIDDEN');
+        }
+
+        // D2: Per-matter PMS view on the matter page remains unchanged (finance:view_matter + matter access)
+        const feMatterPageBundle = await runAsTestActor('P-000002', () =>
+          getMatterPmsViewBundle(nonTeamMatter.id, 'P-000002'),
+        );
+        expect(isActionDenied(feMatterPageBundle)).toBe(false);
+
+        // Partner P-000001 (holds finance:view) still sees all accessible linked matters, including non-team ones
+        const partnerRows = await runAsTestActor('P-000001', () =>
+          getMatterFinanceRows('P-000001'),
+        );
+        expect(isActionDenied(partnerRows)).toBe(false);
+        if (!isActionDenied(partnerRows)) {
+          expect(
+            partnerRows.allMatterFins.some((f) => f.matter_code === nonTeamPmsCode),
+          ).toBe(true);
+        }
+      } finally {
+        setTestEntraSessionOverride(undefined);
+      }
+    });
+
+    it('R527 (D3): refuses disabling requireMfaForAdminPermissions in live overrides/preview and enforces admin MFA in live resolver & template approval defence-in-depth', async () => {
+      const baseRaw = structuredClone(
+        getActiveTenantRawBaseConfig() as Record<string, unknown>,
+      );
+      const liveRawConfig: Record<string, unknown> = {
+        ...baseRaw,
+        environment: 'live',
+        integrations: {
+          ...(baseRaw.integrations as Record<string, unknown>),
+          pmsConnectionSecretVaultRef: 'kv://kv-notalawfirm-live/pms-connection-string',
+          companiesHouseApiKeyVaultRef: 'kv://kv-notalawfirm-live/companies-house-api-key',
+        },
+        featureFlags: {
+          ...((baseRaw.featureFlags as Record<string, unknown>) ?? {}),
+          enableDemoMode: false,
+        },
+      };
+
+      const prevPlatformEnv = process.env.PLATFORM_ENVIRONMENT;
+      try {
+        await resetAllDemoData('P-000001', testDataResetContext());
+        process.env.PLATFORM_ENVIRONMENT = 'live';
+        setActiveTenantConfigForTesting(liveRawConfig, { environment: 'live' });
+        const activeRbac = getDefaultTenantRbacConfig();
+
+        // 1. Runtime RBAC config save refuses requireMfaForAdminPermissions: false in live
+        const updateDenied = await runAsTestActor('P-000004', () =>
+          updateTenantRbacConfig(
+            {
+              identityMapping: {
+                ...activeRbac.identityMapping,
+                requireMfaForAdminPermissions: false,
+              },
+            },
+            'P-000004',
+            { mfaVerified: true },
+          ),
+        );
+        expect(updateDenied.ok).toBe(false);
+        expect(updateDenied.code).toBe('FORBIDDEN');
+
+        // 2. Runtime preview also refuses requireMfaForAdminPermissions: false in live
+        const previewDenied = await runAsTestActor('P-000004', () =>
+          previewRbacOverrides(
+            'P-000002',
+            {
+              grant: [],
+              revoke: [],
+              rbacConfig: {
+                ...activeRbac,
+                identityMapping: {
+                  ...activeRbac.identityMapping,
+                  requireMfaForAdminPermissions: false,
+                },
+              },
+            },
+            'P-000004',
+            { mfaVerified: true },
+          ),
+        );
+        expect(previewDenied.ok).toBe(false);
+        expect(previewDenied.code).toBe('FORBIDDEN');
+
+        // 3. Defence-in-depth: resolver ignores false in live
+        clearPermissionRequestCache();
+        const forcedRbacFalse: RbacConfiguration = {
+          ...activeRbac,
+          identityMapping: {
+            ...activeRbac.identityMapping,
+            requireMfaForAdminPermissions: false,
+          },
+        };
+        const liveResolvedNoMfa = resolvePermissions({
+          context: {
+            tenantId: 'not-a-law-firm',
+            correlationId: 'corr-r527-live',
+            actorId: 'P-000004',
+            actorRoles: ['admin'],
+            mfaVerified: false,
+          },
+          config: {
+            environment: 'live',
+            rbac: forcedRbacFalse,
+          },
+          actor: {
+            userId: 'P-000004',
+            roles: ['admin'],
+          },
+        });
+        expect(liveResolvedNoMfa.requireMfaForAdminPermissions).toBe(true);
+        expect(liveResolvedNoMfa.mfaPendingPermissions.has('admin:access')).toBe(true);
+
+        // Non-live (test/dev) still honours requireMfaForAdminPermissions: false
+        const testResolvedNoMfa = resolvePermissions({
+          context: {
+            tenantId: 'not-a-law-firm',
+            correlationId: 'corr-r527-test',
+            actorId: 'P-000004',
+            actorRoles: ['admin'],
+            mfaVerified: false,
+          },
+          config: {
+            environment: 'test',
+            rbac: forcedRbacFalse,
+          },
+          actor: {
+            userId: 'P-000004',
+            roles: ['admin'],
+          },
+        });
+        expect(testResolvedNoMfa.requireMfaForAdminPermissions).toBe(false);
+        expect(testResolvedNoMfa.mfaPendingPermissions.has('admin:access')).toBe(false);
+
+        // 4. Defence-in-depth in template approval workflow even if live config had false in memory
+        const liveCfgForcedFalse = {
+          ...getActiveTenantConfiguration(),
+          environment: 'live' as const,
+          rbac: forcedRbacFalse,
+        };
+        const docRepo = new TenantDocumentRepository();
+        const docCtx = resolveTenantFromVerifiedToken({
+          verifiedToken: {
+            __verifiedByOidcMiddleware: true,
+            sub: 'P-000001',
+            tenantId: 'not-a-law-firm',
+            name: 'Rhian Morgan',
+            email: 'rhian.morgan@notalawfirm.example',
+            roles: ['managing_partner'],
+            mfaVerified: false,
+          },
+          hostingMode: 'multi_tenant',
+          environment: 'live',
+          correlationId: 'corr-r527-doc-approve',
+        });
+        await docRepo.putTemplate(docCtx, {
+          id: 'TPL-R527',
+          tenantId: 'not-a-law-firm',
+          code: 'R527_TEST',
+          name: 'R527 Test',
+          description: 'Test',
+          category: 'General',
+          tags: [],
+          outputDocumentType: 'letter',
+          filenamePattern: '{{matter.reference}}',
+          availabilityRules: { sourceContexts: ['matter'] },
+          activeVersionId: null,
+          status: 'Submitted',
+          createdByUserId: 'P-000002',
+          createdAt: '2026-11-19T00:00:00Z',
+          updatedAt: '2026-11-19T00:00:00Z',
+        });
+        await docRepo.putTemplateVersion(docCtx, {
+          id: 'VER-R527',
+          tenantId: 'not-a-law-firm',
+          templateId: 'TPL-R527',
+          versionNumber: 1,
+          engine: 'basic-merge',
+          status: 'Submitted',
+          storageProvider: 'local-fs',
+          blobKey: 'templates/ver-r527.docx',
+          fileName: 'ver-r527.docx',
+          fileSha256: 'abc',
+          fileSizeBytes: 100,
+          scanStatus: 'clean',
+          extractedPlaceholders: [],
+          fieldMappings: {},
+          promptedFields: [],
+          createdByUserId: 'P-000002',
+          createdAt: '2026-11-19T00:00:00Z',
+          submittedByUserId: 'P-000002',
+          submittedAt: '2026-11-19T01:00:00Z',
+        });
+        await expect(
+          approveTemplateVersion({
+            ctx: docCtx,
+            repo: docRepo,
+            actor: {
+              id: 'P-000001',
+              tenantId: docCtx.tenantId,
+              roles: ['managing_partner'],
+              mfaVerified: false,
+            },
+            config: liveCfgForcedFalse,
+            versionId: 'VER-R527',
+          }),
+        ).rejects.toThrow(/MFA_REQUIRED/);
+      } finally {
+        if (prevPlatformEnv === undefined) {
+          delete process.env.PLATFORM_ENVIRONMENT;
+        } else {
+          process.env.PLATFORM_ENVIRONMENT = prevPlatformEnv;
+        }
+        setActiveTenantConfigForTesting(null);
+        setTestEntraSessionOverride(undefined);
+        clearPermissionRequestCache();
+      }
+    });
+
+    it('R547 & R559: resolver defaults omitted environment to live MFA enforcement and threads environment across null-user, unmatched Entra, and left-rail callers', () => {
+      clearPermissionRequestCache();
+      const activeRbac = getDefaultTenantRbacConfig();
+      const forcedRbacFalse: RbacConfiguration = {
+        ...activeRbac,
+        identityMapping: {
+          ...activeRbac.identityMapping,
+          requireMfaForAdminPermissions: false,
+        },
+      };
+
+      // 1. Direct resolvePermissions with omitted environment defaults to live (MFA required)
+      const omittedEnvResolved = resolvePermissions({
+        context: {
+          tenantId: 'not-a-law-firm',
+          correlationId: 'corr-r547-omitted',
+          actorId: 'P-000004',
+          actorRoles: ['admin'],
+          mfaVerified: false,
+        },
+        config: { rbac: forcedRbacFalse },
+        actor: { userId: 'P-000004', roles: ['admin'] },
+      });
+      expect(omittedEnvResolved.requireMfaForAdminPermissions).toBe(true);
+      expect(omittedEnvResolved.mfaPendingPermissions.has('admin:access')).toBe(
+        true,
+      );
+
+      // 2. Null-user branch in resolvePersonPermissionSet always fails closed
+      //    (empty set, requireMfaForAdminPermissions: true even when environment is 'test')
+      const nullUserOmitted = domainResolvePersonPermissionSet(null, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: forcedRbacFalse },
+      });
+      expect(nullUserOmitted.requireMfaForAdminPermissions).toBe(true);
+      expect(nullUserOmitted.permissions.size).toBe(0);
+      const nullUserExplicitTest = domainResolvePersonPermissionSet(null, {
+        tenantId: 'not-a-law-firm',
+        config: { environment: 'test', rbac: forcedRbacFalse },
+      });
+      expect(nullUserExplicitTest.requireMfaForAdminPermissions).toBe(true);
+      expect(nullUserExplicitTest.permissions.size).toBe(0);
+
+      //    For a real admin user, omitted environment defaults to live MFA enforcement (true)
+      //    while explicit 'test' honours requireMfaForAdminPermissions: false
+      const adminPerson = makeTestPerson({ id: 'P-000004', roles: ['admin'] });
+      const adminOmittedEnv = domainResolvePersonPermissionSet(adminPerson, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: forcedRbacFalse },
+      });
+      expect(adminOmittedEnv.requireMfaForAdminPermissions).toBe(true);
+      const adminTestEnv = domainResolvePersonPermissionSet(adminPerson, {
+        tenantId: 'not-a-law-firm',
+        config: { environment: 'test', rbac: forcedRbacFalse },
+      });
+      expect(adminTestEnv.requireMfaForAdminPermissions).toBe(false);
+
+      // 3. Unmatched Entra user in resolvePersonForEntraClaims defaults omitted environment to live and honours threaded environment
+      const unmatchedClaims = {
+        sub: 'entra-unmatched-r547',
+        oid: '00000000-0000-4000-8000-999999990547',
+        preferred_username: 'unmatched.admin@notalawfirm.example',
+        roles: ['admin'],
+        amr: ['pwd'],
+      };
+      const unmatchedOmitted = domainResolvePersonForEntraClaims({
+        claims: unmatchedClaims,
+        people: [],
+        tenantId: 'not-a-law-firm',
+        rbacConfig: forcedRbacFalse,
+      });
+      expect(unmatchedOmitted.person).toBeNull();
+      expect(unmatchedOmitted.permissions.requireMfaForAdminPermissions).toBe(
+        true,
+      );
+      expect(
+        unmatchedOmitted.permissions.mfaPendingPermissions.has('admin:access'),
+      ).toBe(true);
+
+      const unmatchedTestEnv = domainResolvePersonForEntraClaims({
+        claims: unmatchedClaims,
+        people: [],
+        tenantId: 'not-a-law-firm',
+        rbacConfig: forcedRbacFalse,
+        environment: 'test',
+      });
+      expect(unmatchedTestEnv.permissions.requireMfaForAdminPermissions).toBe(
+        false,
+      );
+      expect(
+        unmatchedTestEnv.permissions.mfaPendingPermissions.has('admin:access'),
+      ).toBe(false);
+
+      // 4. Left-rail visibility threads optional environment without throwing or failing live mode
+      const liveRail = domainGetLeftRailVisibility('admin', ['admin'], {
+        tenantId: 'not-a-law-firm',
+        config: { environment: 'live', rbac: forcedRbacFalse },
+      });
+      expect(liveRail.admin).toBe(true);
+    });
+
+    it('R570: documents decisive restrictedAccessUserIds precedence in canAccessMatter docstring, ADR 0014 and rbac-reference, and verifies seed restricted-matter allow-lists', () => {
+      const repoRoot = path.resolve(__dirname, '../..');
+      const resolverSrc = fs.readFileSync(
+        path.join(repoRoot, 'core/src/domain/rbac/resolver.ts'),
+        'utf8',
+      );
+      const adr0014 = fs.readFileSync(
+        path.join(
+          repoRoot,
+          'docs/decisions/0014-staff-matter-access-by-permission.md',
+        ),
+        'utf8',
+      );
+      const rbacRef = fs.readFileSync(
+        path.join(repoRoot, 'docs/rbac-reference.md'),
+        'utf8',
+      );
+
+      expect(resolverSrc).not.toMatch(/plus named matter participants/i);
+      expect(resolverSrc).toMatch(
+        /decisive when non-empty[\s\S]*restrictedAccessUserIds|non-empty `restrictedAccessUserIds`[\s\S]*decisive/i,
+      );
+
+      expect(adr0014).not.toMatch(/plus the matter's named participants/i);
+      expect(adr0014).not.toMatch(/plus named matter participants/i);
+      expect(adr0014).toMatch(/restrictedAccessUserIds[\s\S]*decisive/i);
+
+      expect(rbacRef).not.toMatch(/plus named matter participants/i);
+      expect(rbacRef).toMatch(/decisive/i);
+      expect(rbacRef).toMatch(/hasEthicalWall/);
+
+      // Audit both committed seed JSON and dynamically built seed store:
+      // every restricted matter allow-list must cover partner, supervisor, fee earner, and team.
+      for (const seedStore of [loadCommittedSeedStore(), createSeedStore()]) {
+        const restrictedMatters = seedStore.matters.filter(
+          (m) =>
+            Boolean(m.isStaffMatter) ||
+            Boolean(m.hasEthicalWall) ||
+            (Array.isArray(m.restrictedAccessUserIds) &&
+              m.restrictedAccessUserIds.length > 0),
+        );
+        for (const m of restrictedMatters) {
+          const allowSet = new Set(m.restrictedAccessUserIds ?? []);
+          const owningTeam = m.owningTeamId
+            ? seedStore.teams.find((t) => t.id === m.owningTeamId)
+            : undefined;
+          const expectedIds = [
+            m.responsiblePartnerId,
+            m.supervisingPartnerId,
+            m.leadFeeEarnerId,
+            m.relationshipPartnerId,
+            ...(m.teamMemberIds ?? []),
+            ...(owningTeam?.memberIds ?? []),
+          ].filter((id): id is string => Boolean(id));
+          for (const pid of expectedIds) {
+            expect(allowSet.has(pid)).toBe(true);
+          }
+        }
+      }
     });
   });
 });

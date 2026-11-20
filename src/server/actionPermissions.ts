@@ -506,7 +506,7 @@ export const ACTION_PERMISSIONS = {
   },
   createRecordFromPmsAction: {
     kind: 'permission',
-    key: 'admin:access',
+    key: 'finance:manage_links',
     enforcedBy: 'action',
   },
 

@@ -872,8 +872,9 @@ export function computeStaffMatterStatus(
 }
 
 /**
- * Checks whether a user can view a matter (enforces restricted access on staff matters
- * via `matter:restricted:access` permission + named matter participants, ADR-0014).
+ * Checks whether a user can view a matter (`ADR-0014`, `R546`, `R570`): oversight holders
+ * with `matter:restricted:access` retain access, while a non-empty `restrictedAccessUserIds`
+ * allow-list is decisive when populated (falling back to named participants only when empty).
  */
 export function canUserAccessMatter(
   matter: Matter,

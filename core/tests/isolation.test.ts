@@ -78,6 +78,7 @@ import {
   getExtensionHostLoadErrors,
   getJobRunRepository,
   getPlatformExtensionHost,
+  getPmsRepository,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '../../src/platform/tenantRuntime';
@@ -12165,6 +12166,439 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await partyRepo.clearTenantData(ctxA).catch(() => undefined);
       await partyRepo.clearTenantData(ctxB).catch(() => undefined);
       await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+  it('R526 two-tenant isolation: getMatterFinanceRows restricts non-finance:view actors to own/team matters in their verified tenant and rejects cross-tenant IDs and forged tenant claims', async () => {
+    const rawBase = JSON.parse(
+      fs.readFileSync(
+        path.resolve(__dirname, '../../client-not-a-law-firm/config/base.json'),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    const ctxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-ALPHA-FE',
+        tenantId: 'tenant-alpha',
+        name: 'Alpha Fee Earner',
+        email: 'alpha-fe@tenant-alpha.example',
+        roles: ['fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r526-a',
+    });
+    const ctxB = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-BRAVO-FE',
+        tenantId: 'tenant-bravo',
+        name: 'Bravo Fee Earner',
+        email: 'bravo-fe@tenant-bravo.example',
+        roles: ['fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r526-b',
+    });
+
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const pmsRepo = getPmsRepository();
+    const store = loadCommittedSeedStore();
+
+    try {
+      await pmsRepo.clearTenantData(ctxA).catch(() => undefined);
+      await pmsRepo.clearTenantData(ctxB).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+
+      const feTemplate = store.people.find((p) => p.id === 'P-000002')!;
+      const partnerTemplate = store.people.find((p) => p.id === 'P-000001')!;
+      const orgTemplate = store.organisations.find((o) => o.id === 'O-000001')!;
+      const matterTemplate = store.matters.find((m) => m.id === 'M-000001')!;
+
+      await partyRepo.putPeople(ctxA, [
+        {
+          ...feTemplate,
+          id: 'P-ALPHA-FE',
+          firstName: 'Alpha',
+          surname: 'FeeEarner',
+          roles: ['fee_earner'],
+          permissionOverrides: undefined,
+        },
+        {
+          ...partnerTemplate,
+          id: 'P-ALPHA-PARTNER',
+          firstName: 'Alpha',
+          surname: 'Partner',
+          roles: ['partner', 'fee_earner'],
+          permissionOverrides: undefined,
+        },
+      ]);
+      await partyRepo.putOrganisation(ctxA, {
+        ...orgTemplate,
+        id: 'O-ALPHA-R526',
+        legalName: 'Alpha Client Ltd',
+      });
+      await partyRepo.putPerson(ctxB, {
+        ...feTemplate,
+        id: 'P-BRAVO-FE',
+        firstName: 'Bravo',
+        surname: 'FeeEarner',
+        roles: ['fee_earner'],
+        permissionOverrides: undefined,
+      });
+      await partyRepo.putOrganisation(ctxB, {
+        ...orgTemplate,
+        id: 'O-BRAVO-R526',
+        legalName: 'Bravo Client Ltd',
+      });
+
+      // Tenant Alpha has two linked unrestricted matters: OWN (owned by P-ALPHA-FE) and OTHER (owned only by P-ALPHA-PARTNER)
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...matterTemplate,
+          id: 'M-ALPHA-OWN',
+          matterNumber: 'PEN001-0001',
+          title: 'Alpha Own Matter',
+          clientId: 'O-ALPHA-R526',
+          responsiblePartnerId: 'P-ALPHA-PARTNER',
+          supervisingPartnerId: 'P-ALPHA-PARTNER',
+          leadFeeEarnerId: 'P-ALPHA-FE',
+          teamMemberIds: ['P-ALPHA-FE'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: [],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...matterTemplate,
+          id: 'M-ALPHA-OTHER',
+          matterNumber: 'PRI001-0001',
+          title: 'Alpha Non-Team Matter',
+          clientId: 'O-ALPHA-R526',
+          responsiblePartnerId: 'P-ALPHA-PARTNER',
+          supervisingPartnerId: 'P-ALPHA-PARTNER',
+          leadFeeEarnerId: 'P-ALPHA-PARTNER',
+          teamMemberIds: ['P-ALPHA-PARTNER'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: [],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      await matterRepo.putMatter(
+        ctxB,
+        {
+          ...matterTemplate,
+          id: 'M-BRAVO-OWN',
+          matterNumber: 'SEV001-0001',
+          title: 'Bravo Own Matter',
+          clientId: 'O-BRAVO-R526',
+          responsiblePartnerId: 'P-BRAVO-FE',
+          supervisingPartnerId: 'P-BRAVO-FE',
+          leadFeeEarnerId: 'P-BRAVO-FE',
+          teamMemberIds: ['P-BRAVO-FE'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: [],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+
+      await pmsRepo.putPmsLink(ctxA, {
+        id: 'PMSL-ALPHA-OWN',
+        entityType: 'matter',
+        onesquaredId: 'M-ALPHA-OWN',
+        pmsCode: 'PEN001-0001',
+        matchedBy: 'manual',
+        matchedAt: '2026-11-19T10:00:00.000Z',
+      });
+      await pmsRepo.putPmsLink(ctxA, {
+        id: 'PMSL-ALPHA-OTHER',
+        entityType: 'matter',
+        onesquaredId: 'M-ALPHA-OTHER',
+        pmsCode: 'PRI001-0001',
+        matchedBy: 'manual',
+        matchedAt: '2026-11-19T10:00:00.000Z',
+      });
+      await pmsRepo.putPmsLink(ctxB, {
+        id: 'PMSL-BRAVO-OWN',
+        entityType: 'matter',
+        onesquaredId: 'M-BRAVO-OWN',
+        pmsCode: 'SEV001-0001',
+        matchedBy: 'manual',
+        matchedAt: '2026-11-19T10:00:00.000Z',
+      });
+
+      const extractMeta = {
+        asAtDate: '2026-10-31',
+        sourceFile: 'invented-pms.xlsx',
+        importedAt: '2026-11-19T10:00:00.000Z',
+      };
+      await pmsRepo.importExtractDataset(ctxA, {
+        extractInfo: extractMeta,
+        feeEarners: [
+          {
+            fee_earner_id: 'FE001',
+            initials: 'AM',
+            first_name: 'Alex',
+            last_name: 'Morgan',
+            email: 'alex.morgan@tenant-alpha.example',
+            grade: 'Partner',
+            department: 'Corporate',
+            standard_hourly_rate: 350,
+            annual_target_hours: 1200,
+            annual_target_fees: 350000,
+            active: 'Yes',
+          },
+        ],
+        clients: [
+          {
+            client_code: 'PEN001',
+            client_name: 'Alpha Client Ltd',
+            client_type: 'Organisation',
+            company_number: '10000001',
+            email: 'accounts@alpha.example',
+            phone: '029 2018 0100',
+            billing_address: '1 High Street',
+            postcode: 'CF10 1AA',
+            client_partner_id: 'FE001',
+            credit_terms_days: 30,
+            credit_limit: 50000,
+            rate_discount_pct: 0,
+            date_opened: '2025-01-15',
+            sector: 'Industrial',
+            crm_match_on: 'company_number',
+            status: 'Active',
+          },
+        ],
+        matters: [
+          {
+            matter_code: 'PEN001-0001',
+            client_code: 'PEN001',
+            matter_description: 'Alpha Own Financial',
+            work_type: 'M&A',
+            practice_area: 'Corporate',
+            responsible_partner_id: 'FE001',
+            fee_earner_id: 'FE001',
+            billing_basis: 'Hourly Rate',
+            fixed_fee_amount: 0,
+            fee_estimate: 10000,
+            estimate_alert_pct: 80,
+            date_opened: '2026-01-01',
+            date_closed: null,
+            status: 'Open',
+            billing_frequency: 'Monthly',
+            client_reference: 'REF-OWN',
+            third_party_payer: '',
+          },
+          {
+            matter_code: 'PRI001-0001',
+            client_code: 'PEN001',
+            matter_description: 'Alpha Other Financial',
+            work_type: 'M&A',
+            practice_area: 'Corporate',
+            responsible_partner_id: 'FE001',
+            fee_earner_id: 'FE001',
+            billing_basis: 'Hourly Rate',
+            fixed_fee_amount: 0,
+            fee_estimate: 20000,
+            estimate_alert_pct: 80,
+            date_opened: '2026-01-01',
+            date_closed: null,
+            status: 'Open',
+            billing_frequency: 'Monthly',
+            client_reference: 'REF-OTHER',
+            third_party_payer: '',
+          },
+        ],
+        feeEstimates: [],
+        invoices: [],
+        payments: [],
+        timeEntries: [
+          {
+            time_id: 'T-OWN-1',
+            matter_code: 'PEN001-0001',
+            fee_earner_id: 'FE001',
+            date: '2026-10-15',
+            activity: 'Drafting',
+            narrative: 'Drafting agreement',
+            minutes: 60,
+            units: 10,
+            hours: 1,
+            rate: 350,
+            value: 1200,
+            chargeable: 'Y',
+            billed_status: 'Unbilled',
+            invoice_number: null,
+            billed_value: 0,
+            write_off_value: 0,
+          },
+          {
+            time_id: 'T-OTHER-1',
+            matter_code: 'PRI001-0001',
+            fee_earner_id: 'FE001',
+            date: '2026-10-15',
+            activity: 'Review',
+            narrative: 'Reviewing papers',
+            minutes: 120,
+            units: 20,
+            hours: 2,
+            rate: 350,
+            value: 9900,
+            chargeable: 'Y',
+            billed_status: 'Unbilled',
+            invoice_number: null,
+            billed_value: 0,
+            write_off_value: 0,
+          },
+        ],
+        disbursements: [],
+        clientAccount: [],
+      });
+      await pmsRepo.importExtractDataset(ctxB, {
+        extractInfo: extractMeta,
+        feeEarners: [
+          {
+            fee_earner_id: 'FE003',
+            initials: 'BM',
+            first_name: 'Bravo',
+            last_name: 'Earner',
+            email: 'bravo.earner@tenant-bravo.example',
+            grade: 'Partner',
+            department: 'Commercial',
+            standard_hourly_rate: 350,
+            annual_target_hours: 1200,
+            annual_target_fees: 350000,
+            active: 'Yes',
+          },
+        ],
+        clients: [
+          {
+            client_code: 'SEV001',
+            client_name: 'Bravo Client Ltd',
+            client_type: 'Organisation',
+            company_number: '20000002',
+            email: 'accounts@bravo.example',
+            phone: '029 2018 0200',
+            billing_address: '2 High Street',
+            postcode: 'CF10 1AA',
+            client_partner_id: 'FE003',
+            credit_terms_days: 30,
+            credit_limit: 50000,
+            rate_discount_pct: 0,
+            date_opened: '2025-01-15',
+            sector: 'Industrial',
+            crm_match_on: 'company_number',
+            status: 'Active',
+          },
+        ],
+        matters: [
+          {
+            matter_code: 'SEV001-0001',
+            client_code: 'SEV001',
+            matter_description: 'Bravo Own Financial',
+            work_type: 'Contract',
+            practice_area: 'Commercial',
+            responsible_partner_id: 'FE003',
+            fee_earner_id: 'FE003',
+            billing_basis: 'Fixed Fee',
+            fixed_fee_amount: 0,
+            fee_estimate: 15000,
+            estimate_alert_pct: 80,
+            date_opened: '2026-01-01',
+            date_closed: null,
+            status: 'Open',
+            billing_frequency: 'Monthly',
+            client_reference: 'REF-BRV',
+            third_party_payer: '',
+          },
+        ],
+        feeEstimates: [],
+        invoices: [],
+        payments: [],
+        timeEntries: [
+          {
+            time_id: 'T-BRV-1',
+            matter_code: 'SEV001-0001',
+            fee_earner_id: 'FE003',
+            date: '2026-10-15',
+            activity: 'Drafting',
+            narrative: 'Bravo drafting',
+            minutes: 60,
+            units: 10,
+            hours: 1,
+            rate: 350,
+            value: 5500,
+            chargeable: 'Y',
+            billed_status: 'Unbilled',
+            invoice_number: null,
+            billed_value: 0,
+            write_off_value: 0,
+          },
+        ],
+        disbursements: [],
+        clientAccount: [],
+      });
+
+      setActiveTenantConfigForTesting(
+        { ...rawBase, tenantId: 'tenant-alpha', hostingMode: 'multi_tenant' },
+        { tenantId: 'tenant-alpha', environment: 'test' },
+      );
+
+      const feRowsA = await getMatterFinanceRows(ctxA);
+      expect(isActionDenied(feRowsA)).toBe(false);
+      if (!isActionDenied(feRowsA)) {
+        expect(feRowsA.allMatterFins.map((r) => r.matter_code)).toEqual(['PEN001-0001']);
+      }
+
+      // Tampered Tenant A non-team matter ID and tampered Tenant B matter ID are both rejected
+      const nonTeamExplicitA = await getMatterFinanceRows(ctxA, ['M-ALPHA-OTHER']);
+      expect(isActionDenied(nonTeamExplicitA)).toBe(true);
+      if (isActionDenied(nonTeamExplicitA)) {
+        expect(nonTeamExplicitA.code).toBe('FORBIDDEN');
+      }
+
+      const tamperedBravoMatterA = await getMatterFinanceRows(ctxA, ['M-BRAVO-OWN']);
+      expect(isActionDenied(tamperedBravoMatterA)).toBe(true);
+      if (isActionDenied(tamperedBravoMatterA)) {
+        expect(tamperedBravoMatterA.code).toBe('FORBIDDEN');
+      }
+
+      // Mismatched tenantId on TenantContext fails at database layer; forged session tenant claim throws TENANCY_FORGERY_DETECTED
+      await expect(
+        getMatterFinanceRows(Object.freeze({ ...ctxA, tenantId: 'tenant-bravo' })),
+      ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED|TENANCY_FORGERY_DETECTED|42501/i);
+      await expect(
+        runWithActiveActorSession(
+          {
+            personId: 'P-ALPHA-FE',
+            tenantId: 'tenant-bravo',
+            tokenRoles: ['fee_earner'],
+            expiresAtMs: Date.now() + 60_000,
+          },
+          () => getMatterFinanceRows('P-ALPHA-FE'),
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+    } finally {
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(null);
+      await pmsRepo.clearTenantData(ctxA).catch(() => undefined);
+      await pmsRepo.clearTenantData(ctxB).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxA).catch(() => undefined);
+      await partyRepo.clearTenantData(ctxB).catch(() => undefined);
     }
   });
 });

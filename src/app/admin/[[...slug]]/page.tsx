@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { AdminClient, type AdminTab } from '@/components/AdminClient';
+import { isActionDenied } from '@/domain/actionResult';
 import { createDefaultRoleConfigs } from '@/domain/homeConfig';
 import { hasPersonPermission } from '@/server/rbacRuntime';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
@@ -56,7 +57,10 @@ export default async function AdminCatchAllPage({
       ...(Number.isFinite(parsedBeforeSeq) ? { beforeSeq: parsedBeforeSeq } : {}),
     });
 
-    const pmsAdmin = await getPmsAdminSnapshot(actor.personId);
+    const pmsAdminResult = await getPmsAdminSnapshot(actor.personId);
+    const pmsAdmin = isActionDenied(pmsAdminResult) ? undefined : pmsAdminResult;
+    const activeTenantCfg = getActiveTenantConfiguration();
+    const isLiveEnvironment = activeTenantCfg.environment === 'live';
     const entraEnvStatus = getEntraEnvStatus();
 
     const first = slug?.[0];
@@ -72,13 +76,13 @@ export default async function AdminCatchAllPage({
               first === 'document-templates' ||
               first === 'key-dates' ||
               first === 'registers' ||
-          first === 'work-types' ||
+              first === 'work-types' ||
               first === 'custom-fields' ||
               first === 'enquiry-settings' ||
               first === 'task-settings' ||
               first === 'employees' ||
-              first === 'pms-links' ||
-              first === 'demo-data'
+              first === 'demo-data' ||
+              (first === 'pms-links' && Boolean(pmsAdmin))
             ? first
             : 'lists';
 
@@ -98,9 +102,10 @@ export default async function AdminCatchAllPage({
         taskSettings={snap.taskSettings}
         enquiries={snap.enquiries}
         pmsAdmin={pmsAdmin}
+        isLiveEnvironment={isLiveEnvironment}
         homePagesConfig={snap.homePagesConfig}
         defaultRoleConfigs={createDefaultRoleConfigs(
-          getActiveTenantConfiguration().branding.primaryDomain,
+          activeTenantCfg.branding.primaryDomain,
         )}
         orgStructure={snap.orgStructure}
         matterPartyTaxonomy={snap.matterPartyTaxonomy}

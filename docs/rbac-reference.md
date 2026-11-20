@@ -55,7 +55,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `matter:create` | `matter` | `standard` | No | Create and open new matters, including draft conflict checks and enquiry/quote conversions |
 | `matter:edit` | `matter` | `standard` | No | Edit matter details, participants, conflict check records, and commercial fields on accessible matters |
 | `matter:reassign_ownership` | `matter` | `restricted` | No | Change the owning department or owning team/practice group on an existing matter (re-permissioning linked document store folders) |
-| `matter:restricted:access` | `matter` | `confidential` | No | Oversight access to restricted staff matters (`isStaffMatter`) and linked documents |
+| `matter:restricted:access` | `matter` | `confidential` | No | Oversight access to restricted matters (`isStaffMatter`, `hasEthicalWall`, or non-empty `restrictedAccessUserIds`) and linked records |
 | `matter:restriction:lift` | `matter` | `restricted` | **Yes** | Lift a staff-matter or information-barrier restriction on a matter with a mandatory audited reason |
 | `matter:costs:sign_off` | `matter` | `restricted` | No | Sign off matter fee estimates that exceed the configured partner cost sign-off threshold |
 | `task:claim_any` | `task` | `standard` | No | Take or claim unassigned tasks across any team |
@@ -138,7 +138,7 @@ Configured per tenant in `client-<slug>/config/base.json` and validated by `core
 - `rbac.roles`: Built-in roles (starting from `DEFAULT_RBAC_ROLES`) plus optional tenant-defined custom roles.
 - `rbac.departmentGrants`: Maps tenant department IDs (e.g. `DEPT-HR`, `DEPT-FIN`, `DEPT-RISK`) to additional `PermissionKey[]`. Core ships `{}` (zero hardcoded department IDs in core code).
 - `rbac.relationshipGrants`: Configurable relationship grant rules (`team_lead_of_any_team`, `team_lead_of_target_team`, `line_manager_of_target`, `supporting_target_fee_earner`).
-- `rbac.identityMapping`: Configures `authorityMode` (`token_only | hybrid | store_only`), `entraGroupToRoleKey`, `entraAppRoleToRoleKey`, and `requireMfaForAdminPermissions`.
+- `rbac.identityMapping`: Configures `authorityMode` (`token_only | hybrid | store_only`), `entraGroupToRoleKey`, `entraAppRoleToRoleKey`, and `requireMfaForAdminPermissions` (always `true` in `live`; schema validation, `updateTenantRbacConfig`, and `previewRbacOverrides` reject `false` in `live`, and `resolvePermissions` ignores `false` in `live` as defence in depth; configurable only in non-live environments).
 
 ### Deprecation of `documentGeneration.permissions.roleDefaults`
 - `documentGeneration.permissions.roleDefaults` is **deprecated** (`ADR-0011`) and replaced by `rbac.roles`.
@@ -190,11 +190,12 @@ Implemented in `core/src/domain/rbac/resolver.ts` (and bridged for host entities
 
 ---
 
-## 7. Dynamic Staff-Matter & Linked-Document Access (`canAccessMatter`)
+## 7. Dynamic Staff-Matter, Ethical-Wall & Linked-Record Access (`canAccessMatter`)
 
-- When an active firm employee is a client on a matter (`isStaffMatter: true`), `computeStaffMatterStatus` populates `restrictedAccessUserIds` **only** with the named matter participants (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
+- When an active firm employee is a client on a matter (`isStaffMatter: true`), `computeStaffMatterStatus` populates `restrictedAccessUserIds` **only** with the named matter participants (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `originatingSolicitorId`, `teamMemberIds`).
+- Across the entire platform (not only finance), whenever `restrictedAccessUserIds` is populated (non-empty) on a staff (`isStaffMatter`), ethical-wall (`hasEthicalWall`), or allow-list-restricted matter, `canAccessMatter` treats `restrictedAccessUserIds` as **decisive** for non-oversight users (matching SQL repository predicates across matters, tasks, enquiries, quotes, key dates, registers, search, and finance), so excluded `teamMemberIds` or named participant fields cannot access the matter (`R546`, `R570`). Named participant fields (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `originatingSolicitorId`, `teamMemberIds`) act as a fallback only when `restrictedAccessUserIds` is empty (`B12`).
 - Oversight access is evaluated dynamically via `matter:restricted:access` (`risk_compliance`, `managing_partner`, `admin`), so role changes take effect immediately without stale stored user IDs.
-- Generated documents linked to a restricted staff matter inherit the restriction on both Matter and Client (`person` / `organisation`) screens via `canActorAccessGeneratedDocument`.
+- Generated documents and linked records (enquiries, quotes, tasks, key dates, register records) referencing a restricted matter inherit the restriction across both Matter and Client screens via `canActorAccessGeneratedDocument` and `canAccessMatter`.
 
 ---
 

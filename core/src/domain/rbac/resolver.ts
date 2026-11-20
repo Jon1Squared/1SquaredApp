@@ -95,7 +95,11 @@ export interface ResolvePermissionsInput {
   > | null;
   readonly config?:
     | Pick<TenantConfiguration, 'rbac'>
-    | { rbac?: RbacConfiguration; documentGeneration?: TenantConfiguration['documentGeneration'] }
+    | {
+        environment?: TenantConfiguration['environment'];
+        rbac?: RbacConfiguration;
+        documentGeneration?: TenantConfiguration['documentGeneration'];
+      }
     | null;
   readonly actor: PermissionResolutionActor | null | undefined;
   readonly relationships?: PermissionRelationshipContext | null;
@@ -508,8 +512,15 @@ export function resolvePermissions(
   }
 
   // 5. Compute MFA-pending permissions when `mfaVerified` is false
-  const requireMfaForAdminPermissions =
-    rbacConfig.identityMapping?.requireMfaForAdminPermissions ?? true;
+  // Owner Decision D3 (`R527` / `R547`): `live` (and omitted `environment`) never permit disabling admin MFA even if overridden in store/config.
+  const explicitEnv =
+    input.config && typeof input.config === 'object' && 'environment' in input.config
+      ? (input.config as { environment?: TenantConfiguration['environment'] }).environment
+      : undefined;
+  const isLiveEnvironment = explicitEnv === undefined || explicitEnv === 'live';
+  const requireMfaForAdminPermissions = isLiveEnvironment
+    ? true
+    : (rbacConfig.identityMapping?.requireMfaForAdminPermissions ?? true);
   const mfaPendingPermissions = new Set<PermissionKey>();
   if (requireMfaForAdminPermissions && !mfaVerified) {
     for (const perm of finalPermissions) {
@@ -537,7 +548,7 @@ export function resolvePermissions(
   };
 
   if (correlationId) {
-    const cacheKey = `${tenantId}:${correlationId}:${actorUserId}:${authoritativeRoles.join(',')}:${deptIds.join(',')}:${Boolean(rel?.isTeamLeadOfAnyTeam)}:${Boolean(rel?.isTeamLeadOfTargetTeam)}:${effectiveOverrides.grant.join(',')}:${effectiveOverrides.revoke.join(',')}:${mfaVerified}`;
+    const cacheKey = `${tenantId}:${correlationId}:${actorUserId}:${authoritativeRoles.join(',')}:${deptIds.join(',')}:${Boolean(rel?.isTeamLeadOfAnyTeam)}:${Boolean(rel?.isTeamLeadOfTargetTeam)}:${effectiveOverrides.grant.join(',')}:${effectiveOverrides.revoke.join(',')}:${mfaVerified}:${isLiveEnvironment ? 'live' : 'nonlive'}:${requireMfaForAdminPermissions}`;
     if (REQUEST_PERMISSION_CACHE.size >= MAX_CACHE_ENTRIES) {
       const oldestKey = REQUEST_PERMISSION_CACHE.keys().next().value;
       if (oldestKey) REQUEST_PERMISSION_CACHE.delete(oldestKey);
@@ -622,8 +633,12 @@ export function requirePermission(
 }
 
 /**
- * Evaluates whether an actor can access a matter record, enforcing restricted staff-matter rules
- * via the `matter:restricted:access` permission plus named matter participants (ADR-0014).
+ * Evaluates whether an actor can access a matter record (`ADR-0014`, `B12`, `R546`, `R570`).
+ *
+ * When a matter is restricted (`isStaffMatter`, `hasEthicalWall`, or non-empty `restrictedAccessUserIds`),
+ * `matter:restricted:access` grants oversight access; otherwise, a non-empty `restrictedAccessUserIds`
+ * allow-list is decisive (falling back to named matter participants and `teamMemberIds` only when
+ * `restrictedAccessUserIds` is empty).
  */
 export function canAccessMatter(
   resolvedOrInput: ResolvedPermissionSet | ResolvePermissionsInput,
@@ -657,7 +672,14 @@ export function canAccessMatter(
 
   const userId = resolved.actorUserId;
 
-  // 2. Named matter participants on the matter record
+  // 2. Explicit per-matter participant allowlist (`restrictedAccessUserIds`):
+  //    When populated, `restrictedAccessUserIds` is authoritative (matching SQL repositories)
+  //    so excluded team members / participants cannot bypass the restriction.
+  if (hasExplicitAllowList) {
+    return matter.restrictedAccessUserIds!.includes(userId);
+  }
+
+  // 3. Empty-allowlist fallback (`B12`): named matter participants on the matter record
   if (
     matter.responsiblePartnerId === userId ||
     matter.responsibleSolicitorId === userId ||
@@ -671,14 +693,6 @@ export function canAccessMatter(
   if (
     Array.isArray(matter.teamMemberIds) &&
     matter.teamMemberIds.includes(userId)
-  ) {
-    return true;
-  }
-
-  // 3. Explicit per-matter participant allowlist (`restrictedAccessUserIds`)
-  if (
-    hasExplicitAllowList &&
-    matter.restrictedAccessUserIds!.includes(userId)
   ) {
     return true;
   }

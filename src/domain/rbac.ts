@@ -326,6 +326,7 @@ export interface ResolvePersonPermissionsOptions {
   config?:
     | Pick<TenantConfiguration, 'rbac'>
     | {
+        environment?: TenantConfiguration['environment'];
         rbac?: RbacConfiguration;
         documentGeneration?: TenantConfiguration['documentGeneration'];
       }
@@ -375,7 +376,12 @@ export function resolvePersonPermissionSet(
         actorRoles: [],
         mfaVerified: false,
       },
-      config: { rbac: rbacConfig },
+      config: {
+        ...(options?.config && 'environment' in options.config && options.config.environment !== undefined
+          ? { environment: options.config.environment }
+          : {}),
+        rbac: rbacConfig,
+      },
       actor: null,
     });
   }
@@ -526,8 +532,10 @@ export function requirePersonPermission(
 }
 
 /**
- * Evaluates whether a `Person` can access a `Matter` record, enforcing restricted staff-matter rules
- * via `matter:restricted:access` + named matter participants (ADR-0014).
+ * Evaluates whether a `Person` can access a `Matter` record (`ADR-0014`, `R546`, `R570`):
+ * `matter:restricted:access` grants oversight access, while a non-empty `restrictedAccessUserIds`
+ * allow-list is decisive when populated (falling back to named participants and `teamMemberIds`
+ * only when `restrictedAccessUserIds` is empty).
  */
 export function canPersonAccessMatter(
   matter: Pick<
@@ -682,6 +690,7 @@ export function resolvePersonForEntraClaims(params: {
   tenantId?: string;
   rbacConfig?: RbacConfiguration;
   primaryDomain?: string;
+  environment?: TenantConfiguration['environment'];
 }): {
   person: Person | null;
   matchedByEmailOnly?: boolean;
@@ -818,7 +827,12 @@ export function resolvePersonForEntraClaims(params: {
         actorGroups: verifiedToken.groups,
         mfaVerified: verifiedToken.mfaVerified,
       },
-      config: { rbac: rbacConfig },
+      config: {
+        ...(params.environment !== undefined
+          ? { environment: params.environment }
+          : {}),
+        rbac: rbacConfig,
+      },
       actor: {
         userId: verifiedToken.sub,
         roles: [...verifiedToken.roles],
@@ -856,7 +870,12 @@ export function resolvePersonForEntraClaims(params: {
     {
       allPeople: people,
       teams,
-      config: { rbac: rbacConfig },
+      config: {
+        ...(params.environment !== undefined
+          ? { environment: params.environment }
+          : {}),
+        rbac: rbacConfig,
+      },
       mfaVerified: verifiedToken.mfaVerified,
       context: {
         tenantId: verifiedToken.tenantId,

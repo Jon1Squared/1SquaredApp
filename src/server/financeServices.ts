@@ -15,6 +15,7 @@ import {
 } from '@platform/core';
 import { buildActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { createDefaultHomePagesConfig, resolveEmployeeRoles } from '@/domain/homeConfig';
+import { resolveMatterDefaultResponsiblePersonIds } from '@/domain/keyDates';
 import {
   buildFeeEarnerWeeklyTime,
   buildFirmFinanceRollups,
@@ -240,11 +241,23 @@ export async function verifyFinanceActorAndPermission(
     teams,
     tokenRoles,
     tokenRolesActorId: actor.id,
+    mfaVerified:
+      verifiedTenantContext?.mfaVerified ?? activeSession?.mfaVerified,
+    context:
+      verifiedTenantContext && verifiedTenantContext.tenantId === tenantCfg.tenantId
+        ? verifiedTenantContext
+        : undefined,
   });
   if (!permSet.permissions.has(requiredPermission)) {
     return buildActionDenied(
       'FORBIDDEN',
       `You do not have permission (${requiredPermission}) to view this finance data.`,
+    );
+  }
+  if (permSet.mfaPendingPermissions.has(requiredPermission)) {
+    return buildActionDenied(
+      'MFA_REQUIRED',
+      `Multi-factor authentication (MFA) is required for permission "${requiredPermission}".`,
     );
   }
 
@@ -333,11 +346,49 @@ export async function getMatterFinanceRows(
     matters,
     teams,
     actor,
+    effectiveWorkPerson,
+    permSet,
     tokenRoles,
+    hiddenMatterIds,
     accessibleLinkedPmsMatterCodes,
     visiblePmsLinks,
     tenantPmsLinks,
   } = auth;
+
+  const hasFirmFinanceView = permSet.permissions.has('finance:view');
+  const isOwnMatterForFinance = (matter: Matter): boolean => {
+    if (hasFirmFinanceView) return true;
+    const teamIds = resolveMatterDefaultResponsiblePersonIds(matter);
+    return (
+      teamIds.includes(effectiveWorkPerson.id) || teamIds.includes(actor.id)
+    );
+  };
+
+  const ownMatterIds = hasFirmFinanceView
+    ? null
+    : new Set(
+        matters
+          .filter(
+            (m) =>
+              !m.mergedIntoId &&
+              !hiddenMatterIds.has(m.id) &&
+              isOwnMatterForFinance(m),
+          )
+          .map((m) => m.id),
+      );
+
+  const scopedVisiblePmsLinks = hasFirmFinanceView
+    ? visiblePmsLinks
+    : visiblePmsLinks.filter(
+        (l) => l.entityType !== 'matter' || ownMatterIds!.has(l.onesquaredId),
+      );
+  const scopedAccessibleLinkedPmsMatterCodes = hasFirmFinanceView
+    ? accessibleLinkedPmsMatterCodes
+    : new Set(
+        scopedVisiblePmsLinks
+          .filter((l) => l.entityType === 'matter')
+          .map((l) => l.pmsCode),
+      );
 
   let allowedPmsCodesFilter: Set<string> | null = null;
   let allowedMatterIdsFilter: Set<string> | null = null;
@@ -354,7 +405,8 @@ export async function getMatterFinanceRows(
           teams,
           tokenRoles,
           tokenRolesActorId: actor.id,
-        })
+        }) ||
+        !isOwnMatterForFinance(matter)
       ) {
         return buildActionDenied(
           'FORBIDDEN',
@@ -362,7 +414,7 @@ export async function getMatterFinanceRows(
         );
       }
       allowedMatterIdsFilter.add(matter.id);
-      const code = findPmsCodeForRecord(visiblePmsLinks, 'matter', matter.id);
+      const code = findPmsCodeForRecord(scopedVisiblePmsLinks, 'matter', matter.id);
       if (code) {
         allowedPmsCodesFilter.add(code);
       }
@@ -379,7 +431,7 @@ export async function getMatterFinanceRows(
         sourceFile: 'No PMS linked (Clean Client Deployment)',
         importedAt: now.toISOString(),
       },
-      pmsLinks: visiblePmsLinks,
+      pmsLinks: scopedVisiblePmsLinks,
       pmsSummaryByMatterId: {},
       allMatterFins: [],
       pmsAgedDebt: [],
@@ -398,7 +450,7 @@ export async function getMatterFinanceRows(
         sourceFile: PMS_AS_AT_UNAVAILABLE_LABEL,
         importedAt: pmsExtractInfo.importedAt,
       },
-      pmsLinks: visiblePmsLinks,
+      pmsLinks: scopedVisiblePmsLinks,
       pmsSummaryByMatterId: {},
       allMatterFins: [],
       pmsAgedDebt: [],
@@ -409,7 +461,7 @@ export async function getMatterFinanceRows(
   }
 
   const isCodeAllowed = (matterCode: string): boolean => {
-    if (!accessibleLinkedPmsMatterCodes.has(matterCode)) return false;
+    if (!scopedAccessibleLinkedPmsMatterCodes.has(matterCode)) return false;
     if (allowedPmsCodesFilter && !allowedPmsCodesFilter.has(matterCode)) return false;
     return true;
   };
@@ -419,7 +471,7 @@ export async function getMatterFinanceRows(
   const finByMatterCode = new Map(allMatterFins.map((f) => [f.matter_code, f]));
 
   const pmsSummaryByMatterId: Record<string, PmsMatterFinancials> = {};
-  for (const link of visiblePmsLinks) {
+  for (const link of scopedVisiblePmsLinks) {
     if (link.entityType !== 'matter') continue;
     if (allowedMatterIdsFilter && !allowedMatterIdsFilter.has(link.onesquaredId)) {
       continue;
@@ -451,7 +503,7 @@ export async function getMatterFinanceRows(
 
   return {
     pmsExtractInfo,
-    pmsLinks: visiblePmsLinks,
+    pmsLinks: scopedVisiblePmsLinks,
     pmsSummaryByMatterId,
     allMatterFins,
     pmsAgedDebt,
