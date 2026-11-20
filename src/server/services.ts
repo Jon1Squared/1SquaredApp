@@ -20774,9 +20774,58 @@ function assertKeyDatesModuleEnabled(
   return null;
 }
 
+function resolvePrelimKeyDatesTenantContext(
+  byId: string,
+  options?: { tenantCtx?: TenantContext | null },
+): TenantContext | null {
+  if (!byId || !byId.trim()) return null;
+  try {
+    return resolveDefaultServiceTenantContext(null, null, {
+      tenantCtx: options?.tenantCtx,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function runPostCommitKeyDateCalendarSync(params: {
+  ctx: TenantContext;
+  config: KeyDatesConfig;
+  nowIso: string;
+  existingSyncs: KeyDateCalendarSync[];
+  items: Array<{ keyDate: KeyDate; matter: Matter | null; enquiry: Enquiry | null }>;
+  adapter?: GraphCalendarAdapter;
+}): Promise<void> {
+  if (params.items.length === 0) return;
+  const workingSyncs = params.existingSyncs.map((cs) => structuredClone(cs));
+  const syncedIds = new Set<string>();
+  for (const item of params.items) {
+    await syncKeyDateToOutlookCalendar({
+      keyDate: item.keyDate,
+      config: params.config,
+      matter: item.matter,
+      enquiry: item.enquiry,
+      calendarSyncs: workingSyncs,
+      ...(params.adapter ? { adapter: params.adapter } : {}),
+      nowIso: params.nowIso,
+    });
+    syncedIds.add(item.keyDate.id);
+  }
+  const toPersist = workingSyncs.filter((cs) => syncedIds.has(cs.keyDateId));
+  if (toPersist.length > 0) {
+    const keyDateRepo = getKeyDateRepository();
+    await keyDateRepo.withTenantTransaction(params.ctx, async () => {
+      for (const cs of toPersist) {
+        await keyDateRepo.putCalendarSync(params.ctx, cs);
+      }
+    });
+  }
+}
+
 async function commitKeyDateDomainWritesInPostgres(params: {
   ctx: TenantContext;
   keyDatesToUpsert?: readonly KeyDate[];
+  expectedVersionsById?: ReadonlyMap<string, number | null>;
   notApplicableToUpsert?: readonly KeyDateNotApplicable[];
   reminderStatesToUpsert?: KeyDateReminderState[];
   reminderStatesToDeleteKeyDateIds?: readonly string[];
@@ -20821,7 +20870,12 @@ async function commitKeyDateDomainWritesInPostgres(params: {
       await taskRepo.putNotification(params.ctx, n);
     }
     for (const kd of params.keyDatesToUpsert ?? []) {
-      await keyDateRepo.putKeyDate(params.ctx, kd);
+      const expectedVersion = params.expectedVersionsById?.get(kd.id);
+      await keyDateRepo.putKeyDate(
+        params.ctx,
+        kd,
+        expectedVersion !== undefined ? { expectedVersion } : undefined,
+      );
     }
     for (const na of params.notApplicableToUpsert ?? []) {
       await keyDateRepo.putNotApplicable(params.ctx, na);
@@ -21028,147 +21082,165 @@ export async function createOrProposeKeyDateRecord(
   message?: string;
 }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
-
-    const matter = input.matterId
-      ? matters.find((m) => m.id === input.matterId) ?? null
-      : null;
-    const enquiry = input.enquiryId
-      ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, input.enquiryId, {
-          includeRestricted: true,
-        })
-      : null;
-
-    if (
-      input.matterId &&
-      (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people, rbacOptions))
-    ) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
-
-    const resolvedSource = resolveKeyDateSource({
-      source: input.source,
-      hasCalculation: Boolean(input.calculation),
-      allowSystemSource: false,
-    });
-    if (!resolvedSource.ok) {
-      return buildActionDenied('FORBIDDEN', resolvedSource.error);
-    }
-    const manualCheck = validateKeyDateManualEntry(
-      config,
-      input.keyDateTypeId,
-      resolvedSource.source,
-    );
-    if (!manualCheck.ok) {
-      return buildActionDenied('FORBIDDEN', manualCheck.error);
-    }
-
     const keyDateRepo = getKeyDateRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
 
-    const kd = createOrProposeKeyDate({
-      id: newKdId,
-      matter,
-      enquiry,
-      keyDateTypeId: input.keyDateTypeId,
-      title: input.title,
-      dueDate: input.dueDate,
-      dueTime: input.dueTime,
-      isCritical: input.isCritical,
-      source: resolvedSource.source,
-      teamId: input.teamId,
-      responsiblePersonIds: input.responsiblePersonIds,
-      calculation: input.calculation,
-      notes: input.notes,
-      sourceDocumentId: input.sourceDocumentId,
-      intent: input.intent,
-      actor,
-      nowIso,
-      config,
-      teams,
-      people,
-      rbacOptions,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
+    const txResult = await keyDateRepo.withTenantTransaction(
+      prelimCtx,
+      async () => {
+        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        if (!resolved || !resolved.actor) {
+          return {
+            ok: false as const,
+            error: `Unknown or unauthenticated user "${byId}".`,
+          };
+        }
+        const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
+        const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+        const disabledErr = assertKeyDatesModuleEnabled(config);
+        if (disabledErr) return disabledErr;
 
-    const reminderStatesWorking: KeyDateReminderState[] = [];
-    const calendarSyncsWorking: KeyDateCalendarSync[] = [];
-    let changedTasks: Task[] = [];
-    let deletedTaskIds: string[] = [];
+        const nowIso = new Date().toISOString();
+        const todayIso = toIsoDate(new Date());
 
-    if (kd.status === 'confirmed') {
-      const existingNaForMatter = kd.matterId
-        ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
-        : [];
-      const isMarkedNotApplicable = existingNaForMatter.some(
-        (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
-      );
-      if (!isMarkedNotApplicable) {
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-        const beforeTaskJsonById = new Map(
-          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-        );
-        let pendingTaskIdx = 0;
-        syncReminderForConfirmedKeyDate({
-          keyDate: kd,
+        const matter = input.matterId
+          ? matters.find((m) => m.id === input.matterId) ?? null
+          : null;
+        const enquiry = input.enquiryId
+          ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, input.enquiryId, {
+              includeRestricted: true,
+            })
+          : null;
+
+        if (
+          input.matterId &&
+          (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people, rbacOptions))
+        ) {
+          return { ok: false as const, error: 'Matter not found or restricted.' };
+        }
+
+        const resolvedSource = resolveKeyDateSource({
+          source: input.source,
+          hasCalculation: Boolean(input.calculation),
+          allowSystemSource: false,
+        });
+        if (!resolvedSource.ok) {
+          return buildActionDenied('FORBIDDEN', resolvedSource.error);
+        }
+        const manualCheck = validateKeyDateManualEntry(
           config,
-          tasks: storeTasks,
-          reminderStates: reminderStatesWorking,
-          matters: matter ? [matter] : [],
+          input.keyDateTypeId,
+          resolvedSource.source,
+        );
+        if (!manualCheck.ok) {
+          return buildActionDenied('FORBIDDEN', manualCheck.error);
+        }
+
+        const newKdId = await keyDateRepo.allocateNextKeyDateId(ctx);
+        const stagedAudit: AuditEntry[] = [];
+        let pendingIdx = 0;
+
+        const kd = createOrProposeKeyDate({
+          id: newKdId,
+          matter,
+          enquiry,
+          keyDateTypeId: input.keyDateTypeId,
+          title: input.title,
+          dueDate: input.dueDate,
+          dueTime: input.dueTime,
+          isCritical: input.isCritical,
+          source: resolvedSource.source,
+          teamId: input.teamId,
+          responsiblePersonIds: input.responsiblePersonIds,
+          calculation: input.calculation,
+          notes: input.notes,
+          sourceDocumentId: input.sourceDocumentId,
+          intent: input.intent,
+          actor,
+          nowIso,
+          config,
+          teams,
           people,
-          rbacOptions: personRbacOptions,
+          rbacOptions,
           audit: stagedAudit,
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-          todayIso,
-          nowIso,
-          actorId: actor.id,
-          tenantId: ctx.tenantId,
-          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         });
-        changedTasks = storeTasks.filter(
-          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-        );
-        const currentIds = new Set(storeTasks.map((t) => t.id));
-        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-          (id) => !currentIds.has(id),
-        );
-      }
+
+        const reminderStatesWorking: KeyDateReminderState[] = [];
+        let changedTasks: Task[] = [];
+        let deletedTaskIds: string[] = [];
+
+        if (kd.status === 'confirmed') {
+          const existingNaForMatter = kd.matterId
+            ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
+            : [];
+          const isMarkedNotApplicable = existingNaForMatter.some(
+            (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
+          );
+          if (!isMarkedNotApplicable) {
+            const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+            const beforeTaskJsonById = new Map(
+              storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+            );
+            let pendingTaskIdx = 0;
+            syncReminderForConfirmedKeyDate({
+              keyDate: kd,
+              config,
+              tasks: storeTasks,
+              reminderStates: reminderStatesWorking,
+              matters: matter ? [matter] : [],
+              people,
+              rbacOptions: personRbacOptions,
+              audit: stagedAudit,
+              nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+              todayIso,
+              nowIso,
+              actorId: actor.id,
+              tenantId: ctx.tenantId,
+              nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+            });
+            changedTasks = storeTasks.filter(
+              (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+            );
+            const currentIds = new Set(storeTasks.map((t) => t.id));
+            deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+              (id) => !currentIds.has(id),
+            );
+          }
+        }
+
+        await commitKeyDateDomainWritesInPostgres({
+          ctx,
+          keyDatesToUpsert: [kd],
+          reminderStatesToUpsert: reminderStatesWorking,
+          tasksToUpsert: changedTasks,
+          tasksToDeleteIds: deletedTaskIds,
+          auditEntries: stagedAudit,
+        });
+
+        return {
+          ok: true as const,
+          keyDate: kd,
+          postCommitSync: {
+            ctx,
+            config,
+            nowIso,
+            existingSyncs: [] as KeyDateCalendarSync[],
+            items: [{ keyDate: kd, matter, enquiry }],
+          },
+        };
+      },
+    );
+
+    if (!txResult.ok || !('postCommitSync' in txResult)) {
+      return txResult;
     }
-
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      nowIso,
-    });
-
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      keyDatesToUpsert: [kd],
-      reminderStatesToUpsert: reminderStatesWorking,
-      calendarSyncsToUpsert: calendarSyncsWorking,
-      tasksToUpsert: changedTasks,
-      tasksToDeleteIds: deletedTaskIds,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, keyDate: kd };
+    await runPostCommitKeyDateCalendarSync(txResult.postCommitSync);
+    return { ok: true, keyDate: txResult.keyDate };
   } catch (err) {
     return {
       ok: false,
@@ -21182,121 +21254,140 @@ export async function proposeProvisionalKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
-
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      actor,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd, matter, enquiry } = loaded;
     const keyDateRepo = getKeyDateRepository();
     const taskRepo = getTaskWorkflowRepository();
 
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
+    const txResult = await keyDateRepo.withTenantTransaction(
+      prelimCtx,
+      async () => {
+        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        if (!resolved || !resolved.actor) {
+          return {
+            ok: false as const,
+            error: `Unknown or unauthenticated user "${byId}".`,
+          };
+        }
+        const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
+        const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+        const disabledErr = assertKeyDatesModuleEnabled(config);
+        if (disabledErr) return disabledErr;
 
-    proposeProvisionalKeyDate({
-      keyDate: kd,
-      actor,
-      nowIso,
-      config,
-      matter,
-      enquiry,
-      teams,
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
+        const nowIso = new Date().toISOString();
+        const todayIso = toIsoDate(new Date());
 
-    const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
-    const reminderStatesWorking: KeyDateReminderState[] = existingReminder
-      ? [existingReminder]
-      : [];
-    const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
-    const calendarSyncsWorking: KeyDateCalendarSync[] = existingSync
-      ? [existingSync]
-      : [];
-
-    let changedTasks: Task[] = [];
-    let deletedTaskIds: string[] = [];
-    if (kd.status === 'confirmed') {
-      const existingNaForMatter = kd.matterId
-        ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
-        : [];
-      const isMarkedNotApplicable = existingNaForMatter.some(
-        (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
-      );
-      if (!isMarkedNotApplicable) {
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-        const beforeTaskJsonById = new Map(
-          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-        );
-        let pendingTaskIdx = 0;
-        syncReminderForConfirmedKeyDate({
-          keyDate: kd,
-          config,
-          tasks: storeTasks,
-          reminderStates: reminderStatesWorking,
-          matters: matter ? [matter] : [],
+        const loaded = await loadKeyDateForActorOrClassifyError(
+          ctx,
+          null,
+          keyDateId,
+          actor,
           people,
-          rbacOptions: personRbacOptions,
+          matters,
+          teams,
+          rbacOptions,
+          { forUpdate: true },
+        );
+        if (!loaded.kd) {
+          return { ok: false as const, error: loaded.error ?? 'Key date not found.' };
+        }
+        const { kd, matter, enquiry } = loaded;
+        const expectedVersion = kd.version;
+
+        const stagedAudit: AuditEntry[] = [];
+        let pendingIdx = 0;
+
+        proposeProvisionalKeyDate({
+          keyDate: kd,
+          actor,
+          nowIso,
+          config,
+          matter,
+          enquiry,
+          teams,
+          people,
           audit: stagedAudit,
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-          todayIso,
-          nowIso,
-          actorId: actor.id,
-          tenantId: ctx.tenantId,
-          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
         });
-        changedTasks = storeTasks.filter(
-          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-        );
-        const currentIds = new Set(storeTasks.map((t) => t.id));
-        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-          (id) => !currentIds.has(id),
-        );
-      }
+
+        const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+        const reminderStatesWorking: KeyDateReminderState[] = existingReminder
+          ? [existingReminder]
+          : [];
+        const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+
+        let changedTasks: Task[] = [];
+        let deletedTaskIds: string[] = [];
+        if (kd.status === 'confirmed') {
+          const existingNaForMatter = kd.matterId
+            ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, actor.id)
+            : [];
+          const isMarkedNotApplicable = existingNaForMatter.some(
+            (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
+          );
+          if (!isMarkedNotApplicable) {
+            const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+            const beforeTaskJsonById = new Map(
+              storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+            );
+            let pendingTaskIdx = 0;
+            syncReminderForConfirmedKeyDate({
+              keyDate: kd,
+              config,
+              tasks: storeTasks,
+              reminderStates: reminderStatesWorking,
+              matters: matter ? [matter] : [],
+              people,
+              rbacOptions: personRbacOptions,
+              audit: stagedAudit,
+              nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+              todayIso,
+              nowIso,
+              actorId: actor.id,
+              tenantId: ctx.tenantId,
+              nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+            });
+            changedTasks = storeTasks.filter(
+              (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+            );
+            const currentIds = new Set(storeTasks.map((t) => t.id));
+            deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+              (id) => !currentIds.has(id),
+            );
+          }
+        }
+
+        await commitKeyDateDomainWritesInPostgres({
+          ctx,
+          keyDatesToUpsert: [kd],
+          expectedVersionsById: new Map([[kd.id, expectedVersion]]),
+          reminderStatesToUpsert: reminderStatesWorking,
+          tasksToUpsert: changedTasks,
+          tasksToDeleteIds: deletedTaskIds,
+          auditEntries: stagedAudit,
+        });
+
+        return {
+          ok: true as const,
+          keyDate: kd,
+          postCommitSync: {
+            ctx,
+            config,
+            nowIso,
+            existingSyncs: existingSync ? [existingSync] : [],
+            items: [{ keyDate: kd, matter, enquiry }],
+          },
+        };
+      },
+    );
+
+    if (!txResult.ok || !('postCommitSync' in txResult)) {
+      return txResult;
     }
-
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      nowIso,
-    });
-
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      keyDatesToUpsert: [kd],
-      reminderStatesToUpsert: reminderStatesWorking,
-      calendarSyncsToUpsert: calendarSyncsWorking,
-      tasksToUpsert: changedTasks,
-      tasksToDeleteIds: deletedTaskIds,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, keyDate: kd };
+    await runPostCommitKeyDateCalendarSync(txResult.postCommitSync);
+    return { ok: true, keyDate: txResult.keyDate };
   } catch (err) {
     return {
       ok: false,
@@ -21314,9 +21405,12 @@ async function loadKeyDateForActorOrClassifyError(
   matters: readonly Matter[],
   teams: readonly Team[],
   rbacOptions?: ResolvePersonPermissionsOptions,
+  options?: { forUpdate?: boolean },
 ): Promise<{ kd: KeyDate | null; error?: string; matter: Matter | null; enquiry: Enquiry | null }> {
   const keyDateRepo = getKeyDateRepository();
-  const kd = await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
+  const kd = options?.forUpdate
+    ? await keyDateRepo.getKeyDateByIdForUpdate(ctx, keyDateId, actor.id)
+    : await keyDateRepo.getKeyDateById(ctx, keyDateId, actor.id);
   if (!kd) {
     // Distinguish missing key date vs restricted/orphan matter key date (R30, R82):
     const probeExists = await keyDateRepo.withTenantReadTransaction(ctx, async (tx) => {
@@ -21366,121 +21460,139 @@ export async function verifyProposedKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor: verifier, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      verifier,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd, matter, enquiry } = loaded;
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
-
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
-
-    verifyProposedKeyDate({
-      keyDate: kd,
-      verifier,
-      nowIso,
-      config,
-      teams,
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
-
     const keyDateRepo = getKeyDateRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-      ctx,
-      verifier.id,
-    );
-    const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
-      ctx,
-      verifier.id,
+
+    const txResult = await keyDateRepo.withTenantTransaction(
+      prelimCtx,
+      async () => {
+        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        if (!resolved || !resolved.actor) {
+          return {
+            ok: false as const,
+            error: `Unknown or unauthenticated user "${byId}".`,
+          };
+        }
+        const { ctx, actor: verifier, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
+        const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
+        const disabledErr = assertKeyDatesModuleEnabled(config);
+        if (disabledErr) return disabledErr;
+
+        const loaded = await loadKeyDateForActorOrClassifyError(
+          ctx,
+          null,
+          keyDateId,
+          verifier,
+          people,
+          matters,
+          teams,
+          rbacOptions,
+          { forUpdate: true },
+        );
+        if (!loaded.kd) {
+          return { ok: false as const, error: loaded.error ?? 'Key date not found.' };
+        }
+        const { kd, matter, enquiry } = loaded;
+        const expectedVersion = kd.version;
+        const nowIso = new Date().toISOString();
+        const todayIso = toIsoDate(new Date());
+
+        const stagedAudit: AuditEntry[] = [];
+        let pendingIdx = 0;
+
+        verifyProposedKeyDate({
+          keyDate: kd,
+          verifier,
+          nowIso,
+          config,
+          teams,
+          people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        });
+
+        const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+          ctx,
+          verifier.id,
+        );
+        const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, verifier.id);
+
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        const existingNaForMatter = kd.matterId
+          ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, verifier.id)
+          : [];
+        const isMarkedNotApplicable = existingNaForMatter.some(
+          (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
+        );
+        let pendingTaskIdx = 0;
+        if (!isMarkedNotApplicable) {
+          syncReminderForConfirmedKeyDate({
+            keyDate: kd,
+            config,
+            tasks: storeTasks,
+            reminderStates: reminderStatesWorking,
+            matters: matter ? [matter] : [],
+            people,
+            rbacOptions: personRbacOptions,
+            audit: stagedAudit,
+            nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+            todayIso,
+            nowIso,
+            actorId: verifier.id,
+            tenantId: ctx.tenantId,
+            nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+            transferredFromKeyDateId: kd.supersedesKeyDateId,
+          });
+        }
+
+        const changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+
+        const targetReminders = reminderStatesWorking.filter(
+          (rs) => rs.keyDateId === kd.id || rs.keyDateId === kd.supersedesKeyDateId,
+        );
+
+        await commitKeyDateDomainWritesInPostgres({
+          ctx,
+          keyDatesToUpsert: [kd],
+          expectedVersionsById: new Map([[kd.id, expectedVersion]]),
+          reminderStatesToUpsert: targetReminders,
+          tasksToUpsert: changedTasks,
+          tasksToDeleteIds: deletedTaskIds,
+          auditEntries: stagedAudit,
+        });
+
+        return {
+          ok: true as const,
+          keyDate: kd,
+          postCommitSync: {
+            ctx,
+            config,
+            nowIso,
+            existingSyncs: existingSync ? [existingSync] : [],
+            items: [{ keyDate: kd, matter, enquiry }],
+          },
+        };
+      },
     );
 
-    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-    const beforeTaskJsonById = new Map(
-      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-    );
-    const existingNaForMatter = kd.matterId
-      ? await keyDateRepo.listNotApplicableForMatter(ctx, kd.matterId, verifier.id)
-      : [];
-    const isMarkedNotApplicable = existingNaForMatter.some(
-      (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
-    );
-    let pendingTaskIdx = 0;
-    if (!isMarkedNotApplicable) {
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
-        people,
-        rbacOptions: personRbacOptions,
-        audit: stagedAudit,
-        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: verifier.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-        transferredFromKeyDateId: kd.supersedesKeyDateId,
-      });
+    if (!txResult.ok || !('postCommitSync' in txResult)) {
+      return txResult;
     }
-
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      nowIso,
-    });
-
-    const changedTasks = storeTasks.filter(
-      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-    );
-    const currentIds = new Set(storeTasks.map((t) => t.id));
-    const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-      (id) => !currentIds.has(id),
-    );
-
-    const targetReminders = reminderStatesWorking.filter(
-      (rs) => rs.keyDateId === kd.id || rs.keyDateId === kd.supersedesKeyDateId,
-    );
-    const targetSyncs = calendarSyncsWorking.filter((cs) => cs.keyDateId === kd.id);
-
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      keyDatesToUpsert: [kd],
-      reminderStatesToUpsert: targetReminders,
-      calendarSyncsToUpsert: targetSyncs,
-      tasksToUpsert: changedTasks,
-      tasksToDeleteIds: deletedTaskIds,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, keyDate: kd };
+    await runPostCommitKeyDateCalendarSync(txResult.postCommitSync);
+    return { ok: true, keyDate: txResult.keyDate };
   } catch (err) {
     return {
       ok: false,
@@ -21495,52 +21607,63 @@ export async function rejectProposedKeyDateRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor: verifier, people, matters, teams, rbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
+    const keyDateRepo = getKeyDateRepository();
 
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      verifier,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd } = loaded;
-    const nowIso = new Date().toISOString();
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
+    return await keyDateRepo.withTenantTransaction(prelimCtx, async () => {
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
+      if (!resolved || !resolved.actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const { ctx, actor: verifier, people, matters, teams, rbacOptions } = resolved;
+      const config = await getKeyDatesConfig({ ctx, userId: verifier.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    rejectProposedKeyDate({
-      keyDate: kd,
-      verifier,
-      reason,
-      nowIso,
-      config,
-      teams,
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        null,
+        keyDateId,
+        verifier,
+        people,
+        matters,
+        teams,
+        rbacOptions,
+        { forUpdate: true },
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd } = loaded;
+      const expectedVersion = kd.version;
+      const nowIso = new Date().toISOString();
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
+
+      rejectProposedKeyDate({
+        keyDate: kd,
+        verifier,
+        reason,
+        nowIso,
+        config,
+        teams,
+        people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
+
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        keyDatesToUpsert: [kd],
+        expectedVersionsById: new Map([[kd.id, expectedVersion]]),
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, keyDate: kd };
     });
-
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      keyDatesToUpsert: [kd],
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, keyDate: kd };
   } catch (err) {
     return {
       ok: false,
@@ -21575,198 +21698,217 @@ export async function supersedeConfirmedKeyDateRecord(
   message?: string;
 }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      actor,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd: existing, matter, enquiry } = loaded;
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
-
-    const resolvedSupersede = resolveSupersedeKeyDateSource({
-      existingKeyDate: existing,
-      updates,
-      reason,
-      config,
-      allowSystemSource: false,
-    });
-    if (!resolvedSupersede.ok) {
-      return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
-    }
-    const manualCheck = validateKeyDateManualEntry(
-      config,
-      existing.keyDateTypeId,
-      resolvedSupersede.source,
-    );
-    if (!manualCheck.ok) {
-      return buildActionDenied('FORBIDDEN', manualCheck.error);
-    }
-
     const keyDateRepo = getKeyDateRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const newKeyDateId = await keyDateRepo.allocateNextKeyDateId(ctx);
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
 
-    const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
-      existingKeyDate: existing,
-      newKeyDateId,
-      updates,
-      reason,
-      actor,
-      nowIso,
-      config,
-      matter,
-      enquiry,
-      teams,
-      people,
-      rbacOptions,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
+    const txResult = await keyDateRepo.withTenantTransaction(
+      prelimCtx,
+      async (tx) => {
+        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        if (!resolved || !resolved.actor) {
+          return {
+            ok: false as const,
+            error: `Unknown or unauthenticated user "${byId}".`,
+          };
+        }
+        const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
+        const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+        const disabledErr = assertKeyDatesModuleEnabled(config);
+        if (disabledErr) return disabledErr;
 
-    const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-      ctx,
-      actor.id,
-    );
-    const calendarSyncsWorking = await keyDateRepo.listAllVisibleCalendarSyncs(
-      ctx,
-      actor.id,
-    );
+        const loaded = await loadKeyDateForActorOrClassifyError(
+          ctx,
+          null,
+          keyDateId,
+          actor,
+          people,
+          matters,
+          teams,
+          rbacOptions,
+          { forUpdate: true },
+        );
+        if (!loaded.kd) {
+          return { ok: false as const, error: loaded.error ?? 'Key date not found.' };
+        }
+        const { kd: existing, matter, enquiry } = loaded;
+        const expectedSupersededVersion = existing.version;
+        const nowIso = new Date().toISOString();
+        const todayIso = toIsoDate(new Date());
 
-    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-    const beforeTaskJsonById = new Map(
-      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-    );
-    let pendingTaskIdx = 0;
-    syncReminderForConfirmedKeyDate({
-      keyDate: replacementKeyDate,
-      config,
-      tasks: storeTasks,
-      reminderStates: reminderStatesWorking,
-      matters: matter ? [matter] : [],
-      people,
-      rbacOptions: personRbacOptions,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-      todayIso,
-      nowIso,
-      actorId: actor.id,
-      tenantId: ctx.tenantId,
-      nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
-      transferredFromKeyDateId: supersededKeyDate.id,
-    });
+        const resolvedSupersede = resolveSupersedeKeyDateSource({
+          existingKeyDate: existing,
+          updates,
+          reason,
+          config,
+          allowSystemSource: false,
+        });
+        if (!resolvedSupersede.ok) {
+          return buildActionDenied('FORBIDDEN', resolvedSupersede.error);
+        }
+        const manualCheck = validateKeyDateManualEntry(
+          config,
+          existing.keyDateTypeId,
+          resolvedSupersede.source,
+        );
+        if (!manualCheck.ok) {
+          return buildActionDenied('FORBIDDEN', manualCheck.error);
+        }
 
-    await syncKeyDateToOutlookCalendar({
-      keyDate: supersededKeyDate,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      nowIso,
-    });
-    await syncKeyDateToOutlookCalendar({
-      keyDate: replacementKeyDate,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      nowIso,
-    });
+        const newKeyDateId = await keyDateRepo.allocateNextKeyDateId(ctx);
+        const stagedAudit: AuditEntry[] = [];
+        let pendingIdx = 0;
 
-    const changedTasks = storeTasks.filter(
-      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-    );
-    const currentIds = new Set(storeTasks.map((t) => t.id));
-    const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-      (id) => !currentIds.has(id),
-    );
+        const { supersededKeyDate, replacementKeyDate } = supersedeConfirmedKeyDate({
+          existingKeyDate: existing,
+          newKeyDateId,
+          updates,
+          reason,
+          actor,
+          nowIso,
+          config,
+          matter,
+          enquiry,
+          teams,
+          people,
+          rbacOptions,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        });
 
-    await keyDateRepo.withTenantTransaction(ctx, async (tx) => {
-      for (const deletedId of deletedTaskIds) {
-        await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
-          ctx.tenantId,
-          deletedId,
-        ]);
-      }
-      for (const t of changedTasks) {
-        if (t.id.startsWith('TSK-PENDING-')) {
-          const oldId = t.id;
-          const realId = await taskRepo.allocateNextTaskId(ctx);
-          t.id = realId;
-          t.reference = realId;
-          for (const rs of reminderStatesWorking) {
-            if (rs.taskId === oldId) rs.taskId = realId;
+        const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
+          ctx,
+          actor.id,
+        );
+        const existingSync = await keyDateRepo.getCalendarSync(
+          ctx,
+          supersededKeyDate.id,
+          actor.id,
+        );
+
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
+        syncReminderForConfirmedKeyDate({
+          keyDate: replacementKeyDate,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people,
+          rbacOptions: personRbacOptions,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+          transferredFromKeyDateId: supersededKeyDate.id,
+        });
+
+        const changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+
+        for (const deletedId of deletedTaskIds) {
+          await tx.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [
+            ctx.tenantId,
+            deletedId,
+          ]);
+        }
+        for (const t of changedTasks) {
+          if (t.id.startsWith('TSK-PENDING-')) {
+            const oldId = t.id;
+            const realId = await taskRepo.allocateNextTaskId(ctx);
+            t.id = realId;
+            t.reference = realId;
+            for (const rs of reminderStatesWorking) {
+              if (rs.taskId === oldId) rs.taskId = realId;
+            }
+            for (const a of stagedAudit) {
+              if (a.recordId === oldId) a.recordId = realId;
+            }
           }
-          for (const a of stagedAudit) {
-            if (a.recordId === oldId) a.recordId = realId;
+          await taskRepo.putTask(ctx, t);
+        }
+
+        // Insert replacement first without supersededBy link on existing, then link both cleanly
+        const replacementFirst = { ...replacementKeyDate };
+        await keyDateRepo.putKeyDate(
+          ctx,
+          {
+            ...supersededKeyDate,
+            supersededByKeyDateId: undefined,
+          },
+          { expectedVersion: expectedSupersededVersion },
+        );
+        await keyDateRepo.putKeyDate(ctx, replacementFirst);
+        await keyDateRepo.putKeyDate(ctx, supersededKeyDate, {
+          expectedVersion: supersededKeyDate.version,
+        });
+
+        if (!reminderStatesWorking.some((rs) => rs.keyDateId === supersededKeyDate.id)) {
+          await keyDateRepo.removeReminderState(ctx, supersededKeyDate.id);
+        }
+        for (const rs of reminderStatesWorking) {
+          if (
+            rs.keyDateId === replacementKeyDate.id ||
+            rs.keyDateId === supersededKeyDate.id
+          ) {
+            await keyDateRepo.putReminderState(ctx, rs);
           }
         }
-        await taskRepo.putTask(ctx, t);
-      }
+        const auditInputs: FirmAuditEntryInput[] = stagedAudit.map((a) => ({
+          recordType: a.recordType,
+          recordId: a.recordId,
+          action: a.action,
+          field: a.field,
+          oldValue: a.oldValue,
+          newValue: a.newValue,
+          byId: a.byId,
+          at: a.at,
+          ...(a.reason !== undefined ? { reason: a.reason } : {}),
+          ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
+        }));
+        await appendTenantAuditEntries(ctx, auditInputs);
 
-      // Insert replacement first without supersededBy link on existing, then link both cleanly
-      const replacementFirst = { ...replacementKeyDate };
-      await keyDateRepo.putKeyDate(ctx, {
-        ...supersededKeyDate,
-        supersededByKeyDateId: undefined,
-      });
-      await keyDateRepo.putKeyDate(ctx, replacementFirst);
-      await keyDateRepo.putKeyDate(ctx, supersededKeyDate);
+        return {
+          ok: true as const,
+          supersededKeyDate,
+          replacementKeyDate,
+          postCommitSync: {
+            ctx,
+            config,
+            nowIso,
+            existingSyncs: existingSync ? [existingSync] : [],
+            items: [
+              { keyDate: supersededKeyDate, matter, enquiry },
+              { keyDate: replacementKeyDate, matter, enquiry },
+            ],
+          },
+        };
+      },
+    );
 
-      if (!reminderStatesWorking.some((rs) => rs.keyDateId === supersededKeyDate.id)) {
-        await keyDateRepo.removeReminderState(ctx, supersededKeyDate.id);
-      }
-      for (const rs of reminderStatesWorking) {
-        if (
-          rs.keyDateId === replacementKeyDate.id ||
-          rs.keyDateId === supersededKeyDate.id
-        ) {
-          await keyDateRepo.putReminderState(ctx, rs);
-        }
-      }
-      for (const cs of calendarSyncsWorking) {
-        if (
-          cs.keyDateId === replacementKeyDate.id ||
-          cs.keyDateId === supersededKeyDate.id
-        ) {
-          await keyDateRepo.putCalendarSync(ctx, cs);
-        }
-      }
-      const auditInputs: FirmAuditEntryInput[] = stagedAudit.map((a) => ({
-        recordType: a.recordType,
-        recordId: a.recordId,
-        action: a.action,
-        field: a.field,
-        oldValue: a.oldValue,
-        newValue: a.newValue,
-        byId: a.byId,
-        at: a.at,
-        ...(a.reason !== undefined ? { reason: a.reason } : {}),
-        ...(a.snapshot !== undefined ? { snapshot: a.snapshot } : {}),
-      }));
-      await appendTenantAuditEntries(ctx, auditInputs);
-    });
-
-    return { ok: true, supersededKeyDate, replacementKeyDate };
+    if (!txResult.ok || !('postCommitSync' in txResult)) {
+      return txResult;
+    }
+    await runPostCommitKeyDateCalendarSync(txResult.postCommitSync);
+    return {
+      ok: true,
+      supersededKeyDate: txResult.supersededKeyDate,
+      replacementKeyDate: txResult.replacementKeyDate,
+    };
   } catch (err) {
     return {
       ok: false,
@@ -21785,90 +21927,111 @@ export async function resolveKeyDateOutcomeRecord(
   byId: string,
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      actor,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd, matter, enquiry } = loaded;
-    const nowIso = new Date().toISOString();
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
-
-    resolveKeyDateOutcome({
-      keyDate: kd,
-      kind: input.kind,
-      note: input.note,
-      evidenceDocumentId: input.evidenceDocumentId,
-      actor,
-      nowIso,
-      config,
-      teams,
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
-
     const keyDateRepo = getKeyDateRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
-    const reminderStatesWorking = existingReminder ? [existingReminder] : [];
-    const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
-    const calendarSyncsWorking = existingSync ? [existingSync] : [];
 
-    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-    const beforeTaskJsonById = new Map(
-      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+    const txResult = await keyDateRepo.withTenantTransaction(
+      prelimCtx,
+      async () => {
+        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        if (!resolved || !resolved.actor) {
+          return {
+            ok: false as const,
+            error: `Unknown or unauthenticated user "${byId}".`,
+          };
+        }
+        const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
+        const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+        const disabledErr = assertKeyDatesModuleEnabled(config);
+        if (disabledErr) return disabledErr;
+
+        const loaded = await loadKeyDateForActorOrClassifyError(
+          ctx,
+          null,
+          keyDateId,
+          actor,
+          people,
+          matters,
+          teams,
+          rbacOptions,
+          { forUpdate: true },
+        );
+        if (!loaded.kd) {
+          return { ok: false as const, error: loaded.error ?? 'Key date not found.' };
+        }
+        const { kd, matter, enquiry } = loaded;
+        const expectedVersion = kd.version;
+        const nowIso = new Date().toISOString();
+        const stagedAudit: AuditEntry[] = [];
+        let pendingIdx = 0;
+
+        resolveKeyDateOutcome({
+          keyDate: kd,
+          kind: input.kind,
+          note: input.note,
+          evidenceDocumentId: input.evidenceDocumentId,
+          actor,
+          nowIso,
+          config,
+          teams,
+          people,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        });
+
+        const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+        const reminderStatesWorking = existingReminder ? [existingReminder] : [];
+        const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        closeReminderTaskForKeyDate({
+          keyDateId: kd.id,
+          tenantId: ctx.tenantId,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          nowIso,
+          actorId: actor.id,
+        });
+
+        const changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+
+        await commitKeyDateDomainWritesInPostgres({
+          ctx,
+          keyDatesToUpsert: [kd],
+          expectedVersionsById: new Map([[kd.id, expectedVersion]]),
+          reminderStatesToUpsert: reminderStatesWorking,
+          tasksToUpsert: changedTasks,
+          auditEntries: stagedAudit,
+        });
+
+        return {
+          ok: true as const,
+          keyDate: kd,
+          postCommitSync: {
+            ctx,
+            config,
+            nowIso,
+            existingSyncs: existingSync ? [existingSync] : [],
+            items: [{ keyDate: kd, matter, enquiry }],
+          },
+        };
+      },
     );
-    closeReminderTaskForKeyDate({
-      keyDateId: kd.id,
-      tenantId: ctx.tenantId,
-      tasks: storeTasks,
-      reminderStates: reminderStatesWorking,
-      nowIso,
-      actorId: actor.id,
-    });
 
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      nowIso,
-    });
-
-    const changedTasks = storeTasks.filter(
-      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-    );
-
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      keyDatesToUpsert: [kd],
-      reminderStatesToUpsert: reminderStatesWorking,
-      calendarSyncsToUpsert: calendarSyncsWorking,
-      tasksToUpsert: changedTasks,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, keyDate: kd };
+    if (!txResult.ok || !('postCommitSync' in txResult)) {
+      return txResult;
+    }
+    await runPostCommitKeyDateCalendarSync(txResult.postCommitSync);
+    return { ok: true, keyDate: txResult.keyDate };
   } catch (err) {
     return {
       ok: false,
@@ -21888,83 +22051,104 @@ export async function reassignKeyDateTeamRecord(
   options?: { calendarAdapter?: GraphCalendarAdapter },
 ): Promise<{ ok: boolean; keyDate?: KeyDate; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      actor,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd, matter, enquiry } = loaded;
-    const nowIso = new Date().toISOString();
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
-
-    const taskRepo = getTaskWorkflowRepository();
-    const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-    const beforeTaskJsonById = new Map(
-      storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-    );
-    reassignKeyDateTeamAndOwners({
-      keyDate: kd,
-      tenantId: ctx.tenantId,
-      teamId: input.teamId,
-      responsiblePersonIds: input.responsiblePersonIds,
-      reason: input.reason,
-      actor,
-      nowIso,
-      config,
-      matter,
-      tasks: storeTasks,
-      teams,
-      people,
-      rbacOptions,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
-
     const keyDateRepo = getKeyDateRepository();
-    const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
-    const calendarSyncsWorking = existingSync ? [existingSync] : [];
+    const taskRepo = getTaskWorkflowRepository();
 
-    await syncKeyDateToOutlookCalendar({
-      keyDate: kd,
-      config,
-      matter,
-      enquiry,
-      calendarSyncs: calendarSyncsWorking,
-      adapter: options?.calendarAdapter,
-      nowIso,
-    });
+    const txResult = await keyDateRepo.withTenantTransaction(
+      prelimCtx,
+      async () => {
+        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        if (!resolved || !resolved.actor) {
+          return {
+            ok: false as const,
+            error: `Unknown or unauthenticated user "${byId}".`,
+          };
+        }
+        const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
+        const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+        const disabledErr = assertKeyDatesModuleEnabled(config);
+        if (disabledErr) return disabledErr;
 
-    const changedTasks = storeTasks.filter(
-      (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        const loaded = await loadKeyDateForActorOrClassifyError(
+          ctx,
+          null,
+          keyDateId,
+          actor,
+          people,
+          matters,
+          teams,
+          rbacOptions,
+          { forUpdate: true },
+        );
+        if (!loaded.kd) {
+          return { ok: false as const, error: loaded.error ?? 'Key date not found.' };
+        }
+        const { kd, matter, enquiry } = loaded;
+        const expectedVersion = kd.version;
+        const nowIso = new Date().toISOString();
+        const stagedAudit: AuditEntry[] = [];
+        let pendingIdx = 0;
+
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        reassignKeyDateTeamAndOwners({
+          keyDate: kd,
+          tenantId: ctx.tenantId,
+          teamId: input.teamId,
+          responsiblePersonIds: input.responsiblePersonIds,
+          reason: input.reason,
+          actor,
+          nowIso,
+          config,
+          matter,
+          tasks: storeTasks,
+          teams,
+          people,
+          rbacOptions,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+        });
+
+        const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
+
+        const changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+
+        await commitKeyDateDomainWritesInPostgres({
+          ctx,
+          keyDatesToUpsert: [kd],
+          expectedVersionsById: new Map([[kd.id, expectedVersion]]),
+          tasksToUpsert: changedTasks,
+          auditEntries: stagedAudit,
+        });
+
+        return {
+          ok: true as const,
+          keyDate: kd,
+          postCommitSync: {
+            ctx,
+            config,
+            nowIso,
+            existingSyncs: existingSync ? [existingSync] : [],
+            items: [{ keyDate: kd, matter, enquiry }],
+            adapter: options?.calendarAdapter,
+          },
+        };
+      },
     );
 
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      keyDatesToUpsert: [kd],
-      calendarSyncsToUpsert: calendarSyncsWorking,
-      tasksToUpsert: changedTasks,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, keyDate: kd };
+    if (!txResult.ok || !('postCommitSync' in txResult)) {
+      return txResult;
+    }
+    await runPostCommitKeyDateCalendarSync(txResult.postCommitSync);
+    return { ok: true, keyDate: txResult.keyDate };
   } catch (err) {
     return {
       ok: false,
@@ -21982,78 +22166,85 @@ export async function recordKeyDateNotApplicableRecord(
   byId: string,
 ): Promise<{ ok: boolean; record?: KeyDateNotApplicable; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    const matter = matters.find((m) => m.id === input.matterId);
-    if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people, rbacOptions)) {
-      return { ok: false, error: 'Matter not found or restricted.' };
-    }
-
     const keyDateRepo = getKeyDateRepository();
-    const existingNaList = await keyDateRepo.listNotApplicableForMatter(
-      ctx,
-      matter.id,
-      actor.id,
-    );
-    const nowIso = new Date().toISOString();
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
 
-    const rec = recordKeyDateNotApplicable({
-      matterId: matter.id,
-      matterTypeId: matter.matterTypeId || matter.practiceAreaId,
-      keyDateTypeId: input.keyDateTypeId,
-      reason: input.reason,
-      actor,
-      nowIso,
-      config,
-      notApplicableList: existingNaList,
-      teams,
-      people,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-    });
+    return await keyDateRepo.withTenantTransaction(prelimCtx, async () => {
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
+      if (!resolved || !resolved.actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const { ctx, actor, people, matters, teams, rbacOptions } = resolved;
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
 
-    const matterKeyDates = await keyDateRepo.listKeyDatesForMatter(
-      ctx,
-      matter.id,
-      actor.id,
-    );
-    const matchingKeyDateIds = matterKeyDates
-      .filter((kd) => kd.keyDateTypeId === input.keyDateTypeId)
-      .map((kd) => kd.id);
-    const deletedTaskIds: string[] = [];
-    if (matchingKeyDateIds.length > 0) {
-      const taskRepo = getTaskWorkflowRepository();
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const idempotencyKeys = new Set(
-        matchingKeyDateIds.map((kdId) =>
-          buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId),
-        ),
+      const matter = matters.find((m) => m.id === input.matterId);
+      if (!matter || !canViewerAccessMatterKeyDates(matter, actor.id, actor, people, rbacOptions)) {
+        return { ok: false, error: 'Matter not found or restricted.' };
+      }
+
+      const existingNaList = await keyDateRepo.listNotApplicableForMatter(
+        ctx,
+        matter.id,
+        actor.id,
       );
-      for (const t of storeTasks) {
-        if (t.idempotencyKey && idempotencyKeys.has(t.idempotencyKey)) {
-          deletedTaskIds.push(t.id);
+      const nowIso = new Date().toISOString();
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
+
+      const rec = recordKeyDateNotApplicable({
+        matterId: matter.id,
+        matterTypeId: matter.matterTypeId || matter.practiceAreaId,
+        keyDateTypeId: input.keyDateTypeId,
+        reason: input.reason,
+        actor,
+        nowIso,
+        config,
+        notApplicableList: existingNaList,
+        teams,
+        people,
+        audit: stagedAudit,
+        nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      });
+
+      const matterKeyDates = await keyDateRepo.listKeyDatesForMatter(
+        ctx,
+        matter.id,
+        actor.id,
+      );
+      const matchingKeyDateIds = matterKeyDates
+        .filter((kd) => kd.keyDateTypeId === input.keyDateTypeId)
+        .map((kd) => kd.id);
+      const deletedTaskIds: string[] = [];
+      if (matchingKeyDateIds.length > 0) {
+        const taskRepo = getTaskWorkflowRepository();
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const idempotencyKeys = new Set(
+          matchingKeyDateIds.map((kdId) =>
+            buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId),
+          ),
+        );
+        for (const t of storeTasks) {
+          if (t.idempotencyKey && idempotencyKeys.has(t.idempotencyKey)) {
+            deletedTaskIds.push(t.id);
+          }
         }
       }
-    }
 
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      notApplicableToUpsert: [rec],
-      reminderStatesToDeleteKeyDateIds: matchingKeyDateIds,
-      tasksToDeleteIds: deletedTaskIds,
-      auditEntries: stagedAudit,
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        notApplicableToUpsert: [rec],
+        reminderStatesToDeleteKeyDateIds: matchingKeyDateIds,
+        tasksToDeleteIds: deletedTaskIds,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, record: rec };
     });
-
-    return { ok: true, record: rec };
   } catch (err) {
     return {
       ok: false,
@@ -22070,125 +22261,133 @@ export async function acknowledgeKeyDateReminderRecord(
   byId: string,
 ): Promise<{ ok: boolean; reminderState?: KeyDateReminderState; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
-    const config = await getKeyDatesConfig({ ctx, userId: actor.id });
-    const disabledErr = assertKeyDatesModuleEnabled(config);
-    if (disabledErr) return disabledErr;
-
-    if (
-      !hasKeyDatePermission(actor, 'keydate:view', {
-        config,
-        allPeople: people,
-        teams,
-        rbac: rbacOptions,
-      })
-    ) {
-      return {
-        ok: false,
-        error:
-          'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
-      };
-    }
-
-    const loaded = await loadKeyDateForActorOrClassifyError(
-      ctx,
-      null,
-      keyDateId,
-      actor,
-      people,
-      matters,
-      teams,
-      rbacOptions,
-    );
-    if (!loaded.kd) {
-      return { ok: false, error: loaded.error ?? 'Key date not found.' };
-    }
-    const { kd, matter } = loaded;
-
-    if (kd.status !== 'confirmed') {
-      return {
-        ok: false,
-        error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
-      };
-    }
-
-    const owningTeam = teams.find((t) => t.id === kd.teamId);
-    const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
-    const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
-    if (!isResponsiblePerson && !isOwningTeamLead) {
-      return {
-        ok: false,
-        error:
-          'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
-      };
-    }
-
-    const nowIso = new Date().toISOString();
-    const todayIso = toIsoDate(new Date());
     const keyDateRepo = getKeyDateRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const existingReminder = await keyDateRepo.getReminderState(ctx, keyDateId, actor.id);
-    const reminderStatesWorking: KeyDateReminderState[] = existingReminder
-      ? [existingReminder]
-      : [];
-    const stagedAudit: AuditEntry[] = [];
-    let pendingIdx = 0;
 
-    let changedTasks: Task[] = [];
-    let deletedTaskIds: string[] = [];
-    if (reminderStatesWorking.length === 0) {
-      const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-      );
-      let pendingTaskIdx = 0;
-      syncReminderForConfirmedKeyDate({
-        keyDate: kd,
-        config,
-        tasks: storeTasks,
-        reminderStates: reminderStatesWorking,
-        matters: matter ? [matter] : [],
+    return await keyDateRepo.withTenantTransaction(prelimCtx, async () => {
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
+      if (!resolved || !resolved.actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const { ctx, actor, people, matters, teams, rbacOptions, personRbacOptions } = resolved;
+      const config = await getKeyDatesConfig({ ctx, userId: actor.id });
+      const disabledErr = assertKeyDatesModuleEnabled(config);
+      if (disabledErr) return disabledErr;
+
+      if (
+        !hasKeyDatePermission(actor, 'keydate:view', {
+          config,
+          allPeople: people,
+          teams,
+          rbac: rbacOptions,
+        })
+      ) {
+        return {
+          ok: false,
+          error:
+            'KEY_DATE_PERMISSION_DENIED: You need "keydate:view" permission to acknowledge key date reminders.',
+        };
+      }
+
+      const loaded = await loadKeyDateForActorOrClassifyError(
+        ctx,
+        null,
+        keyDateId,
+        actor,
         people,
-        rbacOptions: personRbacOptions,
+        matters,
+        teams,
+        rbacOptions,
+        { forUpdate: true },
+      );
+      if (!loaded.kd) {
+        return { ok: false, error: loaded.error ?? 'Key date not found.' };
+      }
+      const { kd, matter } = loaded;
+
+      if (kd.status !== 'confirmed') {
+        return {
+          ok: false,
+          error: `KEY_DATE_INVALID_STATE: Reminders can only be acknowledged for confirmed key dates (current status: "${kd.status}").`,
+        };
+      }
+
+      const owningTeam = teams.find((t) => t.id === kd.teamId);
+      const isResponsiblePerson = kd.responsiblePersonIds.includes(actor.id);
+      const isOwningTeamLead = Boolean(owningTeam?.leadIds.includes(actor.id));
+      if (!isResponsiblePerson && !isOwningTeamLead) {
+        return {
+          ok: false,
+          error:
+            'KEY_DATE_PERMISSION_DENIED: Only a responsible person on the key date or the owning team lead may acknowledge a reminder stage.',
+        };
+      }
+
+      const nowIso = new Date().toISOString();
+      const todayIso = toIsoDate(new Date());
+      const existingReminder = await keyDateRepo.getReminderState(ctx, keyDateId, actor.id);
+      const reminderStatesWorking: KeyDateReminderState[] = existingReminder
+        ? [existingReminder]
+        : [];
+      const stagedAudit: AuditEntry[] = [];
+      let pendingIdx = 0;
+
+      let changedTasks: Task[] = [];
+      let deletedTaskIds: string[] = [];
+      if (reminderStatesWorking.length === 0) {
+        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const beforeTaskJsonById = new Map(
+          storeTasks.map((t) => [t.id, JSON.stringify(t)]),
+        );
+        let pendingTaskIdx = 0;
+        syncReminderForConfirmedKeyDate({
+          keyDate: kd,
+          config,
+          tasks: storeTasks,
+          reminderStates: reminderStatesWorking,
+          matters: matter ? [matter] : [],
+          people,
+          rbacOptions: personRbacOptions,
+          audit: stagedAudit,
+          nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+          todayIso,
+          nowIso,
+          actorId: actor.id,
+          tenantId: ctx.tenantId,
+          nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
+        });
+        changedTasks = storeTasks.filter(
+          (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+        );
+        const currentIds = new Set(storeTasks.map((t) => t.id));
+        deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+          (id) => !currentIds.has(id),
+        );
+      }
+
+      const state = acknowledgeKeyDateReminderStage({
+        keyDateId,
+        actorId: actor.id,
+        nowIso,
+        reminderStates: reminderStatesWorking,
         audit: stagedAudit,
         nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-        todayIso,
-        nowIso,
-        actorId: actor.id,
-        tenantId: ctx.tenantId,
-        nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
       });
-      changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
-    }
 
-    const state = acknowledgeKeyDateReminderStage({
-      keyDateId,
-      actorId: actor.id,
-      nowIso,
-      reminderStates: reminderStatesWorking,
-      audit: stagedAudit,
-      nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
+      await commitKeyDateDomainWritesInPostgres({
+        ctx,
+        reminderStatesToUpsert: reminderStatesWorking,
+        tasksToUpsert: changedTasks,
+        tasksToDeleteIds: deletedTaskIds,
+        auditEntries: stagedAudit,
+      });
+
+      return { ok: true, reminderState: state };
     });
-
-    await commitKeyDateDomainWritesInPostgres({
-      ctx,
-      reminderStatesToUpsert: reminderStatesWorking,
-      tasksToUpsert: changedTasks,
-      tasksToDeleteIds: deletedTaskIds,
-      auditEntries: stagedAudit,
-    });
-
-    return { ok: true, reminderState: state };
   } catch (err) {
     return {
       ok: false,
@@ -23121,79 +23320,90 @@ export async function saveKeyDatesConfigRecord(
   options?: { mfaVerified?: boolean } | boolean,
 ): Promise<{ ok: boolean; config?: KeyDatesConfig; error?: string }> {
   try {
-    const resolved = await resolveKeyDatesActorAndData(null, byId);
-    if (!resolved || !resolved.actor) {
+    const prelimCtx = resolvePrelimKeyDatesTenantContext(byId);
+    if (!prelimCtx) {
       return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
     }
-    const { ctx, actor, people, teams } = resolved;
-    const currentConfig = await getKeyDatesConfig({ ctx, userId: actor.id });
+    const keyDateRepo = getKeyDateRepository();
 
-    if (
-      !hasKeyDatePermission(actor, 'keydate:configure', {
-        config: currentConfig,
-        allPeople: people,
-        teams,
-      })
-    ) {
-      return {
-        ok: false,
-        error: 'You need "keydate:configure" permission to modify Key Dates configuration.',
-      };
-    }
+    return await keyDateRepo.withTenantTransaction(prelimCtx, async (tx) => {
+      await tx.query(
+        'SELECT tenant_id FROM key_dates_tenant_configs WHERE tenant_id = $1 FOR UPDATE',
+        [prelimCtx.tenantId],
+      );
 
-    const mfaVerified =
-      typeof options === 'boolean' ? options : options?.mfaVerified;
-    const configurePermDef = PERMISSION_REGISTRY['keydate:configure'];
-    if ((configurePermDef?.requiresMfa ?? true) && mfaVerified !== true) {
-      return {
-        ok: false,
-        error:
-          'MFA_REQUIRED: Multi-factor authentication (MFA) is required to modify Key Dates configuration.',
-      };
-    }
+      const resolved = await resolveKeyDatesActorAndData(null, byId);
+      if (!resolved || !resolved.actor) {
+        return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
+      }
+      const { ctx, actor, people, teams } = resolved;
+      const currentConfig = await getKeyDatesConfig({ ctx, userId: actor.id });
 
-    for (const rs of newConfigInput.limitationRuleSets ?? []) {
-      const rawStatus = (rs as { reviewStatus?: unknown }).reviewStatus;
-      if (rawStatus !== 'reviewed' && rawStatus !== 'unreviewed') {
+      if (
+        !hasKeyDatePermission(actor, 'keydate:configure', {
+          config: currentConfig,
+          allPeople: people,
+          teams,
+        })
+      ) {
         return {
           ok: false,
-          error: `Invalid reviewStatus "${String(rawStatus)}" on limitation rule set "${rs.id}". Expected "reviewed" or "unreviewed".`,
+          error: 'You need "keydate:configure" permission to modify Key Dates configuration.',
         };
       }
-    }
 
-    const validated = validateKeyDatesConfig(newConfigInput) as unknown as KeyDatesConfig;
-    const nowIso = new Date().toISOString();
-    const todayIso = nowIso.slice(0, 10);
-    const prevRuleSetsById = new Map(
-      (currentConfig.limitationRuleSets ?? []).map((rs) => [rs.id, rs]),
-    );
-    if (validated.limitationRuleSets) {
-      validated.limitationRuleSets = validated.limitationRuleSets.map((rs) => {
-        if (rs.reviewStatus === 'unreviewed') {
-          const nextUnreviewed = { ...rs, reviewStatus: 'unreviewed' as const };
-          delete nextUnreviewed.reviewedBy;
-          delete nextUnreviewed.reviewedOn;
-          return nextUnreviewed;
-        }
-        const prev = prevRuleSetsById.get(rs.id);
-        const keepPreviousReviewer =
-          prev?.reviewStatus === 'reviewed' &&
-          prev.version === rs.version &&
-          Boolean(prev.reviewedBy);
+      const mfaVerified =
+        typeof options === 'boolean' ? options : options?.mfaVerified;
+      const configurePermDef = PERMISSION_REGISTRY['keydate:configure'];
+      if ((configurePermDef?.requiresMfa ?? true) && mfaVerified !== true) {
         return {
-          ...rs,
-          reviewStatus: 'reviewed' as const,
-          reviewedBy: keepPreviousReviewer ? prev!.reviewedBy : actor.id,
-          reviewedOn: keepPreviousReviewer
-            ? (prev!.reviewedOn ?? todayIso)
-            : todayIso,
+          ok: false,
+          error:
+            'MFA_REQUIRED: Multi-factor authentication (MFA) is required to modify Key Dates configuration.',
         };
-      });
-    }
+      }
 
-    const keyDateRepo = getKeyDateRepository();
-    await keyDateRepo.withTenantTransaction(ctx, async () => {
+      for (const rs of newConfigInput.limitationRuleSets ?? []) {
+        const rawStatus = (rs as { reviewStatus?: unknown }).reviewStatus;
+        if (rawStatus !== 'reviewed' && rawStatus !== 'unreviewed') {
+          return {
+            ok: false,
+            error: `Invalid reviewStatus "${String(rawStatus)}" on limitation rule set "${rs.id}". Expected "reviewed" or "unreviewed".`,
+          };
+        }
+      }
+
+      const validated = validateKeyDatesConfig(newConfigInput) as unknown as KeyDatesConfig;
+
+      const nowIso = new Date().toISOString();
+      const todayIso = nowIso.slice(0, 10);
+      const prevRuleSetsById = new Map(
+        (currentConfig.limitationRuleSets ?? []).map((rs) => [rs.id, rs]),
+      );
+      if (validated.limitationRuleSets) {
+        validated.limitationRuleSets = validated.limitationRuleSets.map((rs) => {
+          if (rs.reviewStatus === 'unreviewed') {
+            const nextUnreviewed = { ...rs, reviewStatus: 'unreviewed' as const };
+            delete nextUnreviewed.reviewedBy;
+            delete nextUnreviewed.reviewedOn;
+            return nextUnreviewed;
+          }
+          const prev = prevRuleSetsById.get(rs.id);
+          const keepPreviousReviewer =
+            prev?.reviewStatus === 'reviewed' &&
+            prev.version === rs.version &&
+            Boolean(prev.reviewedBy);
+          return {
+            ...rs,
+            reviewStatus: 'reviewed' as const,
+            reviewedBy: keepPreviousReviewer ? prev!.reviewedBy : actor.id,
+            reviewedOn: keepPreviousReviewer
+              ? (prev!.reviewedOn ?? todayIso)
+              : todayIso,
+          };
+        });
+      }
+
       await keyDateRepo.putKeyDatesTenantConfig(
         ctx,
         validated as unknown as KeyDatesConfiguration,
@@ -23216,9 +23426,9 @@ export async function saveKeyDatesConfigRecord(
           },
         },
       ]);
-    });
 
-    return { ok: true, config: validated };
+      return { ok: true, config: validated };
+    });
   } catch (err) {
     return {
       ok: false,
@@ -24284,87 +24494,91 @@ export async function deleteMatterRateOverrideRecord(
   } & Partial<Omit<ActionDenied, 'code'>>
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const [people, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, MATTER_RATE_MANAGE_PERMS, people, teams)) {
-    const msg = 'You do not have permission to delete matter rate overrides.';
-    return {
-      ...buildActionDenied('FORBIDDEN', msg),
-      deleted: false,
-      code: 'FORBIDDEN',
-      message: msg,
-      error: msg,
-    };
-  }
-
   const trimmedId = id?.trim() || '';
-  if (!trimmedId) {
-    const msg = 'NOT_FOUND: Matter rate override id is required.';
-    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
-  }
-
   const repo = getRateOverrideRepository();
-  const existing = await repo.getMatterRateOverrideById(ctx, trimmedId);
-  if (!existing) {
-    const msg = `NOT_FOUND: Matter rate override "${trimmedId}" was not found.`;
-    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
-  }
 
-  const matter = await getMatterRepository().getMatterById<Matter>(ctx, existing.matterId, {
-    includeRestricted: true,
-  });
-  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
-    const msg = 'Matter not found or restricted.';
-    return {
-      ...buildActionDenied('FORBIDDEN', msg),
-      deleted: false,
-      code: 'FORBIDDEN',
-      message: msg,
-      error: msg,
-    };
-  }
-
-  const deleted = await repo.withTenantTransaction(ctx, async () => {
-    const ok = await repo.deleteMatterRateOverride(ctx, trimmedId);
-    if (ok) {
-      const nowIso = new Date().toISOString();
-      const summaryOld = formatMatterOverrideSummary(existing);
-      await appendTenantAuditEntries(ctx, [
-        {
-          recordType: 'matter_rate_override',
-          recordId: existing.id,
-          action: 'rate-override-delete',
-          field: 'Matter rate override removed',
-          oldValue: summaryOld,
-          newValue: null,
-          byId,
-          at: nowIso,
-          snapshot: existing,
-        },
-        {
-          recordType: 'matter',
-          recordId: existing.matterId,
-          action: 'rate-override-delete',
-          field: `Matter rate override removed (${existing.id} · ${existing.gradeKey})`,
-          oldValue: summaryOld,
-          newValue: null,
-          byId,
-          at: nowIso,
-          snapshot: existing,
-        },
-      ]);
+  return repo.withTenantTransaction(ctx, async (tx) => {
+    const [people, teams] = await Promise.all([
+      getPartyRepository().listAllPeople<Person>(ctx),
+      getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    ]);
+    const actor = people.find((p) => p.id === byId) ?? null;
+    if (!hasAnyPersonPermission(actor, MATTER_RATE_MANAGE_PERMS, people, teams)) {
+      const msg = 'You do not have permission to delete matter rate overrides.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        deleted: false,
+        code: 'FORBIDDEN',
+        message: msg,
+        error: msg,
+      };
     }
-    return ok;
-  });
 
-  if (!deleted) {
-    const msg = `NOT_FOUND: Matter rate override "${trimmedId}" was not found.`;
-    return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
-  }
-  return { deleted: true };
+    if (!trimmedId) {
+      const msg = 'NOT_FOUND: Matter rate override id is required.';
+      return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+    }
+
+    await tx.query(
+      'SELECT id FROM public.matter_rate_overrides WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+      [ctx.tenantId, trimmedId],
+    );
+
+    const existing = await repo.getMatterRateOverrideById(ctx, trimmedId);
+    if (!existing) {
+      const msg = `NOT_FOUND: Matter rate override "${trimmedId}" was not found.`;
+      return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+    }
+
+    const matter = await getMatterRepository().getMatterById<Matter>(ctx, existing.matterId, {
+      includeRestricted: true,
+    });
+    if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+      const msg = 'Matter not found or restricted.';
+      return {
+        ...buildActionDenied('FORBIDDEN', msg),
+        deleted: false,
+        code: 'FORBIDDEN',
+        message: msg,
+        error: msg,
+      };
+    }
+
+    const ok = await repo.deleteMatterRateOverride(ctx, trimmedId);
+    if (!ok) {
+      const msg = `NOT_FOUND: Matter rate override "${trimmedId}" was not found.`;
+      return { deleted: false, code: 'NOT_FOUND', message: msg, error: msg };
+    }
+
+    const nowIso = new Date().toISOString();
+    const summaryOld = formatMatterOverrideSummary(existing);
+    await appendTenantAuditEntries(ctx, [
+      {
+        recordType: 'matter_rate_override',
+        recordId: existing.id,
+        action: 'rate-override-delete',
+        field: 'Matter rate override removed',
+        oldValue: summaryOld,
+        newValue: null,
+        byId,
+        at: nowIso,
+        snapshot: existing,
+      },
+      {
+        recordType: 'matter',
+        recordId: existing.matterId,
+        action: 'rate-override-delete',
+        field: `Matter rate override removed (${existing.id} · ${existing.gradeKey})`,
+        oldValue: summaryOld,
+        newValue: null,
+        byId,
+        at: nowIso,
+        snapshot: existing,
+      },
+    ]);
+
+    return { deleted: true };
+  });
 }
 
 export async function resolveApplicableRatesRecord(

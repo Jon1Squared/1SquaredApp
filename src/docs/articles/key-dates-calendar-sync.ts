@@ -6,11 +6,13 @@ export const keyDatesCalendarSyncArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'Why Microsoft Graph Outlook calendar sync is not available in this phase (all records remain disabled until a live Graph adapter is delivered), why 1Squared is the single source of truth, and how restricted staff matters and client confidentiality are protected.',
-  updated: '2026-11-03',
+  updated: '2026-11-20',
   body: `
 Microsoft Outlook calendar synchronisation via Microsoft Graph is **not available in this phase**. Until a live Microsoft Graph calendar adapter is delivered in a subsequent release, no external Graph calls are made by default and every \`KeyDateCalendarSync\` record remains in state \`'disabled'\`.
 
 > **Single source of truth**: 1Squared is always the source of truth. Even when an external calendar adapter is connected in a future phase, editing or deleting a calendar entry inside Outlook will never alter or delete the key date in 1Squared.
+
+> **Post-commit synchronisation**: Calendar synchronisation runs strictly **after** the key date database transaction commits. If a save, verification, supersession, resolution, or reassignment rolls back, no external Graph call is made.
 
 ## Per-matter-type configuration and sync contract
 

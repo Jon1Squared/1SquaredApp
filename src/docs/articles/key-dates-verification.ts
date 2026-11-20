@@ -6,7 +6,7 @@ export const keyDatesVerificationArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'How four-eyes verification prevents single-person calculation errors on limitation and critical dates, and why proposers cannot verify their own dates.',
-  updated: '2026-11-05',
+  updated: '2026-11-20',
   body: `
 Professional indemnity insurers and risk teams recommend "four-eyes" verification for limitation and other critical deadlines. 1Squared enforces two-step verification at the domain and data layers.
 
@@ -28,6 +28,7 @@ When \`verification.required\` is \`true\`, the \`appliesTo\` setting determines
 3. **Strict separation of duties**: The person who proposed the date (\`proposedByPersonId\`) can **never** verify their own date. Attempting to do so is rejected by the server regardless of role.
 4. **Confirming (Verify)**: A different user with \`keydate:verify\` reviews the trigger dates, rule calculation, or source order and selects **Verify**. The date moves to \`confirmed\`, records \`verifiedByPersonId\` and \`verifiedAt\`, and creates its single reminder task.
 5. **Rejecting (Reject)**: If the verifier spots an error, they select **Reject** and must provide a mandatory **rejection reason**. The date returns to \`provisional\` with \`rejectionReason\` recorded, and the proposer is notified to amend and re-propose it.
+6. **Concurrent update protection**: Every create, propose, verify, reject, supersede, resolve, reassign, not-applicable, and reminder-acknowledgement action executes inside a single per-tenant PostgreSQL transaction with \`FOR UPDATE\` row locking and optimistic version checks (\`expectedVersion\`), ensuring simultaneous requests never overwrite newer edits or create duplicate reminder tasks.
 
 ## Overdue verification monitoring
 

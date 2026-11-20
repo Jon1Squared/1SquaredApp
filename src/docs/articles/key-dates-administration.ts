@@ -6,7 +6,7 @@ export const keyDatesAdministrationArticle: DocArticle = {
   section: 'key-dates-limitation',
   summary:
     'How administrators and COLPs configure key date types, matter type policies, countdown schedules, limitation rule sets, and business calendars under strict JSON Schema validation and audit logging.',
-  updated: '2026-11-13',
+  updated: '2026-11-20',
   body: `
 All statutory limitation periods, reminder schedules, verification rules, and business calendars in 1Squared live in **schema-validated tenant configuration** (\`schemas/keyDates.config.schema.json\`), never in hardcoded core code.
 
@@ -42,6 +42,6 @@ Both the scheduled job and the manual button share the same single-transaction p
 
 Every configuration save is validated against \`keyDates.config.schema.json\` (rejecting unknown keys) and requires an explicit **audit reason**. The platform records a \`keydate-config-change\` entry in the immutable audit log containing the actor, timestamp, reason, and complete \`before\` and \`after\` configuration snapshots.
 
-The saved configuration and its \`keydate-config-change\` audit entry are written to the firm's PostgreSQL database in the same transaction. If the audit entry cannot be written, the configuration change is not saved either, and you will see an error asking you to try again. The firm audit log is append-only: the application's database role can add entries but has no permission to change or delete them.
+The saved configuration and its \`keydate-config-change\` audit entry are written to the firm's PostgreSQL database in the same transaction, after locking and reading the previous configuration inside that transaction so rule-set reviewer metadata and the \`before\` audit snapshot reflect the committed state immediately prior to the change. If the audit entry cannot be written, the configuration change is not saved either, and you will see an error asking you to try again. The firm audit log is append-only: the application's database role can add entries but has no permission to change or delete them.
 `,
 };

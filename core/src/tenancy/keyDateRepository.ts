@@ -407,7 +407,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   public async putKeyDate(
     ctx: TenantContext,
     keyDate: KeyDate,
-    options?: { allowEntityRebindForCompensation?: boolean },
+    options?: { expectedVersion?: number | null },
   ): Promise<KeyDate> {
     if (
       (keyDate.matterId && keyDate.enquiryId) ||
@@ -431,7 +431,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const existingRes = await tx.query<DbKeyDateRow>(
-        'SELECT * FROM key_dates WHERE id = $1',
+        'SELECT * FROM key_dates WHERE id = $1 FOR UPDATE',
         [keyDate.id],
       );
       const existing = existingRes.rows[0];
@@ -448,15 +448,31 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
           Boolean(keyDate.matterId) &&
           !keyDate.enquiryId &&
           keyDate.source === 'carried_from_enquiry';
-        if (
-          entityChanged &&
-          !isCarriedFromEnquiryConversion &&
-          !options?.allowEntityRebindForCompensation
-        ) {
+        if (entityChanged && !isCarriedFromEnquiryConversion) {
           throw new Error(
             'KEY_DATE_ENTITY_IMMUTABLE: Cannot change matterId or enquiryId on an existing KeyDate.',
           );
         }
+        const expectedVersion = options?.expectedVersion;
+        if (typeof expectedVersion === 'number') {
+          if (
+            !Number.isInteger(expectedVersion) ||
+            expectedVersion < 1 ||
+            Number(existing.version) !== expectedVersion
+          ) {
+            const conflictErr = new Error(
+              `KEY_DATE_CONCURRENCY_CONFLICT: KeyDate "${keyDate.id}" was modified concurrently (expected version ${expectedVersion}, found ${existing.version}).`,
+            ) as Error & { code: string };
+            conflictErr.code = 'KEY_DATE_CONCURRENCY_CONFLICT';
+            throw conflictErr;
+          }
+        }
+      } else if (typeof options?.expectedVersion === 'number') {
+        const conflictErr = new Error(
+          `KEY_DATE_CONCURRENCY_CONFLICT: KeyDate "${keyDate.id}" no longer exists (expected version ${options.expectedVersion}).`,
+        ) as Error & { code: string };
+        conflictErr.code = 'KEY_DATE_CONCURRENCY_CONFLICT';
+        throw conflictErr;
       }
 
       if (
@@ -549,26 +565,6 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
-  public async deleteKeyDateByIdForCompensation(
-    ctx: TenantContext,
-    id: KeyDateId,
-  ): Promise<void> {
-    await this.withTenantTransaction(ctx, async (tx) => {
-      await tx.query(
-        'DELETE FROM key_date_calendar_syncs WHERE tenant_id = $1 AND key_date_id = $2',
-        [ctx.tenantId, id],
-      );
-      await tx.query(
-        'DELETE FROM key_date_reminder_states WHERE tenant_id = $1 AND key_date_id = $2',
-        [ctx.tenantId, id],
-      );
-      await tx.query(
-        'DELETE FROM key_dates WHERE tenant_id = $1 AND id = $2',
-        [ctx.tenantId, id],
-      );
-    });
-  }
-
   public async listHiddenKeyDateIdsForMatters(
     ctx: TenantContext,
     hiddenMatterIds: ReadonlySet<string>,
@@ -637,6 +633,31 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbKeyDateRow>(
         'SELECT * FROM key_dates WHERE id = $1 AND tenant_id = $2',
+        [id, ctx.tenantId],
+      );
+      const row = res.rows[0];
+      if (!row) return null;
+      this.assertRowTenant(ctx, row.tenant_id, 'KeyDate');
+      if (
+        !options?.includeRestricted &&
+        row.matter_id &&
+        !(await this.checkMatterVisibleInTx(tx, ctx, row.matter_id, viewerId))
+      ) {
+        return null;
+      }
+      return mapKeyDateRow(row);
+    });
+  }
+
+  public async getKeyDateByIdForUpdate(
+    ctx: TenantContext,
+    id: KeyDateId,
+    viewerId: string = ctx.actorId,
+    options?: { includeRestricted?: boolean },
+  ): Promise<KeyDate | null> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbKeyDateRow>(
+        'SELECT * FROM key_dates WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
         [id, ctx.tenantId],
       );
       const row = res.rows[0];

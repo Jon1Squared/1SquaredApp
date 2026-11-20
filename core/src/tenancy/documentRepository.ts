@@ -842,7 +842,6 @@ export class TenantDocumentRepository extends TenantScopedRepository {
     survivorId: string,
   ): Promise<{
     updatedCount: number;
-    undoDelta: () => Promise<void>;
   }> {
     return this.withTenantTransaction(ctx, async (tx) => {
       const affectedDocsRes = await tx.query<DbDocumentRow>(
@@ -852,11 +851,6 @@ export class TenantDocumentRepository extends TenantScopedRepository {
          FOR UPDATE`,
         [ctx.tenantId, mergedId],
       );
-      const originalDocs = affectedDocsRes.rows.map((r) => ({
-        id: r.id,
-        primaryClientId: r.primary_client_id,
-        recipientPartyId: r.recipient_party_id,
-      }));
 
       let updatedCount = 0;
       for (const row of affectedDocsRes.rows) {
@@ -885,8 +879,6 @@ export class TenantDocumentRepository extends TenantScopedRepository {
         [ctx.tenantId, entityType, mergedId],
       );
       const originalLinks = affectedLinksRes.rows.map(mapDocumentLinkRow);
-      const deletedLinks: DocumentLinkRecord[] = [];
-      const repointedLinkIds: string[] = [];
 
       for (const link of originalLinks) {
         const dupCheck = await tx.query<{ id: string }>(
@@ -912,53 +904,16 @@ export class TenantDocumentRepository extends TenantScopedRepository {
             'DELETE FROM document_links WHERE id = $1 AND tenant_id = $2',
             [link.id, ctx.tenantId],
           );
-          deletedLinks.push(link);
         } else {
           await tx.query(
             `UPDATE document_links SET entity_id = $1 WHERE id = $2 AND tenant_id = $3`,
             [survivorId, link.id, ctx.tenantId],
           );
-          repointedLinkIds.push(link.id);
           updatedCount += 1;
         }
       }
 
-      const undoDelta = async () => {
-        await this.withTenantTransaction(ctx, async (undoTx) => {
-          for (const d of originalDocs) {
-            await undoTx.query(
-              `UPDATE documents
-               SET primary_client_id = $1, recipient_party_id = $2
-               WHERE id = $3 AND tenant_id = $4`,
-              [d.primaryClientId, d.recipientPartyId, d.id, ctx.tenantId],
-            );
-          }
-          for (const linkId of repointedLinkIds) {
-            await undoTx.query(
-              `UPDATE document_links SET entity_id = $1 WHERE id = $2 AND tenant_id = $3`,
-              [mergedId, linkId, ctx.tenantId],
-            );
-          }
-          for (const dl of deletedLinks) {
-            await undoTx.query(
-              `INSERT INTO document_links (id, tenant_id, document_id, entity_type, entity_id, link_role, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)
-               ON CONFLICT (id) DO NOTHING`,
-              [
-                dl.id,
-                ctx.tenantId,
-                dl.documentId,
-                dl.entityType,
-                dl.entityId,
-                dl.linkRole,
-                dl.createdAt,
-              ],
-            );
-          }
-        });
-      };
-
-      return { updatedCount, undoDelta };
+      return { updatedCount };
     });
   }
 
