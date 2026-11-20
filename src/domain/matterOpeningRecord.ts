@@ -950,13 +950,28 @@ export function resolveRiskRatingIdForLevel(
   level: RiskLevel,
 ): string {
   const target = level.toLowerCase();
+  const bySystemKey = values.find(
+    (v) =>
+      v.listKey === 'risk_rating' &&
+      v.active &&
+      v.systemKey?.toLowerCase() === target,
+  );
+  if (bySystemKey) return bySystemKey.id;
+  const canonicalId = `risk_rating.${target}`;
+  const byCanonicalId = values.find(
+    (v) =>
+      v.listKey === 'risk_rating' &&
+      v.active &&
+      v.id === canonicalId,
+  );
+  if (byCanonicalId) return byCanonicalId.id;
   const match = values.find(
     (v) =>
       v.listKey === 'risk_rating' &&
       v.active &&
       v.label.toLowerCase().startsWith(target),
   );
-  return match?.id ?? `risk_rating.${target}`;
+  return match?.id ?? canonicalId;
 }
 
 export interface MatterRiskSectionSummaryItem extends RiskSectionDef {

@@ -38,6 +38,7 @@ import {
 } from '@/server/financeServices';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import {
+  createRecordFromPms,
   executeMerge,
   flagMatterWriteOff,
   getClientPmsViewBundle,
@@ -1874,6 +1875,160 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
         mfaVerified: true,
       });
       expect(synced.pmsLinkActive).toBe(true);
+    } finally {
+      await pmsRepo.clearTenantData(seedCtx).catch(() => undefined);
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      clearPermissionRequestCache();
+    }
+  });
+
+  it('R592: createRecordFromPms maps employee grade via configured integrations.pmsSync.gradeRoleMap and defaults unmapped grades to employee_role.support_staff', async () => {
+    const baseStore = loadCommittedSeedStore();
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const seedCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000004',
+        tenantId: 'not-a-law-firm',
+        name: 'Huw Pritchard',
+        email: 'huw.pritchard@notalawfirm.example',
+        roles: ['admin', 'managing_partner', 'finance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r592-pms-grade',
+    });
+    const pmsRepo = getPmsRepository();
+    const partyRepo = getPartyRepository();
+    try {
+      const baseIntegrations = (rawBase.integrations as Record<string, unknown>) ?? {};
+      const basePmsSync = (baseIntegrations.pmsSync as Record<string, unknown>) ?? {};
+      setActiveTenantConfigForTesting(
+        {
+          ...rawBase,
+          integrations: {
+            ...baseIntegrations,
+            pmsSync: {
+              ...basePmsSync,
+              gradeRoleMap: {
+                'Equity Director': 'employee_role.partner',
+                'Legal Operations Lead': 'employee_role.practice_manager',
+              },
+            },
+          },
+        },
+        { environment: 'test' },
+      );
+
+      await importFirmStoreModulesToPostgres({
+        ctx: seedCtx,
+        store: baseStore,
+        tenantConfig: getActiveTenantConfiguration(),
+        modules: ['parties', 'matters', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+
+      const dataset = buildSyntheticDataset({
+        suffix: 'A',
+        asAtDate: '2026-10-31',
+        wipAmount: 14000,
+        invoiceNet: 6000,
+        unlinkedWipAmount: 22000,
+      });
+      const extendedDataset: TenantPmsExtractDataset = {
+        ...dataset,
+        feeEarners: [
+          ...dataset.feeEarners,
+          {
+            fee_earner_id: 'FE-R592-DIR',
+            initials: 'ED',
+            first_name: 'Gareth',
+            last_name: 'Powell',
+            email: 'gareth.powell@notalawfirm.example',
+            grade: 'Equity Director',
+            department: 'Corporate and commercial',
+            standard_hourly_rate: 450,
+            annual_target_hours: 1100,
+            annual_target_fees: 400000,
+            active: 'Yes',
+          },
+          {
+            fee_earner_id: 'FE-R592-OPS',
+            initials: 'LO',
+            first_name: 'Tamsin',
+            last_name: 'Reed',
+            email: 'tamsin.reed@notalawfirm.example',
+            grade: 'Legal Operations Lead',
+            department: 'Corporate and commercial',
+            standard_hourly_rate: 250,
+            annual_target_hours: 1000,
+            annual_target_fees: 200000,
+            active: 'Yes',
+          },
+          {
+            fee_earner_id: 'FE-R592-UNMAPPED',
+            initials: 'UP',
+            first_name: 'Morgan',
+            last_name: 'Bell',
+            email: 'morgan.bell@notalawfirm.example',
+            grade: 'External Partner Advisor',
+            department: 'Corporate and commercial',
+            standard_hourly_rate: 0,
+            annual_target_hours: 0,
+            annual_target_fees: 0,
+            active: 'Yes',
+          },
+        ],
+      };
+
+      await pmsRepo.clearTenantData(seedCtx);
+      await pmsRepo.importExtractDataset(seedCtx, extendedDataset);
+
+      const { actorSession } = makeHostActorAndContext('P-000004');
+      await runWithActiveActorSession(actorSession, async () => {
+        const dirRes = await createRecordFromPms('employee', 'FE-R592-DIR', 'P-000004', {
+          mfaVerified: true,
+          tenantCtx: seedCtx,
+        });
+        expect(dirRes.ok).toBe(true);
+        const dirPerson = await partyRepo.getPersonById(
+          seedCtx,
+          dirRes.createdId!,
+        );
+        expect(dirPerson?.employeeRoleId).toBe('employee_role.partner');
+
+        const opsRes = await createRecordFromPms('employee', 'FE-R592-OPS', 'P-000004', {
+          mfaVerified: true,
+          tenantCtx: seedCtx,
+        });
+        expect(opsRes.ok).toBe(true);
+        const opsPerson = await partyRepo.getPersonById(
+          seedCtx,
+          opsRes.createdId!,
+        );
+        expect(opsPerson?.employeeRoleId).toBe('employee_role.practice_manager');
+
+        // Unmapped grade containing substring "Partner" MUST NOT receive Partner role; must fall back to least-privileged role
+        const unmappedRes = await createRecordFromPms(
+          'employee',
+          'FE-R592-UNMAPPED',
+          'P-000004',
+          {
+            mfaVerified: true,
+            tenantCtx: seedCtx,
+          },
+        );
+        expect(unmappedRes.ok).toBe(true);
+        const unmappedPerson = await partyRepo.getPersonById(
+          seedCtx,
+          unmappedRes.createdId!,
+        );
+        expect(unmappedPerson?.employeeRoleId).toBe('employee_role.support_staff');
+      });
     } finally {
       await pmsRepo.clearTenantData(seedCtx).catch(() => undefined);
       setActiveTenantConfigForTesting(null);

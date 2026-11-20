@@ -278,6 +278,16 @@ describe('enquiries and tasks', () => {
     expect(unmapped.team?.name).toBe('Intake');
     expect(unmapped.isFallbackIntake).toBe(true);
 
+    // R592: Renaming the Intake team preserves fallback routing via systemKey: 'intake'
+    const renamedTeams = demo.teams.map((t) =>
+      t.id === unmapped.team?.id
+        ? { ...t, name: 'Client Triage Desk', systemKey: 'intake' }
+        : t,
+    );
+    const routedRenamed = resolveRoutedTeam('work_type.unknown_practice_area', renamedTeams);
+    expect(routedRenamed.team?.id).toBe(unmapped.team?.id);
+    expect(routedRenamed.isFallbackIntake).toBe(true);
+
     expect(findPracticeAreaRoutingClashes(demo.teams)).toEqual([]);
   });
 

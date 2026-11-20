@@ -1077,4 +1077,53 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(details.employment?.systems?.dataProtectionTrainingCompletedAt).toBeNull();
     });
   });
+
+  describe('R592: Employee hierarchy uses role keys rather than job titles', () => {
+    it('R592: createDefaultEmploymentRecord determines isTopOfHierarchy from managing_partner role rather than jobTitle', () => {
+      const fakeTitleEmployee = createDefaultEmploymentRecord({
+        person: {
+          id: 'P-FAKE-TOP',
+          firstName: 'Sam',
+          surname: 'FakeTitle',
+          jobTitle: 'Acting Managing Partner',
+          roles: ['fee_earner'],
+          employeeRoleId: 'employee_role.fee_earner',
+          departmentId: 'DEPT-RE',
+        },
+        allPeople: [
+          {
+            id: 'P-REAL-MP',
+            firstName: 'Gethin',
+            surname: 'Lloyd',
+            roles: ['managing_partner'],
+            employeeRoleId: 'employee_role.practice_manager',
+            isEmployee: true,
+          } as Person,
+        ],
+        byId: 'P-000004',
+        nowIso: '2026-11-20T10:00:00.000Z',
+        primaryDomain: 'notalawfirm.example',
+      });
+      expect(fakeTitleEmployee.isTopOfHierarchy).toBe(false);
+      expect(fakeTitleEmployee.lineManagerId).toBe('P-REAL-MP');
+
+      const renamedMpRoleEmployee = createDefaultEmploymentRecord({
+        person: {
+          id: 'P-REAL-MP-2',
+          firstName: 'Angharad',
+          surname: 'Evans',
+          jobTitle: 'Senior Executive Chair',
+          roles: ['managing_partner'],
+          employeeRoleId: 'employee_role.practice_manager',
+          departmentId: 'DEPT-RE',
+        },
+        allPeople: [],
+        byId: 'P-000004',
+        nowIso: '2026-11-20T10:00:00.000Z',
+        primaryDomain: 'notalawfirm.example',
+      });
+      expect(renamedMpRoleEmployee.isTopOfHierarchy).toBe(true);
+      expect(renamedMpRoleEmployee.lineManagerId).toBeNull();
+    });
+  });
 });

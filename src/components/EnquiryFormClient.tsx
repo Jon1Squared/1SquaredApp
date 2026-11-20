@@ -1341,7 +1341,7 @@ export function EnquiryFormClient({
         return;
       }
       setSendEmailModalOpen(false);
-      showToast(`Email sent to ${emailTo.trim()} and logged in audit trail`);
+      showToast('Email queued for delivery and logged in audit trail');
       router.refresh();
     });
   };

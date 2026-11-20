@@ -1178,9 +1178,7 @@ export function createDefaultEmploymentRecord(opts: {
     orgStructure.teamsOrPracticeGroups.find((t) => t.parentDepartmentId === resolvedDept.id) ??
     null;
 
-  const isTop =
-    opts.person.roles?.includes('managing_partner') ||
-    (opts.person.jobTitle ?? '').toLowerCase().includes('managing partner');
+  const isTop = Boolean(opts.person.roles?.includes('managing_partner'));
 
   const deptPartnerId = resolveDefaultDepartmentPartnerId(
     resolvedDept.id,

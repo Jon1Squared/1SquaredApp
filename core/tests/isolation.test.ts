@@ -77,6 +77,7 @@ import {
   getCatalogueRepository,
   getExtensionHostLoadErrors,
   getJobRunRepository,
+  getOutboxRepository,
   getPlatformExtensionHost,
   getPmsRepository,
   resolveCurrentTenantContext,
@@ -92,6 +93,8 @@ import {
 } from '../../src/server/entraAuth';
 import {
   approveSignOff,
+  assignEnquiryRecord,
+  closeEnquiryRecord,
   createOrProposeKeyDateRecord,
   createRecordFromPms,
   discussSignOff,
@@ -122,6 +125,7 @@ import {
   runMatterConflictSearchRecord,
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
+  saveEnquiryRecord,
   saveMatterRecord,
   savePersonRecord,
   saveTaskRecord,
@@ -7880,14 +7884,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(isActionDenied(validEnqEmail)).toBe(false);
       const auditAfterEmail = await auditEntriesSince(auditMarkBeforeEmail);
       expect(auditAfterEmail.length).toBeGreaterThan(0);
+      const queuedEntry = auditAfterEmail.find(
+        (a) =>
+          a.recordType === 'enquiry' &&
+          a.recordId === validEnqId &&
+          a.action === 'email-queued',
+      );
+      expect(queuedEntry).toBeDefined();
+      expect(queuedEntry?.newValue).toContain('recipients:1');
+      expect(JSON.stringify(queuedEntry)).not.toContain('tenanta.control@notalawfirm.example');
+      expect(JSON.stringify(queuedEntry)).not.toContain('Tenant A Valid Follow-up Email');
+      const queuedOutbox = await getOutboxRepository().listOutboxRecords(s005Ctx);
       expect(
-        auditAfterEmail.some(
-          (a) =>
-            a.recordType === 'enquiry' &&
-            a.recordId === validEnqId &&
-            a.action === 'email-sent' &&
-            a.newValue?.includes('Tenant A Valid Follow-up Email'),
-        ),
+        queuedOutbox.some((r) => r.templateKey === 'enquiry.email'),
       ).toBe(true);
 
       const validEnqClose = await closeEnquiryAction(validEnqId, {
@@ -12869,6 +12878,339 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await regRepo.clearTenantData(ctxB).catch(() => undefined);
       await partyRepo.clearTenantData(ctxA).catch(() => undefined);
       await partyRepo.clearTenantData(ctxB).catch(() => undefined);
+    }
+  });
+
+  it('R576: matter opening gate resolves prospective, cmi_incomplete, and active by systemKey even when labels are renamed and fails closed if missing', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const ctx = testTenantCtx('P-000004');
+    const catRepo = getCatalogueRepository();
+    try {
+      const values = await catRepo.listAllChoiceValues<{
+        id: string;
+        listKey: string;
+        label: string;
+        systemKey?: string;
+        sortOrder: number;
+        active: boolean;
+      }>(ctx);
+      const renamedValues = values.map((v) => {
+        if (v.listKey !== 'matter_status') return v;
+        if (v.systemKey === 'prospective') return { ...v, label: 'Pre-opening' };
+        if (v.systemKey === 'cmi_incomplete') return { ...v, label: 'Pending CDD' };
+        if (v.systemKey === 'active') return { ...v, label: 'Open' };
+        return v;
+      });
+      await catRepo.putChoiceValues(ctx, renamedValues);
+
+      const seed = loadCommittedSeedStore();
+      const template = seed.matters.find((m) => m.id === 'M-000004')!;
+      const { id: _id, ...baseMatter } = template;
+      void _id;
+
+      await runAsTestActor('P-000004', async () => {
+        // 1. Draft save under renamed 'Prospective / Enquiry' must stay prospective, NEVER Active
+        const draftSave = await saveMatterRecord(
+          {
+            ...baseMatter,
+            matterNumber: 'DRAFT',
+            title: 'R576 Renamed Prospective Draft',
+            matterStatusId: undefined,
+            recordStatusId: undefined,
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(draftSave.errors).toBeUndefined();
+        expect(draftSave.matter?.matterStatusId).toBe(
+          'matter_status.prospective_enquiry',
+        );
+
+        // 2. Attempt to open without conflict check or risk assessment MUST still invoke opening gate and fail closed
+        const gatedSave = await saveMatterRecord(
+          {
+            ...baseMatter,
+            matterNumber: 'MAT-R576-GATE',
+            title: 'R576 Missing Conflict Check Open Attempt',
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckRecord: undefined,
+            fieldValues: {},
+          },
+          { byId: 'P-000004', saveMode: 'submit_cleared' },
+        );
+        expect(gatedSave.matter).toBeNull();
+        expect(Object.keys(gatedSave.errors ?? {}).length).toBeGreaterThan(0);
+
+        // 3. Removing prospective systemKey must fail closed (never fall back to Active)
+        const brokenValues = renamedValues.map((v) =>
+          v.listKey === 'matter_status' && v.systemKey === 'prospective'
+            ? { ...v, systemKey: undefined }
+            : v,
+        );
+        await catRepo.putChoiceValues(ctx, brokenValues);
+
+        const missingKeySave = await saveMatterRecord(
+          {
+            ...baseMatter,
+            matterNumber: 'DRAFT',
+            title: 'R576 Missing SystemKey Fail Closed',
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(missingKeySave.matter).toBeNull();
+        expect(Object.keys(missingKeySave.errors ?? {}).length).toBeGreaterThan(0);
+      });
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R589: saveMatterRecord ignores client-supplied conflictCheckDate and openedAt and stamps tenant-local date on opening', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const seed = loadCommittedSeedStore();
+    const template = seed.matters.find((m) => m.id === 'M-000004')!;
+    const {
+      id: _id,
+      openedAt: _opened,
+      conflictCheckDate: _ccDate,
+      matterStatusId: _msId,
+      recordStatusId: _rsId,
+      ...baseMatter
+    } = template;
+    void _id;
+    void _opened;
+    void _ccDate;
+    void _msId;
+    void _rsId;
+    const clearedConflict = {
+      status: 'Cleared' as const,
+      outcomeLabel: 'Cleared by fee earner' as const,
+      declarationConfirmed: true,
+      reviewerMessage: '',
+      lastRunAtDisplay: '19 Nov 2026',
+      lastRunById: 'P-000004',
+      lastRunByName: 'Catrin Williams',
+      submittedAtDisplay: '19 Nov 2026',
+      submittedById: 'P-000004',
+      submittedByName: 'Catrin Williams',
+      approvedAtDisplay: null,
+      approvedById: null,
+      approvedByName: null,
+      parties: [],
+      matches: [],
+      comments: [],
+      runs: [],
+    };
+
+    try {
+      await runAsTestActor('P-000004', async () => {
+        const draftSave = await saveMatterRecord(
+          {
+            ...baseMatter,
+            matterNumber: 'DRAFT',
+            title: 'R589 Backdate Draft',
+            conflictCheckDate: '1999-02-02',
+            openedAt: '1999-01-01',
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(draftSave.errors).toBeUndefined();
+        expect(draftSave.matter?.conflictCheckDate).not.toBe('1999-02-02');
+        expect(draftSave.matter?.openedAt).toBeNull();
+
+        const openSave = await saveMatterRecord(
+          {
+            ...baseMatter,
+            id: draftSave.matter!.id,
+            matterNumber: 'DRAFT',
+            title: 'R589 Backdate Open',
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckDate: '1999-02-02',
+            openedAt: '1999-01-01',
+            conflictCheckRecord: clearedConflict,
+          },
+          { id: draftSave.matter!.id, byId: 'P-000004', saveMode: 'submit_cleared' },
+        );
+        expect(openSave.errors).toBeUndefined();
+        expect(openSave.matter?.conflictCheckDate).not.toBe('1999-02-02');
+        expect(openSave.matter?.openedAt).not.toBe('1999-01-01');
+        expect(openSave.matter?.openedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      });
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R592: enquiry urgency SLA, close reasons, and automatic contact/draft tasks use systemKey and autoTrigger rather than labels or title prefixes', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const ctx = testTenantCtx('P-000004');
+    const catRepo = getCatalogueRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    try {
+      const values = await catRepo.listAllChoiceValues<{
+        id: string;
+        listKey: string;
+        label: string;
+        systemKey?: string;
+        sortOrder: number;
+        active: boolean;
+      }>(ctx);
+      const renamedValues = values.map((v) => {
+        if (v.listKey === 'enquiry_urgency' && v.systemKey === 'emergency') {
+          return { ...v, label: 'Level 1 Critical' };
+        }
+        if (v.listKey === 'task_priority' && v.systemKey === 'urgent') {
+          return { ...v, label: 'P1 Now' };
+        }
+        if (v.listKey === 'enquiry_close_reason' && v.systemKey === 'referred_out') {
+          return { ...v, label: 'Sent to Specialist Counsel' };
+        }
+        if (v.listKey === 'task_type' && v.systemKey === 'call_back') {
+          return { ...v, label: 'Initial Telephone Call' };
+        }
+        if (v.listKey === 'task_type' && v.systemKey === 'general') {
+          return { ...v, label: 'General Admin' };
+        }
+        return v;
+      });
+      await catRepo.putChoiceValues(ctx, renamedValues);
+
+      const seed = loadCommittedSeedStore();
+      const templateEnq = seed.enquiries.find((e) => e.status === 'New')!;
+
+      await runAsTestActor('P-000004', async () => {
+        // 1. Emergency urgency (renamed label) must assign Urgent priority ('task_priority.urgent') & 2h emergency SLA
+        const createdEnq = await saveEnquiryRecord(
+          {
+            firstName: 'R592',
+            lastName: 'Prospect',
+            email: 'r592.prospect@outside.example',
+            phone: '029 2000 5920',
+            channelId: templateEnq.channelId,
+            practiceAreaId: templateEnq.practiceAreaId,
+            summary: 'Urgent injunctive relief',
+            notes: 'Needs urgent contact',
+            urgencyId: 'enquiry_urgency.emergency',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000004' },
+        );
+        expect(createdEnq.error).toBeUndefined();
+        const enqId = createdEnq.enquiry!.id;
+
+        const tasks = await taskRepo.listAllTasksUnfiltered(ctx);
+        const contactTask = tasks.find(
+          (t) =>
+            t.linkedRecords.some(
+              (r) => r.recordType === 'enquiry' && r.recordId === enqId,
+            ) && t.autoTrigger === 'enquiry_contact',
+        )!;
+        expect(contactTask).toBeDefined();
+        expect(contactTask.priorityId).toBe('task_priority.urgent');
+
+        // Rename contact task title & taskTypeId away from legacy strings; keep autoTrigger: 'enquiry_contact'
+        await taskRepo.putTask(ctx, {
+          ...contactTask,
+          title: 'Initial Telephone Follow-up (Renamed)',
+          taskTypeId: 'task_type.general',
+        });
+
+        // Reassign enquiry -> renamed contact task moves via autoTrigger
+        const assignRes = await assignEnquiryRecord(enqId, 'P-000002', undefined, 'P-000004');
+        expect(assignRes.error).toBeUndefined();
+        const taskAfterAssign = await taskRepo.getTaskById(ctx, contactTask.id, {
+          includeRestricted: true,
+        });
+        expect(taskAfterAssign?.assignedPersonId).toBe('P-000002');
+
+        // Close as Referred out without explicit closeReasonId -> resolves by systemKey 'referred_out'
+        // and closes renamed contact task via autoTrigger
+        const closeRes = await closeEnquiryRecord(
+          enqId,
+          {
+            targetStatus: 'Referred out',
+            referredToName: 'Specialist Chambers',
+          },
+          'P-000004',
+        );
+        expect(closeRes.error).toBeUndefined();
+        expect(closeRes.enquiry?.closeReasonId).toBe(
+          'enquiry_close_reason.referred_out',
+        );
+        const taskAfterClose = await taskRepo.getTaskById(ctx, contactTask.id, {
+          includeRestricted: true,
+        });
+        expect(taskAfterClose?.status).toBe('Done');
+
+        // 2. Conflict draft task uses autoTrigger: 'conflict_check_draft' rather than title prefix
+        const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+        const { id: _mid, ...matterTemplate } = baseMatter;
+        void _mid;
+        const draftMatter = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            title: 'R592 Draft Task AutoTrigger',
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(draftMatter.errors).toBeUndefined();
+        const matterId = draftMatter.matter!.id;
+        const draftTasks = await taskRepo.listAllTasksUnfiltered(ctx);
+        const conflictDraftTask = draftTasks.find((t) =>
+          t.linkedRecords.some(
+            (r) => r.recordType === 'matter' && r.recordId === matterId,
+          ),
+        )!;
+        expect(conflictDraftTask).toBeDefined();
+        expect(conflictDraftTask.autoTrigger).toBe('conflict_check_draft');
+
+        await taskRepo.putTask(ctx, {
+          ...conflictDraftTask,
+          title: 'Custom Compliance Draft Task Name',
+        });
+
+        const clearedMatter = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            id: matterId,
+            matterNumber: 'DRAFT',
+            title: 'R592 Draft Task AutoTrigger',
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckRecord: matterTemplate.conflictCheckRecord ?? {
+              status: 'Cleared' as const,
+              outcomeLabel: 'Cleared by fee earner' as const,
+              declarationConfirmed: true,
+              reviewerMessage: '',
+              lastRunAtDisplay: '19 Nov 2026',
+              lastRunById: 'P-000004',
+              lastRunByName: 'Catrin Williams',
+              submittedAtDisplay: '19 Nov 2026',
+              submittedById: 'P-000004',
+              submittedByName: 'Catrin Williams',
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
+          },
+          { id: matterId, byId: 'P-000004', saveMode: 'submit_cleared' },
+        );
+        expect(clearedMatter.errors).toBeUndefined();
+        const completedDraftTask = await taskRepo.getTaskById(
+          ctx,
+          conflictDraftTask.id,
+          { includeRestricted: true },
+        );
+        expect(completedDraftTask?.status).toBe('Done');
+      });
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
 });

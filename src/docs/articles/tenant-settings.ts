@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-19',
+  updated: '2026-11-20',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -87,6 +87,7 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`integrations.pmsSync.clientCodeAllocation\` | \`"onesquared"\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS client code allocation (\`F22\`) |
 | \`integrations.pmsSync.pollIntervalMinutes\` | \`15\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS delta polling interval (\`F22\`) |
 | \`integrations.pmsSync.fieldMappings\` | \`[]\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS field-level synchronisation (\`F22\`) |
+| \`integrations.pmsSync.gradeRoleMap\` | \`{}\` | Active | Maps external PMS fee-earner grade strings (case-insensitive) to canonical \`employee_role.*\` IDs in \`createRecordFromPms\`; unmapped grades fall back to least-privileged \`employee_role.support_staff\` |
 
 ### Custom fields, extensions, RBAC, documents and key dates
 

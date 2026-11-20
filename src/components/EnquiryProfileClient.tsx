@@ -119,7 +119,10 @@ export function EnquiryProfileClient({
     [values],
   );
   const [closeReasonId, setCloseReasonId] = useState(
-    () => closeReasons.find((r) => r.label === 'Outside practice area')?.id ?? closeReasons[0]?.id ?? '',
+    () =>
+      closeReasons.find((r) => r.systemKey === 'outside_expertise')?.id ??
+      closeReasons[0]?.id ??
+      '',
   );
   const [closeNotes, setCloseNotes] = useState('');
   const [referredToOrganisationId, setReferredToOrganisationId] = useState('');

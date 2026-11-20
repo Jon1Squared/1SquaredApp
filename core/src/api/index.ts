@@ -370,6 +370,7 @@ export interface PmsIntegrationSyncConfig {
   clientCodeAllocation: 'onesquared' | 'pms_on_open';
   pollIntervalMinutes: number;
   fieldMappings: PmsFieldMappingEntry[];
+  gradeRoleMap?: Record<string, string>;
 }
 
 export type PmsOutboundCommandType =

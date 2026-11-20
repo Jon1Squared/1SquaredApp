@@ -285,10 +285,11 @@ export function findPracticeAreaRoutingClashes(
   return clashes;
 }
 
-/** Find the active team routed for a practice area, or fallback to the Intake team. */
+/** Find the active team routed for a practice area, or fallback to the configured/Intake team via stable IDs/systemKey. */
 export function resolveRoutedTeam(
   practiceAreaId: string,
   teams: Team[],
+  fallbackTeamId?: string | null,
 ): { team: Team | null; isFallbackIntake: boolean } {
   const activeTeams = teams.filter((t) => t.active);
   const matched = activeTeams.find((t) => t.practiceAreaIds.includes(practiceAreaId));
@@ -296,8 +297,9 @@ export function resolveRoutedTeam(
     return { team: matched, isFallbackIntake: false };
   }
   const intake =
-    activeTeams.find((t) => t.name.toLowerCase() === 'intake') ??
-    activeTeams.find((t) => t.name.toLowerCase().includes('intake')) ??
+    (fallbackTeamId ? activeTeams.find((t) => t.id === fallbackTeamId) : undefined) ??
+    activeTeams.find((t) => t.systemKey === 'intake') ??
+    activeTeams.find((t) => t.orgTeamId === 'TPG-BD-INTAKE') ??
     null;
   return { team: intake, isFallbackIntake: true };
 }

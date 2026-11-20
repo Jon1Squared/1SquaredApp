@@ -3,6 +3,7 @@ import {
   HIGH_RISK_RATING_IDS,
   isHighOrCriticalRiskRating,
   isMatterConflictCheckAwaitingDecision,
+  resolveRiskRatingIdForLevel,
 } from '../matterOpeningRecord';
 import type { ChoiceValue } from '../types';
 
@@ -117,5 +118,41 @@ describe('matterOpeningRecord domain helpers (R345, R365, R367, R372)', () => {
         conflictDecision: null,
       }),
     ).toBe(false);
+  });
+
+  it('R592: resolveRiskRatingIdForLevel resolves by systemKey even when risk_rating labels are renamed', () => {
+    const renamedValues: ChoiceValue[] = [
+      {
+        id: 'risk_rating.custom_low_id',
+        listKey: 'risk_rating',
+        label: 'Tier 1 Standard',
+        systemKey: 'low',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'risk_rating.custom_high_id',
+        listKey: 'risk_rating',
+        label: 'Elevated Supervision',
+        systemKey: 'high',
+        sortOrder: 2,
+        active: true,
+      },
+      {
+        id: 'risk_rating.decoy_high_prefix',
+        listKey: 'risk_rating',
+        label: 'High-volume standard',
+        systemKey: 'medium',
+        sortOrder: 3,
+        active: true,
+      },
+    ];
+
+    expect(resolveRiskRatingIdForLevel(renamedValues, 'Low')).toBe(
+      'risk_rating.custom_low_id',
+    );
+    expect(resolveRiskRatingIdForLevel(renamedValues, 'High')).toBe(
+      'risk_rating.custom_high_id',
+    );
   });
 });

@@ -42,11 +42,11 @@ interface TaskRepoInTx {
   ) => Promise<TenantTaskRecord>;
 }
 
-const PRIORITY_SUFFIX_LABEL: Record<string, string> = {
-  'task_priority.low': 'Low',
-  'task_priority.normal': 'Normal',
-  'task_priority.high': 'High',
-  'task_priority.urgent': 'Urgent',
+const PRIORITY_SUFFIX_SYSTEM_KEY: Record<string, string> = {
+  'task_priority.low': 'low',
+  'task_priority.normal': 'normal',
+  'task_priority.high': 'high',
+  'task_priority.urgent': 'urgent',
 };
 
 export function resolveWorkTypeTaskPriorityId(
@@ -57,27 +57,37 @@ export function resolveWorkTypeTaskPriorityId(
     (v) => v.listKey === 'task_priority' && v.id === configuredPriorityId,
   );
   if (byExactId) return byExactId.id;
-  const desiredLabel = PRIORITY_SUFFIX_LABEL[configuredPriorityId] ?? 'Normal';
-  const byLabel = values.find(
+  const desiredSystemKey =
+    PRIORITY_SUFFIX_SYSTEM_KEY[configuredPriorityId] ?? 'normal';
+  const bySystemKey = values.find(
     (v) =>
       v.listKey === 'task_priority' &&
-      v.label.toLowerCase() === desiredLabel.toLowerCase(),
+      v.systemKey?.toLowerCase() === desiredSystemKey,
   );
-  if (byLabel) return byLabel.id;
+  if (bySystemKey) return bySystemKey.id;
   const normalFallback = values.find(
-    (v) => v.listKey === 'task_priority' && v.label.toLowerCase() === 'normal',
+    (v) =>
+      v.listKey === 'task_priority' &&
+      v.systemKey?.toLowerCase() === 'normal',
   );
   return normalFallback?.id ?? configuredPriorityId ?? 'task_priority.normal';
 }
 
 export function resolveWorkTypeTaskTypeId(values: readonly ChoiceValue[]): string {
-  const preferred = values.find(
+  const bySystemKey = values.find(
     (v) =>
       v.listKey === 'task_type' &&
       v.active &&
-      v.label.toLowerCase() === 'complete matter opening',
+      v.systemKey === 'complete_matter_opening',
   );
-  if (preferred) return preferred.id;
+  if (bySystemKey) return bySystemKey.id;
+  const byCanonicalId = values.find(
+    (v) =>
+      v.listKey === 'task_type' &&
+      v.active &&
+      v.id === 'task_type.complete_matter_opening',
+  );
+  if (byCanonicalId) return byCanonicalId.id;
   const firstActive = values.find((v) => v.listKey === 'task_type' && v.active);
   return firstActive?.id ?? 'task_type.complete_matter_opening';
 }

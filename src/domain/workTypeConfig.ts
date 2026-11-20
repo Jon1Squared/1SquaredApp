@@ -515,9 +515,13 @@ export function isProspectiveMatterStatus(
   if (cv) {
     return cv.systemKey
       ? cv.systemKey === 'prospective'
-      : cv.id === 'matter_status.prospective';
+      : cv.id === 'matter_status.prospective' ||
+          cv.id === 'matter_status.prospective_enquiry';
   }
-  return statusId === 'matter_status.prospective';
+  return (
+    statusId === 'matter_status.prospective' ||
+    statusId === 'matter_status.prospective_enquiry'
+  );
 }
 
 /**

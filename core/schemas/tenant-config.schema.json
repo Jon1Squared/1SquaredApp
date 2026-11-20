@@ -646,6 +646,15 @@
                 "for": "backlog",
                 "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
               }
+            },
+            "gradeRoleMap": {
+              "type": "object",
+              "description": "Maps external PMS fee-earner grade strings (case-insensitive) to canonical employee_role.* IDs during createRecordFromPms.",
+              "default": {},
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^employee_role\\.[a-z0-9_]+$"
+              }
             }
           }
         }
