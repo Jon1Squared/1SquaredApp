@@ -1776,11 +1776,27 @@ async function getAppSnapshotInScope(
         people,
         teams,
         orgStructure,
-        { config: { rbac: rbacConfig } },
+        { tokenRoles: effectiveTokenRoles, config: { rbac: rbacConfig } },
         employeeMatterVisibility,
       ),
     };
   });
+  const filteredCurrentUser: Person =
+    filteredPeople.find((p) => p.id === user.id) ??
+    (user.employment
+      ? {
+          ...user,
+          employment: filterEmploymentForUser(
+            user.employment,
+            user,
+            people,
+            teams,
+            orgStructure,
+            { tokenRoles: effectiveTokenRoles, config: { rbac: rbacConfig } },
+            employeeMatterVisibility,
+          ),
+        }
+      : user);
   const employees = activeEmployees(filteredPeople, store.values);
   const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
     snapshotTenantCtx,
@@ -1937,11 +1953,12 @@ async function getAppSnapshotInScope(
     (cs) => visibleKeyDateIdSet.has(cs.keyDateId),
   );
 
-  // If the current user is a demo user with showsWorkOfId, resolve the underlying employee for personal panels
+  // If the current user is a demo user with showsWorkOfId, resolve the underlying filtered employee for personal panels
   const effectiveWorkPerson: Person =
     user.demo && user.showsWorkOfId
-      ? (people.find((p) => p.id === user.showsWorkOfId) ?? user)
-      : user;
+      ? (filteredPeople.find((p) => p.id === user.showsWorkOfId) ??
+        filteredCurrentUser)
+      : filteredCurrentUser;
 
   const finance: AppFinanceCapabilities = {
     canViewFirm: currentUserPermissions.includes('finance:view'),
@@ -2184,7 +2201,7 @@ async function getAppSnapshotInScope(
     aiProviderChoice: activeTenantCfg.integrations?.aiProviderChoice ?? 'disabled',
     enableMatterCostsGovernance: Boolean(activeTenantCfg.featureFlags?.enableMatterCostsGovernance),
     enablePmsLiveRateSync: Boolean(activeTenantCfg.featureFlags?.enablePmsLiveRateSync),
-    currentUser: user,
+    currentUser: filteredCurrentUser,
     currentUserId: user.id,
     currentUserRole,
     currentUserRoles,
@@ -2315,7 +2332,11 @@ export async function getEmployeeDetailsForUser(
   ]);
   const user = people.find((p) => p.id === byId) ?? null;
   const person = people.find((p) => p.id === personId) ?? null;
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    user && activeSession?.personId === user.id ? activeSession.tokenRoles : undefined;
   const perms = resolveEmployeePermissions(user, people, teams, {
+    tokenRoles: effectiveTokenRoles,
     config: { rbac: rbacConfig },
   });
   const errors: Record<string, string> = {};
@@ -2324,6 +2345,7 @@ export async function getEmployeeDetailsForUser(
     return { employment: null, sensitive: null, permissions: perms, errors: { notFound: 'Person not found.' } };
   }
 
+  let payrollAuditWritten = false;
   let sensitiveAuditWritten = false;
   let rawEmployment: EmploymentRecord | null = person.employment ?? null;
   let rawSensitive: EmployeeSensitiveRecord | null = null;
@@ -2346,11 +2368,18 @@ export async function getEmployeeDetailsForUser(
 
     const auditInputs: FirmAuditEntryInput[] = [];
     const nowIso = new Date().toISOString();
+    let pendingPayrollAudit = false;
+    let pendingSensitiveAudit = false;
 
     if (opts.logViewPayroll) {
-      if (!hasEmployeePermission(user, 'employee:payroll', people, teams, { config: { rbac: rbacConfig } })) {
+      if (
+        !hasEmployeePermission(user, 'employee:payroll', people, teams, {
+          tokenRoles: effectiveTokenRoles,
+          config: { rbac: rbacConfig },
+        })
+      ) {
         errors.payrollPermission = 'You do not have permission to view payroll details.';
-      } else {
+      } else if (rawEmployment?.payroll) {
         auditInputs.push({
           recordType: 'employee_payroll',
           recordId: personId,
@@ -2361,11 +2390,17 @@ export async function getEmployeeDetailsForUser(
           byId,
           at: nowIso,
         });
+        pendingPayrollAudit = true;
       }
     }
 
     if (opts.logViewSensitive) {
-      if (!hasEmployeePermission(user, 'employee:sensitive', people, teams, { config: { rbac: rbacConfig } })) {
+      if (
+        !hasEmployeePermission(user, 'employee:sensitive', people, teams, {
+          tokenRoles: effectiveTokenRoles,
+          config: { rbac: rbacConfig },
+        })
+      ) {
         errors.sensitivePermission = 'You do not have permission to view sensitive employee information.';
       } else {
         auditInputs.push({
@@ -2378,12 +2413,14 @@ export async function getEmployeeDetailsForUser(
           byId,
           at: nowIso,
         });
-        sensitiveAuditWritten = true;
+        pendingSensitiveAudit = true;
       }
     }
 
     if (auditInputs.length > 0) {
       await hrRepo.appendHrAuditEntriesInTx(ctx, auditInputs);
+      if (pendingPayrollAudit) payrollAuditWritten = true;
+      if (pendingSensitiveAudit) sensitiveAuditWritten = true;
     }
     if (opts.beforeCommitHook) {
       await opts.beforeCommitHook();
@@ -2394,6 +2431,7 @@ export async function getEmployeeDetailsForUser(
     canPersonAccessMatter(m, byId, user, {
       allPeople: people,
       teams,
+      tokenRoles: effectiveTokenRoles,
       config: { rbac: rbacConfig },
     }),
   );
@@ -2403,10 +2441,14 @@ export async function getEmployeeDetailsForUser(
     people,
     teams,
     store.orgStructure,
-    { config: { rbac: rbacConfig } },
+    {
+      tokenRoles: effectiveTokenRoles,
+      config: { rbac: rbacConfig },
+      includePayroll: payrollAuditWritten,
+    },
     matterVisibility,
   );
-  // R103 & R130: Only return sensitive HR records when logViewSensitive: true and audit write succeeded in the same transaction
+  // R103, R130 & R513: Only return sensitive/payroll HR records when explicitly requested and audit write succeeded in the same transaction
   const sensitive = sensitiveAuditWritten
     ? structuredClone(rawSensitive ?? null)
     : null;
@@ -2858,7 +2900,7 @@ export async function savePersonRecord(
     key = 'permission',
   ) => ({
     ...buildActionDenied(code, message),
-    person: existing as Person,
+    person: null as unknown as Person,
     errors: { [key]: message },
   });
   // Promoting a synthetic enquiry caller (`id: "ENQ-..."`) creates a new Person linked via
@@ -2924,7 +2966,10 @@ export async function savePersonRecord(
   }
 
   if (!input.firstName?.trim() || !input.surname?.trim()) {
-    return { person: existing as Person, errors: { name: 'First name and surname are required.' } };
+    return {
+      person: null as unknown as Person,
+      errors: { name: 'First name and surname are required.' },
+    };
   }
 
   // Determine whether the person works at the firm (or has an employment record)
@@ -3517,15 +3562,15 @@ export async function savePersonRecord(
 
   if (missingEmployeeRoleType) {
     return {
-      person: existing as Person,
+      person: null as unknown as Person,
       errors: { employeeRoleId: 'An employee must have a role type.' },
     };
   }
   if (Object.keys(empErrors).length > 0) {
-    return { person: existing as Person, errors: empErrors };
+    return { person: null as unknown as Person, errors: empErrors };
   }
   if (Object.keys(cfValidation.errors).length > 0) {
-    return { person: existing as Person, errors: cfValidation.errors };
+    return { person: null as unknown as Person, errors: cfValidation.errors };
   }
 
   const changedMattersOnHire: Array<{ matter: Matter; prevMatter: Matter }> = [];
@@ -3932,6 +3977,9 @@ export async function savePersonRecord(
         config: { rbac: rbacConfig },
       }),
   );
+  const canReadRbacSecurityFields =
+    userPerms.has('rbac:manage_user_overrides') ||
+    userPerms.has('rbac:manage_config');
   const returnedPerson: Person = person.employment
     ? {
         ...person,
@@ -3946,7 +3994,11 @@ export async function savePersonRecord(
             actorMatterVisibility,
           ) ?? null,
       }
-    : person;
+    : { ...person };
+  if (!canReadRbacSecurityFields) {
+    delete returnedPerson.permissionOverrides;
+    delete returnedPerson.entraObjectId;
+  }
   return { person: returnedPerson };
   })();
   for (const syncItem of pendingLifecycleSyncs) {
@@ -13035,6 +13087,13 @@ export async function prepareEnquiryConversion(
         },
         { byId, internalSystemStep: 'enquiry_conversion' },
       );
+      if (!createdPerson.person) {
+        throw new Error(
+          createdPerson.message ||
+            Object.values(createdPerson.errors ?? {}).join(' ') ||
+            'Failed to create person during enquiry conversion.',
+        );
+      }
       personId = createdPerson.person.id;
     }
 
@@ -15103,7 +15162,20 @@ export async function updatePersonPermissionOverrides(
 
       await flushStagedAuditEntries(ctx);
     });
-    return { ok: true, person: target };
+    const safeTarget: Person = target.employment
+      ? {
+          ...target,
+          employment: filterEmploymentForUser(
+            target.employment,
+            actor,
+            people,
+            teams,
+            undefined,
+            { config: { rbac: rbacConfig } },
+          ),
+        }
+      : target;
+    return { ok: true, person: safeTarget };
   });
 }
 
@@ -18044,6 +18116,13 @@ export async function prepareQuoteConversionRecord(
         },
         { byId, internalSystemStep: 'quote_conversion' },
       );
+      if (!createdPerson.person) {
+        throw new Error(
+          createdPerson.message ||
+            Object.values(createdPerson.errors ?? {}).join(' ') ||
+            'Failed to create person during quote conversion.',
+        );
+      }
       personId = createdPerson.person.id;
     }
 
@@ -22534,11 +22613,20 @@ export async function listRegistersWorkspaceDataRecord(
 
     const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
     const visibleMatters = allMatters.filter((m) =>
-      canPersonAccessMatter(m, actor.id, actor, { allPeople: people, teams }),
+      canPersonAccessMatter(m, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      }),
     );
     const employeeMatterVisibility = buildMatterVisibilityForEmployeeRecord(
       allMatters,
-      (m) => canPersonAccessMatter(m, actor.id, actor, { allPeople: people, teams }),
+      (m) =>
+        canPersonAccessMatter(m, actor.id, actor, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        }),
     );
     const orgStructure = buildDefaultOrgStructure({ legalName: tenantCfg.displayName });
     const filteredPeople = people

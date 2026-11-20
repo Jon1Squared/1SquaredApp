@@ -18,6 +18,7 @@ import { deploymentAndSecurityArticle } from './articles/deployment-and-security
 import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
 import { duplicateChecks } from './articles/duplicate-checks';
+import { employeeRecordsArticle } from './articles/employee-records';
 import { financeDataAndPermissionsArticle } from './articles/finance-data-and-permissions';
 import { globalSearchArticle } from './articles/global-search';
 import { homeAndProfileScreensArticle } from './articles/home-and-profile-screens';
@@ -95,6 +96,7 @@ export const ARTICLES: DocArticle[] = [
   sharepointSitesSelectedSetupArticle,
   quickConflictCheck,
   duplicateChecks,
+  employeeRecordsArticle,
   leaversAndReassignmentArticle,
 ];
 

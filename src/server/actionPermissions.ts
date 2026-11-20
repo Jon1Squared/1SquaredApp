@@ -92,10 +92,15 @@ export const ACTION_PERMISSIONS = {
   // ---------------------------------------------------------------------------
   // Enforced inside the service layer today (47)
   // ---------------------------------------------------------------------------
-  // HR / Employee restricted access (2)
+  // HR / Employee restricted access (3)
   logEmployeeRestrictedAccessAction: {
     kind: 'permission',
     key: { anyOf: ['employee:payroll', 'employee:sensitive'] },
+    enforcedBy: 'service',
+  },
+  revealEmployeePayrollAction: {
+    kind: 'permission',
+    key: 'employee:payroll',
     enforcedBy: 'service',
   },
   revealEmployeeSensitiveRecordAction: {

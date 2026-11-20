@@ -235,6 +235,8 @@ function mapEmploymentRow<
       : {};
   if (row.payroll_json !== undefined && row.payroll_json !== null) {
     base.payroll = structuredClone(row.payroll_json);
+  } else if (row.payroll_json === null) {
+    delete base.payroll;
   }
   return {
     ...base,

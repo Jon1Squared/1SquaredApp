@@ -5,8 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ChevronDown, Eye, EyeOff, ShieldAlert } from 'lucide-react';
 import {
-  logEmployeeRestrictedAccessAction,
   reassignLeaverOwnedRecordsAction,
+  revealEmployeePayrollAction,
   revealEmployeeSensitiveRecordAction,
   savePersonAction,
 } from '@/app/actions';
@@ -646,6 +646,12 @@ export function PersonFormClient({
     existingEmp?.payroll?.pensionOptOutDate ?? '',
   );
   const [payrollMasked, setPayrollMasked] = useState<boolean>(true);
+  const [payrollLoaded, setPayrollLoaded] = useState<boolean>(() =>
+    Boolean(!existing || !existingEmp || existingEmp?.payroll),
+  );
+  const [payrollEdited, setPayrollEdited] = useState<boolean>(false);
+  const [loadingPayroll, setLoadingPayroll] = useState<boolean>(false);
+  const [payrollLoadError, setPayrollLoadError] = useState<string | null>(null);
 
   // 6. Emergency contacts (HR restricted, inline on employment record — never separate Person records)
   const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>(
@@ -813,18 +819,43 @@ export function PersonFormClient({
     }
   };
 
-  const handleTogglePayrollMask = () => {
-    const nextMasked = !payrollMasked;
-    setPayrollMasked(nextMasked);
-    if (!nextMasked && existing?.id) {
-      startTransition(async () => {
-        await logEmployeeRestrictedAccessAction(
-          existing.id,
-          'payroll',
-          'Revealed masked NI and bank details in UI',
-        );
-      });
+  const handleLoadPayrollForEdit = async () => {
+    if (!existing?.id || !existingEmp || !canPayroll || payrollLoaded || loadingPayroll) {
+      return;
     }
+    setLoadingPayroll(true);
+    setPayrollLoadError(null);
+    try {
+      const res = await revealEmployeePayrollAction(existing.id, { mode: 'full' });
+      if (isActionDenied(res)) {
+        setPayrollLoadError(res.message);
+        return;
+      }
+      if (res.errors && Object.keys(res.errors).length > 0) {
+        setPayrollLoadError(Object.values(res.errors).join(' '));
+        return;
+      }
+      const loaded = res.payroll;
+      if (loaded) {
+        setPayExternalRef(loaded.externalPayrollReference ?? '');
+        setPayNiNumber(loaded.nationalInsuranceNumber ?? '');
+        setPayBankAccountName(loaded.bankAccountName ?? '');
+        setPayBankSortCode(loaded.bankSortCode ?? '');
+        setPayBankAccountNumber(loaded.bankAccountNumber ?? '');
+        setPayBuildingSocietyRoll(loaded.buildingSocietyRollNumber ?? '');
+        setPayStarterDecl(loaded.starterDeclarationOrP45 ?? '');
+        setPayStudentLoan(loaded.studentLoanPlan ?? '');
+        setPayPensionStatus(loaded.pensionAutoEnrolmentStatus ?? '');
+        setPayPensionOptOutDate(loaded.pensionOptOutDate ?? '');
+      }
+      setPayrollLoaded(true);
+    } finally {
+      setLoadingPayroll(false);
+    }
+  };
+
+  const handleTogglePayrollMask = () => {
+    setPayrollMasked((prev) => !prev);
   };
 
   const handleRevealSensitive = () => {
@@ -1400,7 +1431,7 @@ export function PersonFormClient({
                   },
                 }
               : { feeEarner: null }),
-            ...(canPayroll
+            ...(canPayroll && (!existing ? payrollEdited : payrollLoaded && payrollEdited)
               ? {
                   payroll: {
                     externalPayrollReference: payExternalRef.trim(),
@@ -1548,6 +1579,10 @@ export function PersonFormClient({
 
       if (res.errors && Object.keys(res.errors).length > 0) {
         setErrorMsg(Object.values(res.errors).join(' '));
+        return;
+      }
+
+      if (!res.person) {
         return;
       }
 
@@ -2936,7 +2971,12 @@ export function PersonFormClient({
                               role="tab"
                               aria-selected={empSubTab === sub.key}
                               className={`form-tab-btn ${empSubTab === sub.key ? 'form-tab-btn--active' : ''}`}
-                              onClick={() => setEmpSubTab(sub.key)}
+                              onClick={() => {
+                                setEmpSubTab(sub.key);
+                                if (sub.key === 'payroll') {
+                                  void handleLoadPayrollForEdit();
+                                }
+                              }}
                             >
                               {sub.label}
                             </button>
@@ -4042,6 +4082,25 @@ export function PersonFormClient({
                       {/* SUB-TAB 5: Payroll and benefits (restricted to HR/payroll permission) */}
                       {empSubTab === 'payroll' && canPayroll ? (
                         <div>
+                          {existing?.id && !payrollLoaded ? (
+                            <div className="subcard" style={{ marginBottom: 14 }}>
+                              <p className="muted" style={{ margin: '0 0 8px' }}>
+                                {loadingPayroll
+                                  ? 'Loading payroll details (written to the audit log)…'
+                                  : payrollLoadError ??
+                                    'Load this employee’s payroll details before editing (each load is written to the audit log).'}
+                              </p>
+                              {!loadingPayroll ? (
+                                <button
+                                  type="button"
+                                  className="btn btn--secondary btn--sm"
+                                  onClick={() => void handleLoadPayrollForEdit()}
+                                >
+                                  Load payroll details (logged to audit)
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
                           <div
                             style={{
                               display: 'flex',
@@ -4055,8 +4114,12 @@ export function PersonFormClient({
                             <label className="checkbox-pill">
                               <input
                                 type="checkbox"
+                                disabled={Boolean(existing?.id && !payrollLoaded)}
                                 checked={externalPayrollOnlyMode}
-                                onChange={(e) => setExternalPayrollOnlyMode(e.target.checked)}
+                                onChange={(e) => {
+                                  setExternalPayrollOnlyMode(e.target.checked);
+                                  setPayrollEdited(true);
+                                }}
                               />
                               <span>
                                 External payroll mode (store only external payroll reference; hide NI
@@ -4064,7 +4127,7 @@ export function PersonFormClient({
                               </span>
                             </label>
 
-                            {!externalPayrollOnlyMode ? (
+                            {!externalPayrollOnlyMode && payrollLoaded ? (
                               <button
                                 type="button"
                                 className="btn btn--secondary btn--sm"
@@ -4086,8 +4149,12 @@ export function PersonFormClient({
                                 id="pay-ext-ref"
                                 type="text"
                                 className="field-input"
+                                disabled={Boolean(existing?.id && !payrollLoaded)}
                                 value={payExternalRef}
-                                onChange={(e) => setPayExternalRef(e.target.value)}
+                                onChange={(e) => {
+                                  setPayExternalRef(e.target.value);
+                                  setPayrollEdited(true);
+                                }}
                               />
                             </div>
 
@@ -4111,10 +4178,12 @@ export function PersonFormClient({
                                       type="text"
                                       className="field-input"
                                       placeholder="e.g. QQ123456C"
+                                      disabled={Boolean(existing?.id && !payrollLoaded)}
                                       value={payNiNumber}
-                                      onChange={(e) =>
-                                        setPayNiNumber(e.target.value.toUpperCase())
-                                      }
+                                      onChange={(e) => {
+                                        setPayNiNumber(e.target.value.toUpperCase());
+                                        setPayrollEdited(true);
+                                      }}
                                     />
                                   )}
                                 </div>
@@ -4127,9 +4196,12 @@ export function PersonFormClient({
                                     id="pay-bank-name"
                                     type="text"
                                     className="field-input"
-                                    disabled={payrollMasked}
+                                    disabled={payrollMasked || Boolean(existing?.id && !payrollLoaded)}
                                     value={payBankAccountName}
-                                    onChange={(e) => setPayBankAccountName(e.target.value)}
+                                    onChange={(e) => {
+                                      setPayBankAccountName(e.target.value);
+                                      setPayrollEdited(true);
+                                    }}
                                   />
                                 </div>
 
@@ -4154,8 +4226,12 @@ export function PersonFormClient({
                                       type="text"
                                       className="field-input"
                                       placeholder="20-00-00"
+                                      disabled={Boolean(existing?.id && !payrollLoaded)}
                                       value={payBankSortCode}
-                                      onChange={(e) => setPayBankSortCode(e.target.value)}
+                                      onChange={(e) => {
+                                        setPayBankSortCode(e.target.value);
+                                        setPayrollEdited(true);
+                                      }}
                                     />
                                   )}
                                 </div>
@@ -4181,8 +4257,12 @@ export function PersonFormClient({
                                       type="text"
                                       className="field-input"
                                       placeholder="8-digit account number"
+                                      disabled={Boolean(existing?.id && !payrollLoaded)}
                                       value={payBankAccountNumber}
-                                      onChange={(e) => setPayBankAccountNumber(e.target.value)}
+                                      onChange={(e) => {
+                                        setPayBankAccountNumber(e.target.value);
+                                        setPayrollEdited(true);
+                                      }}
                                     />
                                   )}
                                 </div>
@@ -4195,9 +4275,12 @@ export function PersonFormClient({
                                     id="pay-bs-roll"
                                     type="text"
                                     className="field-input"
-                                    disabled={payrollMasked}
+                                    disabled={payrollMasked || Boolean(existing?.id && !payrollLoaded)}
                                     value={payBuildingSocietyRoll}
-                                    onChange={(e) => setPayBuildingSocietyRoll(e.target.value)}
+                                    onChange={(e) => {
+                                      setPayBuildingSocietyRoll(e.target.value);
+                                      setPayrollEdited(true);
+                                    }}
                                   />
                                 </div>
 
@@ -4208,8 +4291,12 @@ export function PersonFormClient({
                                   <select
                                     id="pay-starter"
                                     className="field-select"
+                                    disabled={Boolean(existing?.id && !payrollLoaded)}
                                     value={payStarterDecl}
-                                    onChange={(e) => setPayStarterDecl(e.target.value)}
+                                    onChange={(e) => {
+                                      setPayStarterDecl(e.target.value);
+                                      setPayrollEdited(true);
+                                    }}
                                   >
                                     <option value="P45 received">P45 received</option>
                                     <option value="Starter Declaration A">
@@ -4232,8 +4319,12 @@ export function PersonFormClient({
                                   <select
                                     id="pay-student-loan"
                                     className="field-select"
+                                    disabled={Boolean(existing?.id && !payrollLoaded)}
                                     value={payStudentLoan}
-                                    onChange={(e) => setPayStudentLoan(e.target.value)}
+                                    onChange={(e) => {
+                                      setPayStudentLoan(e.target.value);
+                                      setPayrollEdited(true);
+                                    }}
                                   >
                                     <option value="None">None</option>
                                     <option value="Plan 1">Plan 1</option>
@@ -4251,8 +4342,12 @@ export function PersonFormClient({
                                   <select
                                     id="pay-pension"
                                     className="field-select"
+                                    disabled={Boolean(existing?.id && !payrollLoaded)}
                                     value={payPensionStatus}
-                                    onChange={(e) => setPayPensionStatus(e.target.value)}
+                                    onChange={(e) => {
+                                      setPayPensionStatus(e.target.value);
+                                      setPayrollEdited(true);
+                                    }}
                                   >
                                     <option value="Eligible jobholder — enrolled">
                                       Eligible jobholder — enrolled
@@ -4276,8 +4371,12 @@ export function PersonFormClient({
                                     id="pay-pension-optout"
                                     type="date"
                                     className="field-input"
+                                    disabled={Boolean(existing?.id && !payrollLoaded)}
                                     value={payPensionOptOutDate}
-                                    onChange={(e) => setPayPensionOptOutDate(e.target.value)}
+                                    onChange={(e) => {
+                                      setPayPensionOptOutDate(e.target.value);
+                                      setPayrollEdited(true);
+                                    }}
                                   />
                                 </div>
                               </>
