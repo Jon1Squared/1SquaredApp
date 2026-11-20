@@ -18,11 +18,13 @@ import {
   buildMatterOpeningPdfLines,
   buildRiskAssessmentPdfLines,
   formatRecordPdfHeading,
+  isPmsImportedWithoutLocalConflictCheck,
   resolveMatterOpeningSnapshot,
   summariseClientConflictState,
   type MatterOpeningSnapshot,
   type MatterRiskAssessmentSnapshot,
 } from '../matterOpeningRecord';
+import { matterOpeningAndRiskArticle } from '../../docs/articles/matter-opening-and-risk';
 import { resolveMatterIntakeComplianceRows } from '../../components/MatterProfileClient';
 import { resolveOrganisationComplianceDisplay } from '../../components/OrganisationProfileClient';
 import { resolvePersonComplianceDisplay } from '../../components/PersonProfileClient';
@@ -332,6 +334,16 @@ describe('S0-11a: demo literal CI guard and data-driven profile/domain helpers',
       'Imported from PMS: conflict check recorded in the source system',
     );
     expect(pmsImportedRows.conflictCheck.cleared).toBe(false);
+
+    // R572: Legacy/seeded matters without isPmsImport: true keep "Not started" until a local conflict check is recorded,
+    // and the Help article documents pms:import, seeded demo matters, and pre-R545 imports.
+    expect(
+      isPmsImportedWithoutLocalConflictCheck({
+        conflictCheckStatus: 'Not started',
+      }),
+    ).toBe(false);
+    expect(matterOpeningAndRiskArticle.body).toMatch(/pms:import/i);
+    expect(matterOpeningAndRiskArticle.body).toMatch(/without `isPmsImport: true`/);
 
     const populatedRows = resolveMatterIntakeComplianceRows(
       {
