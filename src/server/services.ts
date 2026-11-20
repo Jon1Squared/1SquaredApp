@@ -19580,10 +19580,7 @@ export async function syncMatterCostsRatesFromPms(
       actorUserId: byId,
     });
   }
-  if (
-    syncPermSet.mfaPendingPermissions.has('admin:access') &&
-    (options?.mfaVerified !== undefined || Boolean(options?.tenantCtx || activeSession))
-  ) {
+  if (syncPermSet.mfaPendingPermissions.has('admin:access')) {
     throw new AuthorisationError({
       code: 'MFA_REQUIRED',
       message:

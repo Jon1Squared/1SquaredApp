@@ -376,7 +376,12 @@ export function resolvePersonPermissionSet(
         actorRoles: [],
         mfaVerified: false,
       },
-      config: { rbac: rbacConfig },
+      config: {
+        ...(options?.config && 'environment' in options.config && options.config.environment !== undefined
+          ? { environment: options.config.environment }
+          : {}),
+        rbac: rbacConfig,
+      },
       actor: null,
     });
   }
@@ -683,6 +688,7 @@ export function resolvePersonForEntraClaims(params: {
   tenantId?: string;
   rbacConfig?: RbacConfiguration;
   primaryDomain?: string;
+  environment?: TenantConfiguration['environment'];
 }): {
   person: Person | null;
   matchedByEmailOnly?: boolean;
@@ -819,7 +825,12 @@ export function resolvePersonForEntraClaims(params: {
         actorGroups: verifiedToken.groups,
         mfaVerified: verifiedToken.mfaVerified,
       },
-      config: { rbac: rbacConfig },
+      config: {
+        ...(params.environment !== undefined
+          ? { environment: params.environment }
+          : {}),
+        rbac: rbacConfig,
+      },
       actor: {
         userId: verifiedToken.sub,
         roles: [...verifiedToken.roles],
@@ -857,7 +868,12 @@ export function resolvePersonForEntraClaims(params: {
     {
       allPeople: people,
       teams,
-      config: { rbac: rbacConfig },
+      config: {
+        ...(params.environment !== undefined
+          ? { environment: params.environment }
+          : {}),
+        rbac: rbacConfig,
+      },
       mfaVerified: verifiedToken.mfaVerified,
       context: {
         tenantId: verifiedToken.tenantId,

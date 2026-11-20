@@ -9,6 +9,7 @@ import {
   RoleHomeConfig,
   Team,
 } from './types';
+import type { TenantConfiguration } from '@platform/core';
 import {
   resolvePermissions,
   resolvePersonAuthoritativeRoles,
@@ -860,7 +861,13 @@ export interface LeftRailVisibility {
 export function getLeftRailVisibility(
   activeRole: string,
   userRoles: string[] = [activeRole],
-  options?: { config?: { rbac: RbacConfiguration }; tenantId?: string },
+  options?: {
+    config?: {
+      environment?: TenantConfiguration['environment'];
+      rbac: RbacConfiguration;
+    };
+    tenantId?: string;
+  },
 ): LeftRailVisibility {
   const activeTenantId = options?.tenantId?.trim() || '';
   const rbacConfig = options?.config?.rbac;
@@ -869,7 +876,12 @@ export function getLeftRailVisibility(
       'RBAC_CONFIG_REQUIRED: getLeftRailVisibility needs config.rbac and tenantId.',
     );
   }
-  const config = { rbac: rbacConfig };
+  const config = {
+    ...(options?.config?.environment !== undefined
+      ? { environment: options.config.environment }
+      : {}),
+    rbac: rbacConfig,
+  };
   const authoritativeRoles = userRoles.length > 0 ? userRoles : [activeRole];
   const userPerms = resolvePermissions({
     context: {

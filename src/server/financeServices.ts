@@ -254,10 +254,7 @@ export async function verifyFinanceActorAndPermission(
       `You do not have permission (${requiredPermission}) to view this finance data.`,
     );
   }
-  if (
-    permSet.mfaPendingPermissions.has(requiredPermission) &&
-    Boolean(verifiedTenantContext || activeSession)
-  ) {
+  if (permSet.mfaPendingPermissions.has(requiredPermission)) {
     return buildActionDenied(
       'MFA_REQUIRED',
       `Multi-factor authentication (MFA) is required for permission "${requiredPermission}".`,

@@ -8992,11 +8992,113 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           }),
         ).rejects.toThrow(/MFA_REQUIRED/);
       } finally {
-        process.env.PLATFORM_ENVIRONMENT = prevPlatformEnv;
+        if (prevPlatformEnv === undefined) {
+          delete process.env.PLATFORM_ENVIRONMENT;
+        } else {
+          process.env.PLATFORM_ENVIRONMENT = prevPlatformEnv;
+        }
         setActiveTenantConfigForTesting(null);
         setTestEntraSessionOverride(undefined);
         clearPermissionRequestCache();
       }
+    });
+
+    it('R547 & R559: resolver defaults omitted environment to live MFA enforcement and threads environment across null-user, unmatched Entra, and left-rail callers', () => {
+      clearPermissionRequestCache();
+      const activeRbac = getDefaultTenantRbacConfig();
+      const forcedRbacFalse: RbacConfiguration = {
+        ...activeRbac,
+        identityMapping: {
+          ...activeRbac.identityMapping,
+          requireMfaForAdminPermissions: false,
+        },
+      };
+
+      // 1. Direct resolvePermissions with omitted environment defaults to live (MFA required)
+      const omittedEnvResolved = resolvePermissions({
+        context: {
+          tenantId: 'not-a-law-firm',
+          correlationId: 'corr-r547-omitted',
+          actorId: 'P-000004',
+          actorRoles: ['admin'],
+          mfaVerified: false,
+        },
+        config: { rbac: forcedRbacFalse },
+        actor: { userId: 'P-000004', roles: ['admin'] },
+      });
+      expect(omittedEnvResolved.requireMfaForAdminPermissions).toBe(true);
+      expect(omittedEnvResolved.mfaPendingPermissions.has('admin:access')).toBe(
+        true,
+      );
+
+      // 2. Null-user branch in resolvePersonPermissionSet fails closed (empty set, requireMfaForAdminPermissions: true),
+      //    while admin user without environment defaults to live MFA enforcement and explicit 'test' honours false
+      const nullUserOmitted = domainResolvePersonPermissionSet(null, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: forcedRbacFalse },
+      });
+      expect(nullUserOmitted.requireMfaForAdminPermissions).toBe(true);
+      expect(nullUserOmitted.permissions.size).toBe(0);
+      const nullUserExplicitTest = domainResolvePersonPermissionSet(null, {
+        tenantId: 'not-a-law-firm',
+        config: { environment: 'test', rbac: forcedRbacFalse },
+      });
+      expect(nullUserExplicitTest.requireMfaForAdminPermissions).toBe(true);
+      expect(nullUserExplicitTest.permissions.size).toBe(0);
+      const adminPerson = makeTestPerson({ id: 'P-000004', roles: ['admin'] });
+      const adminOmittedEnv = domainResolvePersonPermissionSet(adminPerson, {
+        tenantId: 'not-a-law-firm',
+        config: { rbac: forcedRbacFalse },
+      });
+      expect(adminOmittedEnv.requireMfaForAdminPermissions).toBe(true);
+      const adminTestEnv = domainResolvePersonPermissionSet(adminPerson, {
+        tenantId: 'not-a-law-firm',
+        config: { environment: 'test', rbac: forcedRbacFalse },
+      });
+      expect(adminTestEnv.requireMfaForAdminPermissions).toBe(false);
+
+      // 3. Unmatched Entra user in resolvePersonForEntraClaims defaults omitted environment to live and honours threaded environment
+      const unmatchedClaims = {
+        sub: 'entra-unmatched-r547',
+        oid: '00000000-0000-4000-8000-999999990547',
+        preferred_username: 'unmatched.admin@notalawfirm.example',
+        roles: ['admin'],
+        amr: ['pwd'],
+      };
+      const unmatchedOmitted = domainResolvePersonForEntraClaims({
+        claims: unmatchedClaims,
+        people: [],
+        tenantId: 'not-a-law-firm',
+        rbacConfig: forcedRbacFalse,
+      });
+      expect(unmatchedOmitted.person).toBeNull();
+      expect(unmatchedOmitted.permissions.requireMfaForAdminPermissions).toBe(
+        true,
+      );
+      expect(
+        unmatchedOmitted.permissions.mfaPendingPermissions.has('admin:access'),
+      ).toBe(true);
+
+      const unmatchedTestEnv = domainResolvePersonForEntraClaims({
+        claims: unmatchedClaims,
+        people: [],
+        tenantId: 'not-a-law-firm',
+        rbacConfig: forcedRbacFalse,
+        environment: 'test',
+      });
+      expect(unmatchedTestEnv.permissions.requireMfaForAdminPermissions).toBe(
+        false,
+      );
+      expect(
+        unmatchedTestEnv.permissions.mfaPendingPermissions.has('admin:access'),
+      ).toBe(false);
+
+      // 4. Left-rail visibility threads optional environment without throwing or failing live mode
+      const liveRail = domainGetLeftRailVisibility('admin', ['admin'], {
+        tenantId: 'not-a-law-firm',
+        config: { environment: 'live', rbac: forcedRbacFalse },
+      });
+      expect(liveRail.admin).toBe(true);
     });
   });
 });

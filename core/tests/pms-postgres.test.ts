@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  clearPermissionRequestCache,
   createDirectMigrationClient,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
@@ -17,8 +18,10 @@ import {
 import { isActionDenied } from '@/domain/actionResult';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
   getPmsRepository,
   resolveCurrentTenantContext,
+  setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
 import { setAuditAdapterFailureHookForTesting } from '../../src/server/testSupport/auditTestSupport';
 import { getTenantPmsSource } from '@/pms/pmsSource';
@@ -1551,5 +1554,331 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     expect(writeAuditMatches.length).toBe(117);
     const flushMatches = servicesSrc.match(/\bflushStagedAuditEntries\s*\(/g) ?? [];
     expect(flushMatches.length).toBeGreaterThanOrEqual(45);
+  });
+
+  it('R546: getMatterFinanceRows excludes staff and ethical-wall restricted matters even when fee earner is in teamMemberIds (unless in restrictedAccessUserIds), across two tenants', async () => {
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const ctxB = makeTenantContext('tenant-b', 'P-000001');
+    const feCtxA = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000002',
+        tenantId: 'tenant-a',
+        name: 'Dafydd Evans',
+        email: 'dafydd.evans@tenant-a.example',
+        roles: ['fee_earner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r546-fe-a',
+    });
+    const matterRepo = getMatterRepository();
+    const pmsRepo = getPmsRepository();
+    const baseStore = loadCommittedSeedStore();
+
+    try {
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        store: baseStore,
+        tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxA.tenantId },
+        modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxB,
+        store: baseStore,
+        tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxB.tenantId },
+        modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+
+      const datasetA = buildSyntheticDataset({
+        suffix: 'A',
+        asAtDate: '2026-10-31',
+        wipAmount: 14000,
+        invoiceNet: 6000,
+        unlinkedWipAmount: 22000,
+      });
+      const extendedDatasetA: TenantPmsExtractDataset = {
+        ...datasetA,
+        matters: [
+          ...datasetA.matters,
+          {
+            ...datasetA.matters[0]!,
+            matter_code: 'MAT-A002',
+            matter_description: 'R546 Ethical Wall PMS Matter',
+          },
+        ],
+        timeEntries: [
+          ...datasetA.timeEntries,
+          {
+            ...datasetA.timeEntries[0]!,
+            time_id: 'TE-A002',
+            matter_code: 'MAT-A002',
+            rate: 15500,
+            value: 31000,
+          },
+        ],
+      };
+      const datasetB = buildSyntheticDataset({
+        suffix: 'B',
+        asAtDate: '2026-11-15',
+        wipAmount: 38000,
+        invoiceNet: 16000,
+        unlinkedWipAmount: 55000,
+      });
+
+      await pmsRepo.clearTenantData(ctxA);
+      await pmsRepo.clearTenantData(ctxB);
+      await pmsRepo.importExtractDataset(ctxA, extendedDatasetA);
+      await pmsRepo.importExtractDataset(ctxB, datasetB);
+
+      const templateMatter = baseStore.matters[0]!;
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-000001',
+          matterNumber: 'MAT-A001',
+          title: 'R546 Staff Restricted Matter',
+          leadFeeEarnerId: 'P-000002',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          teamMemberIds: ['P-000002', 'P-000001'],
+          isStaffMatter: true,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: ['P-000001'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000001'] },
+      );
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-000002',
+          matterNumber: 'MAT-A002',
+          title: 'R546 Ethical Wall Restricted Matter',
+          leadFeeEarnerId: 'P-000002',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          teamMemberIds: ['P-000002', 'P-000001'],
+          isStaffMatter: false,
+          hasEthicalWall: true,
+          restrictedAccessUserIds: ['P-000001'],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000001'] },
+      );
+      await matterRepo.putMatter(
+        ctxA,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-000003',
+          matterNumber: 'MAT-A-UNLINKED',
+          title: 'R546 Unrestricted Team Matter',
+          leadFeeEarnerId: 'P-000002',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          teamMemberIds: ['P-000002', 'P-000001'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: [],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+      await matterRepo.putMatter(
+        ctxB,
+        {
+          ...structuredClone(templateMatter),
+          id: 'M-000001',
+          matterNumber: 'MAT-B001',
+          title: 'Tenant B Matter',
+          leadFeeEarnerId: 'P-000002',
+          teamMemberIds: ['P-000002', 'P-000001'],
+          isStaffMatter: false,
+          hasEthicalWall: false,
+          restrictedAccessUserIds: [],
+        },
+        { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+      );
+
+      await pmsRepo.putPmsLinks(ctxA, [
+        {
+          id: 'PMSL-R546-STAFF',
+          entityType: 'matter',
+          onesquaredId: 'M-000001',
+          pmsCode: 'MAT-A001',
+          matchedBy: 'manual',
+          matchedAt: '2026-10-31T10:00:00.000Z',
+        },
+        {
+          id: 'PMSL-R546-WALL',
+          entityType: 'matter',
+          onesquaredId: 'M-000002',
+          pmsCode: 'MAT-A002',
+          matchedBy: 'manual',
+          matchedAt: '2026-10-31T10:00:00.000Z',
+        },
+        {
+          id: 'PMSL-R546-OPEN',
+          entityType: 'matter',
+          onesquaredId: 'M-000003',
+          pmsCode: 'MAT-A-UNLINKED',
+          matchedBy: 'manual',
+          matchedAt: '2026-10-31T10:00:00.000Z',
+        },
+      ]);
+      await pmsRepo.putPmsLinks(ctxB, [
+        {
+          id: 'PMSL-R546-B',
+          entityType: 'matter',
+          onesquaredId: 'M-000001',
+          pmsCode: 'MAT-B001',
+          matchedBy: 'manual',
+          matchedAt: '2026-11-15T10:00:00.000Z',
+        },
+      ]);
+
+      // Fee earner on teamMemberIds but NOT in restrictedAccessUserIds sees ONLY M-000003
+      const feRows = await getMatterFinanceRows(feCtxA);
+      expect(isActionDenied(feRows)).toBe(false);
+      if (isActionDenied(feRows)) throw new Error(feRows.message);
+      expect(feRows.allMatterFins.map((r) => r.matter_code)).toEqual(['MAT-A-UNLINKED']);
+      expect(feRows.pmsLinks.map((l) => l.onesquaredId)).toEqual(['M-000003']);
+      expect(feRows.pmsSummaryByMatterId['M-000001']).toBeUndefined();
+      expect(feRows.pmsSummaryByMatterId['M-000002']).toBeUndefined();
+      expect(feRows.pmsSummaryByMatterId['M-000003']?.unbilled_wip).toBe(22000);
+      expect(feRows.pmsInvoices.some((i) => i.matter_code === 'MAT-A001' || i.matter_code === 'MAT-B001')).toBe(false);
+
+      // Direct matterId lookup on restricted matters is also FORBIDDEN
+      const staffDenied = await getMatterFinanceRows(feCtxA, ['M-000001']);
+      expect(isActionDenied(staffDenied)).toBe(true);
+      if (isActionDenied(staffDenied)) {
+        expect(staffDenied.code).toBe('FORBIDDEN');
+      }
+      const wallDenied = await getMatterFinanceRows(feCtxA, ['M-000002']);
+      expect(isActionDenied(wallDenied)).toBe(true);
+      if (isActionDenied(wallDenied)) {
+        expect(wallDenied.code).toBe('FORBIDDEN');
+      }
+
+      // Permitted user (in restrictedAccessUserIds) in Tenant A still sees all 3 Tenant A matters, zero Tenant B
+      const partnerRows = await getMatterFinanceRows(ctxA);
+      expect(isActionDenied(partnerRows)).toBe(false);
+      if (!isActionDenied(partnerRows)) {
+        expect(partnerRows.allMatterFins.map((r) => r.matter_code).sort()).toEqual([
+          'MAT-A-UNLINKED',
+          'MAT-A001',
+          'MAT-A002',
+        ]);
+        expect(partnerRows.allMatterFins.some((r) => r.matter_code === 'MAT-B001')).toBe(false);
+      }
+    } finally {
+      await pmsRepo.clearTenantData(ctxA).catch(() => undefined);
+      await pmsRepo.clearTenantData(ctxB).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxA).catch(() => undefined);
+      await matterRepo.clearTenantData(ctxB).catch(() => undefined);
+      await getPartyRepository().clearTenantData(ctxA).catch(() => undefined);
+      await getPartyRepository().clearTenantData(ctxB).catch(() => undefined);
+    }
+  });
+
+  it('R558: getPmsAdminSnapshot and syncMatterCostsRatesFromPms fail closed with MFA_REQUIRED when session and TenantContext are absent', async () => {
+    const baseStore = loadCommittedSeedStore();
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const seedCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000004',
+        tenantId: 'not-a-law-firm',
+        name: 'Huw Pritchard',
+        email: 'huw.pritchard@notalawfirm.example',
+        roles: ['admin', 'managing_partner', 'finance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r558-seed',
+    });
+    const pmsRepo = getPmsRepository();
+    try {
+      setActiveTenantConfigForTesting(
+        {
+          ...rawBase,
+          featureFlags: {
+            ...((rawBase.featureFlags as Record<string, unknown>) ?? {}),
+            enablePmsLiveRateSync: true,
+          },
+        },
+        { environment: 'test' },
+      );
+      await importFirmStoreModulesToPostgres({
+        ctx: seedCtx,
+        store: baseStore,
+        tenantConfig: getActiveTenantConfiguration(),
+        modules: ['parties', 'matters', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+      await pmsRepo.clearTenantData(seedCtx);
+      await pmsRepo.importExtractDataset(
+        seedCtx,
+        buildSyntheticDataset({
+          suffix: 'A',
+          asAtDate: '2026-10-31',
+          wipAmount: 14000,
+          invoiceNet: 6000,
+          unlinkedWipAmount: 22000,
+        }),
+      );
+      setTestEntraSessionOverride(undefined);
+      clearPermissionRequestCache();
+
+      // Absent session & TenantContext -> getPmsAdminSnapshot fails closed with MFA_REQUIRED and syncMatterCostsRatesFromPms fails closed with UNAUTHENTICATED
+      const snapDenied = await getPmsAdminSnapshot('P-000004');
+      expect(isActionDenied(snapDenied)).toBe(true);
+      if (isActionDenied(snapDenied)) {
+        expect(snapDenied.code).toBe('MFA_REQUIRED');
+      }
+
+      await expect(syncMatterCostsRatesFromPms('P-000004')).rejects.toThrow(
+        /UNAUTHENTICATED/,
+      );
+
+      // Non-MFA Entra session without options or active actor context wrapper -> fails closed with MFA_REQUIRED
+      const noMfaCookie = createSignedEntraSessionCookie({
+        personId: 'P-000004',
+        tenantId: 'not-a-law-firm',
+        oid: '00000000-0000-4000-8000-000000000004',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000004',
+        email: 'huw.pritchard@notalawfirm.example',
+        displayName: 'Huw Pritchard',
+        entraRoles: ['admin', 'managing_partner', 'finance'],
+        mappedRoles: ['admin', 'managing_partner', 'finance'],
+        entraGroups: [],
+        mfaVerified: false,
+        amr: ['pwd'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+      setTestEntraSessionOverride(verifySignedEntraSessionCookie(noMfaCookie)!);
+      await expect(syncMatterCostsRatesFromPms('P-000004')).rejects.toThrow(
+        /MFA_REQUIRED/,
+      );
+
+      // Positive control: explicit MFA + verified tenant context succeeds
+      const synced = await syncMatterCostsRatesFromPms('P-000004', {
+        tenantCtx: seedCtx,
+        mfaVerified: true,
+      });
+      expect(synced.pmsLinkActive).toBe(true);
+    } finally {
+      await pmsRepo.clearTenantData(seedCtx).catch(() => undefined);
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      clearPermissionRequestCache();
+    }
   });
 });

@@ -300,6 +300,7 @@ export function resolvePersonForEntraClaims(params: {
   tenantId?: string;
   rbacConfig?: RbacConfiguration;
   primaryDomain?: string;
+  environment?: TenantConfiguration['environment'];
 }): {
   person: Person | null;
   matchedByEmailOnly?: boolean;
@@ -317,6 +318,7 @@ export function resolvePersonForEntraClaims(params: {
     tenantId: activeTenantId,
     rbacConfig,
     primaryDomain: params.primaryDomain ?? serverConfig.branding.primaryDomain,
+    environment: params.environment ?? getActiveTenantConfiguration().environment,
   });
 }
 
@@ -391,7 +393,10 @@ export function getLeftRailVisibility(
   activeRole: string,
   userRoles: string[] = [activeRole],
   options: {
-    config?: { rbac?: RbacConfiguration };
+    config?: {
+      environment?: TenantConfiguration['environment'];
+      rbac?: RbacConfiguration;
+    };
     tenantId?: string;
   } = {},
 ): LeftRailVisibility {
@@ -405,9 +410,11 @@ export function getLeftRailVisibility(
     options.config?.rbac ??
     sessionRbacConfig ??
     getDefaultTenantRbacConfig(activeTenantId);
+  const environment =
+    options.config?.environment ?? getActiveTenantConfiguration().environment;
   return domainGetLeftRailVisibility(activeRole, userRoles, {
     tenantId: activeTenantId,
-    config: { rbac: rbacConfig },
+    config: { environment, rbac: rbacConfig },
   });
 }
 

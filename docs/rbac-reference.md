@@ -193,6 +193,7 @@ Implemented in `core/src/domain/rbac/resolver.ts` (and bridged for host entities
 ## 7. Dynamic Staff-Matter & Linked-Document Access (`canAccessMatter`)
 
 - When an active firm employee is a client on a matter (`isStaffMatter: true`), `computeStaffMatterStatus` populates `restrictedAccessUserIds` **only** with the named matter participants (`responsiblePartnerId`, `supervisingPartnerId`, `leadFeeEarnerId`, `teamMemberIds`).
+- When `restrictedAccessUserIds` is populated on a staff matter or ethical-wall matter, `canAccessMatter` treats that allow-list as authoritative (falling back to named matter participants only when `restrictedAccessUserIds` is empty), so excluded `teamMemberIds` entries cannot access the matter (`R546`).
 - Oversight access is evaluated dynamically via `matter:restricted:access` (`risk_compliance`, `managing_partner`, `admin`), so role changes take effect immediately without stale stored user IDs.
 - Generated documents linked to a restricted staff matter inherit the restriction on both Matter and Client (`person` / `organisation`) screens via `canActorAccessGeneratedDocument`.
 

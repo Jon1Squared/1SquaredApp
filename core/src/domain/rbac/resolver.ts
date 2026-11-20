@@ -512,12 +512,12 @@ export function resolvePermissions(
   }
 
   // 5. Compute MFA-pending permissions when `mfaVerified` is false
-  // Owner Decision D3 (`R527`): `live` never permits disabling admin MFA even if overridden in store/config.
+  // Owner Decision D3 (`R527` / `R547`): `live` (and omitted `environment`) never permit disabling admin MFA even if overridden in store/config.
   const explicitEnv =
     input.config && typeof input.config === 'object' && 'environment' in input.config
       ? (input.config as { environment?: TenantConfiguration['environment'] }).environment
       : undefined;
-  const isLiveEnvironment = explicitEnv === 'live';
+  const isLiveEnvironment = explicitEnv === undefined || explicitEnv === 'live';
   const requireMfaForAdminPermissions = isLiveEnvironment
     ? true
     : (rbacConfig.identityMapping?.requireMfaForAdminPermissions ?? true);
@@ -668,7 +668,14 @@ export function canAccessMatter(
 
   const userId = resolved.actorUserId;
 
-  // 2. Named matter participants on the matter record
+  // 2. Explicit per-matter participant allowlist (`restrictedAccessUserIds`):
+  //    When populated, `restrictedAccessUserIds` is authoritative (matching SQL repositories)
+  //    so excluded team members / participants cannot bypass the restriction.
+  if (hasExplicitAllowList) {
+    return matter.restrictedAccessUserIds!.includes(userId);
+  }
+
+  // 3. Empty-allowlist fallback (`B12`): named matter participants on the matter record
   if (
     matter.responsiblePartnerId === userId ||
     matter.responsibleSolicitorId === userId ||
@@ -682,14 +689,6 @@ export function canAccessMatter(
   if (
     Array.isArray(matter.teamMemberIds) &&
     matter.teamMemberIds.includes(userId)
-  ) {
-    return true;
-  }
-
-  // 3. Explicit per-matter participant allowlist (`restrictedAccessUserIds`)
-  if (
-    hasExplicitAllowList &&
-    matter.restrictedAccessUserIds!.includes(userId)
   ) {
     return true;
   }
