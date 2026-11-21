@@ -6,6 +6,7 @@ import {
   CORE_TENANT_MIGRATIONS,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
+  TenantJobRunRepository,
   TenantMigrationRunner,
   type EmailSender,
   type KeyDate,
@@ -13,6 +14,7 @@ import {
   type TenantConfiguration,
   type TenantContext,
   type TenantRegistry,
+  type TenantSqlClient,
 } from '../src/index';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import {
@@ -1123,5 +1125,141 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
         clearFirst: true,
       }),
     ).rejects.toThrow(/DEMO_DATA_LIVE_FORBIDDEN/);
+  });
+
+  it('R614: aborting signal during the final succeeded job_runs insert rolls back both domain writes and the succeeded job_runs row while isolating other tenants', async () => {
+    const alphaCfg = buildTenantConfig('tenant-alpha');
+    const bravoCfg = buildTenantConfig('tenant-bravo');
+    await seedMinimalTenantEntities(ctxAlpha, alphaCfg);
+    await seedMinimalTenantEntities(ctxBravo, bravoCfg);
+
+    const taskRepo = getTaskWorkflowRepository();
+    const controller = new AbortController();
+    const r614JobRepo = new (class extends TenantJobRunRepository {
+      override withTenantTransaction<T>(
+        txCtx: TenantContext,
+        fn: (tx: TenantSqlClient) => Promise<T>,
+        txOpts?: { statementTimeoutMs?: number },
+      ): Promise<T> {
+        return super.withTenantTransaction(
+          txCtx,
+          (tx) => {
+            const origQuery = tx.query.bind(tx);
+            const spiedTx: TenantSqlClient = {
+              query: async <TRow = Record<string, unknown>>(
+                sql: string,
+                queryParams?: readonly unknown[],
+              ) => {
+                const res = await origQuery<TRow>(sql, queryParams);
+                if (
+                  txCtx.tenantId === 'tenant-alpha' &&
+                  sql.includes('INSERT INTO public.job_runs') &&
+                  sql.includes("'succeeded'")
+                ) {
+                  controller.abort(
+                    Object.assign(
+                      new Error('JOB_TENANT_TIMEOUT: aborted after succeeded job_runs insert'),
+                      { code: 'JOB_TENANT_TIMEOUT' },
+                    ),
+                  );
+                }
+                return res;
+              },
+            };
+            return fn(spiedTx);
+          },
+          txOpts,
+        );
+      }
+    })();
+
+    const abortedTaskId = 'TSK-R614-POST-INSERT-ABORT';
+    await expect(
+      r614JobRepo.executeControlledTenantJobRun(ctxAlpha, {
+        jobKey: 'usage-retention-purge',
+        triggerSource: 'scheduled',
+        triggeredById: 'system:usage-retention-purge',
+        timeZone: 'Europe/London',
+        targetLocalHour: 0,
+        now: new Date('2026-07-04T03:00:00.000Z'),
+        signal: controller.signal,
+        work: async () => {
+          await taskRepo.putTask(ctxAlpha, {
+            id: abortedTaskId,
+            reference: 'T-R614-ABORT',
+            title: 'Must roll back when aborted post-insert',
+            description: 'R614 post-insert abort rollback check',
+            taskTypeId: 'task_type.general',
+            priorityId: 'task_priority.normal',
+            dueAt: '2026-07-05T12:00:00.000Z',
+            assignedTeamId: null,
+            assignedPersonId: null,
+            status: 'To do',
+            linkedRecords: [],
+            createdById: 'P-000001',
+            createdAt: '2026-07-04T03:00:00.000Z',
+            updatedById: 'P-000001',
+            updatedAt: '2026-07-04T03:00:00.000Z',
+            completedById: null,
+            completedAt: null,
+            comments: [],
+          });
+          return { result: { purged: 1 }, summary: { count: 1 } };
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'JOB_TENANT_TIMEOUT' });
+
+    const alphaRuns = await r614JobRepo.listJobRuns(ctxAlpha, {
+      jobKey: 'usage-retention-purge',
+      localDate: '2026-07-04',
+    });
+    expect(alphaRuns.filter((r) => r.status === 'succeeded')).toHaveLength(0);
+    expect(
+      await taskRepo.getTaskById(ctxAlpha, abortedTaskId, {
+        includeRestricted: true,
+      }),
+    ).toBeNull();
+
+    // Positive control: unaffected Tenant Bravo completes cleanly
+    const bravoController = new AbortController();
+    const bravoOutcome = await r614JobRepo.executeControlledTenantJobRun(ctxBravo, {
+      jobKey: 'usage-retention-purge',
+      triggerSource: 'scheduled',
+      triggeredById: 'system:usage-retention-purge',
+      timeZone: 'Europe/London',
+      targetLocalHour: 0,
+      now: new Date('2026-07-04T03:00:00.000Z'),
+      signal: bravoController.signal,
+      work: async () => ({ result: { purged: 0 }, summary: { count: 0 } }),
+    });
+    expect(bravoOutcome.outcome).toBe('executed');
+  });
+
+  it('R618: scheduled job sweeps reject tenantConfigOverrideByTenantId when NODE_ENV !== "test"', async () => {
+    const alphaCfg = buildTenantConfig('tenant-alpha');
+    const registry: TenantRegistry = {
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [makeRegistryEntry('tenant-alpha')],
+    };
+
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      await expect(
+        runScheduledKeyDateRemindersJobSweep({
+          registry,
+          tenantConfigOverrideByTenantId: { 'tenant-alpha': alphaCfg },
+        }),
+      ).rejects.toThrow(/SECURITY_ERROR/);
+      await expect(
+        runScheduledOutboxDrainJobSweep({
+          registry,
+          tenantConfigOverrideByTenantId: { 'tenant-alpha': alphaCfg },
+        }),
+      ).rejects.toThrow(/SECURITY_ERROR/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

@@ -9,6 +9,7 @@ import {
 } from '@platform/core';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
+import nalfManifestJson from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/manifest.json';
 
 describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => {
   const tenantConfig = loadAndValidateTenantConfig(
@@ -43,7 +44,7 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
         name: 'Ext Without Config Read',
         version: '1.0.0',
         description: 'Does not declare config:read permission',
-        supportedCoreApiRange: '^1.0.0',
+        supportedCoreApiRange: '^2.0.0',
         permissions: [
           'matter:costs:validate',
           'matter:open:gate',
@@ -137,7 +138,7 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
         name: 'Ext With Config Read',
         version: '1.0.0',
         description: 'Declares config:read permission',
-        supportedCoreApiRange: '^1.0.0',
+        supportedCoreApiRange: '^2.0.0',
         permissions: [
           'config:read',
           'matter:costs:validate',
@@ -417,7 +418,7 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
         name: 'Ext With Undeclared Hooks',
         version: '1.0.0',
         description: 'Has full permissions but empty manifest.hooks',
-        supportedCoreApiRange: '^1.0.0',
+        supportedCoreApiRange: '^2.0.0',
         permissions: [
           'config:read',
           'matter:costs:validate',
@@ -620,5 +621,28 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
     );
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('R599: CORE_API_VERSION is 2.0.0, bundled nalf-matter-costs-governance declares ^2.0.0, and legacy ^1.0.0 manifests fail closed with EXTENSION_COMPATIBILITY_ERROR', () => {
+    expect(CORE_API_VERSION).toBe('2.0.0');
+    expect(nalfManifestJson.supportedCoreApiRange).toBe('^2.0.0');
+    expect(nalfManifestJson.permissions).toContain('config:read');
+
+    const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    const legacyV1Ext: PlatformExtension = {
+      manifest: {
+        id: 'ext-legacy-v1-compat',
+        name: 'Legacy v1 Extension',
+        version: '1.0.0',
+        description: 'Requires v1 core API',
+        supportedCoreApiRange: '^1.0.0',
+        permissions: ['matter:read'],
+        hooks: [],
+      },
+      hooks: {},
+    };
+    expect(() => host.registerExtension(legacyV1Ext)).toThrow(
+      /EXTENSION_COMPATIBILITY_ERROR/,
+    );
   });
 });

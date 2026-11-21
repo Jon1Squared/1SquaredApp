@@ -68,8 +68,15 @@ export async function runImportPmsCli(
   const registry = options.registry ?? loadActiveTenantRegistry();
   const enabledEntries = registry.tenants.filter((t) => t.enabled);
 
+  const explicitTenantArg = cliOptions.tenant?.trim().replace(/_/g, '-');
+  if (!explicitTenantArg && enabledEntries.length > 1) {
+    throw createCodedError(
+      'PMS_IMPORT_TENANT_REQUIRED',
+      'Multiple enabled tenants exist in the active registry; pass --tenant <tenant-id> explicitly.',
+    );
+  }
   const targetTenantId =
-    cliOptions.tenant?.trim().replace(/_/g, '-') ||
+    explicitTenantArg ||
     (enabledEntries.length === 1
       ? enabledEntries[0]!.tenantId
       : getActiveTenantConfiguration().tenantId);

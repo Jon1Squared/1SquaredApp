@@ -3,7 +3,7 @@
   "name": "Not A Law Firm — Partner Cost Sign-off Governance",
   "version": "1.2.0",
   "description": "Enforces Partner Cost Sign-off whenever estimated fees or caps reach the configured threshold.",
-  "supportedCoreApiRange": "^1.0.0",
+  "supportedCoreApiRange": "^2.0.0",
   "permissions": [
     "matter:read",
     "matter:costs:validate",

@@ -23613,6 +23613,16 @@ export async function executeUsageRetentionPurgeForTenant(
   });
 }
 
+function assertTestOnlyTenantConfigOverride(
+  override: Record<string, TenantConfiguration> | undefined,
+): void {
+  if (override && process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: tenantConfigOverrideByTenantId is only permitted when NODE_ENV === "test".',
+    );
+  }
+}
+
 export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?: {
   readonly registry?: TenantRegistry;
   readonly timeoutMs?: number;
@@ -23620,6 +23630,7 @@ export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?
   readonly guardedJobOptions?: GuardedJobOptions;
   readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
   const skippedTenants: Array<{
@@ -23712,6 +23723,7 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
   readonly guardedJobOptions?: GuardedJobOptions;
   readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
   const skippedTenants: Array<{
@@ -23787,6 +23799,7 @@ export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
   readonly guardedJobOptions?: GuardedJobOptions;
   readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
   const skippedTenants: Array<{
@@ -25567,9 +25580,13 @@ export async function resolveApplicableRatesRecord(
 async function resolveRegisterActorAndConfig(
   byId?: string,
   explicitMfa?: boolean,
+  explicitOptions?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
 ): Promise<{
   ctx: TenantContext;
-  tenantCfg: ReturnType<typeof getActiveTenantConfiguration>;
+  tenantCfg: TenantConfiguration;
   actor: Person;
   people: Person[];
   teams: Team[];
@@ -25577,12 +25594,17 @@ async function resolveRegisterActorAndConfig(
   rbacConfig: RbacConfiguration;
   permSet: ReturnType<typeof resolvePersonPermissionSet>;
 }> {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const tenantCfg = getActiveTenantConfiguration();
+  const ctx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: explicitOptions?.tenantCtx,
+  });
+  const tenantCfg = resolveVerifiedTenantConfiguration(
+    ctx,
+    explicitOptions?.tenantConfig,
+  );
   const [people, teams, rbacConfig] = await Promise.all([
     getPartyRepository().listAllPeople<Person>(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
-    loadEffectiveTenantRbacConfig(ctx),
+    loadEffectiveTenantRbacConfig(ctx, undefined, tenantCfg),
   ]);
   const actor = people.find((p) => p.id === (byId || ctx.actorId) && !p.mergedIntoId) ?? null;
   if (!actor) {
@@ -25595,17 +25617,27 @@ async function resolveRegisterActorAndConfig(
     });
   }
   const activeSession = getActiveActorSession();
+  const matchingExplicitCtx =
+    explicitOptions?.tenantCtx && explicitOptions.tenantCtx.actorId === actor.id
+      ? explicitOptions.tenantCtx
+      : null;
   const effectiveTokenRoles =
-    activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined;
+    matchingExplicitCtx?.actorRoles ??
+    (activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined);
   const effectiveMfa =
     explicitMfa ??
-    (activeSession?.personId === actor.id ? activeSession.mfaVerified === true : false);
+    (matchingExplicitCtx
+      ? matchingExplicitCtx.mfaVerified === true
+      : activeSession?.personId === actor.id
+        ? activeSession.mfaVerified === true
+        : false);
   const permSet = resolvePersonPermissionSet(actor, {
     allPeople: people,
     teams,
     tokenRoles: effectiveTokenRoles,
     tokenRolesActorId: actor.id,
     mfaVerified: effectiveMfa,
+    ...(matchingExplicitCtx ? { context: matchingExplicitCtx } : {}),
     config: { ...tenantCfg, rbac: rbacConfig },
   });
   const actorRoles = resolveEmployeeRoles(actor, teams);
@@ -25649,6 +25681,12 @@ function registerServiceFailure(
 function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
   const rawErr = err as { code?: string; message?: string };
   const rawCode = rawErr?.code ?? '';
+  if (
+    rawCode === 'TENANT_CONFIG_MISMATCH' ||
+    rawCode === 'TENANCY_FORGERY_DETECTED'
+  ) {
+    throw err;
+  }
   const msg = rawErr?.message || (err instanceof Error ? err.message : 'Register operation failed.');
   if (rawCode === 'MFA_REQUIRED') {
     return registerServiceFailure('MFA_REQUIRED', msg);
@@ -25673,6 +25711,10 @@ export async function listRegistersWorkspaceDataRecord(
     matterId?: string;
   } = {},
   byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
 ): Promise<
   | {
       ok: true;
@@ -25687,7 +25729,7 @@ export async function listRegistersWorkspaceDataRecord(
 > {
   try {
     const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
-      await resolveRegisterActorAndConfig(byId);
+      await resolveRegisterActorAndConfig(byId, undefined, options);
     const canView =
       permSet.permissions.has('register:view') ||
       permSet.permissions.has('undertaking:manage');
@@ -25702,7 +25744,7 @@ export async function listRegistersWorkspaceDataRecord(
       ctx,
       'registers',
     );
-    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
     const registersConfig = mergeRegistersConfigurations(baseRegisters, dbOverride);
     const registerTypes = resolveEffectiveRegisterTypes(baseRegisters, dbOverride);
     const registerRepo = getRegisterRepository();
@@ -25783,6 +25825,10 @@ export async function listRegistersWorkspaceDataRecord(
 export async function getRegisterRecordDetailRecord(
   recordId: string,
   byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
 ): Promise<
   | {
       ok: true;
@@ -25794,7 +25840,7 @@ export async function getRegisterRecordDetailRecord(
 > {
   try {
     const { ctx, tenantCfg, actor, people, teams, permSet } =
-      await resolveRegisterActorAndConfig(byId);
+      await resolveRegisterActorAndConfig(byId, undefined, options);
     const trimmedId = recordId?.trim() || '';
     const registerRepo = getRegisterRepository();
     const record = await registerRepo.getRegisterRecordById(ctx, trimmedId, {
@@ -25827,7 +25873,7 @@ export async function getRegisterRecordDetailRecord(
       ctx,
       'registers',
     );
-    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
     const registerType = findEffectiveRegisterType(
       record.registerTypeKey,
       baseRegisters,
@@ -25862,6 +25908,10 @@ export async function createRegisterRecordService(
     fieldValues?: Record<string, unknown>;
   },
   byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
 ): Promise<
   | {
       ok: true;
@@ -25872,12 +25922,12 @@ export async function createRegisterRecordService(
 > {
   try {
     const { ctx, tenantCfg, actor, people, teams, permSet } =
-      await resolveRegisterActorAndConfig(byId);
+      await resolveRegisterActorAndConfig(byId, undefined, options);
     const catRepo = getCatalogueRepository();
     const matterRepo = getMatterRepository();
     const registerRepo = getRegisterRepository();
     const dbOverridePre = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
-    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
     const registerTypePre = findEffectiveRegisterType(
       input.registerTypeKey?.trim() || '',
       baseRegisters,
@@ -25916,10 +25966,7 @@ export async function createRegisterRecordService(
     });
 
     // Execute pre-create extension hooks STRICTLY OUTSIDE any PostgreSQL write transaction.
-    const hookCfg =
-      ctx.tenantId === tenantCfg.tenantId
-        ? tenantCfg
-        : { ...tenantCfg, tenantId: ctx.tenantId };
+    const hookCfg = tenantCfg;
     const hookResult = await getPlatformExtensionHost().executeRegisterBeforeCreateHook(
       ctx,
       hookCfg,
@@ -26047,6 +26094,10 @@ export async function transitionRegisterRecordService(
     expectedRowVersion?: number;
   },
   byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
 ): Promise<
   | {
       ok: true;
@@ -26058,7 +26109,7 @@ export async function transitionRegisterRecordService(
 > {
   try {
     const { ctx, tenantCfg, actor, people, teams, actorRoles, permSet } =
-      await resolveRegisterActorAndConfig(byId);
+      await resolveRegisterActorAndConfig(byId, undefined, options);
     const catRepo = getCatalogueRepository();
     const matterRepo = getMatterRepository();
     const registerRepo = getRegisterRepository();
@@ -26085,7 +26136,7 @@ export async function transitionRegisterRecordService(
     }
 
     const dbOverridePre = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
-    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
     const registerTypePre = findEffectiveRegisterType(
       existingPre.registerTypeKey,
       baseRegisters,
@@ -26110,10 +26161,7 @@ export async function transitionRegisterRecordService(
     });
 
     // Execute beforeTransition hook STRICTLY OUTSIDE any PostgreSQL write transaction.
-    const hookCfg =
-      ctx.tenantId === tenantCfg.tenantId
-        ? tenantCfg
-        : { ...tenantCfg, tenantId: ctx.tenantId };
+    const hookCfg = tenantCfg;
     const beforeHookRes = await getPlatformExtensionHost().executeRegisterBeforeTransitionHook(
       ctx,
       hookCfg,
@@ -26259,13 +26307,17 @@ export async function updateRegisterRecordDetailsService(
     fieldValues?: Record<string, unknown>;
   },
   byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
 ): Promise<
   | { ok: true; record: RegisterRecord }
   | RegisterServiceDenialOrError
 > {
   try {
     const { ctx, tenantCfg, actor, people, teams, permSet } =
-      await resolveRegisterActorAndConfig(byId);
+      await resolveRegisterActorAndConfig(byId, undefined, options);
     const registerRepo = getRegisterRepository();
     const catRepo = getCatalogueRepository();
     const existing = await registerRepo.getRegisterRecordById(ctx, input.recordId?.trim() || '', {
@@ -26289,7 +26341,7 @@ export async function updateRegisterRecordDetailsService(
       }
     }
     const dbOverride = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
-    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
     const registerType = findEffectiveRegisterType(
       existing.registerTypeKey,
       baseRegisters,
@@ -26352,7 +26404,13 @@ export async function saveRegistersConfigRecord(
   newConfigInput: RegistersConfiguration,
   reason: string,
   byId?: string,
-  options?: { mfaVerified?: boolean } | boolean,
+  options?:
+    | {
+        readonly mfaVerified?: boolean;
+        readonly tenantCtx?: TenantContext | null;
+        readonly tenantConfig?: TenantConfiguration;
+      }
+    | boolean,
 ): Promise<
   | { ok: true; config: RegistersConfiguration; registerTypes: RegisterTypeDefinition[] }
   | RegisterServiceDenialOrError
@@ -26362,6 +26420,7 @@ export async function saveRegistersConfigRecord(
     const { ctx, tenantCfg, actor, permSet } = await resolveRegisterActorAndConfig(
       byId,
       explicitMfa,
+      typeof options === 'boolean' ? undefined : options,
     );
     if (!permSet.permissions.has('register:configure')) {
       return registerServiceFailure('FORBIDDEN', 'Missing required permission "register:configure".');
@@ -26381,7 +26440,7 @@ export async function saveRegistersConfigRecord(
     }
 
     const validated = validateRegistersConfig(newConfigInput);
-    const baseRegisters = ctx.tenantId === tenantCfg.tenantId ? tenantCfg.registers : DEFAULT_REGISTERS_CONFIG;
+    const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
     const effectiveTypes = resolveEffectiveRegisterTypes(baseRegisters, validated);
 
     const catRepo = getCatalogueRepository();
@@ -26697,6 +26756,7 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
   readonly guardedJobOptions?: GuardedJobOptions;
   readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
   const skippedTenants: Array<{
@@ -26788,6 +26848,7 @@ export async function runScheduledOutboxDrainJobSweep(options?: {
   readonly baseBackoffSeconds?: number;
   readonly now?: Date;
 }): Promise<OutboxDrainSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const outboxRepo = getOutboxRepository();
   const succeededTenants: string[] = [];
@@ -27418,6 +27479,7 @@ export async function runScheduledNotificationDigestsJobSweep(options?: {
   readonly storageProvider?: DocumentStorageProvider;
   readonly now?: Date;
 }): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
   const skippedTenants: Array<{

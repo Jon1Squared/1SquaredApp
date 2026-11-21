@@ -2,6 +2,15 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-21 — Extension API v2.0.0 (Least-Privilege `config:read`, `manifest.hooks` Gate & Registry Update)
+
+### Breaking Changes
+- **`CORE_API_VERSION` bumped from `'1.1.0'` to `'2.0.0'` (`@platform/core-api`, `core/src/api/index.ts`, [ADR 0037](../../docs/decisions/0037-extension-api-v2-least-privilege-config-context.md)):**
+  - Narrowed `ExtensionExecutionContext.config` from `TenantConfiguration` to `TenantConfiguration | undefined` (`readonly config?: TenantConfiguration`).
+  - `ExtensionHost` (`core/src/extension-host/index.ts`) populates `ctx.config` only when `'config:read'` is declared in `manifest.permissions` and passes `undefined` otherwise.
+  - All hook runners refuse extensions whose `manifest.hooks` omits the invoked hook.
+  - Manifests still declaring `^1.0.0` or `^1.1.0` fail closed at registration with `EXTENSION_COMPATIBILITY_ERROR`. See [`core/docs/extension-api-v2-migration.md`](./extension-api-v2-migration.md) for upgrade instructions.
+
 ## 2026-11-09 — Slice S0-30 (Employee Identity Binding & Sign-In Email Linking Configuration)
 
 ### Added

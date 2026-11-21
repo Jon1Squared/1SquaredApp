@@ -928,9 +928,9 @@ describe('Key Dates permissions, config schema validation, and extension contrac
     });
   });
 
-  describe('Extension API v1.1.0 Contract Tests', () => {
+  describe('Extension API v2.0.0 Contract Tests', () => {
     it('supports keydate:read, keydate:write and all 3 KeyDateExtensionPoints with error/timeout isolation', async () => {
-      expect(CORE_API_VERSION).toBe('1.1.0');
+      expect(CORE_API_VERSION).toBe('2.0.0');
       const host = new ExtensionHost({
         coreApiVersion: CORE_API_VERSION,
         defaultHookTimeoutMs: 100,
@@ -942,7 +942,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
           name: 'KeyDate Test Extension',
           version: '1.0.0',
           description: 'Tests keyDate hooks',
-          supportedCoreApiRange: '^1.0.0',
+          supportedCoreApiRange: '^2.0.0',
           permissions: ['keydate:read', 'keydate:write'],
           hooks: [
             'keyDate.beforeCreate',
@@ -1038,7 +1038,7 @@ describe('Key Dates permissions, config schema validation, and extension contrac
             name: 'Missing Write Perm',
             version: '1.0.0',
             description: 'Missing keydate:write',
-            supportedCoreApiRange: '^1.0.0',
+            supportedCoreApiRange: '^2.0.0',
             permissions: ['keydate:read'],
             hooks: ['keyDate.beforeCreate'],
           },

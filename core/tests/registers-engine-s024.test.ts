@@ -51,12 +51,16 @@ import {
   createRegisterRecordService,
   executeRegisterRemindersForTenant,
   getAppSnapshot,
+  getRegisterRecordDetailRecord,
+  listRegistersWorkspaceDataRecord,
   resetAllDemoData,
   runScheduledRegisterRemindersJobSweep,
+  saveRegistersConfigRecord,
   transitionRegisterRecordService,
   updateEmployeeRoleSetting,
   updateEmployeeRolesAndSupports,
   updatePersonPermissionOverrides,
+  updateRegisterRecordDetailsService,
 } from '@/server/services';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
@@ -708,7 +712,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
         name: 'S0-24 Register Enrichment Test',
         version: '1.0.0',
         description: 'Enriches undertakings outside TX and runs isolated post-commit afterTransition',
-        supportedCoreApiRange: '^1.0.0',
+        supportedCoreApiRange: '^2.0.0',
         permissions: ['register:read', 'register:write'],
         hooks: ['register.beforeCreate', 'register.beforeTransition', 'register.afterTransition'],
         hookTimeoutMs: 500,
@@ -784,7 +788,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
         name: 'S0-24 Timeout Extension',
         version: '1.0.0',
         description: 'Times out in beforeCreate / throws in beforeTransition',
-        supportedCoreApiRange: '^1.0.0',
+        supportedCoreApiRange: '^2.0.0',
         permissions: ['register:write'],
         hooks: ['register.beforeCreate', 'register.beforeTransition'],
         hookTimeoutMs: 40,
@@ -851,7 +855,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
         name: 'S0-24 Failing AfterTransition Extension',
         version: '1.0.0',
         description: 'Throws in post-commit afterTransition',
-        supportedCoreApiRange: '^1.0.0',
+        supportedCoreApiRange: '^2.0.0',
         permissions: ['register:read'],
         hooks: ['register.afterTransition'],
         hookTimeoutMs: 200,
@@ -1263,5 +1267,201 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
       },
       { tenantId: tenantAlpha, roles: ['fee_earner'], mfaVerified: false },
     );
+  });
+
+  it('R615: register services resolve verified tenant configuration via resolveVerifiedTenantConfiguration and reject cross-tenant context mismatches with TENANT_CONFIG_MISMATCH', async () => {
+    const tenantAlpha = 's024-alpha';
+    const tenantBravo = 's024-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+
+    const ctxAlpha = makeVerifiedTenantCtx(tenantAlpha, 'P-000004');
+    const ctxBravo = makeVerifiedTenantCtx(tenantBravo, 'P-000004');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const alphaRaw = {
+      ...getActiveTenantRawBaseConfig(),
+      tenantId: tenantAlpha,
+      displayName: 'Alpha Solicitors LLP',
+      environment: 'test' as const,
+      hostingMode: 'multi_tenant' as const,
+    };
+    const bravoRaw = {
+      ...getActiveTenantRawBaseConfig(),
+      tenantId: tenantBravo,
+      displayName: 'Bravo Seal Law LLP',
+      environment: 'test' as const,
+      hostingMode: 'multi_tenant' as const,
+      registers: {
+        defaultReminderHourLocal: 8,
+        defaultDueDaysBefore: [14, 7, 1, 0],
+        defaultReviewDaysBefore: [14, 7, 0],
+        customTypes: [
+          {
+            key: 'bravo_seal',
+            label: 'Bravo Corporate Seal',
+            pluralLabel: 'Bravo Corporate Seals',
+            description: 'Tenant-configured register loaded strictly from verified tenantConfig',
+            isCore: false,
+            enabled: true,
+            referencePrefix: 'SEAL',
+            initialStatus: 'held',
+            createPermission: 'register:create' as const,
+            editPermission: 'register:edit' as const,
+            approvalRules: null,
+            reminderSchedule: {
+              enabled: false,
+              dueDaysBefore: [],
+              reviewDaysBefore: [],
+              recipientMode: 'owner_only' as const,
+            },
+            states: [
+              { key: 'held', label: 'Held', isTerminal: false, tone: 'info' as const },
+              { key: 'returned', label: 'Returned', isTerminal: true, tone: 'success' as const },
+            ],
+            transitions: [
+              {
+                key: 'return_seal',
+                label: 'Return seal',
+                fromStatuses: ['held'],
+                toStatus: 'returned',
+                requiredPermission: 'register:edit' as const,
+              },
+            ],
+            fields: [
+              { key: 'sealNumber', label: 'Seal number', type: 'text' as const, required: true },
+            ],
+          },
+        ],
+        typeOverrides: {},
+      },
+    };
+    const alphaValidated = loadAndValidateTenantConfig(alphaRaw, {}, 'test', 'multi_tenant');
+    const bravoValidated = loadAndValidateTenantConfig(bravoRaw, {}, 'test', 'multi_tenant');
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: alphaValidated,
+      store: createSeedStore(),
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      tenantConfig: bravoValidated,
+      store: createSeedStore(),
+      clearFirst: true,
+    });
+
+    // Keep process active config at not-a-law-firm; passing foreign ctxBravo without tenantConfig must fail closed with TENANT_CONFIG_MISMATCH across all 6 services
+    await expect(
+      listRegistersWorkspaceDataRecord({}, 'P-000004', { tenantCtx: ctxBravo }),
+    ).rejects.toThrow(/TENANT_CONFIG_MISMATCH/);
+    await expect(
+      getRegisterRecordDetailRecord('REG-000001', 'P-000004', { tenantCtx: ctxBravo }),
+    ).rejects.toThrow(/TENANT_CONFIG_MISMATCH/);
+    await expect(
+      createRegisterRecordService(
+        { registerTypeKey: 'bravo_seal', title: 'Mismatch must reject', fieldValues: { sealNumber: 'S-1' } },
+        'P-000004',
+        { tenantCtx: ctxBravo },
+      ),
+    ).rejects.toThrow(/TENANT_CONFIG_MISMATCH/);
+    await expect(
+      transitionRegisterRecordService(
+        { recordId: 'REG-000001', transitionKey: 'return_seal' },
+        'P-000004',
+        { tenantCtx: ctxBravo },
+      ),
+    ).rejects.toThrow(/TENANT_CONFIG_MISMATCH/);
+    await expect(
+      updateRegisterRecordDetailsService(
+        { recordId: 'REG-000001', title: 'Updated' },
+        'P-000004',
+        { tenantCtx: ctxBravo },
+      ),
+    ).rejects.toThrow(/TENANT_CONFIG_MISMATCH/);
+    await expect(
+      saveRegistersConfigRecord({ customTypes: [] }, 'Mismatch config save', 'P-000004', {
+        mfaVerified: true,
+        tenantCtx: ctxBravo,
+      }),
+    ).rejects.toThrow(/TENANT_CONFIG_MISMATCH/);
+
+    // Supplying verified bravoValidated resolves Bravo's custom register config (no silent DEFAULT_REGISTERS_CONFIG fallback)
+    const listedBravo = await listRegistersWorkspaceDataRecord({}, 'P-000004', {
+      tenantCtx: ctxBravo,
+      tenantConfig: bravoValidated,
+    });
+    expect(listedBravo.ok).toBe(true);
+    if (!listedBravo.ok) throw new Error(`Expected Bravo list ok: ${listedBravo.message}`);
+    expect(listedBravo.registerTypes.some((t) => t.key === 'bravo_seal')).toBe(true);
+
+    const createdBravo = await createRegisterRecordService(
+      {
+        registerTypeKey: 'bravo_seal',
+        title: 'Bravo Deed Seal #1',
+        fieldValues: { sealNumber: 'SEAL-2026-01' },
+      },
+      'P-000004',
+      { tenantCtx: ctxBravo, tenantConfig: bravoValidated },
+    );
+    expect(createdBravo.ok).toBe(true);
+    if (!createdBravo.ok) throw new Error(`Expected Bravo create ok: ${createdBravo.message}`);
+
+    const updatedBravo = await updateRegisterRecordDetailsService(
+      {
+        recordId: createdBravo.record.id,
+        expectedRowVersion: createdBravo.record.rowVersion,
+        title: 'Bravo Deed Seal #1 Updated',
+        fieldValues: { sealNumber: 'SEAL-2026-02' },
+      },
+      'P-000004',
+      { tenantCtx: ctxBravo, tenantConfig: bravoValidated },
+    );
+    expect(updatedBravo.ok).toBe(true);
+    if (!updatedBravo.ok) throw new Error(`Expected Bravo update ok: ${updatedBravo.message}`);
+
+    const transitionedBravo = await transitionRegisterRecordService(
+      {
+        recordId: createdBravo.record.id,
+        transitionKey: 'return_seal',
+        expectedRowVersion: updatedBravo.record.rowVersion,
+      },
+      'P-000004',
+      { tenantCtx: ctxBravo, tenantConfig: bravoValidated },
+    );
+    expect(transitionedBravo.ok).toBe(true);
+    if (!transitionedBravo.ok) throw new Error(`Expected Bravo transition ok: ${transitionedBravo.message}`);
+    expect(transitionedBravo.record.status).toBe('returned');
+
+    const detailBravo = await getRegisterRecordDetailRecord(createdBravo.record.id, 'P-000004', {
+      tenantCtx: ctxBravo,
+      tenantConfig: bravoValidated,
+    });
+    expect(detailBravo.ok).toBe(true);
+
+    const savedCfgBravo = await saveRegistersConfigRecord(
+      { typeOverrides: { undertaking: { enabled: true } } },
+      'Verify verified tenantConfig in saveRegistersConfigRecord',
+      'P-000004',
+      { mfaVerified: true, tenantCtx: ctxBravo, tenantConfig: bravoValidated },
+    );
+    expect(savedCfgBravo.ok).toBe(true);
+
+    // Two-tenant isolation: Alpha with its own config does not see Bravo's record or bravo_seal type
+    const listedAlpha = await listRegistersWorkspaceDataRecord({}, 'P-000004', {
+      tenantCtx: ctxAlpha,
+      tenantConfig: alphaValidated,
+    });
+    expect(listedAlpha.ok).toBe(true);
+    if (!listedAlpha.ok) throw new Error('Expected Alpha list ok');
+    expect(listedAlpha.registerTypes.some((t) => t.key === 'bravo_seal')).toBe(false);
+    expect(listedAlpha.records.some((r) => r.id === createdBravo.record.id)).toBe(false);
   });
 });

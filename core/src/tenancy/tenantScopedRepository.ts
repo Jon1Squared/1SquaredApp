@@ -246,6 +246,7 @@ export abstract class TenantScopedRepository {
 
     let inTransaction = false;
     let fnThrew = false;
+    let queryQueue: Promise<unknown> = Promise.resolve();
     try {
       await rawClient.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
       inTransaction = true;
@@ -315,7 +316,6 @@ export abstract class TenantScopedRepository {
         );
       }
 
-      let queryQueue: Promise<unknown> = Promise.resolve();
       const wrappedTx: TenantSqlClient = {
         query: <TRow = Record<string, unknown>>(
           sql: string,
@@ -367,11 +367,13 @@ export abstract class TenantScopedRepository {
         scope.closed = true;
       }
 
+      await queryQueue.catch(() => undefined);
       await rawClient.query('COMMIT');
       inTransaction = false;
       return result;
     } catch (err) {
       if (inTransaction) {
+        await queryQueue.catch(() => undefined);
         await rawClient.query('ROLLBACK').catch(() => {});
       }
       const errCode = (err as { code?: unknown })?.code;

@@ -388,6 +388,9 @@ export class TenantJobRunRepository extends TenantScopedRepository {
           const inserted = insertRes.rows[0]!;
           this.assertRowTenant(ctx, inserted.tenant_id, 'JobRun');
 
+          // R614: Re-check abort signal right after inserting 'succeeded' before returning to COMMIT.
+          throwIfJobAborted(params.signal);
+
           return {
             outcome: 'executed' as const,
             localDate,

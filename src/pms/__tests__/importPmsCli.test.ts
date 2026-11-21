@@ -272,4 +272,63 @@ describe('pms:import CLI tenancy & live environment guards (R584)', () => {
       fs.rmSync(tmpPkg, { recursive: true, force: true });
     }
   });
+
+  it('R618: runImportPmsCli requires --tenant when the active registry has more than one enabled tenant', async () => {
+    const cliMod = (await import('../../../scripts/import-pms')) as {
+      runImportPmsCli?: (
+        argv: readonly string[],
+        options?: {
+          registry?: Record<string, unknown>;
+          environment?: string;
+          importer?: () => Promise<Record<string, unknown>>;
+          closePools?: () => Promise<void>;
+        },
+      ) => Promise<unknown>;
+    };
+    const multiTenantRegistry = {
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: 'tenant-alpha',
+          slug: 'tenant_alpha',
+          environment: 'test',
+          postgresHost: '127.0.0.1',
+          postgresDatabaseName: 'pg_tenant_tenant_alpha_test',
+          postgresRoleName: 'role_tenant_tenant_alpha_test',
+          keyVaultUri: 'https://kv-alpha-r618.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+        {
+          tenantId: 'tenant-bravo',
+          slug: 'tenant_bravo',
+          environment: 'test',
+          postgresHost: '127.0.0.1',
+          postgresDatabaseName: 'pg_tenant_tenant_bravo_test',
+          postgresRoleName: 'role_tenant_tenant_bravo_test',
+          keyVaultUri: 'https://kv-bravo-r618.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    };
+
+    await expect(
+      cliMod.runImportPmsCli!([], {
+        registry: multiTenantRegistry,
+        environment: 'test',
+        importer: async () => ({
+          dbPath: 'should-not-run',
+          asAtDate: '2026-11-20',
+          importedAt: '2026-11-20T00:00:00.000Z',
+          counts: {},
+        }),
+        closePools: async () => undefined,
+      }),
+    ).rejects.toThrow(/PMS_IMPORT_TENANT_REQUIRED/);
+  });
 });
