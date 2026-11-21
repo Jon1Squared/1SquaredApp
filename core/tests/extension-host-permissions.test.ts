@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_API_VERSION,
   ExtensionHost,
+  isCoreApiRangeCompatible,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   type ExtensionExecutionContext,
@@ -642,6 +643,35 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
       hooks: {},
     };
     expect(() => host.registerExtension(legacyV1Ext)).toThrow(
+      /EXTENSION_COMPATIBILITY_ERROR/,
+    );
+  });
+
+  it('R634: isCoreApiRangeCompatible and ExtensionHost.registerExtension enforce full semver range satisfaction via semver.satisfies', () => {
+    expect(isCoreApiRangeCompatible('2.1.0', '^2.2.0')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.2.0', '^2.2.0')).toBe(true);
+    expect(isCoreApiRangeCompatible('2.0.0', '>=2.0.0 <3.0.0')).toBe(true);
+    expect(isCoreApiRangeCompatible('2.0.0', '~2.0.0')).toBe(true);
+    expect(isCoreApiRangeCompatible('2.1.0', '~2.0.0')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0', '^1.0.0')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0', '')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0', '*')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0-alpha.1', '^2.0.0')).toBe(false);
+
+    const host = new ExtensionHost({ coreApiVersion: '2.1.0' });
+    const higherMinorExt: PlatformExtension = {
+      manifest: {
+        id: 'ext-requires-2-2',
+        name: 'Requires 2.2 Extension',
+        version: '1.0.0',
+        description: 'Requires core API ^2.2.0',
+        supportedCoreApiRange: '^2.2.0',
+        permissions: ['matter:read'],
+        hooks: [],
+      },
+      hooks: {},
+    };
+    expect(() => host.registerExtension(higherMinorExt)).toThrow(
       /EXTENSION_COMPATIBILITY_ERROR/,
     );
   });

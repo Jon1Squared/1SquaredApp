@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   CORE_TENANT_MIGRATIONS,
+  getGlobalTenantPostgresPoolManager,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   TenantJobRunRepository,
@@ -352,7 +353,7 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
           updatedAt: '2026-05-01T10:00:00.000Z',
           version: 1,
         };
-        await kdRepo.putKeyDate(ctx, kd);
+        await kdRepo.putKeyDate(ctx, kd, { expectedVersion: null });
       }
 
       const registry: TenantRegistry = {
@@ -530,7 +531,7 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
       updatedById: 'P-000001',
       updatedAt: '2026-06-01T10:00:00.000Z',
       version: 1,
-    });
+    }, { expectedVersion: null });
 
     const registry: TenantRegistry = {
       schemaVersion: '1.0.0',
@@ -961,7 +962,7 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
       updatedById: 'P-000001',
       updatedAt: '2026-06-01T10:00:00.000Z',
       version: 1,
-    });
+    }, { expectedVersion: null });
 
     const outboxRepo = getOutboxRepository();
     await outboxRepo.enqueueEmail(ctxBravo, {
@@ -1261,5 +1262,147 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it('R632: withTenantTransaction rejects and rolls back earlier writes when an un-awaited or caught-and-ignored queued query aborts the PostgreSQL transaction', async () => {
+    const alphaCfg = buildTenantConfig('tenant-alpha');
+    const bravoCfg = buildTenantConfig('tenant-bravo');
+    await seedMinimalTenantEntities(ctxAlpha, alphaCfg);
+    await seedMinimalTenantEntities(ctxBravo, bravoCfg);
+
+    const taskRepo = getTaskWorkflowRepository();
+
+    const makeR632Task = (id: string, reference: string, title: string): Task => ({
+      id,
+      reference,
+      title,
+      description: 'R632 aborted transaction regression check',
+      taskTypeId: 'task_type.general',
+      priorityId: 'task_priority.normal',
+      dueAt: '2026-07-06T12:00:00.000Z',
+      assignedTeamId: null,
+      assignedPersonId: null,
+      status: 'To do',
+      linkedRecords: [],
+      createdById: 'P-000001',
+      createdAt: '2026-07-05T03:00:00.000Z',
+      updatedById: 'P-000001',
+      updatedAt: '2026-07-05T03:00:00.000Z',
+      completedById: null,
+      completedAt: null,
+      comments: [],
+    });
+
+    // 1. Un-awaited failing query leaves transaction aborted in PostgreSQL
+    const unawaitedTaskId = 'TSK-R632-UNAWAITED';
+    await expect(
+      taskRepo.withTenantTransaction(ctxAlpha, async (tx) => {
+        await taskRepo.putTask(
+          ctxAlpha,
+          makeR632Task(unawaitedTaskId, 'T-R632-UNAW', 'Must roll back unawaited failure'),
+        );
+        void tx.query('SELECT 1 / 0');
+        return 'committed';
+      }),
+    ).rejects.toThrow();
+
+    expect(
+      await taskRepo.getTaskById(ctxAlpha, unawaitedTaskId, {
+        includeRestricted: true,
+      }),
+    ).toBeNull();
+
+    // 2. Caught and swallowed failing query still leaves PostgreSQL transaction aborted
+    const caughtTaskId = 'TSK-R632-CAUGHT';
+    await expect(
+      taskRepo.withTenantTransaction(ctxAlpha, async (tx) => {
+        await taskRepo.putTask(
+          ctxAlpha,
+          makeR632Task(caughtTaskId, 'T-R632-CGHT', 'Must roll back swallowed failure'),
+        );
+        try {
+          await tx.query('SELECT 1 / 0');
+        } catch {
+          // Intentionally swallowed by buggy caller
+        }
+        return 'committed';
+      }),
+    ).rejects.toThrow();
+
+    expect(
+      await taskRepo.getTaskById(ctxAlpha, caughtTaskId, {
+        includeRestricted: true,
+      }),
+    ).toBeNull();
+
+    // 3. Defence in depth: non-COMMIT response to COMMIT throws TENANCY_TRANSACTION_ABORTED
+    const poolMgr = getGlobalTenantPostgresPoolManager();
+    const origGetPool = poolMgr.getPoolForTenant.bind(poolMgr);
+    let intercepted = false;
+    const poolSpy = vi
+      .spyOn(poolMgr, 'getPoolForTenant')
+      .mockImplementation(async (targetCtx) => {
+        const res = await origGetPool(targetCtx);
+        if (!intercepted && targetCtx.tenantId === 'tenant-alpha') {
+          intercepted = true;
+          const origConnect = res.pool.connect.bind(res.pool);
+          vi.spyOn(res.pool, 'connect').mockImplementationOnce(async () => {
+            const client = await origConnect();
+            const origQuery = client.query.bind(client);
+            client.query = (async (sql: unknown, params?: unknown) => {
+              if (typeof sql === 'string' && sql.trim() === 'COMMIT') {
+                client.query = origQuery;
+                await (origQuery as (q: string) => Promise<unknown>)('ROLLBACK');
+                return { command: 'ROLLBACK', rows: [], rowCount: 0 };
+              }
+              return (origQuery as (q: unknown, p?: unknown) => Promise<unknown>)(
+                sql,
+                params,
+              );
+            }) as typeof client.query;
+            return client;
+          });
+        }
+        return res;
+      });
+
+    const commitAbortTaskId = 'TSK-R632-COMMIT-ROLLBACK';
+    try {
+      await expect(
+        taskRepo.withTenantTransaction(ctxAlpha, async () => {
+          await taskRepo.putTask(
+            ctxAlpha,
+            makeR632Task(
+              commitAbortTaskId,
+              'T-R632-CMTR',
+              'Must throw when COMMIT returns ROLLBACK',
+            ),
+          );
+          return 'committed';
+        }),
+      ).rejects.toMatchObject({ code: 'TENANCY_TRANSACTION_ABORTED' });
+    } finally {
+      poolSpy.mockRestore();
+    }
+
+    expect(
+      await taskRepo.getTaskById(ctxAlpha, commitAbortTaskId, {
+        includeRestricted: true,
+      }),
+    ).toBeNull();
+
+    // Two-tenant positive control: Tenant Bravo commits cleanly
+    const bravoTaskId = 'TSK-R632-BRAVO-OK';
+    await taskRepo.withTenantTransaction(ctxBravo, async () => {
+      await taskRepo.putTask(
+        ctxBravo,
+        makeR632Task(bravoTaskId, 'T-R632-BRVO', 'Bravo transaction commits cleanly'),
+      );
+    });
+    expect(
+      await taskRepo.getTaskById(ctxBravo, bravoTaskId, {
+        includeRestricted: true,
+      }),
+    ).toMatchObject({ id: bravoTaskId, reference: 'T-R632-BRVO' });
   });
 });

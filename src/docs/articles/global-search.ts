@@ -12,11 +12,11 @@ The global search bar on **Home** and in the top navigation bar runs debounced q
 
 ## 1. Record types indexed
 
-Migration \`0018_tenant_search_indexes_expand\` installs \`pg_trgm\` in the tenant database and maintains immutable GIN full-text (\`to_tsvector('simple', ...)\`) and trigram (\`gin_trgm_ops\`) indexes across nine record types:
+Migration \`0018_tenant_search_indexes_expand\` enables full-text and trigram search indexing across nine record types in each tenant store:
 
 | Type | Searchable fields | Destination |
 | --- | --- | --- |
-| **People** | Name, preferred/other names, job title, primary email, active \`person_emails\`, ID (excluding merged tombstones) | \`/people/[id]\` |
+| **People** | Name, preferred/other names, job title, primary email, active contact emails, ID (excluding merged tombstones) | \`/people/[id]\` |
 | **Organisations** | Legal name, trading name, company number, VAT number, client reference, general email, main phone, website, ID (excluding merged tombstones) | \`/organisations/[id]\` |
 | **Matters** | Matter number, title, practice area, work type, status, stage, ID (excluding \`O-KEYDATE-STUB\`) | \`/matters/[id]\` |
 | **Enquiries** | Reference, name, email, phone, postcode, calling-on-behalf-of, organisation name, practice area, matter summary, ID | \`/enquiries/[id]\` |
@@ -28,14 +28,14 @@ Migration \`0018_tenant_search_indexes_expand\` installs \`pg_trgm\` in the tena
 
 ## 2. Matching, ranking and pagination
 
-- **Hybrid matching**: Each search combines exact reference/ID boosts, prefix \`to_tsquery('simple', ...)\` matching, \`websearch_to_tsquery('simple', ...)\` full-text matching, case-insensitive substring \`ILIKE\`, and trigram word similarity (\`pg_trgm\`) so minor spelling mistakes still surface relevant records.
+- **Hybrid matching**: Each search combines exact reference/ID boosts, prefix and natural-language full-text matching, case-insensitive substring matching, and trigram similarity so minor spelling mistakes still surface relevant records.
 - **Type facets & pagination**: Users can filter by any of the nine record types using the facet pills inside the search dropdown (displaying per-type counts across permitted matches) and load subsequent pages with **Load more results**.
 
 ## 3. Permissions, ethical walls and privacy
 
-All access control executes inside PostgreSQL \`WHERE\` clauses **before** ranking, counting or pagination—so restricted or unpermitted records never contribute to either search hits or facet totals (and two-tenant isolation tests verify that exact cross-tenant record ID and reference queries return zero hits across tenants, \`R587\`):
+All access control executes on the server **before** ranking, counting or pagination—so restricted or unpermitted records never contribute to either search hits or facet totals (and two-tenant isolation tests verify that exact cross-tenant record ID and reference queries return zero hits across tenants, \`R587\`):
 
-- **Staff matters & ethical walls**: Matters with \`isStaffMatter\`, \`hasEthicalWall\`, or a non-empty allowlist (\`restrictedAccessUserIdsFallback\`) are visible only to users holding \`matter:restricted:access\`, named partners/supervisors/fee earners/team members, or explicit allowlist members. Linked enquiries, quotes, tasks, documents (\`document_links\` and \`primary_matter_id\`), key dates, and register records inherit the same restriction.
+- **Staff matters & ethical walls**: Matters with \`isStaffMatter\`, \`hasEthicalWall\`, or a non-empty allowlist (\`restrictedAccessUserIdsFallback\`) are visible only to users holding \`matter:restricted:access\`, named partners/supervisors/fee earners/team members, or explicit allowlist members. Linked enquiries, quotes, tasks, documents (across both document links and primary matter links), key dates, and register records inherit the same restriction.
 - **Role permissions**:
   - \`document:view\` is required for documents.
   - \`quote:view\` is required for quotes (and quote amounts in subtitles are hidden unless the user also holds \`finance:view\` or \`finance:view_matter\`).

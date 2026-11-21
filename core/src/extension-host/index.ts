@@ -11,6 +11,7 @@
  *   any sensitive HR/payroll field keys.
  */
 
+import semver from 'semver';
 import type {
   ExtensionExecutionContext,
   ExtensionHookName,
@@ -62,19 +63,23 @@ export interface ExecutedFieldProvidersResult {
   isolatedErrors: string[];
 }
 
-function parseMajorVersion(version: string): number {
-  const cleaned = version.trim().replace(/^\^|~|>=|=/, '');
-  const major = Number.parseInt(cleaned.split('.')[0] ?? '', 10);
-  return Number.isNaN(major) ? -1 : major;
-}
-
 export function isCoreApiRangeCompatible(
   coreApiVersion: string,
   supportedRange: string,
 ): boolean {
-  const coreMajor = parseMajorVersion(coreApiVersion);
-  const rangeMajor = parseMajorVersion(supportedRange);
-  return coreMajor > 0 && coreMajor === rangeMajor;
+  const trimmedVersion = coreApiVersion.trim();
+  const trimmedRange = supportedRange.trim();
+  if (!trimmedVersion || !trimmedRange || trimmedRange === '*') {
+    return false;
+  }
+  const validVersion = semver.valid(trimmedVersion);
+  const validRange = semver.validRange(trimmedRange);
+  if (!validVersion || !validRange) {
+    return false;
+  }
+  return semver.satisfies(validVersion, validRange, {
+    includePrerelease: false,
+  });
 }
 
 export class ExtensionHost {

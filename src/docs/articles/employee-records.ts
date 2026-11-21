@@ -8,7 +8,7 @@ export const employeeRecordsArticle: DocArticle = {
     'How 1Squared separates core employment, HR-restricted terms, payroll and benefits, and special-category HR information, and how audited per-person payroll loading protects confidentiality.',
   updated: '2026-11-20',
   body: `
-1Squared stores colleagues alongside external contacts in \`public.people\` with dedicated PostgreSQL tables for employment (\`public.employee_employment_records\`) and payroll/special-category HR (\`public.employee_sensitive_records\`, protected with \`ON DELETE RESTRICT\`).
+1Squared stores colleagues alongside external contacts in each tenant’s directory with dedicated isolated records for core employment, HR-restricted terms, payroll, and special-category HR information (protecting employee people records against cascading hard deletion).
 
 ## Permission tiers on employee records
 

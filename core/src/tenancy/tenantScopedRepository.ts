@@ -247,6 +247,7 @@ export abstract class TenantScopedRepository {
     let inTransaction = false;
     let fnThrew = false;
     let queryQueue: Promise<unknown> = Promise.resolve();
+    let queuedQueryError: Error | null = null;
     try {
       await rawClient.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
       inTransaction = true;
@@ -336,7 +337,11 @@ export abstract class TenantScopedRepository {
                 // A missing relation means the schema changed under us (R437): re-check next time.
                 this.poolManager.invalidateSchemaReadiness(target.databaseName);
               }
-              throw sanitizePostgresError(queryErr, 'query');
+              const sanitizedErr = sanitizePostgresError(queryErr, 'query');
+              if (!queuedQueryError) {
+                queuedQueryError = sanitizedErr;
+              }
+              throw sanitizedErr;
             }
           };
           const next = queryQueue.then(runQuery, runQuery);
@@ -368,8 +373,19 @@ export abstract class TenantScopedRepository {
       }
 
       await queryQueue.catch(() => undefined);
-      await rawClient.query('COMMIT');
+      if (queuedQueryError) {
+        throw queuedQueryError;
+      }
+      const commitRes = await rawClient.query('COMMIT');
       inTransaction = false;
+      if (commitRes.command !== 'COMMIT') {
+        await rawClient.query('ROLLBACK').catch(() => {});
+        const abortErr = new Error(
+          `TENANCY_TRANSACTION_ABORTED: PostgreSQL answered COMMIT with "${commitRes.command ?? 'UNKNOWN'}" instead of COMMIT.`,
+        ) as Error & { code: string };
+        abortErr.code = 'TENANCY_TRANSACTION_ABORTED';
+        throw abortErr;
+      }
       return result;
     } catch (err) {
       if (inTransaction) {
