@@ -622,13 +622,23 @@ export function EnquiryProfileClient({
         </div>
       </div>
 
-      {/* BANNER: Fallback Intake routing */}
-      {enquiry.routedToIntakeFallback && open && routed ? (
+      {/* BANNER: Fallback Intake routing or unassigned warning */}
+      {open && routed && !enquiry.assignedTeamId && !enquiry.assignedToId ? (
+        <div className="banner banner--warning" style={{ marginBottom: 16 }}>
+          <div>
+            <strong>Manual routing needed:</strong> No active team was mapped to {practiceLabel} and
+            no fallback intake team is configured, so this enquiry is currently{' '}
+            <strong>unassigned</strong>. Use <strong>Assign</strong> to route it to a team or fee earner.
+          </div>
+        </div>
+      ) : null}
+      {enquiry.routedToIntakeFallback && enquiry.assignedTeamId && open && routed ? (
         <div className="banner banner--warning" style={{ marginBottom: 16 }}>
           <div>
             <strong>Manual routing needed:</strong> No active team was mapped to{' '}
-            {practiceLabel}, so this enquiry was placed in the <strong>Intake</strong> team
-            queue. Use <strong>Assign</strong> to route it to a team or fee earner.
+            {practiceLabel}, so this enquiry was placed in the{' '}
+            <strong>{nameOfTeam(enquiry.assignedTeamId) || 'fallback intake'}</strong> team queue. Use{' '}
+            <strong>Assign</strong> to route it to a team or fee earner.
           </div>
         </div>
       ) : null}

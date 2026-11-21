@@ -1956,9 +1956,153 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
           a.action === 'email-queued',
       );
       expect(queuedAudits).toHaveLength(1);
+
+      // 4. R622: Reusing the same submissionId with edited content queues a second email rather than dropping edits
+      const editedSubmit = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Sanitised Enquiry Follow Up (Edited)',
+          bodyHtml: '<p>Smith &amp; Co updated details</p>',
+          bodyText: '',
+          submissionId: 'sub-r601-fixed-001',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(editedSubmit.error).toBeUndefined();
+      const rowsAfterEdit = await outboxRepo.listOutboxRecords(ctxA);
+      expect(rowsAfterEdit).toHaveLength(2);
+      const editedRow = rowsAfterEdit.find(
+        (r) => r.subject === 'Sanitised Enquiry Follow Up (Edited)',
+      )!;
+      expect(editedRow).toBeDefined();
+      // R623: No double-escaping in persisted email outbox HTML
+      expect(editedRow.htmlBody).toBe('<p>Smith &amp; Co updated details</p>');
+
+      // 5. R623: CR/LF in subject rejected synchronously before enqueue
+      const crlfSubject = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Subject\r\nBcc: injected@outside-domain.example',
+          bodyHtml: '<p>Body</p>',
+          bodyText: 'Body',
+          submissionId: 'sub-r623-crlf',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(crlfSubject.error).toMatch(/line breaks/i);
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(2);
+
+      // 6. R633: Semicolon/comma-suffixed or malformed addresses are rejected before enqueue
+      const semicolonRecipient = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'a@b.com;x',
+          subject: 'Malformed Address',
+          bodyHtml: '<p>Hello</p>',
+          bodyText: 'Hello',
+        },
+        'P-000001',
+      );
+      expect(semicolonRecipient.error).toMatch(/not valid/i);
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(2);
     } finally {
       setTestEntraSessionOverride(null);
       await outboxRepo.clearTenantData(ctxA).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext()).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  it('R622 & R633: same submissionId creates one outbox row in each of two tenants, and isValidEmailAddress rejects a@b.com;x', async () => {
+    const { isValidEmailAddress } = await import('../src/integrations/email/allowList');
+    expect(isValidEmailAddress('a@b.com;x')).toBe(false);
+    expect(isValidEmailAddress('a@b.com,c@d.com')).toBe(false);
+    expect(isValidEmailAddress('a..b@c.com')).toBe(false);
+    expect(isValidEmailAddress("o'connor+legal@firm.co.uk")).toBe(true);
+
+    const tenantBId = 'r622-tenant-b';
+    const ctxA = await setupMigratedTenant('not-a-law-firm', 'test');
+    const ctxB = await setupMigratedTenant(tenantBId, 'test');
+    const outboxRepo = getOutboxRepository();
+
+    const baseRaw = getActiveTenantRawBaseConfig() as Record<string, unknown>;
+    const rawTenantB: Record<string, unknown> = {
+      ...structuredClone(baseRaw),
+      tenantId: tenantBId,
+      displayName: 'Tenant B Chambers LLP',
+      hostingMode: 'multi_tenant',
+    };
+
+    try {
+      setActiveTenantConfigForTesting(null);
+      const seedA = createSeedStore(new Date(), { includeSyntheticEntraOids: false });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        store: seedA,
+        clearFirst: true,
+      });
+      await outboxRepo.clearTenantData(ctxA);
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'partner', 'enquiries_coordinator'],
+        mfaVerified: true,
+      });
+      const resA = await sendEnquiryEmailRecord(
+        seedA.enquiries[0]!.id,
+        {
+          to: 'client.a@outside-domain.example',
+          subject: 'Shared Submission Check',
+          bodyHtml: '<p>Tenant A message</p>',
+          bodyText: '',
+          submissionId: 'shared-sub-r622',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(resA.error).toBeUndefined();
+
+      setActiveTenantConfigForTesting(rawTenantB, { environment: 'test' });
+      const tenantBCfg = loadAndValidateTenantConfig(rawTenantB, { environment: 'test' });
+      const seedB = createSeedStore(new Date(), { includeSyntheticEntraOids: false });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxB,
+        store: seedB,
+        tenantConfig: tenantBCfg,
+        clearFirst: true,
+      });
+      await outboxRepo.clearTenantData(ctxB);
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'partner', 'enquiries_coordinator'],
+        mfaVerified: true,
+        tenantId: tenantBId,
+      });
+      const resB = await sendEnquiryEmailRecord(
+        seedB.enquiries[0]!.id,
+        {
+          to: 'client.b@outside-domain.example',
+          subject: 'Shared Submission Check',
+          bodyHtml: '<p>Tenant B message</p>',
+          bodyText: '',
+          submissionId: 'shared-sub-r622',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(resB.error).toBeUndefined();
+
+      const rowsA = await outboxRepo.listOutboxRecords(ctxA);
+      const rowsB = await outboxRepo.listOutboxRecords(ctxB);
+      expect(rowsA).toHaveLength(1);
+      expect(rowsB).toHaveLength(1);
+      expect(rowsA[0]!.tenantId).toBe('not-a-law-firm');
+      expect(rowsB[0]!.tenantId).toBe(tenantBId);
+      expect(rowsA[0]!.recipients.to).toEqual(['client.a@outside-domain.example']);
+      expect(rowsB[0]!.recipients.to).toEqual(['client.b@outside-domain.example']);
+    } finally {
+      setTestEntraSessionOverride(null);
+      setActiveTenantConfigForTesting(null);
+      await outboxRepo.clearTenantData(ctxA).catch(() => undefined);
+      await outboxRepo.clearTenantData(ctxB).catch(() => undefined);
       await resetAllDemoData('P-000001', testDataResetContext()).catch(
         () => undefined,
       );

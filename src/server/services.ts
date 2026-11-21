@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { resolveRequestCorrelationId } from './correlationId';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
@@ -172,7 +172,6 @@ import {
 } from '@/domain/employment';
 import {
   buildDefaultOrgStructure,
-  DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveDepartmentForPracticeArea,
@@ -909,27 +908,11 @@ async function loadTenantCatalogueStoreView(
     }
   }
 
-  const rawOrgStructure =
+  const orgStructure: OrgStructureCatalogue =
     (catSnap.moduleConfigs.org_structure as OrgStructureCatalogue | undefined) ??
     buildDefaultOrgStructure({
       legalName: activeTenantConfig.displayName,
     });
-  const existingOrgTeamIds = new Set(
-    (rawOrgStructure.teamsOrPracticeGroups ?? []).map((t) => t.id),
-  );
-  const missingDefaultOrgTeams = DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS.filter(
-    (d) => !existingOrgTeamIds.has(d.id),
-  ).map((d) => ({ ...d }));
-  const orgStructure: OrgStructureCatalogue =
-    missingDefaultOrgTeams.length > 0
-      ? {
-          ...rawOrgStructure,
-          teamsOrPracticeGroups: [
-            ...(rawOrgStructure.teamsOrPracticeGroups ?? []),
-            ...missingDefaultOrgTeams,
-          ],
-        }
-      : rawOrgStructure;
   for (const v of values) {
     if (v.listKey === 'work_type' && !v.parentId && !v.meta?.departmentId) {
       const resolvedDept = resolveDepartmentForPracticeArea(v.id, orgStructure, values);
@@ -996,13 +979,18 @@ async function loadTenantCatalogueStoreView(
       );
 
   const persistedEnquirySettings =
-    catSnap.moduleConfigs.enquiry_settings as EnquirySettings | undefined;
+    catSnap.moduleConfigs.enquiry_settings as Partial<EnquirySettings> | undefined;
+  const configuredFallbackTeamId =
+    activeTenantConfig.enquiries?.fallbackTeamId?.trim() || null;
+  const persistedFallbackTeamId =
+    typeof persistedEnquirySettings?.fallbackTeamId === 'string' &&
+    persistedEnquirySettings.fallbackTeamId.trim().length > 0
+      ? persistedEnquirySettings.fallbackTeamId.trim()
+      : null;
   const enquirySettings: EnquirySettings = {
     ...DEFAULT_ENQUIRY_SETTINGS,
-    ...(activeTenantConfig.enquiries?.fallbackTeamId !== undefined
-      ? { fallbackTeamId: activeTenantConfig.enquiries.fallbackTeamId }
-      : {}),
     ...(persistedEnquirySettings ?? {}),
+    fallbackTeamId: persistedFallbackTeamId ?? configuredFallbackTeamId ?? null,
   };
 
   const taskSettings: TaskSettings =
@@ -3305,9 +3293,36 @@ export async function savePersonRecord(
     };
   }
 
-  const defaultStatus = valueBySystemKey(store.values, 'person_record_status', 'active')!.id;
-  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
-  const dupPossible = valueBySystemKey(store.values, 'duplicate_status', 'possible_match')!.id;
+  let defaultStatus: string;
+  let dupNone: string;
+  let dupPossible: string;
+  try {
+    defaultStatus = requireActiveChoiceValueId(
+      store.values,
+      'person_record_status',
+      'active',
+    );
+    dupNone = requireActiveChoiceValueId(
+      store.values,
+      'duplicate_status',
+      'none',
+    );
+    dupPossible = requireActiveChoiceValueId(
+      store.values,
+      'duplicate_status',
+      'possible_match',
+    );
+  } catch (err) {
+    return {
+      person: null as unknown as Person,
+      errors: {
+        duplicateStatusId:
+          err instanceof Error
+            ? err.message
+            : 'CHOICE_VALUE_NOT_CONFIGURED: Required choice value is missing or inactive.',
+      },
+    };
+  }
 
   const duplicateStatusId = opts.flagPossibleDuplicate
     ? dupPossible
@@ -4148,9 +4163,36 @@ export async function saveOrganisationRecord(
     return { organisation: existing as Organisation, errors: cfValidation.errors };
   }
 
-  const defaultStatus = valueBySystemKey(store.values, 'organisation_record_status', 'active')!.id;
-  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
-  const dupPossible = valueBySystemKey(store.values, 'duplicate_status', 'possible_match')!.id;
+  let defaultStatus: string;
+  let dupNone: string;
+  let dupPossible: string;
+  try {
+    defaultStatus = requireActiveChoiceValueId(
+      store.values,
+      'organisation_record_status',
+      'active',
+    );
+    dupNone = requireActiveChoiceValueId(
+      store.values,
+      'duplicate_status',
+      'none',
+    );
+    dupPossible = requireActiveChoiceValueId(
+      store.values,
+      'duplicate_status',
+      'possible_match',
+    );
+  } catch (err) {
+    return {
+      organisation: existing as Organisation,
+      errors: {
+        duplicateStatusId:
+          err instanceof Error
+            ? err.message
+            : 'CHOICE_VALUE_NOT_CONFIGURED: Required choice value is missing or inactive.',
+      },
+    };
+  }
 
   const duplicateStatusId = opts.flagPossibleDuplicate
     ? dupPossible
@@ -5334,6 +5376,22 @@ function resolveRequiredMatterStatusIdBySystemKey(
   return match.id;
 }
 
+function requireActiveChoiceValueId(
+  values: ChoiceValue[],
+  listKey: string,
+  systemKey: string,
+): string {
+  const match = valueBySystemKey(values, listKey, systemKey);
+  if (!match) {
+    const err = new Error(
+      `CHOICE_VALUE_NOT_CONFIGURED: Tenant has no active "${systemKey}" choice value configured in "${listKey}".`,
+    ) as Error & { code: string };
+    err.code = 'CHOICE_VALUE_NOT_CONFIGURED';
+    throw err;
+  }
+  return match.id;
+}
+
 function resolveProspectiveStatusId(store: FirmStore): string {
   return resolveRequiredMatterStatusIdBySystemKey(store, 'prospective');
 }
@@ -6016,17 +6074,26 @@ export async function saveMatterRecord(
   const pendingOrganisations: Organisation[] = [];
   const pendingEnquiryLinks: Array<{ enquiry: Enquiry; prevEnquiry: Enquiry; linkedPersonId: string }> = [];
 
-  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  let dupNone: string;
   let cmiIncompleteStatus: string;
   let prospectiveStatus: string;
   try {
+    dupNone = requireActiveChoiceValueId(
+      store.values,
+      'duplicate_status',
+      'none',
+    );
     cmiIncompleteStatus = resolveCmiIncompleteStatusId(store);
     prospectiveStatus = resolveProspectiveStatusId(store);
   } catch (err) {
+    const fieldKey =
+      err instanceof Error && err.message.startsWith('CHOICE_VALUE_NOT_CONFIGURED')
+        ? 'duplicateStatusId'
+        : 'matterStatusId';
     return {
       matter: null,
       errors: {
-        matterStatusId:
+        [fieldKey]:
           err instanceof Error
             ? err.message
             : 'MATTER_STATUS_NOT_CONFIGURED: Required matter status is missing or inactive.',
@@ -7835,7 +7902,41 @@ export async function saveMatterRecord(
               matter,
             );
 
-          if (!assignedReviewerId) {
+          const existingReviewTask = tasks.find(
+            (t) =>
+              t.status !== 'Done' &&
+              t.status !== 'Cancelled' &&
+              t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id) &&
+              t.autoTrigger === 'conflict_check_review',
+          );
+
+          const existingAssignee = existingReviewTask?.assignedPersonId
+            ? allPeopleWithPending.find(
+                (p) =>
+                  p.id === existingReviewTask.assignedPersonId &&
+                  p.isEmployee &&
+                  isWorkingAtFirm(p) &&
+                  !p.mergedIntoId,
+              ) ?? null
+            : null;
+          const keepExistingAssignee =
+            existingAssignee !== null &&
+            canPersonAccessMatter(matter, existingAssignee.id, existingAssignee, {
+              allPeople: allPeopleWithPending,
+              teams,
+              config: { rbac: matterRbacConfig },
+            }) &&
+            (hasPersonPermission(existingAssignee, 'risk:view', {
+              allPeople: allPeopleWithPending,
+              teams,
+              config: { rbac: matterRbacConfig },
+            }) ||
+              Boolean(resolvedRiskTeam && resolvedRiskTeam.memberIds.includes(existingAssignee.id)));
+          const effectiveReviewerId = keepExistingAssignee
+            ? existingAssignee!.id
+            : assignedReviewerId;
+
+          if (!effectiveReviewerId) {
             console.warn(
               JSON.stringify({
                 level: 'warn',
@@ -7851,7 +7952,7 @@ export async function saveMatterRecord(
           }
 
           const isRestrictedMatter = Boolean(matter.isStaffMatter || matter.hasEthicalWall);
-          const canIncludeMatterNames = !isRestrictedMatter || Boolean(assignedReviewerId);
+          const canIncludeMatterNames = !isRestrictedMatter || Boolean(effectiveReviewerId);
           const linkedRecords: TaskLinkedRecord[] = [{ recordType: 'matter', recordId: matter.id }];
           if (canIncludeMatterNames) {
             if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
@@ -7865,19 +7966,16 @@ export async function saveMatterRecord(
               `Referred to Risk & Compliance for conflict review on ${clientLabel}.`
             : `Referred for conflict review on restricted matter ${matter.id}.`;
 
-          const existingReviewTask = tasks.find(
-            (t) =>
-              t.status !== 'Done' &&
-              t.status !== 'Cancelled' &&
-              t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id) &&
-              t.autoTrigger === 'conflict_check_review',
-          );
-
           if (existingReviewTask) {
             existingReviewTask.title = riskTaskTitle;
             existingReviewTask.description = riskTaskDescription;
             existingReviewTask.assignedTeamId = resolvedRiskTeam?.id ?? null;
-            existingReviewTask.assignedPersonId = assignedReviewerId;
+            existingReviewTask.assignedPersonId = effectiveReviewerId;
+            if (Array.isArray(existingReviewTask.assignedPersonIds)) {
+              existingReviewTask.assignedPersonIds = effectiveReviewerId
+                ? [effectiveReviewerId]
+                : [];
+            }
             existingReviewTask.linkedRecords = linkedRecords;
             existingReviewTask.dueAt = today;
             existingReviewTask.updatedById = opts.byId;
@@ -7894,7 +7992,7 @@ export async function saveMatterRecord(
               priorityId: highTaskPriorityId,
               dueAt: today,
               assignedTeamId: resolvedRiskTeam?.id ?? null,
-              assignedPersonId: assignedReviewerId,
+              assignedPersonId: effectiveReviewerId,
               status: 'To do',
               linkedRecords,
               autoTrigger: 'conflict_check_review',
@@ -9319,7 +9417,11 @@ export async function dismissDuplicateMatch(
       'You do not have permission (record:merge) to dismiss duplicate matches.',
     );
   }
-  const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
+  const dupNone = requireActiveChoiceValueId(
+    store.values,
+    'duplicate_status',
+    'none',
+  );
   const list: AnyRecord[] = recordType === 'person' ? people : organisations;
   const rec = list.find((r) => r.id === recordId);
   if (!rec) {
@@ -9490,13 +9592,21 @@ export async function executeMerge(
         }
 
         const plan = planMerge(survivor, merged);
-        const dupNone = valueBySystemKey(store.values, 'duplicate_status', 'none')!.id;
-        const dupMerged = valueBySystemKey(store.values, 'duplicate_status', 'merged')!.id;
-        const statusMerged = valueBySystemKey(
+        const dupNone = requireActiveChoiceValueId(
+          store.values,
+          'duplicate_status',
+          'none',
+        );
+        const dupMerged = requireActiveChoiceValueId(
+          store.values,
+          'duplicate_status',
+          'merged',
+        );
+        const statusMerged = requireActiveChoiceValueId(
           store.values,
           recordType === 'person' ? 'person_record_status' : 'organisation_record_status',
           'merged',
-        )!.id;
+        );
 
         // 1. Repoint person-organisation links and merge collisions onto the survivor's link (R273)
         let linksMoved = 0;
@@ -11530,11 +11640,13 @@ export async function saveTeamRecord(
     };
   }
 
+  const existingDepartmentId = existing?.departmentId?.trim() || null;
   const resolvedDepartmentId =
     input.departmentId !== undefined
       ? input.departmentId?.trim() || null
-      : existing?.departmentId ?? null;
-  if (resolvedDepartmentId) {
+      : existingDepartmentId;
+  const departmentChanged = resolvedDepartmentId !== existingDepartmentId;
+  if (resolvedDepartmentId && departmentChanged) {
     const dept = store.orgStructure.departments.find(
       (d) => d.id === resolvedDepartmentId && d.active !== false,
     );
@@ -11545,13 +11657,17 @@ export async function saveTeamRecord(
     }
   }
 
+  const existingOrgTeamId = existing?.orgTeamId?.trim() || null;
   const resolvedOrgTeamId =
     input.orgTeamId !== undefined
       ? input.orgTeamId?.trim() || null
-      : existing?.orgTeamId ?? null;
-  if (resolvedOrgTeamId) {
+      : existingOrgTeamId;
+  const orgTeamChanged = resolvedOrgTeamId !== existingOrgTeamId;
+  if (resolvedOrgTeamId && (orgTeamChanged || departmentChanged)) {
     const tpg = store.orgStructure.teamsOrPracticeGroups.find(
-      (g) => g.id === resolvedOrgTeamId && g.active !== false,
+      (g) =>
+        g.id === resolvedOrgTeamId &&
+        (!orgTeamChanged || g.active !== false),
     );
     if (!tpg) {
       return {
@@ -11739,29 +11855,51 @@ export async function saveEnquirySettingsRecord(
   let result!: (EnquirySettings & { error?: undefined }) | { error: string };
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const [store, allTeams] = await Promise.all([
+      const [store, rawPersistedSettings, allTeams] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
+        catalogueRepo.getModuleConfig<Partial<EnquirySettings>>(
+          ctx,
+          'enquiry_settings',
+        ),
         hrRepo.listAllTeams<Team>(ctx),
       ]);
-      const normalizedFallbackTeamId =
+      const rawPersistedFallbackTeamId =
+        typeof rawPersistedSettings?.fallbackTeamId === 'string' &&
+        rawPersistedSettings.fallbackTeamId.trim().length > 0
+          ? rawPersistedSettings.fallbackTeamId.trim()
+          : null;
+      const requestedFallbackTeamId =
         patch.fallbackTeamId === undefined
-          ? store.enquirySettings.fallbackTeamId ?? null
+          ? rawPersistedFallbackTeamId
           : patch.fallbackTeamId?.trim() || null;
       if (
-        normalizedFallbackTeamId !== null &&
-        !allTeams.some((t) => t.id === normalizedFallbackTeamId && t.active)
+        requestedFallbackTeamId !== null &&
+        !allTeams.some((t) => t.id === requestedFallbackTeamId && t.active)
       ) {
         result = {
           error: 'Fallback enquiry team must reference an existing active team.',
         };
         return;
       }
+      const { fallbackTeamId: _omittedFallback, ...patchWithoutFallback } = patch;
+      void _omittedFallback;
+      const persistedToSave: EnquirySettings = {
+        ...DEFAULT_ENQUIRY_SETTINGS,
+        ...(rawPersistedSettings ?? {}),
+        ...patchWithoutFallback,
+        fallbackTeamId: requestedFallbackTeamId,
+      };
+      if (requestedFallbackTeamId === null) {
+        delete persistedToSave.fallbackTeamId;
+      }
+      await catalogueRepo.putEnquirySettingsConfig(ctx, persistedToSave, byId);
+      const configuredFallbackTeamId =
+        getActiveTenantConfiguration().enquiries?.fallbackTeamId?.trim() || null;
       const nextSettings: EnquirySettings = {
         ...store.enquirySettings,
-        ...patch,
-        fallbackTeamId: normalizedFallbackTeamId,
+        ...persistedToSave,
+        fallbackTeamId: requestedFallbackTeamId ?? configuredFallbackTeamId ?? null,
       };
-      await catalogueRepo.putEnquirySettingsConfig(ctx, nextSettings, byId);
       writeAudit(null, {
         recordType: 'system',
         recordId: 'enquiry-settings',
@@ -13057,6 +13195,7 @@ export async function saveEnquiryRecord(
   enquiry?: Enquiry;
   routedTeamName?: string;
   routedToIntakeFallback?: boolean;
+  routingWarning?: string;
   errors?: Record<string, string>;
   missingFields?: string[];
 } & Partial<ActionDenied>> {
@@ -13065,6 +13204,7 @@ export async function saveEnquiryRecord(
       enquiry?: Enquiry;
       routedTeamName?: string;
       routedToIntakeFallback?: boolean;
+      routingWarning?: string;
       errors?: Record<string, string>;
       missingFields?: string[];
     } & Partial<ActionDenied>
@@ -13502,7 +13642,11 @@ export async function saveEnquiryRecord(
 
   const routedTeam = teams.find((t) => t.id === enquiry.assignedTeamId);
   const practiceAreaLabel =
-    resolveLabel(store.values, enquiry.practiceAreaId) || routedTeam?.name || 'Intake';
+    resolveLabel(store.values, enquiry.practiceAreaId) ||
+    routedTeam?.name ||
+    enquiry.practiceAreaId ||
+    'this practice area';
+  let routingWarning: string | undefined;
 
   await intakeRepo.putEnquiry(enqCtx, enquiry);
   if (!existing) {
@@ -13538,13 +13682,34 @@ export async function saveEnquiryRecord(
   });
 
   if (isInitialRoute) {
+    const isUnroutedWithoutFallback = !enquiry.assignedTeamId && !enquiry.assignedToId;
+    if (isUnroutedWithoutFallback) {
+      routingWarning =
+        'No active team is mapped to this practice area and no fallback intake team is configured. The enquiry was saved unassigned — assign it manually or configure a fallback intake team in Admin → Enquiry settings.';
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'enquiry_unrouted_no_fallback_team',
+          tenantId: enqCtx.tenantId,
+          correlationId: enqCtx.correlationId,
+          enquiryId: enquiry.id,
+          practiceAreaId: enquiry.practiceAreaId,
+        }),
+      );
+    }
     writeAudit(store, {
       recordType: 'enquiry',
       recordId: enquiry.id,
       action: existing ? 'status-change' : 'create',
-      field: `Enquiry routed to ${practiceAreaLabel} team`,
+      field: isUnroutedWithoutFallback
+        ? 'Enquiry saved unassigned (no practice-area or fallback intake team configured)'
+        : routedTeam
+          ? `Enquiry routed to ${routedTeam.name} team`
+          : `Enquiry routed (${practiceAreaLabel})`,
       oldValue: existing ? 'Draft' : null,
-      newValue: `${enquiry.reference} — ${enquiryDisplayName(enquiry)} (${routedTeam?.name ?? practiceAreaLabel})`,
+      newValue: isUnroutedWithoutFallback
+        ? `${enquiry.reference} — ${enquiryDisplayName(enquiry)} (Unassigned)`
+        : `${enquiry.reference} — ${enquiryDisplayName(enquiry)} (${routedTeam?.name ?? practiceAreaLabel})`,
       byId: opts.byId,
       at: now,
     });
@@ -13594,6 +13759,34 @@ export async function saveEnquiryRecord(
         preloadedNotificationContext: enquiryPreloadedCtx,
       },
     );
+
+    if (isUnroutedWithoutFallback) {
+      const adminRecipients = people.filter(
+        (p) =>
+          p.isEmployee &&
+          isWorkingAtFirm(p) &&
+          !p.mergedIntoId &&
+          hasPersonPermission(p, 'admin:access', {
+            allPeople: people,
+            teams,
+            config: { rbac: rbacConfig },
+          }),
+      );
+      for (const adminPerson of adminRecipients) {
+        await pushNotification(enqCtx, {
+          recipientId: adminPerson.id,
+          kind: 'general',
+          title: 'Admin warning: enquiry saved without a fallback intake team',
+          detail:
+            'No active team matched the enquiry practice area and no fallback intake team is configured. Set a fallback team in Admin → Enquiry settings.',
+          href: '/admin/enquiry-settings',
+          recordId: enquiry.id,
+          preloaded: enquiryPreloadedCtx,
+          byId: opts.byId,
+          at: now,
+        });
+      }
+    }
   } else {
     writeAudit(store, {
       recordType: 'enquiry',
@@ -13610,8 +13803,9 @@ export async function saveEnquiryRecord(
   await flushStagedAuditEntries(enqCtx);
   return {
     enquiry,
-    routedTeamName: routedTeam?.name ?? 'Intake',
+    routedTeamName: routedTeam?.name,
     routedToIntakeFallback,
+    ...(routingWarning ? { routingWarning } : {}),
   };
   });
   });
@@ -13952,7 +14146,17 @@ export async function sendEnquiryEmailRecord(
 
   const tenantConfig = getActiveTenantConfiguration();
   const outboxRepo = getOutboxRepository();
-  const idempotencyKey = `enquiry-email:${enqCtx.tenantId}:${enq.id}:${trimmedSubmissionId || randomUUID()}`;
+  const contentDigest = createHash('sha256')
+    .update(
+      JSON.stringify([
+        to.toLowerCase(),
+        subject,
+        safeHtmlBody,
+        safeTextBody,
+      ]),
+    )
+    .digest('hex');
+  const idempotencyKey = `enquiry-email:${enqCtx.tenantId}:${enq.id}:${trimmedSubmissionId || randomUUID()}:${contentDigest}`;
 
   await intakeRepo.withTenantTransaction(enqCtx, async () => {
     const queued = await outboxRepo.enqueueEmail(enqCtx, {
@@ -15791,6 +15995,23 @@ export async function createRecordFromPms(
       };
     }
 
+    let activePersonStatusId: string;
+    try {
+      activePersonStatusId = requireActiveChoiceValueId(
+        store.values,
+        'person_record_status',
+        'active',
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'CHOICE_VALUE_NOT_CONFIGURED: Tenant has no active "active" value configured in "person_record_status".',
+      };
+    }
+
     const res = await savePersonRecord(
       {
         firstName: fe.first_name,
@@ -15807,7 +16028,7 @@ export async function createRecordFromPms(
             isPrimary: true,
           },
         ],
-        recordStatusId: valueBySystemKey(store.values, 'person_record_status', 'active')!.id,
+        recordStatusId: activePersonStatusId,
       },
       { byId, mfaVerified: actorPerms.mfaVerified },
     );

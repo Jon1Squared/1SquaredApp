@@ -98,7 +98,9 @@ import {
   createOrProposeKeyDateRecord,
   createRecordFromPms,
   discussSignOff,
+  dismissDuplicateMatch,
   executeKeyDateRemindersForTenant,
+  executeMerge,
   flagMatterWriteOff,
   getAppSnapshot,
   getClientPmsViewBundle,
@@ -127,6 +129,7 @@ import {
   runScheduledUsageRetentionPurgeJobSweep,
   saveEnquiryRecord,
   saveMatterRecord,
+  saveOrganisationRecord,
   savePersonRecord,
   saveTaskRecord,
   signOffMatterCostsRecord,
@@ -13458,6 +13461,209 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(submittedCleared.errors).toBeUndefined();
         expect(submittedCleared.matter?.conflictCheckDate).not.toBe('2001-01-01');
         expect(submittedCleared.matter?.conflictCheckDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      });
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R621 & R633: re-referral preserves an eligible manually reassigned Risk reviewer and pre-upgrade Referred review task, and inactive systemKey choices fail with clean domain errors instead of TypeError', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const ctx = testTenantCtx('P-000004');
+    const taskRepo = getTaskWorkflowRepository();
+    const catRepo = getCatalogueRepository();
+    const seed = loadCommittedSeedStore();
+    const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+    const {
+      id: _id,
+      openedAt: _opened,
+      conflictCheckDate: _ccDate,
+      matterStatusId: _msId,
+      recordStatusId: _rsId,
+      ...matterTemplate
+    } = baseMatter;
+    void _id;
+    void _opened;
+    void _ccDate;
+    void _msId;
+    void _rsId;
+
+    try {
+      await runAsTestActor('P-000004', async () => {
+        // 1. R633: Re-referral preserves an eligible manually reassigned Risk reviewer
+        const firstRef = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            title: 'R633 Reassigned Reviewer Preservation',
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckRecord: {
+              status: 'Referred' as const,
+              outcomeLabel: 'Referred to risk for review' as const,
+              declarationConfirmed: false,
+              reviewerMessage: 'First submission',
+              lastRunAtDisplay: '20 Nov 2026',
+              lastRunById: 'P-000004',
+              lastRunByName: 'Catrin Williams',
+              submittedAtDisplay: '20 Nov 2026',
+              submittedById: 'P-000004',
+              submittedByName: 'Catrin Williams',
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
+          },
+          { byId: 'P-000004', saveMode: 'submit_referred' },
+        );
+        expect(firstRef.errors).toBeUndefined();
+        const refMatterId = firstRef.matter!.id;
+
+        const reviewTask = (await taskRepo.listAllTasksUnfiltered(ctx)).find(
+          (t) =>
+            t.linkedRecords.some(
+              (r) => r.recordType === 'matter' && r.recordId === refMatterId,
+            ) && t.autoTrigger === 'conflict_check_review',
+        )!;
+        expect(reviewTask).toBeDefined();
+        const initialAssignee = reviewTask.assignedPersonId;
+        // Reassign manually to another eligible Risk team member / risk:view holder and rename away from default title (R621 + R633)
+        const altReviewerId = initialAssignee === 'P-000001' ? 'P-000003' : 'P-000001';
+        await taskRepo.putTask(ctx, {
+          ...reviewTask,
+          title: 'Legacy Pre-0021 Review Title',
+          assignedPersonId: altReviewerId,
+        });
+
+        const secondRef = await saveMatterRecord(
+          {
+            ...firstRef.matter!,
+            conflictCheckRecord: {
+              ...firstRef.matter!.conflictCheckRecord!,
+              reviewerMessage: 'Second submission after reassignment',
+            },
+          },
+          { id: refMatterId, byId: 'P-000004', saveMode: 'submit_referred' },
+        );
+        expect(secondRef.errors).toBeUndefined();
+        const allReviewAfterSecond = (await taskRepo.listAllTasksUnfiltered(ctx)).filter(
+          (t) =>
+            t.linkedRecords.some(
+              (r) => r.recordType === 'matter' && r.recordId === refMatterId,
+            ) && t.autoTrigger === 'conflict_check_review',
+        );
+        expect(allReviewAfterSecond).toHaveLength(1);
+        expect(allReviewAfterSecond[0]!.id).toBe(reviewTask.id);
+        expect(allReviewAfterSecond[0]!.assignedPersonId).toBe(altReviewerId);
+
+        // Approval closes the single backfilled/preserved conflict_check_review task
+        await runAsTestActor('P-000003', async () => {
+          const approveRes = await updateMatterConflictRecord(
+            refMatterId,
+            {
+              ...firstRef.matter!.conflictCheckRecord!,
+              status: 'Approved',
+              outcomeLabel: 'Approved by Risk & Compliance',
+              declarationConfirmed: true,
+              approvedAtDisplay: '21 Nov 2026',
+              approvedById: 'P-000003',
+              approvedByName: 'Bethan Rees',
+            },
+            'P-000003',
+          );
+          expect(approveRes.errors).toBeUndefined();
+        });
+        const reviewAfterApprove = await taskRepo.getTaskById(ctx, reviewTask.id, {
+          includeRestricted: true,
+        });
+        expect(reviewAfterApprove?.status).toBe('Done');
+
+        // 2. R633: Deactivating required duplicate_status / person_record_status systemKeys returns clean errors, not TypeError
+        const valuesBefore = await catRepo.listAllChoiceValues<{
+          id: string;
+          listKey: string;
+          label: string;
+          systemKey?: string;
+          sortOrder: number;
+          active: boolean;
+        }>(ctx);
+        await catRepo.putChoiceValues(
+          ctx,
+          valuesBefore.map((v) =>
+            v.listKey === 'duplicate_status' && v.systemKey === 'none'
+              ? { ...v, active: false }
+              : v,
+          ),
+        );
+
+        const personNoDupNone = await savePersonRecord(
+          {
+            firstName: 'Clean',
+            surname: 'ErrorCheck',
+            emails: [],
+          },
+          { byId: 'P-000004' },
+        );
+        expect(personNoDupNone.errors).toBeDefined();
+
+        const orgNoDupNone = await saveOrganisationRecord(
+          {
+            legalName: 'Clean Error Check Ltd',
+          },
+          { byId: 'P-000004' },
+        );
+        expect(orgNoDupNone.errors).toBeDefined();
+
+        const matterNoDupNone = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            title: 'Missing duplicate_status.none clean error',
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(matterNoDupNone.matter).toBeNull();
+        expect(matterNoDupNone.errors).toBeDefined();
+
+        // Re-enable duplicate_status.none briefly to create two external contacts, then deactivate again
+        await catRepo.putChoiceValues(ctx, valuesBefore);
+        const contactOne = (
+          await savePersonRecord(
+            { firstName: 'ExtOne', surname: 'Alpha', emails: [] },
+            { byId: 'P-000004' },
+          )
+        ).person!;
+        const contactTwo = (
+          await savePersonRecord(
+            { firstName: 'ExtTwo', surname: 'Beta', emails: [] },
+            { byId: 'P-000004' },
+          )
+        ).person!;
+
+        await catRepo.putChoiceValues(
+          ctx,
+          valuesBefore.map((v) =>
+            v.listKey === 'duplicate_status' && v.systemKey === 'none'
+              ? { ...v, active: false }
+              : v,
+          ),
+        );
+
+        await expect(
+          dismissDuplicateMatch('person', contactOne.id, contactTwo.id, 'P-000004'),
+        ).rejects.toMatchObject({
+          message: expect.stringMatching(/CHOICE_VALUE_NOT_CONFIGURED/),
+        });
+
+        await expect(
+          executeMerge('person', contactOne.id, contactTwo.id, 'P-000004'),
+        ).rejects.toMatchObject({
+          message: expect.stringMatching(/CHOICE_VALUE_NOT_CONFIGURED/),
+        });
       });
     } finally {
       await resetAllDemoData('P-000001', testDataResetContext());

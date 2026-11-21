@@ -351,8 +351,8 @@ export function PersonFormClient({
   // =========================================================================
   const existingEmp = existing?.employment ?? null;
   const initialMappedRole = useMemo(
-    () => mapLegacyEmployeeRoleToRoleType(existing?.employeeRoleId),
-    [existing?.employeeRoleId],
+    () => mapLegacyEmployeeRoleToRoleType(existing?.employeeRoleId, values),
+    [existing?.employeeRoleId, values],
   );
   const initialResolvedDept = useMemo(
     () =>

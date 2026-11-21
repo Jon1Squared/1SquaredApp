@@ -547,6 +547,16 @@ export function AdminClient({
     [teams],
   );
 
+  const hasConfiguredIntakeFallback = useMemo(
+    () =>
+      teams.some(
+        (t) =>
+          t.active &&
+          (t.systemKey === 'intake' || (Boolean(fallbackTeamId) && t.id === fallbackTeamId)),
+      ),
+    [teams, fallbackTeamId],
+  );
+
   const customFieldUsage = useMemo(
     () =>
       customFields
@@ -912,13 +922,14 @@ export function AdminClient({
   const handleSaveEnquirySettings = (e: React.FormEvent) => {
     e.preventDefault();
     startTransition(async () => {
+      const fallbackChanged = fallbackTeamId !== (enquirySettings.fallbackTeamId ?? '');
       const res = await saveEnquirySettingsAction({
         emergencyHours: Math.max(1, Number(emergencyHours) || 2),
         workDayStart,
         workDayEnd,
         failedAttemptsBeforeSuggestNoResponse: Math.max(1, Number(failedAttempts) || 3),
         retentionMonths: Math.max(1, Number(retentionMonths) || 12),
-        fallbackTeamId: fallbackTeamId || null,
+        ...(fallbackChanged ? { fallbackTeamId: fallbackTeamId || null } : {}),
       });
       if ('error' in res && res.error) {
         showToast(res.error);
@@ -2669,6 +2680,15 @@ export function AdminClient({
       {/* TAB: ENQUIRY SETTINGS */}
       {tab === 'enquiry-settings' && (
         <div style={{ maxWidth: 760 }}>
+          {!hasConfiguredIntakeFallback ? (
+            <div className="banner banner--warning" style={{ marginBottom: 14 }}>
+              <div>
+                <strong>No fallback intake team configured:</strong> No active team currently carries the{' '}
+                <code>intake</code> system key and no active fallback intake team is selected below. New
+                enquiries for unmapped practice areas will be saved unassigned until a fallback team is set.
+              </div>
+            </div>
+          ) : null}
           <form onSubmit={handleSaveEnquirySettings} className="subcard">
             <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
               Enquiry SLA, working hours &amp; retention settings
@@ -3689,6 +3709,16 @@ export function AdminClient({
                 + Create team
               </button>
             </div>
+
+            {!hasConfiguredIntakeFallback ? (
+              <div className="banner banner--warning" style={{ marginBottom: 14 }}>
+                <div>
+                  <strong>No fallback intake team configured:</strong> No active team has the{' '}
+                  <code>intake</code> routing key and no fallback intake team is configured in Enquiry
+                  settings. Enquiries for unmapped practice areas will be left unassigned until one is set.
+                </div>
+              </div>
+            ) : null}
 
             {routingClashes.length > 0 ? (
               <div className="banner banner--warning" style={{ marginBottom: 14 }}>

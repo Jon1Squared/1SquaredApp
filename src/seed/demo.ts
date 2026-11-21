@@ -28,6 +28,7 @@ import type {
   Note,
   NotificationItem,
   OrgOffice,
+  OrgTeamOrPracticeGroup,
   Organisation,
   OtherName,
   Person,
@@ -101,6 +102,23 @@ export const DEMO_ORG_OFFICES: OrgOffice[] = [
       postcode: 'EC4Y 1AA',
       countryId: 'country.united_kingdom',
     },
+    active: true,
+  },
+];
+
+export const DEMO_EXTRA_ORG_TEAMS: OrgTeamOrPracticeGroup[] = [
+  {
+    id: 'TPG-FIN-BANKING',
+    name: 'Banking, Finance & Restructuring',
+    code: 'FIN-BNK',
+    parentDepartmentId: 'DEPT-CORP',
+    active: true,
+  },
+  {
+    id: 'TPG-REG-PUB',
+    name: 'Regulatory, Public & Specialist',
+    code: 'RISK-REG',
+    parentDepartmentId: 'DEPT-RISK',
     active: true,
   },
 ];
@@ -1928,7 +1946,7 @@ export function buildDemoData(
     ['P-000001', 'P-000007'],
     ['P-000007'],
     ['Finance & Banking'],
-    { orgTeamId: 'TPG-FIN-BANKING' },
+    { departmentId: 'DEPT-CORP', orgTeamId: 'TPG-FIN-BANKING' },
   );
   const tmRegulatory = addTeam(
     'Regulatory, Public & Specialist',
@@ -1936,7 +1954,7 @@ export function buildDemoData(
     ['P-000003', 'P-000006'],
     ['P-000003'],
     ['Regulatory & Compliance'],
-    { orgTeamId: 'TPG-REG-PUB' },
+    { departmentId: 'DEPT-RISK', orgTeamId: 'TPG-REG-PUB' },
   );
   const tmIntake = addTeam(
     'Intake',

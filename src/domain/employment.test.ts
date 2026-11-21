@@ -203,6 +203,27 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         roleType: 'Trainee',
         engagementType: 'Employee',
       });
+      // R626: Bare display labels must not match — only employee_role.* IDs or ChoiceValue.systemKey
+      expect(mapLegacyEmployeeRoleToRoleType('Partner')).toBeNull();
+      expect(mapLegacyEmployeeRoleToRoleType('Solicitor')).toBeNull();
+      expect(mapLegacyEmployeeRoleToRoleType('Senior Solicitor')).toBeNull();
+      expect(mapLegacyEmployeeRoleToRoleType('Practice manager')).toBeNull();
+      expect(
+        mapLegacyEmployeeRoleToRoleType('role.custom_solicitor', [
+          {
+            id: 'role.custom_solicitor',
+            listKey: 'employee_role',
+            label: 'Custom Role Title',
+            systemKey: 'solicitor',
+            sortOrder: 1,
+            active: true,
+          },
+        ]),
+      ).toMatchObject({
+        roleType: 'Fee earner',
+        engagementType: 'Employee',
+        legacyEmployeeRoleId: 'role.custom_solicitor',
+      });
 
       const org = buildDefaultOrgStructure({ legalName: 'Test Firm LLP' });
       const resolvedRealEstate = resolveOrgDepartment('department.real_estate', org);

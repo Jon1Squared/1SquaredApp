@@ -300,7 +300,7 @@ export function resolveRoutedTeam(
     (fallbackTeamId ? activeTeams.find((t) => t.id === fallbackTeamId) : undefined) ??
     activeTeams.find((t) => t.systemKey === 'intake') ??
     null;
-  return { team: intake, isFallbackIntake: true };
+  return { team: intake, isFallbackIntake: intake !== null };
 }
 
 /**

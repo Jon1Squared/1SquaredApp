@@ -1614,7 +1614,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     }
   });
 
-  it('R604: 0021_stable_keys_and_team_metadata_backfill backfills choice systemKeys, team metadata & draft task triggers idempotently without clobbering, enables intake routing, and reverses cleanly', async () => {
+  it('R604, R619 & R621: 0021 backfills canonical choice systemKeys and Referred/Draft task triggers without touching custom teams, revokes audit table privileges, avoids duplicate systemKeys, and reverses value-matched rows cleanly', async () => {
     expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
     const tenantId = 'mig-backfill-0021';
     await provisionPostgresClusterRolesAndDatabases({
@@ -1632,9 +1632,22 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     // Seed pre-0021 rows via direct migration client (runtime repos refuse < 0021 with TENANT_SCHEMA_NOT_READY)
     const client = await createDirectMigrationClient({ ctx });
     try {
-      await client.query(`DELETE FROM public.tasks WHERE tenant_id = $1 AND id = 'TSK-000099'`, [tenantId]);
-      await client.query(`DELETE FROM public.teams WHERE tenant_id = $1 AND id IN ('TM-000008','TM-000009','TM-000010','TM-000006')`, [tenantId]);
-      await client.query(`DELETE FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner','employee_role.support_staff','risk_rating.high','risk_rating.custom_preserved')`, [tenantId]);
+      await client.query(
+        `DELETE FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-000099','TSK-R621-REVIEW')`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.matters WHERE tenant_id = $1 AND id IN ('M-LEGACY','M-REFERRED')`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.teams WHERE tenant_id = $1 AND id IN ('TM-000008','TM-000009','TM-000010','TM-000006','TM-CUST-1')`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner','employee_role.support_staff','risk_rating.high','risk_rating.custom_preserved','risk_rating.preexisting_low','risk_rating.low')`,
+        [tenantId],
+      );
       await client.query(
         `INSERT INTO public.choice_lists (tenant_id, key, label, description, system_locked, metadata_json)
          VALUES
@@ -1649,27 +1662,55 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
            ($1, 'employee_role.partner', 'employee_role', 'Equity Partner', 1, TRUE, '{}'::jsonb),
            ($1, 'employee_role.support_staff', 'employee_role', 'Legal Support', 2, TRUE, '{}'::jsonb),
            ($1, 'risk_rating.high', 'risk_rating', 'High Risk', 1, TRUE, '{}'::jsonb),
-           ($1, 'risk_rating.custom_preserved', 'risk_rating', 'Custom Preserved', 2, TRUE, '{"systemKey":"custom_admin_key"}'::jsonb)`,
+           ($1, 'risk_rating.custom_preserved', 'risk_rating', 'Custom Preserved', 2, TRUE, '{"systemKey":"custom_admin_key"}'::jsonb),
+           ($1, 'risk_rating.preexisting_low', 'risk_rating', 'Custom Low Already Claimed', 3, TRUE, '{"systemKey":"low"}'::jsonb),
+           ($1, 'risk_rating.low', 'risk_rating', 'Standard Low', 4, TRUE, '{}'::jsonb)`,
         [tenantId],
       );
       await client.query(
         `INSERT INTO public.teams (tenant_id, id, name, description, active, created_by_id, updated_by_id, member_ids_json, lead_ids_json, practice_area_ids_json, payload_json)
          VALUES
-           ($1, 'TM-000008', 'Intake', 'Legacy Intake', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb),
-           ($1, 'TM-000009', 'Risk & Compliance', 'Legacy Risk', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb),
-           ($1, 'TM-000010', 'Accounts', 'Legacy Accounts', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb),
-           ($1, 'TM-000006', 'Banking, Finance & Restructuring', 'Legacy Banking', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '["work_type.finance_and_banking"]'::jsonb, '{}'::jsonb)`,
+           ($1, 'TM-000008', 'Intake', 'Firm Intake Team', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb),
+           ($1, 'TM-CUST-1', 'Corporate North', 'Custom Firm Org Team', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '["work_type.corporate_and_commercial"]'::jsonb, '{}'::jsonb)`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.matters (tenant_id, id, matter_number, title, client_id, practice_area_id, status_id, conflict_check_status, conflict_check_record_json)
+         VALUES
+           ($1, 'M-LEGACY', 'MAT-LEGACY', 'Legacy Draft Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Draft', '{"status":"In progress","savedDraftAtDisplay":"20 Nov 2026"}'::jsonb),
+           ($1, 'M-REFERRED', 'MAT-REFERRED', 'Legacy Referred Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Pending conflict review', '{"status":"Referred","reviewerMessage":"Legacy escalate"}'::jsonb)`,
         [tenantId],
       );
       await client.query(
         `INSERT INTO public.tasks (tenant_id, id, reference, title, description, status, task_type_id, priority_id, due_at, assigned_team_id, assigned_person_id, auto_trigger, created_by_id, updated_by_id, linked_records_json, profile_json)
          VALUES
-           ($1, 'TSK-000099', 'TSK-000099', 'Conflict check · Pre-0021 Client · Draft', 'Saved conflict check draft for Legacy Matter. Reopen to run fresh search and submit.', 'To do', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '[{"recordType":"matter","recordId":"M-LEGACY"}]'::jsonb, '{}'::jsonb)`,
+           ($1, 'TSK-000099', 'TSK-000099', 'Custom Draft Task Name Without Prefix', 'Custom draft description', 'To do', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '[{"recordType":"matter","recordId":"M-LEGACY"}]'::jsonb, '{}'::jsonb),
+           ($1, 'TSK-R621-REVIEW', 'TSK-R621-REVIEW', 'Non-standard review title', 'Pre-upgrade referred task', 'In progress', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000003', NULL, 'P-000001', 'P-000001', '[{"recordType":"matter","recordId":"M-REFERRED"}]'::jsonb, '{}'::jsonb)`,
         [tenantId],
       );
 
       const applied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
       expect(applied.map((m) => m.version)).toEqual(['0021']);
+
+      // R619: Tenant runtime role has ZERO privileges on migration_0021_backfill_audit
+      const dbRoleRes = await client.query<{
+        priv_sel: boolean;
+        priv_ins: boolean;
+        priv_upd: boolean;
+        priv_del: boolean;
+      }>(
+        `SELECT
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'SELECT') AS priv_sel,
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'INSERT') AS priv_ins,
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'UPDATE') AS priv_upd,
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'DELETE') AS priv_del`,
+      );
+      expect(dbRoleRes.rows[0]).toEqual({
+        priv_sel: false,
+        priv_ins: false,
+        priv_upd: false,
+        priv_del: false,
+      });
 
       const valuesAfter = await catRepo.listAllChoiceValues<
         TenantChoiceValueRecord & { systemKey?: string }
@@ -1678,44 +1719,65 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(valuesAfter.find((v) => v.id === 'employee_role.support_staff')?.systemKey).toBe('support_staff');
       expect(valuesAfter.find((v) => v.id === 'risk_rating.high')?.systemKey).toBe('high');
       expect(valuesAfter.find((v) => v.id === 'risk_rating.custom_preserved')?.systemKey).toBe('custom_admin_key');
+      // R619: Duplicate systemKey 'low' is NOT written to risk_rating.low because risk_rating.preexisting_low already holds it
+      expect(valuesAfter.find((v) => v.id === 'risk_rating.low')?.systemKey).toBeUndefined();
 
+      // R619: 0021 does NOT modify any teams or stamp firm-specific DEPT-*/TPG-* IDs or display-name systemKeys
       const teamsAfter = await hrRepo.listAllTeams<Team>(ctx);
-      const intakeAfter = teamsAfter.find((t) => t.id === 'TM-000008')!;
-      expect(intakeAfter.systemKey).toBe('intake');
-      expect(intakeAfter.departmentId).toBe('DEPT-BD');
-      expect(teamsAfter.find((t) => t.id === 'TM-000009')?.systemKey).toBe('risk_compliance');
-      expect(teamsAfter.find((t) => t.id === 'TM-000010')?.systemKey).toBe('accounts');
-      expect(teamsAfter.find((t) => t.id === 'TM-000006')?.departmentId).toBe('DEPT-CORP');
-      expect(teamsAfter.find((t) => t.id === 'TM-000006')?.orgTeamId).toBe('TPG-FIN-BANKING');
-      expect(resolveRoutedTeam('work_type.unknown', teamsAfter).team?.id).toBe('TM-000008');
+      expect(teamsAfter.find((t) => t.id === 'TM-000008')?.systemKey).toBeUndefined();
+      expect(teamsAfter.find((t) => t.id === 'TM-000008')?.departmentId).toBeUndefined();
+      expect(teamsAfter.find((t) => t.id === 'TM-CUST-1')?.departmentId).toBeUndefined();
+      expect(teamsAfter.find((t) => t.id === 'TM-CUST-1')?.orgTeamId).toBeUndefined();
+      // Configured fallbackTeamId routes when no team holds 'intake'; with neither, returns team: null
+      expect(resolveRoutedTeam('work_type.unknown', teamsAfter, 'TM-CUST-1')).toEqual({
+        team: teamsAfter.find((t) => t.id === 'TM-CUST-1'),
+        isFallbackIntake: true,
+      });
+      expect(resolveRoutedTeam('work_type.unknown', teamsAfter, null)).toEqual({
+        team: null,
+        isFallbackIntake: false,
+      });
 
+      // R621: Both draft and referred conflict tasks are backfilled by matter linkage & status without title matching
       const draftTaskAfter = await taskRepo.getTaskById(ctx, 'TSK-000099', {
         includeRestricted: true,
       });
       expect(draftTaskAfter?.autoTrigger).toBe('conflict_check_draft');
+      const reviewTaskAfter = await taskRepo.getTaskById(ctx, 'TSK-R621-REVIEW', {
+        includeRestricted: true,
+      });
+      expect(reviewTaskAfter?.autoTrigger).toBe('conflict_check_review');
 
-      // Reversal removes only backfilled keys and leaves custom admin keys untouched
+      // Simulate admin changing employee_role.partner's backfilled systemKey before rolling back 0021
+      await client.query(
+        `UPDATE public.choice_values
+            SET metadata_json = jsonb_set(metadata_json, '{systemKey}', '"admin_partner_override"'::jsonb, true)
+          WHERE tenant_id = $1 AND id = 'employee_role.partner'`,
+        [tenantId],
+      );
+
+      // Reversal removes ONLY values that still match what 0021 wrote (leaving admin override & pre-existing keys untouched)
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       const valuesDown = await client.query<{ id: string; metadata_json: { systemKey?: string } }>(
-        `SELECT id, metadata_json FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner', 'risk_rating.custom_preserved')`,
+        `SELECT id, metadata_json FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner', 'employee_role.support_staff', 'risk_rating.custom_preserved')`,
         [tenantId],
       );
-      expect(valuesDown.rows.find((v) => v.id === 'employee_role.partner')?.metadata_json?.systemKey).toBeUndefined();
+      expect(valuesDown.rows.find((v) => v.id === 'employee_role.support_staff')?.metadata_json?.systemKey).toBeUndefined();
+      expect(valuesDown.rows.find((v) => v.id === 'employee_role.partner')?.metadata_json?.systemKey).toBe('admin_partner_override');
       expect(valuesDown.rows.find((v) => v.id === 'risk_rating.custom_preserved')?.metadata_json?.systemKey).toBe('custom_admin_key');
 
-      const teamsDown = await client.query<{ id: string; payload_json: Record<string, unknown> }>(
-        `SELECT id, payload_json FROM public.teams WHERE tenant_id = $1 AND id = 'TM-000008'`,
+      const tasksDown = await client.query<{ id: string; auto_trigger: string | null }>(
+        `SELECT id, auto_trigger FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-000099', 'TSK-R621-REVIEW')`,
         [tenantId],
       );
-      expect(teamsDown.rows[0]?.payload_json?.systemKey).toBeUndefined();
-      expect(teamsDown.rows[0]?.payload_json?.departmentId).toBeUndefined();
+      expect(tasksDown.rows.find((t) => t.id === 'TSK-000099')?.auto_trigger).toBeNull();
+      expect(tasksDown.rows.find((t) => t.id === 'TSK-R621-REVIEW')?.auto_trigger).toBeNull();
 
-      const tasksDown = await client.query<{ auto_trigger: string | null }>(
-        `SELECT auto_trigger FROM public.tasks WHERE tenant_id = $1 AND id = 'TSK-000099'`,
+      // Clean up admin override to verify clean re-up round trip
+      await client.query(
+        `UPDATE public.choice_values SET metadata_json = '{}'::jsonb WHERE tenant_id = $1 AND id = 'employee_role.partner'`,
         [tenantId],
       );
-      expect(tasksDown.rows[0]?.auto_trigger).toBeNull();
-
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
       expect(reapplied.map((m) => m.version)).toEqual(['0021']);
     } finally {

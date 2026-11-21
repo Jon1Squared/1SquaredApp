@@ -1460,19 +1460,21 @@ export function migrateEmployeesToEmploymentRecords(
       continue;
     }
 
-    // Check role mapping
-    const roleLabel = resolveLabel(values, person.employeeRoleId) || person.employeeRoleId || '';
-    const mappedRole =
-      mapLegacyEmployeeRoleToRoleType(person.employeeRoleId, values) ??
-      mapLegacyEmployeeRoleToRoleType(roleLabel, values);
+    // Check role mapping strictly by ID / systemKey (R626)
+    const mappedRole = mapLegacyEmployeeRoleToRoleType(
+      person.employeeRoleId,
+      values,
+    );
 
     if (!mappedRole) {
+      const displayRole =
+        resolveLabel(values, person.employeeRoleId) || person.employeeRoleId || 'empty';
       unmappedRecords.push({
         personId: person.id,
         personName: personDisplayName(person),
         field: 'employeeRoleId',
         rawValue: String(person.employeeRoleId ?? ''),
-        reason: `Employee role "${roleLabel || person.employeeRoleId || 'empty'}" could not be mapped automatically to a Role type.`,
+        reason: `Employee role "${displayRole}" could not be mapped automatically to a Role type.`,
       });
     }
 

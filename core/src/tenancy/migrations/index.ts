@@ -2717,20 +2717,44 @@ export const STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021: TenantMigrat
     version: '0021',
     name: '0021_stable_keys_and_team_metadata_backfill',
     description:
-      'Reversible idempotent per-tenant backfill of canonical employee_role and risk_rating choice systemKeys, default team departmentId/orgTeamId/systemKey metadata, and legacy conflict-draft task autoTrigger values (R600, R604).',
+      'Reversible idempotent per-tenant backfill of canonical choice_values systemKeys and legacy conflict_check_draft / conflict_check_review task autoTrigger values without team layout assumptions (R600, R604, R619, R621).',
     dependsOn: ['0020'],
-    tablesChanged: ['choice_values', 'teams', 'tasks'],
+    tablesChanged: ['choice_values', 'tasks'],
     upSql: `
 CREATE TABLE IF NOT EXISTS public.migration_0021_backfill_audit (
   tenant_id TEXT NOT NULL,
   entity_kind TEXT NOT NULL,
   record_id TEXT NOT NULL,
-  keys_added JSONB NOT NULL DEFAULT '[]'::jsonb,
+  written_value TEXT NOT NULL,
   PRIMARY KEY (tenant_id, entity_kind, record_id)
 );
 
+REVOKE ALL ON TABLE public.migration_0021_backfill_audit FROM PUBLIC;
+DO $$
+DECLARE
+  v_role TEXT := 'role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$');
+BEGIN
+  IF v_role IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+    EXECUTE format('REVOKE ALL ON TABLE public.migration_0021_backfill_audit FROM %I', v_role);
+  END IF;
+END $$;
+
 WITH choice_mapping(id, list_key, sys_key) AS (
   VALUES
+    ('person_role.client_contact', 'person_role', 'client_contact'),
+    ('person_role.private_client', 'person_role', 'private_client'),
+    ('person_role.referrer', 'person_role', 'referrer'),
+    ('person_role.introducer', 'person_role', 'introducer'),
+    ('person_role.supplier_contact', 'person_role', 'supplier_contact'),
+    ('person_role.counsel', 'person_role', 'counsel'),
+    ('person_role.expert', 'person_role', 'expert'),
+    ('person_role.internal_colleague', 'person_role', 'internal_colleague'),
+    ('person_role.professional_adviser', 'person_role', 'professional_adviser'),
+    ('person_role.opposing_party', 'person_role', 'opposing_party'),
+    ('person_record_status.active', 'person_record_status', 'active'),
+    ('person_record_status.archived', 'person_record_status', 'archived'),
+    ('person_record_status.deceased', 'person_record_status', 'deceased'),
+    ('person_record_status.merged', 'person_record_status', 'merged'),
     ('employee_role.partner', 'employee_role', 'partner'),
     ('employee_role.fee_earner', 'employee_role', 'fee_earner'),
     ('employee_role.senior_solicitor', 'employee_role', 'senior_solicitor'),
@@ -2742,139 +2766,197 @@ WITH choice_mapping(id, list_key, sys_key) AS (
     ('employee_role.finance', 'employee_role', 'finance'),
     ('employee_role.support_staff', 'employee_role', 'support_staff'),
     ('employee_role.system_administrator', 'employee_role', 'system_administrator'),
+    ('employee_role.supervisor', 'employee_role', 'supervisor'),
+    ('employee_role.intake', 'employee_role', 'intake'),
+    ('employee_role.enquiries_coordinator', 'employee_role', 'enquiries_coordinator'),
+    ('other_name_type.previous_name', 'other_name_type', 'previous_name'),
+    ('other_name_type.maiden_name', 'other_name_type', 'maiden_name'),
+    ('other_name_type.also_known_as', 'other_name_type', 'also_known_as'),
+    ('other_name_type.alias', 'other_name_type', 'alias'),
+    ('organisation_relationship_type.client', 'organisation_relationship_type', 'client'),
+    ('organisation_relationship_type.former_client', 'organisation_relationship_type', 'former_client'),
+    ('organisation_relationship_type.prospect', 'organisation_relationship_type', 'prospect'),
+    ('organisation_relationship_type.referrer', 'organisation_relationship_type', 'referrer'),
+    ('organisation_relationship_type.introducer', 'organisation_relationship_type', 'introducer'),
+    ('organisation_relationship_type.business_development_contact', 'organisation_relationship_type', 'business_development_contact'),
+    ('organisation_relationship_type.supplier', 'organisation_relationship_type', 'supplier'),
+    ('organisation_relationship_type.strategic_partner', 'organisation_relationship_type', 'strategic_partner'),
+    ('organisation_relationship_type.opposing_solicitors', 'organisation_relationship_type', 'opposing_solicitors'),
+    ('organisation_relationship_type.counterparty', 'organisation_relationship_type', 'counterparty'),
+    ('organisation_relationship_type.barristers', 'organisation_relationship_type', 'barristers'),
+    ('organisation_relationship_type.experts_and_consultants', 'organisation_relationship_type', 'experts_and_consultants'),
+    ('organisation_relationship_type.professional_adviser', 'organisation_relationship_type', 'professional_adviser'),
+    ('organisation_record_status.active', 'organisation_record_status', 'active'),
+    ('organisation_record_status.archived', 'organisation_record_status', 'archived'),
+    ('organisation_record_status.merged', 'organisation_record_status', 'merged'),
+    ('organisation_record_status.dissolved', 'organisation_record_status', 'dissolved'),
+    ('conflict_status.cleared', 'conflict_status', 'cleared'),
+    ('conflict_status.potential_conflict', 'conflict_status', 'potential_conflict'),
+    ('relationship_status.prospective', 'relationship_status', 'prospective'),
+    ('relationship_status.active', 'relationship_status', 'active'),
+    ('relationship_status.dormant', 'relationship_status', 'dormant'),
+    ('relationship_status.former', 'relationship_status', 'former'),
+    ('duplicate_status.none', 'duplicate_status', 'none'),
+    ('duplicate_status.possible_match', 'duplicate_status', 'possible_match'),
+    ('duplicate_status.confirmed_duplicate', 'duplicate_status', 'confirmed_duplicate'),
+    ('duplicate_status.merged', 'duplicate_status', 'merged'),
+    ('verification_status.not_started', 'verification_status', 'not_started'),
+    ('verification_status.in_progress', 'verification_status', 'in_progress'),
+    ('verification_status.verified', 'verification_status', 'verified'),
+    ('verification_status.expired', 'verification_status', 'expired'),
+    ('verification_status.not_required', 'verification_status', 'not_required'),
     ('risk_rating.low', 'risk_rating', 'low'),
     ('risk_rating.medium', 'risk_rating', 'medium'),
     ('risk_rating.high', 'risk_rating', 'high'),
     ('risk_rating.critical', 'risk_rating', 'critical'),
     ('risk_rating.conflict_flagged', 'risk_rating', 'conflict_flagged'),
-    ('risk_rating.sensitive', 'risk_rating', 'sensitive')
+    ('risk_rating.sensitive', 'risk_rating', 'sensitive'),
+    ('matter_status.prospective_enquiry', 'matter_status', 'prospective'),
+    ('matter_status.cmi_incomplete', 'matter_status', 'cmi_incomplete'),
+    ('matter_status.active', 'matter_status', 'active'),
+    ('matter_status.on_hold', 'matter_status', 'on_hold'),
+    ('matter_status.completed', 'matter_status', 'completed'),
+    ('matter_status.closed', 'matter_status', 'closed'),
+    ('matter_status.archived', 'matter_status', 'archived'),
+    ('matter_status.aborted_lost', 'matter_status', 'aborted'),
+    ('enquiry_channel.phone', 'enquiry_channel', 'phone'),
+    ('enquiry_channel.email', 'enquiry_channel', 'email'),
+    ('enquiry_channel.web_form', 'enquiry_channel', 'web_form'),
+    ('enquiry_channel.walk_in', 'enquiry_channel', 'walk_in'),
+    ('enquiry_channel.referral', 'enquiry_channel', 'referral'),
+    ('enquiry_channel.existing_client', 'enquiry_channel', 'existing_client'),
+    ('enquiry_urgency.standard', 'enquiry_urgency', 'standard'),
+    ('enquiry_urgency.urgent', 'enquiry_urgency', 'urgent'),
+    ('enquiry_urgency.emergency', 'enquiry_urgency', 'emergency'),
+    ('enquiry_close_reason.conflict', 'enquiry_close_reason', 'conflict'),
+    ('enquiry_close_reason.outside_our_expertise', 'enquiry_close_reason', 'outside_expertise'),
+    ('enquiry_close_reason.not_commercially_viable', 'enquiry_close_reason', 'not_viable'),
+    ('enquiry_close_reason.client_went_elsewhere', 'enquiry_close_reason', 'went_elsewhere'),
+    ('enquiry_close_reason.no_response', 'enquiry_close_reason', 'no_response'),
+    ('enquiry_close_reason.referred_out', 'enquiry_close_reason', 'referred_out'),
+    ('enquiry_close_reason.other', 'enquiry_close_reason', 'other'),
+    ('task_type.call_back', 'task_type', 'call_back'),
+    ('task_type.follow_up', 'task_type', 'follow_up'),
+    ('task_type.send_letter', 'task_type', 'send_letter'),
+    ('task_type.conflict_check', 'task_type', 'conflict_check'),
+    ('task_type.review', 'task_type', 'review'),
+    ('task_type.complete_matter_opening', 'task_type', 'complete_matter_opening'),
+    ('task_type.general', 'task_type', 'general'),
+    ('task_priority.low', 'task_priority', 'low'),
+    ('task_priority.normal', 'task_priority', 'normal'),
+    ('task_priority.high', 'task_priority', 'high'),
+    ('task_priority.urgent', 'task_priority', 'urgent'),
+    ('task_status.to_do', 'task_status', 'todo'),
+    ('task_status.in_progress', 'task_status', 'in_progress'),
+    ('task_status.waiting', 'task_status', 'waiting'),
+    ('task_status.done', 'task_status', 'done'),
+    ('task_status.cancelled', 'task_status', 'cancelled'),
+    ('matter_stage_group.default_group', 'matter_stage_group', 'default_group')
 ),
 inserted_choice_audit AS (
-  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, keys_added)
-  SELECT cv.tenant_id, 'choice_value', cv.id, '["systemKey"]'::jsonb
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, written_value)
+  SELECT cv.tenant_id, 'choice_value', cv.id, cm.sys_key
     FROM public.choice_values cv
     JOIN choice_mapping cm ON cm.id = cv.id AND cm.list_key = cv.list_key
    WHERE COALESCE(cv.metadata_json->>'systemKey', '') = ''
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.choice_values cv2
+        WHERE cv2.tenant_id = cv.tenant_id
+          AND cv2.list_key = cv.list_key
+          AND cv2.id <> cv.id
+          AND cv2.metadata_json->>'systemKey' = cm.sys_key
+     )
   ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
-  RETURNING tenant_id, record_id
+  RETURNING tenant_id, record_id, written_value
 )
 UPDATE public.choice_values cv
    SET metadata_json = jsonb_set(
      COALESCE(cv.metadata_json, '{}'::jsonb),
      '{systemKey}',
-     to_jsonb(cm.sys_key),
+     to_jsonb(ica.written_value),
      true
    )
-  FROM choice_mapping cm
-  JOIN inserted_choice_audit ica ON ica.record_id = cm.id
+  FROM inserted_choice_audit ica
+  JOIN choice_mapping cm ON cm.id = ica.record_id
  WHERE cv.tenant_id = ica.tenant_id
    AND cv.id = ica.record_id
    AND cv.list_key = cm.list_key
-   AND COALESCE(cv.metadata_json->>'systemKey', '') = '';
+   AND COALESCE(cv.metadata_json->>'systemKey', '') = ''
+   AND NOT EXISTS (
+     SELECT 1
+       FROM public.choice_values cv2
+      WHERE cv2.tenant_id = cv.tenant_id
+        AND cv2.list_key = cv.list_key
+        AND cv2.id <> cv.id
+        AND cv2.metadata_json->>'systemKey' = ica.written_value
+   );
 
-WITH team_rule(kind, match_key, dept_id, org_team_id, sys_key) AS (
-  VALUES
-    ('pa', 'work_type.real_estate_and_property', 'DEPT-RE', NULL::text, NULL::text),
-    ('pa', 'work_type.corporate_and_commercial', 'DEPT-CORP', NULL::text, NULL::text),
-    ('pa', 'work_type.dispute_resolution', 'DEPT-DR', NULL::text, NULL::text),
-    ('pa', 'work_type.private_client', 'DEPT-PC', NULL::text, NULL::text),
-    ('pa', 'work_type.employment_and_hr', 'DEPT-EMP', NULL::text, NULL::text),
-    ('pa', 'work_type.finance_and_banking', 'DEPT-CORP', 'TPG-FIN-BANKING', NULL::text),
-    ('pa', 'work_type.regulatory_and_compliance', 'DEPT-RISK', 'TPG-REG-PUB', NULL::text),
-    ('name', 'intake', 'DEPT-BD', NULL::text, 'intake'),
-    ('name', 'risk & compliance', 'DEPT-RISK', NULL::text, 'risk_compliance'),
-    ('name', 'accounts', 'DEPT-FIN', NULL::text, 'accounts')
+WITH task_matter_links AS (
+  SELECT tlr.tenant_id, tlr.task_id, tlr.record_id AS matter_id
+    FROM public.task_linked_records tlr
+   WHERE tlr.record_type = 'matter'
+  UNION
+  SELECT t.tenant_id, t.id AS task_id, lr.elem->>'recordId' AS matter_id
+    FROM public.tasks t
+   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.linked_records_json, '[]'::jsonb)) AS lr(elem)
+   WHERE lr.elem->>'recordType' = 'matter'
+     AND COALESCE(lr.elem->>'recordId', '') <> ''
 ),
-matched_teams AS (
+task_candidates AS (
   SELECT DISTINCT ON (t.tenant_id, t.id)
     t.tenant_id,
     t.id,
-    t.payload_json,
-    tr.dept_id,
-    tr.org_team_id,
     CASE
-      WHEN tr.sys_key IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1
-            FROM public.teams t2
-           WHERE t2.tenant_id = t.tenant_id
-             AND t2.id <> t.id
-             AND t2.payload_json->>'systemKey' = tr.sys_key
+      WHEN (
+        CASE
+          WHEN m.conflict_check_record_json IS NOT NULL
+            AND COALESCE(trim(m.conflict_check_record_json->>'status'), '') <> ''
+          THEN trim(m.conflict_check_record_json->>'status') = 'Referred'
+          ELSE trim(COALESCE(m.conflict_check_status, '')) IN (
+            'Referred',
+            'Pending conflict review',
+            'Potential conflict — escalated',
+            'Potential conflict - escalated',
+            'Potential conflict'
+          )
+        END
+      ) THEN 'conflict_check_review'
+      WHEN (
+        (
+          COALESCE(trim(m.conflict_check_record_json->>'savedDraftAtDisplay'), '') <> ''
+          AND COALESCE(trim(m.conflict_check_record_json->>'status'), '') IN ('In progress', 'Not started', '')
         )
-      THEN tr.sys_key
+        OR (
+          COALESCE(trim(m.conflict_check_record_json->>'status'), '') = ''
+          AND trim(COALESCE(m.conflict_check_status, '')) = 'Draft'
+        )
+      ) THEN 'conflict_check_draft'
       ELSE NULL
-    END AS sys_key
-  FROM public.teams t
-  JOIN team_rule tr ON (
-    (tr.kind = 'pa' AND COALESCE(t.practice_area_ids_json, '[]'::jsonb) ? tr.match_key)
-    OR (
-      tr.kind = 'name'
-      AND jsonb_array_length(COALESCE(t.practice_area_ids_json, '[]'::jsonb)) = 0
-      AND lower(trim(t.name)) = tr.match_key
-    )
-  )
-  ORDER BY t.tenant_id, t.id, tr.kind ASC, tr.match_key ASC
+    END AS trigger_value
+  FROM public.tasks t
+  JOIN task_matter_links tml ON tml.tenant_id = t.tenant_id AND tml.task_id = t.id
+  JOIN public.matters m ON m.tenant_id = tml.tenant_id AND m.id = tml.matter_id
+  WHERE t.auto_trigger IS NULL
+    AND COALESCE(t.profile_json->>'autoTrigger', '') = ''
+    AND t.task_type_id = 'task_type.conflict_check'
+    AND t.status NOT IN ('Done', 'Cancelled')
+  ORDER BY t.tenant_id, t.id, trigger_value DESC NULLS LAST
 ),
-team_deltas AS (
-  SELECT
-    mt.tenant_id,
-    mt.id,
-    CASE WHEN COALESCE(mt.payload_json->>'departmentId', '') = '' AND mt.dept_id IS NOT NULL THEN mt.dept_id ELSE NULL END AS add_dept,
-    CASE WHEN COALESCE(mt.payload_json->>'orgTeamId', '') = '' AND mt.org_team_id IS NOT NULL THEN mt.org_team_id ELSE NULL END AS add_org_team,
-    CASE WHEN COALESCE(mt.payload_json->>'systemKey', '') = '' AND mt.sys_key IS NOT NULL THEN mt.sys_key ELSE NULL END AS add_sys_key,
-    (
-      SELECT COALESCE(jsonb_agg(k), '[]'::jsonb)
-        FROM unnest(ARRAY[
-          CASE WHEN COALESCE(mt.payload_json->>'departmentId', '') = '' AND mt.dept_id IS NOT NULL THEN 'departmentId' ELSE NULL END,
-          CASE WHEN COALESCE(mt.payload_json->>'orgTeamId', '') = '' AND mt.org_team_id IS NOT NULL THEN 'orgTeamId' ELSE NULL END,
-          CASE WHEN COALESCE(mt.payload_json->>'systemKey', '') = '' AND mt.sys_key IS NOT NULL THEN 'systemKey' ELSE NULL END
-        ]) AS k
-       WHERE k IS NOT NULL
-    ) AS keys_added
-  FROM matched_teams mt
-),
-inserted_team_audit AS (
-  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, keys_added)
-  SELECT td.tenant_id, 'team', td.id, td.keys_added
-    FROM team_deltas td
-   WHERE jsonb_array_length(td.keys_added) > 0
+inserted_task_audit AS (
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, written_value)
+  SELECT tc.tenant_id, 'task', tc.id, tc.trigger_value
+    FROM task_candidates tc
+   WHERE tc.trigger_value IS NOT NULL
   ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
-  RETURNING tenant_id, record_id
-)
-UPDATE public.teams t
-   SET payload_json = COALESCE(t.payload_json, '{}'::jsonb) || jsonb_strip_nulls(
-     jsonb_build_object(
-       'departmentId', td.add_dept,
-       'orgTeamId', td.add_org_team,
-       'systemKey', td.add_sys_key
-     )
-   )
-  FROM team_deltas td
-  JOIN inserted_team_audit ita ON ita.tenant_id = td.tenant_id AND ita.record_id = td.id
- WHERE t.tenant_id = td.tenant_id
-   AND t.id = td.id
-   AND jsonb_array_length(td.keys_added) > 0;
-
-WITH inserted_task_audit AS (
-  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, keys_added)
-  SELECT t.tenant_id, 'task', t.id, '["autoTrigger"]'::jsonb
-    FROM public.tasks t
-   WHERE t.auto_trigger IS NULL
-     AND COALESCE(t.profile_json->>'autoTrigger', '') = ''
-     AND t.task_type_id = 'task_type.conflict_check'
-     AND (
-       t.title LIKE 'Conflict check · % · Draft'
-       OR t.description LIKE 'Saved conflict check draft for %'
-     )
-  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
-  RETURNING tenant_id, record_id
+  RETURNING tenant_id, record_id, written_value
 )
 UPDATE public.tasks t
-   SET auto_trigger = 'conflict_check_draft',
+   SET auto_trigger = ita.written_value,
        profile_json = jsonb_set(
          COALESCE(t.profile_json, '{}'::jsonb),
          '{autoTrigger}',
-         '"conflict_check_draft"'::jsonb,
+         to_jsonb(ita.written_value),
          true
        )
   FROM inserted_task_audit ita
@@ -2889,18 +2971,7 @@ UPDATE public.choice_values cv
  WHERE a.tenant_id = cv.tenant_id
    AND a.entity_kind = 'choice_value'
    AND a.record_id = cv.id
-   AND (a.keys_added ? 'systemKey');
-
-UPDATE public.teams t
-   SET payload_json = (
-     SELECT COALESCE(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
-       FROM jsonb_each(COALESCE(t.payload_json, '{}'::jsonb)) e
-      WHERE NOT (a.keys_added ? e.key)
-   )
-  FROM public.migration_0021_backfill_audit a
- WHERE a.tenant_id = t.tenant_id
-   AND a.entity_kind = 'team'
-   AND a.record_id = t.id;
+   AND cv.metadata_json->>'systemKey' = a.written_value;
 
 UPDATE public.tasks t
    SET auto_trigger = NULL,
@@ -2909,7 +2980,7 @@ UPDATE public.tasks t
  WHERE a.tenant_id = t.tenant_id
    AND a.entity_kind = 'task'
    AND a.record_id = t.id
-   AND t.auto_trigger = 'conflict_check_draft';
+   AND t.auto_trigger = a.written_value;
 
 DROP TABLE IF EXISTS public.migration_0021_backfill_audit CASCADE;
 `.trim(),

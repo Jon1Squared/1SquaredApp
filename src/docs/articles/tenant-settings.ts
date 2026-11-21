@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-20',
+  updated: '2026-11-21',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -31,7 +31,7 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`firm.website\` | \`""\` | Active | Public firm website URL or hostname for document headers and footers |
 | \`conflictReview.assigneeTeamKey\` | \`null\` | Active | Team ID or code receiving referred conflict review tasks |
 | \`conflictReview.assigneeRoleKey\` | \`null\` | Active | Role key used to select an assignee within the conflict review team |
-| \`enquiries.fallbackTeamId\` | \`null\` | Active | Optional active Team ID used as the default fallback intake team when no practice area matches (can be overridden per tenant under **Admin → Enquiry settings**; defaults to the active team with \`systemKey: "intake"\` when \`null\`) |
+| \`enquiries.fallbackTeamId\` | \`null\` | Active | Optional active Team ID used as the default fallback intake team when no practice area matches (an explicit non-empty setting under **Admin → Enquiry settings** overrides this; when unset in Admin it falls back to \`enquiries.fallbackTeamId\`, then to an active team with \`systemKey: "intake"\`, or saves unmapped enquiries unassigned with an Admin warning) |
 
 ### Feature flags
 

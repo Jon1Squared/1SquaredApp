@@ -47,7 +47,10 @@ import {
   type EnquiryFormState,
 } from '@/domain/enquiries';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
-import { sanitizeEnquiryEmailHtml } from '@/domain/emailHtmlSanitizer';
+import {
+  plainTextToSanitizedEmailHtml,
+  sanitizeEnquiryEmailHtml,
+} from '@/domain/emailHtmlSanitizer';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
   resolveAddressSuggestion,
@@ -1050,8 +1053,11 @@ export function EnquiryFormClient({
         showToast(`Enquiry ${res.enquiry.reference} changes saved.`);
         router.refresh();
       } else {
+        const resWithWarning = res as typeof res & { routingWarning?: string };
         showToast(
-          `Enquiry ${res.enquiry.reference} saved and routed to ${res.routedTeamName ?? 'Intake'}.`,
+          resWithWarning.routingWarning
+            ? `Enquiry ${res.enquiry.reference} saved unassigned: ${resWithWarning.routingWarning}`
+            : `Enquiry ${res.enquiry.reference} saved and routed to ${res.routedTeamName ?? 'the assigned team'}.`,
         );
         if (isSavedEnquiry) {
           router.refresh();
@@ -2069,14 +2075,24 @@ export function EnquiryFormClient({
         </div>
       ) : null}
 
-      {/* BANNER: Fallback Intake routing */}
-      {enquiry && enquiry.routedToIntakeFallback && open && routed ? (
+      {/* BANNER: Fallback Intake routing or unassigned warning */}
+      {enquiry && open && routed && !enquiry.assignedTeamId && !enquiry.assignedToId ? (
+        <div className="banner banner--warning" style={{ marginBottom: 14 }}>
+          <div>
+            <strong>Manual routing needed:</strong> No active team was mapped to{' '}
+            {practiceAreaLabel || 'this practice area'} and no fallback intake team is configured, so
+            this enquiry is currently <strong>unassigned</strong>. Use <strong>Assign</strong> to route
+            it to a team or fee earner.
+          </div>
+        </div>
+      ) : null}
+      {enquiry && enquiry.routedToIntakeFallback && enquiry.assignedTeamId && open && routed ? (
         <div className="banner banner--warning" style={{ marginBottom: 14 }}>
           <div>
             <strong>Manual routing needed:</strong> No active team was mapped to{' '}
             {practiceAreaLabel || 'this practice area'}, so this enquiry was placed in the{' '}
-            <strong>Intake</strong> team queue. Use <strong>Assign</strong> to route it to a team or
-            fee earner.
+            <strong>{assignedTeam?.name ?? 'fallback intake'}</strong> team queue. Use{' '}
+            <strong>Assign</strong> to route it to a team or fee earner.
           </div>
         </div>
       ) : null}
@@ -4320,13 +4336,7 @@ export function EnquiryFormClient({
                 dangerouslySetInnerHTML={{
                   __html:
                     sanitizeEnquiryEmailHtml(viewingSentEmail.email.bodyHtml) ||
-                    sanitizeEnquiryEmailHtml(
-                      `<p>${viewingSentEmail.email.bodyText
-                        .replace(/&/g, '&amp;')
-                        .replace(/</g, '&lt;')
-                        .replace(/>/g, '&gt;')
-                        .replace(/\n/g, '<br />')}</p>`,
-                    ),
+                    plainTextToSanitizedEmailHtml(viewingSentEmail.email.bodyText),
                 }}
               />
             </div>

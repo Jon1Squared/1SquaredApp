@@ -2062,6 +2062,16 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     const partyRepo = getPartyRepository();
     const catRepo = getCatalogueRepository();
     const recorder = getPlatformTelemetryRecorder();
+    let currentValues: Awaited<
+      ReturnType<typeof catRepo.listAllChoiceValues<{
+        id: string;
+        listKey: string;
+        label: string;
+        systemKey?: string;
+        sortOrder: number;
+        active: boolean;
+      }>>
+    > | null = null;
     try {
       const baseIntegrations = (rawBase.integrations as Record<string, unknown>) ?? {};
       const basePmsSync = (baseIntegrations.pmsSync as Record<string, unknown>) ?? {};
@@ -2090,7 +2100,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
         clearFirst: true,
       });
 
-      const currentValues = await catRepo.listAllChoiceValues<{
+      currentValues = await catRepo.listAllChoiceValues<{
         id: string;
         listKey: string;
         label: string;
@@ -2100,7 +2110,7 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       }>(seedCtx);
       await catRepo.putChoiceValues(
         seedCtx,
-        currentValues.map((v) =>
+        currentValues!.map((v) =>
           v.listKey === 'employee_role' && v.id === 'employee_role.partner'
             ? { ...v, active: false }
             : v,
@@ -2137,6 +2147,19 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
             first_name: 'Ffion',
             last_name: 'James',
             email: 'ffion.james@notalawfirm.example',
+            grade: 'Missing Role Grade',
+            department: 'Corporate and commercial',
+            standard_hourly_rate: 250,
+            annual_target_hours: 1000,
+            annual_target_fees: 200000,
+            active: 'Yes',
+          },
+          {
+            fee_earner_id: 'FE-R633-NO-ACTIVE-STATUS',
+            initials: 'NA',
+            first_name: 'Sian',
+            last_name: 'Morgan',
+            email: 'sian.morgan@notalawfirm.example',
             grade: 'Missing Role Grade',
             department: 'Corporate and commercial',
             standard_hourly_rate: 250,
@@ -2196,8 +2219,29 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
         expect(serialized).not.toContain('Inactive Partner Grade');
         expect(fallbackEvents[0]!.tenantId).toBe(seedCtx.tenantId);
         expect(fallbackEvents[0]!.correlationId).toBe(seedCtx.correlationId);
+
+        // R633: When person_record_status 'active' is inactive, createRecordFromPms returns clean CHOICE_VALUE_NOT_CONFIGURED error instead of TypeError
+        await catRepo.putChoiceValues(
+          seedCtx,
+          currentValues!.map((v) =>
+            v.listKey === 'person_record_status' && v.systemKey === 'active'
+              ? { ...v, active: false }
+              : v,
+          ),
+        );
+        const noActiveStatusRes = await createRecordFromPms(
+          'employee',
+          'FE-R633-NO-ACTIVE-STATUS',
+          'P-000004',
+          { mfaVerified: true, tenantCtx: seedCtx },
+        );
+        expect(noActiveStatusRes.ok).toBe(false);
+        expect(noActiveStatusRes.error).toMatch(/CHOICE_VALUE_NOT_CONFIGURED/);
       });
     } finally {
+      if (currentValues) {
+        await catRepo.putChoiceValues(seedCtx, currentValues).catch(() => undefined);
+      }
       await pmsRepo.clearTenantData(seedCtx).catch(() => undefined);
       setActiveTenantConfigForTesting(null);
       setTestEntraSessionOverride(undefined);
