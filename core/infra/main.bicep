@@ -83,13 +83,20 @@ param enablePdfConverterContainerApp bool = false
 @description('Optional in Stage 0 (unused by app runtime; carried to Stage 1): container image reference for the internal PDF converter Container App (required non-empty if enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
 
+@description('Runtime document storage provider configured for the web app (ADR 0008, ADR 0024)')
+@allowed([
+  'local-fs'
+  'azure-blob'
+])
+param documentStorageProvider string = environment == 'live' ? 'azure-blob' : 'local-fs'
+
 @description('Minimum running replicas for the web Container App (at least 1 per ADR 0024)')
 @minValue(1)
 param webMinReplicas int = 1
 
-@description('Maximum replicas for the web Container App (pinned to 1 in demo while using container-local storage per ADR 0008)')
+@description('Maximum replicas for the web Container App (pinned to 1 across all environments while documentStorageProvider is local-fs per ADR 0008)')
 @minValue(1)
-param webMaxReplicas int = environment == 'demo' ? 1 : 10
+param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10
 
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
 param enableSchedulerJobs bool = true
@@ -196,6 +203,7 @@ module platform 'modules/platform.bicep' = {
     entraTenantId: entraTenantId
     entraRedirectUri: entraRedirectUri
     tenantPackageDir: tenantPackageDir
+    documentStorageProvider: documentStorageProvider
     webMinReplicas: webMinReplicas
     webMaxReplicas: webMaxReplicas
     alertActionGroupId: alertActionGroupId

@@ -13,6 +13,7 @@ param hostingMode = 'multi_tenant'
 param location = 'uksouth'
 param tenantSlug = 'not-a-law-firm'
 param defaultCostCentre = 'CC-DEMO'
+param documentStorageProvider = 'local-fs'
 param webMinReplicas = 1
 param webMaxReplicas = 1
 param enableCloudBlobStorage = true

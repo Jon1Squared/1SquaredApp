@@ -485,11 +485,12 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       'utf8',
     );
 
-    // R578 (D4): demo web app pinned to 1 replica and /app/data writable by USER node
+    // R578 (D4) & R613: local-fs web app pinned to 1 replica across all environments and /app/data writable by USER node
     expect(platformBicep).toContain(
-      "param webMaxReplicas int = environment == 'demo' ? 1 : 10",
+      "param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10",
     );
-    expect(platformBicep).toContain('DEMO_SINGLE_REPLICA_REQUIRED');
+    expect(platformBicep).toContain('LOCAL_FS_SINGLE_REPLICA_REQUIRED');
+    expect(demoParams).toContain("param documentStorageProvider = 'local-fs'");
     expect(demoParams).toContain('param webMaxReplicas = 1');
     const mkdirIdx = dockerfile.indexOf('chown -R node:node /app/data');
     const userNodeIdx = dockerfile.indexOf('USER node');
@@ -513,5 +514,26 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
 
     // R582 (D5): ca-pdf cannot be enabled with an empty container image
     expect(platformBicep).toContain('PDF_CONVERTER_IMAGE_REQUIRED');
+  });
+
+  it('R611 & R613: enforces Startup probe and 5s/3x probe thresholds, and guards local-fs single replica across all environments', () => {
+    // R613: documentStorageProvider parameter + global local-fs single-replica guard
+    expect(mainBicep).toMatch(/param documentStorageProvider string/);
+    expect(platformBicep).toMatch(/param documentStorageProvider string/);
+    expect(platformBicep).toContain(
+      "param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10",
+    );
+    expect(platformBicep).toContain('LOCAL_FS_SINGLE_REPLICA_REQUIRED');
+    expect(platformBicep).toContain("documentStorageProvider == 'local-fs'");
+    expect(platformBicep).toContain('STORAGE_LIVE_LOCAL_FS_FORBIDDEN');
+
+    // R611: Startup probe on /api/health/live + timeoutSeconds: 5 & failureThreshold: 3 on Liveness & Readiness
+    const webAppBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource webContainerApp'),
+      platformNoComments.indexOf('resource provisionJob'),
+    );
+    expect(webAppBlock).toContain("type: 'Startup'");
+    expect(webAppBlock).toMatch(/type:\s*'Liveness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
+    expect(webAppBlock).toMatch(/type:\s*'Readiness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
   });
 });

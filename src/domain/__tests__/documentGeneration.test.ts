@@ -869,6 +869,30 @@ describe('Host Document Generation Domain & Server Services', () => {
         payloadBytes,
       );
 
+      // R618: Simulated process restart (fresh LocalTenantStorageProvider with empty caches) reads disk blob as clean and serves it
+      const restartedStorage = new LocalTenantStorageProvider({
+        inMemoryOnly: false,
+        rootDir: tmpRoot,
+        environment: 'test',
+        tokenSigningKey: 'r579-disk-storage-test-signing-key-32bytes',
+      });
+      expect(
+        await restartedStorage.getMalwareScanStatus(ctx, stored.blobKey),
+      ).toBe('clean');
+      const token = await restartedStorage.issueScopedDownloadToken(ctx, {
+        blobKey: stored.blobKey,
+        fileName: 'disk-only.docx',
+        documentId: 'DOC-R579-DISK',
+      });
+      const verifiedToken = await restartedStorage.verifyScopedDownloadToken(
+        ctx,
+        token.token,
+      );
+      expect(verifiedToken.blobKey).toBe(stored.blobKey);
+      expect(
+        await restartedStorage.getObjectBytes(ctx, { blobKey: stored.blobKey }),
+      ).toEqual(payloadBytes);
+
       // Deleting the file on disk (e.g. another replica deleted it) must NOT serve a stale in-memory copy
       fs.unlinkSync(diskPath);
       await expect(

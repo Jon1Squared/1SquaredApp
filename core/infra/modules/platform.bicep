@@ -142,13 +142,20 @@ param postgresBackupRetentionDays int = environment == 'live' ? 35 : 7
 ])
 param postgresGeoRedundantBackup string = environment == 'live' ? 'Enabled' : 'Disabled'
 
+@description('Runtime document storage provider configured for the web app (ADR 0008, ADR 0024)')
+@allowed([
+  'local-fs'
+  'azure-blob'
+])
+param documentStorageProvider string = environment == 'live' ? 'azure-blob' : 'local-fs'
+
 @description('Minimum running replicas for the web Container App (at least 1 per ADR 0024)')
 @minValue(1)
 param webMinReplicas int = 1
 
-@description('Maximum replicas for the web Container App (pinned to 1 in demo while using container-local storage per ADR 0008)')
+@description('Maximum replicas for the web Container App (pinned to 1 across all environments while documentStorageProvider is local-fs per ADR 0008)')
 @minValue(1)
-param webMaxReplicas int = environment == 'demo' ? 1 : 10
+param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10
 
 @description('Optional additional dedicated Container Apps workload profiles beyond Consumption')
 param dedicatedWorkloadProfiles array = []
@@ -186,8 +193,11 @@ var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
 var deployAppsImageGuard = (deployApps && empty(appContainerImage))
   ? fail('APP_CONTAINER_IMAGE_REQUIRED: appContainerImage is required when deployApps is true.')
   : true
-var demoWebReplicasGuard = (environment == 'demo' && (webMinReplicas != 1 || webMaxReplicas != 1))
-  ? fail('DEMO_SINGLE_REPLICA_REQUIRED: Demo web app must remain pinned to 1 replica while using container-local document storage (ADR 0008).')
+var localFsSingleReplicaGuard = (documentStorageProvider == 'local-fs' && (webMinReplicas != 1 || webMaxReplicas != 1))
+  ? fail('LOCAL_FS_SINGLE_REPLICA_REQUIRED: Web app must remain pinned to 1 replica across all environments while documentStorageProvider is local-fs (ADR 0008).')
+  : true
+var localFsLiveGuard = (environment == 'live' && documentStorageProvider == 'local-fs')
+  ? fail('STORAGE_LIVE_LOCAL_FS_FORBIDDEN: documentStorageProvider cannot be local-fs when environment is live.')
   : true
 var alertRecipientGuard = ((environment == 'demo' || environment == 'live') && empty(alertRecipientEmail) && empty(alertActionGroupId))
   ? fail('ALERT_RECIPIENT_REQUIRED: Either alertRecipientEmail or alertActionGroupId is required when environment is demo or live.')
@@ -978,7 +988,7 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
   ]
 }
 
-resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard && demoWebReplicasGuard) {
+resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard && localFsSingleReplicaGuard && localFsLiveGuard) {
   name: webContainerAppName
   location: location
   tags: platformTags
@@ -1019,6 +1029,17 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
           }
           probes: [
             {
+              type: 'Startup'
+              httpGet: {
+                path: '/api/health/live'
+                port: 3000
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 12
+            }
+            {
               type: 'Liveness'
               httpGet: {
                 path: '/api/health/live'
@@ -1026,6 +1047,8 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
               }
               initialDelaySeconds: 15
               periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
             }
             {
               type: 'Readiness'
@@ -1035,6 +1058,8 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
               }
               initialDelaySeconds: 10
               periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 3
             }
           ]
         }

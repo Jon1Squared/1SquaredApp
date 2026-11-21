@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getGlobalTenantPostgresPoolManager } from '@platform/core';
+import { resetHealthReadinessCacheForTesting } from '@/server/healthReadiness';
 
 describe('Health & readiness endpoints (R580)', () => {
   it('R580: GET /api/health/live responds 200 without DB queries or tenant data', async () => {
@@ -13,6 +14,7 @@ describe('Health & readiness endpoints (R580)', () => {
   });
 
   it('R580: GET /api/health/ready verifies PostgreSQL pool & schema readiness, exposes zero tenant data, and fails 503 if unhealthy or live local-fs', async () => {
+    resetHealthReadinessCacheForTesting();
     const readyMod = (await import('@/app/api/health/ready/route')) as {
       GET: (req: Request) => Promise<Response>;
     };
@@ -28,6 +30,7 @@ describe('Health & readiness endpoints (R580)', () => {
     expect(rawOk).not.toContain('pg_tenant_');
 
     // Simulate unreachable database -> 503 not_ready with no details leaked
+    resetHealthReadinessCacheForTesting();
     const poolMgr = getGlobalTenantPostgresPoolManager();
     const poolSpy = vi
       .spyOn(poolMgr, 'getPoolForTenant')
@@ -42,6 +45,7 @@ describe('Health & readiness endpoints (R580)', () => {
       expect(rawFail).not.toContain('DB_UNREACHABLE');
     } finally {
       poolSpy.mockRestore();
+      resetHealthReadinessCacheForTesting();
     }
 
     // When environment is 'live' and storageProvider is 'local-fs', ready returns 503 not_ready
@@ -52,6 +56,85 @@ describe('Health & readiness endpoints (R580)', () => {
       );
       expect(liveLocalFsRes.status).toBe(503);
       expect(await liveLocalFsRes.json()).toEqual({ status: 'not_ready' });
+    } finally {
+      vi.unstubAllEnvs();
+      resetHealthReadinessCacheForTesting();
+    }
+  });
+
+  it('R612: deduplicates 50 concurrent /api/health/ready requests into at most one DB probe, caches within 5s TTL, and logs failures with correlationId and no PII', async () => {
+    resetHealthReadinessCacheForTesting();
+    const readyMod = (await import('@/app/api/health/ready/route')) as {
+      GET: (req: Request) => Promise<Response>;
+    };
+    const poolMgr = getGlobalTenantPostgresPoolManager();
+    const origGetPool = poolMgr.getPoolForTenant.bind(poolMgr);
+    let poolLookups = 0;
+    const poolSpy = vi
+      .spyOn(poolMgr, 'getPoolForTenant')
+      .mockImplementation(async (ctx) => {
+        poolLookups += 1;
+        await new Promise((r) => setTimeout(r, 40));
+        return origGetPool(ctx);
+      });
+
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 50 }, (_, idx) =>
+          readyMod.GET(
+            new Request(`http://localhost:3000/api/health/ready?r=${idx}`),
+          ),
+        ),
+      );
+      expect(responses.every((r) => r.status === 200)).toBe(true);
+      expect(poolLookups).toBeLessThanOrEqual(1);
+
+      // Subsequent call within 5s TTL serves cached readiness without extra DB probe
+      const callsAfterBurst = poolLookups;
+      const cachedRes = await readyMod.GET(
+        new Request('http://localhost:3000/api/health/ready?r=cached'),
+      );
+      expect(cachedRes.status).toBe(200);
+      expect(poolLookups).toBe(callsAfterBurst);
+    } finally {
+      poolSpy.mockRestore();
+      resetHealthReadinessCacheForTesting();
+    }
+
+    // Fresh failure test: spy on warn to confirm PII-free health.readiness_failed log with exact correlationId
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failSpy = vi
+      .spyOn(poolMgr, 'getPoolForTenant')
+      .mockRejectedValue(new Error('postgresql://user:secret@host/db_down'));
+    try {
+      const failRes = await readyMod.GET(
+        new Request('http://localhost:3000/api/health/ready', {
+          headers: { 'x-correlation-id': 'corr-r612-probe' },
+        }),
+      );
+      expect(failRes.status).toBe(503);
+      const logs = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((line) => line.includes('health.readiness_failed'));
+      expect(logs.length).toBeGreaterThanOrEqual(1);
+      const parsed = JSON.parse(logs[0]!) as {
+        correlationId?: string;
+        tenantId?: string;
+      };
+      expect(parsed.correlationId).toBe('corr-r612-probe');
+      expect(parsed.tenantId).toBeTruthy();
+      expect(logs[0]).not.toContain('secret');
+      expect(logs[0]).not.toContain('postgresql://');
+    } finally {
+      failSpy.mockRestore();
+      warnSpy.mockRestore();
+      resetHealthReadinessCacheForTesting();
+    }
+
+    // Test-reset helper refuses non-test NODE_ENV
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      expect(() => resetHealthReadinessCacheForTesting()).toThrow(/SECURITY_ERROR/);
     } finally {
       vi.unstubAllEnvs();
     }
