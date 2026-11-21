@@ -10,7 +10,7 @@
 | Size | `M` |
 | Backlog IDs | `28`, `Q1` (also verifies `S0-07`/`B7`, `S0-09`/`B4`; cross-cutting `P8`, `P10`, `P11`) |
 | Decision record(s) | `D8` — [ADR 0033](../decisions/0033-contact-personas.md) (`Accepted`) |
-| Spec / standards references | Architecture Standard sections 4, 7, 10, 12; [RBAC Reference](../rbac-reference.md); [ADR 0014](../decisions/0014-restricted-matters.md); [ADR 0028](../decisions/0028-tenant-database-and-repositories.md) |
+| Spec / standards references | Architecture Standard sections 4, 7, 10, 12; [RBAC Reference](../rbac-reference.md); [ADR 0014](../decisions/0014-staff-matter-access-by-permission.md); [ADR 0028](../decisions/0028-tenant-database-and-repositories.md) |
 
 ---
 

@@ -1,7 +1,7 @@
 # ADR-0005: Template Versioning, Approval Workflow, and Self-Approval Controls
 
 - **Date:** 2026-04-20
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 
 ## Context
 

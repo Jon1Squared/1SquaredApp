@@ -1,7 +1,9 @@
 # ADR-0023: Least-Privilege SharePoint Access via `Sites.Selected`
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Date:** 2026-11-05
+
+> **Implementation notes (2026-11-20):** Implemented via `DocumentStoreTokenService`, `MockSharePointGraphBackend` (returning `simulated: true` in non-live environments), fail-closed `live` refusal (`R523`), and per-tenant PostgreSQL config overrides (`S0-14`); live Microsoft Graph transport remains to be connected before live onboarding (`E2`).
 - **Deciders:** Chief Architect, Security Lead, Head of Engineering
 - **Amends:** [ADR-0018: Two-Identity Authentication Model](./0018-two-identity-authentication-model.md)
 - **Related:** [ADR-0012](./0012-role-source-of-truth-and-entra-identity-mapping.md), [ADR-0017](./0017-document-store-provider-abstraction.md), [Platform Architecture Standard](../architecture-standard.md)

@@ -1,8 +1,10 @@
 # ADR-0019: Inheritance-Based Permission Model, Scale Guard, and Drift Reconciliation
 
 - **Date:** 2026-11-02
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Related:** [ADR-0014](./0014-staff-matter-access-by-permission.md), [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0018](./0018-two-identity-authentication-model.md)
+
+> **Implementation notes (2026-11-20):** Per-tenant store metadata persists in `TenantDocumentStoreRepository` (`S0-14`), automatic drift remediation (`documentAccess.autoRemediateDrift`) is deferred to backlog item `F23` (`S0-23`/`R534`), and `live` Graph transport remains fail-closed until connected.
 
 ## Context
 

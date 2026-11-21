@@ -1,8 +1,10 @@
 # ADR-0018: Two-Identity Authentication Model (Delegated User OBO and Application Provisioning)
 
 - **Date:** 2026-11-02
-- **Status:** Proposed (Amended by [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md))
+- **Status:** Accepted (2026-11-20; amended by [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md))
 - **Related:** [ADR-0012](./0012-role-source-of-truth-and-entra-identity-mapping.md), [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0023](./0023-sharepoint-sites-selected-least-privilege.md)
+
+> **Implementation notes (2026-11-20):** Interactive Graph browsing and uploads use On-Behalf-Of (OBO) tokens while background provisioning/reconciliation uses application certificates validated via `assertTenantOwnsKeyVaultSecretRef` (`kv://<vault>/<secret>`). Non-live environments run against `MockSharePointGraphBackend`; `live` fails closed (`R523`) until live SharePoint transport is connected.
 
 ## Context
 

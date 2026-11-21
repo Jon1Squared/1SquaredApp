@@ -1,7 +1,9 @@
 # ADR-0008: Document Storage Provider Abstraction, Transitional Local Tenant Storage, and Azure Blob Isolation
 
 - **Date:** 2026-04-20
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20; Stage 0 exit decision D4 (ADR 0008) exception recorded below)
+
+> **Implementation notes (2026-11-20):** References below to [ADR 0001](./0001-shared-repo-and-transitional-store.md) are superseded by [ADR 0028](./0028-tenant-database-and-repositories.md) and [ADR 0026](./0026-separate-demo-tenant.md). See **Stage 0 Exception & Removal Condition (Stage 0 exit decision D4 (ADR 0008), 20 November 2026)** at the end of this record: `LocalTenantStorageProvider` (`local-fs`) fails closed in `live`, reads/writes on disk without retaining `memoryBlobs`, returns `'pending'` for unknown scan keys, and runs on a single-replica demo container until `azure-blob` is implemented before the first hosted client.
 
 ## Context
 
@@ -100,7 +102,7 @@ export interface DocumentStorageProvider {
 - **The application works out of the box today using the tenant-isolated `local-fs` provider (`data/storage/tenant-<slug>-<env>/`) with zero Azure setup required.**
 - Switching to Azure Blob Storage or a DMS later requires only changing `documentGeneration.storageProvider` in tenant configuration.
 
-## Stage 0 Exception & Removal Condition (Owner Decision D4, 20 November 2026)
+## Stage 0 Exception & Removal Condition (Stage 0 exit decision D4 (ADR 0008), 20 November 2026)
 
 1. **Supersession of ADR 0001:** References above to ADR 0001 are superseded by [ADR 0028](./0028-tenant-database-and-repositories.md) and [ADR 0026](./0026-separate-demo-tenant.md); document metadata and template records live in per-tenant PostgreSQL (`TenantDocumentRepository`).
 2. **Stage 0 `local-fs` exception (`R578`):** `AzureBlobDocumentStorageProvider` (`azure-blob`) remains unimplemented (`STORAGE_PROVIDER_NOT_SUPPORTED`) in Stage 0. For Stage 0 only:

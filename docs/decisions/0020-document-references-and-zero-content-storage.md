@@ -1,8 +1,10 @@
 # ADR-0020: Storing Document References Rather Than Copies and Zero-PII Telemetry
 
 - **Date:** 2026-11-02
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Related:** [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0018](./0018-two-identity-authentication-model.md)
+
+> **Implementation notes (2026-11-20):** `TenantDocumentStoreRepository` (`S0-14`) persists `matter_document_locations` and audit events in per-tenant PostgreSQL without copying external SharePoint file bytes; telemetry and errors are sanitised before export.
 
 ## Context
 

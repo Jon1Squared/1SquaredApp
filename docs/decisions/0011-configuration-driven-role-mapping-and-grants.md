@@ -1,8 +1,10 @@
 # ADR-0011: Configuration-Driven Role Mapping, Department Grants, and Relationship Grants
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Supersedes:** Configuration schema aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
+
+> **Implementation notes (2026-11-20):** Runtime tenant RBAC overrides persist in per-tenant PostgreSQL (`public.tenant_rbac_configs` via `TenantHrAndRbacRepository`, [ADR 0028](./0028-tenant-database-and-repositories.md), `S0-17b`) and merge deterministically over verified per-tenant `tenantConfig.rbac` (`R586`).
 
 ## Context
 

@@ -10,7 +10,7 @@
 | Size | `M` |
 | Backlog IDs | `32` (remains `Partly built` until `S0-26` + `S0-29`; verifies `documentAccess.autoRemediateDrift` re-tagged to `backlog` during `S0-23` per owner approval 15 Nov 2026; cross-cutting `P8`, `P10`, `P11`) |
 | Decision record(s) | None required (implements Architecture Standard sections 4, 7 & 10 on top of ADR 0014, ADR 0025, ADR 0028) |
-| Spec / standards references | Architecture Standard sections 4, 7, 10, 12; [ADR 0014](../decisions/0014-restricted-matters.md); [ADR 0028](../decisions/0028-tenant-database-and-repositories.md) |
+| Spec / standards references | Architecture Standard sections 4, 7, 10, 12; [ADR 0014](../decisions/0014-staff-matter-access-by-permission.md); [ADR 0028](../decisions/0028-tenant-database-and-repositories.md) |
 
 ---
 

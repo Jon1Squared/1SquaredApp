@@ -1,7 +1,9 @@
 # ADR-0012: Authoritative Role Source of Truth, Unified `HomeRoleKey`, and Entra ID Identity Mapping
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
+
+> **Implementation notes (2026-11-20):** Built-in `HomeRoleKey` includes all 10 built-in keys (`fee_earner`, `supervisor`, `partner`, `legal_secretary`, `intake`, `enquiries_coordinator`, `finance`, `risk_compliance`, `managing_partner`, `admin`); active email addresses sync into `public.person_emails` (`TenantPartyRepository` / `TenantHrAndRbacRepository`, [ADR 0028](./0028-tenant-database-and-repositories.md), `S0-16`/`S0-17b`); and first-time Entra email linking (`rbac.identityMapping.emailLinking`, `S0-30`/`B13`) requires verified domain membership and never binds privileged personas.
 
 ## Context
 

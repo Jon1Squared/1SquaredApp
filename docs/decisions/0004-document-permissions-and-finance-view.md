@@ -1,7 +1,7 @@
 # ADR-0004: Document Generation Permissions and Introduction of `finance:view`
 
 - **Date:** 2026-04-20
-- **Status:** Superseded by [ADR-0010](./0010-central-permission-registry-and-resolver.md), [ADR-0011](./0011-configuration-driven-role-mapping-and-grants.md), [ADR-0012](./0012-role-source-of-truth-and-entra-identity-mapping.md), [ADR-0013](./0013-viewing-as-role-presentation-only.md), [ADR-0014](./0014-staff-matter-access-by-permission.md), and [ADR-0015](./0015-unified-per-person-permission-overrides.md)
+- **Status:** Superseded by [ADR-0010](./0010-central-permission-registry-and-resolver.md), [ADR-0011](./0011-configuration-driven-role-mapping-and-grants.md), [ADR-0012](./0012-role-source-of-truth-and-entra-identity-mapping.md), [ADR-0013](./0013-viewing-as-role-presentation-only.md), [ADR-0014](./0014-staff-matter-access-by-permission.md), and [ADR-0015](./0015-unified-per-person-permission-overrides.md) (all now Accepted)
 
 > **Supersedence Note (2026-11-01):** This ADR remains the historical record of how Document Generation permissions (`document:*`, `document_template:*`, and `finance:view`), `resolveDocumentPermissions`, `Person.documentPermissions`, and `documentGeneration.permissions.roleDefaults` were originally introduced. Under the Central Configuration-Driven RBAC refactor:
 > - All permissions (`document:*`, `document_template:*`, `employee:*`, `finance:*`, `risk:*`, `admin:*`, `rbac:*`, `matter:restricted:access`, `task:*`, `enquiry:*`) are consolidated into a single core **Permission Registry** and resolved by a single **`resolvePermissions`** function ([ADR-0010](./0010-central-permission-registry-and-resolver.md)).

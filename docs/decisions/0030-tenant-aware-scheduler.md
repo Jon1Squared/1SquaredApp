@@ -54,10 +54,10 @@ The standard requires background jobs to:
   - a policy entry in `src/server/actionPermissions.ts`, checked the same way as user actions (ADR 0025)
   - `MAX_KNOWN_GAPS` must not go up
 - **A `guardedJob(jobKey, handler)` wrapper** does the checks and sets the context:
-  - It builds the job's context: the tenant, a correlation ID and the declared permissions.
-  - It refuses to run without a tenant.
-  - It checks the policy.
-  - It runs the handler inside `runTenantBackgroundJob`.
+  - It builds the verified job `TenantContext` directly from the validated tenant registry entry, mints a correlation ID and `jobPermissions`, and emits sanitised telemetry (rather than calling the synchronous in-memory `runTenantBackgroundJob` wrapper, `R598`).
+  - It refuses to run without a registered, enabled tenant.
+  - It checks `JOB_PERMISSIONS` (`jobOnly: true`).
+  - It enforces the per-tenant `AbortController` timeout (`JOB_TENANT_TIMEOUT`), which `executeControlledTenantJobRun` checks before lock acquisition, work execution, and `'succeeded'` commit (`R588`).
 - **Audit entries name the actor `system:<jobKey>`.**
 - **Least privilege.**
   - Jobs get permissions that only jobs hold, scoped to what the job does. For example, `keydate:run_reminders` reads key dates and creates notifications.

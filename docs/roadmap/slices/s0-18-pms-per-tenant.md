@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Backlog | P3, P7 (re-tag reserved PMS sync & Companies House settings to `backlog`), P8, items 14, 26, 35, E6 |
-| Decision | [ADR 0028: Tenant Databases and Repositories](../../decisions/0028-tenant-database-and-repositories.md) (D3, accepted 9 November 2026); [ADR 0029: Finance Data Gating](../../decisions/0029-finance-data-gating.md) (D4, accepted 8 November 2026); Owner Decision 3 (9 November 2026: keep `integrations.pmsSync.*` and `pmsConnectionSecretVaultRef` reserved; move PMS data and `pms_links` per tenant only) |
+| Decision | [ADR 0028: Tenant Databases and Repositories](../../decisions/0028-tenant-database-and-repositories.md) (D3, accepted 9 November 2026); [ADR 0029: Finance Data Gating](../../decisions/0029-finance-data-delivery.md) (D4, accepted 8 November 2026); Owner Decision 3 (9 November 2026: keep `integrations.pmsSync.*` and `pmsConnectionSecretVaultRef` reserved; move PMS data and `pms_links` per tenant only) |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0B (WP4 Checkpoint 4b) |
 | Branch | `s0-18-pms-per-tenant`, from `s0-17c-catalogues-and-configs`, targeting `develop` |
 | Change class | Core feature / tenant-scoped persistence & config-merge fix (`core/src/tenancy/`, `core/src/config-engine/`, `core/schemas/tenant-config.schema.json`, `src/pms/`, `src/server/financeServices.ts`, `src/server/services.ts`, `scripts/`). |

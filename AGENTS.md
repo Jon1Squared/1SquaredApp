@@ -12,7 +12,7 @@ Reference documents (read before any architecture decision or review; not loaded
 ## Roadmap and stages
 
 Read these first in every session, before planning or writing code:
-- `docs/roadmap/feature-list.md`: the master backlog. IDs (1–45, F1–F18, P1–P13, B1–B13, E1–E9, Q1–Q2) are stable; never renumber them, and new items take the next free number in their series.
+- `docs/roadmap/feature-list.md`: the master backlog. IDs (1–46, F1–F23, P1–P13, B1–B21, E1–E9, Q1–Q2) are stable; never renumber them, and new items take the next free number in their series.
 - The current stage plan: `docs/roadmap/stage-0-plan.md` (detailed slice plans are in `docs/roadmap/slices/`). Work only on slices in that plan, and respect each slice's dependencies.
 
 Rules:
@@ -43,7 +43,7 @@ Rules:
 - Classify the change: core feature, core extension point, configuration option, client extension, client configuration or infrastructure.
 - Choose the least invasive mechanism: existing configuration, then a core feature behind a flag or option, then a client extension on a published extension point. If the core lacks the extension point you need, propose a generic one as a separate core change. Never reach into core internals.
 - If the change is structural or needs an exception to the standard, draft an architecture decision record in `docs/decisions/` first.
-- See `docs/decisions/0001-shared-repo-and-transitional-store.md` (superseded for runtime persistence by [ADR 0028](docs/decisions/0028-tenant-database-and-repositories.md) and for demo seeding by [ADR 0026](docs/decisions/0026-demo-tenant.md)) for the shared repository layout (`core/`, `client-not-a-law-firm/`, `src/`) and invented test fixtures (`Not A Law Firm LLP` / `Pembroke Vaughan`).
+- See `docs/decisions/0001-shared-repo-and-transitional-store.md` (superseded for runtime persistence by [ADR 0028](docs/decisions/0028-tenant-database-and-repositories.md) and for demo seeding by [ADR 0026](docs/decisions/0026-separate-demo-tenant.md)) for the shared repository layout (`core/`, `client-not-a-law-firm/`, `src/`) and invented test fixtures (`Not A Law Firm LLP` / `Pembroke Vaughan`).
 
 ## While you write code
 
@@ -68,7 +68,7 @@ Rules:
 - Staff matters (`isStaffMatter`) are restricted to `restrictedAccessUserIds`. Any new query, report, search or export that returns matters must respect this.
 - Hiding a nav item is not access control. Every API endpoint enforces its own permission check.
 - Every server action and API route uses `guardedAction` / `guardedRoute` and has a policy in `src/server/actionPermissions.ts`.
-- New code compares stable keys (`HomeRoleKey`, `employee_role.*` IDs), never display labels. The label matching in `resolveUserAppRole` is known technical debt: flag it, don't copy it.
+- New code compares stable keys (`HomeRoleKey`, `employee_role.*` IDs, `systemKey`), never display labels. (The former label matching in `resolveUserAppRole` has been resolved to derive roles strictly from resolved permissions and team-lead relationships; never reintroduce label matching.)
 - Roles are defined in the core; clients map their own roles through configuration.
 - Extensions get only the permissions in their manifest (`ExtensionPermission`).
 

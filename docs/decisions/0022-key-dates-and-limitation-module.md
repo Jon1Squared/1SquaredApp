@@ -1,7 +1,9 @@
 # ADR 0022: Key Dates and Limitation Module
 
 - **Date:** 2026-11-03
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
+
+> **Implementation notes (2026-11-20):** Key dates, reminder states, calendar sync rows, not-applicable exceptions, and append-only audit entries persist solely in per-tenant PostgreSQL (`TenantKeyDateRepository`, `S0-15`) with single-transaction `FOR UPDATE` locking + `expectedVersion` optimistic concurrency (`KEY_DATE_CONCURRENCY_CONFLICT`) and strictly post-commit `syncKeyDateToOutlookCalendar` execution (`R577`); hourly reminders run through `key-date-reminders` ([ADR 0030](./0030-tenant-aware-scheduler.md), `S0-19`) with verified per-tenant config (`R586`) and `AbortSignal` rollback (`R588`); and `keyDates.defaults.teamAssignment`, `keyDates.calendarSync.provider`, `keyDates.matterTypes[].defaultRuleSetIds`, and `keyDates.limitationRuleSets[].rules[].claimType` remain `[x-reserved:backlog]` (`F19`).
 
 ## Context
 

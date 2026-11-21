@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Backlog | P2 (close to `Completed`), plus **Checkpoint B** (`stage-0-plan.md:122`: full two-tenant isolation suite & strict-bar `feature-list.md` status review across WP4) |
-| Decision | [ADR 0028: Tenant Databases and Repositories](../../decisions/0028-tenant-database-and-repositories.md) (D3, supersedes [ADR 0001](../../decisions/0001-shared-repo-and-transitional-store.md)); [ADR 0026: Separate Demo Tenant](../../decisions/0026-demo-tenant.md) (D5, seed-only builders) |
+| Decision | [ADR 0028: Tenant Databases and Repositories](../../decisions/0028-tenant-database-and-repositories.md) (D3, supersedes [ADR 0001](../../decisions/0001-shared-repo-and-transitional-store.md)); [ADR 0026: Separate Demo Tenant](../../decisions/0026-separate-demo-tenant.md) (D5, seed-only builders) |
 | Stage plan | `docs/roadmap/stage-0-plan.md`, phase 0B (WP4 Checkpoint 4c + Checkpoint B) |
 | Branch | `s0-20-retire-json-store`, from `s0-19b-anonymisation-job`, targeting `develop` |
 | Change class | Core cleanup, contract migration (`0015`), dependency removal, ADR 0001 supersession, and Checkpoint B verification (`core/src/tenancy/`, `src/server/`, `src/seed/`, `core/infra/modules/platform.bicep`, `package.json`, `eslint.config.mjs`, `docs/decisions/0001-shared-repo-and-transitional-store.md`, `docs/roadmap/feature-list.md`). |
