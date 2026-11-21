@@ -173,10 +173,12 @@ import {
 } from '@/domain/employment';
 import {
   buildDefaultOrgStructure,
+  formatOrgStructureAuditSummary,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveDepartmentForPracticeArea,
   resolveOrgDepartment,
+  validateOrgStructureCatalogue,
 } from '@/domain/orgStructure';
 import {
   extractPlainTextFromEmailHtml,
@@ -326,6 +328,7 @@ import {
   type EmailSender,
   type KeyVaultSecretReader,
   type NotificationChannelFrequency,
+  type ResolvedPermissionSet,
   type TeamsActivityOutboxRecord,
   type TeamsDevCatcherHandler,
   type TeamsNotifier,
@@ -17892,15 +17895,84 @@ export async function recordInvoiceCreditControlAction(
 export async function saveOrgStructure(
   nextCatalogue: OrgStructureCatalogue,
   byId: string,
-): Promise<{ orgStructure: OrgStructureCatalogue }> {
+): Promise<
+  | { ok: true; orgStructure: OrgStructureCatalogue }
+  | {
+      ok: false;
+      code: string;
+      error: string;
+      message?: string;
+      orgStructure: OrgStructureCatalogue;
+    }
+  | (ActionDenied & { orgStructure: OrgStructureCatalogue })
+> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const [people, teams, rbacOverride] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride);
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: people,
+    teams,
+    config: { rbac: rbacConfig },
+    context: ctx,
+    mfaVerified: ctx.mfaVerified,
+    tokenRoles: ctx.actorRoles,
+    tokenRolesActorId: actor?.id ?? byId,
+  });
+  if (!permSet.permissions.has('admin:access')) {
+    return {
+      ...buildActionDenied(
+        'FORBIDDEN',
+        'Forbidden: Permission "admin:access" is required to modify organisation structure.',
+      ),
+      orgStructure: nextCatalogue,
+    };
+  }
+  if (permSet.mfaPendingPermissions.has('admin:access') || ctx.mfaVerified !== true) {
+    return {
+      ...buildActionDenied(
+        'MFA_REQUIRED',
+        'MFA_REQUIRED: Multi-factor authentication is required to modify organisation structure.',
+      ),
+      orgStructure: nextCatalogue,
+    };
+  }
+
+  const validation = validateOrgStructureCatalogue(nextCatalogue);
   const catalogueRepo = getCatalogueRepository();
+  let result!:
+    | { ok: true; orgStructure: OrgStructureCatalogue }
+    | {
+        ok: false;
+        code: string;
+        error: string;
+        message?: string;
+        orgStructure: OrgStructureCatalogue;
+      };
+
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
       const store = await loadTenantCatalogueStoreView(ctx);
-      await catalogueRepo.putOrgStructureConfig(ctx, nextCatalogue, byId);
+      if (!validation.ok) {
+        result = {
+          ok: false,
+          code: validation.code,
+          error: validation.error,
+          message: validation.error,
+          orgStructure: store.orgStructure,
+        };
+        return;
+      }
+      const validated = validation.data;
+      const oldSummary = formatOrgStructureAuditSummary(store.orgStructure);
+      const newSummary = formatOrgStructureAuditSummary(validated);
+      await catalogueRepo.putOrgStructureConfig(ctx, validated, byId);
       const syncedPracticeAreas = syncPracticeAreasFromOrgStructure(
-        nextCatalogue,
+        validated,
         store.values,
       );
       for (const paVal of syncedPracticeAreas) {
@@ -17911,15 +17983,16 @@ export async function saveOrgStructure(
         recordId: 'ORG-STRUCTURE',
         action: 'update',
         field: 'Organisation structure reference tables',
-        oldValue: null,
-        newValue: `Updated organisation hierarchy (${nextCatalogue.divisions.length} divisions, ${nextCatalogue.departments.length} departments, ${nextCatalogue.teamsOrPracticeGroups.length} teams/practice groups)`,
+        oldValue: oldSummary,
+        newValue: newSummary,
         byId,
         at: new Date().toISOString(),
       });
       await flushStagedAuditEntries(ctx);
+      result = { ok: true, orgStructure: validated };
     }),
   );
-  return { orgStructure: nextCatalogue };
+  return result;
 }
 
 export async function saveMatterPartyRelationship(
@@ -24830,7 +24903,7 @@ const CLIENT_RATE_VIEW_PERMS: readonly PermissionKey[] = [
 ];
 
 const CLIENT_RATE_MANAGE_PERMS: readonly PermissionKey[] = [
-  'finance:view',
+  'matter:costs:sign_off',
   'finance:credit_control',
   'admin:access',
 ];
@@ -24854,24 +24927,70 @@ const RESOLVE_RATE_PERMS: readonly PermissionKey[] = [
 ];
 
 const MATTER_RATE_MANAGE_PERMS: readonly PermissionKey[] = [
-  'matter:create',
-  'matter:edit',
   'matter:costs:sign_off',
-  'finance:view',
   'finance:credit_control',
   'admin:access',
 ];
 
-function hasAnyPersonPermission(
-  actor: Person | null,
-  perms: readonly PermissionKey[],
-  people: Person[],
-  teams: Team[],
-): boolean {
-  if (!actor) return false;
-  return perms.some((perm) =>
-    hasPersonPermission(actor, perm, { allPeople: people, teams }),
+async function resolveRateOverrideActor(
+  ctx: TenantContext,
+  byId: string,
+): Promise<{
+  people: Person[];
+  teams: Team[];
+  rbacConfig: RbacConfiguration;
+  actor: Person | null;
+  permSet: ResolvedPermissionSet;
+}> {
+  const [people, teams, rbacOverride] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride);
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: people,
+    teams,
+    config: { rbac: rbacConfig },
+    context: ctx,
+    mfaVerified: ctx.mfaVerified,
+    tokenRoles: ctx.actorRoles,
+    tokenRolesActorId: actor?.id ?? byId,
+  });
+  return { people, teams, rbacConfig, actor, permSet };
+}
+
+function checkRateManagePermissions(
+  permSet: ResolvedPermissionSet,
+  ctx: TenantContext,
+  allowedPerms: readonly PermissionKey[],
+  options: { requireMfaAlways: boolean; deniedMessage: string; mfaMessage: string },
+): ActionDenied | null {
+  const held = allowedPerms.filter((perm) => permSet.permissions.has(perm));
+  if (held.length === 0) {
+    return buildActionDenied('FORBIDDEN', options.deniedMessage);
+  }
+  if (options.requireMfaAlways) {
+    if (ctx.mfaVerified !== true) {
+      return buildActionDenied('MFA_REQUIRED', options.mfaMessage);
+    }
+    return null;
+  }
+  const hasUnblockedPerm = held.some(
+    (perm) => !permSet.mfaPendingPermissions.has(perm),
   );
+  if (!hasUnblockedPerm) {
+    return buildActionDenied('MFA_REQUIRED', options.mfaMessage);
+  }
+  return null;
+}
+
+function hasAnyResolvedPermission(
+  permSet: ResolvedPermissionSet,
+  perms: readonly PermissionKey[],
+): boolean {
+  return perms.some((perm) => permSet.permissions.has(perm));
 }
 
 function formatClientOverrideSummary(override: ClientRateOverrideRecord): string {
@@ -24909,12 +25028,8 @@ export async function listClientRateOverridesRecord(
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
-  const [people, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, CLIENT_RATE_VIEW_PERMS, people, teams)) {
+  const { permSet } = await resolveRateOverrideActor(ctx, byId);
+  if (!hasAnyResolvedPermission(permSet, CLIENT_RATE_VIEW_PERMS)) {
     const msg =
       'You do not have permission to view negotiated client rate overrides.';
     return {
@@ -25018,19 +25133,23 @@ export async function saveClientRateOverrideRecord(
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
-  const [people, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, CLIENT_RATE_MANAGE_PERMS, people, teams)) {
-    const msg =
-      'You do not have permission (finance:view, finance:credit_control, or admin:access) to manage negotiated client rate overrides.';
+  const { permSet } = await resolveRateOverrideActor(ctx, byId);
+  const clientWriteDenial = checkRateManagePermissions(
+    permSet,
+    ctx,
+    CLIENT_RATE_MANAGE_PERMS,
+    {
+      requireMfaAlways: true,
+      deniedMessage:
+        'You do not have permission (matter:costs:sign_off, finance:credit_control, or admin:access) to manage negotiated client rate overrides.',
+      mfaMessage:
+        'MFA_REQUIRED: Multi-factor authentication is required to manage negotiated client rate overrides.',
+    },
+  );
+  if (clientWriteDenial) {
     return {
-      ...buildActionDenied('FORBIDDEN', msg),
-      code: 'FORBIDDEN',
-      message: msg,
-      error: msg,
+      ...clientWriteDenial,
+      error: clientWriteDenial.message,
     };
   }
 
@@ -25147,21 +25266,24 @@ export async function deleteClientRateOverrideRecord(
   } & Partial<Omit<ActionDenied, 'code'>>
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const partyRepo = getPartyRepository();
-  const [people, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, CLIENT_RATE_MANAGE_PERMS, people, teams)) {
-    const msg =
-      'You do not have permission (finance:view, finance:credit_control, or admin:access) to delete negotiated client rate overrides.';
+  const { permSet } = await resolveRateOverrideActor(ctx, byId);
+  const clientDeleteDenial = checkRateManagePermissions(
+    permSet,
+    ctx,
+    CLIENT_RATE_MANAGE_PERMS,
+    {
+      requireMfaAlways: true,
+      deniedMessage:
+        'You do not have permission (matter:costs:sign_off, finance:credit_control, or admin:access) to delete negotiated client rate overrides.',
+      mfaMessage:
+        'MFA_REQUIRED: Multi-factor authentication is required to delete negotiated client rate overrides.',
+    },
+  );
+  if (clientDeleteDenial) {
     return {
-      ...buildActionDenied('FORBIDDEN', msg),
+      ...clientDeleteDenial,
       deleted: false,
-      code: 'FORBIDDEN',
-      message: msg,
-      error: msg,
+      error: clientDeleteDenial.message,
     };
   }
 
@@ -25228,15 +25350,13 @@ export async function listMatterRateOverridesRecord(
   } & Partial<Omit<ActionDenied, 'code'>>
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const [people, teams, matter] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  const [{ people, teams, rbacConfig, actor, permSet }, matter] = await Promise.all([
+    resolveRateOverrideActor(ctx, byId),
     getMatterRepository().getMatterById<Matter>(ctx, matterId?.trim() || '', {
       includeRestricted: true,
     }),
   ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, MATTER_RATE_VIEW_PERMS, people, teams)) {
+  if (!hasAnyResolvedPermission(permSet, MATTER_RATE_VIEW_PERMS)) {
     const msg = 'You do not have permission to view matter rate overrides.';
     return {
       ...buildActionDenied('FORBIDDEN', msg),
@@ -25246,7 +25366,7 @@ export async function listMatterRateOverridesRecord(
       error: msg,
     };
   }
-  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams, config: { rbac: rbacConfig } })) {
     const msg = 'Matter not found or restricted.';
     return {
       ...buildActionDenied('FORBIDDEN', msg),
@@ -25286,24 +25406,31 @@ export async function saveMatterRateOverrideRecord(
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const tenantCfg = getActiveTenantConfiguration();
-  const [people, teams, matter] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+  const [{ people, teams, rbacConfig, actor, permSet }, matter] = await Promise.all([
+    resolveRateOverrideActor(ctx, byId),
     getMatterRepository().getMatterById<Matter>(ctx, input.matterId?.trim() || '', {
       includeRestricted: true,
     }),
   ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, MATTER_RATE_MANAGE_PERMS, people, teams)) {
-    const msg = 'You do not have permission to manage matter rate overrides.';
+  const matterWriteDenial = checkRateManagePermissions(
+    permSet,
+    ctx,
+    MATTER_RATE_MANAGE_PERMS,
+    {
+      requireMfaAlways: false,
+      deniedMessage:
+        'You do not have permission (matter:costs:sign_off, finance:credit_control, or admin:access) to manage matter rate overrides.',
+      mfaMessage:
+        'MFA_REQUIRED: Multi-factor authentication is required for administrative permission "admin:access" to manage matter rate overrides.',
+    },
+  );
+  if (matterWriteDenial) {
     return {
-      ...buildActionDenied('FORBIDDEN', msg),
-      code: 'FORBIDDEN',
-      message: msg,
-      error: msg,
+      ...matterWriteDenial,
+      error: matterWriteDenial.message,
     };
   }
-  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+  if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams, config: { rbac: rbacConfig } })) {
     const msg = 'Matter not found or restricted.';
     return {
       ...buildActionDenied('FORBIDDEN', msg),
@@ -25421,19 +25548,25 @@ export async function deleteMatterRateOverrideRecord(
   const repo = getRateOverrideRepository();
 
   return repo.withTenantTransaction(ctx, async (tx) => {
-    const [people, teams] = await Promise.all([
-      getPartyRepository().listAllPeople<Person>(ctx),
-      getHrAndRbacRepository().listAllTeams<Team>(ctx),
-    ]);
-    const actor = people.find((p) => p.id === byId) ?? null;
-    if (!hasAnyPersonPermission(actor, MATTER_RATE_MANAGE_PERMS, people, teams)) {
-      const msg = 'You do not have permission to delete matter rate overrides.';
+    const { people, teams, rbacConfig, actor, permSet } =
+      await resolveRateOverrideActor(ctx, byId);
+    const matterDeleteDenial = checkRateManagePermissions(
+      permSet,
+      ctx,
+      MATTER_RATE_MANAGE_PERMS,
+      {
+        requireMfaAlways: false,
+        deniedMessage:
+          'You do not have permission (matter:costs:sign_off, finance:credit_control, or admin:access) to delete matter rate overrides.',
+        mfaMessage:
+          'MFA_REQUIRED: Multi-factor authentication is required for administrative permission "admin:access" to delete matter rate overrides.',
+      },
+    );
+    if (matterDeleteDenial) {
       return {
-        ...buildActionDenied('FORBIDDEN', msg),
+        ...matterDeleteDenial,
         deleted: false,
-        code: 'FORBIDDEN',
-        message: msg,
-        error: msg,
+        error: matterDeleteDenial.message,
       };
     }
 
@@ -25456,7 +25589,7 @@ export async function deleteMatterRateOverrideRecord(
     const matter = await getMatterRepository().getMatterById<Matter>(ctx, existing.matterId, {
       includeRestricted: true,
     });
-    if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+    if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams, config: { rbac: rbacConfig } })) {
       const msg = 'Matter not found or restricted.';
       return {
         ...buildActionDenied('FORBIDDEN', msg),
@@ -25525,12 +25658,9 @@ export async function resolveApplicableRatesRecord(
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const tenantCfg = getActiveTenantConfiguration();
-  const [people, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (!hasAnyPersonPermission(actor, RESOLVE_RATE_PERMS, people, teams)) {
+  const { people, teams, rbacConfig, actor, permSet } =
+    await resolveRateOverrideActor(ctx, byId);
+  if (!hasAnyResolvedPermission(permSet, RESOLVE_RATE_PERMS)) {
     const msg = 'You do not have permission to resolve applicable hourly rates.';
     return {
       ...buildActionDenied('FORBIDDEN', msg),
@@ -25547,7 +25677,7 @@ export async function resolveApplicableRatesRecord(
       trimmedMatterId,
       { includeRestricted: true },
     );
-    if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams })) {
+    if (!matter || !canPersonAccessMatter(matter, byId, actor, { allPeople: people, teams, config: { rbac: rbacConfig } })) {
       const msg = 'Matter not found or restricted.';
       return {
         ...buildActionDenied('FORBIDDEN', msg),

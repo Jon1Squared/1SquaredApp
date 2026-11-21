@@ -1392,9 +1392,155 @@ describe('S0-28a: Negotiated Client & Parent-Group Rates + 4-Tier Lookup (ADR 00
 
     // Also verify getAppSnapshot in host context runs cleanly after all operations
     setActiveTenantConfigForTesting(alphaRaw);
-    await runAsActionActor('P-000004', async () => {
-      const snap = await getAppSnapshot('P-000004');
-      expect(snap.tenantId).toBe(tenantAlpha);
+    await runAsActionActor(
+      'P-000004',
+      async () => {
+        const snap = await getAppSnapshot('P-000004');
+        expect(snap.tenantId).toBe(tenantAlpha);
+      },
+      { tenantId: tenantAlpha },
+    );
+
+    // R643 (D9 = a): Role & MFA gating on matter and client overrides inside the two-tenant suite
+    const alphaAccessibleMatter = alphaSeed.matters.find(
+      (m) => !m.isStaffMatter && !m.hasEthicalWall && !m.mergedIntoId,
+    )!;
+    const partnerCreatedMatterOvr = await runAsActionActor(
+      'P-000001',
+      () =>
+        saveMatterRateOverrideAction({
+          matterId: alphaAccessibleMatter.id,
+          gradeKey: 'partner',
+          rateGbp: 345,
+          effectiveFrom: '2026-01-01',
+          notes: 'R643 partner matter override',
+        }),
+      { tenantId: tenantAlpha, roles: ['partner', 'fee_earner'], mfaVerified: false },
+    );
+    expect(isActionDenied(partnerCreatedMatterOvr)).toBe(false);
+    expect(partnerCreatedMatterOvr.override?.rateGbp).toBe(345);
+    const partnerMatterOvrId = partnerCreatedMatterOvr.override!.id;
+
+    // Legal secretary (P-000010) and Fee earner (P-000002) are refused on an accessible matter
+    for (const actorSpec of [
+      { id: 'P-000010', roles: ['legal_secretary'] as const },
+      { id: 'P-000002', roles: ['fee_earner'] as const },
+    ]) {
+      await runAsActionActor(
+        actorSpec.id,
+        async () => {
+          const deniedSave = await saveMatterRateOverrideAction({
+            matterId: alphaAccessibleMatter.id,
+            gradeKey: 'associate',
+            rateGbp: 185,
+            effectiveFrom: '2026-01-01',
+          });
+          expect(isActionDenied(deniedSave)).toBe(true);
+          if (isActionDenied(deniedSave)) {
+            expect(deniedSave.code).toBe('FORBIDDEN');
+          }
+
+          const deniedDel = await deleteMatterRateOverrideAction(partnerMatterOvrId);
+          expect(isActionDenied(deniedDel)).toBe(true);
+          if (isActionDenied(deniedDel)) {
+            expect(deniedDel.code).toBe('FORBIDDEN');
+          }
+        },
+        { tenantId: tenantAlpha, roles: actorSpec.roles, mfaVerified: true },
+      );
+    }
+
+    // Disabling allowMatterRateOverrides still allows deleting an existing matter rate override (R643)
+    const alphaBaseCostsCfg = createDefaultMatterCostsConfig(alphaSeed.values, {
+      clientProfileCode: tenantAlpha,
     });
+    await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMatterCostsConfigAction({
+          ...alphaBaseCostsCfg,
+          allowMatterRateOverrides: false,
+        }),
+      { tenantId: tenantAlpha, mfaVerified: true },
+    );
+    const delWhenDisabled = await runAsActionActor(
+      'P-000001',
+      () => deleteMatterRateOverrideAction(partnerMatterOvrId),
+      { tenantId: tenantAlpha, roles: ['partner', 'fee_earner'], mfaVerified: false },
+    );
+    expect(delWhenDisabled.deleted).toBe(true);
+
+    // Client rate override writes require MFA (even for partner / finance) and reject finance:view-only
+    const noMfaClientSave = await runAsActionActor(
+      'P-000001',
+      () =>
+        saveClientRateOverrideAction({
+          clientType: 'organisation',
+          clientId: alphaOrg.id,
+          practiceAreaId: null,
+          gradeKey: 'associate',
+          rateGbp: 225,
+          effectiveFrom: '2026-02-01',
+        }),
+      { tenantId: tenantAlpha, roles: ['partner', 'fee_earner'], mfaVerified: false },
+    );
+    expect(isActionDenied(noMfaClientSave)).toBe(true);
+    if (isActionDenied(noMfaClientSave)) {
+      expect(noMfaClientSave.code).toBe('MFA_REQUIRED');
+    }
+
+    const noMfaClientDelete = await runAsActionActor(
+      'P-000009',
+      () => deleteClientRateOverrideAction(alphaOverride.id),
+      { tenantId: tenantAlpha, roles: ['finance'], mfaVerified: false },
+    );
+    expect(isActionDenied(noMfaClientDelete)).toBe(true);
+    if (isActionDenied(noMfaClientDelete)) {
+      expect(noMfaClientDelete.code).toBe('MFA_REQUIRED');
+    }
+
+    // User holding only finance:view (via override revoking finance:credit_control) is refused
+    await freshPartyRepo.putPerson(ctxAlpha, {
+      ...alphaSeed.people.find((p) => p.id === 'P-000009')!,
+      permissionOverrides: {
+        grant: ['finance:view'],
+        revoke: ['finance:credit_control'],
+      },
+    });
+    const financeViewOnlySave = await runAsActionActor(
+      'P-000009',
+      () =>
+        saveClientRateOverrideAction({
+          clientType: 'organisation',
+          clientId: alphaOrg.id,
+          practiceAreaId: null,
+          gradeKey: 'trainee',
+          rateGbp: 135,
+          effectiveFrom: '2026-02-01',
+        }),
+      { tenantId: tenantAlpha, roles: ['finance'], mfaVerified: true },
+    );
+    expect(isActionDenied(financeViewOnlySave)).toBe(true);
+    if (isActionDenied(financeViewOnlySave)) {
+      expect(financeViewOnlySave.code).toBe('FORBIDDEN');
+    }
+
+    // Partner with MFA succeeds in Alpha and remains isolated from Bravo
+    const mfaClientSave = await runAsActionActor(
+      'P-000001',
+      () =>
+        saveClientRateOverrideAction({
+          clientType: 'organisation',
+          clientId: alphaOrg.id,
+          practiceAreaId: null,
+          gradeKey: 'trainee',
+          rateGbp: 135,
+          effectiveFrom: '2026-02-01',
+        }),
+      { tenantId: tenantAlpha, roles: ['partner', 'fee_earner'], mfaVerified: true },
+    );
+    expect(isActionDenied(mfaClientSave)).toBe(false);
+    expect(mfaClientSave.override?.rateGbp).toBe(135);
+    expect(await freshRateRepo.getClientRateOverrideById(ctxBravo, mfaClientSave.override!.id)).toBeNull();
   });
 });

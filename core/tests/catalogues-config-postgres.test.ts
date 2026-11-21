@@ -1739,4 +1739,122 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
       await resetAllDemoData('P-000001', ctx);
     }
   });
+
+  it('R644: saveOrgStructure validates schema, rejects duplicate IDs and dangling references, and writes before/after summary audit entries', async () => {
+    const { ctx, actorSession } = makeHostActorAndContext('P-000001');
+    const auditRepo = new TenantAuditRepository();
+    try {
+      await runWithActiveActorSession(actorSession, async () => {
+        await resetAllDemoData('P-000001', ctx);
+        const snapBefore = await getAppSnapshot('P-000001');
+        const auditCountBefore = await auditRepo.countAuditEntries(ctx);
+
+        // 1. Dangling parentDepartmentId on teamsOrPracticeGroups must be refused
+        const danglingDeptTeam = {
+          ...snapBefore.orgStructure,
+          teamsOrPracticeGroups: [
+            ...snapBefore.orgStructure.teamsOrPracticeGroups,
+            {
+              id: 'TPG-DANGLING-R644',
+              code: 'DANGLING',
+              name: 'Dangling Team',
+              parentDepartmentId: 'DEPT-DOES-NOT-EXIST',
+              active: true,
+            },
+          ],
+        };
+        const danglingDeptRes = (await saveOrgStructure(
+          danglingDeptTeam,
+          'P-000001',
+        )) as { ok?: boolean; code?: string; error?: string };
+        expect(danglingDeptRes.ok).toBe(false);
+        expect(danglingDeptRes.code).toBe('ORG_STRUCTURE_VALIDATION_ERROR');
+        expect(danglingDeptRes.error).toMatch(/parentDepartmentId|DEPT-DOES-NOT-EXIST/i);
+
+        // 2. Dangling parentDivisionId on departments must be refused
+        const danglingDivDept = {
+          ...snapBefore.orgStructure,
+          departments: [
+            ...snapBefore.orgStructure.departments,
+            {
+              id: 'DEPT-DANGLING-DIV',
+              code: 'DANGDIV',
+              name: 'Dangling Division Dept',
+              parentDivisionId: 'DIV-DOES-NOT-EXIST',
+              defaultCostCentreId: snapBefore.orgStructure.costCentres[0]!.id,
+              defaultProfitCentreId: snapBefore.orgStructure.profitCentres[0]!.id,
+              active: true,
+            },
+          ],
+        };
+        const danglingDivRes = (await saveOrgStructure(
+          danglingDivDept,
+          'P-000001',
+        )) as { ok?: boolean; code?: string; error?: string };
+        expect(danglingDivRes.ok).toBe(false);
+        expect(danglingDivRes.code).toBe('ORG_STRUCTURE_VALIDATION_ERROR');
+        expect(danglingDivRes.error).toMatch(/parentDivisionId|DIV-DOES-NOT-EXIST/i);
+
+        // 3. Duplicate team ID in teamsOrPracticeGroups must be refused
+        const existingTeam = snapBefore.orgStructure.teamsOrPracticeGroups[0]!;
+        const duplicateTeamOrg = {
+          ...snapBefore.orgStructure,
+          teamsOrPracticeGroups: [
+            ...snapBefore.orgStructure.teamsOrPracticeGroups,
+            {
+              ...existingTeam,
+              name: 'Duplicate Team ID Entry',
+            },
+          ],
+        };
+        const dupTeamRes = (await saveOrgStructure(
+          duplicateTeamOrg,
+          'P-000001',
+        )) as { ok?: boolean; code?: string; error?: string };
+        expect(dupTeamRes.ok).toBe(false);
+        expect(dupTeamRes.code).toBe('ORG_STRUCTURE_VALIDATION_ERROR');
+        expect(dupTeamRes.error).toMatch(/duplicate/i);
+
+        // Refused saves must not mutate DB orgStructure or write audit entries
+        const snapAfterRejected = await getAppSnapshot('P-000001');
+        expect(snapAfterRejected.orgStructure).toEqual(snapBefore.orgStructure);
+        expect(await auditRepo.countAuditEntries(ctx)).toBe(auditCountBefore);
+
+        // 4. Valid save writes an ORG-STRUCTURE audit entry with non-null before & after summaries
+        const validNext = {
+          ...snapBefore.orgStructure,
+          teamsOrPracticeGroups: [
+            ...snapBefore.orgStructure.teamsOrPracticeGroups,
+            {
+              id: 'TPG-VALID-R644',
+              code: 'R644V',
+              name: 'Valid R644 Practice Group',
+              parentDepartmentId: snapBefore.orgStructure.departments[0]!.id,
+              active: true,
+            },
+          ],
+        };
+        const validRes = (await saveOrgStructure(validNext, 'P-000001')) as {
+          ok?: boolean;
+          orgStructure: typeof validNext;
+        };
+        expect(validRes.ok).toBe(true);
+        const audits = await auditRepo.listAuditEntriesForRecord(
+          ctx,
+          'system',
+          'ORG-STRUCTURE',
+        );
+        const latestAudit = audits[0];
+        expect(latestAudit).toBeDefined();
+        expect(latestAudit!.oldValue).toBeTruthy();
+        expect(latestAudit!.oldValue).not.toContain('TPG-VALID-R644');
+        expect(latestAudit!.newValue).toBeTruthy();
+        expect(latestAudit!.newValue).toContain('TPG-VALID-R644');
+      });
+    } finally {
+      setTestEntraSessionOverride(null);
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', ctx);
+    }
+  });
 });

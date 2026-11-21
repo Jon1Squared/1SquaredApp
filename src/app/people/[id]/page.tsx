@@ -93,7 +93,7 @@ export default async function PersonProfilePage({
       ].includes(p),
     );
     const canManageNegotiatedRates = snap.currentUserPermissions.some((p) =>
-      ['finance:view', 'finance:credit_control', 'admin:access'].includes(p),
+      ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(p),
     );
     const rateBundle = canViewNegotiatedRates
       ? await listClientRateOverridesRecord(

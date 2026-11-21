@@ -303,6 +303,31 @@ export function AdminClient({
   );
   const [pending, startTransition] = useTransition();
 
+  const persistOrgStructureUpdate = (
+    next: OrgStructureCatalogue,
+    successMessage: string,
+    onSuccess?: () => void,
+  ) => {
+    const previous = orgCatalogue;
+    setOrgCatalogue(next);
+    startTransition(async () => {
+      const res = await saveOrgStructureAction(next);
+      if (isActionDenied(res)) {
+        setOrgCatalogue(previous);
+        showToast(res.message);
+        return;
+      }
+      if (res.ok === false) {
+        setOrgCatalogue(res.orgStructure);
+        showToast(res.error);
+        return;
+      }
+      setOrgCatalogue(res.orgStructure);
+      onSuccess?.();
+      showToast(successMessage);
+    });
+  };
+
   const normalizedLists = useMemo(() => {
     const mapped = lists.map((l) => {
       const nextLabel = LIST_LABEL_OVERRIDES[l.key] ?? l.label;
@@ -3321,12 +3346,9 @@ export function AdminClient({
                       },
                     ],
                   };
-                  setOrgCatalogue(next);
-                  setNewDivName('');
-                  setNewDivCode('');
-                  startTransition(async () => {
-                    await saveOrgStructureAction(next);
-                    showToast(`Added division ${id}`);
+                  persistOrgStructureUpdate(next, `Added division ${id}`, () => {
+                    setNewDivName('');
+                    setNewDivCode('');
                   });
                 }}
               >
@@ -3442,13 +3464,10 @@ export function AdminClient({
                                               },
                                         ),
                                       };
-                                      setOrgCatalogue(next);
-                                      startTransition(async () => {
-                                        await saveOrgStructureAction(next);
-                                        showToast(
-                                          `Updated practice areas for ${dept.name}`,
-                                        );
-                                      });
+                                      persistOrgStructureUpdate(
+                                        next,
+                                        `Updated practice areas for ${dept.name}`,
+                                      );
                                     }}
                                   />
                                   <span>{pa.label}</span>
@@ -3486,15 +3505,12 @@ export function AdminClient({
                                   d.id === dept.id ? { ...d, active: !d.active } : d,
                                 ),
                               };
-                              setOrgCatalogue(next);
-                              startTransition(async () => {
-                                await saveOrgStructureAction(next);
-                                showToast(
-                                  dept.active
-                                    ? `${dept.name} deactivated across Intake, Quotes & Matters`
-                                    : `${dept.name} activated`,
-                                );
-                              });
+                              persistOrgStructureUpdate(
+                                next,
+                                dept.active
+                                  ? `${dept.name} deactivated across Intake, Quotes & Matters`
+                                  : `${dept.name} activated`,
+                              );
                             }}
                           >
                             {dept.active ? 'Deactivate' : 'Activate'}
@@ -3581,12 +3597,9 @@ export function AdminClient({
                       },
                     ],
                   };
-                  setOrgCatalogue(next);
-                  setNewDeptName('');
-                  setNewDeptCode('');
-                  startTransition(async () => {
-                    await saveOrgStructureAction(next);
-                    showToast(`Added department ${id}`);
+                  persistOrgStructureUpdate(next, `Added department ${id}`, () => {
+                    setNewDeptName('');
+                    setNewDeptCode('');
                   });
                 }}
               >
@@ -3677,12 +3690,9 @@ export function AdminClient({
                       },
                     ],
                   };
-                  setOrgCatalogue(next);
-                  setNewTeamName('');
-                  setNewTeamCode('');
-                  startTransition(async () => {
-                    await saveOrgStructureAction(next);
-                    showToast(`Added team / practice group ${id}`);
+                  persistOrgStructureUpdate(next, `Added team / practice group ${id}`, () => {
+                    setNewTeamName('');
+                    setNewTeamCode('');
                   });
                 }}
               >
@@ -4120,12 +4130,9 @@ export function AdminClient({
                         },
                       ],
                     };
-                    setOrgCatalogue(next);
-                    setNewOfficeName('');
-                    setNewOfficeCode('');
-                    startTransition(async () => {
-                      await saveOrgStructureAction(next);
-                      showToast(`Added office ${id}`);
+                    persistOrgStructureUpdate(next, `Added office ${id}`, () => {
+                      setNewOfficeName('');
+                      setNewOfficeCode('');
                     });
                   }}
                 >
@@ -4177,12 +4184,9 @@ export function AdminClient({
                         },
                       ],
                     };
-                    setOrgCatalogue(next);
-                    setNewCcName('');
-                    setNewCcCode('');
-                    startTransition(async () => {
-                      await saveOrgStructureAction(next);
-                      showToast(`Added cost centre ${code}`);
+                    persistOrgStructureUpdate(next, `Added cost centre ${code}`, () => {
+                      setNewCcName('');
+                      setNewCcCode('');
                     });
                   }}
                 >
@@ -4234,12 +4238,9 @@ export function AdminClient({
                         },
                       ],
                     };
-                    setOrgCatalogue(next);
-                    setNewPcName('');
-                    setNewPcCode('');
-                    startTransition(async () => {
-                      await saveOrgStructureAction(next);
-                      showToast(`Added profit centre ${code}`);
+                    persistOrgStructureUpdate(next, `Added profit centre ${code}`, () => {
+                      setNewPcName('');
+                      setNewPcCode('');
                     });
                   }}
                 >
