@@ -291,6 +291,24 @@ describe('enquiries and tasks', () => {
     expect(findPracticeAreaRoutingClashes(demo.teams)).toEqual([]);
   });
 
+  it('R616: valueBySystemKey ignores inactive values so deactivated statuses fail closed', () => {
+    const res = valueBySystemKey(
+      [
+        {
+          id: 'matter_status.prospective_enquiry',
+          listKey: 'matter_status',
+          label: 'Prospective / Enquiry',
+          systemKey: 'prospective',
+          sortOrder: 1,
+          active: false,
+        },
+      ],
+      'matter_status',
+      'prospective',
+    );
+    expect(res).toBeUndefined();
+  });
+
   it('calculates working hours and working days respecting weekends and bank holidays', () => {
     const dueEmergency = calculateFirstContactDue('2026-10-16T10:00:00.000Z', 'Emergency');
     expect(dueEmergency.startsWith('2026-10-16')).toBe(true);

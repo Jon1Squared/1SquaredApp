@@ -2589,6 +2589,22 @@ export const TenantConfigurationSchema = z
       .describe(
         'Tenant notification digest schedule and delivery settings (ADR 0035, S0-29)',
       ),
+    enquiries: z
+      .object({
+        fallbackTeamId: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .nullable()
+          .default(null)
+          .describe(
+            'Optional active Team ID used as the fallback enquiry routing target when no practice-area team matches; overrides the systemKey=intake default when set.',
+          ),
+      })
+      .strict()
+      .optional()
+      .describe('Tenant enquiry intake and routing settings'),
   })
   .strict()
   .superRefine((cfg, ctx) => {

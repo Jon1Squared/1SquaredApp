@@ -23,7 +23,12 @@ import {
   type KeyVaultSecretReader,
 } from './keyVaultSecretReader';
 
-const EMAIL_ADDRESS_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+export const EMAIL_ADDRESS_PATTERN = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+
+export function isValidEmailAddress(address: string): boolean {
+  const trimmed = address.trim();
+  return trimmed.length > 0 && !/[\r\n]/.test(address) && EMAIL_ADDRESS_PATTERN.test(trimmed);
+}
 
 export function collectNormalizedRecipients(
   recipients: EmailRecipientList,

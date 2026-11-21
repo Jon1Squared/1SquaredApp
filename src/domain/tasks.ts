@@ -299,7 +299,6 @@ export function resolveRoutedTeam(
   const intake =
     (fallbackTeamId ? activeTeams.find((t) => t.id === fallbackTeamId) : undefined) ??
     activeTeams.find((t) => t.systemKey === 'intake') ??
-    activeTeams.find((t) => t.orgTeamId === 'TPG-BD-INTAKE') ??
     null;
   return { team: intake, isFallbackIntake: true };
 }

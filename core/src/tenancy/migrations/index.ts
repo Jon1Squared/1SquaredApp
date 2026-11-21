@@ -2712,6 +2712,209 @@ DROP SEQUENCE IF EXISTS public.tenant_teams_outbox_id_seq;
 `.trim(),
   };
 
+export const STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021: TenantMigrationDefinition =
+  {
+    version: '0021',
+    name: '0021_stable_keys_and_team_metadata_backfill',
+    description:
+      'Reversible idempotent per-tenant backfill of canonical employee_role and risk_rating choice systemKeys, default team departmentId/orgTeamId/systemKey metadata, and legacy conflict-draft task autoTrigger values (R600, R604).',
+    dependsOn: ['0020'],
+    tablesChanged: ['choice_values', 'teams', 'tasks'],
+    upSql: `
+CREATE TABLE IF NOT EXISTS public.migration_0021_backfill_audit (
+  tenant_id TEXT NOT NULL,
+  entity_kind TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  keys_added JSONB NOT NULL DEFAULT '[]'::jsonb,
+  PRIMARY KEY (tenant_id, entity_kind, record_id)
+);
+
+WITH choice_mapping(id, list_key, sys_key) AS (
+  VALUES
+    ('employee_role.partner', 'employee_role', 'partner'),
+    ('employee_role.fee_earner', 'employee_role', 'fee_earner'),
+    ('employee_role.senior_solicitor', 'employee_role', 'senior_solicitor'),
+    ('employee_role.solicitor', 'employee_role', 'solicitor'),
+    ('employee_role.trainee_paralegal', 'employee_role', 'trainee_paralegal'),
+    ('employee_role.practice_manager', 'employee_role', 'practice_manager'),
+    ('employee_role.business_development', 'employee_role', 'business_development'),
+    ('employee_role.risk_and_compliance', 'employee_role', 'risk_and_compliance'),
+    ('employee_role.finance', 'employee_role', 'finance'),
+    ('employee_role.support_staff', 'employee_role', 'support_staff'),
+    ('employee_role.system_administrator', 'employee_role', 'system_administrator'),
+    ('risk_rating.low', 'risk_rating', 'low'),
+    ('risk_rating.medium', 'risk_rating', 'medium'),
+    ('risk_rating.high', 'risk_rating', 'high'),
+    ('risk_rating.critical', 'risk_rating', 'critical'),
+    ('risk_rating.conflict_flagged', 'risk_rating', 'conflict_flagged'),
+    ('risk_rating.sensitive', 'risk_rating', 'sensitive')
+),
+inserted_choice_audit AS (
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, keys_added)
+  SELECT cv.tenant_id, 'choice_value', cv.id, '["systemKey"]'::jsonb
+    FROM public.choice_values cv
+    JOIN choice_mapping cm ON cm.id = cv.id AND cm.list_key = cv.list_key
+   WHERE COALESCE(cv.metadata_json->>'systemKey', '') = ''
+  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
+  RETURNING tenant_id, record_id
+)
+UPDATE public.choice_values cv
+   SET metadata_json = jsonb_set(
+     COALESCE(cv.metadata_json, '{}'::jsonb),
+     '{systemKey}',
+     to_jsonb(cm.sys_key),
+     true
+   )
+  FROM choice_mapping cm
+  JOIN inserted_choice_audit ica ON ica.record_id = cm.id
+ WHERE cv.tenant_id = ica.tenant_id
+   AND cv.id = ica.record_id
+   AND cv.list_key = cm.list_key
+   AND COALESCE(cv.metadata_json->>'systemKey', '') = '';
+
+WITH team_rule(kind, match_key, dept_id, org_team_id, sys_key) AS (
+  VALUES
+    ('pa', 'work_type.real_estate_and_property', 'DEPT-RE', NULL::text, NULL::text),
+    ('pa', 'work_type.corporate_and_commercial', 'DEPT-CORP', NULL::text, NULL::text),
+    ('pa', 'work_type.dispute_resolution', 'DEPT-DR', NULL::text, NULL::text),
+    ('pa', 'work_type.private_client', 'DEPT-PC', NULL::text, NULL::text),
+    ('pa', 'work_type.employment_and_hr', 'DEPT-EMP', NULL::text, NULL::text),
+    ('pa', 'work_type.finance_and_banking', 'DEPT-CORP', 'TPG-FIN-BANKING', NULL::text),
+    ('pa', 'work_type.regulatory_and_compliance', 'DEPT-RISK', 'TPG-REG-PUB', NULL::text),
+    ('name', 'intake', 'DEPT-BD', NULL::text, 'intake'),
+    ('name', 'risk & compliance', 'DEPT-RISK', NULL::text, 'risk_compliance'),
+    ('name', 'accounts', 'DEPT-FIN', NULL::text, 'accounts')
+),
+matched_teams AS (
+  SELECT DISTINCT ON (t.tenant_id, t.id)
+    t.tenant_id,
+    t.id,
+    t.payload_json,
+    tr.dept_id,
+    tr.org_team_id,
+    CASE
+      WHEN tr.sys_key IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+            FROM public.teams t2
+           WHERE t2.tenant_id = t.tenant_id
+             AND t2.id <> t.id
+             AND t2.payload_json->>'systemKey' = tr.sys_key
+        )
+      THEN tr.sys_key
+      ELSE NULL
+    END AS sys_key
+  FROM public.teams t
+  JOIN team_rule tr ON (
+    (tr.kind = 'pa' AND COALESCE(t.practice_area_ids_json, '[]'::jsonb) ? tr.match_key)
+    OR (
+      tr.kind = 'name'
+      AND jsonb_array_length(COALESCE(t.practice_area_ids_json, '[]'::jsonb)) = 0
+      AND lower(trim(t.name)) = tr.match_key
+    )
+  )
+  ORDER BY t.tenant_id, t.id, tr.kind ASC, tr.match_key ASC
+),
+team_deltas AS (
+  SELECT
+    mt.tenant_id,
+    mt.id,
+    CASE WHEN COALESCE(mt.payload_json->>'departmentId', '') = '' AND mt.dept_id IS NOT NULL THEN mt.dept_id ELSE NULL END AS add_dept,
+    CASE WHEN COALESCE(mt.payload_json->>'orgTeamId', '') = '' AND mt.org_team_id IS NOT NULL THEN mt.org_team_id ELSE NULL END AS add_org_team,
+    CASE WHEN COALESCE(mt.payload_json->>'systemKey', '') = '' AND mt.sys_key IS NOT NULL THEN mt.sys_key ELSE NULL END AS add_sys_key,
+    (
+      SELECT COALESCE(jsonb_agg(k), '[]'::jsonb)
+        FROM unnest(ARRAY[
+          CASE WHEN COALESCE(mt.payload_json->>'departmentId', '') = '' AND mt.dept_id IS NOT NULL THEN 'departmentId' ELSE NULL END,
+          CASE WHEN COALESCE(mt.payload_json->>'orgTeamId', '') = '' AND mt.org_team_id IS NOT NULL THEN 'orgTeamId' ELSE NULL END,
+          CASE WHEN COALESCE(mt.payload_json->>'systemKey', '') = '' AND mt.sys_key IS NOT NULL THEN 'systemKey' ELSE NULL END
+        ]) AS k
+       WHERE k IS NOT NULL
+    ) AS keys_added
+  FROM matched_teams mt
+),
+inserted_team_audit AS (
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, keys_added)
+  SELECT td.tenant_id, 'team', td.id, td.keys_added
+    FROM team_deltas td
+   WHERE jsonb_array_length(td.keys_added) > 0
+  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
+  RETURNING tenant_id, record_id
+)
+UPDATE public.teams t
+   SET payload_json = COALESCE(t.payload_json, '{}'::jsonb) || jsonb_strip_nulls(
+     jsonb_build_object(
+       'departmentId', td.add_dept,
+       'orgTeamId', td.add_org_team,
+       'systemKey', td.add_sys_key
+     )
+   )
+  FROM team_deltas td
+  JOIN inserted_team_audit ita ON ita.tenant_id = td.tenant_id AND ita.record_id = td.id
+ WHERE t.tenant_id = td.tenant_id
+   AND t.id = td.id
+   AND jsonb_array_length(td.keys_added) > 0;
+
+WITH inserted_task_audit AS (
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, keys_added)
+  SELECT t.tenant_id, 'task', t.id, '["autoTrigger"]'::jsonb
+    FROM public.tasks t
+   WHERE t.auto_trigger IS NULL
+     AND COALESCE(t.profile_json->>'autoTrigger', '') = ''
+     AND t.task_type_id = 'task_type.conflict_check'
+     AND (
+       t.title LIKE 'Conflict check · % · Draft'
+       OR t.description LIKE 'Saved conflict check draft for %'
+     )
+  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
+  RETURNING tenant_id, record_id
+)
+UPDATE public.tasks t
+   SET auto_trigger = 'conflict_check_draft',
+       profile_json = jsonb_set(
+         COALESCE(t.profile_json, '{}'::jsonb),
+         '{autoTrigger}',
+         '"conflict_check_draft"'::jsonb,
+         true
+       )
+  FROM inserted_task_audit ita
+ WHERE t.tenant_id = ita.tenant_id
+   AND t.id = ita.record_id
+   AND t.auto_trigger IS NULL;
+`.trim(),
+    downSql: `
+UPDATE public.choice_values cv
+   SET metadata_json = COALESCE(cv.metadata_json, '{}'::jsonb) - 'systemKey'
+  FROM public.migration_0021_backfill_audit a
+ WHERE a.tenant_id = cv.tenant_id
+   AND a.entity_kind = 'choice_value'
+   AND a.record_id = cv.id
+   AND (a.keys_added ? 'systemKey');
+
+UPDATE public.teams t
+   SET payload_json = (
+     SELECT COALESCE(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+       FROM jsonb_each(COALESCE(t.payload_json, '{}'::jsonb)) e
+      WHERE NOT (a.keys_added ? e.key)
+   )
+  FROM public.migration_0021_backfill_audit a
+ WHERE a.tenant_id = t.tenant_id
+   AND a.entity_kind = 'team'
+   AND a.record_id = t.id;
+
+UPDATE public.tasks t
+   SET auto_trigger = NULL,
+       profile_json = COALESCE(t.profile_json, '{}'::jsonb) - 'autoTrigger'
+  FROM public.migration_0021_backfill_audit a
+ WHERE a.tenant_id = t.tenant_id
+   AND a.entity_kind = 'task'
+   AND a.record_id = t.id
+   AND t.auto_trigger = 'conflict_check_draft';
+
+DROP TABLE IF EXISTS public.migration_0021_backfill_audit CASCADE;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -2733,6 +2936,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   TENANT_SEARCH_INDEXES_MIGRATION_0018,
   EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019,
   TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020,
+  STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021,
 ];
 
 export function validateMigrationCatalogueOrder(

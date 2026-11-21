@@ -420,6 +420,9 @@ export function AdminClient({
   const [editingTeam, setEditingTeam] = useState<Team | null>(null);
   const [teamName, setTeamName] = useState('');
   const [teamDesc, setTeamDesc] = useState('');
+  const [teamDepartmentId, setTeamDepartmentId] = useState('');
+  const [teamOrgTeamId, setTeamOrgTeamId] = useState('');
+  const [teamSystemKey, setTeamSystemKey] = useState('');
   const [teamMemberIds, setTeamMemberIds] = useState<string[]>([]);
   const [teamLeadIds, setTeamLeadIds] = useState<string[]>([]);
   const [teamPracticeAreaIds, setTeamPracticeAreaIds] = useState<string[]>([]);
@@ -432,6 +435,7 @@ export function AdminClient({
     enquirySettings.failedAttemptsBeforeSuggestNoResponse,
   );
   const [retentionMonths, setRetentionMonths] = useState(enquirySettings.retentionMonths);
+  const [fallbackTeamId, setFallbackTeamId] = useState(enquirySettings.fallbackTeamId ?? '');
 
   // Task settings state
   const [templates, setTemplates] = useState(taskSettings.templates);
@@ -836,6 +840,9 @@ export function AdminClient({
     setEditingTeam(null);
     setTeamName('');
     setTeamDesc('');
+    setTeamDepartmentId('');
+    setTeamOrgTeamId('');
+    setTeamSystemKey('');
     setTeamMemberIds([]);
     setTeamLeadIds([]);
     setTeamPracticeAreaIds([]);
@@ -846,6 +853,9 @@ export function AdminClient({
     setEditingTeam(tm);
     setTeamName(tm.name);
     setTeamDesc(tm.description);
+    setTeamDepartmentId(tm.departmentId ?? '');
+    setTeamOrgTeamId(tm.orgTeamId ?? '');
+    setTeamSystemKey(tm.systemKey ?? '');
     setTeamMemberIds([...tm.memberIds]);
     setTeamLeadIds([...tm.leadIds]);
     setTeamPracticeAreaIds([...tm.practiceAreaIds]);
@@ -860,6 +870,9 @@ export function AdminClient({
         id: editingTeam?.id,
         name: teamName.trim(),
         description: teamDesc.trim(),
+        departmentId: teamDepartmentId || null,
+        orgTeamId: teamOrgTeamId || null,
+        systemKey: teamSystemKey || null,
         memberIds: teamMemberIds,
         leadIds: teamLeadIds,
         practiceAreaIds: teamPracticeAreaIds,
@@ -876,15 +889,22 @@ export function AdminClient({
 
   const handleToggleTeamActive = (tm: Team) => {
     startTransition(async () => {
-      await saveTeamAction({
+      const res = await saveTeamAction({
         id: tm.id,
         name: tm.name,
         description: tm.description,
+        departmentId: tm.departmentId ?? null,
+        orgTeamId: tm.orgTeamId ?? null,
+        systemKey: tm.systemKey ?? null,
         memberIds: tm.memberIds,
         leadIds: tm.leadIds,
         practiceAreaIds: tm.practiceAreaIds,
         active: !tm.active,
       });
+      if (res.error) {
+        showToast(res.error);
+        return;
+      }
       showToast(tm.active ? 'Team deactivated' : 'Team activated');
     });
   };
@@ -892,13 +912,18 @@ export function AdminClient({
   const handleSaveEnquirySettings = (e: React.FormEvent) => {
     e.preventDefault();
     startTransition(async () => {
-      await saveEnquirySettingsAction({
+      const res = await saveEnquirySettingsAction({
         emergencyHours: Math.max(1, Number(emergencyHours) || 2),
         workDayStart,
         workDayEnd,
         failedAttemptsBeforeSuggestNoResponse: Math.max(1, Number(failedAttempts) || 3),
         retentionMonths: Math.max(1, Number(retentionMonths) || 12),
+        fallbackTeamId: fallbackTeamId || null,
       });
+      if ('error' in res && res.error) {
+        showToast(res.error);
+        return;
+      }
       showToast('Enquiry settings updated');
     });
   };
@@ -2735,6 +2760,31 @@ export function AdminClient({
                   Default: 12 months. After this period, personal details on closed unconverted enquiries can be removed while keeping practice area, channel, dates and outcome for reporting.
                 </span>
               </div>
+
+              <div className="field-group field-group--full">
+                <label className="field-label" htmlFor="enq-fallback-team">
+                  Fallback intake routing team
+                </label>
+                <select
+                  id="enq-fallback-team"
+                  className="field-input"
+                  style={{ maxWidth: 420 }}
+                  value={fallbackTeamId}
+                  onChange={(e) => setFallbackTeamId(e.target.value)}
+                >
+                  <option value="">Automatic (active team with system key &lsquo;intake&rsquo;)</option>
+                  {teams
+                    .filter((t) => t.active || t.id === fallbackTeamId)
+                    .map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name} ({t.id}){!t.active ? ' — Inactive' : ''}
+                      </option>
+                    ))}
+                </select>
+                <span className="field-help">
+                  Receives new enquiries whose practice area is not mapped to any active team. Leave on Automatic to route to the active team carrying system key &lsquo;intake&rsquo;.
+                </span>
+              </div>
             </div>
 
             <div style={{ marginTop: 16 }}>
@@ -3685,6 +3735,18 @@ export function AdminClient({
                         ({tm.id})
                       </span>{' '}
                       {!tm.active ? <StatusPill label="Inactive" tone="neutral" /> : null}
+                      {tm.systemKey ? (
+                        <StatusPill label={`Key: ${tm.systemKey}`} tone="neutral" />
+                      ) : null}
+                      {tm.departmentId ? (
+                        <StatusPill
+                          label={
+                            orgCatalogue.departments.find((d) => d.id === tm.departmentId)?.name ??
+                            tm.departmentId
+                          }
+                          tone="neutral"
+                        />
+                      ) : null}
                       {mappedPracticeAreas.map((pa) => (
                         <StatusPill key={pa} label={`Routes: ${pa}`} tone="positive" />
                       ))}
@@ -3752,6 +3814,100 @@ export function AdminClient({
                           value={teamDesc}
                           onChange={(e) => setTeamDesc(e.target.value)}
                         />
+                      </div>
+
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="team-department-select">
+                          Department
+                        </label>
+                        <select
+                          id="team-department-select"
+                          className="field-input"
+                          value={teamDepartmentId}
+                          onChange={(e) => {
+                            const nextDept = e.target.value;
+                            setTeamDepartmentId(nextDept);
+                            if (
+                              nextDept &&
+                              teamOrgTeamId &&
+                              orgCatalogue.teamsOrPracticeGroups.find(
+                                (g) => g.id === teamOrgTeamId,
+                              )?.parentDepartmentId !== nextDept
+                            ) {
+                              setTeamOrgTeamId('');
+                            }
+                          }}
+                        >
+                          <option value="">None specified</option>
+                          {orgCatalogue.departments
+                            .filter((d) => d.active || d.id === teamDepartmentId)
+                            .map((d) => (
+                              <option key={d.id} value={d.id}>
+                                {d.name} ({d.id})
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="team-org-team-select">
+                          Org practice group (optional)
+                        </label>
+                        <select
+                          id="team-org-team-select"
+                          className="field-input"
+                          value={teamOrgTeamId}
+                          onChange={(e) => {
+                            const nextTpgId = e.target.value;
+                            setTeamOrgTeamId(nextTpgId);
+                            const matchedTpg = orgCatalogue.teamsOrPracticeGroups.find(
+                              (g) => g.id === nextTpgId,
+                            );
+                            if (matchedTpg && !teamDepartmentId) {
+                              setTeamDepartmentId(matchedTpg.parentDepartmentId);
+                            }
+                          }}
+                        >
+                          <option value="">None specified</option>
+                          {orgCatalogue.teamsOrPracticeGroups
+                            .filter(
+                              (g) =>
+                                (g.active || g.id === teamOrgTeamId) &&
+                                (!teamDepartmentId || g.parentDepartmentId === teamDepartmentId),
+                            )
+                            .map((g) => (
+                              <option key={g.id} value={g.id}>
+                                {g.name} ({g.id})
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      <div className="field-group field-group--full">
+                        <label className="field-label" htmlFor="team-system-key-select">
+                          Routing / system key (optional)
+                        </label>
+                        <select
+                          id="team-system-key-select"
+                          className="field-input"
+                          style={{ maxWidth: 360 }}
+                          value={teamSystemKey}
+                          onChange={(e) => setTeamSystemKey(e.target.value)}
+                        >
+                          <option value="">None (practice-area routing only)</option>
+                          <option value="intake">intake — Fallback enquiry intake queue</option>
+                          <option value="risk_compliance">risk_compliance — Conflicts &amp; compliance queue</option>
+                          <option value="accounts">accounts — Accounts &amp; billing queue</option>
+                          {teamSystemKey &&
+                          teamSystemKey !== 'intake' &&
+                          teamSystemKey !== 'risk_compliance' &&
+                          teamSystemKey !== 'accounts' ? (
+                            <option value={teamSystemKey}>{teamSystemKey}</option>
+                          ) : null}
+                        </select>
+                        <span className="field-help">
+                          Stable routing key used for automatic HR team membership sync and conflict/intake fallbacks. Only one active team may hold each key.
+                        </span>
                       </div>
 
                       <div className="field-group field-group--full">

@@ -49,13 +49,13 @@ export function optionsFor(
   return valuesForList(values, listKey).filter((v) => v.active || current.has(v.id));
 }
 
-/** Find a value by its stable systemKey (used by business rules, never labels). */
+/** Find an active value by its stable systemKey (used by business rules, never labels). */
 export function valueBySystemKey(
   values: ChoiceValue[],
   listKey: string,
   systemKey: string,
 ): ChoiceValue | undefined {
-  return values.find((v) => v.listKey === listKey && v.systemKey === systemKey);
+  return values.find((v) => v.active && v.listKey === listKey && v.systemKey === systemKey);
 }
 
 export function systemKeyOf(values: ChoiceValue[], id: string | null | undefined): string | undefined {

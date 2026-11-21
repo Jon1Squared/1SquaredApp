@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   clearPermissionRequestCache,
   createDirectMigrationClient,
+  getPlatformTelemetryRecorder,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
   TenantIntakeQuoteRepository,
@@ -19,6 +20,7 @@ import { isActionDenied } from '@/domain/actionResult';
 import {
   getActiveTenantConfiguration,
   getActiveTenantRawBaseConfig,
+  getCatalogueRepository,
   getPmsRepository,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
@@ -2028,6 +2030,172 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
           unmappedRes.createdId!,
         );
         expect(unmappedPerson?.employeeRoleId).toBe('employee_role.support_staff');
+      });
+    } finally {
+      await pmsRepo.clearTenantData(seedCtx).catch(() => undefined);
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      clearPermissionRequestCache();
+    }
+  });
+
+  it('R603: createRecordFromPms falls back to active support_staff with zero-PII telemetry when configured gradeRoleMap target is missing or inactive', async () => {
+    const baseStore = loadCommittedSeedStore();
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const seedCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000004',
+        tenantId: 'not-a-law-firm',
+        name: 'Huw Pritchard',
+        email: 'huw.pritchard@notalawfirm.example',
+        roles: ['admin', 'managing_partner', 'finance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r603-pms-grade',
+    });
+    const pmsRepo = getPmsRepository();
+    const partyRepo = getPartyRepository();
+    const catRepo = getCatalogueRepository();
+    const recorder = getPlatformTelemetryRecorder();
+    try {
+      const baseIntegrations = (rawBase.integrations as Record<string, unknown>) ?? {};
+      const basePmsSync = (baseIntegrations.pmsSync as Record<string, unknown>) ?? {};
+      setActiveTenantConfigForTesting(
+        {
+          ...rawBase,
+          integrations: {
+            ...baseIntegrations,
+            pmsSync: {
+              ...basePmsSync,
+              gradeRoleMap: {
+                'Inactive Partner Grade': 'employee_role.partner',
+                'Missing Role Grade': 'employee_role.nonexistent_custom',
+              },
+            },
+          },
+        },
+        { environment: 'test' },
+      );
+
+      await importFirmStoreModulesToPostgres({
+        ctx: seedCtx,
+        store: baseStore,
+        tenantConfig: getActiveTenantConfiguration(),
+        modules: ['parties', 'matters', 'hr', 'catalogues'],
+        clearFirst: true,
+      });
+
+      const currentValues = await catRepo.listAllChoiceValues<{
+        id: string;
+        listKey: string;
+        label: string;
+        systemKey?: string;
+        sortOrder: number;
+        active: boolean;
+      }>(seedCtx);
+      await catRepo.putChoiceValues(
+        seedCtx,
+        currentValues.map((v) =>
+          v.listKey === 'employee_role' && v.id === 'employee_role.partner'
+            ? { ...v, active: false }
+            : v,
+        ),
+      );
+
+      const dataset = buildSyntheticDataset({
+        suffix: 'A',
+        asAtDate: '2026-10-31',
+        wipAmount: 14000,
+        invoiceNet: 6000,
+        unlinkedWipAmount: 22000,
+      });
+      const extendedDataset: TenantPmsExtractDataset = {
+        ...dataset,
+        feeEarners: [
+          ...dataset.feeEarners,
+          {
+            fee_earner_id: 'FE-R603-INACTIVE',
+            initials: 'IP',
+            first_name: 'Owen',
+            last_name: 'Davies',
+            email: 'owen.davies@notalawfirm.example',
+            grade: 'Inactive Partner Grade',
+            department: 'Corporate and commercial',
+            standard_hourly_rate: 300,
+            annual_target_hours: 1000,
+            annual_target_fees: 250000,
+            active: 'Yes',
+          },
+          {
+            fee_earner_id: 'FE-R603-MISSING',
+            initials: 'MR',
+            first_name: 'Ffion',
+            last_name: 'James',
+            email: 'ffion.james@notalawfirm.example',
+            grade: 'Missing Role Grade',
+            department: 'Corporate and commercial',
+            standard_hourly_rate: 250,
+            annual_target_hours: 1000,
+            annual_target_fees: 200000,
+            active: 'Yes',
+          },
+        ],
+      };
+
+      await pmsRepo.clearTenantData(seedCtx);
+      await pmsRepo.importExtractDataset(seedCtx, extendedDataset);
+
+      const { actorSession } = makeHostActorAndContext('P-000004');
+      await runWithActiveActorSession(actorSession, async () => {
+        const beforeEventsCount = recorder.getRecentEntries({
+          tenantId: seedCtx.tenantId,
+        }).length;
+        const inactiveRes = await createRecordFromPms(
+          'employee',
+          'FE-R603-INACTIVE',
+          'P-000004',
+          { mfaVerified: true, tenantCtx: seedCtx },
+        );
+        expect(inactiveRes.ok).toBe(true);
+        const inactivePerson = await partyRepo.getPersonById(
+          seedCtx,
+          inactiveRes.createdId!,
+        );
+        expect(inactivePerson?.employeeRoleId).toBe('employee_role.support_staff');
+
+        const missingRes = await createRecordFromPms(
+          'employee',
+          'FE-R603-MISSING',
+          'P-000004',
+          { mfaVerified: true, tenantCtx: seedCtx },
+        );
+        expect(missingRes.ok).toBe(true);
+        const missingPerson = await partyRepo.getPersonById(
+          seedCtx,
+          missingRes.createdId!,
+        );
+        expect(missingPerson?.employeeRoleId).toBe('employee_role.support_staff');
+
+        const newEvents = recorder
+          .getRecentEntries({ tenantId: seedCtx.tenantId })
+          .slice(beforeEventsCount);
+        const fallbackEvents = newEvents.filter(
+          (e) => e.eventName === 'pms.employee_role_fallback',
+        );
+        expect(fallbackEvents.length).toBeGreaterThanOrEqual(2);
+        const serialized = JSON.stringify(fallbackEvents);
+        expect(serialized).not.toContain('Owen');
+        expect(serialized).not.toContain('Davies');
+        expect(serialized).not.toContain('owen.davies');
+        expect(serialized).not.toContain('Ffion');
+        expect(serialized).not.toContain('Inactive Partner Grade');
+        expect(fallbackEvents[0]!.tenantId).toBe(seedCtx.tenantId);
+        expect(fallbackEvents[0]!.correlationId).toBe(seedCtx.correlationId);
       });
     } finally {
       await pmsRepo.clearTenantData(seedCtx).catch(() => undefined);

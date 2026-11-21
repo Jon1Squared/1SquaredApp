@@ -13213,4 +13213,254 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
+
+  it('R600 & R616: draft save and re-referral leave manual conflict tasks and Risk review tasks intact, update Risk review task on re-referral, complete it on conflict approval, and clear stale draft conflictCheckDate', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const ctx = testTenantCtx('P-000004');
+    const taskRepo = getTaskWorkflowRepository();
+    const matterRepo = getMatterRepository();
+    const seed = loadCommittedSeedStore();
+    const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
+    const {
+      id: _id,
+      openedAt: _opened,
+      conflictCheckDate: _ccDate,
+      matterStatusId: _msId,
+      recordStatusId: _rsId,
+      ...matterTemplate
+    } = baseMatter;
+    void _id;
+    void _opened;
+    void _ccDate;
+    void _msId;
+    void _rsId;
+
+    try {
+      let referredMatterId = '';
+      let riskReviewTaskId = '';
+      let manualTaskId = '';
+
+      await runAsTestActor('P-000004', async () => {
+        // 1. Initial referral creates Risk referral review task with autoTrigger: 'conflict_check_review'
+        const firstReferral = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            title: 'R600 Referred Matter',
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckRecord: {
+              status: 'Referred' as const,
+              outcomeLabel: 'Referred to risk for review' as const,
+              declarationConfirmed: false,
+              reviewerMessage: 'Initial referral note for Risk',
+              lastRunAtDisplay: '20 Nov 2026',
+              lastRunById: 'P-000004',
+              lastRunByName: 'Catrin Williams',
+              submittedAtDisplay: '20 Nov 2026',
+              submittedById: 'P-000004',
+              submittedByName: 'Catrin Williams',
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
+          },
+          { byId: 'P-000004', saveMode: 'submit_referred' },
+        );
+        expect(firstReferral.errors).toBeUndefined();
+        referredMatterId = firstReferral.matter!.id;
+
+        const tasksAfterFirstRef = await taskRepo.listAllTasksUnfiltered(ctx);
+        const reviewTask = tasksAfterFirstRef.find(
+          (t) =>
+            t.linkedRecords.some(
+              (r) => r.recordType === 'matter' && r.recordId === referredMatterId,
+            ) && t.title.startsWith('Conflict review'),
+        )!;
+        expect(reviewTask).toBeDefined();
+        expect(reviewTask.autoTrigger).toBe('conflict_check_review');
+        riskReviewTaskId = reviewTask.id;
+
+        // Also create an ordinary manual task with task_type.conflict_check & autoTrigger: null
+        const manualRes = await saveTaskRecord(
+          {
+            title: 'Verify client source of funds note',
+            description: 'Manual compliance follow-up task',
+            taskTypeId: 'task_type.conflict_check',
+            dueAt: '2026-12-01',
+            assignedPersonId: 'P-000004',
+            linkedRecords: [{ recordType: 'matter', recordId: referredMatterId }],
+            autoTrigger: null,
+          },
+          'P-000004',
+        );
+        expect(manualRes.error).toBeUndefined();
+        manualTaskId = manualRes.task!.id;
+
+        // 2. Saving as draft on referred matter must NOT hijack Risk review task OR manual task
+        const draftAfterRef = await saveMatterRecord(
+          {
+            ...firstReferral.matter!,
+            title: 'R600 Referred Matter Draft Note',
+          },
+          { id: referredMatterId, byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(draftAfterRef.errors).toBeUndefined();
+
+        const reviewAfterDraft = await taskRepo.getTaskById(ctx, riskReviewTaskId, {
+          includeRestricted: true,
+        });
+        expect(reviewAfterDraft?.title).toBe(reviewTask.title);
+        expect(reviewAfterDraft?.autoTrigger).toBe('conflict_check_review');
+        expect(reviewAfterDraft?.status).toBe('To do');
+
+        const manualAfterDraft = await taskRepo.getTaskById(ctx, manualTaskId, {
+          includeRestricted: true,
+        });
+        expect(manualAfterDraft?.title).toBe('Verify client source of funds note');
+        expect(manualAfterDraft?.autoTrigger ?? null).toBeNull();
+        expect(manualAfterDraft?.status).toBe('To do');
+
+        // 3. Re-referring updates existing Risk review task instead of marking it Done or duplicating
+        const secondReferral = await saveMatterRecord(
+          {
+            ...draftAfterRef.matter!,
+            conflictCheckRecord: {
+              ...firstReferral.matter!.conflictCheckRecord!,
+              reviewerMessage: 'Updated referral note for Risk',
+            },
+          },
+          { id: referredMatterId, byId: 'P-000004', saveMode: 'submit_referred' },
+        );
+        expect(secondReferral.errors).toBeUndefined();
+
+        const tasksAfterSecondRef = await taskRepo.listAllTasksUnfiltered(ctx);
+        const reviewTasksAfterSecond = tasksAfterSecondRef.filter(
+          (t) =>
+            t.linkedRecords.some(
+              (r) => r.recordType === 'matter' && r.recordId === referredMatterId,
+            ) && t.autoTrigger === 'conflict_check_review',
+        );
+        expect(reviewTasksAfterSecond).toHaveLength(1);
+        expect(reviewTasksAfterSecond[0]!.id).toBe(riskReviewTaskId);
+        expect(reviewTasksAfterSecond[0]!.status).toBe('To do');
+        expect(reviewTasksAfterSecond[0]!.description).toContain('Updated referral note');
+      });
+
+      // 4. Risk & Compliance approving conflict check completes the Risk review task (manual stays open)
+      await runAsTestActor('P-000003', async () => {
+        const approveRes = await updateMatterConflictRecord(
+          referredMatterId,
+          {
+            status: 'Approved',
+            outcomeLabel: 'Approved by Risk & Compliance',
+            declarationConfirmed: true,
+            reviewerMessage: 'Approved with note',
+            lastRunAtDisplay: '20 Nov 2026',
+            lastRunById: 'P-000004',
+            lastRunByName: 'Catrin Williams',
+            submittedAtDisplay: '20 Nov 2026',
+            submittedById: 'P-000004',
+            submittedByName: 'Catrin Williams',
+            approvedAtDisplay: '20 Nov 2026',
+            approvedById: 'P-000003',
+            approvedByName: 'Bethan Rees',
+            parties: [],
+            matches: [],
+            comments: [],
+            runs: [],
+          },
+          'P-000003',
+        );
+        expect(approveRes.errors).toBeUndefined();
+
+        const reviewAfterApprove = await taskRepo.getTaskById(ctx, riskReviewTaskId, {
+          includeRestricted: true,
+        });
+        expect(reviewAfterApprove?.status).toBe('Done');
+        expect(reviewAfterApprove?.completedById).toBe('P-000003');
+
+        const manualAfterApprove = await taskRepo.getTaskById(ctx, manualTaskId, {
+          includeRestricted: true,
+        });
+        expect(manualAfterApprove?.status).toBe('To do');
+      });
+
+      // 5. R616: stale draft conflictCheckDate is cleared on draft save and overwritten on submit
+      await runAsTestActor('P-000004', async () => {
+        const seedDraft = await saveMatterRecord(
+          {
+            ...matterTemplate,
+            matterNumber: 'DRAFT',
+            title: 'R616 Stale Draft Date',
+          },
+          { byId: 'P-000004', saveMode: 'draft' },
+        );
+        const staleId = seedDraft.matter!.id;
+        const updatedStaleDraft = await matterRepo.updateMatter(
+          ctx,
+          {
+            ...seedDraft.matter!,
+            conflictCheckDate: '2001-01-01',
+          },
+          seedDraft.matter!.rowVersion ?? 1,
+        );
+
+        const resavedDraft = await saveMatterRecord(
+          {
+            ...updatedStaleDraft,
+            title: 'R616 Stale Draft Date Updated',
+          },
+          { id: staleId, byId: 'P-000004', saveMode: 'draft' },
+        );
+        expect(resavedDraft.errors).toBeUndefined();
+        expect(resavedDraft.matter?.conflictCheckDate).toBeNull();
+
+        const updatedPreSubmitDraft = await matterRepo.updateMatter(
+          ctx,
+          {
+            ...resavedDraft.matter!,
+            conflictCheckDate: '2001-01-01',
+          },
+          resavedDraft.matter!.rowVersion ?? 1,
+        );
+        const submittedCleared = await saveMatterRecord(
+          {
+            ...updatedPreSubmitDraft,
+            agreedFeeCapGbp: 5000,
+            feeEstimateGbp: 5000,
+            conflictCheckRecord: {
+              status: 'Cleared' as const,
+              outcomeLabel: 'Cleared by fee earner' as const,
+              declarationConfirmed: true,
+              reviewerMessage: '',
+              lastRunAtDisplay: '20 Nov 2026',
+              lastRunById: 'P-000004',
+              lastRunByName: 'Catrin Williams',
+              submittedAtDisplay: '20 Nov 2026',
+              submittedById: 'P-000004',
+              submittedByName: 'Catrin Williams',
+              approvedAtDisplay: null,
+              approvedById: null,
+              approvedByName: null,
+              parties: [],
+              matches: [],
+              comments: [],
+              runs: [],
+            },
+          },
+          { id: staleId, byId: 'P-000004', saveMode: 'submit_cleared' },
+        );
+        expect(submittedCleared.errors).toBeUndefined();
+        expect(submittedCleared.matter?.conflictCheckDate).not.toBe('2001-01-01');
+        expect(submittedCleared.matter?.conflictCheckDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      });
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
 });

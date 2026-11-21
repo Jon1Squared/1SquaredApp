@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createDirectMigrationClient,
+  loadAndValidateTenantConfig,
   mergeDeclarativeTenantConfigCustomFields,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
@@ -15,9 +16,12 @@ import {
   type TenantCustomFieldDefinitionRecord,
   type TenantContext,
 } from '@platform/core';
+import type { Team } from '@/domain/types';
 import { isActionDenied } from '@/domain/actionResult';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
+  getHrAndRbacRepository,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
@@ -49,8 +53,10 @@ import {
   saveMatterPartyRelationship,
   saveOrgStructure,
   saveTaskSettingsRecord,
+  saveTeamRecord,
   updateWorkTypeProfiles,
 } from '@/server/services';
+import { resolveRoutedTeam } from '@/domain/tasks';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
@@ -1173,5 +1179,98 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
     );
     const getStoreMatches = [...actionsSrc.matchAll(/\bgetStore\s*\(/g)];
     expect(getStoreMatches).toHaveLength(0);
+  });
+
+  it('R605: validates EnquirySettings.fallbackTeamId against active teams, preserves & validates Team departmentId/orgTeamId/systemKey, and supports enquiries.fallbackTeamId schema config', async () => {
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const validatedWithFallback = loadAndValidateTenantConfig(
+      { ...rawBase, enquiries: { fallbackTeamId: 'TM-000008' } },
+      { environment: 'test' },
+    );
+    expect(validatedWithFallback.enquiries?.fallbackTeamId).toBe('TM-000008');
+
+    const { actorSession, ctx } = makeHostActorAndContext('P-000001');
+    await resetAllDemoData('P-000001', ctx);
+    const hrRepo = getHrAndRbacRepository();
+    try {
+      await runWithActiveActorSession(actorSession, async () => {
+        const allTeams = await hrRepo.listAllTeams<Team>(ctx);
+        const intakeTeam = allTeams.find((t) => t.systemKey === 'intake')!;
+        const altTeam = allTeams.find((t) => t.active && t.id !== intakeTeam.id)!;
+        expect(intakeTeam).toBeDefined();
+        expect(intakeTeam.departmentId).toBeDefined();
+
+        // 1. Unknown fallbackTeamId rejected server-side
+        const invalidFallback = (await saveEnquirySettingsRecord(
+          { fallbackTeamId: 'TM-DOES-NOT-EXIST' },
+          'P-000001',
+        )) as unknown as { error?: string };
+        expect(invalidFallback.error).toBeDefined();
+
+        // 2. Editing a team without metadata preserves departmentId, orgTeamId, and systemKey
+        const savedTeamRes = await saveTeamRecord(
+          {
+            id: intakeTeam.id,
+            name: 'Intake Renamed Preserved',
+            description: intakeTeam.description,
+            memberIds: intakeTeam.memberIds,
+            leadIds: intakeTeam.leadIds,
+            practiceAreaIds: intakeTeam.practiceAreaIds,
+            active: true,
+          },
+          'P-000001',
+        );
+        expect(savedTeamRes.error).toBeUndefined();
+        expect(savedTeamRes.team?.departmentId).toBe(intakeTeam.departmentId);
+        expect(savedTeamRes.team?.systemKey).toBe('intake');
+
+        // 3. Invalid departmentId rejected in saveTeamRecord
+        const badDeptTeam = await saveTeamRecord(
+          {
+            id: altTeam.id,
+            name: altTeam.name,
+            memberIds: altTeam.memberIds,
+            leadIds: altTeam.leadIds,
+            practiceAreaIds: altTeam.practiceAreaIds,
+            departmentId: 'DEPT-NONEXISTENT',
+          } as Parameters<typeof saveTeamRecord>[0],
+          'P-000001',
+        );
+        expect(badDeptTeam.error).toBeDefined();
+
+        // 4. Setting valid active fallbackTeamId persists and drives resolveRoutedTeam; deactivating it is rejected
+        const okFallback = await saveEnquirySettingsRecord(
+          { fallbackTeamId: altTeam.id },
+          'P-000001',
+        );
+        expect('error' in okFallback && okFallback.error).toBeFalsy();
+        const snap = await getAppSnapshot('P-000001');
+        expect(snap.enquirySettings.fallbackTeamId).toBe(altTeam.id);
+        expect(
+          resolveRoutedTeam(
+            'work_type.unmapped_r605',
+            snap.teams,
+            snap.enquirySettings.fallbackTeamId,
+          ).team?.id,
+        ).toBe(altTeam.id);
+
+        const deactivateFallbackRes = await saveTeamRecord(
+          {
+            id: altTeam.id,
+            name: altTeam.name,
+            memberIds: altTeam.memberIds,
+            leadIds: altTeam.leadIds,
+            practiceAreaIds: altTeam.practiceAreaIds,
+            active: false,
+          },
+          'P-000001',
+        );
+        expect(deactivateFallbackRes.error).toBeDefined();
+      });
+    } finally {
+      await resetAllDemoData('P-000001', ctx);
+    }
   });
 });

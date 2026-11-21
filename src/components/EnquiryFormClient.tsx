@@ -46,7 +46,8 @@ import {
   shouldSuggestNoResponse,
   type EnquiryFormState,
 } from '@/domain/enquiries';
-import { resolveLabel, valuesForList } from '@/domain/lists';
+import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
+import { sanitizeEnquiryEmailHtml } from '@/domain/emailHtmlSanitizer';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
   resolveAddressSuggestion,
@@ -404,6 +405,7 @@ export function EnquiryFormClient({
   const [emailTo, setEmailTo] = useState('');
   const [emailSubject, setEmailSubject] = useState(`Response to enquiry to ${firmName}`);
   const [emailBodyHtml, setEmailBodyHtml] = useState('');
+  const [emailSubmissionId, setEmailSubmissionId] = useState('');
   const emailEditorRef = useRef<HTMLDivElement | null>(null);
   const [viewingSentEmail, setViewingSentEmail] = useState<{
     entry: AuditEntry;
@@ -571,8 +573,8 @@ export function EnquiryFormClient({
 
   const routedPreview = useMemo(() => {
     if (!practiceAreaId) return null;
-    return resolveRoutedTeam(practiceAreaId, teams);
-  }, [practiceAreaId, teams]);
+    return resolveRoutedTeam(practiceAreaId, teams, enquirySettings?.fallbackTeamId);
+  }, [practiceAreaId, teams, enquirySettings?.fallbackTeamId]);
 
   const combinedPeople = useMemo(
     () => mergePeopleWithEnquiries(people, enquiries, values, enquiry?.id ?? null),
@@ -1294,6 +1296,11 @@ export function EnquiryFormClient({
     setEmailTo(resolvedEmail);
     setEmailSubject(`Response to enquiry to ${firmName}`);
     setEmailBodyHtml('');
+    setEmailSubmissionId(
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    );
     setSendEmailModalOpen(true);
     setTimeout(() => {
       if (emailEditorRef.current) {
@@ -1335,12 +1342,14 @@ export function EnquiryFormClient({
         subject: emailSubject.trim(),
         bodyHtml,
         bodyText,
+        ...(emailSubmissionId ? { submissionId: emailSubmissionId } : {}),
       });
       if (res.error) {
         showToast(res.error);
         return;
       }
       setSendEmailModalOpen(false);
+      setEmailSubmissionId('');
       showToast('Email queued for delivery and logged in audit trail');
       router.refresh();
     });
@@ -1362,20 +1371,20 @@ export function EnquiryFormClient({
     if (leadEmp?.employment?.supervisingPartnerId) {
       addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
     }
-    const colpEmp =
-      employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
-      employees.find((e) =>
-        (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
-      );
+    const riskRoleId = valueBySystemKey(values, 'employee_role', 'risk_and_compliance')?.id;
+    const colpEmp = riskRoleId
+      ? employees.find((e) => e.employeeRoleId === riskRoleId)
+      : undefined;
     if (colpEmp) addPerson(colpEmp.id, 'COLP');
 
-    const practiceMgrEmp = employees.find((e) =>
-      (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('practice manager'),
-    );
+    const pmRoleId = valueBySystemKey(values, 'employee_role', 'practice_manager')?.id;
+    const practiceMgrEmp = pmRoleId
+      ? employees.find((e) => e.employeeRoleId === pmRoleId)
+      : undefined;
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [employees, enquiry?.assignedToId, currentUserId]);
+  }, [employees, enquiry?.assignedToId, currentUserId, values]);
 
   const handleCreateTask = (payload: CreateTaskSubmitPayload) => {
     if (!enquiry) return;
@@ -4310,8 +4319,14 @@ export function EnquiryFormClient({
                 }}
                 dangerouslySetInnerHTML={{
                   __html:
-                    viewingSentEmail.email.bodyHtml ||
-                    viewingSentEmail.email.bodyText.replace(/\n/g, '<br />'),
+                    sanitizeEnquiryEmailHtml(viewingSentEmail.email.bodyHtml) ||
+                    sanitizeEnquiryEmailHtml(
+                      `<p>${viewingSentEmail.email.bodyText
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/\n/g, '<br />')}</p>`,
+                    ),
                 }}
               />
             </div>

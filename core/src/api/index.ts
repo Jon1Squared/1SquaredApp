@@ -899,6 +899,9 @@ export interface TenantConfiguration {
   database?: TenantDatabaseConfig;
   workTypes?: WorkTypesConfiguration;
   notifications?: TenantNotificationsConfig;
+  enquiries?: {
+    readonly fallbackTeamId: string | null;
+  };
 }
 
 // ------------------------------------------------------------------ Work Type & Departmental Behaviour Configuration (S0-22)

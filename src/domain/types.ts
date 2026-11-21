@@ -1089,6 +1089,11 @@ export type AutoTaskTrigger =
   | 'complete_matter_opening'
   | 'conflict_check_draft';
 
+export type TaskAutoTrigger =
+  | AutoTaskTrigger
+  | 'conflict_check_review'
+  | 'work_type_auto_task';
+
 export interface Task {
   id: string; // TSK-000001
   reference: string; // TSK-000001
@@ -1110,7 +1115,7 @@ export interface Task {
   completedById: string | null;
   completedAt: string | null;
   comments: TaskComment[];
-  autoTrigger?: AutoTaskTrigger | 'work_type_auto_task' | null;
+  autoTrigger?: TaskAutoTrigger | null;
   linkedKeyDateId?: string | null;
   idempotencyKey?: string | null;
   systemKey?: string | null;

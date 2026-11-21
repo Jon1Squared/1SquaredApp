@@ -172,11 +172,16 @@ import {
 } from '@/domain/employment';
 import {
   buildDefaultOrgStructure,
+  DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS,
   mapLegacyEmployeeRoleToRoleType,
   mapRoleTypeToLegacyEmployeeRoleId,
   resolveDepartmentForPracticeArea,
   resolveOrgDepartment,
 } from '@/domain/orgStructure';
+import {
+  extractPlainTextFromEmailHtml,
+  sanitizeEnquiryEmailHtml,
+} from '@/domain/emailHtmlSanitizer';
 import {
   isClosedOrArchivedMatterStatus,
   isProspectiveMatterStatus,
@@ -286,6 +291,7 @@ import {
   getEffectiveReminderHourLocal,
   hasActiveTenantTransaction,
   INVALID_PARENT_ORGANISATION_CODE,
+  isValidEmailAddress,
   loadActiveTenantRegistry,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
@@ -903,11 +909,27 @@ async function loadTenantCatalogueStoreView(
     }
   }
 
-  const orgStructure =
+  const rawOrgStructure =
     (catSnap.moduleConfigs.org_structure as OrgStructureCatalogue | undefined) ??
     buildDefaultOrgStructure({
       legalName: activeTenantConfig.displayName,
     });
+  const existingOrgTeamIds = new Set(
+    (rawOrgStructure.teamsOrPracticeGroups ?? []).map((t) => t.id),
+  );
+  const missingDefaultOrgTeams = DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS.filter(
+    (d) => !existingOrgTeamIds.has(d.id),
+  ).map((d) => ({ ...d }));
+  const orgStructure: OrgStructureCatalogue =
+    missingDefaultOrgTeams.length > 0
+      ? {
+          ...rawOrgStructure,
+          teamsOrPracticeGroups: [
+            ...(rawOrgStructure.teamsOrPracticeGroups ?? []),
+            ...missingDefaultOrgTeams,
+          ],
+        }
+      : rawOrgStructure;
   for (const v of values) {
     if (v.listKey === 'work_type' && !v.parentId && !v.meta?.departmentId) {
       const resolvedDept = resolveDepartmentForPracticeArea(v.id, orgStructure, values);
@@ -973,10 +995,15 @@ async function loadTenantCatalogueStoreView(
         values,
       );
 
-  const enquirySettings: EnquirySettings =
-    (catSnap.moduleConfigs.enquiry_settings as EnquirySettings | undefined) ?? {
-      ...DEFAULT_ENQUIRY_SETTINGS,
-    };
+  const persistedEnquirySettings =
+    catSnap.moduleConfigs.enquiry_settings as EnquirySettings | undefined;
+  const enquirySettings: EnquirySettings = {
+    ...DEFAULT_ENQUIRY_SETTINGS,
+    ...(activeTenantConfig.enquiries?.fallbackTeamId !== undefined
+      ? { fallbackTeamId: activeTenantConfig.enquiries.fallbackTeamId }
+      : {}),
+    ...(persistedEnquirySettings ?? {}),
+  };
 
   const taskSettings: TaskSettings =
     (catSnap.moduleConfigs.task_settings as TaskSettings | undefined) ?? {
@@ -3057,6 +3084,7 @@ export async function savePersonRecord(
           jobTitle: rawEmpInput?.jobTitle ?? existing?.employment?.jobTitle ?? input.jobTitle ?? '',
         },
         allPeople: people,
+        values: store.values,
         orgStructure,
         byId: opts.byId,
         nowIso: now,
@@ -3067,7 +3095,7 @@ export async function savePersonRecord(
     // If legacy callers passed employeeRoleId or departmentId without rawEmpInput, map them
     const mappedLegacyRole =
       !rawEmpInput?.roleType && input.employeeRoleId
-        ? mapLegacyEmployeeRoleToRoleType(input.employeeRoleId)
+        ? mapLegacyEmployeeRoleToRoleType(input.employeeRoleId, store.values)
         : null;
     const mappedLegacyDept =
       !rawEmpInput?.departmentId && input.departmentId
@@ -3904,18 +3932,9 @@ export async function savePersonRecord(
         } else {
           const deptId = person.employment.departmentId;
           const tpgId = person.employment.teamOrPracticeGroupId;
-          const deptSystemKeyMap: Record<string, string> = {
-            'DEPT-RISK': 'risk_compliance',
-            'DEPT-FIN': 'accounts',
-            'DEPT-BD': 'intake',
-          };
-          const targetSystemKey = deptSystemKeyMap[deptId];
           const matchingTeam =
             teams.find((tm) => tpgId && tm.orgTeamId === tpgId) ??
-            teams.find((tm) => tm.departmentId === deptId) ??
-            (targetSystemKey
-              ? teams.find((tm) => tm.systemKey === targetSystemKey)
-              : undefined);
+            teams.find((tm) => tm.departmentId === deptId);
           if (matchingTeam) {
             let teamChanged = false;
             if (!matchingTeam.memberIds.includes(person.id)) {
@@ -6870,10 +6889,20 @@ export async function saveMatterRecord(
             ? existing?.conflictCheckStatus ?? 'Draft'
             : existing?.conflictCheckStatus ?? 'Not started',
     conflictCheckDate:
-      existing?.conflictCheckDate ??
-      (opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred'
-        ? today
-        : null),
+      opts.saveMode === 'submit_cleared' || opts.saveMode === 'submit_referred'
+        ? !existingHasOpened &&
+          existing?.conflictCheckRecord?.status !== 'Referred' &&
+          existing?.conflictCheckRecord?.status !== 'Cleared' &&
+          existing?.conflictCheckRecord?.status !== 'Approved'
+          ? today
+          : existing?.conflictCheckDate ?? today
+        : isDraftSave &&
+            !existingHasOpened &&
+            existing?.conflictCheckRecord?.status !== 'Referred' &&
+            existing?.conflictCheckRecord?.status !== 'Cleared' &&
+            existing?.conflictCheckRecord?.status !== 'Approved'
+          ? null
+          : existing?.conflictCheckDate ?? null,
     conflictClearedById: existing?.conflictClearedById ?? null,
     conflictNotes: input.conflictNotes ?? existing?.conflictNotes ?? '',
     amlStatus: (input.amlStatus || existing?.amlStatus || 'CMI incomplete').trim(),
@@ -7750,16 +7779,12 @@ export async function saveMatterRecord(
           t.status !== 'Done' &&
           t.status !== 'Cancelled' &&
           t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id) &&
-          (t.autoTrigger === 'conflict_check_draft' ||
-            (t.autoTrigger == null && t.taskTypeId === conflictTaskTypeId)),
+          t.autoTrigger === 'conflict_check_draft',
       );
 
       if (isDraftSave) {
         if (existingDraftTask) {
           existingDraftTask.title = draftTaskTitle;
-          if (!existingDraftTask.autoTrigger) {
-            existingDraftTask.autoTrigger = 'conflict_check_draft';
-          }
           existingDraftTask.updatedAt = now;
           existingDraftTask.updatedById = opts.byId;
           await taskRepo.putTask(extensionCtx, existingDraftTask);
@@ -7801,7 +7826,6 @@ export async function saveMatterRecord(
           await taskRepo.putTask(extensionCtx, existingDraftTask);
         }
         if (opts.saveMode === 'submit_referred') {
-          const riskTaskId = await taskRepo.allocateNextTaskId(extensionCtx);
           const configuredTeamKey = tenantCfg.conflictReview?.assigneeTeamKey?.trim() || null;
           const configuredRoleKey = tenantCfg.conflictReview?.assigneeRoleKey?.trim() || null;
           const { team: resolvedRiskTeam, assigneeId: assignedReviewerId } =
@@ -7833,32 +7857,57 @@ export async function saveMatterRecord(
             if (clientOrg) linkedRecords.push({ recordType: 'organisation', recordId: clientOrg.id });
             else if (clientPerson) linkedRecords.push({ recordType: 'person', recordId: clientPerson.id });
           }
-          const riskTask: Task = {
-            id: riskTaskId,
-            reference: riskTaskId,
-            title: canIncludeMatterNames
-              ? `Conflict review · ${clientLabel} — ${matter.title}`
-              : `Conflict review required: ${matter.id}`,
-            description: canIncludeMatterNames
-              ? matter.conflictCheckRecord?.reviewerMessage ||
-                `Referred to Risk & Compliance for conflict review on ${clientLabel}.`
-              : `Referred for conflict review on restricted matter ${matter.id}.`,
-            taskTypeId: conflictTaskTypeId,
-            priorityId: highTaskPriorityId,
-            dueAt: today,
-            assignedTeamId: resolvedRiskTeam?.id ?? null,
-            assignedPersonId: assignedReviewerId,
-            status: 'To do',
-            linkedRecords,
-            createdById: opts.byId,
-            createdAt: now,
-            updatedById: opts.byId,
-            updatedAt: now,
-            completedById: null,
-            completedAt: null,
-            comments: [],
-          };
-          await taskRepo.putTask(extensionCtx, riskTask);
+          const riskTaskTitle = canIncludeMatterNames
+            ? `Conflict review · ${clientLabel} — ${matter.title}`
+            : `Conflict review required: ${matter.id}`;
+          const riskTaskDescription = canIncludeMatterNames
+            ? matter.conflictCheckRecord?.reviewerMessage ||
+              `Referred to Risk & Compliance for conflict review on ${clientLabel}.`
+            : `Referred for conflict review on restricted matter ${matter.id}.`;
+
+          const existingReviewTask = tasks.find(
+            (t) =>
+              t.status !== 'Done' &&
+              t.status !== 'Cancelled' &&
+              t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id) &&
+              t.autoTrigger === 'conflict_check_review',
+          );
+
+          if (existingReviewTask) {
+            existingReviewTask.title = riskTaskTitle;
+            existingReviewTask.description = riskTaskDescription;
+            existingReviewTask.assignedTeamId = resolvedRiskTeam?.id ?? null;
+            existingReviewTask.assignedPersonId = assignedReviewerId;
+            existingReviewTask.linkedRecords = linkedRecords;
+            existingReviewTask.dueAt = today;
+            existingReviewTask.updatedById = opts.byId;
+            existingReviewTask.updatedAt = now;
+            await taskRepo.putTask(extensionCtx, existingReviewTask);
+          } else {
+            const riskTaskId = await taskRepo.allocateNextTaskId(extensionCtx);
+            const riskTask: Task = {
+              id: riskTaskId,
+              reference: riskTaskId,
+              title: riskTaskTitle,
+              description: riskTaskDescription,
+              taskTypeId: conflictTaskTypeId,
+              priorityId: highTaskPriorityId,
+              dueAt: today,
+              assignedTeamId: resolvedRiskTeam?.id ?? null,
+              assignedPersonId: assignedReviewerId,
+              status: 'To do',
+              linkedRecords,
+              autoTrigger: 'conflict_check_review',
+              createdById: opts.byId,
+              createdAt: now,
+              updatedById: opts.byId,
+              updatedAt: now,
+              completedById: null,
+              completedAt: null,
+              comments: [],
+            };
+            await taskRepo.putTask(extensionCtx, riskTask);
+          }
         }
       }
 
@@ -8718,14 +8767,41 @@ export async function updateMatterConflictRecord(
         byId,
         at: now,
       });
+      const existingTasksForConflict =
+        transitionedToOpenOnConflictApproval ||
+        sanitisedRecord.status === 'Approved' ||
+        sanitisedRecord.status === 'Cleared' ||
+        sanitisedRecord.status === 'Declined'
+          ? await taskRepo.listAllTasksUnfiltered<Task>(conflictCtx)
+          : [];
+      if (
+        sanitisedRecord.status === 'Approved' ||
+        sanitisedRecord.status === 'Cleared' ||
+        sanitisedRecord.status === 'Declined'
+      ) {
+        for (const t of existingTasksForConflict) {
+          if (
+            t.status !== 'Done' &&
+            t.status !== 'Cancelled' &&
+            t.autoTrigger === 'conflict_check_review' &&
+            t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id)
+          ) {
+            t.status = 'Done';
+            t.completedById = byId;
+            t.completedAt = now;
+            t.updatedById = byId;
+            t.updatedAt = now;
+            await taskRepo.putTask(conflictCtx, t);
+          }
+        }
+      }
       if (transitionedToOpenOnConflictApproval) {
-        const existingTasksForOpen = await taskRepo.listAllTasksUnfiltered<Task>(conflictCtx);
         await instantiateWorkTypeAutoTasksInTx({
           ctx: conflictCtx,
           matter: saved,
           people,
           teams,
-          existingTasks: existingTasksForOpen,
+          existingTasks: existingTasksForConflict,
           workTypesConfig: workTypesConfigForConflict,
           values: store.values,
           workingHoursConfig: workingHoursConfigFromStore(store),
@@ -11406,6 +11482,9 @@ export async function saveTeamRecord(
     id?: string;
     name: string;
     description?: string;
+    departmentId?: string | null;
+    orgTeamId?: string | null;
+    systemKey?: string | null;
     memberIds: string[];
     leadIds: string[];
     practiceAreaIds: string[];
@@ -11419,9 +11498,11 @@ export async function saveTeamRecord(
 
   const teamCtx = resolveDefaultServiceTenantContext(null, byId);
   const hrRepo = getHrAndRbacRepository();
-  const existing = input.id
-    ? await hrRepo.getTeamById<Team>(teamCtx, input.id)
-    : null;
+  const [existing, allTeams, store] = await Promise.all([
+    input.id ? hrRepo.getTeamById<Team>(teamCtx, input.id) : Promise.resolve(null),
+    hrRepo.listAllTeams<Team>(teamCtx),
+    loadTenantCatalogueStoreView(teamCtx),
+  ]);
   if (input.id && !existing) {
     const msg = `Team "${input.id}" not found.`;
     return {
@@ -11442,6 +11523,73 @@ export async function saveTeamRecord(
     };
   }
 
+  const nextActive = input.active ?? existing?.active ?? true;
+  if (!nextActive && existing && store.enquirySettings.fallbackTeamId === existing.id) {
+    return {
+      error: 'Cannot deactivate the team currently configured as the fallback enquiry team.',
+    };
+  }
+
+  const resolvedDepartmentId =
+    input.departmentId !== undefined
+      ? input.departmentId?.trim() || null
+      : existing?.departmentId ?? null;
+  if (resolvedDepartmentId) {
+    const dept = store.orgStructure.departments.find(
+      (d) => d.id === resolvedDepartmentId && d.active !== false,
+    );
+    if (!dept) {
+      return {
+        error: `Department "${resolvedDepartmentId}" does not match an active department.`,
+      };
+    }
+  }
+
+  const resolvedOrgTeamId =
+    input.orgTeamId !== undefined
+      ? input.orgTeamId?.trim() || null
+      : existing?.orgTeamId ?? null;
+  if (resolvedOrgTeamId) {
+    const tpg = store.orgStructure.teamsOrPracticeGroups.find(
+      (g) => g.id === resolvedOrgTeamId && g.active !== false,
+    );
+    if (!tpg) {
+      return {
+        error: `Practice group "${resolvedOrgTeamId}" does not match an active org team.`,
+      };
+    }
+    if (resolvedDepartmentId && tpg.parentDepartmentId !== resolvedDepartmentId) {
+      return {
+        error: `Practice group "${resolvedOrgTeamId}" does not belong to department "${resolvedDepartmentId}".`,
+      };
+    }
+  }
+
+  const resolvedSystemKey =
+    input.systemKey !== undefined
+      ? input.systemKey?.trim() || undefined
+      : existing?.systemKey;
+  if (resolvedSystemKey !== undefined) {
+    if (!/^[a-z0-9_]{1,64}$/.test(resolvedSystemKey)) {
+      return {
+        error: 'Team system key must match ^[a-z0-9_]{1,64}$.',
+      };
+    }
+    if (nextActive) {
+      const colliding = allTeams.find(
+        (t) =>
+          t.id !== existing?.id &&
+          t.active &&
+          t.systemKey === resolvedSystemKey,
+      );
+      if (colliding) {
+        return {
+          error: `Active team "${colliding.name}" already uses system key "${resolvedSystemKey}".`,
+        };
+      }
+    }
+  }
+
   const memberIds = Array.from(new Set([...input.memberIds, ...input.leadIds]));
   const leadIds = input.leadIds.filter((id) => memberIds.includes(id));
 
@@ -11455,10 +11603,13 @@ export async function saveTeamRecord(
         id: allocatedTeamId,
         name,
         description: (input.description ?? existing?.description ?? '').trim(),
+        ...(resolvedDepartmentId ? { departmentId: resolvedDepartmentId } : {}),
+        ...(resolvedOrgTeamId ? { orgTeamId: resolvedOrgTeamId } : {}),
+        ...(resolvedSystemKey ? { systemKey: resolvedSystemKey } : {}),
         memberIds,
         leadIds,
         practiceAreaIds: input.practiceAreaIds,
-        active: input.active ?? existing?.active ?? true,
+        active: nextActive,
         createdById: existing?.createdById ?? byId,
         createdAt: existing?.createdAt ?? now,
         updatedById: byId,
@@ -11581,16 +11732,34 @@ export async function updateEmployeeRoleSetting(
 export async function saveEnquirySettingsRecord(
   patch: Partial<EnquirySettings>,
   byId: string,
-): Promise<EnquirySettings> {
+): Promise<(EnquirySettings & { error?: undefined }) | { error: string }> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const catalogueRepo = getCatalogueRepository();
-  let nextSettings!: EnquirySettings;
+  const hrRepo = getHrAndRbacRepository();
+  let result!: (EnquirySettings & { error?: undefined }) | { error: string };
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const store = await loadTenantCatalogueStoreView(ctx);
-      nextSettings = {
+      const [store, allTeams] = await Promise.all([
+        loadTenantCatalogueStoreView(ctx),
+        hrRepo.listAllTeams<Team>(ctx),
+      ]);
+      const normalizedFallbackTeamId =
+        patch.fallbackTeamId === undefined
+          ? store.enquirySettings.fallbackTeamId ?? null
+          : patch.fallbackTeamId?.trim() || null;
+      if (
+        normalizedFallbackTeamId !== null &&
+        !allTeams.some((t) => t.id === normalizedFallbackTeamId && t.active)
+      ) {
+        result = {
+          error: 'Fallback enquiry team must reference an existing active team.',
+        };
+        return;
+      }
+      const nextSettings: EnquirySettings = {
         ...store.enquirySettings,
         ...patch,
+        fallbackTeamId: normalizedFallbackTeamId,
       };
       await catalogueRepo.putEnquirySettingsConfig(ctx, nextSettings, byId);
       writeAudit(null, {
@@ -11599,13 +11768,14 @@ export async function saveEnquirySettingsRecord(
         action: 'update',
         field: 'Enquiry settings',
         oldValue: null,
-        newValue: `Emergency ${nextSettings.emergencyHours}h · Hours ${nextSettings.workDayStart}–${nextSettings.workDayEnd} · Attempts ${nextSettings.failedAttemptsBeforeSuggestNoResponse} · Retention ${nextSettings.retentionMonths}m`,
+        newValue: `Emergency ${nextSettings.emergencyHours}h · Hours ${nextSettings.workDayStart}–${nextSettings.workDayEnd} · Attempts ${nextSettings.failedAttemptsBeforeSuggestNoResponse} · Retention ${nextSettings.retentionMonths}m · Fallback ${nextSettings.fallbackTeamId ?? 'intake-default'}`,
         byId,
       });
       await flushStagedAuditEntries(ctx);
+      result = nextSettings;
     }),
   );
-  return nextSettings;
+  return result;
 }
 
 export async function saveTaskSettingsRecord(
@@ -13707,6 +13877,7 @@ export async function sendEnquiryEmailRecord(
     subject: string;
     bodyHtml: string;
     bodyText: string;
+    submissionId?: string;
   },
   byId: string,
 ): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
@@ -13748,17 +13919,32 @@ export async function sendEnquiryEmailRecord(
   const to = input.to.trim();
   const subject = input.subject.trim();
   if (!to) return { error: 'Recipient email address is required.' };
+  if (!isValidEmailAddress(to)) {
+    return { error: 'Recipient email address is not valid.' };
+  }
   if (!subject) return { error: 'Email subject is required.' };
-  if (!input.bodyText.trim() && !input.bodyHtml.trim()) {
+  if (/[\r\n]/.test(subject)) {
+    return { error: 'Email subject cannot contain line breaks.' };
+  }
+  const trimmedSubmissionId = input.submissionId?.trim();
+  if (
+    trimmedSubmissionId !== undefined &&
+    trimmedSubmissionId !== '' &&
+    !/^[A-Za-z0-9._:-]{1,128}$/.test(trimmedSubmissionId)
+  ) {
+    return { error: 'Invalid email submission identifier.' };
+  }
+
+  const sanitizedHtml = sanitizeEnquiryEmailHtml(input.bodyHtml);
+  const extractedPlainText = extractPlainTextFromEmailHtml(sanitizedHtml);
+  const explicitText = input.bodyText.trim();
+  if (!explicitText && !extractedPlainText) {
     return { error: 'Please enter a message before sending.' };
   }
 
-  const safeTextBody =
-    input.bodyText.trim() ||
-    input.bodyHtml.replace(/<[^>]+>/g, ' ').trim() ||
-    subject;
+  const safeTextBody = explicitText || extractedPlainText || subject;
   const safeHtmlBody =
-    input.bodyHtml.trim() || `<p>${escapeHtmlTextForEmail(safeTextBody)}</p>`;
+    sanitizedHtml || `<p>${escapeHtmlTextForEmail(safeTextBody)}</p>`;
 
   const now = new Date().toISOString();
   enq.updatedAt = now;
@@ -13766,10 +13952,11 @@ export async function sendEnquiryEmailRecord(
 
   const tenantConfig = getActiveTenantConfiguration();
   const outboxRepo = getOutboxRepository();
+  const idempotencyKey = `enquiry-email:${enqCtx.tenantId}:${enq.id}:${trimmedSubmissionId || randomUUID()}`;
 
   await intakeRepo.withTenantTransaction(enqCtx, async () => {
     const queued = await outboxRepo.enqueueEmail(enqCtx, {
-      idempotencyKey: `enquiry-email:${enqCtx.tenantId}:${enq.id}:${randomUUID()}`,
+      idempotencyKey,
       templateKey: 'enquiry.email',
       recipients: { to: [to] },
       subject,
@@ -13778,25 +13965,27 @@ export async function sendEnquiryEmailRecord(
       createdByPersonId: byId,
       correlationId: enqCtx.correlationId,
     });
-    const queuedSnapshot: EnquiryQueuedEmailSnapshot = {
-      kind: 'queued_email',
-      outboxId: queued.record.id,
-      recipientCount: 1,
-      templateKey: 'enquiry.email',
-    };
-    await intakeRepo.putEnquiry(enqCtx, enq);
-    writeAudit(store, {
-      recordType: 'enquiry',
-      recordId: enq.id,
-      action: 'email-queued',
-      field: 'Enquiry email queued',
-      oldValue: null,
-      newValue: `outbox:${queued.record.id} · recipients:1`,
-      byId,
-      at: now,
-      snapshot: queuedSnapshot,
-    });
-    await flushStagedAuditEntries(enqCtx);
+    if (!queued.deduplicated) {
+      const queuedSnapshot: EnquiryQueuedEmailSnapshot = {
+        kind: 'queued_email',
+        outboxId: queued.record.id,
+        recipientCount: 1,
+        templateKey: 'enquiry.email',
+      };
+      await intakeRepo.putEnquiry(enqCtx, enq);
+      writeAudit(store, {
+        recordType: 'enquiry',
+        recordId: enq.id,
+        action: 'email-queued',
+        field: 'Enquiry email queued',
+        oldValue: null,
+        newValue: `outbox:${queued.record.id} · recipients:1`,
+        byId,
+        at: now,
+        snapshot: queuedSnapshot,
+      });
+      await flushStagedAuditEntries(enqCtx);
+    }
   });
 
   if (
@@ -15427,28 +15616,41 @@ function mapPmsWorkTypeSubcategoryId(
   return subValues[0]?.id ?? vid('work_type', 'Commercial contracts');
 }
 
+interface PmsEmployeeRoleResolution {
+  roleId: string | null;
+  fallbackReason?: 'mapped_role_inactive' | 'mapped_role_missing';
+  configuredRoleId?: string;
+}
+
 function mapPmsEmployeeRoleId(
   store: FirmStore,
   grade: string,
   gradeRoleMap?: Record<string, string>,
-): string {
-  const normalizedGrade = grade.trim().toLowerCase();
-  if (gradeRoleMap && normalizedGrade) {
-    for (const [configuredGrade, mappedRoleId] of Object.entries(gradeRoleMap)) {
-      if (configuredGrade.trim().toLowerCase() === normalizedGrade) {
-        const activeRole = store.values.find(
-          (v) => v.listKey === 'employee_role' && v.active && v.id === mappedRoleId,
-        );
-        return activeRole?.id ?? mappedRoleId;
-      }
-    }
-  }
+): PmsEmployeeRoleResolution {
   const supportRole = valueBySystemKey(
     store.values,
     'employee_role',
     'support_staff',
   );
-  return supportRole?.id ?? 'employee_role.support_staff';
+  const normalizedGrade = grade.trim().toLowerCase();
+  if (gradeRoleMap && normalizedGrade) {
+    for (const [configuredGrade, mappedRoleId] of Object.entries(gradeRoleMap)) {
+      if (configuredGrade.trim().toLowerCase() === normalizedGrade) {
+        const matched = store.values.find(
+          (v) => v.listKey === 'employee_role' && v.id === mappedRoleId,
+        );
+        if (matched && matched.active) {
+          return { roleId: matched.id };
+        }
+        return {
+          roleId: supportRole?.id ?? null,
+          fallbackReason: matched ? 'mapped_role_inactive' : 'mapped_role_missing',
+          configuredRoleId: mappedRoleId,
+        };
+      }
+    }
+  }
+  return { roleId: supportRole?.id ?? null };
 }
 
 export async function createRecordFromPms(
@@ -15562,18 +15764,39 @@ export async function createRecordFromPms(
 
     const paId = mapPmsPracticeAreaId(store, fe.department);
     const tenantConfig = getActiveTenantConfiguration();
-    const mappedEmployeeRoleId = mapPmsEmployeeRoleId(
+    const roleResolution = mapPmsEmployeeRoleId(
       store,
       fe.grade,
       tenantConfig.integrations.pmsSync?.gradeRoleMap,
     );
+    if (roleResolution.fallbackReason) {
+      emitTenantTelemetryEvent({
+        eventName: 'pms.employee_role_fallback',
+        severity: 'warn',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        properties: {
+          reason: roleResolution.fallbackReason,
+          hasGrade: Boolean(fe.grade.trim()),
+          configuredRoleId: roleResolution.configuredRoleId ?? 'none',
+          resolvedRoleId: roleResolution.roleId ?? 'none',
+        },
+      });
+    }
+    if (!roleResolution.roleId) {
+      return {
+        ok: false,
+        error:
+          'Cannot create employee from PMS: active employee_role with systemKey "support_staff" is not configured.',
+      };
+    }
 
     const res = await savePersonRecord(
       {
         firstName: fe.first_name,
         surname: fe.last_name,
         isEmployee: true,
-        employeeRoleId: mappedEmployeeRoleId,
+        employeeRoleId: roleResolution.roleId,
         departmentId: paId,
         jobTitle: fe.grade,
         emails: [
@@ -17856,7 +18079,8 @@ export async function saveQuoteRecord(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
+  const [catalogueStore, people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx),
     getPartyRepository().listAllPeople<Person>(ctx),
     getPartyRepository().listAllOrganisations<Organisation>(ctx),
     getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
@@ -17943,7 +18167,11 @@ export async function saveQuoteRecord(
   const disbursements = normalizedDisbursements.disbursements;
 
   const feeEarnerId = input.feeEarnerId || existing?.feeEarnerId || opts.byId;
-  const routedTeam = resolveRoutedTeam(input.practiceAreaId, teams);
+  const routedTeam = resolveRoutedTeam(
+    input.practiceAreaId,
+    teams,
+    catalogueStore.enquirySettings.fallbackTeamId,
+  );
   const feeEarnerTeam = teams.find(
     (t) => t.active && t.memberIds.includes(feeEarnerId),
   );

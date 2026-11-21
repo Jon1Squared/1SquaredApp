@@ -31,6 +31,7 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`firm.website\` | \`""\` | Active | Public firm website URL or hostname for document headers and footers |
 | \`conflictReview.assigneeTeamKey\` | \`null\` | Active | Team ID or code receiving referred conflict review tasks |
 | \`conflictReview.assigneeRoleKey\` | \`null\` | Active | Role key used to select an assignee within the conflict review team |
+| \`enquiries.fallbackTeamId\` | \`null\` | Active | Optional active Team ID used as the default fallback intake team when no practice area matches (can be overridden per tenant under **Admin → Enquiry settings**; defaults to the active team with \`systemKey: "intake"\` when \`null\`) |
 
 ### Feature flags
 

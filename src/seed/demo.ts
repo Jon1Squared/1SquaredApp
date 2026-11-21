@@ -114,6 +114,7 @@ export const DEFAULT_ENQUIRY_SETTINGS: EnquirySettings = {
   workingDays: [1, 2, 3, 4, 5],
   failedAttemptsBeforeSuggestNoResponse: 3,
   retentionMonths: 12,
+  fallbackTeamId: null,
 };
 
 export const DEFAULT_TASK_SETTINGS: TaskSettings = {

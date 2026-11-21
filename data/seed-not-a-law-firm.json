@@ -8030,6 +8030,13 @@
         "active": true
       },
       {
+        "id": "TPG-FIN-BANKING",
+        "name": "Banking, Finance & Restructuring",
+        "code": "FIN-BNK",
+        "parentDepartmentId": "DEPT-CORP",
+        "active": true
+      },
+      {
         "id": "TPG-DR-COM",
         "name": "Commercial Litigation",
         "code": "DR-COM",
@@ -8068,6 +8075,13 @@
         "id": "TPG-RISK-AML",
         "name": "Conflicts, AML & Regulatory",
         "code": "RISK-AML",
+        "parentDepartmentId": "DEPT-RISK",
+        "active": true
+      },
+      {
+        "id": "TPG-REG-PUB",
+        "name": "Regulatory, Public & Specialist",
+        "code": "RISK-REG",
         "parentDepartmentId": "DEPT-RISK",
         "active": true
       },
@@ -22804,7 +22818,8 @@
       5
     ],
     "failedAttemptsBeforeSuggestNoResponse": 3,
-    "retentionMonths": 12
+    "retentionMonths": 12,
+    "fallbackTeamId": null
   },
   "taskSettings": {
     "templates": [

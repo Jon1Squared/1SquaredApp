@@ -1135,6 +1135,7 @@ export function resolveDefaultDepartmentPartnerId(
 export function createDefaultEmploymentRecord(opts: {
   person: Partial<Person> & { id: string; firstName: string; surname: string };
   allPeople: Person[];
+  values?: readonly ChoiceValue[];
   orgStructure?: Pick<
     OrgStructureCatalogue,
     'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
@@ -1158,7 +1159,10 @@ export function createDefaultEmploymentRecord(opts: {
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const today = nowIso.slice(0, 10);
 
-  const mappedRole = mapLegacyEmployeeRoleToRoleType(opts.person.employeeRoleId);
+  const mappedRole = mapLegacyEmployeeRoleToRoleType(
+    opts.person.employeeRoleId,
+    opts.values,
+  );
   const roleType: EmployeeRoleType = mappedRole?.roleType ?? 'Fee earner';
   const engagementType: EngagementType = mappedRole?.engagementType ?? 'Employee';
 
@@ -1459,8 +1463,8 @@ export function migrateEmployeesToEmploymentRecords(
     // Check role mapping
     const roleLabel = resolveLabel(values, person.employeeRoleId) || person.employeeRoleId || '';
     const mappedRole =
-      mapLegacyEmployeeRoleToRoleType(person.employeeRoleId) ??
-      mapLegacyEmployeeRoleToRoleType(roleLabel);
+      mapLegacyEmployeeRoleToRoleType(person.employeeRoleId, values) ??
+      mapLegacyEmployeeRoleToRoleType(roleLabel, values);
 
     if (!mappedRole) {
       unmappedRecords.push({
@@ -1491,6 +1495,7 @@ export function migrateEmployeesToEmploymentRecords(
     const emp = createDefaultEmploymentRecord({
       person,
       allPeople: [...updatedPeople, ...people.filter((p) => !updatedPeople.some((u) => u.id === p.id))],
+      values,
       orgStructure,
       byId: person.updatedById || person.createdById || person.id,
       nowIso,
