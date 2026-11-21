@@ -3000,6 +3000,26 @@ DROP TABLE IF EXISTS public.migration_0021_backfill_audit CASCADE;
 `.trim(),
   };
 
+export const KEY_DATE_CALENDAR_SYNC_LEASE_MIGRATION_0022: TenantMigrationDefinition =
+  {
+    version: '0022',
+    name: '0022_key_date_calendar_sync_lease_expand',
+    description:
+      'Expand-phase migration adding short-lived lease_token and lease_expires_at columns to key_date_calendar_syncs for single-flight post-commit Outlook calendar sync coordination (R627).',
+    dependsOn: ['0003'],
+    tablesChanged: ['key_date_calendar_syncs'],
+    upSql: `
+ALTER TABLE public.key_date_calendar_syncs
+  ADD COLUMN IF NOT EXISTS lease_token TEXT NULL,
+  ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ NULL;
+`.trim(),
+    downSql: `
+ALTER TABLE public.key_date_calendar_syncs
+  DROP COLUMN IF EXISTS lease_expires_at,
+  DROP COLUMN IF EXISTS lease_token;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3022,6 +3042,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019,
   TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020,
   STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021,
+  KEY_DATE_CALENDAR_SYNC_LEASE_MIGRATION_0022,
 ];
 
 export function validateMigrationCatalogueOrder(

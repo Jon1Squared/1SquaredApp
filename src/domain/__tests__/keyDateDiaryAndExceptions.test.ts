@@ -874,22 +874,26 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
       isRestricted: true,
       restrictedAccessUserIds: [managingPartner.id],
     });
-    await kdRepo.putKeyDate(partnerCtx, {
-      ...baseKd,
-      id: 'KD-R29-NO-ASSIGNEE',
-      matterId: staffMatterNoAssignee.id,
-      enquiryId: undefined,
-      title: 'Staff Matter Unassignable Deadline',
-      dueDate: '2026-12-01',
-      status: 'awaiting_verification',
-      teamId: activeTeamId,
-      responsiblePersonIds: [unpermittedAssignee.id],
-      verification: {
-        required: true,
-        proposedById: unpermittedAssignee.id,
-        proposedAt: '2026-11-01T10:00:00.000Z',
+    await kdRepo.putKeyDate(
+      partnerCtx,
+      {
+        ...baseKd,
+        id: 'KD-R29-NO-ASSIGNEE',
+        matterId: staffMatterNoAssignee.id,
+        enquiryId: undefined,
+        title: 'Staff Matter Unassignable Deadline',
+        dueDate: '2026-12-01',
+        status: 'awaiting_verification',
+        teamId: activeTeamId,
+        responsiblePersonIds: [unpermittedAssignee.id],
+        verification: {
+          required: true,
+          proposedById: unpermittedAssignee.id,
+          proposedAt: '2026-11-01T10:00:00.000Z',
+        },
       },
-    });
+      { expectedVersion: null },
+    );
     const verifyAuditMark = await markAuditPosition();
     const verifyStaffRes = await runAsTestActor(managingPartner.id, () =>
       verifyProposedKeyDateRecord(
@@ -943,12 +947,16 @@ describe('Team Diary & Compliance Exceptions (§5, §6)', () => {
     const otherTeam = store.teams.find(
       (t) => t.active && !ownTeamIds.has(t.id),
     )!;
-    await kdRepo.putKeyDate(partnerCtx, {
-      ...baseKd,
-      id: 'KD-OTHER-TEAM-999',
-      teamId: otherTeam.id,
-      title: 'Other Team Key Date',
-    });
+    await kdRepo.putKeyDate(
+      partnerCtx,
+      {
+        ...baseKd,
+        id: 'KD-OTHER-TEAM-999',
+        teamId: otherTeam.id,
+        title: 'Other Team Key Date',
+      },
+      { expectedVersion: null },
+    );
     const snap = await runAsTestActor(feeEarner.id, () =>
       getAppSnapshot(feeEarner.id),
     );

@@ -12,7 +12,7 @@ Microsoft Outlook calendar synchronisation via Microsoft Graph is **not availabl
 
 > **Single source of truth**: 1Squared is always the source of truth. Even when an external calendar adapter is connected in a future phase, editing or deleting a calendar entry inside Outlook will never alter or delete the key date in 1Squared.
 
-> **Post-commit synchronisation without holding locks**: Calendar synchronisation runs strictly **after** the key date database transaction commits. Post-commit sync reads the latest committed key date and \`KeyDateCalendarSync\` rows in a short \`FOR UPDATE\` transaction, releases all database locks before calling Microsoft Graph, and re-checks the database version on commit — merging external event IDs and retrying if a concurrent key date update landed while Graph was in flight.
+> **Post-commit synchronisation without holding locks**: Calendar synchronisation runs strictly **after** the key date database transaction commits. Post-commit sync claims a short-lived single-flight sync lease and reads the latest committed key date and calendar sync state in a short transaction, releases all database locks before calling Microsoft Graph (passing a deterministic Graph \`transactionId\` per key date and target), and verifies both the key date version and lease ownership on commit — deleting any displaced external event and retrying if a concurrent key date update landed while Graph was in flight.
 
 ## Per-matter-type configuration and sync contract
 
@@ -35,6 +35,7 @@ When a live Graph calendar adapter is supplied:
 
 When a post-commit calendar adapter returns or throws an error:
 - The saved key date mutation remains committed (the action returns \`ok: true\` alongside a non-fatal \`calendarSyncWarning\` banner in the Key Dates panel and Team Diary workspace so the user never re-submits duplicate deadlines).
-- The failure is persisted in \`KeyDateCalendarSync\` (\`state: 'failed'\`, \`lastError\`, \`attempts\`) and surfaced automatically as a \`calendar_sync_failed\` item in the [Compliance exceptions report](/docs/key-dates-exceptions).
+- Every failed key date is recorded with a redacted diagnostic entry in the application log and persisted in \`KeyDateCalendarSync\` (\`state: 'failed'\`, \`lastError\`, \`attempts\`), surfacing automatically as a \`calendar_sync_failed\` item in the [Compliance exceptions report](/docs/key-dates-exceptions).
+- When the daily reminder scheduler runs with a live calendar adapter configured, any \`'failed'\` sync records are automatically retried post-commit.
 `,
 };

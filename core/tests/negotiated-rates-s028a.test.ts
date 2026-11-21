@@ -1229,7 +1229,7 @@ describe('S0-28a: Negotiated Client & Parent-Group Rates + 4-Tier Lookup (ADR 00
     const migrationRunner = new TenantMigrationRunner();
     await migrationRunner.applyUp(ctxAlpha);
     await migrationRunner.applyUp(ctxBravo);
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0022');
 
     const alphaRaw = {
       ...getActiveTenantRawBaseConfig(),

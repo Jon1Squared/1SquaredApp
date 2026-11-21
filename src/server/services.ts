@@ -395,6 +395,7 @@ import {
   resolvePermittedDiaryTeamIds,
 } from '@/domain/keyDateDiary';
 import {
+  ManagedIdentityGraphCalendarAdapter,
   sanitizeCalendarSyncError,
   syncKeyDateToOutlookCalendar,
   type GraphCalendarAdapter,
@@ -20829,6 +20830,8 @@ async function runPostCommitKeyDateCalendarSync(params: {
   existingSyncs?: KeyDateCalendarSync[];
   items: Array<{ keyDate: KeyDate; matter: Matter | null; enquiry: Enquiry | null }>;
   adapter?: GraphCalendarAdapter;
+  allowSystemSchedulerWrite?: boolean;
+  leaseTtlMs?: number;
 }): Promise<{ calendarSyncWarning?: string }> {
   if (params.items.length === 0) return {};
   const keyDateRepo = getKeyDateRepository();
@@ -20837,64 +20840,143 @@ async function runPostCommitKeyDateCalendarSync(params: {
   const uniqueKeyDateIds = Array.from(
     new Set(params.items.map((item) => item.keyDate.id)),
   );
-  let anyFailure = false;
-  let lastFailedKeyDateId = '';
-  let lastLoggedAttempts = 0;
-  let lastLoggedError = '';
+  const leaseTtlMs = params.leaseTtlMs ?? 30_000;
+  const failures: Array<{ keyDateId: string; attempts: number; error: string }> = [];
+  const adapterIsConfigured =
+    Boolean(params.adapter) &&
+    !(
+      params.adapter instanceof ManagedIdentityGraphCalendarAdapter &&
+      !params.adapter.isConfigured
+    );
+  const deleteDisplacedEvents = async (
+    events: ReadonlyArray<{ target: string; eventId: string }>,
+  ): Promise<void> => {
+    if (!adapterIsConfigured || !params.adapter || events.length === 0) return;
+    for (const ext of events) {
+      try {
+        await params.adapter.deleteEvent({
+          target: ext.target,
+          eventId: ext.eventId,
+        });
+      } catch {
+        // Best-effort cleanup of displaced external calendar events after lease loss or skew
+      }
+    }
+  };
 
   for (const keyDateId of uniqueKeyDateIds) {
     const maxAttempts = 3;
+    const myLeaseToken = randomUUID();
     let completed = false;
     const observedExternalEvents: Array<{ target: string; eventId: string }> = [];
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let claimedLeaseInTx1 = false;
       try {
-        // Short TX 1 (R607): lock & read latest key date + sync row, committing before Graph HTTP
-        const tx1 = await keyDateRepo.withTenantTransaction(params.ctx, async () => {
-          const { keyDate: latestKd, calendarSync: latestSync } =
-            await keyDateRepo.readKeyDateAndCalendarSyncForUpdate(
-              params.ctx,
-              keyDateId,
-            );
-          if (!latestKd) {
-            return null;
-          }
-          const [latestMatter, latestEnquiry, latestConfig] = await Promise.all([
-            latestKd.matterId
-              ? matterRepo.getMatterById<Matter>(params.ctx, latestKd.matterId, {
-                  includeRestricted: true,
-                })
-              : Promise.resolve(null),
-            latestKd.enquiryId
-              ? intakeRepo.getEnquiryById<Enquiry>(params.ctx, latestKd.enquiryId, {
-                  includeRestricted: true,
-                })
-              : Promise.resolve(null),
-            getKeyDatesConfig({ ctx: params.ctx }),
-          ]);
-          return {
-            latestKd,
-            latestSync,
-            latestMatter: latestMatter ?? null,
-            latestEnquiry: latestEnquiry ?? null,
-            latestConfig,
-          };
-        });
+        // Short TX 1 (R607, R627): claim single-flight sync lease and read latest committed state before Graph HTTP
+        let tx1:
+          | {
+              latestKd: KeyDate;
+              latestSync: KeyDateCalendarSync;
+              latestMatter: Matter | null;
+              latestEnquiry: Enquiry | null;
+              latestConfig: KeyDatesConfig;
+            }
+          | null = null;
+        let skippedByActiveLease = false;
 
-        if (!tx1) {
+        for (let leaseWait = 0; leaseWait <= 2; leaseWait += 1) {
+          const claimAttempt = await keyDateRepo.withTenantTransaction(
+            params.ctx,
+            async () => {
+              const { keyDate: latestKd, calendarSync: latestSync } =
+                await keyDateRepo.readKeyDateAndCalendarSyncForUpdate(
+                  params.ctx,
+                  keyDateId,
+                  { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
+                );
+              if (!latestKd) {
+                return { status: 'missing' as const };
+              }
+              const nowMs = Date.now();
+              const activeOtherLease =
+                latestSync?.state === 'syncing' &&
+                Boolean(latestSync.leaseToken) &&
+                latestSync.leaseToken !== myLeaseToken &&
+                Boolean(latestSync.leaseExpiresAt) &&
+                Date.parse(latestSync.leaseExpiresAt!) > nowMs;
+              if (activeOtherLease) {
+                return { status: 'busy' as const };
+              }
+
+              const leaseExpiresAt = new Date(nowMs + leaseTtlMs).toISOString();
+              const claimedSync: KeyDateCalendarSync = {
+                keyDateId,
+                state: 'syncing',
+                externalEvents: latestSync?.externalEvents ?? [],
+                ...(latestSync?.lastSyncedAt
+                  ? { lastSyncedAt: latestSync.lastSyncedAt }
+                  : {}),
+                ...(latestSync?.lastError ? { lastError: latestSync.lastError } : {}),
+                attempts: latestSync?.attempts ?? 0,
+                leaseToken: myLeaseToken,
+                leaseExpiresAt,
+              };
+              const savedClaim = await keyDateRepo.putCalendarSync(
+                params.ctx,
+                claimedSync,
+                { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
+              );
+
+              const [latestMatter, latestEnquiry, latestConfig] = await Promise.all([
+                latestKd.matterId
+                  ? matterRepo.getMatterById<Matter>(params.ctx, latestKd.matterId, {
+                      includeRestricted: true,
+                    })
+                  : Promise.resolve(null),
+                latestKd.enquiryId
+                  ? intakeRepo.getEnquiryById<Enquiry>(params.ctx, latestKd.enquiryId, {
+                      includeRestricted: true,
+                    })
+                  : Promise.resolve(null),
+                getKeyDatesConfig({ ctx: params.ctx }),
+              ]);
+              return {
+                status: 'claimed' as const,
+                latestKd,
+                latestSync: savedClaim,
+                latestMatter: latestMatter ?? null,
+                latestEnquiry: latestEnquiry ?? null,
+                latestConfig,
+              };
+            },
+          );
+
+          if (claimAttempt.status === 'missing') {
+            completed = true;
+            break;
+          }
+          if (claimAttempt.status === 'busy') {
+            if (leaseWait < 2) {
+              await new Promise((r) => setTimeout(r, 25));
+              continue;
+            }
+            skippedByActiveLease = true;
+            completed = true;
+            break;
+          }
+          tx1 = claimAttempt;
+          claimedLeaseInTx1 = true;
+          break;
+        }
+
+        if (skippedByActiveLease || !tx1) {
           completed = true;
           break;
         }
 
         const observedVersion = tx1.latestKd.version;
-        const baseSync: KeyDateCalendarSync = tx1.latestSync
-          ? structuredClone(tx1.latestSync)
-          : {
-              keyDateId,
-              state: 'pending',
-              externalEvents: [],
-              attempts: 0,
-            };
+        const baseSync: KeyDateCalendarSync = structuredClone(tx1.latestSync);
         if (observedExternalEvents.length > 0) {
           const mergedMap = new Map(
             baseSync.externalEvents.map((e) => [e.target, e.eventId]),
@@ -20941,30 +21023,66 @@ async function runPostCommitKeyDateCalendarSync(params: {
           }
         }
 
-        // Short TX 2 (R607): verify version didn't advance while Graph call was in flight
+        // Short TX 2 (R607, R627): verify lease ownership & key date version before committing sync state
         const tx2Result = await keyDateRepo.withTenantTransaction(params.ctx, async () => {
           const { keyDate: recheckedKd, calendarSync: currentDbSync } =
             await keyDateRepo.readKeyDateAndCalendarSyncForUpdate(
               params.ctx,
               keyDateId,
+              { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
             );
           if (!recheckedKd) {
-            return { action: 'done' as const };
-          }
-          if (recheckedKd.version === observedVersion) {
-            await keyDateRepo.putCalendarSync(params.ctx, updatedSync);
             return {
               action: 'done' as const,
-              finalSync: updatedSync,
+              displacedEvents: updatedSync.externalEvents,
+            };
+          }
+
+          if (currentDbSync?.leaseToken !== myLeaseToken) {
+            const displacedEvents = updatedSync.externalEvents.filter(
+              (ext) =>
+                !currentDbSync?.externalEvents.some(
+                  (c) => c.target === ext.target && c.eventId === ext.eventId,
+                ),
+            );
+            return {
+              action: 'done' as const,
+              finalSync: currentDbSync ?? undefined,
+              displacedEvents,
+            };
+          }
+
+          if (recheckedKd.version === observedVersion) {
+            const committedSync: KeyDateCalendarSync = {
+              keyDateId: updatedSync.keyDateId,
+              state: updatedSync.state,
+              externalEvents: updatedSync.externalEvents,
+              ...(updatedSync.lastSyncedAt
+                ? { lastSyncedAt: updatedSync.lastSyncedAt }
+                : {}),
+              ...(updatedSync.lastError ? { lastError: updatedSync.lastError } : {}),
+              attempts: updatedSync.attempts,
+            };
+            await keyDateRepo.putCalendarSync(params.ctx, committedSync, {
+              allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
+            });
+            return {
+              action: 'done' as const,
+              finalSync: committedSync,
+              displacedEvents: [] as Array<{ target: string; eventId: string }>,
             };
           }
 
           const mergedByTarget = new Map(
             (currentDbSync?.externalEvents ?? []).map((e) => [e.target, e.eventId]),
           );
+          const displacedEvents: Array<{ target: string; eventId: string }> = [];
           for (const ext of updatedSync.externalEvents) {
-            if (!mergedByTarget.has(ext.target)) {
+            const existingWinner = mergedByTarget.get(ext.target);
+            if (!existingWinner) {
               mergedByTarget.set(ext.target, ext.eventId);
+            } else if (existingWinner !== ext.eventId) {
+              displacedEvents.push(ext);
             }
           }
           const mergedEvents = Array.from(mergedByTarget.entries()).map(
@@ -20973,7 +21091,7 @@ async function runPostCommitKeyDateCalendarSync(params: {
           const isFinalAttempt = attempt >= maxAttempts;
           const skewedSync: KeyDateCalendarSync = {
             keyDateId,
-            state: isFinalAttempt ? 'failed' : 'pending',
+            state: isFinalAttempt ? 'failed' : 'syncing',
             externalEvents: mergedEvents,
             ...(currentDbSync?.lastSyncedAt
               ? { lastSyncedAt: currentDbSync.lastSyncedAt }
@@ -20987,80 +21105,112 @@ async function runPostCommitKeyDateCalendarSync(params: {
               currentDbSync?.attempts ?? 0,
               updatedSync.attempts ?? 0,
             ),
+            ...(isFinalAttempt
+              ? {}
+              : {
+                  leaseToken: myLeaseToken,
+                  leaseExpiresAt: new Date(Date.now() + leaseTtlMs).toISOString(),
+                }),
           };
-          await keyDateRepo.putCalendarSync(params.ctx, skewedSync);
+          await keyDateRepo.putCalendarSync(params.ctx, skewedSync, {
+            allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
+          });
           return {
             action: isFinalAttempt ? ('failed' as const) : ('retry' as const),
             finalSync: skewedSync,
+            displacedEvents,
           };
         });
 
+        await deleteDisplacedEvents(tx2Result.displacedEvents);
+
         if (tx2Result.action === 'done') {
           if (tx2Result.finalSync?.state === 'failed') {
-            anyFailure = true;
-            lastFailedKeyDateId = keyDateId;
-            lastLoggedAttempts = tx2Result.finalSync.attempts ?? 1;
-            lastLoggedError =
-              tx2Result.finalSync.lastError ?? 'Microsoft Graph calendar sync error';
+            failures.push({
+              keyDateId,
+              attempts: tx2Result.finalSync.attempts ?? 1,
+              error:
+                tx2Result.finalSync.lastError ?? 'Microsoft Graph calendar sync error',
+            });
           }
           completed = true;
           break;
         }
         if (tx2Result.action === 'failed') {
-          anyFailure = true;
-          lastFailedKeyDateId = keyDateId;
-          lastLoggedAttempts = tx2Result.finalSync?.attempts ?? attempt;
-          lastLoggedError =
-            tx2Result.finalSync?.lastError ?? 'CONCURRENT_CALENDAR_SYNC_VERSION_SKEW';
+          failures.push({
+            keyDateId,
+            attempts: tx2Result.finalSync?.attempts ?? attempt,
+            error:
+              tx2Result.finalSync?.lastError ??
+              'CONCURRENT_CALENDAR_SYNC_VERSION_SKEW',
+          });
           completed = true;
           break;
         }
       } catch (err) {
         const redacted = sanitizeCalendarSyncError(err);
-        anyFailure = true;
-        lastFailedKeyDateId = keyDateId;
-        lastLoggedAttempts = attempt;
-        lastLoggedError = redacted;
+        let recordedAttempts = attempt;
         try {
-          const existingFailed = await keyDateRepo.getCalendarSync(
-            params.ctx,
-            keyDateId,
-          );
-          await keyDateRepo.putCalendarSync(params.ctx, {
-            keyDateId,
-            state: 'failed',
-            externalEvents: existingFailed?.externalEvents ?? observedExternalEvents,
-            ...(existingFailed?.lastSyncedAt
-              ? { lastSyncedAt: existingFailed.lastSyncedAt }
-              : {}),
-            lastError: redacted,
-            attempts: (existingFailed?.attempts ?? 0) + 1,
-          });
+          if (claimedLeaseInTx1) {
+            const existingFailed = await keyDateRepo.getCalendarSync(
+              params.ctx,
+              keyDateId,
+            );
+            if (!existingFailed?.leaseToken || existingFailed.leaseToken === myLeaseToken) {
+              recordedAttempts = (existingFailed?.attempts ?? 0) + 1;
+              await keyDateRepo.putCalendarSync(
+                params.ctx,
+                {
+                  keyDateId,
+                  state: 'failed',
+                  externalEvents:
+                    existingFailed?.externalEvents ?? observedExternalEvents,
+                  ...(existingFailed?.lastSyncedAt
+                    ? { lastSyncedAt: existingFailed.lastSyncedAt }
+                    : {}),
+                  lastError: redacted,
+                  attempts: recordedAttempts,
+                },
+                { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
+              );
+            }
+          }
         } catch {
           // Best-effort retry persistence; key date mutation is already committed
         }
+        failures.push({
+          keyDateId,
+          attempts: recordedAttempts,
+          error: redacted,
+        });
         completed = true;
         break;
       }
     }
 
     if (!completed) {
-      anyFailure = true;
+      failures.push({
+        keyDateId,
+        attempts: maxAttempts,
+        error: 'CONCURRENT_CALENDAR_SYNC_VERSION_SKEW',
+      });
     }
   }
 
-  if (anyFailure) {
-    console.warn(
-      JSON.stringify({
-        level: 'warn',
-        event: 'keydate.calendar_sync_failed',
-        tenantId: params.ctx.tenantId,
-        correlationId: params.ctx.correlationId,
-        keyDateId: lastFailedKeyDateId,
-        attempts: lastLoggedAttempts,
-        error: lastLoggedError,
-      }),
-    );
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'keydate.calendar_sync_failed',
+          tenantId: params.ctx.tenantId,
+          correlationId: params.ctx.correlationId,
+          keyDateId: failure.keyDateId,
+          attempts: failure.attempts,
+          error: failure.error,
+        }),
+      );
+    }
     return { calendarSyncWarning: CALENDAR_SYNC_WARNING_MESSAGE };
   }
   return {};
@@ -21115,11 +21265,14 @@ async function commitKeyDateDomainWritesInPostgres(params: {
     }
     for (const kd of params.keyDatesToUpsert ?? []) {
       const expectedVersion = params.expectedVersionsById?.get(kd.id);
-      const savedKd = await keyDateRepo.putKeyDate(
-        params.ctx,
-        kd,
-        expectedVersion !== undefined ? { expectedVersion } : undefined,
-      );
+      if (expectedVersion === undefined) {
+        throw new Error(
+          `KEY_DATE_VALIDATION_ERROR: commitKeyDateDomainWritesInPostgres requires expectedVersion for KeyDate "${kd.id}".`,
+        );
+      }
+      const savedKd = await keyDateRepo.putKeyDate(params.ctx, kd, {
+        expectedVersion,
+      });
       kd.version = savedKd.version;
     }
     for (const na of params.notApplicableToUpsert ?? []) {
@@ -21131,7 +21284,9 @@ async function commitKeyDateDomainWritesInPostgres(params: {
       });
     }
     for (const cs of params.calendarSyncsToUpsert ?? []) {
-      await keyDateRepo.putCalendarSync(params.ctx, cs);
+      await keyDateRepo.putCalendarSync(params.ctx, cs, {
+        allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
+      });
     }
     if (params.auditEntries.length > 0) {
       const auditInputs: FirmAuditEntryInput[] = params.auditEntries.map((a) => ({
@@ -22581,7 +22736,7 @@ export async function recordKeyDateNotApplicableRecord(
         ctx,
         matter.id,
         actor.id,
-        { forUpdate: true },
+        { forUpdate: true, keyDateTypeId: input.keyDateTypeId },
       );
       const matchingKeyDateIds = matterKeyDates
         .filter((kd) => kd.keyDateTypeId === input.keyDateTypeId)
@@ -22812,6 +22967,7 @@ export interface ExecuteKeyDateRemindersForTenantOptions {
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
   readonly statementTimeoutMs?: number;
+  readonly calendarAdapter?: GraphCalendarAdapter;
 }
 
 /**
@@ -22822,9 +22978,9 @@ export interface ExecuteKeyDateRemindersForTenantOptions {
  * Inside one `withTenantTransaction`:
  * 1. Acquires `pg_try_advisory_xact_lock(hashtext('onesquared_job:key-date-reminders:' || tenantId))`.
  * 2. Checks `job_runs` for scheduled runs (`localHour >= 02:00` and no `status = 'succeeded'` row for `local_date`).
- * 3. Reads all inputs (`keyDates`, `reminderStates`, `tasks`, `people`, `teams`, `matters`, `config`) inside the transaction.
+ * 3. Reads an unlocked snapshot, identifies candidate key dates needing reminder/task updates, and locks ONLY those candidates (`FOR UPDATE SKIP LOCKED`) so concurrent user edits/acknowledgements on other rows are never blocked (R629).
  * 4. Evaluates due reminders, escalations, tasks, notifications, and audit entries and writes them on the same transaction client.
- * 5. Inserts the `status = 'succeeded'` row in `job_runs` before `COMMIT` releases the advisory lock atomically.
+ * 5. Inserts the `status = 'succeeded'` row in `job_runs` before `COMMIT` releases the advisory lock atomically, then retries any previously `'failed'` calendar sync records strictly post-commit when a configured Graph adapter is supplied (R628).
  */
 export async function executeKeyDateRemindersForTenant(
   ctx: TenantContext,
@@ -22840,8 +22996,13 @@ export async function executeKeyDateRemindersForTenant(
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const now = new Date();
   const nowIso = now.toISOString();
+  let postCommitFailedSyncItems: Array<{
+    keyDate: KeyDate;
+    matter: Matter | null;
+    enquiry: Enquiry | null;
+  }> = [];
 
-  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+  const jobOutcome = await getJobRunRepository().executeControlledTenantJobRun(ctx, {
     jobKey: 'key-date-reminders',
     triggerSource: options.triggerSource,
     triggeredById: options.triggeredById,
@@ -22856,25 +23017,23 @@ export async function executeKeyDateRemindersForTenant(
       const matterRepo = getMatterRepository();
       const hrRepo = getHrAndRbacRepository();
       const catalogueRepo = getCatalogueRepository();
+      const intakeRepo = getIntakeQuoteRepository();
 
-      // R609: Lock key_dates then key_date_reminder_states in consistent ascending ID order before reading remaining tables
-      const keyDatesWorking = await keyDateRepo.listAllKeyDatesUnfilteredForScheduler(
+      // R629: Read unlocked snapshot first so unaffected rows are never locked by the batch sweep
+      const keyDatesSnapshot = await keyDateRepo.listAllKeyDatesUnfilteredForScheduler(
         ctx,
-        { forUpdate: true },
       );
-      const reminderStatesWorking =
-        await keyDateRepo.listAllReminderStatesUnfilteredForScheduler(ctx, {
-          forUpdate: true,
-        });
+      const reminderStatesSnapshot =
+        await keyDateRepo.listAllReminderStatesUnfilteredForScheduler(ctx);
 
       const [
         people,
         matters,
-        storeTasks,
+        storeTasksSnapshot,
         teams,
         values,
         config,
-        notApplicableWorking,
+        notApplicableSnapshot,
         calendarSyncsWorking,
         rbacConfig,
       ] = await Promise.all([
@@ -22924,25 +23083,46 @@ export async function executeKeyDateRemindersForTenant(
         }
       }
 
-      const beforeReminderStageByKd = new Map(
-        reminderStatesWorking.map((rs) => [
-          rs.keyDateId,
-          rs.currentStageDaysBefore,
-        ]),
-      );
-      const beforeReminderJsonByKd = new Map(
-        reminderStatesWorking.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
-      );
-      const beforeTaskJsonById = new Map(
-        storeTasks.map((t) => [t.id, JSON.stringify(t)]),
-      );
-      const createdNotifications: NotificationItem[] = [];
-      const stagedAudit: AuditEntry[] = [];
-      let pendingIdx = 0;
-      let pendingTaskIdx = 0;
-      let pendingNotifIdx = 0;
+      // Collect any failed Outlook calendar syncs to retry strictly post-commit (R628)
+      const snapshotKdById = new Map(keyDatesSnapshot.map((k) => [k.id, k]));
+      const matterById = new Map(matters.map((m) => [m.id, m]));
+      const failedSyncItems: Array<{
+        keyDate: KeyDate;
+        matter: Matter | null;
+        enquiry: Enquiry | null;
+      }> = [];
+      for (const cs of calendarSyncsWorking) {
+        if (cs.state !== 'failed') continue;
+        const failedKd = snapshotKdById.get(cs.keyDateId);
+        if (!failedKd) continue;
+        const failedEnquiry = failedKd.enquiryId
+          ? ((await intakeRepo.getEnquiryById<Enquiry>(ctx, failedKd.enquiryId, {
+              includeRestricted: true,
+            })) ?? null)
+          : null;
+        failedSyncItems.push({
+          keyDate: failedKd,
+          matter: failedKd.matterId ? (matterById.get(failedKd.matterId) ?? null) : null,
+          enquiry: failedEnquiry,
+        });
+      }
+      postCommitFailedSyncItems = failedSyncItems;
 
-      const result = runTenantBackgroundJob(
+      // Pass 1 (unlocked): determine which confirmed key dates require reminder/task changes
+      const dryKeyDates = structuredClone(keyDatesSnapshot);
+      const dryReminders = structuredClone(reminderStatesSnapshot);
+      const dryTasks = structuredClone(storeTasksSnapshot);
+      const beforeDryRemJsonByKd = new Map(
+        dryReminders.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
+      );
+      const beforeDryTaskJsonById = new Map(
+        dryTasks.map((t) => [t.id, JSON.stringify(t)]),
+      );
+      let dryTaskIdx = 0;
+      let dryNotifIdx = 0;
+      let dryAuditIdx = 0;
+
+      const dryResult = runTenantBackgroundJob(
         {
           jobId: `keydate-reminder-scheduler:${ctx.tenantId}:${localDate}`,
           tenantId: ctx.tenantId,
@@ -22956,10 +23136,114 @@ export async function executeKeyDateRemindersForTenant(
             todayIso: job.payload.todayIso,
             nowIso: job.payload.nowIso,
             config,
-            keyDates: keyDatesWorking,
-            reminderStates: reminderStatesWorking,
-            notApplicable: notApplicableWorking,
-            tasks: storeTasks,
+            keyDates: dryKeyDates,
+            reminderStates: dryReminders,
+            notApplicable: notApplicableSnapshot,
+            tasks: dryTasks,
+            matters,
+            teams,
+            people,
+            rbacOptions: recipientRbacOptions,
+            notifications: [],
+            audit: [],
+            nextTaskId: () => `TSK-DRY-${++dryTaskIdx}`,
+            nextNotificationId: () => `NTF-DRY-${++dryNotifIdx}`,
+            nextAuditId: () => `AU-DRY-${++dryAuditIdx}`,
+          }),
+      );
+
+      const idempotencyKeyToKdId = new Map(
+        keyDatesSnapshot.map((k) => [
+          buildKeyDateReminderIdempotencyKey(k.id, ctx.tenantId),
+          k.id,
+        ]),
+      );
+      const linkTaskKeyDateId = (t: Task): string | undefined =>
+        t.linkedKeyDateId ??
+        (t.idempotencyKey ? idempotencyKeyToKdId.get(t.idempotencyKey) : undefined);
+
+      const candidateKeyDateIdSet = new Set<string>();
+      for (const rs of dryReminders) {
+        if (beforeDryRemJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs)) {
+          candidateKeyDateIdSet.add(rs.keyDateId);
+        }
+      }
+      const afterDryRemKdIds = new Set(dryReminders.map((rs) => rs.keyDateId));
+      for (const prevKdId of beforeDryRemJsonByKd.keys()) {
+        if (!afterDryRemKdIds.has(prevKdId)) {
+          candidateKeyDateIdSet.add(prevKdId);
+        }
+      }
+      for (const t of dryTasks) {
+        if (beforeDryTaskJsonById.get(t.id) !== JSON.stringify(t)) {
+          const kdId = linkTaskKeyDateId(t);
+          if (kdId) candidateKeyDateIdSet.add(kdId);
+        }
+      }
+      const afterDryTaskIds = new Set(dryTasks.map((t) => t.id));
+      for (const t of storeTasksSnapshot) {
+        if (!afterDryTaskIds.has(t.id)) {
+          const kdId = linkTaskKeyDateId(t);
+          if (kdId) candidateKeyDateIdSet.add(kdId);
+        }
+      }
+
+      const keyDatesForExceptionsMap = new Map(keyDatesSnapshot.map((k) => [k.id, k]));
+      const remindersForExceptionsMap = new Map(
+        reminderStatesSnapshot.map((r) => [r.keyDateId, r]),
+      );
+      let notApplicableWorking = notApplicableSnapshot;
+      let result: ReturnType<typeof runTenantKeyDateReminderJob> = {
+        ...dryResult,
+        stagesAdvancedCount: 0,
+        escalationsTriggeredCount: 0,
+        notificationsSentCount: 0,
+      };
+      let changedReminders: KeyDateReminderState[] = [];
+      let changedTasks: Task[] = [];
+      let deletedTaskIds: string[] = [];
+      let newTasksCount = 0;
+      const createdNotifications: NotificationItem[] = [];
+      const stagedAudit: AuditEntry[] = [];
+
+      if (candidateKeyDateIdSet.size > 0) {
+        // Pass 2 (R629): lock ONLY candidates with FOR UPDATE SKIP LOCKED and evaluate fresh DB state
+        const lockResult = await keyDateRepo.lockKeyDatesAndRemindersForSchedulerWrite(
+          ctx,
+          Array.from(candidateKeyDateIdSet),
+        );
+        const [storeTasksFresh, notApplicableFresh] = await Promise.all([
+          taskRepo.listAllTasksUnfiltered<Task>(ctx),
+          keyDateRepo.listAllNotApplicableUnfilteredForScheduler(ctx),
+        ]);
+        notApplicableWorking = notApplicableFresh;
+
+        if (lockResult.keyDates.length > 0) {
+          const candidateKeyDates = structuredClone(lockResult.keyDates);
+          const candidateReminders = structuredClone(lockResult.reminderStates);
+          const beforeReminderStageByKd = new Map(
+            candidateReminders.map((rs) => [rs.keyDateId, rs.currentStageDaysBefore]),
+          );
+          const beforeReminderJsonByKd = new Map(
+            candidateReminders.map((rs) => [rs.keyDateId, JSON.stringify(rs)]),
+          );
+          const beforeTaskJsonById = new Map(
+            storeTasksFresh.map((t) => [t.id, JSON.stringify(t)]),
+          );
+          let pendingIdx = 0;
+          let pendingTaskIdx = 0;
+          let pendingNotifIdx = 0;
+
+          const candidateResult = runTenantKeyDateReminderJob({
+            tenantId: ctx.tenantId,
+            actorId: options.triggeredById,
+            todayIso: localDate,
+            nowIso,
+            config,
+            keyDates: candidateKeyDates,
+            reminderStates: candidateReminders,
+            notApplicable: notApplicableFresh,
+            tasks: storeTasksFresh,
             matters,
             teams,
             people,
@@ -22969,53 +23253,88 @@ export async function executeKeyDateRemindersForTenant(
             nextTaskId: () => `TSK-PENDING-${++pendingTaskIdx}`,
             nextNotificationId: () => `NTF-PENDING-${++pendingNotifIdx}`,
             nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
-          }),
-      );
-
-      const changedTasks = storeTasks.filter(
-        (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
-      );
-      const newTasksCount = changedTasks.filter((t) =>
-        t.id.startsWith('TSK-PENDING-'),
-      ).length;
-      const currentIds = new Set(storeTasks.map((t) => t.id));
-      const deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
-        (id) => !currentIds.has(id),
-      );
-      const changedReminders = reminderStatesWorking.filter(
-        (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
-      );
-
-      for (const rs of changedReminders) {
-        const alreadyAudited = stagedAudit.some(
-          (a) => a.recordId === rs.keyDateId,
-        );
-        if (!alreadyAudited) {
-          const prevStage = beforeReminderStageByKd.get(rs.keyDateId);
-          stagedAudit.push({
-            id: `AU-PENDING-${++pendingIdx}`,
-            recordType: 'key_date',
-            recordId: rs.keyDateId,
-            action: 'update',
-            field: 'currentStageDaysBefore',
-            oldValue: prevStage !== undefined ? String(prevStage) : null,
-            newValue: String(rs.currentStageDaysBefore),
-            byId: options.triggeredById,
-            at: nowIso,
-            reason: `Key date reminder stage evaluated (${localDate})`,
           });
+
+          result = {
+            ...candidateResult,
+            evaluatedCount: Math.max(
+              0,
+              dryResult.evaluatedCount - lockResult.skippedKeyDateIds.length,
+            ),
+          };
+
+          changedTasks = storeTasksFresh.filter(
+            (t) => beforeTaskJsonById.get(t.id) !== JSON.stringify(t),
+          );
+          newTasksCount = changedTasks.filter((t) =>
+            t.id.startsWith('TSK-PENDING-'),
+          ).length;
+          const currentIds = new Set(storeTasksFresh.map((t) => t.id));
+          deletedTaskIds = [...beforeTaskJsonById.keys()].filter(
+            (id) => !currentIds.has(id),
+          );
+          changedReminders = candidateReminders.filter(
+            (rs) => beforeReminderJsonByKd.get(rs.keyDateId) !== JSON.stringify(rs),
+          );
+
+          for (const rs of changedReminders) {
+            const alreadyAudited = stagedAudit.some(
+              (a) => a.recordId === rs.keyDateId,
+            );
+            if (!alreadyAudited) {
+              const prevStage = beforeReminderStageByKd.get(rs.keyDateId);
+              stagedAudit.push({
+                id: `AU-PENDING-${++pendingIdx}`,
+                recordType: 'key_date',
+                recordId: rs.keyDateId,
+                action: 'update',
+                field: 'currentStageDaysBefore',
+                oldValue: prevStage !== undefined ? String(prevStage) : null,
+                newValue: String(rs.currentStageDaysBefore),
+                byId: options.triggeredById,
+                at: nowIso,
+                reason: `Key date reminder stage evaluated (${localDate})`,
+              });
+            }
+          }
+
+          if (
+            changedReminders.length > 0 ||
+            changedTasks.length > 0 ||
+            deletedTaskIds.length > 0 ||
+            createdNotifications.length > 0 ||
+            stagedAudit.length > 0
+          ) {
+            await commitKeyDateDomainWritesInPostgres({
+              ctx,
+              reminderStatesToUpsert: changedReminders,
+              tasksToUpsert: changedTasks,
+              tasksToDeleteIds: deletedTaskIds,
+              notificationsToUpsert: createdNotifications,
+              auditEntries: stagedAudit,
+              allowSystemSchedulerWrite: true,
+            });
+          }
+
+          for (const kd of candidateKeyDates) {
+            keyDatesForExceptionsMap.set(kd.id, kd);
+          }
+          for (const rs of candidateReminders) {
+            remindersForExceptionsMap.set(rs.keyDateId, rs);
+          }
+        } else {
+          result = {
+            ...result,
+            evaluatedCount: Math.max(
+              0,
+              dryResult.evaluatedCount - lockResult.skippedKeyDateIds.length,
+            ),
+          };
         }
       }
 
-      await commitKeyDateDomainWritesInPostgres({
-        ctx,
-        reminderStatesToUpsert: changedReminders,
-        tasksToUpsert: changedTasks,
-        tasksToDeleteIds: deletedTaskIds,
-        notificationsToUpsert: createdNotifications,
-        auditEntries: stagedAudit,
-        allowSystemSchedulerWrite: true,
-      });
+      const keyDatesWorking = Array.from(keyDatesForExceptionsMap.values());
+      const reminderStatesWorking = Array.from(remindersForExceptionsMap.values());
 
       const syntheticViewer: Person =
         people.find((p) => p.id === options.triggeredById) ??
@@ -23059,6 +23378,26 @@ export async function executeKeyDateRemindersForTenant(
       };
     },
   });
+
+  if (
+    jobOutcome.outcome === 'executed' &&
+    postCommitFailedSyncItems.length > 0 &&
+    options.calendarAdapter &&
+    !(
+      options.calendarAdapter instanceof ManagedIdentityGraphCalendarAdapter &&
+      !options.calendarAdapter.isConfigured
+    )
+  ) {
+    await runPostCommitKeyDateCalendarSync({
+      ctx,
+      nowIso: new Date().toISOString(),
+      items: postCommitFailedSyncItems,
+      adapter: options.calendarAdapter,
+      allowSystemSchedulerWrite: true,
+    });
+  }
+
+  return jobOutcome;
 }
 
 export interface UsageRetentionPurgeJobSummary extends Record<string, number> {

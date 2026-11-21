@@ -297,4 +297,50 @@ describe('One-Way Outlook Calendar Sync via Microsoft Graph (§7)', () => {
       true,
     );
   });
+
+  it('R627: syncKeyDateToOutlookCalendar passes deterministic Graph transactionId keydate:<id>:<target> to upsertEvent', async () => {
+    const capturedCalls: Array<{
+      target: string;
+      transactionId?: string;
+      payloadTransactionId?: string;
+    }> = [];
+    const spyAdapter: MicrosoftGraphCalendarAdapter = {
+      credentialSource: 'managed_identity',
+      isConfigured: true,
+      async upsertEvent(input) {
+        const typedInput = input as typeof input & { transactionId?: string };
+        const typedPayload = input.payload as MicrosoftGraphCalendarEventPayload & {
+          transactionId?: string;
+        };
+        capturedCalls.push({
+          target: input.target,
+          transactionId: typedInput.transactionId,
+          payloadTransactionId: typedPayload.transactionId,
+        });
+        return { eventId: `evt-${input.target}` };
+      },
+      async deleteEvent() {},
+    };
+
+    const res = await syncKeyDateToOutlookCalendar({
+      keyDate: makeKeyDate({
+        id: 'KD-R627-TXID',
+        responsiblePersonIds: ['P-FEE-1'],
+      }),
+      config,
+      matter: litMatter,
+      calendarSyncs: [],
+      nowIso: '2026-02-01T10:00:00Z',
+      adapter: spyAdapter,
+    });
+
+    expect(res.state).toBe('synced');
+    expect(capturedCalls).toEqual([
+      {
+        target: 'person:P-FEE-1',
+        transactionId: 'keydate:KD-R627-TXID:person:P-FEE-1',
+        payloadTransactionId: 'keydate:KD-R627-TXID:person:P-FEE-1',
+      },
+    ]);
+  });
 });

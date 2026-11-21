@@ -17,9 +17,9 @@ Users with the \`keydate:configure\` permission (by default \`admin\` and \`risk
 In addition to the unattended daily Container Apps job (\`key-date-reminders\`, which executes once per local day at or after \`02:00\` in the tenant's configured \`timeZone\` under the job-only permission \`keydate:run_reminders\`), administrators and COLPs with \`keydate:configure\` (and MFA verified) can click **Run daily reminder check** in **Admin → Key dates & limitation** (\`runKeyDateReminderSchedulerAction\`).
 
 Both the scheduled job and the manual button share the same single-transaction per-tenant runner (\`executeKeyDateRemindersForTenant\`):
-- The transaction acquires \`pg_try_advisory_xact_lock(hashtext('onesquared_job:key-date-reminders:' || tenantId))\` so a manual click and a scheduled hourly tick can never overlap or duplicate tasks, notifications, or audit entries.
-- A manual run executes immediately for the tenant's current \`local_date\` (regardless of whether the clock is before \`02:00\`), attributes all \`audit_entries\` to the authenticated administrator's \`personId\`, and records a \`trigger_source = 'manual'\`, \`status = 'succeeded'\` row in \`public.job_runs\`.
-- When the next scheduled hourly tick arrives on the same \`local_date\`, it sees the existing \`status = 'succeeded'\` row in \`public.job_runs\` and skips cleanly without re-running.
+- The runner acquires an exclusive per-tenant scheduler lock so a manual click and a scheduled hourly tick can never overlap or duplicate tasks, notifications, or audit entries, while using non-blocking candidate locking so active user key-date edits and acknowledgements are not stalled.
+- A manual run executes immediately for the tenant's current local date (regardless of whether the clock is before \`02:00\`), attributes all audit entries to the authenticated administrator's \`personId\`, and records a successful manual completion in the firm's job-run ledger.
+- When the next scheduled hourly tick arrives on the same local date, it sees today's recorded completion in the job-run ledger and skips cleanly without re-running.
 
 ## What you can configure
 

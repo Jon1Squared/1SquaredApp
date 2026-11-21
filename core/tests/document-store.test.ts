@@ -2626,10 +2626,14 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           'M-000001',
         );
         for (const kd of snapshotKeyDates) {
-          await kdRepoForClose.putKeyDate(kdCtxForClose, {
-            ...structuredClone(kd),
-            status: 'met',
-          });
+          await kdRepoForClose.putKeyDate(
+            kdCtxForClose,
+            {
+              ...structuredClone(kd),
+              status: 'met',
+            },
+            { expectedVersion: kd.version },
+          );
         }
         try {
           const closedStatusId =
@@ -2748,7 +2752,9 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           }
         } finally {
           for (const kd of snapshotKeyDates) {
-            await kdRepoForClose.putKeyDate(kdCtxForClose, kd);
+            await kdRepoForClose.putKeyDate(kdCtxForClose, kd, {
+              expectedVersion: (kd.version ?? 1) + 1,
+            });
           }
           setBeforeMatterDocumentsCloseHookForTesting(undefined);
         }

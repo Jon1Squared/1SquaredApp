@@ -5705,7 +5705,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         r183KdCtx,
         fixtureM3.id,
       )) {
-        await getKeyDateRepository().putKeyDate(r183KdCtx, { ...kd, status: 'met' });
+        await getKeyDateRepository().putKeyDate(
+          r183KdCtx,
+          { ...kd, status: 'met' },
+          { expectedVersion: kd.version },
+        );
       }
       const closeSuccessRes = await runWithActiveActorSession(
         partnerSession,
@@ -10819,25 +10823,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         status: 'Pending',
       });
 
-      await kdRepo.putKeyDate(ctxA, {
-        id: kdId,
-        matterId: allowListMatterId,
-        keyDateTypeId: 'limitation',
-        category: 'limitation',
-        title: 'Allow-list Key Date',
-        dueDate: '2027-02-01',
-        isCritical: true,
-        status: 'confirmed',
-        source: 'manual',
-        teamId: 'TM-000001',
-        responsiblePersonIds: ['P-ALPHA-1'],
-        verification: { required: false },
-        createdById: 'P-ALPHA-1',
-        createdAt: '2026-11-19T10:00:00.000Z',
-        updatedById: 'P-ALPHA-1',
-        updatedAt: '2026-11-19T10:00:00.000Z',
-        version: 1,
-      });
+      await kdRepo.putKeyDate(
+        ctxA,
+        {
+          id: kdId,
+          matterId: allowListMatterId,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Allow-list Key Date',
+          dueDate: '2027-02-01',
+          isCritical: true,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-ALPHA-1'],
+          verification: { required: false },
+          createdById: 'P-ALPHA-1',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-ALPHA-1',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 1,
+        },
+        { expectedVersion: null },
+      );
 
       await regRepo.createRegisterRecord(
         ctxA,
@@ -11030,25 +11038,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // Update allow-list key date to list unpermitted P-ALPHA-2 + permitted P-ALPHA-1 and run manual reminder as admin tokenRoles in Tenant Alpha
-      await kdRepo.putKeyDate(ctxA, {
-        id: kdId,
-        matterId: allowListMatterId,
-        keyDateTypeId: 'limitation',
-        category: 'limitation',
-        title: 'Allow-list Key Date',
-        dueDate: '2027-02-01',
-        isCritical: true,
-        status: 'confirmed',
-        source: 'manual',
-        teamId: 'TM-000001',
-        responsiblePersonIds: ['P-ALPHA-2', 'P-ALPHA-1'],
-        verification: { required: false },
-        createdById: 'P-ALPHA-1',
-        createdAt: '2026-11-19T10:00:00.000Z',
-        updatedById: 'P-ALPHA-1',
-        updatedAt: '2026-11-19T10:00:00.000Z',
-        version: 2,
-      });
+      await kdRepo.putKeyDate(
+        ctxA,
+        {
+          id: kdId,
+          matterId: allowListMatterId,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Allow-list Key Date',
+          dueDate: '2027-02-01',
+          isCritical: true,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-ALPHA-2', 'P-ALPHA-1'],
+          verification: { required: false },
+          createdById: 'P-ALPHA-1',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-ALPHA-1',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 2,
+        },
+        { expectedVersion: 1 },
+      );
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2027-02-01T10:00:00.000Z'));
       try {
@@ -11087,25 +11099,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
         { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
       );
-      await kdRepo.putKeyDate(ctxA, {
-        id: `KD-R568-OPEN-${suffix}`,
-        matterId: `MAT-R568-OPEN-${suffix}`,
-        keyDateTypeId: 'limitation',
-        category: 'limitation',
-        title: 'R568 Alpha Open KeyDate',
-        dueDate: '2027-02-01',
-        isCritical: false,
-        status: 'confirmed',
-        source: 'manual',
-        teamId: 'TM-000001',
-        responsiblePersonIds: ['P-ALPHA-1'],
-        verification: { required: false },
-        createdById: 'P-ALPHA-1',
-        createdAt: '2026-11-19T10:00:00.000Z',
-        updatedById: 'P-ALPHA-1',
-        updatedAt: '2026-11-19T10:00:00.000Z',
-        version: 1,
-      });
+      await kdRepo.putKeyDate(
+        ctxA,
+        {
+          id: `KD-R568-OPEN-${suffix}`,
+          matterId: `MAT-R568-OPEN-${suffix}`,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'R568 Alpha Open KeyDate',
+          dueDate: '2027-02-01',
+          isCritical: false,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-ALPHA-1'],
+          verification: { required: false },
+          createdById: 'P-ALPHA-1',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-ALPHA-1',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 1,
+        },
+        { expectedVersion: null },
+      );
       const r568TwoKdTaskId = `TSK-R568-ISO-${suffix}`;
       await taskRepo.putTask(ctxA, {
         ...structuredClone(seed.tasks[0]!),

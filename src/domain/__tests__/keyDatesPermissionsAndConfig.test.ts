@@ -648,7 +648,9 @@ describe('Key Dates permissions, config schema validation, and extension contrac
         ...confirmedKd.responsiblePersonIds,
         revokedViewer.id,
       ];
-      await kdRepo.putKeyDate(testTenantCtx(admin.id), confirmedKd);
+      await kdRepo.putKeyDate(testTenantCtx(admin.id), confirmedKd, {
+        expectedVersion: confirmedKd.version,
+      });
 
       expect(
         (
