@@ -1455,7 +1455,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
 
         const createdKd = calculatedAttempt.keyDate!;
         createdKd.status = 'confirmed';
-        await kdRepo.putKeyDate(testTenantCtx('P-000001'), createdKd);
+        await kdRepo.putKeyDate(testTenantCtx('P-000001'), createdKd, {
+          expectedVersion: createdKd.version,
+        });
 
         // R294: Superseding into a manual date on a type with allowManualEntry: false is denied with ActionDenied
         const configWithoutRuleSets = structuredClone(await getKeyDatesConfig(store));
@@ -1487,7 +1489,9 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
         carriedKd.calculation = undefined;
         carriedKd.dueDate = '2027-06-01';
         carriedKd.status = 'confirmed';
-        await kdRepo.putKeyDate(testTenantCtx('P-000001'), carriedKd);
+        await kdRepo.putKeyDate(testTenantCtx('P-000001'), carriedKd, {
+          expectedVersion: null,
+        });
 
         const supersedeCarriedDenied = await supersedeConfirmedKeyDateRecord(
           carriedKd.id,

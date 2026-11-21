@@ -34,6 +34,7 @@ export interface MicrosoftGraphCalendarEventPayload {
   dueTime?: string;
   bodyText: string;
   isCritical: boolean;
+  transactionId?: string;
 }
 
 export interface MicrosoftGraphCalendarAdapter {
@@ -45,6 +46,7 @@ export interface MicrosoftGraphCalendarAdapter {
   upsertEvent(input: {
     target: string; // 'person:<id>' or 'group:<groupId>'
     existingEventId?: string;
+    transactionId?: string;
     payload: MicrosoftGraphCalendarEventPayload;
   }): Promise<{ eventId: string }>;
   deleteEvent(input: { target: string; eventId: string }): Promise<void>;
@@ -69,6 +71,7 @@ export class ManagedIdentityGraphCalendarAdapter
   public async upsertEvent(_input: {
     target: string;
     existingEventId?: string;
+    transactionId?: string;
     payload: MicrosoftGraphCalendarEventPayload;
   }): Promise<{ eventId: string }> {
     throw new Error(
@@ -319,10 +322,15 @@ export async function syncKeyDateToOutlookCalendar(
 
     for (const target of targets) {
       const existingEventId = existingByTarget.get(target);
+      const transactionId = `keydate:${keyDate.id}:${target}`;
       const res = await adapter.upsertEvent({
         target,
         existingEventId,
-        payload,
+        transactionId,
+        payload: {
+          ...payload,
+          transactionId,
+        },
       });
       updatedExternalEvents.push({ target, eventId: res.eventId });
       existingByTarget.delete(target);

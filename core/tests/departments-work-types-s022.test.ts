@@ -1510,7 +1510,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     await expect(freshCatRepo.getWorkTypeConfigs(forgedCtx)).rejects.toThrow();
 
     expect(runner).toBeDefined();
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0022');
   });
 
   it('10. R495: ignores client destructionDueAt and retentionPeriod on create and update, rejects non-closing/future/pre-open closedAt with code and message, and audits old/new values', async () => {
@@ -1976,31 +1976,35 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
             injectedKeyDate = true;
             const nowIso = new Date().toISOString();
             await kdRepo.withAutonomousTenantTransaction(ctx, async () => {
-              await kdRepo.putKeyDate(ctx, {
-                id: 'KD-R497-CONCURRENT-01',
-                matterId: targetMatter.id,
-                keyDateTypeId: 'kd-type-limitation',
-                category: 'limitation',
-                title: 'R497 Concurrent Open Key Date',
-                dueDate: '2027-07-01',
-                isCritical: true,
-                status: 'confirmed',
-                source: 'manual',
-                teamId: 'TM-000001',
-                responsiblePersonIds: ['P-000001'],
-                verification: {
-                  required: true,
-                  proposedById: 'P-000001',
-                  proposedAt: nowIso,
-                  verifiedById: 'P-000001',
-                  verifiedAt: nowIso,
+              await kdRepo.putKeyDate(
+                ctx,
+                {
+                  id: 'KD-R497-CONCURRENT-01',
+                  matterId: targetMatter.id,
+                  keyDateTypeId: 'kd-type-limitation',
+                  category: 'limitation',
+                  title: 'R497 Concurrent Open Key Date',
+                  dueDate: '2027-07-01',
+                  isCritical: true,
+                  status: 'confirmed',
+                  source: 'manual',
+                  teamId: 'TM-000001',
+                  responsiblePersonIds: ['P-000001'],
+                  verification: {
+                    required: true,
+                    proposedById: 'P-000001',
+                    proposedAt: nowIso,
+                    verifiedById: 'P-000001',
+                    verifiedAt: nowIso,
+                  },
+                  createdById: 'P-000001',
+                  createdAt: nowIso,
+                  updatedById: 'P-000001',
+                  updatedAt: nowIso,
+                  version: 1,
                 },
-                createdById: 'P-000001',
-                createdAt: nowIso,
-                updatedById: 'P-000001',
-                updatedAt: nowIso,
-                version: 1,
-              });
+                { expectedVersion: null },
+              );
             });
           }
           return cfg;
@@ -2040,7 +2044,11 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
       const injectedKd = (
         await kdRepo.listKeyDatesForMatter(ctx, targetMatter.id, 'P-000001')
       ).find((d) => d.id === 'KD-R497-CONCURRENT-01')!;
-      await kdRepo.putKeyDate(ctx, { ...injectedKd, status: 'met' });
+      await kdRepo.putKeyDate(
+        ctx,
+        { ...injectedKd, status: 'met' },
+        { expectedVersion: injectedKd.version },
+      );
 
       const updatedWorkTypes = cloneBaseWorkTypesConfig();
       const cpItem = updatedWorkTypes.items.find(

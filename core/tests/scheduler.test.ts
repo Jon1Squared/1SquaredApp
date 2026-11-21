@@ -1744,7 +1744,9 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         updatedAt: '2027-01-01T00:00:00.000Z',
         version: 1,
       };
-      await getKeyDateRepository().putKeyDate(setupCtx, dueStaffKd);
+      await getKeyDateRepository().putKeyDate(setupCtx, dueStaffKd, {
+        expectedVersion: null,
+      });
 
       const adminRunCtx = testTenantCtx('P-000004', {
         roles: ['admin', 'managing_partner'],

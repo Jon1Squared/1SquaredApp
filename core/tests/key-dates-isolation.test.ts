@@ -1,21 +1,35 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CORE_TENANT_MIGRATIONS,
   KEY_DATES_MIGRATION_0003,
   KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
   resolveTenantFromVerifiedToken,
+  resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   TenantKeyDateRepository,
   TenantMigrationRunner,
+  validateTenantRegistry,
   type KeyDate,
   type TenantContext,
 } from '../src/index';
+import { guardedJob } from '../../src/server/authorize';
 import {
   acknowledgeKeyDateReminderRecord,
+  createOrProposeKeyDateRecord,
+  executeKeyDateRemindersForTenant,
+  getIntakeQuoteRepository,
+  getKeyDatesConfig,
   getMatterRepository,
   getPartyRepository,
+  getTaskWorkflowRepository,
+  proposeProvisionalKeyDateRecord,
   reassignKeyDateTeamRecord,
+  recordKeyDateNotApplicableRecord,
+  rejectProposedKeyDateRecord,
+  resetAllDemoData,
   resolveKeyDateOutcomeRecord,
+  saveKeyDatesConfigRecord,
+  saveMatterRecord,
   supersedeConfirmedKeyDateRecord,
   verifyProposedKeyDateRecord,
 } from '../../src/server/services';
@@ -23,10 +37,24 @@ import {
   computeKeyDateExceptions,
   queryTeamDiaryEntries,
 } from '../../src/server/rbacRuntime';
-import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import {
+  buildKeyDateReminderIdempotencyKey,
+  isVerificationRequiredForKeyDate,
+  resolveMatterTypeCalendarSyncPolicy,
+} from '../../src/domain/keyDates';
+import type { KeyDatesConfig } from '../../src/domain/keyDates.types';
+import { calculateLimitationDate } from '../../src/domain/keyDateCalculator';
+import type { Enquiry, Matter, Person, Task } from '../../src/domain/types';
+import { getDocumentRepository } from '../../src/server/documentGenerationServices';
+import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
+import { getJobRunRepository } from '../../src/platform/tenantRuntime';
+import { testDataResetContext } from '../../src/test/testTenantContexts';
+import {
+  auditEntriesSince,
   getKeyDateRepository,
+  markAuditPosition,
   runAsTestActor,
+  setJobRunBeforeCommitHookForTesting,
   testTenantCtx,
 } from '../../src/server/testSupport/auditTestSupport';
 
@@ -185,7 +213,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       matterId: 'M-ALPHA-001',
       title: 'Alpha Limitation',
     });
-    await repo.putKeyDate(ctxA, kdAlpha);
+    await repo.putKeyDate(ctxA, kdAlpha, { expectedVersion: null });
     await repo.putReminderState(ctxA, {
       keyDateId: kdAlpha.id,
       taskId: 'TSK-ALPHA-001',
@@ -266,10 +294,16 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
         state: 'disabled',
         attempts: 0,
       })).rejects.toThrow(/KEY_DATE_NOT_FOUND/);
-    await expect(repo.putKeyDate(ctxB, {
-        ...kdAlpha,
-        title: 'Bravo Forged Overwrite',
-      })).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+    await expect(
+      repo.putKeyDate(
+        ctxB,
+        {
+          ...kdAlpha,
+          title: 'Bravo Forged Overwrite',
+        },
+        { expectedVersion: null },
+      ),
+    ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
 
     // Tenant A sees its own records
     expect((await repo.getKeyDateById(ctxA, 'KD-SHARED-ID-001'))?.title).toBe(
@@ -365,7 +399,9 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       title: 'Restricted Staff Matter Deadline',
       teamId: 'TM-000001',
     });
-    await repo.putKeyDate(ctxAuthorised, staffKeyDate);
+    const savedStaffKd = await repo.putKeyDate(ctxAuthorised, staffKeyDate, {
+      expectedVersion: null,
+    });
 
     // Authorised participant in restrictedAccessUserIds sees the key date
     expect(await repo.getKeyDateById(ctxAuthorised, 'KD-STAFF-001')).not.toBeNull();
@@ -393,10 +429,16 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     ).toEqual([]);
 
     // Unpermitted user in the same tenant calling putKeyDate on a staff-matter key date gets an error (R31)
-    await expect(repo.putKeyDate(ctxUnauthorisedCompliance, {
-        ...staffKeyDate,
-        title: 'Tampered Title',
-      })).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+    await expect(
+      repo.putKeyDate(
+        ctxUnauthorisedCompliance,
+        {
+          ...staffKeyDate,
+          title: 'Tampered Title',
+        },
+        { expectedVersion: savedStaffKd.version },
+      ),
+    ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
 
     // Changing matterId on an existing KeyDate is rejected (R31)
     await repo.setMatterRestriction(ctxAuthorised, {
@@ -404,10 +446,16 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       isRestricted: false,
       restrictedAccessUserIds: [],
     });
-    await expect(repo.putKeyDate(ctxAuthorised, {
-        ...staffKeyDate,
-        matterId: 'M-OTHER-002',
-      })).rejects.toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
+    await expect(
+      repo.putKeyDate(
+        ctxAuthorised,
+        {
+          ...staffKeyDate,
+          matterId: 'M-OTHER-002',
+        },
+        { expectedVersion: savedStaffKd.version },
+      ),
+    ).rejects.toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
   });
 
   it('rejects unpermitted callers across verify, resolve, reassign, acknowledge, and supersede services on a staff-matter key date with no state change (R30, R82)', async () => {
@@ -474,8 +522,8 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       isRestricted: true,
       restrictedAccessUserIds: [staffPartner.id],
     });
-    await kdRepo.putKeyDate(staffCtx, awaitingKd);
-    await kdRepo.putKeyDate(staffCtx, confirmedKd);
+    await kdRepo.putKeyDate(staffCtx, awaitingKd, { expectedVersion: null });
+    await kdRepo.putKeyDate(staffCtx, confirmedKd, { expectedVersion: null });
     const readStatus = async (id: string) =>
       (await kdRepo.getKeyDateById(staffCtx, id, staffPartner.id))?.status;
 
@@ -551,7 +599,7 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       isRestricted: false,
       restrictedAccessUserIds: [],
     });
-    await kdRepo.putKeyDate(staffCtx, orphanKd);
+    await kdRepo.putKeyDate(staffCtx, orphanKd, { expectedVersion: null });
     expect(store.matters.some((m) => m.id === 'M-DOES-NOT-EXIST')).toBe(false);
     const allKeyDates = await kdRepo.listKeyDatesForExceptionsReport(
       staffCtx,
@@ -608,5 +656,2468 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
     expect(adminOrphanMatches).toHaveLength(1);
     expect(adminOrphanMatches[0]?.kind).toBe('orphan_key_date_missing_matter');
     expect(adminOrphanMatches[0]?.matterId).toBeUndefined();
+  });
+
+  it('R577: double concurrent verifyProposedKeyDateRecord commits only one verification and one reminder task while preserving two-tenant isolation', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const matters =
+        await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+      const people = await getPartyRepository().listAllPeople<Person>(ctx);
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const targetMatter =
+        matters.find(
+          (m) =>
+            !m.isStaffMatter &&
+            isVerificationRequiredForKeyDate(
+              kdConfig,
+              m.matterTypeId || m.practiceAreaId,
+              { category: kdType.category, isCritical: Boolean(kdType.defaultCritical) },
+            ),
+        ) ?? matters.find((m) => !m.isStaffMatter)!;
+      const verifiers = people.filter(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      );
+      const verifierOne = verifiers[0]!;
+      const verifierTwo = verifiers[1] ?? verifierOne;
+
+      const ruleSet = kdConfig.limitationRuleSets![0]!;
+      const rule = ruleSet.rules[0]!;
+      const calendar = (kdConfig.businessCalendars ?? []).find(
+        (c) => c.id === rule.calendarId,
+      );
+      const calc = calculateLimitationDate(
+        rule,
+        { accrualDate: '2021-09-15' },
+        calendar,
+        { ruleSetReviewStatus: ruleSet.reviewStatus },
+      );
+
+      const created = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R577 Double Verify Concurrency Test',
+              dueDate: calc.date,
+              source: 'calculated',
+              calculation: {
+                ruleSetId: ruleSet.id,
+                ruleSetVersion: ruleSet.version,
+                ruleSetReviewStatus: ruleSet.reviewStatus,
+                ruleId: rule.id,
+                triggers: { accrualDate: '2021-09-15' },
+                calculatedDate: calc.date,
+                overridden: false,
+                explanation: calc.explanation,
+              },
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(created.ok).toBe(true);
+      expect(created.keyDate?.status).toBe('awaiting_verification');
+      const kdId = created.keyDate!.id;
+
+      // Seed an independent awaiting_verification key date in Tenant Bravo
+      await kdRepo.setMatterRestriction(ctxB, {
+        matterId: 'M-BRAVO-R577',
+        isRestricted: false,
+        restrictedAccessUserIds: [],
+      });
+      await kdRepo.putKeyDate(
+        ctxB,
+        makeSampleKeyDate({
+          id: 'KD-BRAVO-R577-001',
+          matterId: 'M-BRAVO-R577',
+          status: 'awaiting_verification',
+        }),
+        { expectedVersion: null },
+      );
+
+      const [res1, res2] = await Promise.all([
+        runAsTestActor(
+          verifierOne.id,
+          () => verifyProposedKeyDateRecord(kdId, verifierOne.id),
+          { roles: verifierOne.roles ?? ['partner'], mfaVerified: true },
+        ),
+        runAsTestActor(
+          verifierTwo.id,
+          () => verifyProposedKeyDateRecord(kdId, verifierTwo.id),
+          { roles: verifierTwo.roles ?? ['partner'], mfaVerified: true },
+        ),
+      ]);
+
+      const okCount = [res1, res2].filter((r) => r.ok).length;
+      const failResults = [res1, res2].filter((r) => !r.ok);
+      expect(okCount).toBe(1);
+      expect(failResults).toHaveLength(1);
+      expect(failResults[0]?.error).toMatch(
+        /KEY_DATE_VERIFY_ERROR|KEY_DATE_CONCURRENCY_CONFLICT|awaiting_verification/i,
+      );
+
+      const idempKey = buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId);
+      const tasks =
+        await getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx);
+      const createdReminderTasks = tasks.filter(
+        (t) => t.idempotencyKey === idempKey,
+      );
+      expect(createdReminderTasks).toHaveLength(1);
+
+      expect(await kdRepo.getKeyDateById(ctxB, kdId)).toBeNull();
+      expect(
+        (await kdRepo.getKeyDateById(ctxB, 'KD-BRAVO-R577-001'))?.status,
+      ).toBe('awaiting_verification');
+    } finally {
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R577: putKeyDate rejects stale expectedVersion with KEY_DATE_CONCURRENCY_CONFLICT and concurrent reject vs verify never overwrites committed state across two tenants', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const matters =
+        await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+      const people = await getPartyRepository().listAllPeople<Person>(ctx);
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const targetMatter =
+        matters.find(
+          (m) =>
+            !m.isStaffMatter &&
+            isVerificationRequiredForKeyDate(
+              kdConfig,
+              m.matterTypeId || m.practiceAreaId,
+              { category: kdType.category, isCritical: Boolean(kdType.defaultCritical) },
+            ),
+        ) ?? matters.find((m) => !m.isStaffMatter)!;
+      const verifier = people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const ruleSet = kdConfig.limitationRuleSets![0]!;
+      const rule = ruleSet.rules[0]!;
+      const calendar = (kdConfig.businessCalendars ?? []).find(
+        (c) => c.id === rule.calendarId,
+      );
+      const calc = calculateLimitationDate(
+        rule,
+        { accrualDate: '2021-10-11' },
+        calendar,
+        { ruleSetReviewStatus: ruleSet.reviewStatus },
+      );
+
+      // 1. Provisional -> propose bumps version to 2; direct stale write (expectedVersion: 1) must reject
+      const provisional = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R577 Stale Version & Re-proposal Race',
+              dueDate: calc.date,
+              source: 'calculated',
+              calculation: {
+                ruleSetId: ruleSet.id,
+                ruleSetVersion: ruleSet.version,
+                ruleSetReviewStatus: ruleSet.reviewStatus,
+                ruleId: rule.id,
+                triggers: { accrualDate: '2021-10-11' },
+                calculatedDate: calc.date,
+                overridden: false,
+                explanation: calc.explanation,
+              },
+              intent: 'provisional',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(provisional.ok).toBe(true);
+      const staleV1Snapshot = structuredClone(provisional.keyDate!);
+
+      const proposed = await runAsTestActor(
+        'P-000001',
+        () =>
+          proposeProvisionalKeyDateRecord(staleV1Snapshot.id, 'P-000001'),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(proposed.ok).toBe(true);
+      expect(proposed.keyDate?.version).toBe(2);
+
+      await expect(
+        kdRepo.putKeyDate(
+          ctx,
+          { ...staleV1Snapshot, status: 'confirmed', version: 2 },
+          { expectedVersion: 1 },
+        ),
+      ).rejects.toThrow(/KEY_DATE_CONCURRENCY_CONFLICT/);
+
+      // 2. Concurrent reject vs verify on the awaiting_verification row: only one commits; winner is preserved
+      const [rejectRes, verifyRes] = await Promise.all([
+        runAsTestActor(
+          verifier.id,
+          () =>
+            rejectProposedKeyDateRecord(
+              staleV1Snapshot.id,
+              'Due date needs correction before approval',
+              verifier.id,
+            ),
+          { roles: verifier.roles ?? ['partner'], mfaVerified: true },
+        ),
+        runAsTestActor(
+          verifier.id,
+          () => verifyProposedKeyDateRecord(staleV1Snapshot.id, verifier.id),
+          { roles: verifier.roles ?? ['partner'], mfaVerified: true },
+        ),
+      ]);
+
+      expect([rejectRes, verifyRes].filter((r) => r.ok)).toHaveLength(1);
+      expect([rejectRes, verifyRes].filter((r) => !r.ok)).toHaveLength(1);
+      const finalKd = await kdRepo.getKeyDateById(
+        ctx,
+        staleV1Snapshot.id,
+        'P-000001',
+      );
+      expect(finalKd?.status).toBe(rejectRes.ok ? 'provisional' : 'confirmed');
+      if (rejectRes.ok) {
+        expect(finalKd?.verification?.rejectedById).toBe(verifier.id);
+      }
+      expect(await kdRepo.getKeyDateById(ctxB, staleV1Snapshot.id)).toBeNull();
+    } finally {
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R577: syncKeyDateToOutlookCalendar runs strictly after DB commit and makes zero Graph calls when transaction rolls back', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const origPutKeyDate = kdRepo.putKeyDate.bind(kdRepo);
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find(
+        (m) =>
+          !m.isStaffMatter &&
+          resolveMatterTypeCalendarSyncPolicy(
+            kdConfig,
+            m.matterTypeId || m.practiceAreaId,
+            false,
+          ).enabled,
+      )!;
+      const teams = store.teams.filter((t) => t.active);
+      const secondTeam = teams[1] ?? teams[0]!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const created = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R577 Post-Commit Calendar Sync Key Date',
+              dueDate: '2027-11-20',
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(created.ok).toBe(true);
+      if (created.keyDate!.status === 'awaiting_verification') {
+        const v = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(created.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(v.ok).toBe(true);
+      }
+      const kdId = created.keyDate!.id;
+
+      let noLockHeldTeamIdDuringGraphCall: string | undefined;
+      const calendarAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async () => {
+          // Prove no PostgreSQL transaction or row lock is held across the Graph HTTP call (R617)
+          const rowDuringGraph = await kdRepo.withTenantTransaction(
+            ctx,
+            async (tx) => {
+              const res = await tx.query<{ id: string; team_id: string }>(
+                'SELECT id, team_id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE NOWAIT',
+                [ctx.tenantId, kdId],
+              );
+              return res.rows[0] ?? null;
+            },
+          );
+          noLockHeldTeamIdDuringGraphCall = rowDuringGraph?.team_id;
+          return { eventId: 'graph-evt-r577-1' };
+        }),
+        deleteEvent: vi.fn(async () => undefined),
+      };
+
+      // Force DB transaction abort on putKeyDate -> Graph must NOT be called
+      let shouldFailOnce = true;
+      kdRepo.putKeyDate = async (callCtx, kdArg, opts) => {
+        if (shouldFailOnce) {
+          shouldFailOnce = false;
+          throw new Error('SIMULATED_KEY_DATE_TX_ABORT');
+        }
+        return origPutKeyDate(callCtx, kdArg, opts);
+      };
+
+      const abortedRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            { teamId: secondTeam.id, reason: 'Rollback calendar isolation test' },
+            'P-000001',
+            { calendarAdapter },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(abortedRes.ok).toBe(false);
+      expect(calendarAdapter.upsertEvent).not.toHaveBeenCalled();
+      expect(calendarAdapter.deleteEvent).not.toHaveBeenCalled();
+
+      // Now let DB commit succeed -> Graph runs strictly AFTER commit without holding DB locks and sync state is persisted
+      kdRepo.putKeyDate = origPutKeyDate;
+      const committedRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            { teamId: secondTeam.id, reason: 'Post-commit calendar sync test' },
+            'P-000001',
+            { calendarAdapter },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(committedRes.ok).toBe(true);
+      expect(calendarAdapter.upsertEvent).toHaveBeenCalled();
+      expect(noLockHeldTeamIdDuringGraphCall).toBe(secondTeam.id);
+      const savedSync = await kdRepo.getCalendarSync(ctx, kdId, 'P-000001');
+      expect(savedSync?.state).toBe('synced');
+      expect(savedSync?.externalEvents.length).toBeGreaterThan(0);
+    } finally {
+      kdRepo.putKeyDate = origPutKeyDate;
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R590: removes dead compensation helpers (undoDelta, deleteKeyDateByIdForCompensation, allowEntityRebindForCompensation) while keeping entity immutability enforced', async () => {
+    const kdRepo = getKeyDateRepository();
+    const docRepo = getDocumentRepository();
+    const ctx = testTenantCtx('P-000001');
+
+    expect('deleteKeyDateByIdForCompensation' in kdRepo).toBe(false);
+
+    const repointRes = await docRepo.repointMergedEntityWithDelta(
+      ctx,
+      'person',
+      'P-NO-SUCH-MERGED',
+      'P-000001',
+    );
+    expect(repointRes).toEqual({ updatedCount: 0 });
+    expect('undoDelta' in repointRes).toBe(false);
+
+    const seed = loadCommittedSeedStore();
+    const matter = seed.matters[0]!;
+    const existingKd = (
+      await kdRepo.listKeyDatesForMatter(ctx, matter.id, 'P-000001')
+    )[0] ?? makeSampleKeyDate({ id: 'KD-R590-IMMUTABLE', matterId: matter.id });
+    if (!(await kdRepo.getKeyDateById(ctx, existingKd.id, 'P-000001'))) {
+      await kdRepo.putKeyDate(ctx, existingKd, { expectedVersion: null });
+    }
+    const otherMatter = seed.matters.find((m) => m.id !== matter.id && !m.isStaffMatter)!;
+    await expect(
+      kdRepo.putKeyDate(
+        ctx,
+        { ...existingKd, matterId: otherMatter.id },
+        {
+          expectedVersion: existingKd.version,
+          allowEntityRebindForCompensation: true,
+        } as never,
+      ),
+    ).rejects.toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
+  });
+
+  it('R606 & R607: post-commit calendar sync failure returns ok:true + warning without duplicating key dates, emits PII-free log, and detects concurrent skew without holding DB locks', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find(
+        (m) =>
+          !m.isStaffMatter &&
+          resolveMatterTypeCalendarSyncPolicy(
+            kdConfig,
+            m.matterTypeId || m.practiceAreaId,
+            false,
+          ).enabled,
+      )!;
+      const teams = store.teams.filter((t) => t.active);
+      const firstTeam = teams[0]!;
+      const secondTeam = teams[1] ?? teams[0]!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const created = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R606 R607 Sync Resilience Key Date',
+              dueDate: '2027-12-01',
+              teamId: firstTeam.id,
+              responsiblePersonIds: ['P-000001'],
+              notes: 'Client Alice Sensitive Note Should Never Log',
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(created.ok).toBe(true);
+      if (created.keyDate!.status === 'awaiting_verification') {
+        const verified = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(created.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(verified.ok).toBe(true);
+      }
+      const kdId = created.keyDate!.id;
+
+      // 1. R606: failing calendar adapter still commits mutation once, warns caller, marks failed sync, and logs zero PII
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const failingAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async () => {
+          throw new Error(
+            'GRAPH_503 user@client.example.invalid "Confidential Client Matter Title"',
+          );
+        }),
+        deleteEvent: vi.fn(async () => undefined),
+      };
+
+      const failRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            {
+              teamId: secondTeam.id,
+              responsiblePersonIds: ['P-000001'],
+              reason: 'R606 failing adapter check',
+            },
+            'P-000001',
+            { calendarAdapter: failingAdapter },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(failRes.ok).toBe(true);
+      expect(failRes.keyDate?.teamId).toBe(secondTeam.id);
+      expect(
+        (failRes as { calendarSyncWarning?: string }).calendarSyncWarning,
+      ).toBeTruthy();
+
+      const allMatterKds = await kdRepo.listKeyDatesForMatter(
+        ctx,
+        targetMatter.id,
+        'P-000001',
+      );
+      expect(
+        allMatterKds.filter((k) => k.title === 'R606 R607 Sync Resilience Key Date'),
+      ).toHaveLength(1);
+      const failedSync = await kdRepo.getCalendarSync(ctx, kdId, 'P-000001');
+      expect(failedSync?.state).toBe('failed');
+      expect(failedSync?.attempts).toBeGreaterThanOrEqual(1);
+      expect(failedSync?.lastError).not.toContain('user@client.example.invalid');
+      expect(failedSync?.lastError).not.toContain('Confidential Client Matter Title');
+
+      const syncWarnLogs = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((s) => s.includes('keydate.calendar_sync_failed'));
+      expect(syncWarnLogs.length).toBeGreaterThanOrEqual(1);
+      const parsedWarn = JSON.parse(syncWarnLogs[0]!) as {
+        tenantId?: string;
+        correlationId?: string;
+      };
+      expect(parsedWarn.tenantId).toBe(ctx.tenantId);
+      expect(typeof parsedWarn.correlationId).toBe('string');
+      expect(parsedWarn.correlationId!.length).toBeGreaterThan(0);
+      expect(syncWarnLogs[0]).not.toContain('Alice');
+      expect(syncWarnLogs[0]).not.toContain('user@client.example.invalid');
+      warnSpy.mockRestore();
+
+      // 2. R607: concurrent mutation during in-flight Graph sync re-reads latest state and converges without losing external events
+      let slowCallCount = 0;
+      const slowUpsertTargets: string[] = [];
+      let releaseSlowFirstCall: (() => void) | null = null;
+      const firstSlowCallStarted = new Promise<void>((resolve) => {
+        releaseSlowFirstCall = resolve;
+      });
+      void firstSlowCallStarted;
+
+      let fastCompletedPromise: Promise<unknown> | null = null;
+      const fastAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async ({ target }: { target: string }) => ({
+          eventId: `evt-fast-${target}`,
+        })),
+        deleteEvent: vi.fn(async () => undefined),
+      };
+
+      const slowAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async ({ target }: { target: string }) => {
+          slowCallCount += 1;
+          slowUpsertTargets.push(target);
+          if (slowCallCount === 1) {
+            // Confirm no DB row lock held during Graph call
+            const nowait = await kdRepo.withTenantTransaction(ctx, async (tx) => {
+              const r = await tx.query<{ id: string }>(
+                'SELECT id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE NOWAIT',
+                [ctx.tenantId, kdId],
+              );
+              return r.rows[0] ?? null;
+            });
+            expect(nowait?.id).toBe(kdId);
+
+            // While slowAdapter is in flight with stale owner P-000001, commit a concurrent reassignment to partner.id
+            fastCompletedPromise = Promise.resolve(
+              runAsTestActor(
+                'P-000001',
+                () =>
+                  reassignKeyDateTeamRecord(
+                    kdId,
+                    {
+                      teamId: firstTeam.id,
+                      responsiblePersonIds: [partner.id],
+                      reason: 'R607 concurrent update during in-flight Graph sync',
+                    },
+                    'P-000001',
+                    { calendarAdapter: fastAdapter },
+                  ),
+                { roles: ['admin', 'managing_partner'], mfaVerified: true },
+              ),
+            );
+            await fastCompletedPromise;
+            releaseSlowFirstCall?.();
+          }
+          return { eventId: `evt-slow-${slowCallCount}-${target}` };
+        }),
+        deleteEvent: vi.fn(async () => undefined),
+      };
+
+      const slowRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            {
+              teamId: secondTeam.id,
+              responsiblePersonIds: ['P-000001'],
+              reason: 'R607 initial slow Graph sync',
+            },
+            'P-000001',
+            { calendarAdapter: slowAdapter },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(slowRes.ok).toBe(true);
+      await fastCompletedPromise;
+
+      // R607 skew retry must re-read latest DB state (partner.id) so externalEvents matches partner.id, NOT stale P-000001
+      const finalKd = await kdRepo.getKeyDateById(ctx, kdId, 'P-000001');
+      const finalSync = await kdRepo.getCalendarSync(ctx, kdId, 'P-000001');
+      expect(finalKd?.responsiblePersonIds).toEqual([partner.id]);
+      expect(slowUpsertTargets).toContain(`person:${partner.id}`);
+      expect(finalSync?.state).toBe('synced');
+      expect(finalSync?.externalEvents.some((e) => e.target === `person:${partner.id}`)).toBe(true);
+      expect(await kdRepo.getCalendarSync(ctxB, kdId)).toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R608: N/A advisory lock prevents live reminder on concurrent verify, and unconfirmed supersede creates no live reminder', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      // Part 1: supersede with intent:'provisional' must close old reminder task and create NO reminder state on unconfirmed replacement
+      const baseConfirmed = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R608 Supersede Confirmed Base',
+              dueDate: '2026-12-10',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(baseConfirmed.ok).toBe(true);
+      if (baseConfirmed.keyDate!.status === 'awaiting_verification') {
+        const ver = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(baseConfirmed.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(ver.ok).toBe(true);
+      }
+
+      const supProvRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          supersedeConfirmedKeyDateRecord(
+            baseConfirmed.keyDate!.id,
+            {
+              title: 'R608 Unconfirmed Provisional Replacement',
+              dueDate: '2026-12-15',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'provisional',
+            },
+            'Testing unconfirmed replacement reminder omission',
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(supProvRes.ok).toBe(true);
+      expect(supProvRes.replacementKeyDate?.status).toBe('provisional');
+      expect(
+        await kdRepo.getReminderState(
+          ctx,
+          supProvRes.replacementKeyDate!.id,
+          'P-000001',
+        ),
+      ).toBeNull();
+      const tasksAfterSup = await taskRepo.listAllTasksUnfiltered(ctx);
+      const oldTaskIdem = buildKeyDateReminderIdempotencyKey(
+        baseConfirmed.keyDate!.id,
+        ctx.tenantId,
+      );
+      const oldReminderTask = tasksAfterSup.find(
+        (t) => t.idempotencyKey === oldTaskIdem,
+      );
+      if (oldReminderTask) {
+        expect(oldReminderTask.status).toBe('Done');
+      }
+
+      // Part 2: concurrent N/A + verifyProposedKeyDateRecord race never leaves a live reminder state/task when N/A runs concurrently
+      const secondMatter = store.matters.find(
+        (m) => !m.isStaffMatter && m.id !== targetMatter.id,
+      )!;
+      const proposed = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: secondMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R608 N/A vs Verify Race',
+              dueDate: '2026-12-12',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(proposed.ok).toBe(true);
+      const raceKdId = proposed.keyDate!.id;
+
+      // Without advisory lock, N/A reading listNotApplicableForMatter before verify commits can interleave with verify's read,
+      // leaving both N/A record AND live reminder state. Delay N/A slightly right after its first read if unlocked,
+      // or run concurrently after an in-flight delay on verify.
+      const origListNa = kdRepo.listNotApplicableForMatter.bind(kdRepo);
+      let stalledVerifyReadOnce = false;
+      kdRepo.listNotApplicableForMatter = async (callCtx, mId, viewer) => {
+        const res = await origListNa(callCtx, mId, viewer);
+        if (!stalledVerifyReadOnce && mId === secondMatter.id) {
+          stalledVerifyReadOnce = true;
+          // Restore immediately so second caller doesn't delay
+          kdRepo.listNotApplicableForMatter = origListNa;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        return res;
+      };
+
+      const verifyPromise =
+        proposed.keyDate!.status === 'awaiting_verification'
+          ? runAsTestActor(
+              partner.id,
+              () => verifyProposedKeyDateRecord(raceKdId, partner.id),
+              { roles: partner.roles ?? ['partner'], mfaVerified: true },
+            )
+          : Promise.resolve({ ok: true });
+      await new Promise((r) => setTimeout(r, 20));
+      const naPromise = runAsTestActor(
+        'P-000001',
+        () =>
+          recordKeyDateNotApplicableRecord(
+            {
+              matterId: secondMatter.id,
+              keyDateTypeId: kdType.id,
+              reason: 'R608 concurrent N/A',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+
+      const [verRaceRes, naRaceRes] = await Promise.all([verifyPromise, naPromise]);
+      expect(naRaceRes.ok).toBe(true);
+      expect(verRaceRes.ok).toBe(true);
+
+      const naListAfter = await kdRepo.listNotApplicableForMatter(
+        ctx,
+        secondMatter.id,
+        'P-000001',
+      );
+      expect(
+        naListAfter.some((na) => na.keyDateTypeId === kdType.id),
+      ).toBe(true);
+      // After both commit, zero live reminder state and zero open reminder task must exist
+      expect(await kdRepo.getReminderState(ctx, raceKdId, 'P-000001')).toBeNull();
+      const tasksAfterRace = await taskRepo.listAllTasksUnfiltered(ctx);
+      const raceIdem = buildKeyDateReminderIdempotencyKey(raceKdId, ctx.tenantId);
+      const liveRaceTask = tasksAfterRace.find(
+        (t) => t.idempotencyKey === raceIdem && t.status !== 'Done' && t.status !== 'Cancelled',
+      );
+      expect(liveRaceTask).toBeUndefined();
+      expect(await kdRepo.listNotApplicableForMatter(ctxB, secondMatter.id)).toEqual([]);
+    } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R609: putReminderState and executeKeyDateRemindersForTenant preserve concurrent reminder acknowledgements without wiping acknowledged_at', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const created = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R609 Ack Preservation Key Date',
+              dueDate: '2026-11-28',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(created.ok).toBe(true);
+      if (created.keyDate!.status === 'awaiting_verification') {
+        const v = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(created.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(v.ok).toBe(true);
+      }
+      const kdId = created.keyDate!.id;
+
+      // 1. Acknowledge the stage
+      const ackRes = await runAsTestActor(
+        'P-000001',
+        () => acknowledgeKeyDateReminderRecord(kdId, 'P-000001'),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(ackRes.ok).toBe(true);
+      expect(ackRes.reminderState?.acknowledgedAt).toBeTruthy();
+
+      // 2. Same-stage scheduler upsert with acknowledgedAt undefined must NOT clear acknowledgedAt / acknowledgedById
+      const afterSameStageWrite = await kdRepo.putReminderState(
+        ctx,
+        {
+          ...ackRes.reminderState!,
+          acknowledgedById: undefined,
+          acknowledgedAt: undefined,
+          lastNotifiedAt: '2026-11-21T03:00:00.000Z',
+        },
+      );
+      expect(afterSameStageWrite.acknowledgedAt).toBe(ackRes.reminderState!.acknowledgedAt);
+      expect(afterSameStageWrite.acknowledgedById).toBe('P-000001');
+
+      // 3. Concurrent scheduler sweep + acknowledgement lock ordering preserves acknowledgement
+      const kd2 = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R609 Concurrent Job vs Ack Key Date',
+              dueDate: '2026-11-29',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(kd2.ok).toBe(true);
+      if (kd2.keyDate!.status === 'awaiting_verification') {
+        await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(kd2.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+      }
+
+      const origListSched = kdRepo.listAllReminderStatesUnfilteredForScheduler.bind(kdRepo);
+      let delayedSchedOnce = false;
+      kdRepo.listAllReminderStatesUnfilteredForScheduler = async (callCtx, opts) => {
+        const res = await origListSched(callCtx, opts);
+        if (!delayedSchedOnce) {
+          delayedSchedOnce = true;
+          kdRepo.listAllReminderStatesUnfilteredForScheduler = origListSched;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        return res;
+      };
+
+      const adminCtx = testTenantCtx('P-000001', {
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      });
+      const jobPromise = executeKeyDateRemindersForTenant(adminCtx, {
+        triggerSource: 'manual',
+        triggeredById: 'P-000001',
+        defaultRunHourLocal: 0,
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      const concurrentAckPromise = runAsTestActor(
+        'P-000001',
+        () => acknowledgeKeyDateReminderRecord(kd2.keyDate!.id, 'P-000001'),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      const [jobRes, ack2Res] = await Promise.all([jobPromise, concurrentAckPromise]);
+      expect(jobRes.outcome).toBe('executed');
+      expect(ack2Res.ok).toBe(true);
+      const persistedAck2 = await kdRepo.getReminderState(ctx, kd2.keyDate!.id, 'P-000001');
+      expect(persistedAck2?.acknowledgedById).toBe('P-000001');
+      expect(persistedAck2?.acknowledgedAt).toBeTruthy();
+      expect(await kdRepo.getReminderState(ctxB, kd2.keyDate!.id)).toBeNull();
+    } finally {
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R610: putKeyDate assigns version authoritatively in DB (1 on insert, +1 on update), supersede increments once, and enquiry conversion locks & versions carried key dates', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      // 1. Caller-supplied version 99 on insert is ignored (DB sets 1); expectedVersion: null rejects overwrite
+      const directInsert = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R610-DB-VERSION',
+          matterId: targetMatter.id,
+          version: 99,
+        }),
+        { expectedVersion: null },
+      );
+      expect(directInsert.version).toBe(1);
+      await expect(
+        kdRepo.putKeyDate(ctx, directInsert, { expectedVersion: null }),
+      ).rejects.toThrow(/KEY_DATE_CONCURRENCY_CONFLICT/);
+
+      const directUpdate = await kdRepo.putKeyDate(
+        ctx,
+        { ...directInsert, notes: 'DB increments version', version: 42 },
+        { expectedVersion: 1 },
+      );
+      expect(directUpdate.version).toBe(2);
+
+      // 2. Supersede bumps superseded version by +1 (not +2) and inserts replacement at version 1
+      const baseConfirmed = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R610 Supersede Version Base',
+              dueDate: '2027-06-15',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(baseConfirmed.ok).toBe(true);
+      let versionBeforeSupersede = baseConfirmed.keyDate!.version;
+      if (baseConfirmed.keyDate!.status === 'awaiting_verification') {
+        const ver = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(baseConfirmed.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(ver.ok).toBe(true);
+        versionBeforeSupersede = ver.keyDate!.version;
+      }
+
+      const supRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          supersedeConfirmedKeyDateRecord(
+            baseConfirmed.keyDate!.id,
+            {
+              title: 'R610 Supersede Replacement',
+              dueDate: '2027-07-15',
+              responsiblePersonIds: ['P-000001'],
+            },
+            'Single +1 increment check',
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(supRes.ok).toBe(true);
+      expect(supRes.supersededKeyDate?.version).toBe(versionBeforeSupersede + 1);
+      expect(supRes.replacementKeyDate?.version).toBe(1);
+
+      // 3. Enquiry conversion locks enquiry key dates FOR UPDATE & bumps version cleanly on carry-over
+      const intakeRepo = getIntakeQuoteRepository();
+      const enquiries = await intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx);
+      const openEnq = enquiries.find(
+        (e: Enquiry) => e.status === 'Assigned' || e.status === 'In contact',
+      )!;
+      const enqKd = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R610-ENQ-CARRY',
+          matterId: undefined,
+          enquiryId: openEnq.id,
+          keyDateTypeId: kdType.id,
+          source: 'manual',
+          status: 'provisional',
+          responsiblePersonIds: ['P-000001'],
+          version: 9,
+        }),
+        { expectedVersion: null },
+      );
+      expect(enqKd.version).toBe(1);
+
+      const listForEnqSpy = vi.spyOn(kdRepo, 'listKeyDatesForEnquiry');
+      const { id: _omId, openedAt: _omOpen, ...matterTpl } = store.matters[0]!;
+      void _omId;
+      void _omOpen;
+      const converted = await runAsTestActor(
+        'P-000001',
+        () =>
+          saveMatterRecord(
+            {
+              ...matterTpl,
+              matterNumber: 'DRAFT',
+              openedAt: null,
+              fieldValues: {},
+              title: 'R610 Enquiry Conversion Matter',
+              sourceEnquiryId: openEnq.id,
+            },
+            { byId: 'P-000001', saveMode: 'draft' },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(converted.errors).toBeUndefined();
+      expect(listForEnqSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        openEnq.id,
+        'P-000001',
+        { forUpdate: true },
+      );
+      const carriedKd = await kdRepo.getKeyDateById(ctx, enqKd.id, 'P-000001');
+      expect(carriedKd?.matterId).toBe(converted.matter!.id);
+      expect(carriedKd?.enquiryId).toBeUndefined();
+      expect(carriedKd?.version).toBe(2);
+      expect(await kdRepo.getKeyDateById(ctxB, enqKd.id)).toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R617: serialises first-time saveKeyDatesConfigRecord and prevents concurrent races across supersede, resolve, reassign, and acknowledge', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const baseCfg = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+
+      // 1. Delete existing config row so first-time concurrent saveKeyDatesConfigRecord runs against empty table
+      await kdRepo.putKeyDatesTenantConfig(ctx, null);
+      const origPutCfg = kdRepo.putKeyDatesTenantConfig.bind(kdRepo);
+      let stalledFirstPut = false;
+      kdRepo.putKeyDatesTenantConfig = async (callCtx, cfgArg, actorArg) => {
+        if (!stalledFirstPut && cfgArg !== null) {
+          stalledFirstPut = true;
+          kdRepo.putKeyDatesTenantConfig = origPutCfg;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        return origPutCfg(callCtx, cfgArg, actorArg);
+      };
+
+      const mark = await markAuditPosition();
+      const save1Promise = runAsTestActor(
+        'P-000004',
+        () =>
+          saveKeyDatesConfigRecord(
+            {
+              ...baseCfg,
+              keyDateTypes: (baseCfg.keyDateTypes ?? []).map((t, i) =>
+                i === 0 ? { ...t, label: 'R617 First Config Label' } : t,
+              ),
+            },
+            'R617 first concurrent save',
+            'P-000004',
+            { mfaVerified: true },
+          ),
+        { roles: ['admin'], mfaVerified: true },
+      );
+      await new Promise((r) => setTimeout(r, 25));
+      const save2Promise = runAsTestActor(
+        'P-000004',
+        () =>
+          saveKeyDatesConfigRecord(
+            {
+              ...baseCfg,
+              keyDateTypes: (baseCfg.keyDateTypes ?? []).map((t, i) =>
+                i === 0 ? { ...t, label: 'R617 Second Config Label' } : t,
+              ),
+            },
+            'R617 second concurrent save',
+            'P-000004',
+            { mfaVerified: true },
+          ),
+        { roles: ['admin'], mfaVerified: true },
+      );
+
+      const [s1, s2] = await Promise.all([save1Promise, save2Promise]);
+      expect(s1.error).toBeUndefined();
+      expect(s1.ok).toBe(true);
+      expect(s2.error).toBeUndefined();
+      expect(s2.ok).toBe(true);
+      const latestCfg = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      expect(latestCfg.keyDateTypes?.[0]?.label).toBe('R617 Second Config Label');
+      const cfgAudits = (await auditEntriesSince(mark)).filter(
+        (a) => a.recordId === 'FIRM-KEY-DATES-CONFIG',
+      );
+      expect(cfgAudits).toHaveLength(2);
+      const secondSaveAudit = cfgAudits.find(
+        (a) => a.reason === 'R617 second concurrent save',
+      );
+      const secondAuditBefore = (
+        secondSaveAudit?.snapshot as { before?: KeyDatesConfig } | undefined
+      )?.before;
+      expect(secondAuditBefore?.keyDateTypes?.[0]?.label).toBe(
+        'R617 First Config Label',
+      );
+
+      // Restore clean seed config for lifecycle races
+      await kdRepo.putKeyDatesTenantConfig(
+        ctx,
+        baseCfg as unknown as Parameters<typeof kdRepo.putKeyDatesTenantConfig>[1],
+        'P-000001',
+      );
+
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdType = (baseCfg.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+      const teams = store.teams.filter((t) => t.active);
+      const teamB = teams[1] ?? teams[0]!;
+
+      const makeConfirmed = async (title: string) => {
+        const res = await runAsTestActor(
+          'P-000001',
+          () =>
+            createOrProposeKeyDateRecord(
+              {
+                matterId: targetMatter.id,
+                keyDateTypeId: kdType.id,
+                title,
+                dueDate: '2027-08-15',
+                responsiblePersonIds: ['P-000001'],
+                intent: 'propose',
+              },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        );
+        expect(res.ok).toBe(true);
+        if (res.keyDate!.status === 'awaiting_verification') {
+          const v = await runAsTestActor(
+            partner.id,
+            () => verifyProposedKeyDateRecord(res.keyDate!.id, partner.id),
+            { roles: partner.roles ?? ['partner'], mfaVerified: true },
+          );
+          expect(v.ok).toBe(true);
+        }
+        return res.keyDate!.id;
+      };
+
+      // 2. Concurrent supersede race -> exactly one succeeds
+      const supKdId = await makeConfirmed('R617 Concurrent Supersede');
+      const [supA, supB] = await Promise.all([
+        runAsTestActor(
+          'P-000001',
+          () =>
+            supersedeConfirmedKeyDateRecord(
+              supKdId,
+              { dueDate: '2027-09-01', responsiblePersonIds: ['P-000001'] },
+              'Race A',
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+        runAsTestActor(
+          'P-000001',
+          () =>
+            supersedeConfirmedKeyDateRecord(
+              supKdId,
+              { dueDate: '2027-10-01', responsiblePersonIds: ['P-000001'] },
+              'Race B',
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+      ]);
+      expect([supA, supB].filter((r) => r.ok)).toHaveLength(1);
+      expect([supA, supB].filter((r) => !r.ok)).toHaveLength(1);
+
+      // 3. Concurrent resolve outcome race -> exactly one succeeds
+      const resKdId = await makeConfirmed('R617 Concurrent Resolve');
+      const [outA, outB] = await Promise.all([
+        runAsTestActor(
+          'P-000001',
+          () =>
+            resolveKeyDateOutcomeRecord(resKdId, { kind: 'met', note: 'A' }, 'P-000001'),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+        runAsTestActor(
+          'P-000001',
+          () =>
+            resolveKeyDateOutcomeRecord(
+              resKdId,
+              { kind: 'waived', note: 'Waiver reason B' },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+      ]);
+      expect([outA, outB].filter((r) => r.ok)).toHaveLength(1);
+      expect([outA, outB].filter((r) => !r.ok)).toHaveLength(1);
+
+      // 4. Concurrent reassign & concurrent acknowledge races
+      const reKdId = await makeConfirmed('R617 Concurrent Reassign & Ack');
+      const [reA, reB] = await Promise.all([
+        runAsTestActor(
+          'P-000001',
+          () =>
+            reassignKeyDateTeamRecord(
+              reKdId,
+              { teamId: teamB.id, responsiblePersonIds: ['P-000001', partner.id], reason: 'Reassign 1' },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+        runAsTestActor(
+          'P-000001',
+          () =>
+            reassignKeyDateTeamRecord(
+              reKdId,
+              { teamId: teams[0]!.id, responsiblePersonIds: ['P-000001'], reason: 'Reassign 2' },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+      ]);
+      expect(reA.ok).toBe(true);
+      expect(reB.ok).toBe(true);
+
+      const [ack1, ack2] = await Promise.all([
+        runAsTestActor(
+          'P-000001',
+          () => acknowledgeKeyDateReminderRecord(reKdId, 'P-000001'),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+        runAsTestActor(
+          'P-000001',
+          () => acknowledgeKeyDateReminderRecord(reKdId, 'P-000001'),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        ),
+      ]);
+      expect(ack1.error).toBeUndefined();
+      expect(ack2.error).toBeUndefined();
+      expect(ack1.ok).toBe(true);
+      expect(ack2.ok).toBe(true);
+      const finalAckState = await kdRepo.getReminderState(ctx, reKdId, 'P-000001');
+      expect(finalAckState?.acknowledgedById).toBe('P-000001');
+      expect(finalAckState?.acknowledgedAt).toBeTruthy();
+      expect(await kdRepo.getKeyDateById(ctxB, reKdId)).toBeNull();
+    } finally {
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R627: overlapping post-commit calendar syncs and expired-lease takeover create one live Outlook event per target and delete displaced events across two tenants', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find(
+        (m) =>
+          !m.isStaffMatter &&
+          resolveMatterTypeCalendarSyncPolicy(
+            kdConfig,
+            m.matterTypeId || m.practiceAreaId,
+            false,
+          ).enabled,
+      )!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const teams = store.teams.filter((t) => t.active);
+      const teamA = teams[0]!;
+      const teamB = teams[1] ?? teams[0]!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const created = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R627 Concurrent Sync Key Date',
+              dueDate: '2027-06-15',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(created.ok).toBe(true);
+      if (created.keyDate!.status === 'awaiting_verification') {
+        const ver = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(created.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(ver.ok).toBe(true);
+      }
+      const kdId = created.keyDate!.id;
+
+      // 1. Overlapping syncs for the SAME target (person:P-000001) must leave only ONE live Outlook event
+      const liveEvents = new Map<string, { target: string; transactionId?: string }>();
+      let nextEvtSeq = 0;
+      const delayedGraphAdapter = (delayMs: number) => ({
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(
+          async (input: {
+            target: string;
+            existingEventId?: string;
+            transactionId?: string;
+          }) => {
+            if (delayMs > 0) {
+              await new Promise((r) => setTimeout(r, delayMs));
+            }
+            if (input.existingEventId && liveEvents.has(input.existingEventId)) {
+              liveEvents.set(input.existingEventId, {
+                target: input.target,
+                transactionId: input.transactionId,
+              });
+              return { eventId: input.existingEventId };
+            }
+            if (input.transactionId) {
+              for (const [id, evt] of liveEvents.entries()) {
+                if (evt.transactionId === input.transactionId) {
+                  return { eventId: id };
+                }
+              }
+            }
+            const eventId = `evt-r627-${++nextEvtSeq}`;
+            liveEvents.set(eventId, {
+              target: input.target,
+              transactionId: input.transactionId,
+            });
+            return { eventId };
+          },
+        ),
+        deleteEvent: vi.fn(async ({ eventId }: { target: string; eventId: string }) => {
+          liveEvents.delete(eventId);
+        }),
+      });
+
+      const adapterOne = delayedGraphAdapter(90);
+      const adapterTwo = delayedGraphAdapter(0);
+      const p1 = runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            {
+              teamId: teamB.id,
+              responsiblePersonIds: ['P-000001'],
+              reason: 'R627 Overlap A',
+            },
+            'P-000001',
+            { calendarAdapter: adapterOne },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      await new Promise((r) => setTimeout(r, 15));
+      const p2 = runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            {
+              teamId: teamA.id,
+              responsiblePersonIds: ['P-000001'],
+              reason: 'R627 Overlap B',
+            },
+            'P-000001',
+            { calendarAdapter: adapterTwo },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      const [res1, res2] = await Promise.all([p1, p2]);
+      expect(res1.ok).toBe(true);
+      expect(res2.ok).toBe(true);
+      const liveForTarget = [...liveEvents.entries()].filter(
+        ([, v]) => v.target === 'person:P-000001',
+      );
+      expect(liveForTarget).toHaveLength(1);
+      const syncAfterOverlap = await kdRepo.getCalendarSync(ctx, kdId, 'P-000001');
+      expect(syncAfterOverlap?.state).toBe('synced');
+      expect(syncAfterOverlap?.externalEvents).toEqual([
+        { target: 'person:P-000001', eventId: liveForTarget[0]![0] },
+      ]);
+
+      // 2. Expired-lease takeover: stale slow worker with expired lease must NOT overwrite winner and must delete displaced event
+      const takeoverEvents = new Map<string, { target: string }>();
+      await kdRepo.putCalendarSync(ctx, {
+        keyDateId: kdId,
+        state: 'pending',
+        externalEvents: [],
+        attempts: 0,
+      });
+
+      let takeoverPromise: Promise<unknown> | null = null;
+      const staleSlowAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async ({ target }: { target: string }) => {
+          takeoverEvents.set('evt-stale-A', { target });
+          // Expire this worker's lease (once 0022 lease columns exist) so Worker B takes over immediately
+          await kdRepo.withTenantTransaction(ctx, async (tx) => {
+            const hasLeaseCol = await tx.query(
+              `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'key_date_calendar_syncs' AND column_name = 'lease_expires_at'`,
+            );
+            if ((hasLeaseCol.rowCount ?? 0) > 0) {
+              await tx.query(
+                `UPDATE key_date_calendar_syncs SET lease_expires_at = NOW() - INTERVAL '5 seconds' WHERE tenant_id = $1 AND key_date_id = $2`,
+                [ctx.tenantId, kdId],
+              );
+            }
+          });
+          takeoverPromise = Promise.resolve(
+            runAsTestActor(
+              'P-000001',
+              () =>
+                reassignKeyDateTeamRecord(
+                  kdId,
+                  {
+                    teamId: teamB.id,
+                    responsiblePersonIds: ['P-000001'],
+                    reason: 'R627 Expired Lease Takeover Winner',
+                  },
+                  'P-000001',
+                  {
+                    calendarAdapter: {
+                      credentialSource: 'managed_identity' as const,
+                      isConfigured: true,
+                      upsertEvent: vi.fn(async ({ target: winTarget }: { target: string }) => {
+                        takeoverEvents.set('evt-winner-B', { target: winTarget });
+                        return { eventId: 'evt-winner-B' };
+                      }),
+                      deleteEvent: vi.fn(async ({ eventId }: { target: string; eventId: string }) => {
+                        takeoverEvents.delete(eventId);
+                      }),
+                    },
+                  },
+                ),
+              { roles: ['admin', 'managing_partner'], mfaVerified: true },
+            ),
+          );
+          await takeoverPromise;
+          return { eventId: 'evt-stale-A' };
+        }),
+        deleteEvent: vi.fn(async ({ eventId }: { target: string; eventId: string }) => {
+          takeoverEvents.delete(eventId);
+        }),
+      };
+
+      const staleRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          reassignKeyDateTeamRecord(
+            kdId,
+            {
+              teamId: teamA.id,
+              responsiblePersonIds: ['P-000001'],
+              reason: 'R627 Stale Slow Worker',
+            },
+            'P-000001',
+            { calendarAdapter: staleSlowAdapter },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(staleRes.ok).toBe(true);
+      await takeoverPromise;
+
+      const finalSync = await kdRepo.getCalendarSync(ctx, kdId, 'P-000001');
+      expect(finalSync?.externalEvents).toEqual([
+        { target: 'person:P-000001', eventId: 'evt-winner-B' },
+      ]);
+      expect(takeoverEvents.has('evt-winner-B')).toBe(true);
+      expect(takeoverEvents.has('evt-stale-A')).toBe(false);
+      expect(await kdRepo.getCalendarSync(ctxB, kdId)).toBeNull();
+    } finally {
+      vi.restoreAllMocks();
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R628: executeKeyDateRemindersForTenant retries failed calendar syncs post-commit and supersede logs every failed key date', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const jobRunRepo = getJobRunRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find(
+        (m) =>
+          !m.isStaffMatter &&
+          resolveMatterTypeCalendarSyncPolicy(
+            kdConfig,
+            m.matterTypeId || m.practiceAreaId,
+            false,
+          ).enabled,
+      )!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const created = await runAsTestActor(
+        'P-000001',
+        () =>
+          createOrProposeKeyDateRecord(
+            {
+              matterId: targetMatter.id,
+              keyDateTypeId: kdType.id,
+              title: 'R628 Retry Failed Sync Key Date',
+              dueDate: '2026-12-05',
+              responsiblePersonIds: ['P-000001'],
+              intent: 'propose',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(created.ok).toBe(true);
+      if (created.keyDate!.status === 'awaiting_verification') {
+        const ver = await runAsTestActor(
+          partner.id,
+          () => verifyProposedKeyDateRecord(created.keyDate!.id, partner.id),
+          { roles: partner.roles ?? ['partner'], mfaVerified: true },
+        );
+        expect(ver.ok).toBe(true);
+      }
+      const kdId = created.keyDate!.id;
+
+      // Seed failed calendar sync record
+      await kdRepo.putCalendarSync(ctx, {
+        keyDateId: kdId,
+        state: 'failed',
+        externalEvents: [],
+        lastError: 'GRAPH_503_TRANSIENT',
+        attempts: 1,
+      });
+
+      const recoveryAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async ({ target }: { target: string }) => ({
+          eventId: `evt-recovered-${target}`,
+        })),
+        deleteEvent: vi.fn(async () => undefined),
+      };
+
+      const jobOutcome = await executeKeyDateRemindersForTenant(ctx, {
+        triggerSource: 'manual',
+        triggeredById: 'P-000001',
+        defaultRunHourLocal: 0,
+        calendarAdapter: recoveryAdapter,
+      } as Parameters<typeof executeKeyDateRemindersForTenant>[1]);
+      expect(jobOutcome.outcome).toBe('executed');
+
+      const retriedSync = await kdRepo.getCalendarSync(ctx, kdId, 'P-000001');
+      expect(retriedSync?.state).toBe('synced');
+      expect(retriedSync?.externalEvents).toEqual([
+        { target: 'person:P-000001', eventId: 'evt-recovered-person:P-000001' },
+      ]);
+      expect(await kdRepo.getCalendarSync(ctxB, kdId)).toBeNull();
+
+      // Part 2: supersede syncs BOTH superseded and replacement; failure on both must log BOTH IDs
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const failBothAdapter = {
+        credentialSource: 'managed_identity' as const,
+        isConfigured: true,
+        upsertEvent: vi.fn(async () => {
+          throw new Error('GRAPH_502_REPLACEMENT_FAILED');
+        }),
+        deleteEvent: vi.fn(async () => {
+          throw new Error('GRAPH_502_DELETE_FAILED');
+        }),
+      };
+
+      const supRes = await runAsTestActor(
+        'P-000001',
+        () =>
+          supersedeConfirmedKeyDateRecord(
+            kdId,
+            {
+              dueDate: '2027-02-20',
+              responsiblePersonIds: ['P-000001'],
+            },
+            'R628 both sync fail logging check',
+            'P-000001',
+            { calendarAdapter: failBothAdapter },
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(supRes.ok).toBe(true);
+      expect(supRes.calendarSyncWarning).toBeTruthy();
+
+      const loggedIds = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((s) => s.includes('keydate.calendar_sync_failed'))
+        .map((s) => (JSON.parse(s) as { keyDateId?: string }).keyDateId);
+      expect(loggedIds).toContain(kdId);
+      expect(loggedIds).toContain(supRes.replacementKeyDate!.id);
+      warnSpy.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R629: putReminderState clears acknowledgement when re-armed at the same stage, and user reminder acknowledgement is not blocked during an active reminder job run', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const jobRunRepo = getJobRunRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+
+    try {
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdType = (kdConfig.keyDateTypes ?? []).find(
+        (t) => t.allowManualEntry !== false,
+      )!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      const createConfirmed = async (title: string): Promise<string> => {
+        const res = await runAsTestActor(
+          'P-000001',
+          () =>
+            createOrProposeKeyDateRecord(
+              {
+                matterId: targetMatter.id,
+                keyDateTypeId: kdType.id,
+                title,
+                dueDate: '2026-12-05',
+                responsiblePersonIds: ['P-000001'],
+                intent: 'propose',
+              },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        );
+        expect(res.ok).toBe(true);
+        if (res.keyDate!.status === 'awaiting_verification') {
+          const ver = await runAsTestActor(
+            partner.id,
+            () => verifyProposedKeyDateRecord(res.keyDate!.id, partner.id),
+            { roles: partner.roles ?? ['partner'], mfaVerified: true },
+          );
+          expect(ver.ok).toBe(true);
+        }
+        return res.keyDate!.id;
+      };
+
+      // Part 1: Re-arming at the SAME stage with new idempotencyKey + stageEnteredAt must clear acknowledgement
+      const kdUpToDateId = await createConfirmed('R629 Unchanged Up-To-Date Key Date');
+      const kdRearmId = await createConfirmed('R629 Rearm Stage Ack Key Date');
+      const ackRearm = await runAsTestActor(
+        'P-000001',
+        () => acknowledgeKeyDateReminderRecord(kdRearmId, 'P-000001'),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(ackRearm.ok).toBe(true);
+      expect(ackRearm.reminderState?.acknowledgedAt).toBeTruthy();
+
+      const rearmedState = await kdRepo.putReminderState(
+        ctx,
+        {
+          ...ackRearm.reminderState!,
+          idempotencyKey: `${ackRearm.reminderState!.idempotencyKey}:rearmed`,
+          stageEnteredAt: '2026-12-01T00:00:00.000Z',
+          acknowledgedById: undefined,
+          acknowledgedAt: undefined,
+        },
+      );
+      expect(rearmedState.acknowledgedById).toBeUndefined();
+      expect(rearmedState.acknowledgedAt).toBeUndefined();
+
+      // Part 2: User ack on unchanged kdUpToDateId must complete while reminder job is paused holding candidate locks
+      const kdNeedsWorkId = await createConfirmed('R629 Candidate Needs Reminder Work');
+      await kdRepo.removeReminderState(ctx, kdNeedsWorkId);
+
+      // Run once first so kdUpToDateId is already synced, then clear job_runs and remove kdNeedsWorkId state again
+      await executeKeyDateRemindersForTenant(ctx, {
+        triggerSource: 'manual',
+        triggeredById: 'P-000001',
+        defaultRunHourLocal: 0,
+      });
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      await kdRepo.removeReminderState(ctx, kdNeedsWorkId);
+
+      const timeline: string[] = [];
+      let jobPausedResolve!: () => void;
+      const jobPausedPromise = new Promise<void>((r) => {
+        jobPausedResolve = r;
+      });
+      setJobRunBeforeCommitHookForTesting(async () => {
+        jobPausedResolve();
+        await new Promise((r) => setTimeout(r, 350));
+        timeline.push('job-releasing');
+      });
+
+      const jobPromise = executeKeyDateRemindersForTenant(ctx, {
+        triggerSource: 'manual',
+        triggeredById: 'P-000001',
+        defaultRunHourLocal: 0,
+      });
+      await jobPausedPromise;
+      const ackDuringJob = await runAsTestActor(
+        'P-000001',
+        () => acknowledgeKeyDateReminderRecord(kdUpToDateId, 'P-000001'),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      timeline.push('ack-done');
+      expect(ackDuringJob.ok).toBe(true);
+      const jobOutcome = await jobPromise;
+      expect(jobOutcome.outcome).toBe('executed');
+      expect(timeline).toEqual(['ack-done', 'job-releasing']);
+    } finally {
+      setJobRunBeforeCommitHookForTesting(null);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R634: putKeyDate requires expectedVersion, importKeyDates enforces entity invariants, advisory lock helpers require an active write transaction, and N/A locks only matching keyDateTypeId rows', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxB = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    try {
+      const store = loadCommittedSeedStore();
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const manualTypes = (kdConfig.keyDateTypes ?? []).filter(
+        (t) => t.allowManualEntry !== false,
+      );
+      const kdTypeA = manualTypes[0]!;
+      const kdTypeB = manualTypes[1] ?? manualTypes[0]!;
+      const firstTeam = store.teams.find((t) => t.active)!;
+      const partner = store.people.find(
+        (p) =>
+          p.isEmployee &&
+          p.id !== 'P-000001' &&
+          (p.roles?.includes('partner') || p.roles?.includes('managing_partner')),
+      )!;
+
+      // 1. putKeyDate requires explicit options.expectedVersion
+      const unsafePut = kdRepo.putKeyDate.bind(kdRepo) as unknown as (
+        c: TenantContext,
+        k: KeyDate,
+      ) => Promise<KeyDate>;
+      await expect(
+        unsafePut(ctx, {
+          id: 'KD-R634-NO-VER',
+          matterId: targetMatter.id,
+          keyDateTypeId: kdTypeA.id,
+          category: 'limitation',
+          title: 'Missing expectedVersion',
+          dueDate: '2027-03-01',
+          isCritical: false,
+          status: 'provisional',
+          source: 'manual',
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          verification: { required: false },
+          createdById: 'P-000001',
+          createdAt: '2026-11-21T00:00:00.000Z',
+          updatedById: 'P-000001',
+          updatedAt: '2026-11-21T00:00:00.000Z',
+          version: 1,
+        }),
+      ).rejects.toThrow(/KEY_DATE_VALIDATION_ERROR/);
+
+      // 2. importKeyDates validates entity scope and immutability
+      const baseImportKd: KeyDate = {
+        id: 'KD-R634-IMPORT-1',
+        matterId: targetMatter.id,
+        keyDateTypeId: kdTypeA.id,
+        category: 'limitation',
+        title: 'Import entity check',
+        dueDate: '2027-03-10',
+        isCritical: false,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: firstTeam.id,
+        responsiblePersonIds: ['P-000001'],
+        verification: { required: false },
+        createdById: 'P-000001',
+        createdAt: '2026-11-21T00:00:00.000Z',
+        updatedById: 'P-000001',
+        updatedAt: '2026-11-21T00:00:00.000Z',
+        version: 1,
+      };
+      await expect(
+        kdRepo.importKeyDates(ctx, [
+          { ...baseImportKd, id: 'KD-R634-IMPORT-BOTH', enquiryId: 'ENQ-000001' },
+        ]),
+      ).rejects.toThrow(/KEY_DATE_ENTITY_ERROR/);
+      await expect(
+        kdRepo.importKeyDates(ctx, [{ ...baseImportKd, responsiblePersonIds: [] }]),
+      ).rejects.toThrow(/KEY_DATE_VALIDATION_ERROR/);
+      await kdRepo.importKeyDates(ctx, [baseImportKd]);
+      await expect(
+        kdRepo.importKeyDates(ctx, [
+          { ...baseImportKd, matterId: undefined, enquiryId: 'ENQ-000001' },
+        ]),
+      ).rejects.toThrow(/KEY_DATE_ENTITY_IMMUTABLE/);
+      expect(await kdRepo.getKeyDateById(ctxB, baseImportKd.id)).toBeNull();
+      const forgedCtx = Object.freeze({
+        ...ctx,
+        tenantId: ctxB.tenantId,
+      }) as TenantContext;
+      await expect(kdRepo.importKeyDates(forgedCtx, [baseImportKd])).rejects.toThrow(
+        /TENANCY_(ISOLATION|DATABASE)_ERROR/,
+      );
+
+      // 3. ensureAndLockKeyDatesTenantConfig and acquireKeyDateTypeScopeLock require an active write TX
+      await expect(
+        kdRepo.acquireKeyDateTypeScopeLock(
+          ctx,
+          `matter:${targetMatter.id}`,
+          kdTypeA.id,
+        ),
+      ).rejects.toThrow(/KEY_DATE_TRANSACTION_REQUIRED/);
+      await expect(
+        kdRepo.ensureAndLockKeyDatesTenantConfig(ctx, kdConfig, 'P-000001'),
+      ).rejects.toThrow(/KEY_DATE_TRANSACTION_REQUIRED/);
+      await expect(
+        kdRepo.withTenantReadTransaction(ctx, () =>
+          kdRepo.acquireKeyDateTypeScopeLock(
+            ctx,
+            `matter:${targetMatter.id}`,
+            kdTypeA.id,
+          ),
+        ),
+      ).rejects.toThrow(/KEY_DATE_TRANSACTION_REQUIRED/);
+
+      // 4. recordKeyDateNotApplicableRecord for kdTypeA does NOT lock kdTypeB on the same matter
+      if (kdTypeA.id !== kdTypeB.id) {
+        const kdOnTypeB = await runAsTestActor(
+          'P-000001',
+          () =>
+            createOrProposeKeyDateRecord(
+              {
+                matterId: targetMatter.id,
+                keyDateTypeId: kdTypeB.id,
+                title: 'R634 Other Type Key Date',
+                dueDate: '2027-04-01',
+                responsiblePersonIds: ['P-000001'],
+                intent: 'propose',
+              },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        );
+        expect(kdOnTypeB.ok).toBe(true);
+        if (kdOnTypeB.keyDate!.status === 'awaiting_verification') {
+          await runAsTestActor(
+            partner.id,
+            () => verifyProposedKeyDateRecord(kdOnTypeB.keyDate!.id, partner.id),
+            { roles: partner.roles ?? ['partner'], mfaVerified: true },
+          );
+        }
+
+        const lockOrder: string[] = [];
+        let bLockedResolve!: () => void;
+        const bLockedPromise = new Promise<void>((r) => {
+          bLockedResolve = r;
+        });
+        const lockBPromise = kdRepo.withAutonomousTenantTransaction(ctx, async (tx) => {
+          await tx.query(
+            'SELECT id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+            [ctx.tenantId, kdOnTypeB.keyDate!.id],
+          );
+          bLockedResolve();
+          await new Promise((r) => setTimeout(r, 350));
+          lockOrder.push('lock-b-released');
+        });
+
+        await bLockedPromise;
+        const naRes = await runAsTestActor(
+          'P-000001',
+          () =>
+            recordKeyDateNotApplicableRecord(
+              {
+                matterId: targetMatter.id,
+                keyDateTypeId: kdTypeA.id,
+                reason: 'R634 narrow N/A lock check',
+              },
+              'P-000001',
+            ),
+          { roles: ['admin', 'managing_partner'], mfaVerified: true },
+        );
+        lockOrder.push('na-a-done');
+        expect(naRes.ok).toBe(true);
+        await lockBPromise;
+        expect(lockOrder).toEqual(['na-a-done', 'lock-b-released']);
+      }
+    } finally {
+      await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R637: only verified keydate:run_reminders job context bypasses restricted-matter checks on reminder state & calendar sync writes (ignoring caller flags) across two tenants', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const matterRepo = getMatterRepository();
+    const jobRunRepo = getJobRunRepository();
+    const ctxAdminAllowlisted = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxBravo = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    const registry = validateTenantRegistry({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: 'not-a-law-firm',
+          slug: 'not_a_law_firm',
+          environment: 'test',
+          postgresHost: process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1',
+          postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
+          postgresRoleName: 'role_tenant_not_a_law_firm_test',
+          keyVaultUri: 'https://kv-nalf-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    });
+
+    try {
+      await jobRunRepo.clearTenantJobRuns(ctxAdminAllowlisted);
+      const store = loadCommittedSeedStore();
+      const baseMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdConfig = await getKeyDatesConfig({
+        ctx: ctxAdminAllowlisted,
+        userId: 'P-000001',
+      });
+      const manualType =
+        (kdConfig.keyDateTypes ?? []).find((t) => t.allowManualEntry !== false) ??
+        kdConfig.keyDateTypes![0]!;
+      const firstTeam = store.teams.find((t) => t.active)!;
+
+      // Create an isolated restricted matter accessible ONLY to P-000010 (excluding admin P-000001)
+      const restrictedMatterId = 'MAT-R637-RESTRICTED';
+      await matterRepo.putMatter(
+        ctxAdminAllowlisted,
+        {
+          ...structuredClone(baseMatter),
+          id: restrictedMatterId,
+          matterNumber: restrictedMatterId,
+          title: 'R637 Restricted Staff Matter',
+          isStaffMatter: true,
+          restrictedAccessUserIds: ['P-000010'],
+        },
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-000010'],
+        },
+      );
+
+      // Seed key date on that restricted matter as allowlisted actor P-000010 (and similarly on Tenant B)
+      const ctxP10 = testTenantCtx('P-000010', { roles: ['partner'], mfaVerified: true });
+      const todayLocal = resolveTenantLocalDateAndHour(new Date(), 'Europe/London').localDate;
+      const restrictedKd = await kdRepo.putKeyDate(
+        ctxP10,
+        makeSampleKeyDate({
+          id: 'KD-R637-RESTR-1',
+          matterId: restrictedMatterId,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000010'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      await kdRepo.setMatterRestriction(ctxBravo, {
+        matterId: 'M-R637-BRAVO',
+        isRestricted: true,
+        restrictedAccessUserIds: ['P-BRAVO-1'],
+      });
+      await kdRepo.putKeyDate(
+        ctxBravo,
+        makeSampleKeyDate({
+          id: 'KD-R637-BRAVO-1',
+          matterId: 'M-R637-BRAVO',
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          responsiblePersonIds: ['P-BRAVO-1'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      // Unpermitted user context P-000001 must be denied across all 3 methods even if a caller passes a runtime flag
+      const unsafePutSync = kdRepo.putCalendarSync.bind(kdRepo) as unknown as (
+        c: TenantContext,
+        s: unknown,
+        o?: unknown,
+      ) => Promise<unknown>;
+      const unsafeReadForUpdate = kdRepo.readKeyDateAndCalendarSyncForUpdate.bind(
+        kdRepo,
+      ) as unknown as (c: TenantContext, id: string, o?: unknown) => Promise<unknown>;
+      const unsafePutReminder = kdRepo.putReminderState.bind(kdRepo) as unknown as (
+        c: TenantContext,
+        s: unknown,
+        o?: unknown,
+      ) => Promise<unknown>;
+
+      await expect(
+        unsafePutSync(
+          ctxAdminAllowlisted,
+          {
+            keyDateId: restrictedKd.id,
+            state: 'syncing',
+            externalEvents: [],
+            attempts: 1,
+          },
+          { allowSystemSchedulerWrite: true },
+        ),
+      ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+
+      await expect(
+        unsafeReadForUpdate(ctxAdminAllowlisted, restrictedKd.id, {
+          allowSystemSchedulerWrite: true,
+        }),
+      ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+
+      await expect(
+        unsafePutReminder(
+          ctxAdminAllowlisted,
+          {
+            keyDateId: restrictedKd.id,
+            taskId: 'TSK-FORGED-R637',
+            idempotencyKey: `keydate-reminder:not-a-law-firm:${restrictedKd.id}`,
+            reminderScheduleId: 'limitation',
+            currentStageDaysBefore: 0,
+            stageEnteredAt: '2026-11-21T00:00:00.000Z',
+            escalationLevel: 0,
+          },
+          { allowSystemSchedulerWrite: true },
+        ),
+      ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+
+      // Manual scheduler run as unpermitted P-000001 must not crash with KEY_DATE_ACCESS_DENIED, must NOT write reminder state for restrictedKd,
+      // and must defer full-day completion so the system scheduler job still runs on the same day.
+      const manualOutcome = await executeKeyDateRemindersForTenant(
+        ctxAdminAllowlisted,
+        {
+          triggerSource: 'manual',
+          triggeredById: 'P-000001',
+          defaultRunHourLocal: 0,
+        },
+      );
+      expect(manualOutcome.outcome).toBe('executed');
+      if (manualOutcome.outcome === 'executed') {
+        expect(manualOutcome.result.summary.skippedCount).toBeGreaterThanOrEqual(1);
+        expect(manualOutcome.jobRun.status).toBe('running');
+      }
+      expect(await kdRepo.getReminderState(ctxP10, restrictedKd.id)).toBeNull();
+
+      // Verified guardedJob('key-date-reminders', ...) context holding keydate:run_reminders CAN read & write all three + evaluate restrictedKd
+      const scheduledJobOutcome = await guardedJob(
+        'key-date-reminders',
+        'not-a-law-firm',
+        async ({ tenantContext }) => {
+          expect(tenantContext.jobPermissions).toEqual(['keydate:run_reminders']);
+          await kdRepo.readKeyDateAndCalendarSyncForUpdate(
+            tenantContext,
+            restrictedKd.id,
+          );
+          await kdRepo.putCalendarSync(tenantContext, {
+            keyDateId: restrictedKd.id,
+            state: 'synced',
+            externalEvents: [],
+            attempts: 1,
+          });
+          return executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            defaultRunHourLocal: 0,
+          });
+        },
+        { registry },
+      );
+      expect(scheduledJobOutcome.outcome).toBe('executed');
+      const remAfterScheduler = await kdRepo.getReminderState(
+        ctxP10,
+        restrictedKd.id,
+      );
+      expect(remAfterScheduler).not.toBeNull();
+
+      // Tenant B's reminder state remains untouched (two-tenant isolation)
+      expect(await kdRepo.getReminderState(ctxBravo, 'KD-R637-BRAVO-1')).toBeNull();
+    } finally {
+      await kdRepo.clearTenantData(ctxBravo);
+      await jobRunRepo.clearTenantJobRuns(ctxAdminAllowlisted);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R638: retries locked key dates once after brief back-off and leaves the day open for the next hourly scheduled run when still locked (two-tenant isolated)', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const jobRunRepo = getJobRunRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxBravo = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    const registry = validateTenantRegistry({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: 'not-a-law-firm',
+          slug: 'not_a_law_firm',
+          environment: 'test',
+          postgresHost: process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1',
+          postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
+          postgresRoleName: 'role_tenant_not_a_law_firm_test',
+          keyVaultUri: 'https://kv-nalf-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    });
+
+    try {
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      await jobRunRepo.clearTenantJobRuns(ctxBravo);
+      const store = loadCommittedSeedStore();
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const manualType =
+        (kdConfig.keyDateTypes ?? []).find((t) => t.allowManualEntry !== false) ??
+        kdConfig.keyDateTypes![0]!;
+      const firstTeam = store.teams.find((t) => t.active)!;
+      const todayLocal = resolveTenantLocalDateAndHour(new Date(), 'Europe/London').localDate;
+
+      const kdLocked = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R638-LOCKED',
+          matterId: targetMatter.id,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+      const kdUnlocked = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R638-UNLOCKED',
+          matterId: targetMatter.id,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+      const kdFastRelease = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R638-FAST-RELEASE',
+          matterId: targetMatter.id,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      await kdRepo.setMatterRestriction(ctxBravo, {
+        matterId: 'M-R638-BRAVO',
+        isRestricted: false,
+        restrictedAccessUserIds: [],
+      });
+      await kdRepo.putKeyDate(
+        ctxBravo,
+        makeSampleKeyDate({
+          id: 'KD-R638-BRAVO-1',
+          matterId: 'M-R638-BRAVO',
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          responsiblePersonIds: ['P-BRAVO-1'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      // Part 1: Hold persistent lock on kdLocked and short lock on kdFastRelease (released during back-off)
+      let persistentLockReadyResolve!: () => void;
+      const persistentLockReady = new Promise<void>((r) => {
+        persistentLockReadyResolve = r;
+      });
+      let releasePersistentLock: () => void = () => {};
+      const persistentLockHold = new Promise<void>((r) => {
+        releasePersistentLock = r;
+      });
+      const persistentLockPromise = kdRepo.withAutonomousTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, kdLocked.id],
+        );
+        persistentLockReadyResolve();
+        await persistentLockHold;
+      });
+
+      let fastLockReadyResolve!: () => void;
+      const fastLockReady = new Promise<void>((r) => {
+        fastLockReadyResolve = r;
+      });
+      const fastLockPromise = kdRepo.withAutonomousTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, kdFastRelease.id],
+        );
+        fastLockReadyResolve();
+        await new Promise((r) => setTimeout(r, 30));
+      });
+
+      try {
+        await Promise.all([persistentLockReady, fastLockReady]);
+
+        const firstRun = await guardedJob(
+          'key-date-reminders',
+          'not-a-law-firm',
+          ({ tenantContext }) =>
+            executeKeyDateRemindersForTenant(tenantContext, {
+              triggerSource: 'scheduled',
+              triggeredById: 'system:key-date-reminders',
+              defaultRunHourLocal: 0,
+              skippedLockRetryDelayMs: 90,
+            } as Parameters<typeof executeKeyDateRemindersForTenant>[1]),
+          { registry },
+        );
+        await fastLockPromise;
+
+        expect(firstRun.outcome).toBe('executed');
+        if (firstRun.outcome === 'executed') {
+          expect(
+            (firstRun.result.summary as { skippedCount?: number }).skippedCount,
+          ).toBe(1);
+          expect(firstRun.jobRun.status).toBe('running');
+          expect((firstRun.jobRun.summary as { scope?: string }).scope).toBe(
+            'partial',
+          );
+          expect(firstRun.jobRun.summary.skippedCount).toBe(1);
+        }
+        // Unlocked and fast-released key dates WERE processed in pass 1 / pass 2
+        expect(await kdRepo.getReminderState(ctx, kdUnlocked.id)).not.toBeNull();
+        expect(await kdRepo.getReminderState(ctx, kdFastRelease.id)).not.toBeNull();
+        expect(await kdRepo.getReminderState(ctx, kdLocked.id)).toBeNull();
+      } finally {
+        releasePersistentLock();
+        await Promise.allSettled([persistentLockPromise, fastLockPromise]);
+      }
+
+      const secondRunSameDay = await guardedJob(
+        'key-date-reminders',
+        'not-a-law-firm',
+        ({ tenantContext }) =>
+          executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            defaultRunHourLocal: 0,
+            skippedLockRetryDelayMs: 10,
+          }),
+        { registry },
+      );
+      expect(secondRunSameDay.outcome).toBe('executed');
+      if (secondRunSameDay.outcome === 'executed') {
+        expect(secondRunSameDay.result.summary.skippedCount).toBe(0);
+        expect(secondRunSameDay.jobRun.status).toBe('succeeded');
+        expect(secondRunSameDay.jobRun.summary.skippedCount).toBe(0);
+      }
+      expect(await kdRepo.getReminderState(ctx, kdLocked.id)).not.toBeNull();
+
+      // Third run on the same day is now idempotently skipped as already_succeeded_today
+      const thirdRunSameDay = await guardedJob(
+        'key-date-reminders',
+        'not-a-law-firm',
+        ({ tenantContext }) =>
+          executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            defaultRunHourLocal: 0,
+          }),
+        { registry },
+      );
+      expect(thirdRunSameDay.outcome).toBe('already_succeeded_today');
+
+      // Tenant B remains unaffected
+      expect(await kdRepo.getReminderState(ctxBravo, 'KD-R638-BRAVO-1')).toBeNull();
+      expect(await jobRunRepo.listJobRuns(ctxBravo, { jobKey: 'key-date-reminders' })).toEqual([]);
+    } finally {
+      await kdRepo.clearTenantData(ctxBravo);
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      await jobRunRepo.clearTenantJobRuns(ctxBravo);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
   });
 });

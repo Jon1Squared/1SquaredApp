@@ -97,6 +97,7 @@ import {
   closeEnquiryRecord,
   createOrProposeKeyDateRecord,
   createRecordFromPms,
+  deleteMatterRateOverrideRecord,
   discussSignOff,
   dismissDuplicateMatch,
   executeKeyDateRemindersForTenant,
@@ -108,9 +109,11 @@ import {
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDateExceptionsReportRecord,
+  getKeyDatesConfig,
   getMatterPmsViewBundle,
   getMatterRepository,
   getPartyRepository,
+  getRateOverrideRepository,
   getRegisterRepository,
   getTaskWorkflowRepository,
   liftMatterRestriction,
@@ -128,6 +131,8 @@ import {
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
   saveEnquiryRecord,
+  saveKeyDatesConfigRecord,
+  saveMatterRateOverrideRecord,
   saveMatterRecord,
   saveOrganisationRecord,
   savePersonRecord,
@@ -5700,7 +5705,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         r183KdCtx,
         fixtureM3.id,
       )) {
-        await getKeyDateRepository().putKeyDate(r183KdCtx, { ...kd, status: 'met' });
+        await getKeyDateRepository().putKeyDate(
+          r183KdCtx,
+          { ...kd, status: 'met' },
+          { expectedVersion: kd.version },
+        );
       }
       const closeSuccessRes = await runWithActiveActorSession(
         partnerSession,
@@ -10814,25 +10823,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         status: 'Pending',
       });
 
-      await kdRepo.putKeyDate(ctxA, {
-        id: kdId,
-        matterId: allowListMatterId,
-        keyDateTypeId: 'limitation',
-        category: 'limitation',
-        title: 'Allow-list Key Date',
-        dueDate: '2027-02-01',
-        isCritical: true,
-        status: 'confirmed',
-        source: 'manual',
-        teamId: 'TM-000001',
-        responsiblePersonIds: ['P-ALPHA-1'],
-        verification: { required: false },
-        createdById: 'P-ALPHA-1',
-        createdAt: '2026-11-19T10:00:00.000Z',
-        updatedById: 'P-ALPHA-1',
-        updatedAt: '2026-11-19T10:00:00.000Z',
-        version: 1,
-      });
+      await kdRepo.putKeyDate(
+        ctxA,
+        {
+          id: kdId,
+          matterId: allowListMatterId,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Allow-list Key Date',
+          dueDate: '2027-02-01',
+          isCritical: true,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-ALPHA-1'],
+          verification: { required: false },
+          createdById: 'P-ALPHA-1',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-ALPHA-1',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 1,
+        },
+        { expectedVersion: null },
+      );
 
       await regRepo.createRegisterRecord(
         ctxA,
@@ -11025,25 +11038,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       // Update allow-list key date to list unpermitted P-ALPHA-2 + permitted P-ALPHA-1 and run manual reminder as admin tokenRoles in Tenant Alpha
-      await kdRepo.putKeyDate(ctxA, {
-        id: kdId,
-        matterId: allowListMatterId,
-        keyDateTypeId: 'limitation',
-        category: 'limitation',
-        title: 'Allow-list Key Date',
-        dueDate: '2027-02-01',
-        isCritical: true,
-        status: 'confirmed',
-        source: 'manual',
-        teamId: 'TM-000001',
-        responsiblePersonIds: ['P-ALPHA-2', 'P-ALPHA-1'],
-        verification: { required: false },
-        createdById: 'P-ALPHA-1',
-        createdAt: '2026-11-19T10:00:00.000Z',
-        updatedById: 'P-ALPHA-1',
-        updatedAt: '2026-11-19T10:00:00.000Z',
-        version: 2,
-      });
+      await kdRepo.putKeyDate(
+        ctxA,
+        {
+          id: kdId,
+          matterId: allowListMatterId,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'Allow-list Key Date',
+          dueDate: '2027-02-01',
+          isCritical: true,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-ALPHA-2', 'P-ALPHA-1'],
+          verification: { required: false },
+          createdById: 'P-ALPHA-1',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-ALPHA-1',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 2,
+        },
+        { expectedVersion: 1 },
+      );
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2027-02-01T10:00:00.000Z'));
       try {
@@ -11082,25 +11099,29 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         },
         { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
       );
-      await kdRepo.putKeyDate(ctxA, {
-        id: `KD-R568-OPEN-${suffix}`,
-        matterId: `MAT-R568-OPEN-${suffix}`,
-        keyDateTypeId: 'limitation',
-        category: 'limitation',
-        title: 'R568 Alpha Open KeyDate',
-        dueDate: '2027-02-01',
-        isCritical: false,
-        status: 'confirmed',
-        source: 'manual',
-        teamId: 'TM-000001',
-        responsiblePersonIds: ['P-ALPHA-1'],
-        verification: { required: false },
-        createdById: 'P-ALPHA-1',
-        createdAt: '2026-11-19T10:00:00.000Z',
-        updatedById: 'P-ALPHA-1',
-        updatedAt: '2026-11-19T10:00:00.000Z',
-        version: 1,
-      });
+      await kdRepo.putKeyDate(
+        ctxA,
+        {
+          id: `KD-R568-OPEN-${suffix}`,
+          matterId: `MAT-R568-OPEN-${suffix}`,
+          keyDateTypeId: 'limitation',
+          category: 'limitation',
+          title: 'R568 Alpha Open KeyDate',
+          dueDate: '2027-02-01',
+          isCritical: false,
+          status: 'confirmed',
+          source: 'manual',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-ALPHA-1'],
+          verification: { required: false },
+          createdById: 'P-ALPHA-1',
+          createdAt: '2026-11-19T10:00:00.000Z',
+          updatedById: 'P-ALPHA-1',
+          updatedAt: '2026-11-19T10:00:00.000Z',
+          version: 1,
+        },
+        { expectedVersion: null },
+      );
       const r568TwoKdTaskId = `TSK-R568-ISO-${suffix}`;
       await taskRepo.putTask(ctxA, {
         ...structuredClone(seed.tasks[0]!),
@@ -13666,6 +13687,192 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         });
       });
     } finally {
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R591: saveKeyDatesConfigRecord and deleteMatterRateOverrideRecord read current state inside their write transactions for merge and audit before-snapshots', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const ctx = testTenantCtx('P-000004', {
+      roles: ['admin'],
+      mfaVerified: true,
+    });
+    const seed = loadCommittedSeedStore();
+    const kdRepo = getKeyDateRepository();
+    const rateRepo = getRateOverrideRepository();
+    const origKdWithTx = kdRepo.withTenantTransaction.bind(kdRepo);
+    const origRateWithTx = rateRepo.withTenantTransaction.bind(rateRepo);
+
+    try {
+      // 1. saveKeyDatesConfigRecord: simulate concurrent putKeyDatesTenantConfig before TX enters
+      const baseKdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000004' });
+      const seedRuleSet = baseKdConfig.limitationRuleSets?.[0];
+      expect(seedRuleSet).toBeDefined();
+
+      const initialConfig = {
+        ...baseKdConfig,
+        limitationRuleSets: [
+          {
+            ...seedRuleSet!,
+            reviewStatus: 'reviewed' as const,
+            reviewedBy: 'P-000001',
+            reviewedOn: '2026-11-10',
+          },
+          ...(baseKdConfig.limitationRuleSets?.slice(1) ?? []),
+        ],
+      };
+      await kdRepo.putKeyDatesTenantConfig(
+        ctx,
+        initialConfig as Parameters<typeof kdRepo.putKeyDatesTenantConfig>[1],
+        'P-000001',
+      );
+
+      const concurrentConfig = {
+        ...baseKdConfig,
+        limitationRuleSets: [
+          {
+            ...seedRuleSet!,
+            reviewStatus: 'reviewed' as const,
+            reviewedBy: 'P-000002',
+            reviewedOn: '2026-11-18',
+          },
+          ...(baseKdConfig.limitationRuleSets?.slice(1) ?? []),
+        ],
+      };
+
+      const kdAuditMark = await markAuditPosition();
+      let injectedKdRace = false;
+      kdRepo.withTenantTransaction = (async (
+        txCtx: Parameters<typeof origKdWithTx>[0],
+        fn: Parameters<typeof origKdWithTx>[1],
+        opts?: Parameters<typeof origKdWithTx>[2],
+      ) => {
+        if (!injectedKdRace) {
+          injectedKdRace = true;
+          kdRepo.withTenantTransaction = origKdWithTx;
+          await origKdWithTx(ctx, async () => {
+            await kdRepo.putKeyDatesTenantConfig(
+              ctx,
+              concurrentConfig as Parameters<typeof kdRepo.putKeyDatesTenantConfig>[1],
+              'P-000002',
+            );
+          });
+        }
+        return origKdWithTx(txCtx, fn, opts);
+      }) as typeof kdRepo.withTenantTransaction;
+
+      const cfgSaveRes = await runAsTestActor(
+        'P-000004',
+        () =>
+          saveKeyDatesConfigRecord(
+            {
+              ...baseKdConfig,
+              limitationRuleSets: [
+                {
+                  ...seedRuleSet!,
+                  reviewStatus: 'reviewed',
+                },
+                ...(baseKdConfig.limitationRuleSets?.slice(1) ?? []),
+              ],
+            },
+            'R591 config merge & before-snapshot test',
+            'P-000004',
+            { mfaVerified: true },
+          ),
+        { roles: ['admin'], mfaVerified: true },
+      );
+      expect(cfgSaveRes.ok).toBe(true);
+      expect(injectedKdRace).toBe(true);
+      expect(cfgSaveRes.config?.limitationRuleSets?.[0]?.reviewedBy).toBe(
+        'P-000002',
+      );
+
+      const kdAudits = await auditEntriesSince(kdAuditMark);
+      const cfgAudit = kdAudits.find(
+        (a) =>
+          a.recordId === 'FIRM-KEY-DATES-CONFIG' &&
+          a.action === 'keydate-config-change',
+      );
+      expect(cfgAudit).toBeDefined();
+      const beforeSnap = (
+        cfgAudit!.snapshot as {
+          before?: { limitationRuleSets?: Array<{ reviewedBy?: string }> };
+        }
+      )?.before;
+      expect(beforeSnap?.limitationRuleSets?.[0]?.reviewedBy).toBe('P-000002');
+
+      // 2. deleteMatterRateOverrideRecord: simulate concurrent update to rate override before TX enters
+      const targetMatter = seed.matters.find((m) => !m.isStaffMatter)!;
+      const createdRate = await runAsTestActor(
+        'P-000001',
+        () =>
+          saveMatterRateOverrideRecord(
+            {
+              matterId: targetMatter.id,
+              gradeKey: 'partner',
+              rateGbp: 250,
+              effectiveFrom: '2026-01-01',
+              notes: 'R591 initial override',
+            },
+            'P-000001',
+          ),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(createdRate.override?.rateMinorUnits).toBe(25000);
+      const overrideId = createdRate.override!.id;
+
+      const rateAuditMark = await markAuditPosition();
+      let injectedRateRace = false;
+      rateRepo.withTenantTransaction = (async (
+        txCtx: Parameters<typeof origRateWithTx>[0],
+        fn: Parameters<typeof origRateWithTx>[1],
+        opts?: Parameters<typeof origRateWithTx>[2],
+      ) => {
+        if (!injectedRateRace) {
+          injectedRateRace = true;
+          rateRepo.withTenantTransaction = origRateWithTx;
+          await runAsTestActor(
+            'P-000001',
+            () =>
+              saveMatterRateOverrideRecord(
+                {
+                  id: overrideId,
+                  matterId: targetMatter.id,
+                  gradeKey: 'partner',
+                  rateGbp: 375,
+                  effectiveFrom: '2026-01-01',
+                  notes: 'R591 concurrent override update',
+                },
+                'P-000001',
+              ),
+            { roles: ['admin', 'managing_partner'], mfaVerified: true },
+          );
+        }
+        return origRateWithTx(txCtx, fn, opts);
+      }) as typeof rateRepo.withTenantTransaction;
+
+      const deleteRes = await runAsTestActor(
+        'P-000001',
+        () => deleteMatterRateOverrideRecord(overrideId, 'P-000001'),
+        { roles: ['admin', 'managing_partner'], mfaVerified: true },
+      );
+      expect(deleteRes.deleted).toBe(true);
+      expect(injectedRateRace).toBe(true);
+
+      const rateAudits = await auditEntriesSince(rateAuditMark);
+      const delAudit = rateAudits.find(
+        (a) =>
+          a.recordType === 'matter_rate_override' &&
+          a.recordId === overrideId &&
+          a.action === 'rate-override-delete',
+      );
+      expect(delAudit).toBeDefined();
+      expect(
+        (delAudit!.snapshot as { rateMinorUnits?: number })?.rateMinorUnits,
+      ).toBe(37500);
+    } finally {
+      kdRepo.withTenantTransaction = origKdWithTx;
+      rateRepo.withTenantTransaction = origRateWithTx;
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });

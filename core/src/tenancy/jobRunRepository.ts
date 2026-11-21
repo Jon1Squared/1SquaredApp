@@ -32,7 +32,7 @@ import {
 
 export type JobTriggerSource = 'scheduled' | 'manual';
 export type JobRunStatus = 'running' | 'succeeded' | 'failed';
-export type JobSummaryScope = 'single' | 'bulk';
+export type JobSummaryScope = 'single' | 'bulk' | 'partial';
 export type JobSummaryValue = number | JobSummaryScope;
 
 export interface JobRunRecord {
@@ -183,7 +183,10 @@ export function sanitizeJobSummaryCounts(
     }
     if (typeof v === 'number' && Number.isFinite(v)) {
       clean[k] = v;
-    } else if (k === 'scope' && (v === 'single' || v === 'bulk')) {
+    } else if (
+      k === 'scope' &&
+      (v === 'single' || v === 'bulk' || v === 'partial')
+    ) {
       clean[k] = v;
     }
   }
@@ -248,6 +251,7 @@ export class TenantJobRunRepository extends TenantScopedRepository {
       }) => Promise<{
         readonly result: TResult;
         readonly summary: Record<string, JobSummaryValue>;
+        readonly deferDailyCompletion?: boolean;
       }>;
     },
   ): Promise<ControlledJobRunOutcome<TResult>> {
@@ -292,7 +296,8 @@ export class TenantJobRunRepository extends TenantScopedRepository {
 
           // 2. For scheduled runs, check if any bulk succeeded row (scheduled OR manual bulk)
           //    already exists for (tenant_id, job_key, local_date). A single-enquiry manual run
-          //    (summary_json->>'scope' = 'single') does not suppress the daily bulk sweep.
+          //    (summary_json->>'scope' = 'single') or partial run with deferred skipped rows
+          //    (summary_json->>'scope' = 'partial') does not suppress the daily bulk sweep.
           if (params.triggerSource === 'scheduled') {
             const existingRes = await tx.query<DbJobRunRow>(
               `SELECT *
@@ -301,7 +306,7 @@ export class TenantJobRunRepository extends TenantScopedRepository {
                   AND job_key = $2
                   AND local_date = $3
                   AND status = 'succeeded'
-                  AND COALESCE(summary_json->>'scope', 'bulk') <> 'single'
+                  AND COALESCE(summary_json->>'scope', 'bulk') NOT IN ('single', 'partial')
                 ORDER BY finished_at DESC NULLS LAST, started_at DESC
                 LIMIT 1`,
               [ctx.tenantId, params.jobKey, localDate],
@@ -319,7 +324,7 @@ export class TenantJobRunRepository extends TenantScopedRepository {
           }
 
           // 3. Execute all reads, domain work, and audit_entries writes on the same transaction client
-          const { result, summary } = await params.work({
+          const { result, summary, deferDailyCompletion } = await params.work({
             tx,
             localDate,
             localHour,
@@ -327,16 +332,25 @@ export class TenantJobRunRepository extends TenantScopedRepository {
           });
 
           const cleanSummary = sanitizeJobSummaryCounts(summary);
+          const effectiveSummary: Record<string, JobSummaryValue> =
+            deferDailyCompletion
+              ? { ...cleanSummary, scope: 'partial' }
+              : cleanSummary;
+          const persistedStatus: JobRunStatus = deferDailyCompletion
+            ? 'running'
+            : 'succeeded';
           const finishedAtIso = new Date().toISOString();
 
-          // 4. Insert the succeeded row in job_runs before COMMIT releases the advisory lock
+          // 4. Insert the run row in job_runs before COMMIT releases the advisory lock
+          //    (recording status = 'running' + scope = 'partial' when deferDailyCompletion is set
+          //    so the next hourly tick evaluates any rows that remained locked or inaccessible)
           const insertRes = await tx.query<DbJobRunRow>(
             `INSERT INTO public.job_runs (
                tenant_id, id, job_key, local_date, trigger_source, triggered_by_id,
                status, started_at, finished_at, correlation_id, error_code, summary_json
              ) VALUES (
                $1, $2, $3, $4, $5, $6,
-               'succeeded', $7::timestamptz, $8::timestamptz, $9, NULL, $10::jsonb
+               $7, $8::timestamptz, $9::timestamptz, $10, NULL, $11::jsonb
              )
              RETURNING *`,
             [
@@ -346,10 +360,11 @@ export class TenantJobRunRepository extends TenantScopedRepository {
               localDate,
               params.triggerSource,
               params.triggeredById,
+              persistedStatus,
               startedAtIso,
               finishedAtIso,
               ctx.correlationId,
-              JSON.stringify(cleanSummary),
+              JSON.stringify(effectiveSummary),
             ],
           );
           const inserted = insertRes.rows[0]!;

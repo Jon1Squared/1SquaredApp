@@ -1088,6 +1088,13 @@ export async function importFirmStoreModulesToPostgres(
             ctx,
           )) as unknown as Matter[]);
     const matterIdSet = new Set(matters.map((m) => m.id));
+    const enquiries =
+      (store.enquiries?.length ?? 0) > 0
+        ? store.enquiries!
+        : ((await new TenantIntakeQuoteRepository().listAllEnquiriesUnfiltered(
+            ctx,
+          )) as Array<{ id: string }>);
+    const enquiryIdSet = new Set(enquiries.map((e) => e.id));
 
     await keyDateRepo.withTenantTransaction(ctx, async () => {
       if (store.keyDatesConfigOverride !== undefined) {
@@ -1100,24 +1107,13 @@ export async function importFirmStoreModulesToPostgres(
       }
 
       const keyDates = (store.keyDates ?? []).filter(
-        (kd) => !kd.matterId || matterIdSet.has(kd.matterId),
+        (kd) =>
+          (!kd.matterId || matterIdSet.has(kd.matterId)) &&
+          (!kd.enquiryId || enquiryIdSet.has(kd.enquiryId)),
       );
-      const importedKeyDateIds = new Set<string>();
-      // Pass 1: insert without self-referential supersession links
-      for (const kd of keyDates) {
-        const firstPass = { ...kd };
-        delete firstPass.supersedesKeyDateId;
-        delete firstPass.supersededByKeyDateId;
-        await keyDateRepo.putKeyDate(ctx, firstPass);
-        importedKeyDateIds.add(kd.id);
-        counts.keyDates += 1;
-      }
-      // Pass 2: apply supersession links once all target rows exist
-      for (const kd of keyDates) {
-        if (kd.supersedesKeyDateId || kd.supersededByKeyDateId) {
-          await keyDateRepo.putKeyDate(ctx, kd);
-        }
-      }
+      const importedKeyDateIds = new Set<string>(keyDates.map((kd) => kd.id));
+      await keyDateRepo.importKeyDates(ctx, keyDates);
+      counts.keyDates += keyDates.length;
 
       for (const na of store.keyDateNotApplicable ?? []) {
         if (!matterIdSet.has(na.matterId)) continue;

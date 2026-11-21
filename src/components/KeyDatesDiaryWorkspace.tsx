@@ -243,7 +243,11 @@ export function KeyDatesDiaryWorkspace({
         showToast(res.error ?? 'Failed to verify key date.');
         return;
       }
-      showToast('Key date verified and confirmed');
+      const warningSuffix =
+        'calendarSyncWarning' in res && res.calendarSyncWarning
+          ? ` (${res.calendarSyncWarning})`
+          : '';
+      showToast(`Key date verified and confirmed${warningSuffix}`);
     });
   };
 

@@ -246,6 +246,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       ]),
     );
     expect(activeAt0017).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0022')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
@@ -1615,7 +1616,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
   });
 
   it('R604, R619 & R621: 0021 backfills canonical choice systemKeys and Referred/Draft task triggers without touching custom teams, revokes audit table privileges, avoids duplicate systemKeys, and reverses value-matched rows cleanly', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0022');
     const tenantId = 'mig-backfill-0021';
     await provisionPostgresClusterRolesAndDatabases({
       tenants: [{ tenantId, environment: 'test' }],
@@ -1898,6 +1899,59 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     } finally {
       await clientAlpha.end();
       await clientBravo.end();
+    }
+  });
+
+  it('R627: 0022_key_date_calendar_sync_lease_expand adds lease columns and reverses cleanly (up -> down -> up)', async () => {
+    const tenantId = 'mig-lease-0022';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+      const colsUp = await client.query<{ column_name: string }>(
+        `SELECT column_name
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'key_date_calendar_syncs'
+            AND column_name IN ('lease_token', 'lease_expires_at')
+          ORDER BY column_name ASC`,
+      );
+      expect(colsUp.rows.map((r) => r.column_name)).toEqual([
+        'lease_expires_at',
+        'lease_token',
+      ]);
+
+      expect(await runner.rollbackVersion(ctx, '0022')).toBe(true);
+      const colsDown = await client.query<{ column_name: string }>(
+        `SELECT column_name
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'key_date_calendar_syncs'
+            AND column_name IN ('lease_token', 'lease_expires_at')`,
+      );
+      expect(colsDown.rowCount).toBe(0);
+
+      const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0022']);
+      const colsReapplied = await client.query<{ column_name: string }>(
+        `SELECT column_name
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'key_date_calendar_syncs'
+            AND column_name IN ('lease_token', 'lease_expires_at')
+          ORDER BY column_name ASC`,
+      );
+      expect(colsReapplied.rows.map((r) => r.column_name)).toEqual([
+        'lease_expires_at',
+        'lease_token',
+      ]);
+    } finally {
+      await client.end();
     }
   });
 });

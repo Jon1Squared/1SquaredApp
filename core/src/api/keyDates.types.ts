@@ -206,6 +206,7 @@ export interface KeyDateReminderState {
 export type CalendarSyncState =
   | 'disabled' // matter type has sync off, or restricted matter
   | 'pending'
+  | 'syncing'
   | 'synced'
   | 'failed';
 
@@ -217,6 +218,8 @@ export interface KeyDateCalendarSync {
   lastSyncedAt?: IsoDateTime;
   lastError?: string; // no client content in error text
   attempts: number;
+  leaseToken?: string;
+  leaseExpiresAt?: IsoDateTime;
 }
 
 // ---------------------------------------------------------------------------

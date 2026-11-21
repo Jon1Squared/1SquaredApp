@@ -810,12 +810,16 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       }
       const { enquiryId: _omittedEnquiryId, ...templateKd } = structuredClone(firstKd);
       void _omittedEnquiryId;
-      await keyDateRepo.putKeyDate(ctx, {
-        ...templateKd,
-        id: kdId,
-        matterId: staffMatter.id,
-        title: 'Staff Matter Limitation Date',
-      });
+      await keyDateRepo.putKeyDate(
+        ctx,
+        {
+          ...templateKd,
+          id: kdId,
+          matterId: staffMatter.id,
+          title: 'Staff Matter Limitation Date',
+        },
+        { expectedVersion: null },
+      );
 
       // Outsider P-000008 cannot see the key date on the staff matter
       const outsiderKds = await keyDateRepo.listKeyDatesForMatter(
@@ -1637,31 +1641,35 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const keyDateRepo = new TenantKeyDateRepository();
     const testKeyDateId = 'KD-R473-STAFF-01';
     const nowIso = new Date().toISOString();
-    await keyDateRepo.putKeyDate(adminCtx, {
-      id: testKeyDateId,
-      matterId: staffMatter.id,
-      keyDateTypeId: 'kd-type-limitation',
-      category: 'limitation',
-      title: 'R473 Staff Matter Key Date',
-      dueDate: '2027-06-15',
-      isCritical: true,
-      status: 'confirmed',
-      source: 'manual',
-      teamId: userUTeamId,
-      responsiblePersonIds: [positiveControlUserId],
-      verification: {
-        required: true,
-        proposedById: positiveControlUserId,
-        proposedAt: nowIso,
-        verifiedById: positiveControlUserId,
-        verifiedAt: nowIso,
+    await keyDateRepo.putKeyDate(
+      adminCtx,
+      {
+        id: testKeyDateId,
+        matterId: staffMatter.id,
+        keyDateTypeId: 'kd-type-limitation',
+        category: 'limitation',
+        title: 'R473 Staff Matter Key Date',
+        dueDate: '2027-06-15',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: userUTeamId,
+        responsiblePersonIds: [positiveControlUserId],
+        verification: {
+          required: true,
+          proposedById: positiveControlUserId,
+          proposedAt: nowIso,
+          verifiedById: positiveControlUserId,
+          verifiedAt: nowIso,
+        },
+        createdById: positiveControlUserId,
+        createdAt: nowIso,
+        updatedById: positiveControlUserId,
+        updatedAt: nowIso,
+        version: 1,
       },
-      createdById: positiveControlUserId,
-      createdAt: nowIso,
-      updatedById: positiveControlUserId,
-      updatedAt: nowIso,
-      version: 1,
-    });
+      { expectedVersion: null },
+    );
 
     const readRestrictedIdsOnFreshConnection = async (): Promise<string[]> => {
       const freshPools = new TenantPostgresPoolManager();
@@ -1899,31 +1907,35 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const keyDateRepo = new TenantKeyDateRepository();
     const testKeyDateId = 'KD-R478-STAFF-01';
     const nowIso = new Date().toISOString();
-    await keyDateRepo.putKeyDate(adminCtx, {
-      id: testKeyDateId,
-      matterId: staffMatter.id,
-      keyDateTypeId: 'kd-type-limitation',
-      category: 'limitation',
-      title: 'R478 Interleaved Staff Matter Key Date',
-      dueDate: '2027-07-01',
-      isCritical: true,
-      status: 'confirmed',
-      source: 'manual',
-      teamId: userUTeamId,
-      responsiblePersonIds: [positiveControlUserId],
-      verification: {
-        required: true,
-        proposedById: positiveControlUserId,
-        proposedAt: nowIso,
-        verifiedById: positiveControlUserId,
-        verifiedAt: nowIso,
+    await keyDateRepo.putKeyDate(
+      adminCtx,
+      {
+        id: testKeyDateId,
+        matterId: staffMatter.id,
+        keyDateTypeId: 'kd-type-limitation',
+        category: 'limitation',
+        title: 'R478 Interleaved Staff Matter Key Date',
+        dueDate: '2027-07-01',
+        isCritical: true,
+        status: 'confirmed',
+        source: 'manual',
+        teamId: userUTeamId,
+        responsiblePersonIds: [positiveControlUserId],
+        verification: {
+          required: true,
+          proposedById: positiveControlUserId,
+          proposedAt: nowIso,
+          verifiedById: positiveControlUserId,
+          verifiedAt: nowIso,
+        },
+        createdById: positiveControlUserId,
+        createdAt: nowIso,
+        updatedById: positiveControlUserId,
+        updatedAt: nowIso,
+        version: 1,
       },
-      createdById: positiveControlUserId,
-      createdAt: nowIso,
-      updatedById: positiveControlUserId,
-      updatedAt: nowIso,
-      version: 1,
-    });
+      { expectedVersion: null },
+    );
 
     const readRestrictedIdsOnFreshConnection = async (): Promise<string[]> => {
       const freshPools = new TenantPostgresPoolManager();
