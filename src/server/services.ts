@@ -13685,7 +13685,7 @@ export async function saveEnquiryRecord(
     const isUnroutedWithoutFallback = !enquiry.assignedTeamId && !enquiry.assignedToId;
     if (isUnroutedWithoutFallback) {
       routingWarning =
-        'No active team is mapped to this practice area and no fallback intake team is configured. The enquiry was saved unassigned — assign it manually or configure a fallback intake team in Admin → Enquiry settings.';
+        'No active team is mapped to this practice area and no active fallback intake team is configured. The enquiry was saved unassigned — assign it manually or configure a fallback intake team in Admin → Enquiry settings.';
       console.warn(
         JSON.stringify({
           level: 'warn',
@@ -13702,7 +13702,7 @@ export async function saveEnquiryRecord(
       recordId: enquiry.id,
       action: existing ? 'status-change' : 'create',
       field: isUnroutedWithoutFallback
-        ? 'Enquiry saved unassigned (no practice-area or fallback intake team configured)'
+        ? 'Enquiry saved unassigned (no practice-area or active fallback intake team configured)'
         : routedTeam
           ? `Enquiry routed to ${routedTeam.name} team`
           : `Enquiry routed (${practiceAreaLabel})`,
@@ -13772,18 +13772,51 @@ export async function saveEnquiryRecord(
             config: { rbac: rbacConfig },
           }),
       );
-      for (const adminPerson of adminRecipients) {
-        await pushNotification(enqCtx, {
-          recipientId: adminPerson.id,
-          kind: 'general',
-          title: 'Admin warning: enquiry saved without a fallback intake team',
-          detail:
-            'No active team matched the enquiry practice area and no fallback intake team is configured. Set a fallback team in Admin → Enquiry settings.',
-          href: '/admin/enquiry-settings',
-          recordId: enquiry.id,
-          preloaded: enquiryPreloadedCtx,
-          byId: opts.byId,
-          at: now,
+      if (adminRecipients.length > 0) {
+        const unroutedWarningTitle =
+          'Admin warning: enquiry saved without a fallback intake team';
+        const effectiveTimeZone =
+          getActiveTenantConfiguration().timeZone || 'Europe/London';
+        const todayLocalDate = resolveTenantLocalDateAndHour(
+          new Date(now),
+          effectiveTimeZone,
+        ).localDate;
+        const taskRepo = getTaskWorkflowRepository();
+        await taskRepo.withTenantTransaction(enqCtx, async (tx) => {
+          await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+            `onesquared_unrouted_enquiry_warn:${enqCtx.tenantId}:${todayLocalDate}`,
+          ]);
+          const existingNotifications =
+            await taskRepo.listAllNotificationsUnfiltered<NotificationItem>(enqCtx);
+          const alreadyWarnedRecipientsToday = new Set(
+            existingNotifications
+              .filter(
+                (n) =>
+                  n.title === unroutedWarningTitle &&
+                  resolveTenantLocalDateAndHour(
+                    new Date(n.createdAt),
+                    effectiveTimeZone,
+                  ).localDate === todayLocalDate,
+              )
+              .map((n) => n.recipientId),
+          );
+          for (const adminPerson of adminRecipients) {
+            if (alreadyWarnedRecipientsToday.has(adminPerson.id)) {
+              continue;
+            }
+            await pushNotification(enqCtx, {
+              recipientId: adminPerson.id,
+              kind: 'general',
+              title: unroutedWarningTitle,
+              detail:
+                'No active team matched the enquiry practice area and no active fallback intake team is configured. Set a fallback team in Admin → Enquiry settings.',
+              href: '/admin/enquiry-settings',
+              recordId: enquiry.id,
+              preloaded: enquiryPreloadedCtx,
+              byId: opts.byId,
+              at: now,
+            });
+          }
         });
       }
     }

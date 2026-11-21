@@ -31,7 +31,11 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`firm.website\` | \`""\` | Active | Public firm website URL or hostname for document headers and footers |
 | \`conflictReview.assigneeTeamKey\` | \`null\` | Active | Team ID or code receiving referred conflict review tasks |
 | \`conflictReview.assigneeRoleKey\` | \`null\` | Active | Role key used to select an assignee within the conflict review team |
-| \`enquiries.fallbackTeamId\` | \`null\` | Active | Optional active Team ID used as the default fallback intake team when no practice area matches (an explicit non-empty setting under **Admin → Enquiry settings** overrides this; when unset in Admin it falls back to \`enquiries.fallbackTeamId\`, then to an active team with \`systemKey: "intake"\`, or saves unmapped enquiries unassigned with an Admin warning) |
+| \`enquiries.fallbackTeamId\` | \`null\` | Active | Optional active Team ID used as the default fallback intake team when no practice area matches (an explicit non-empty setting under **Admin → Enquiry settings** overrides this; when unset in Admin it falls back to \`enquiries.fallbackTeamId\`, then to an active team with \`systemKey: "intake"\`, or saves unmapped enquiries unassigned with a warning stating that no active fallback intake team is configured; repeated admin warnings for unrouted enquiries are deduplicated per tenant per calendar day) |
+
+#### Upgrade step: fallback intake team routing
+
+Before or straight after upgrading from \`develop\`, firms must ensure an explicit intake fallback is configured: set the intake team's \`systemKey\` to \`"intake"\` under **Admin → Teams**, or set \`enquiries.fallbackTeamId\` in tenant configuration (or **Admin → Enquiry settings**). Previously, fallback routing matched a team named \`"Intake"\`; without an active \`intake\` \`systemKey\` or \`fallbackTeamId\`, unmapped enquiries save unassigned with a \`"no active fallback intake team"\` warning and a once-daily per-tenant admin warning notification. For the demo tenant, running **Load demo dataset** in **Admin → Demo data** (or the \`seed-demo\` job) sets the intake team metadata automatically.
 
 ### Feature flags
 

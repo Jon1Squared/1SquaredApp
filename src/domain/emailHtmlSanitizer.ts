@@ -29,7 +29,11 @@ function escapeHtmlText(text: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/'/g, '&#39;')
+    .replace(
+      /[\u202A-\u202E\u2066-\u2069]/g,
+      (ch) => `&#x${ch.codePointAt(0)!.toString(16).toUpperCase()};`,
+    );
 }
 
 function decodeHtmlTextEntities(text: string): string {

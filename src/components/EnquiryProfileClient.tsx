@@ -627,7 +627,7 @@ export function EnquiryProfileClient({
         <div className="banner banner--warning" style={{ marginBottom: 16 }}>
           <div>
             <strong>Manual routing needed:</strong> No active team was mapped to {practiceLabel} and
-            no fallback intake team is configured, so this enquiry is currently{' '}
+            no active fallback intake team is configured, so this enquiry is currently{' '}
             <strong>unassigned</strong>. Use <strong>Assign</strong> to route it to a team or fee earner.
           </div>
         </div>

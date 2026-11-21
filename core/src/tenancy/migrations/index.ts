@@ -2712,6 +2712,10 @@ DROP SEQUENCE IF EXISTS public.tenant_teams_outbox_id_seq;
 `.trim(),
   };
 
+// Retained `0021_stable_keys_and_team_metadata_backfill` name for applied-migration
+// stability after R619 removed English team-name matching in favour of explicit
+// team `systemKey: 'intake'` / `enquiries.fallbackTeamId` (configured via Admin
+// or `Load demo dataset`).
 export const STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021: TenantMigrationDefinition =
   {
     version: '0021',
@@ -2903,10 +2907,12 @@ WITH task_matter_links AS (
    WHERE lr.elem->>'recordType' = 'matter'
      AND COALESCE(lr.elem->>'recordId', '') <> ''
 ),
-task_candidates AS (
-  SELECT DISTINCT ON (t.tenant_id, t.id)
+eligible_matter_tasks AS (
+  SELECT
     t.tenant_id,
+    tml.matter_id,
     t.id,
+    t.created_at,
     CASE
       WHEN (
         CASE
@@ -2941,7 +2947,15 @@ task_candidates AS (
     AND COALESCE(t.profile_json->>'autoTrigger', '') = ''
     AND t.task_type_id = 'task_type.conflict_check'
     AND t.status NOT IN ('Done', 'Cancelled')
-  ORDER BY t.tenant_id, t.id, trigger_value DESC NULLS LAST
+),
+task_candidates AS (
+  SELECT DISTINCT ON (tenant_id, matter_id)
+    tenant_id,
+    id,
+    trigger_value
+  FROM eligible_matter_tasks
+  WHERE trigger_value IS NOT NULL
+  ORDER BY tenant_id, matter_id, created_at DESC, id DESC
 ),
 inserted_task_audit AS (
   INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, written_value)

@@ -3714,7 +3714,7 @@ export function AdminClient({
               <div className="banner banner--warning" style={{ marginBottom: 14 }}>
                 <div>
                   <strong>No fallback intake team configured:</strong> No active team has the{' '}
-                  <code>intake</code> routing key and no fallback intake team is configured in Enquiry
+                  <code>intake</code> routing key and no active fallback intake team is configured in Enquiry
                   settings. Enquiries for unmapped practice areas will be left unassigned until one is set.
                 </div>
               </div>

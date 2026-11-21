@@ -1444,6 +1444,8 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
       // Have non-admin fee-earner P-000002 create an unmapped enquiry when no intake key or fallbackTeamId exists
       const p2 = makeHostActorAndContext('P-000002');
       await runWithActiveActorSession(p2.actorSession, async () => {
+        const dayOneNow = '2026-11-21T10:00:00.000Z';
+        const dayTwoNow = '2026-11-22T10:00:00.000Z';
         const notifsBefore = await taskRepo.listAllNotificationsUnfiltered(ctx);
         const unassignedRes = await saveEnquiryRecord(
           {
@@ -1456,7 +1458,7 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
             notes: 'Caller requesting callback on unmapped practice area.',
             privacyNoticeGiven: true,
           },
-          { byId: 'P-000002' },
+          { byId: 'P-000002', now: dayOneNow },
         );
         expect(unassignedRes.errors).toBeUndefined();
         expect(unassignedRes.enquiry?.assignedTeamId).toBeNull();
@@ -1464,7 +1466,7 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
         expect(unassignedRes.routedTeamName).toBeUndefined();
         expect(
           (unassignedRes as { routingWarning?: string }).routingWarning,
-        ).toMatch(/fallback|unassigned/i);
+        ).toMatch(/no active fallback intake team/i);
 
         const notifsAfter = await taskRepo.listAllNotificationsUnfiltered(ctx);
         const newAdminWarnings = notifsAfter
@@ -1473,6 +1475,53 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
         expect(newAdminWarnings.length).toBeGreaterThanOrEqual(1);
         expect(JSON.stringify(newAdminWarnings)).not.toContain('Unrouted');
         expect(JSON.stringify(newAdminWarnings)).not.toContain('029 2000 0619');
+
+        // Same-day second unrouted enquiry in the same tenant deduplicates the admin warning notification
+        const secondSameDayRes = await saveEnquiryRecord(
+          {
+            firstName: 'UnroutedTwo',
+            lastName: 'ProspectTwo',
+            phone: '029 2000 0620',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.unmapped_r619',
+            summary: 'Second unmapped enquiry same day',
+            notes: 'Should not duplicate admin fallback warning today.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002', now: dayOneNow },
+        );
+        expect(secondSameDayRes.errors).toBeUndefined();
+        expect(
+          (secondSameDayRes as { routingWarning?: string }).routingWarning,
+        ).toMatch(/no active fallback intake team/i);
+
+        const notifsAfterSecondSameDay =
+          await taskRepo.listAllNotificationsUnfiltered(ctx);
+        const dupSameDayWarnings = notifsAfterSecondSameDay
+          .slice(notifsAfter.length)
+          .filter((n) => n.href === '/admin/enquiry-settings');
+        expect(dupSameDayWarnings).toHaveLength(0);
+
+        // Next calendar day in the same tenant sends a fresh admin warning notification
+        await saveEnquiryRecord(
+          {
+            firstName: 'UnroutedNextDay',
+            lastName: 'ProspectThree',
+            phone: '029 2000 0621',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.unmapped_r619',
+            summary: 'Unmapped enquiry next calendar day',
+            notes: 'New day emits new admin warning.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002', now: dayTwoNow },
+        );
+        const notifsAfterDayTwo =
+          await taskRepo.listAllNotificationsUnfiltered(ctx);
+        const dayTwoWarnings = notifsAfterDayTwo
+          .slice(notifsAfterSecondSameDay.length)
+          .filter((n) => n.href === '/admin/enquiry-settings');
+        expect(dayTwoWarnings.length).toBeGreaterThanOrEqual(1);
       });
 
       // 4. R624.3: Two-tenant isolation — Tenant B's fallbackTeamId and departmentId are refused in Tenant A
@@ -1570,6 +1619,67 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
           );
           expect(teamBRes.error).toBeUndefined();
           tenantBTeamId = teamBRes.team!.id;
+
+          // Clear intake systemKey & fallback in Tenant B too -> Tenant B gets its own same-day admin warning independently of Tenant A
+          const teamsB = await hrRepo.listAllTeams<Team>(ctxB);
+          for (const t of teamsB) {
+            if (t.systemKey === 'intake') {
+              await hrRepo.putTeam(ctxB, { ...t, systemKey: undefined });
+            }
+          }
+          const notifsBBefore = await taskRepo.listAllNotificationsUnfiltered(ctxB);
+          const bP2Cookie = createSignedEntraSessionCookie({
+            personId: 'P-000002',
+            tenantId: 'tenant-b',
+            oid: '00000000-0000-4000-8000-000000000002',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'P-000002',
+            email: `p2@${tenantBCfg.branding.primaryDomain}`,
+            displayName: 'Fee Earner tenant-b',
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: false,
+            amr: ['pwd'],
+            authenticatedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          });
+          const bP2Verified = verifySignedEntraSessionCookie(bP2Cookie)!;
+          setTestEntraSessionOverride(bP2Verified);
+          await runWithActiveActorSession(
+            {
+              personId: 'P-000002',
+              tenantId: 'tenant-b',
+              tokenRoles: ['fee_earner'],
+              mfaVerified: false,
+              expiresAtMs: Date.now() + 3600_000,
+              verifiedSession: bP2Verified,
+            },
+            async () => {
+              const resB = await saveEnquiryRecord(
+                {
+                  firstName: 'BravoUnrouted',
+                  lastName: 'Prospect',
+                  phone: '029 2000 0622',
+                  channelId: 'enquiry_channel.phone',
+                  practiceAreaId: 'work_type.unmapped_r636',
+                  summary: 'Tenant B unmapped enquiry',
+                  notes: 'Independent daily warning check in Tenant B.',
+                  privacyNoticeGiven: true,
+                },
+                { byId: 'P-000002', now: '2026-11-21T11:00:00.000Z' },
+              );
+              expect(
+                (resB as { routingWarning?: string }).routingWarning,
+              ).toMatch(/no active fallback intake team/i);
+            },
+          );
+          setTestEntraSessionOverride(bVerified);
+          const notifsBAfter = await taskRepo.listAllNotificationsUnfiltered(ctxB);
+          const bravoWarnings = notifsBAfter
+            .slice(notifsBBefore.length)
+            .filter((n) => n.href === '/admin/enquiry-settings');
+          expect(bravoWarnings.length).toBeGreaterThanOrEqual(1);
         },
       );
 

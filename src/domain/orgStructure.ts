@@ -406,7 +406,7 @@ export function buildDefaultOrgStructure(options: {
 }
 
 /**
- * Maps a legacy `employee_role` choice value ID or label to the new `EmployeeRoleType` and default `EngagementType`.
+ * Maps an `employee_role` choice value ID or `metadata.systemKey` to the new `EmployeeRoleType` and default `EngagementType`.
  * Returns null if the role cannot be automatically mapped.
  */
 export function mapLegacyEmployeeRoleToRoleType(

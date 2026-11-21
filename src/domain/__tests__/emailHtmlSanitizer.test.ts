@@ -74,4 +74,29 @@ describe('emailHtmlSanitizer (R602, R623)', () => {
       'Smith & Co',
     );
   });
+
+  it('R623 suggestion: keeps escaped script tags as escaped text and keeps Unicode bidi override/isolate characters HTML-entity-encoded', () => {
+    expect(
+      sanitizeEnquiryEmailHtml('<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>'),
+    ).toBe('<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>');
+
+    const bidiPayload =
+      '<p>Hello \u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069 world &#x202e; &#8238; &#x2066;</p>';
+    const sanitized = sanitizeEnquiryEmailHtml(bidiPayload);
+    expect(sanitized).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+    expect(sanitized).toBe(
+      '<p>Hello &#x202A;&#x202B;&#x202C;&#x202D;&#x202E;&#x2066;&#x2067;&#x2068;&#x2069; world &#x202E; &#x202E; &#x2066;</p>',
+    );
+
+    const fn = (
+      sanitizer as unknown as {
+        plainTextToSanitizedEmailHtml?: (text: string) => string;
+      }
+    ).plainTextToSanitizedEmailHtml;
+    const plainFallback = fn!('Ref \u202Etxt.pdf \u2066override\u2069');
+    expect(plainFallback).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+    expect(plainFallback).toBe(
+      '<p>Ref &#x202E;txt.pdf &#x2066;override&#x2069;</p>',
+    );
+  });
 });

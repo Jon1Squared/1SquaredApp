@@ -1784,4 +1784,120 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await client.end();
     }
   });
+
+  it('R635: 0021 tags at most the most recent open conflict-check task per matter, leaves older/other tasks untouched, and supports task_linked_records across two tenants', async () => {
+    const tenantAlpha = 'mig-r635-alpha';
+    const tenantBravo = 'mig-r635-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeTestTenantContext(tenantAlpha);
+    const ctxBravo = makeTestTenantContext(tenantBravo);
+    const runner = new TenantMigrationRunner();
+    const taskRepo = new TenantTaskWorkflowRepository();
+
+    await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+    await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+    expect(await runner.rollbackVersion(ctxAlpha, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctxBravo, '0021')).toBe(true);
+
+    const clientAlpha = await createDirectMigrationClient({ ctx: ctxAlpha });
+    const clientBravo = await createDirectMigrationClient({ ctx: ctxBravo });
+    try {
+      await clientAlpha.query(
+        `DELETE FROM public.task_linked_records WHERE tenant_id = $1`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `DELETE FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-R635-OLD','TSK-R635-NEW')`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `DELETE FROM public.matters WHERE tenant_id = $1 AND id IN ('M-R635-REF')`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `INSERT INTO public.matters (tenant_id, id, matter_number, title, client_id, practice_area_id, status_id, conflict_check_status, conflict_check_record_json)
+         VALUES ($1, 'M-R635-REF', 'MAT-R635-1', 'Alpha Referred Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Pending conflict review', '{"status":"Referred","reviewerMessage":"Two open tasks"}'::jsonb)`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `INSERT INTO public.tasks (tenant_id, id, reference, title, description, status, task_type_id, priority_id, due_at, assigned_team_id, assigned_person_id, auto_trigger, created_by_id, updated_by_id, created_at, linked_records_json, profile_json)
+         VALUES
+           ($1, 'TSK-R635-OLD', 'TSK-R635-OLD', 'User-created conflict task', 'Older open conflict task', 'To do', 'task_type.conflict_check', 'task_priority.normal', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '2026-11-01T10:00:00.000Z'::timestamptz, '[{"recordType":"matter","recordId":"M-R635-REF"}]'::jsonb, '{}'::jsonb),
+           ($1, 'TSK-R635-NEW', 'TSK-R635-NEW', 'Latest conflict referral task', 'Newest open conflict task', 'In progress', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000003', NULL, 'P-000001', 'P-000001', '2026-11-10T10:00:00.000Z'::timestamptz, '[]'::jsonb, '{}'::jsonb)`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `INSERT INTO public.task_linked_records (tenant_id, task_id, record_type, record_id)
+         VALUES ($1, 'TSK-R635-NEW', 'matter', 'M-R635-REF')`,
+        [tenantAlpha],
+      );
+
+      await clientBravo.query(
+        `DELETE FROM public.task_linked_records WHERE tenant_id = $1`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `DELETE FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-R635-B-OPEN','TSK-R635-B-DONE')`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `DELETE FROM public.matters WHERE tenant_id = $1 AND id IN ('M-R635-BRAVO')`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `INSERT INTO public.matters (tenant_id, id, matter_number, title, client_id, practice_area_id, status_id, conflict_check_status, conflict_check_record_json)
+         VALUES ($1, 'M-R635-BRAVO', 'MAT-R635-B', 'Bravo Draft TLR Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Draft', '{"status":"In progress","savedDraftAtDisplay":"20 Nov 2026"}'::jsonb)`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `INSERT INTO public.tasks (tenant_id, id, reference, title, description, status, task_type_id, priority_id, due_at, assigned_team_id, assigned_person_id, auto_trigger, created_by_id, updated_by_id, created_at, linked_records_json, profile_json)
+         VALUES
+           ($1, 'TSK-R635-B-OPEN', 'TSK-R635-B-OPEN', 'Bravo Draft Linked Task', 'Linked solely via task_linked_records', 'To do', 'task_type.conflict_check', 'task_priority.normal', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '2026-11-05T10:00:00.000Z'::timestamptz, '[]'::jsonb, '{}'::jsonb),
+           ($1, 'TSK-R635-B-DONE', 'TSK-R635-B-DONE', 'Bravo Completed Conflict Task', 'Already Done newer task', 'Done', 'task_type.conflict_check', 'task_priority.normal', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '2026-11-12T10:00:00.000Z'::timestamptz, '[]'::jsonb, '{}'::jsonb)`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `INSERT INTO public.task_linked_records (tenant_id, task_id, record_type, record_id)
+         VALUES
+           ($1, 'TSK-R635-B-OPEN', 'matter', 'M-R635-BRAVO'),
+           ($1, 'TSK-R635-B-DONE', 'matter', 'M-R635-BRAVO')`,
+        [tenantBravo],
+      );
+
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+
+      const alphaOld = await taskRepo.getTaskById(ctxAlpha, 'TSK-R635-OLD', {
+        includeRestricted: true,
+      });
+      const alphaNew = await taskRepo.getTaskById(ctxAlpha, 'TSK-R635-NEW', {
+        includeRestricted: true,
+      });
+      expect(alphaNew?.autoTrigger).toBe('conflict_check_review');
+      expect(alphaOld?.autoTrigger).toBeUndefined();
+
+      const bravoOpen = await taskRepo.getTaskById(ctxBravo, 'TSK-R635-B-OPEN', {
+        includeRestricted: true,
+      });
+      const bravoDone = await taskRepo.getTaskById(ctxBravo, 'TSK-R635-B-DONE', {
+        includeRestricted: true,
+      });
+      expect(bravoOpen?.autoTrigger).toBe('conflict_check_draft');
+      expect(bravoDone?.autoTrigger).toBeUndefined();
+
+      // Reversal clears only what 0021 wrote in each tenant independently
+      expect(await runner.rollbackVersion(ctxAlpha, '0021')).toBe(true);
+      expect(await runner.rollbackVersion(ctxBravo, '0021')).toBe(true);
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+    } finally {
+      await clientAlpha.end();
+      await clientBravo.end();
+    }
+  });
 });
