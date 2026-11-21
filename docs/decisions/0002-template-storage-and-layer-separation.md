@@ -3,7 +3,7 @@
 - **Date:** 2026-04-20
 - **Status:** Accepted (2026-11-20)
 
-> **Implementation notes (2026-11-20):** References below to [ADR 0001](./0001-shared-repo-and-transitional-store.md) are superseded by [ADR 0028](./0028-tenant-database-and-repositories.md) and [ADR 0026](./0026-separate-demo-tenant.md); document and template metadata persist solely in per-tenant PostgreSQL (`TenantDocumentRepository`). Under Owner Decision D4 ([ADR 0008](./0008-document-storage-provider-abstraction.md)), Stage 0 non-live binary storage uses single-replica disk-backed `local-fs` whilst `live` fails closed until `azure-blob` is built before the first hosted client; portable Template Package export/import UI remains post-Stage-0.
+> **Implementation notes (2026-11-20):** References below to [ADR 0001](./0001-shared-repo-and-transitional-store.md) are superseded by [ADR 0028](./0028-tenant-database-and-repositories.md) and [ADR 0026](./0026-separate-demo-tenant.md); document and template metadata persist solely in per-tenant PostgreSQL (`TenantDocumentRepository`). Under Stage 0 exit decision D4 ([ADR 0008](./0008-document-storage-provider-abstraction.md)), Stage 0 non-live binary storage uses single-replica disk-backed `local-fs` whilst `live` fails closed until `azure-blob` is built before the first hosted client; portable Template Package export/import UI remains post-Stage-0.
 
 ## Context
 

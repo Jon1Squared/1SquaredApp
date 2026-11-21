@@ -3,7 +3,7 @@
 - **Date:** 2026-04-20
 - **Status:** Accepted (2026-11-20)
 
-> **Implementation notes (2026-11-20):** Under Owner Decision D5 ([ADR 0024](./0024-azure-container-apps-hosting.md)), `BuiltInOpenXmlPdfConverter` is the active Stage 0 converter; building the optional LibreOffice container image and wiring `DOC_CONVERTER_URL` (`ca-pdf`) are tracked in Stage 1 backlog item `46`.
+> **Implementation notes (2026-11-20):** Under Stage 0 exit decision D5 ([ADR 0024](./0024-azure-container-apps-hosting.md)), `BuiltInOpenXmlPdfConverter` is the active Stage 0 converter; building the optional LibreOffice container image and wiring `DOC_CONVERTER_URL` (`ca-pdf`) are tracked in Stage 1 backlog item `46`.
 
 ## Context
 
