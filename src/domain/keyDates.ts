@@ -1452,6 +1452,11 @@ export function supersedeConfirmedKeyDate(params: {
   if (!hasKeyDatePermission(actor, 'keydate:edit', { config, allPeople: people, teams, rbac: rbacOptions })) {
     throw new Error('KEY_DATE_PERMISSION_ERROR: You need "keydate:edit" to supersede a key date.');
   }
+  if (existingKeyDate.status !== 'confirmed') {
+    throw new Error(
+      `KEY_DATE_INVALID_STATE: Only confirmed key dates can be superseded (current status: "${existingKeyDate.status}").`,
+    );
+  }
   const cleanReason = reason?.trim();
   if (!cleanReason) {
     throw new Error('KEY_DATE_SUPERSEDE_REASON_REQUIRED: A reason is required when editing/superseding a confirmed key date.');
@@ -1622,6 +1627,17 @@ export function resolveKeyDateOutcome(params: {
     if (!hasKeyDatePermission(actor, 'keydate:resolve', permOpts)) {
       throw new Error('KEY_DATE_PERMISSION_ERROR: You need "keydate:resolve" to mark a key date as met or missed.');
     }
+  }
+
+  if (
+    keyDate.status === 'superseded' ||
+    keyDate.status === 'met' ||
+    keyDate.status === 'missed' ||
+    keyDate.status === 'waived'
+  ) {
+    throw new Error(
+      `KEY_DATE_INVALID_STATE: Key date "${keyDate.id}" is already in terminal status "${keyDate.status}" and cannot be resolved again.`,
+    );
   }
 
   const cleanNote = note?.trim();

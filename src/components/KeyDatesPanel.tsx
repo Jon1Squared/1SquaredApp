@@ -348,9 +348,13 @@ export function KeyDatesPanel({
             'Could not save key date.',
         });
       } else {
+        const warningSuffix =
+          'calendarSyncWarning' in res && res.calendarSyncWarning
+            ? ` — ${res.calendarSyncWarning}`
+            : '';
         setFeedback({
           kind: 'ok',
-          text: `Key date "${res.keyDate?.title}" saved (${res.keyDate?.status}).`,
+          text: `Key date "${res.keyDate?.title}" saved (${res.keyDate?.status}).${warningSuffix}`,
         });
         setShowAddForm(false);
         setTitle('');
@@ -1341,9 +1345,13 @@ export function KeyDatesPanel({
                             if (!res.ok) {
                               setFeedback({ kind: 'err', text: res.error || 'Failed.' });
                             } else {
+                              const warningSuffix =
+                                'calendarSyncWarning' in res && res.calendarSyncWarning
+                                  ? ` — ${res.calendarSyncWarning}`
+                                  : '';
                               setFeedback({
                                 kind: 'ok',
-                                text: `Key date "${kd.title}" moved to ${res.keyDate?.status}.`,
+                                text: `Key date "${kd.title}" moved to ${res.keyDate?.status}.${warningSuffix}`,
                               });
                             }
                           });
@@ -1370,9 +1378,13 @@ export function KeyDatesPanel({
                                   text: res.error || 'Verification failed.',
                                 });
                               } else {
+                                const warningSuffix =
+                                  'calendarSyncWarning' in res && res.calendarSyncWarning
+                                    ? ` — ${res.calendarSyncWarning}`
+                                    : '';
                                 setFeedback({
                                   kind: 'ok',
-                                  text: `Verified and confirmed "${kd.title}".`,
+                                  text: `Verified and confirmed "${kd.title}".${warningSuffix}`,
                                 });
                               }
                             });
@@ -1602,9 +1614,13 @@ export function KeyDatesPanel({
                         'Supersede failed.',
                     });
                   } else {
+                    const warningSuffix =
+                      'calendarSyncWarning' in res && res.calendarSyncWarning
+                        ? ` — ${res.calendarSyncWarning}`
+                        : '';
                     setFeedback({
                       kind: 'ok',
-                      text: `Superseded ${supersedingKd.id} with ${res.replacementKeyDate?.id}.`,
+                      text: `Superseded ${supersedingKd.id} with ${res.replacementKeyDate?.id}.${warningSuffix}`,
                     });
                     setSupersedingKd(null);
                   }
@@ -1672,9 +1688,13 @@ export function KeyDatesPanel({
                   if (!res.ok) {
                     setFeedback({ kind: 'err', text: res.error || 'Resolve failed.' });
                   } else {
+                    const warningSuffix =
+                      'calendarSyncWarning' in res && res.calendarSyncWarning
+                        ? ` — ${res.calendarSyncWarning}`
+                        : '';
                     setFeedback({
                       kind: 'ok',
-                      text: `Marked "${resolvingKd.title}" as ${resolveKind}.`,
+                      text: `Marked "${resolvingKd.title}" as ${resolveKind}.${warningSuffix}`,
                     });
                     setResolvingKd(null);
                   }

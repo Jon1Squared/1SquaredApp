@@ -1102,22 +1102,9 @@ export async function importFirmStoreModulesToPostgres(
       const keyDates = (store.keyDates ?? []).filter(
         (kd) => !kd.matterId || matterIdSet.has(kd.matterId),
       );
-      const importedKeyDateIds = new Set<string>();
-      // Pass 1: insert without self-referential supersession links
-      for (const kd of keyDates) {
-        const firstPass = { ...kd };
-        delete firstPass.supersedesKeyDateId;
-        delete firstPass.supersededByKeyDateId;
-        await keyDateRepo.putKeyDate(ctx, firstPass);
-        importedKeyDateIds.add(kd.id);
-        counts.keyDates += 1;
-      }
-      // Pass 2: apply supersession links once all target rows exist
-      for (const kd of keyDates) {
-        if (kd.supersedesKeyDateId || kd.supersededByKeyDateId) {
-          await keyDateRepo.putKeyDate(ctx, kd);
-        }
-      }
+      const importedKeyDateIds = new Set<string>(keyDates.map((kd) => kd.id));
+      await keyDateRepo.importKeyDates(ctx, keyDates);
+      counts.keyDates += keyDates.length;
 
       for (const na of store.keyDateNotApplicable ?? []) {
         if (!matterIdSet.has(na.matterId)) continue;

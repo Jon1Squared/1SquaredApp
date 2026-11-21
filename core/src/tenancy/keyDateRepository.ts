@@ -229,6 +229,75 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  public async ensureAndLockKeyDatesTenantConfig(
+    ctx: TenantContext,
+    defaultConfig: KeyDatesConfiguration,
+    updatedById?: string,
+  ): Promise<KeyDatesConfiguration> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `onesquared_keydates_config:${ctx.tenantId}`,
+      ]);
+      await tx.query(
+        `INSERT INTO key_dates_tenant_configs (tenant_id, config_json, updated_by_id, updated_at)
+         VALUES ($1, $2::jsonb, $3, NOW())
+         ON CONFLICT (tenant_id) DO NOTHING`,
+        [ctx.tenantId, JSON.stringify(defaultConfig), updatedById ?? ctx.actorId],
+      );
+      const res = await tx.query<{
+        tenant_id: string;
+        config_json: KeyDatesConfiguration;
+      }>(
+        'SELECT tenant_id, config_json FROM key_dates_tenant_configs WHERE tenant_id = $1 FOR UPDATE',
+        [ctx.tenantId],
+      );
+      const row = res.rows[0]!;
+      this.assertRowTenant(ctx, row.tenant_id, 'KeyDatesTenantConfig');
+      return structuredClone(row.config_json);
+    });
+  }
+
+  public async acquireKeyDateTypeScopeLock(
+    ctx: TenantContext,
+    scopeKey: string,
+    keyDateTypeId: string,
+  ): Promise<void> {
+    await this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `onesquared_keydate_na:${ctx.tenantId}:${scopeKey}:${keyDateTypeId}`,
+      ]);
+    });
+  }
+
+  public async getKeyDateScopeSummary(
+    ctx: TenantContext,
+    keyDateId: KeyDateId,
+  ): Promise<{
+    matterId?: string;
+    enquiryId?: string;
+    keyDateTypeId: string;
+  } | null> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{
+        tenant_id: string;
+        matter_id: string | null;
+        enquiry_id: string | null;
+        key_date_type_id: string;
+      }>(
+        'SELECT tenant_id, matter_id, enquiry_id, key_date_type_id FROM key_dates WHERE id = $1 AND tenant_id = $2',
+        [keyDateId, ctx.tenantId],
+      );
+      const row = res.rows[0];
+      if (!row) return null;
+      this.assertRowTenant(ctx, row.tenant_id, 'KeyDate');
+      return {
+        ...(row.matter_id !== null ? { matterId: row.matter_id } : {}),
+        ...(row.enquiry_id !== null ? { enquiryId: row.enquiry_id } : {}),
+        keyDateTypeId: row.key_date_type_id,
+      };
+    });
+  }
+
   public async putKeyDatesTenantConfig(
     ctx: TenantContext,
     config: KeyDatesConfiguration | null,
@@ -454,6 +523,13 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
           );
         }
         const expectedVersion = options?.expectedVersion;
+        if (expectedVersion === null) {
+          const conflictErr = new Error(
+            `KEY_DATE_CONCURRENCY_CONFLICT: KeyDate "${keyDate.id}" already exists (version ${existing.version}).`,
+          ) as Error & { code: string };
+          conflictErr.code = 'KEY_DATE_CONCURRENCY_CONFLICT';
+          throw conflictErr;
+        }
         if (typeof expectedVersion === 'number') {
           if (
             !Number.isInteger(expectedVersion) ||
@@ -498,7 +574,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
            created_by_id, created_at, updated_by_id, updated_at, version
          ) VALUES (
            $1,$2,$3,$4,$5,$6,$7,$8::date,$9,$10,$11,$12,$13,
-           $14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20,$21,$22,$23,$24,$25,$26
+           $14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20,$21,$22,$23,$24,$25,1
          )
          ON CONFLICT (id) DO UPDATE SET
            matter_id = EXCLUDED.matter_id,
@@ -522,7 +598,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
            source_document_id = EXCLUDED.source_document_id,
            updated_by_id = EXCLUDED.updated_by_id,
            updated_at = EXCLUDED.updated_at,
-           version = EXCLUDED.version
+           version = public.key_dates.version + 1
          WHERE key_dates.tenant_id = $2
          RETURNING *`,
         [
@@ -551,7 +627,6 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
           keyDate.createdAt,
           keyDate.updatedById,
           keyDate.updatedAt,
-          keyDate.version,
         ],
       );
       const saved = res.rows[0];
@@ -562,6 +637,102 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       }
       this.assertRowTenant(ctx, saved.tenant_id, 'KeyDate');
       return mapKeyDateRow(saved);
+    });
+  }
+
+  public async importKeyDates(
+    ctx: TenantContext,
+    keyDates: readonly KeyDate[],
+  ): Promise<void> {
+    if (keyDates.length === 0) return;
+    await this.withTenantTransaction(ctx, async (tx) => {
+      for (const kd of keyDates) {
+        const res = await tx.query<{ tenant_id: string }>(
+          `INSERT INTO key_dates (
+             id, tenant_id, matter_id, enquiry_id, key_date_type_id, category,
+             title, due_date, due_time, is_critical, status, source, team_id,
+             responsible_person_ids, calculation_json, verification_json, outcome_json,
+             supersedes_key_date_id, superseded_by_key_date_id, notes, source_document_id,
+             created_by_id, created_at, updated_by_id, updated_at, version
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8::date,$9,$10,$11,$12,$13,
+             $14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,NULL,NULL,$18,$19,$20,$21,$22,$23,$24
+           )
+           ON CONFLICT (id) DO UPDATE SET
+             matter_id = EXCLUDED.matter_id,
+             enquiry_id = EXCLUDED.enquiry_id,
+             key_date_type_id = EXCLUDED.key_date_type_id,
+             category = EXCLUDED.category,
+             title = EXCLUDED.title,
+             due_date = EXCLUDED.due_date,
+             due_time = EXCLUDED.due_time,
+             is_critical = EXCLUDED.is_critical,
+             status = EXCLUDED.status,
+             source = EXCLUDED.source,
+             team_id = EXCLUDED.team_id,
+             responsible_person_ids = EXCLUDED.responsible_person_ids,
+             calculation_json = EXCLUDED.calculation_json,
+             verification_json = EXCLUDED.verification_json,
+             outcome_json = EXCLUDED.outcome_json,
+             supersedes_key_date_id = NULL,
+             superseded_by_key_date_id = NULL,
+             notes = EXCLUDED.notes,
+             source_document_id = EXCLUDED.source_document_id,
+             updated_by_id = EXCLUDED.updated_by_id,
+             updated_at = EXCLUDED.updated_at,
+             version = EXCLUDED.version
+           WHERE key_dates.tenant_id = $2
+           RETURNING tenant_id`,
+          [
+            kd.id,
+            ctx.tenantId,
+            kd.matterId ?? null,
+            kd.enquiryId ?? null,
+            kd.keyDateTypeId,
+            kd.category,
+            kd.title,
+            kd.dueDate,
+            kd.dueTime ?? null,
+            Boolean(kd.isCritical),
+            kd.status,
+            kd.source,
+            kd.teamId,
+            JSON.stringify(kd.responsiblePersonIds),
+            kd.calculation ? JSON.stringify(kd.calculation) : null,
+            JSON.stringify(kd.verification),
+            kd.outcome ? JSON.stringify(kd.outcome) : null,
+            kd.notes ?? null,
+            kd.sourceDocumentId ?? null,
+            kd.createdById,
+            kd.createdAt,
+            kd.updatedById,
+            kd.updatedAt,
+            Math.max(1, Math.trunc(kd.version || 1)),
+          ],
+        );
+        if (!res.rows[0]) {
+          throw new Error(
+            'TENANCY_ISOLATION_ERROR: Cross-tenant KeyDate import ID collision rejected.',
+          );
+        }
+        this.assertRowTenant(ctx, res.rows[0].tenant_id, 'KeyDate');
+      }
+      for (const kd of keyDates) {
+        if (kd.supersedesKeyDateId || kd.supersededByKeyDateId) {
+          await tx.query(
+            `UPDATE key_dates
+             SET supersedes_key_date_id = $1,
+                 superseded_by_key_date_id = $2
+             WHERE id = $3 AND tenant_id = $4`,
+            [
+              kd.supersedesKeyDateId ?? null,
+              kd.supersededByKeyDateId ?? null,
+              kd.id,
+              ctx.tenantId,
+            ],
+          );
+        }
+      }
     });
   }
 
@@ -678,51 +849,71 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     ctx: TenantContext,
     matterId: string,
     viewerId: string = ctx.actorId,
+    options?: { forUpdate?: boolean },
   ): Promise<KeyDate[]> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
+    const run = async (tx: TenantSqlClient): Promise<KeyDate[]> => {
       if (!(await this.checkMatterVisibleInTx(tx, ctx, matterId, viewerId))) {
         return [];
       }
       const res = await tx.query<DbKeyDateRow>(
-        'SELECT * FROM key_dates WHERE tenant_id = $1 AND matter_id = $2 ORDER BY due_date ASC, id ASC',
+        options?.forUpdate
+          ? 'SELECT * FROM key_dates WHERE tenant_id = $1 AND matter_id = $2 ORDER BY id ASC FOR UPDATE'
+          : 'SELECT * FROM key_dates WHERE tenant_id = $1 AND matter_id = $2 ORDER BY due_date ASC, id ASC',
         [ctx.tenantId, matterId],
       );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'KeyDate');
         return mapKeyDateRow(r);
       });
-    });
+    };
+    return options?.forUpdate
+      ? this.withTenantTransaction(ctx, run)
+      : this.withTenantReadTransaction(ctx, run);
   }
 
   public async listKeyDatesForEnquiry(
     ctx: TenantContext,
     enquiryId: string,
+    viewerId: string = ctx.actorId,
+    options?: { forUpdate?: boolean },
   ): Promise<KeyDate[]> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
+    void viewerId;
+    const run = async (tx: TenantSqlClient): Promise<KeyDate[]> => {
       const res = await tx.query<DbKeyDateRow>(
-        'SELECT * FROM key_dates WHERE tenant_id = $1 AND enquiry_id = $2 ORDER BY due_date ASC, id ASC',
+        options?.forUpdate
+          ? 'SELECT * FROM key_dates WHERE tenant_id = $1 AND enquiry_id = $2 ORDER BY id ASC FOR UPDATE'
+          : 'SELECT * FROM key_dates WHERE tenant_id = $1 AND enquiry_id = $2 ORDER BY due_date ASC, id ASC',
         [ctx.tenantId, enquiryId],
       );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'KeyDate');
         return mapKeyDateRow(r);
       });
-    });
+    };
+    return options?.forUpdate
+      ? this.withTenantTransaction(ctx, run)
+      : this.withTenantReadTransaction(ctx, run);
   }
 
   public async listAllKeyDatesUnfilteredForScheduler(
     ctx: TenantContext,
+    options?: { forUpdate?: boolean },
   ): Promise<KeyDate[]> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
+    const run = async (tx: TenantSqlClient): Promise<KeyDate[]> => {
       const res = await tx.query<DbKeyDateRow>(
-        'SELECT * FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
+        options?.forUpdate
+          ? 'SELECT * FROM key_dates WHERE tenant_id = $1 ORDER BY id ASC FOR UPDATE'
+          : 'SELECT * FROM key_dates WHERE tenant_id = $1 ORDER BY due_date ASC, id ASC',
         [ctx.tenantId],
       );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'KeyDate');
         return mapKeyDateRow(r);
       });
-    });
+    };
+    return options?.forUpdate
+      ? this.withTenantTransaction(ctx, run)
+      : this.withTenantReadTransaction(ctx, run);
   }
 
   public async listAllVisibleKeyDates(
@@ -1020,8 +1211,20 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
            reminder_schedule_id = EXCLUDED.reminder_schedule_id,
            current_stage_days_before = EXCLUDED.current_stage_days_before,
            stage_entered_at = EXCLUDED.stage_entered_at,
-           acknowledged_by_id = EXCLUDED.acknowledged_by_id,
-           acknowledged_at = EXCLUDED.acknowledged_at,
+           acknowledged_by_id = CASE
+             WHEN key_date_reminder_states.current_stage_days_before IS NOT DISTINCT FROM EXCLUDED.current_stage_days_before
+               AND EXCLUDED.acknowledged_by_id IS NULL
+               AND EXCLUDED.acknowledged_at IS NULL
+             THEN key_date_reminder_states.acknowledged_by_id
+             ELSE EXCLUDED.acknowledged_by_id
+           END,
+           acknowledged_at = CASE
+             WHEN key_date_reminder_states.current_stage_days_before IS NOT DISTINCT FROM EXCLUDED.current_stage_days_before
+               AND EXCLUDED.acknowledged_by_id IS NULL
+               AND EXCLUDED.acknowledged_at IS NULL
+             THEN key_date_reminder_states.acknowledged_at
+             ELSE EXCLUDED.acknowledged_at
+           END,
            escalation_level = EXCLUDED.escalation_level,
            last_notified_at = EXCLUDED.last_notified_at,
            last_skipped_reason = EXCLUDED.last_skipped_reason
@@ -1053,19 +1256,36 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     ctx: TenantContext,
     keyDateId: KeyDateId,
     viewerId: string = ctx.actorId,
+    options?: { forUpdate?: boolean },
   ): Promise<KeyDateReminderState | null> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const kd = await this.getKeyDateById(ctx, keyDateId, viewerId);
-      if (!kd) return null;
+    const run = async (tx: TenantSqlClient): Promise<KeyDateReminderState | null> => {
+      const kdRes = await tx.query<{ tenant_id: string; matter_id: string | null }>(
+        'SELECT tenant_id, matter_id FROM key_dates WHERE id = $1 AND tenant_id = $2',
+        [keyDateId, ctx.tenantId],
+      );
+      const kdRow = kdRes.rows[0];
+      if (!kdRow) return null;
+      this.assertRowTenant(ctx, kdRow.tenant_id, 'KeyDate');
+      if (
+        kdRow.matter_id &&
+        !(await this.checkMatterVisibleInTx(tx, ctx, kdRow.matter_id, viewerId))
+      ) {
+        return null;
+      }
       const res = await tx.query<DbReminderStateRow>(
-        'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 AND key_date_id = $2',
+        options?.forUpdate
+          ? 'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 AND key_date_id = $2 FOR UPDATE'
+          : 'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 AND key_date_id = $2',
         [ctx.tenantId, keyDateId],
       );
       const row = res.rows[0];
       if (!row) return null;
       this.assertRowTenant(ctx, row.tenant_id, 'KeyDateReminderState');
       return mapReminderStateRow(row);
-    });
+    };
+    return options?.forUpdate
+      ? this.withTenantTransaction(ctx, run)
+      : this.withTenantReadTransaction(ctx, run);
   }
 
   public async listReminderStates(
@@ -1101,17 +1321,23 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
 
   public async listAllReminderStatesUnfilteredForScheduler(
     ctx: TenantContext,
+    options?: { forUpdate?: boolean },
   ): Promise<KeyDateReminderState[]> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
+    const run = async (tx: TenantSqlClient): Promise<KeyDateReminderState[]> => {
       const res = await tx.query<DbReminderStateRow>(
-        'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 ORDER BY key_date_id ASC',
+        options?.forUpdate
+          ? 'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 ORDER BY key_date_id ASC FOR UPDATE'
+          : 'SELECT * FROM key_date_reminder_states WHERE tenant_id = $1 ORDER BY key_date_id ASC',
         [ctx.tenantId],
       );
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'KeyDateReminderState');
         return mapReminderStateRow(row);
       });
-    });
+    };
+    return options?.forUpdate
+      ? this.withTenantTransaction(ctx, run)
+      : this.withTenantReadTransaction(ctx, run);
   }
 
   public async removeReminderState(
@@ -1200,6 +1426,48 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         ...(saved.last_error !== null ? { lastError: saved.last_error } : {}),
         attempts: Number(saved.attempts),
       };
+    });
+  }
+
+  public async readKeyDateAndCalendarSyncForUpdate(
+    ctx: TenantContext,
+    keyDateId: KeyDateId,
+  ): Promise<{
+    keyDate: KeyDate | null;
+    calendarSync: KeyDateCalendarSync | null;
+  }> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const kdRes = await tx.query<DbKeyDateRow>(
+        'SELECT * FROM key_dates WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+        [keyDateId, ctx.tenantId],
+      );
+      const kdRow = kdRes.rows[0];
+      if (!kdRow) {
+        return { keyDate: null, calendarSync: null };
+      }
+      this.assertRowTenant(ctx, kdRow.tenant_id, 'KeyDate');
+      const syncRes = await tx.query<DbCalendarSyncRow>(
+        'SELECT * FROM key_date_calendar_syncs WHERE tenant_id = $1 AND key_date_id = $2 FOR UPDATE',
+        [ctx.tenantId, keyDateId],
+      );
+      const syncRow = syncRes.rows[0];
+      let calendarSync: KeyDateCalendarSync | null = null;
+      if (syncRow) {
+        this.assertRowTenant(ctx, syncRow.tenant_id, 'KeyDateCalendarSync');
+        calendarSync = {
+          keyDateId: syncRow.key_date_id,
+          state: syncRow.state,
+          externalEvents: Array.isArray(syncRow.external_events_json)
+            ? syncRow.external_events_json.map((e) => ({ ...e }))
+            : [],
+          ...(syncRow.last_synced_at !== null
+            ? { lastSyncedAt: toIsoString(syncRow.last_synced_at) }
+            : {}),
+          ...(syncRow.last_error !== null ? { lastError: syncRow.last_error } : {}),
+          attempts: Number(syncRow.attempts),
+        };
+      }
+      return { keyDate: mapKeyDateRow(kdRow), calendarSync };
     });
   }
 
