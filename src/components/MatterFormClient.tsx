@@ -56,7 +56,7 @@ import {
   filterEmployeesForMatterDepartment,
   resolveNewMatterDepartmentDefaults,
 } from '@/domain/employment';
-import { resolveLabel } from '@/domain/lists';
+import { resolveLabel, valueBySystemKey } from '@/domain/lists';
 import {
   formatConversionConflictWarningsNotice,
   normaliseConversionConflictWarnings,
@@ -575,6 +575,7 @@ export function MatterFormClient({
     const sourcePracticeAreaId =
       initialQuote?.practiceAreaId ?? initialEnquiry?.practiceAreaId ?? null;
     if (!sourceFeeEarnerId && !sourcePracticeAreaId) return null;
+    const partnerRoleId = valueBySystemKey(values, 'employee_role', 'partner')?.id;
     if (sourceFeeEarnerId) {
       const assignedEmp = employees.find((e) => e.id === sourceFeeEarnerId);
       if (assignedEmp?.employment?.supervisingPartnerId) {
@@ -583,7 +584,7 @@ export function MatterFormClient({
       if (
         assignedEmp &&
         (assignedEmp.employment?.roleType === 'Partner/Member' ||
-          (assignedEmp.jobTitle || '').toLowerCase().includes('partner'))
+          (partnerRoleId !== undefined && assignedEmp.employeeRoleId === partnerRoleId))
       ) {
         return assignedEmp.id;
       }
@@ -598,12 +599,12 @@ export function MatterFormClient({
       const partner = deptPartners.find(
         (e) =>
           e.employment?.roleType === 'Partner/Member' ||
-          (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('partner'),
+          (partnerRoleId !== undefined && e.employeeRoleId === partnerRoleId),
       );
       if (partner) return partner.id;
     }
     return null;
-  }, [initialQuote, initialEnquiry, employees, practiceAreas]);
+  }, [initialQuote, initialEnquiry, employees, practiceAreas, values]);
 
   const [responsiblePartnerId, setResponsiblePartnerId] = useState<string | null>(
     () =>
@@ -4809,7 +4810,6 @@ export function MatterFormClient({
           billingContactId,
           parties: matterParties,
           stageId: selectedStageId,
-          openedAt: openedAt ?? existing.openedAt ?? today,
           amlStatus,
           sourceOfFundsVerified,
           engagementLetterStatus,
@@ -4892,8 +4892,7 @@ export function MatterFormClient({
         )?.id ?? '';
 
       const cmiIncompleteStatusId =
-        values.find((v) => v.listKey === 'matter_status' && v.label === 'CMI incomplete')
-          ?.id ?? undefined;
+        valueBySystemKey(values, 'matter_status', 'cmi_incomplete')?.id ?? undefined;
 
       const resolvedSourceEnquiryId =
         existing?.sourceEnquiryId ??
@@ -4944,13 +4943,11 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckDate: today,
             conflictNotes: matches
               .map((m) => `${m.partyName}: ${m.note}`)
               .filter(Boolean)
               .join(' | '),
             stageId: intakeCompleteStageId,
-            openedAt: today,
             amlStatus: amlStatus || 'CMI incomplete',
             sourceOfFundsVerified,
             engagementLetterStatus,
@@ -5033,7 +5030,6 @@ export function MatterFormClient({
             instructingContactId,
             billingContactId,
             parties: matterParties,
-            conflictCheckDate: today,
             conflictNotes: reviewerMessage,
             stageId: intakeCompleteStageId,
             feeEstimateGbp: feeEstimateGbp ? Number(feeEstimateGbp) : null,
@@ -11636,7 +11632,9 @@ export function MatterFormClient({
                         type="date"
                         className="field-input"
                         value={openedAt ?? ''}
-                        onChange={(e) => setOpenedAt(e.target.value || null)}
+                        readOnly
+                        disabled
+                        title="Stamped by the server when the matter opens"
                       />
                     </div>
                     <div className="field-group">

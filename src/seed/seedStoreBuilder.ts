@@ -57,6 +57,7 @@ import {
   DEFAULT_ENQUIRY_SETTINGS,
   DEFAULT_TASK_SETTINGS,
   DEFAULT_USER_ID,
+  DEMO_EXTRA_ORG_TEAMS,
   DEMO_ORG_LEGAL_ENTITY_IDS,
   DEMO_ORG_OFFICES,
   FIRM,
@@ -245,11 +246,21 @@ export function createSeedStore(
     today.toISOString(),
   );
   const tenantCfg = getActiveTenantConfiguration();
-  const orgStructure = buildDefaultOrgStructure({
+  const defaultOrgStructure = buildDefaultOrgStructure({
     legalName: tenantCfg.displayName,
     legalEntityIds: DEMO_ORG_LEGAL_ENTITY_IDS,
     offices: DEMO_ORG_OFFICES,
   });
+  const orgStructure = {
+    ...defaultOrgStructure,
+    teamsOrPracticeGroups: [
+      ...defaultOrgStructure.teamsOrPracticeGroups,
+      ...DEMO_EXTRA_ORG_TEAMS.filter(
+        (extra) =>
+          !defaultOrgStructure.teamsOrPracticeGroups.some((existing) => existing.id === extra.id),
+      ),
+    ],
+  };
   const rawValues = [...seedLists.values, ...demo.customValues];
   const empMigration = migrateEmployeesToEmploymentRecords(
     demo.people,

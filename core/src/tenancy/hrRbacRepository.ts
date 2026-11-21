@@ -36,6 +36,9 @@ export interface TenantTeamRecord {
   id: string;
   name: string;
   description: string;
+  departmentId?: string | null;
+  orgTeamId?: string | null;
+  systemKey?: string;
   memberIds: string[];
   leadIds: string[];
   practiceAreaIds: string[];

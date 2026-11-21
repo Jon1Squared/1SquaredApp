@@ -625,6 +625,9 @@ export async function saveTeamAction(input: {
   id?: string;
   name: string;
   description?: string;
+  departmentId?: string | null;
+  orgTeamId?: string | null;
+  systemKey?: string | null;
   memberIds: string[];
   leadIds: string[];
   practiceAreaIds: string[];
@@ -760,6 +763,7 @@ export async function sendEnquiryEmailAction(
     subject: string;
     bodyHtml: string;
     bodyText: string;
+    submissionId?: string;
   },
 ) {
   return guardedAction('sendEnquiryEmailAction', async ({ personId: byId }) => {

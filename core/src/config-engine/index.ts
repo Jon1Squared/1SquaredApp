@@ -871,6 +871,15 @@ const PmsIntegrationSyncConfigSchema = z
       .describe(
         '[x-reserved:backlog] Field-level mappings and System-of-Record ownership rules (reserved for backlog item F22)',
       ),
+    gradeRoleMap: z
+      .record(
+        z.string().min(1),
+        z.string().regex(/^employee_role\.[a-z0-9_]+$/),
+      )
+      .default({})
+      .describe(
+        'Maps external PMS fee-earner grade strings (case-insensitive) to canonical employee_role.* IDs during createRecordFromPms',
+      ),
   })
   .strict();
 
@@ -1097,7 +1106,7 @@ export const TenantConfigurationSchema = z
           .default('disabled')
           .describe('Configured AI model provider for this tenant'),
         pmsSync: PmsIntegrationSyncConfigSchema.optional().describe(
-          '[x-reserved:backlog] Two-way Finance/PMS synchronisation settings and field mappings (reserved for backlog item F22)',
+          'Finance/PMS synchronisation settings, field mappings, and PMS grade-to-role map',
         ),
         email: z
           .object({
@@ -2580,6 +2589,22 @@ export const TenantConfigurationSchema = z
       .describe(
         'Tenant notification digest schedule and delivery settings (ADR 0035, S0-29)',
       ),
+    enquiries: z
+      .object({
+        fallbackTeamId: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .nullable()
+          .default(null)
+          .describe(
+            'Optional active Team ID used as the fallback enquiry routing target when no practice-area team matches; overrides the systemKey=intake default when set.',
+          ),
+      })
+      .strict()
+      .optional()
+      .describe('Tenant enquiry intake and routing settings'),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -3414,6 +3439,16 @@ export function loadAndValidateTenantConfig(
             pmsSync: {
               ...(basePmsSync ?? {}),
               ...(overlayPmsSync ?? {}),
+              ...(basePmsSync?.gradeRoleMap || overlayPmsSync?.gradeRoleMap
+                ? {
+                    gradeRoleMap: {
+                      ...((basePmsSync?.gradeRoleMap as Record<string, unknown> | undefined) ??
+                        {}),
+                      ...((overlayPmsSync?.gradeRoleMap as Record<string, unknown> | undefined) ??
+                        {}),
+                    },
+                  }
+                : {}),
             },
           }
         : {}),

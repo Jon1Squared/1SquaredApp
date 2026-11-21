@@ -121,6 +121,16 @@
       "matterCodeAllocation": "onesquared",
       "clientCodeAllocation": "onesquared",
       "pollIntervalMinutes": 15,
+      "gradeRoleMap": {
+        "Equity Partner": "employee_role.partner",
+        "Salaried Partner": "employee_role.partner",
+        "Partner": "employee_role.partner",
+        "Senior Associate": "employee_role.fee_earner",
+        "Associate": "employee_role.fee_earner",
+        "Solicitor": "employee_role.fee_earner",
+        "Trainee Solicitor": "employee_role.fee_earner",
+        "Paralegal": "employee_role.fee_earner"
+      },
       "fieldMappings": [
         {
           "id": "MAP-ORG-NAME",

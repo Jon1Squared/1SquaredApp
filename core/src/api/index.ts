@@ -370,6 +370,7 @@ export interface PmsIntegrationSyncConfig {
   clientCodeAllocation: 'onesquared' | 'pms_on_open';
   pollIntervalMinutes: number;
   fieldMappings: PmsFieldMappingEntry[];
+  gradeRoleMap?: Record<string, string>;
 }
 
 export type PmsOutboundCommandType =
@@ -898,6 +899,9 @@ export interface TenantConfiguration {
   database?: TenantDatabaseConfig;
   workTypes?: WorkTypesConfiguration;
   notifications?: TenantNotificationsConfig;
+  enquiries?: {
+    readonly fallbackTeamId: string | null;
+  };
 }
 
 // ------------------------------------------------------------------ Work Type & Departmental Behaviour Configuration (S0-22)

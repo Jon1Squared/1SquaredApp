@@ -8,14 +8,20 @@ import {
   createDirectMigrationClient,
   NON_LIVE_AUDIT_RESET_MIGRATION_0008,
   resolveTenantFromVerifiedToken,
+  TenantCatalogueRepository,
+  TenantHrAndRbacRepository,
   TenantMigrationRunner,
   TenantPostgresPoolManager,
   TenantScopedRepository,
+  TenantTaskWorkflowRepository,
   validateTenantRegistry,
+  type TenantChoiceValueRecord,
   type TenantContext,
   type TenantMigrationDefinition,
   type TenantRegistry,
 } from '@platform/core';
+import type { Team } from '@/domain/types';
+import { resolveRoutedTeam } from '@/domain/tasks';
 import * as corePkg from '@platform/core';
 import { loadPgModule } from '../src/tenancy/pgDriver';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
@@ -240,6 +246,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       ]),
     );
     expect(activeAt0017).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0018')).toBe(true);
@@ -1078,7 +1085,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await expect(runner.rollbackVersion(ctx, '0015')).rejects.toThrow(
         /MIGRATION_ROLLBACK_ORDER_ERROR/,
       );
-      expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0018')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
@@ -1128,7 +1136,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privCheck.rows[0]).toEqual({ has_select: true, has_insert: true });
 
-      // Re-apply 0015, 0016, 0017, 0018, 0019, and 0020 -> upSql drops both bridges again and recreates 0016-0020 tables
+      // Re-apply 0015, 0016, 0017, 0018, 0019, 0020, and 0021 -> upSql drops both bridges again and recreates 0016-0021 state
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
       expect(reapplied.map((m) => m.version)).toEqual([
         '0015',
@@ -1137,6 +1145,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0018',
         '0019',
         '0020',
+        '0021',
       ]);
 
       const tableAfterReapply = await client.query(
@@ -1181,7 +1190,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privsUp.rows[0]).toEqual({ cro_ins: true, mro_del: true });
 
-      expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0018')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
@@ -1194,7 +1204,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(tablesDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0016', '0017', '0018', '0019', '0020']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0016', '0017', '0018', '0019', '0020', '0021']);
 
       const tablesReapplied = await client.query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables
@@ -1219,6 +1229,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const runner = new TenantMigrationRunner();
     const pre0017 = CORE_TENANT_MIGRATIONS.filter((m) => m.version < '0017');
     await runner.applyUp(ctx, pre0017);
+    await runner.rollbackVersion(ctx, '0021');
     await runner.rollbackVersion(ctx, '0020');
     await runner.rollbackVersion(ctx, '0019');
     await runner.rollbackVersion(ctx, '0018');
@@ -1318,7 +1329,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
          WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
       );
 
-      expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0018')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0017')).toBe(true);
@@ -1345,7 +1357,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(tablesDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0017', '0018', '0019', '0020']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0017', '0018', '0019', '0020', '0021']);
       const rebackfilled = await client.query<{ status: string }>(
         `SELECT status FROM public.register_records WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
       );
@@ -1406,7 +1418,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         [...expectedIndexes].sort(),
       );
 
-      expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0018')).toBe(true);
 
@@ -1420,7 +1433,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(idxDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0018', '0019', '0020']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0018', '0019', '0020', '0021']);
 
       const idxReapplied = await client.query<{ indexname: string }>(
         `SELECT indexname
@@ -1468,7 +1481,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privs.rows[0]).toEqual({ out_ins: true, pref_upd: true });
 
-      expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0019')).toBe(true);
 
       const tablesDown = await client.query<{ table_name: string }>(
@@ -1480,7 +1494,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(tablesDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0019', '0020']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0019', '0020', '0021']);
 
       const tablesReapplied = await client.query<{ table_name: string }>(
         `SELECT table_name
@@ -1550,7 +1564,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privs.rows[0]).toEqual({ teams_ins: true, ntf_upd: true });
 
-      expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
 
       const teamsDown = await client.query<{ table_name: string }>(
         `SELECT table_name
@@ -1578,7 +1593,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(idxDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0020']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0020', '0021']);
 
       const teamsReapplied = await client.query<{ table_name: string }>(
         `SELECT table_name
@@ -1596,6 +1611,293 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(privsAfterReapply.rows[0]).toEqual({ teams_upd: true, seq_usage: true });
     } finally {
       await client.end();
+    }
+  });
+
+  it('R604, R619 & R621: 0021 backfills canonical choice systemKeys and Referred/Draft task triggers without touching custom teams, revokes audit table privileges, avoids duplicate systemKeys, and reverses value-matched rows cleanly', async () => {
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
+    const tenantId = 'mig-backfill-0021';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+    const catRepo = new TenantCatalogueRepository();
+    const hrRepo = new TenantHrAndRbacRepository();
+    const taskRepo = new TenantTaskWorkflowRepository();
+
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+
+    // Seed pre-0021 rows via direct migration client (runtime repos refuse < 0021 with TENANT_SCHEMA_NOT_READY)
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await client.query(
+        `DELETE FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-000099','TSK-R621-REVIEW')`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.matters WHERE tenant_id = $1 AND id IN ('M-LEGACY','M-REFERRED')`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.teams WHERE tenant_id = $1 AND id IN ('TM-000008','TM-000009','TM-000010','TM-000006','TM-CUST-1')`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner','employee_role.support_staff','risk_rating.high','risk_rating.custom_preserved','risk_rating.preexisting_low','risk_rating.low')`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.choice_lists (tenant_id, key, label, description, system_locked, metadata_json)
+         VALUES
+           ($1, 'employee_role', 'Employee role', 'Roles', TRUE, '{"group":"system","appliesTo":["employee"],"systemManaged":true}'::jsonb),
+           ($1, 'risk_rating', 'Risk rating', 'Risk', FALSE, '{"group":"taxonomy","appliesTo":["matter"],"systemManaged":false}'::jsonb)
+         ON CONFLICT (tenant_id, key) DO NOTHING`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.choice_values (tenant_id, id, list_key, label, sort_order, active, metadata_json)
+         VALUES
+           ($1, 'employee_role.partner', 'employee_role', 'Equity Partner', 1, TRUE, '{}'::jsonb),
+           ($1, 'employee_role.support_staff', 'employee_role', 'Legal Support', 2, TRUE, '{}'::jsonb),
+           ($1, 'risk_rating.high', 'risk_rating', 'High Risk', 1, TRUE, '{}'::jsonb),
+           ($1, 'risk_rating.custom_preserved', 'risk_rating', 'Custom Preserved', 2, TRUE, '{"systemKey":"custom_admin_key"}'::jsonb),
+           ($1, 'risk_rating.preexisting_low', 'risk_rating', 'Custom Low Already Claimed', 3, TRUE, '{"systemKey":"low"}'::jsonb),
+           ($1, 'risk_rating.low', 'risk_rating', 'Standard Low', 4, TRUE, '{}'::jsonb)`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.teams (tenant_id, id, name, description, active, created_by_id, updated_by_id, member_ids_json, lead_ids_json, practice_area_ids_json, payload_json)
+         VALUES
+           ($1, 'TM-000008', 'Intake', 'Firm Intake Team', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb),
+           ($1, 'TM-CUST-1', 'Corporate North', 'Custom Firm Org Team', TRUE, 'system', 'system', '[]'::jsonb, '[]'::jsonb, '["work_type.corporate_and_commercial"]'::jsonb, '{}'::jsonb)`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.matters (tenant_id, id, matter_number, title, client_id, practice_area_id, status_id, conflict_check_status, conflict_check_record_json)
+         VALUES
+           ($1, 'M-LEGACY', 'MAT-LEGACY', 'Legacy Draft Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Draft', '{"status":"In progress","savedDraftAtDisplay":"20 Nov 2026"}'::jsonb),
+           ($1, 'M-REFERRED', 'MAT-REFERRED', 'Legacy Referred Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Pending conflict review', '{"status":"Referred","reviewerMessage":"Legacy escalate"}'::jsonb)`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.tasks (tenant_id, id, reference, title, description, status, task_type_id, priority_id, due_at, assigned_team_id, assigned_person_id, auto_trigger, created_by_id, updated_by_id, linked_records_json, profile_json)
+         VALUES
+           ($1, 'TSK-000099', 'TSK-000099', 'Custom Draft Task Name Without Prefix', 'Custom draft description', 'To do', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '[{"recordType":"matter","recordId":"M-LEGACY"}]'::jsonb, '{}'::jsonb),
+           ($1, 'TSK-R621-REVIEW', 'TSK-R621-REVIEW', 'Non-standard review title', 'Pre-upgrade referred task', 'In progress', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000003', NULL, 'P-000001', 'P-000001', '[{"recordType":"matter","recordId":"M-REFERRED"}]'::jsonb, '{}'::jsonb)`,
+        [tenantId],
+      );
+
+      const applied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(applied.map((m) => m.version)).toEqual(['0021']);
+
+      // R619: Tenant runtime role has ZERO privileges on migration_0021_backfill_audit
+      const dbRoleRes = await client.query<{
+        priv_sel: boolean;
+        priv_ins: boolean;
+        priv_upd: boolean;
+        priv_del: boolean;
+      }>(
+        `SELECT
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'SELECT') AS priv_sel,
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'INSERT') AS priv_ins,
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'UPDATE') AS priv_upd,
+           has_table_privilege('role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$'), 'public.migration_0021_backfill_audit', 'DELETE') AS priv_del`,
+      );
+      expect(dbRoleRes.rows[0]).toEqual({
+        priv_sel: false,
+        priv_ins: false,
+        priv_upd: false,
+        priv_del: false,
+      });
+
+      const valuesAfter = await catRepo.listAllChoiceValues<
+        TenantChoiceValueRecord & { systemKey?: string }
+      >(ctx);
+      expect(valuesAfter.find((v) => v.id === 'employee_role.partner')?.systemKey).toBe('partner');
+      expect(valuesAfter.find((v) => v.id === 'employee_role.support_staff')?.systemKey).toBe('support_staff');
+      expect(valuesAfter.find((v) => v.id === 'risk_rating.high')?.systemKey).toBe('high');
+      expect(valuesAfter.find((v) => v.id === 'risk_rating.custom_preserved')?.systemKey).toBe('custom_admin_key');
+      // R619: Duplicate systemKey 'low' is NOT written to risk_rating.low because risk_rating.preexisting_low already holds it
+      expect(valuesAfter.find((v) => v.id === 'risk_rating.low')?.systemKey).toBeUndefined();
+
+      // R619: 0021 does NOT modify any teams or stamp firm-specific DEPT-*/TPG-* IDs or display-name systemKeys
+      const teamsAfter = await hrRepo.listAllTeams<Team>(ctx);
+      expect(teamsAfter.find((t) => t.id === 'TM-000008')?.systemKey).toBeUndefined();
+      expect(teamsAfter.find((t) => t.id === 'TM-000008')?.departmentId).toBeUndefined();
+      expect(teamsAfter.find((t) => t.id === 'TM-CUST-1')?.departmentId).toBeUndefined();
+      expect(teamsAfter.find((t) => t.id === 'TM-CUST-1')?.orgTeamId).toBeUndefined();
+      // Configured fallbackTeamId routes when no team holds 'intake'; with neither, returns team: null
+      expect(resolveRoutedTeam('work_type.unknown', teamsAfter, 'TM-CUST-1')).toEqual({
+        team: teamsAfter.find((t) => t.id === 'TM-CUST-1'),
+        isFallbackIntake: true,
+      });
+      expect(resolveRoutedTeam('work_type.unknown', teamsAfter, null)).toEqual({
+        team: null,
+        isFallbackIntake: false,
+      });
+
+      // R621: Both draft and referred conflict tasks are backfilled by matter linkage & status without title matching
+      const draftTaskAfter = await taskRepo.getTaskById(ctx, 'TSK-000099', {
+        includeRestricted: true,
+      });
+      expect(draftTaskAfter?.autoTrigger).toBe('conflict_check_draft');
+      const reviewTaskAfter = await taskRepo.getTaskById(ctx, 'TSK-R621-REVIEW', {
+        includeRestricted: true,
+      });
+      expect(reviewTaskAfter?.autoTrigger).toBe('conflict_check_review');
+
+      // Simulate admin changing employee_role.partner's backfilled systemKey before rolling back 0021
+      await client.query(
+        `UPDATE public.choice_values
+            SET metadata_json = jsonb_set(metadata_json, '{systemKey}', '"admin_partner_override"'::jsonb, true)
+          WHERE tenant_id = $1 AND id = 'employee_role.partner'`,
+        [tenantId],
+      );
+
+      // Reversal removes ONLY values that still match what 0021 wrote (leaving admin override & pre-existing keys untouched)
+      expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
+      const valuesDown = await client.query<{ id: string; metadata_json: { systemKey?: string } }>(
+        `SELECT id, metadata_json FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner', 'employee_role.support_staff', 'risk_rating.custom_preserved')`,
+        [tenantId],
+      );
+      expect(valuesDown.rows.find((v) => v.id === 'employee_role.support_staff')?.metadata_json?.systemKey).toBeUndefined();
+      expect(valuesDown.rows.find((v) => v.id === 'employee_role.partner')?.metadata_json?.systemKey).toBe('admin_partner_override');
+      expect(valuesDown.rows.find((v) => v.id === 'risk_rating.custom_preserved')?.metadata_json?.systemKey).toBe('custom_admin_key');
+
+      const tasksDown = await client.query<{ id: string; auto_trigger: string | null }>(
+        `SELECT id, auto_trigger FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-000099', 'TSK-R621-REVIEW')`,
+        [tenantId],
+      );
+      expect(tasksDown.rows.find((t) => t.id === 'TSK-000099')?.auto_trigger).toBeNull();
+      expect(tasksDown.rows.find((t) => t.id === 'TSK-R621-REVIEW')?.auto_trigger).toBeNull();
+
+      // Clean up admin override to verify clean re-up round trip
+      await client.query(
+        `UPDATE public.choice_values SET metadata_json = '{}'::jsonb WHERE tenant_id = $1 AND id = 'employee_role.partner'`,
+        [tenantId],
+      );
+      const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0021']);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('R635: 0021 tags at most the most recent open conflict-check task per matter, leaves older/other tasks untouched, and supports task_linked_records across two tenants', async () => {
+    const tenantAlpha = 'mig-r635-alpha';
+    const tenantBravo = 'mig-r635-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeTestTenantContext(tenantAlpha);
+    const ctxBravo = makeTestTenantContext(tenantBravo);
+    const runner = new TenantMigrationRunner();
+    const taskRepo = new TenantTaskWorkflowRepository();
+
+    await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+    await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+    expect(await runner.rollbackVersion(ctxAlpha, '0021')).toBe(true);
+    expect(await runner.rollbackVersion(ctxBravo, '0021')).toBe(true);
+
+    const clientAlpha = await createDirectMigrationClient({ ctx: ctxAlpha });
+    const clientBravo = await createDirectMigrationClient({ ctx: ctxBravo });
+    try {
+      await clientAlpha.query(
+        `DELETE FROM public.task_linked_records WHERE tenant_id = $1`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `DELETE FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-R635-OLD','TSK-R635-NEW')`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `DELETE FROM public.matters WHERE tenant_id = $1 AND id IN ('M-R635-REF')`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `INSERT INTO public.matters (tenant_id, id, matter_number, title, client_id, practice_area_id, status_id, conflict_check_status, conflict_check_record_json)
+         VALUES ($1, 'M-R635-REF', 'MAT-R635-1', 'Alpha Referred Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Pending conflict review', '{"status":"Referred","reviewerMessage":"Two open tasks"}'::jsonb)`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `INSERT INTO public.tasks (tenant_id, id, reference, title, description, status, task_type_id, priority_id, due_at, assigned_team_id, assigned_person_id, auto_trigger, created_by_id, updated_by_id, created_at, linked_records_json, profile_json)
+         VALUES
+           ($1, 'TSK-R635-OLD', 'TSK-R635-OLD', 'User-created conflict task', 'Older open conflict task', 'To do', 'task_type.conflict_check', 'task_priority.normal', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '2026-11-01T10:00:00.000Z'::timestamptz, '[{"recordType":"matter","recordId":"M-R635-REF"}]'::jsonb, '{}'::jsonb),
+           ($1, 'TSK-R635-NEW', 'TSK-R635-NEW', 'Latest conflict referral task', 'Newest open conflict task', 'In progress', 'task_type.conflict_check', 'task_priority.high', '2026-11-20', NULL, 'P-000003', NULL, 'P-000001', 'P-000001', '2026-11-10T10:00:00.000Z'::timestamptz, '[]'::jsonb, '{}'::jsonb)`,
+        [tenantAlpha],
+      );
+      await clientAlpha.query(
+        `INSERT INTO public.task_linked_records (tenant_id, task_id, record_type, record_id)
+         VALUES ($1, 'TSK-R635-NEW', 'matter', 'M-R635-REF')`,
+        [tenantAlpha],
+      );
+
+      await clientBravo.query(
+        `DELETE FROM public.task_linked_records WHERE tenant_id = $1`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `DELETE FROM public.tasks WHERE tenant_id = $1 AND id IN ('TSK-R635-B-OPEN','TSK-R635-B-DONE')`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `DELETE FROM public.matters WHERE tenant_id = $1 AND id IN ('M-R635-BRAVO')`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `INSERT INTO public.matters (tenant_id, id, matter_number, title, client_id, practice_area_id, status_id, conflict_check_status, conflict_check_record_json)
+         VALUES ($1, 'M-R635-BRAVO', 'MAT-R635-B', 'Bravo Draft TLR Matter', 'O-1', 'work_type.corporate_and_commercial', 'matter_status.prospective_enquiry', 'Draft', '{"status":"In progress","savedDraftAtDisplay":"20 Nov 2026"}'::jsonb)`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `INSERT INTO public.tasks (tenant_id, id, reference, title, description, status, task_type_id, priority_id, due_at, assigned_team_id, assigned_person_id, auto_trigger, created_by_id, updated_by_id, created_at, linked_records_json, profile_json)
+         VALUES
+           ($1, 'TSK-R635-B-OPEN', 'TSK-R635-B-OPEN', 'Bravo Draft Linked Task', 'Linked solely via task_linked_records', 'To do', 'task_type.conflict_check', 'task_priority.normal', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '2026-11-05T10:00:00.000Z'::timestamptz, '[]'::jsonb, '{}'::jsonb),
+           ($1, 'TSK-R635-B-DONE', 'TSK-R635-B-DONE', 'Bravo Completed Conflict Task', 'Already Done newer task', 'Done', 'task_type.conflict_check', 'task_priority.normal', '2026-11-20', NULL, 'P-000001', NULL, 'P-000001', 'P-000001', '2026-11-12T10:00:00.000Z'::timestamptz, '[]'::jsonb, '{}'::jsonb)`,
+        [tenantBravo],
+      );
+      await clientBravo.query(
+        `INSERT INTO public.task_linked_records (tenant_id, task_id, record_type, record_id)
+         VALUES
+           ($1, 'TSK-R635-B-OPEN', 'matter', 'M-R635-BRAVO'),
+           ($1, 'TSK-R635-B-DONE', 'matter', 'M-R635-BRAVO')`,
+        [tenantBravo],
+      );
+
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+
+      const alphaOld = await taskRepo.getTaskById(ctxAlpha, 'TSK-R635-OLD', {
+        includeRestricted: true,
+      });
+      const alphaNew = await taskRepo.getTaskById(ctxAlpha, 'TSK-R635-NEW', {
+        includeRestricted: true,
+      });
+      expect(alphaNew?.autoTrigger).toBe('conflict_check_review');
+      expect(alphaOld?.autoTrigger).toBeUndefined();
+
+      const bravoOpen = await taskRepo.getTaskById(ctxBravo, 'TSK-R635-B-OPEN', {
+        includeRestricted: true,
+      });
+      const bravoDone = await taskRepo.getTaskById(ctxBravo, 'TSK-R635-B-DONE', {
+        includeRestricted: true,
+      });
+      expect(bravoOpen?.autoTrigger).toBe('conflict_check_draft');
+      expect(bravoDone?.autoTrigger).toBeUndefined();
+
+      // Reversal clears only what 0021 wrote in each tenant independently
+      expect(await runner.rollbackVersion(ctxAlpha, '0021')).toBe(true);
+      expect(await runner.rollbackVersion(ctxBravo, '0021')).toBe(true);
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+    } finally {
+      await clientAlpha.end();
+      await clientBravo.end();
     }
   });
 });

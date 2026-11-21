@@ -50,12 +50,19 @@ import { createSeedStore } from '@/seed/seedStoreBuilder';
 import { JOB_PERMISSIONS } from '@/server/actionPermissions';
 import {
   enqueueNotificationEmailIfImmediate,
+  resetAllDemoData,
   runScheduledOutboxDrainJobSweep,
   saveTaskRecord,
+  sendEnquiryEmailRecord,
 } from '@/server/services';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
-import { setTestActorSession } from '@/server/testSupport/auditTestSupport';
+import {
+  auditEntriesSince,
+  markAuditPosition,
+  setTestActorSession,
+} from '@/server/testSupport/auditTestSupport';
+import { testDataResetContext } from '@/test/testTenantContexts';
 import type { TenantRegistry } from '../src/index';
 
 // ---------------------------------------------------------------------------
@@ -352,7 +359,7 @@ afterEach(async () => {
 
 describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-List & outbox-drain)', () => {
   it('1. Migration 0019, RBAC 68+9=77 totals, JOB_PERMISSIONS/REGISTERED_CLI_JOBS, and demo/dev/test config overlays', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0020');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
     expect(EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019.version).toBe('0019');
     expect(EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019.dependsOn).toEqual([
       '0018',
@@ -1654,5 +1661,451 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
         Buffer.from(sigB64!, 'base64url'),
       ),
     ).toBe(true);
+  });
+
+  it('R575: sendEnquiryEmailRecord enqueues email_outbox in TX, writes zero-PII email-queued audit, enforces allow-list on drain, and isolates across two tenants', async () => {
+    const ctxA = await setupMigratedTenant('not-a-law-firm', 'test');
+    const ctxB = await setupMigratedTenant('tenant-b', 'test');
+    const outboxRepo = getOutboxRepository();
+
+    try {
+      const seedStore = createSeedStore(new Date(), {
+        includeSyntheticEntraOids: false,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        store: seedStore,
+        clearFirst: true,
+      });
+      await outboxRepo.clearTenantData(ctxA);
+      await outboxRepo.clearTenantData(ctxB);
+
+      const enq = seedStore.enquiries[0]!;
+      expect(enq).toBeDefined();
+
+      // 1. Provider disabled: enqueues pending email_outbox row + zero-PII email-queued audit
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'partner', 'enquiries_coordinator'],
+        mfaVerified: true,
+      });
+      const mark1 = await markAuditPosition();
+      const firstSend = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'secret.prospect@outside-domain.example',
+          subject: 'Confidential Matter Follow Up',
+          bodyHtml: '<p>Sensitive body content 12345</p>',
+          bodyText: 'Sensitive body content 12345',
+        },
+        'P-000001',
+      );
+      expect(firstSend.error).toBeUndefined();
+      expect(firstSend.enquiry?.id).toBe(enq.id);
+
+      // Sending a second email on the same enquiry creates a distinct second outbox row
+      const secondSend = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'secret.prospect@outside-domain.example',
+          subject: 'Confidential Follow Up Two',
+          bodyHtml: '<p>Second body 67890</p>',
+          bodyText: 'Second body 67890',
+        },
+        'P-000001',
+      );
+      expect(secondSend.error).toBeUndefined();
+
+      const tenantARows = await outboxRepo.listOutboxRecords(ctxA);
+      expect(tenantARows).toHaveLength(2);
+      expect(tenantARows.every((r) => r.templateKey === 'enquiry.email')).toBe(
+        true,
+      );
+      expect(tenantARows.every((r) => r.status === 'pending')).toBe(true);
+      expect(await outboxRepo.listOutboxRecords(ctxB)).toHaveLength(0);
+
+      const auditRows = (await auditEntriesSince(mark1)).filter(
+        (a) => a.recordType === 'enquiry' && a.recordId === enq.id,
+      );
+      const queuedAudits = auditRows.filter((a) => a.action === 'email-queued');
+      expect(queuedAudits).toHaveLength(2);
+      expect(auditRows.some((a) => a.action === 'email-sent')).toBe(false);
+      for (const a of queuedAudits) {
+        const serialized = JSON.stringify(a);
+        expect(serialized).not.toContain('secret.prospect@outside-domain.example');
+        expect(serialized).not.toContain('Confidential');
+        expect(serialized).not.toContain('Sensitive body');
+        expect(serialized).not.toContain('Second body');
+      }
+
+      // 2. Active dev_catcher provider: blocked domain drains to dropped_allowlist; allow-listed domain delivers
+      const catcher = await startEphemeralSmtpCatcher();
+      activeClosers.push(catcher.close);
+      const baseCfg = getActiveTenantRawBaseConfig();
+      const overlay = {
+        integrations: {
+          pmsConnectionSecretVaultRef:
+            'kv://kv-notalawfirm-test/pms-connection-string',
+          companiesHouseApiKeyVaultRef:
+            'kv://kv-notalawfirm-test/companies-house-api-key',
+          aiProviderChoice: 'disabled',
+          email: {
+            provider: 'dev_catcher',
+            senderAddress: 'noreply@notalawfirm.example',
+            recipientAllowList: ['@notalawfirm.example'],
+            devCatcher: { host: catcher.host, port: catcher.port, secure: false },
+          },
+        },
+      };
+      setActiveTenantConfigForTesting(baseCfg, overlay);
+
+      const blockedRes = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'blocked.user@not-allowed.example',
+          subject: 'Blocked Drain Check',
+          bodyHtml: '<p>Should drop</p>',
+          bodyText: 'Should drop',
+        },
+        'P-000001',
+      );
+      expect(blockedRes.error).toBeUndefined();
+
+      const allowedRes = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'allowed.partner@notalawfirm.example',
+          subject: 'Allowed Drain Check',
+          bodyHtml: '<p>Should deliver</p>',
+          bodyText: 'Should deliver',
+        },
+        'P-000001',
+      );
+      expect(allowedRes.error).toBeUndefined();
+
+      const allAfterCatcher = await outboxRepo.listOutboxRecords(ctxA);
+      const droppedRow = allAfterCatcher.find((r) =>
+        r.recipients.to.includes('blocked.user@not-allowed.example'),
+      );
+      const sentRow = allAfterCatcher.find((r) =>
+        r.recipients.to.includes('allowed.partner@notalawfirm.example'),
+      );
+      expect(droppedRow?.status).toBe('dropped_allowlist');
+      expect(sentRow?.status).toBe('sent');
+      expect(
+        catcher.messages.some((m) =>
+          m.rcptTo.includes('allowed.partner@notalawfirm.example'),
+        ),
+      ).toBe(true);
+      expect(
+        catcher.messages.some((m) =>
+          m.rcptTo.includes('blocked.user@not-allowed.example'),
+        ),
+      ).toBe(false);
+
+      // 3. Two-tenant isolation: tampered enquiry ID & forged tenant claim create zero rows
+      const countABeforeTamper = allAfterCatcher.length;
+      const tampered = await sendEnquiryEmailRecord(
+        'ENQ-999999',
+        {
+          to: 'allowed.partner@notalawfirm.example',
+          subject: 'Tampered',
+          bodyHtml: '<p>Tampered</p>',
+          bodyText: 'Tampered',
+        },
+        'P-000001',
+      );
+      expect(tampered.code).toBe('FORBIDDEN');
+
+      const nowIso = new Date().toISOString();
+      setTestEntraSessionOverride({
+        personId: 'P-000001',
+        tenantId: 'fictional-chambers-uk',
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '00000000-0000-4000-8000-000000000000',
+        sub: 'P-000001',
+        email: 'carys@fictionalchambers.co.uk',
+        displayName: 'Forged User',
+        entraRoles: ['admin', 'partner'],
+        mappedRoles: ['admin', 'partner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+      await expect(
+        sendEnquiryEmailRecord(
+          enq.id,
+          {
+            to: 'allowed.partner@notalawfirm.example',
+            subject: 'Forged Tenant',
+            bodyHtml: '<p>Forged</p>',
+            bodyText: 'Forged',
+          },
+          'P-000001',
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/i);
+
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(
+        countABeforeTamper,
+      );
+      expect(await outboxRepo.listOutboxRecords(ctxB)).toHaveLength(0);
+    } finally {
+      setTestEntraSessionOverride(null);
+      await outboxRepo.clearTenantData(ctxA).catch(() => undefined);
+      await outboxRepo.clearTenantData(ctxB).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext()).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  it('R601 & R602: sendEnquiryEmailRecord deduplicates by submissionId, validates recipient address & subject headers, and strips script/on*/img from bodyHtml', async () => {
+    const ctxA = await setupMigratedTenant('not-a-law-firm', 'test');
+    const outboxRepo = getOutboxRepository();
+
+    try {
+      const seedStore = createSeedStore(new Date(), {
+        includeSyntheticEntraOids: false,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        store: seedStore,
+        clearFirst: true,
+      });
+      await outboxRepo.clearTenantData(ctxA);
+      const enq = seedStore.enquiries[0]!;
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'partner', 'enquiries_coordinator'],
+        mfaVerified: true,
+      });
+
+      // 1. R602: Invalid recipient email rejected synchronously before enqueue
+      const badRecipient = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'not-a-valid-email',
+          subject: 'Invalid Recipient Check',
+          bodyHtml: '<p>Hello</p>',
+          bodyText: 'Hello',
+        },
+        'P-000001',
+      );
+      expect(badRecipient.error).toBeDefined();
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(0);
+
+      // 2. R602: Script-only HTML with empty bodyText rejected before enqueue
+      const scriptOnly = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Script Only Check',
+          bodyHtml: '<script>alert("xss")</script>',
+          bodyText: '',
+        },
+        'P-000001',
+      );
+      expect(scriptOnly.error).toBeDefined();
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(0);
+
+      // 3. R602 & R601: Sanitises dangerous HTML tags/attributes & deduplicates repeated submissionId
+      const mark = await markAuditPosition();
+      const firstSubmit = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Sanitised Enquiry Follow Up',
+          bodyHtml:
+            '<script>alert(1)</script><p onclick="evil()" style="color:red">Hello <b>world</b><img src="https://evil.example/track.png" onerror="bad()"/></p>',
+          bodyText: '',
+          submissionId: 'sub-r601-fixed-001',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(firstSubmit.error).toBeUndefined();
+
+      const retrySubmit = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Sanitised Enquiry Follow Up',
+          bodyHtml:
+            '<script>alert(1)</script><p onclick="evil()" style="color:red">Hello <b>world</b><img src="https://evil.example/track.png" onerror="bad()"/></p>',
+          bodyText: '',
+          submissionId: 'sub-r601-fixed-001',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(retrySubmit.error).toBeUndefined();
+
+      const rows = await outboxRepo.listOutboxRecords(ctxA);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.htmlBody).not.toContain('<script');
+      expect(rows[0]!.htmlBody).not.toContain('alert(');
+      expect(rows[0]!.htmlBody).not.toContain('<img');
+      expect(rows[0]!.htmlBody).not.toContain('onclick');
+      expect(rows[0]!.htmlBody).not.toContain('onerror');
+      expect(rows[0]!.htmlBody).not.toContain('style=');
+      expect(rows[0]!.htmlBody).toContain('<p>');
+      expect(rows[0]!.htmlBody).toContain('<b>world</b>');
+
+      const queuedAudits = (await auditEntriesSince(mark)).filter(
+        (a) =>
+          a.recordType === 'enquiry' &&
+          a.recordId === enq.id &&
+          a.action === 'email-queued',
+      );
+      expect(queuedAudits).toHaveLength(1);
+
+      // 4. R622: Reusing the same submissionId with edited content queues a second email rather than dropping edits
+      const editedSubmit = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Sanitised Enquiry Follow Up (Edited)',
+          bodyHtml: '<p>Smith &amp; Co updated details</p>',
+          bodyText: '',
+          submissionId: 'sub-r601-fixed-001',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(editedSubmit.error).toBeUndefined();
+      const rowsAfterEdit = await outboxRepo.listOutboxRecords(ctxA);
+      expect(rowsAfterEdit).toHaveLength(2);
+      const editedRow = rowsAfterEdit.find(
+        (r) => r.subject === 'Sanitised Enquiry Follow Up (Edited)',
+      )!;
+      expect(editedRow).toBeDefined();
+      // R623: No double-escaping in persisted email outbox HTML
+      expect(editedRow.htmlBody).toBe('<p>Smith &amp; Co updated details</p>');
+
+      // 5. R623: CR/LF in subject rejected synchronously before enqueue
+      const crlfSubject = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'prospect@outside-domain.example',
+          subject: 'Subject\r\nBcc: injected@outside-domain.example',
+          bodyHtml: '<p>Body</p>',
+          bodyText: 'Body',
+          submissionId: 'sub-r623-crlf',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(crlfSubject.error).toMatch(/line breaks/i);
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(2);
+
+      // 6. R633: Semicolon/comma-suffixed or malformed addresses are rejected before enqueue
+      const semicolonRecipient = await sendEnquiryEmailRecord(
+        enq.id,
+        {
+          to: 'a@b.com;x',
+          subject: 'Malformed Address',
+          bodyHtml: '<p>Hello</p>',
+          bodyText: 'Hello',
+        },
+        'P-000001',
+      );
+      expect(semicolonRecipient.error).toMatch(/not valid/i);
+      expect(await outboxRepo.listOutboxRecords(ctxA)).toHaveLength(2);
+    } finally {
+      setTestEntraSessionOverride(null);
+      await outboxRepo.clearTenantData(ctxA).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext()).catch(
+        () => undefined,
+      );
+    }
+  });
+
+  it('R622 & R633: same submissionId creates one outbox row in each of two tenants, and isValidEmailAddress rejects a@b.com;x', async () => {
+    const { isValidEmailAddress } = await import('../src/integrations/email/allowList');
+    expect(isValidEmailAddress('a@b.com;x')).toBe(false);
+    expect(isValidEmailAddress('a@b.com,c@d.com')).toBe(false);
+    expect(isValidEmailAddress('a..b@c.com')).toBe(false);
+    expect(isValidEmailAddress("o'connor+legal@firm.co.uk")).toBe(true);
+
+    const tenantBId = 'r622-tenant-b';
+    const ctxA = await setupMigratedTenant('not-a-law-firm', 'test');
+    const ctxB = await setupMigratedTenant(tenantBId, 'test');
+    const outboxRepo = getOutboxRepository();
+
+    const baseRaw = getActiveTenantRawBaseConfig() as Record<string, unknown>;
+    const rawTenantB: Record<string, unknown> = {
+      ...structuredClone(baseRaw),
+      tenantId: tenantBId,
+      displayName: 'Tenant B Chambers LLP',
+      hostingMode: 'multi_tenant',
+    };
+
+    try {
+      setActiveTenantConfigForTesting(null);
+      const seedA = createSeedStore(new Date(), { includeSyntheticEntraOids: false });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        store: seedA,
+        clearFirst: true,
+      });
+      await outboxRepo.clearTenantData(ctxA);
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'partner', 'enquiries_coordinator'],
+        mfaVerified: true,
+      });
+      const resA = await sendEnquiryEmailRecord(
+        seedA.enquiries[0]!.id,
+        {
+          to: 'client.a@outside-domain.example',
+          subject: 'Shared Submission Check',
+          bodyHtml: '<p>Tenant A message</p>',
+          bodyText: '',
+          submissionId: 'shared-sub-r622',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(resA.error).toBeUndefined();
+
+      setActiveTenantConfigForTesting(rawTenantB, { environment: 'test' });
+      const tenantBCfg = loadAndValidateTenantConfig(rawTenantB, { environment: 'test' });
+      const seedB = createSeedStore(new Date(), { includeSyntheticEntraOids: false });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxB,
+        store: seedB,
+        tenantConfig: tenantBCfg,
+        clearFirst: true,
+      });
+      await outboxRepo.clearTenantData(ctxB);
+      setTestActorSession('P-000001', {
+        roles: ['admin', 'partner', 'enquiries_coordinator'],
+        mfaVerified: true,
+        tenantId: tenantBId,
+      });
+      const resB = await sendEnquiryEmailRecord(
+        seedB.enquiries[0]!.id,
+        {
+          to: 'client.b@outside-domain.example',
+          subject: 'Shared Submission Check',
+          bodyHtml: '<p>Tenant B message</p>',
+          bodyText: '',
+          submissionId: 'shared-sub-r622',
+        } as Parameters<typeof sendEnquiryEmailRecord>[1],
+        'P-000001',
+      );
+      expect(resB.error).toBeUndefined();
+
+      const rowsA = await outboxRepo.listOutboxRecords(ctxA);
+      const rowsB = await outboxRepo.listOutboxRecords(ctxB);
+      expect(rowsA).toHaveLength(1);
+      expect(rowsB).toHaveLength(1);
+      expect(rowsA[0]!.tenantId).toBe('not-a-law-firm');
+      expect(rowsB[0]!.tenantId).toBe(tenantBId);
+      expect(rowsA[0]!.recipients.to).toEqual(['client.a@outside-domain.example']);
+      expect(rowsB[0]!.recipients.to).toEqual(['client.b@outside-domain.example']);
+    } finally {
+      setTestEntraSessionOverride(null);
+      setActiveTenantConfigForTesting(null);
+      await outboxRepo.clearTenantData(ctxA).catch(() => undefined);
+      await outboxRepo.clearTenantData(ctxB).catch(() => undefined);
+      await resetAllDemoData('P-000001', testDataResetContext()).catch(
+        () => undefined,
+      );
+    }
   });
 });

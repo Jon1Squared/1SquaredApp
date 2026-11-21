@@ -646,6 +646,15 @@
                 "for": "backlog",
                 "reason": "Reserved for backlog item F22 live external PMS field-level synchronisation."
               }
+            },
+            "gradeRoleMap": {
+              "type": "object",
+              "description": "Maps external PMS fee-earner grade strings (case-insensitive) to canonical employee_role.* IDs during createRecordFromPms.",
+              "default": {},
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^employee_role\\.[a-z0-9_]+$"
+              }
             }
           }
         }
@@ -1868,6 +1877,20 @@
           "maximum": 23,
           "default": 8,
           "description": "Tenant-local hour (0..23) at or after which daily and weekly notification digests are dispatched on working days (default 8)"
+        }
+      }
+    },
+    "enquiries": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tenant enquiry intake and routing settings",
+      "properties": {
+        "fallbackTeamId": {
+          "type": ["string", "null"],
+          "default": null,
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Optional active Team ID used as the fallback enquiry routing target when no practice-area team matches; overrides the systemKey=intake default when set."
         }
       }
     }

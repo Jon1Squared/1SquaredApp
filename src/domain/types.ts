@@ -1053,6 +1053,9 @@ export interface Team {
   id: string; // Team record identifier
   name: string;
   description: string;
+  departmentId?: string | null;
+  orgTeamId?: string | null;
+  systemKey?: string;
   memberIds: string[]; // Employee P-xxxxxx ids
   leadIds: string[]; // Must be subset of memberIds
   practiceAreaIds: string[]; // work_type top-level ChoiceValue ids
@@ -1080,7 +1083,16 @@ export interface TaskComment {
   text: string;
 }
 
-export type AutoTaskTrigger = 'enquiry_contact' | 'non_engagement_letter' | 'complete_matter_opening';
+export type AutoTaskTrigger =
+  | 'enquiry_contact'
+  | 'non_engagement_letter'
+  | 'complete_matter_opening'
+  | 'conflict_check_draft';
+
+export type TaskAutoTrigger =
+  | AutoTaskTrigger
+  | 'conflict_check_review'
+  | 'work_type_auto_task';
 
 export interface Task {
   id: string; // TSK-000001
@@ -1103,7 +1115,7 @@ export interface Task {
   completedById: string | null;
   completedAt: string | null;
   comments: TaskComment[];
-  autoTrigger?: AutoTaskTrigger | 'work_type_auto_task' | null;
+  autoTrigger?: TaskAutoTrigger | null;
   linkedKeyDateId?: string | null;
   idempotencyKey?: string | null;
   systemKey?: string | null;
@@ -1187,6 +1199,13 @@ export interface EnquirySentEmailSnapshot {
   bodyText: string;
   sentAt: string;
   sentById: string;
+}
+
+export interface EnquiryQueuedEmailSnapshot {
+  kind: 'queued_email';
+  outboxId: string;
+  recipientCount: number;
+  templateKey: string;
 }
 
 export interface ContactLogEntry {
@@ -1413,6 +1432,7 @@ export interface EnquirySettings {
   workingDays: number[]; // default [1, 2, 3, 4, 5] (Mon-Fri)
   failedAttemptsBeforeSuggestNoResponse: number; // default 3
   retentionMonths: number; // default 12
+  fallbackTeamId?: string | null;
 }
 
 export interface AutoTaskTemplateSetting {
@@ -1489,6 +1509,7 @@ export type AuditAction =
   | 'status-change'
   | 'assign'
   | 'contact-log'
+  | 'email-queued'
   | 'email-sent'
   | 'convert'
   | 'comment'

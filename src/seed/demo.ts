@@ -28,6 +28,7 @@ import type {
   Note,
   NotificationItem,
   OrgOffice,
+  OrgTeamOrPracticeGroup,
   Organisation,
   OtherName,
   Person,
@@ -105,6 +106,23 @@ export const DEMO_ORG_OFFICES: OrgOffice[] = [
   },
 ];
 
+export const DEMO_EXTRA_ORG_TEAMS: OrgTeamOrPracticeGroup[] = [
+  {
+    id: 'TPG-FIN-BANKING',
+    name: 'Banking, Finance & Restructuring',
+    code: 'FIN-BNK',
+    parentDepartmentId: 'DEPT-CORP',
+    active: true,
+  },
+  {
+    id: 'TPG-REG-PUB',
+    name: 'Regulatory, Public & Specialist',
+    code: 'RISK-REG',
+    parentDepartmentId: 'DEPT-RISK',
+    active: true,
+  },
+];
+
 export const DEFAULT_ENQUIRY_SETTINGS: EnquirySettings = {
   emergencyHours: 2,
   urgentSameDayEnd: true,
@@ -114,6 +132,7 @@ export const DEFAULT_ENQUIRY_SETTINGS: EnquirySettings = {
   workingDays: [1, 2, 3, 4, 5],
   failedAttemptsBeforeSuggestNoResponse: 3,
   retentionMonths: 12,
+  fallbackTeamId: null,
 };
 
 export const DEFAULT_TASK_SETTINGS: TaskSettings = {
@@ -1858,12 +1877,16 @@ export function buildDemoData(
     memberIds: string[],
     leadIds: string[],
     practiceAreas: string[],
+    meta?: { departmentId?: string | null; orgTeamId?: string | null; systemKey?: string },
   ): Team => {
     const id = `TM-${String(++tmn).padStart(6, '0')}`;
     const tm: Team = {
       id,
       name,
       description,
+      ...(meta?.departmentId !== undefined ? { departmentId: meta.departmentId } : {}),
+      ...(meta?.orgTeamId !== undefined ? { orgTeamId: meta.orgTeamId } : {}),
+      ...(meta?.systemKey !== undefined ? { systemKey: meta.systemKey } : {}),
       memberIds: Array.from(new Set([...memberIds, ...leadIds])),
       leadIds,
       practiceAreaIds: practiceAreas.map((pa) => v('work_type', pa)),
@@ -1883,6 +1906,7 @@ export function buildDemoData(
     ['P-000001', 'P-000002', 'P-000010'],
     ['P-000001'],
     ['Real Estate & Property'],
+    { departmentId: 'DEPT-RE' },
   );
   const tmCorporate = addTeam(
     'Corporate & Commercial',
@@ -1890,6 +1914,7 @@ export function buildDemoData(
     ['P-000001', 'P-000002', 'P-000007'],
     ['P-000007'],
     ['Corporate & Commercial'],
+    { departmentId: 'DEPT-CORP' },
   );
   const tmDisputes = addTeam(
     'Dispute Resolution & Litigation',
@@ -1897,6 +1922,7 @@ export function buildDemoData(
     ['P-000001', 'P-000006', 'P-000003'],
     ['P-000001'],
     ['Dispute Resolution'],
+    { departmentId: 'DEPT-DR' },
   );
   const tmPrivateClient = addTeam(
     'Private Client, Trusts & Family',
@@ -1904,6 +1930,7 @@ export function buildDemoData(
     ['P-000005', 'P-000002', 'P-000010'],
     ['P-000005'],
     ['Private Client'],
+    { departmentId: 'DEPT-PC' },
   );
   const tmEmployment = addTeam(
     'Employment & HR',
@@ -1911,6 +1938,7 @@ export function buildDemoData(
     ['P-000005', 'P-000006', 'P-000010'],
     ['P-000005'],
     ['Employment & HR'],
+    { departmentId: 'DEPT-EMP' },
   );
   const tmBanking = addTeam(
     'Banking, Finance & Restructuring',
@@ -1918,6 +1946,7 @@ export function buildDemoData(
     ['P-000001', 'P-000007'],
     ['P-000007'],
     ['Finance & Banking'],
+    { departmentId: 'DEPT-CORP', orgTeamId: 'TPG-FIN-BANKING' },
   );
   const tmRegulatory = addTeam(
     'Regulatory, Public & Specialist',
@@ -1925,6 +1954,7 @@ export function buildDemoData(
     ['P-000003', 'P-000006'],
     ['P-000003'],
     ['Regulatory & Compliance'],
+    { departmentId: 'DEPT-RISK', orgTeamId: 'TPG-REG-PUB' },
   );
   const tmIntake = addTeam(
     'Intake',
@@ -1932,6 +1962,7 @@ export function buildDemoData(
     ['P-000010', 'P-000008', 'P-000001'],
     ['P-000008'],
     [],
+    { departmentId: 'DEPT-BD', systemKey: 'intake' },
   );
   const tmRisk = addTeam(
     'Risk & Compliance',
@@ -1939,6 +1970,7 @@ export function buildDemoData(
     ['P-000003', 'P-000004', 'P-000001'],
     ['P-000003'],
     [],
+    { departmentId: 'DEPT-RISK', systemKey: 'risk_compliance' },
   );
   const tmAccounts = addTeam(
     'Accounts',
@@ -1946,6 +1978,7 @@ export function buildDemoData(
     ['P-000009', 'P-000007'],
     ['P-000009'],
     [],
+    { departmentId: 'DEPT-FIN', systemKey: 'accounts' },
   );
 
   // Person & Pending Matter created from Converted Employment & HR Enquiry ENQ-000003 (Sam Jones)

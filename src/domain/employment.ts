@@ -1135,6 +1135,7 @@ export function resolveDefaultDepartmentPartnerId(
 export function createDefaultEmploymentRecord(opts: {
   person: Partial<Person> & { id: string; firstName: string; surname: string };
   allPeople: Person[];
+  values?: readonly ChoiceValue[];
   orgStructure?: Pick<
     OrgStructureCatalogue,
     'departments' | 'offices' | 'teamsOrPracticeGroups' | 'defaultProbationMonths'
@@ -1158,7 +1159,10 @@ export function createDefaultEmploymentRecord(opts: {
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const today = nowIso.slice(0, 10);
 
-  const mappedRole = mapLegacyEmployeeRoleToRoleType(opts.person.employeeRoleId);
+  const mappedRole = mapLegacyEmployeeRoleToRoleType(
+    opts.person.employeeRoleId,
+    opts.values,
+  );
   const roleType: EmployeeRoleType = mappedRole?.roleType ?? 'Fee earner';
   const engagementType: EngagementType = mappedRole?.engagementType ?? 'Employee';
 
@@ -1178,9 +1182,7 @@ export function createDefaultEmploymentRecord(opts: {
     orgStructure.teamsOrPracticeGroups.find((t) => t.parentDepartmentId === resolvedDept.id) ??
     null;
 
-  const isTop =
-    opts.person.roles?.includes('managing_partner') ||
-    (opts.person.jobTitle ?? '').toLowerCase().includes('managing partner');
+  const isTop = Boolean(opts.person.roles?.includes('managing_partner'));
 
   const deptPartnerId = resolveDefaultDepartmentPartnerId(
     resolvedDept.id,
@@ -1458,19 +1460,21 @@ export function migrateEmployeesToEmploymentRecords(
       continue;
     }
 
-    // Check role mapping
-    const roleLabel = resolveLabel(values, person.employeeRoleId) || person.employeeRoleId || '';
-    const mappedRole =
-      mapLegacyEmployeeRoleToRoleType(person.employeeRoleId) ??
-      mapLegacyEmployeeRoleToRoleType(roleLabel);
+    // Check role mapping strictly by ID / systemKey (R626)
+    const mappedRole = mapLegacyEmployeeRoleToRoleType(
+      person.employeeRoleId,
+      values,
+    );
 
     if (!mappedRole) {
+      const displayRole =
+        resolveLabel(values, person.employeeRoleId) || person.employeeRoleId || 'empty';
       unmappedRecords.push({
         personId: person.id,
         personName: personDisplayName(person),
         field: 'employeeRoleId',
         rawValue: String(person.employeeRoleId ?? ''),
-        reason: `Employee role "${roleLabel || person.employeeRoleId || 'empty'}" could not be mapped automatically to a Role type.`,
+        reason: `Employee role "${displayRole}" could not be mapped automatically to a Role type.`,
       });
     }
 
@@ -1493,6 +1497,7 @@ export function migrateEmployeesToEmploymentRecords(
     const emp = createDefaultEmploymentRecord({
       person,
       allPeople: [...updatedPeople, ...people.filter((p) => !updatedPeople.some((u) => u.id === p.id))],
+      values,
       orgStructure,
       byId: person.updatedById || person.createdById || person.id,
       nowIso,

@@ -68,6 +68,10 @@ import {
 } from '@/server/services';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
+  resolveWorkTypeTaskPriorityId,
+  resolveWorkTypeTaskTypeId,
+} from '@/server/workTypeServiceHelpers';
+import {
   auditEntriesSince,
   markAuditPosition,
   runAsTestActor,
@@ -141,6 +145,25 @@ async function queryDirectSql<T extends Record<string, unknown>>(
   } finally {
     await client.end();
   }
+}
+
+async function backdateMatterOpenedOnForTest(
+  ctx: TenantContext,
+  matterId: string,
+  openedOnIso: string,
+): Promise<void> {
+  await queryDirectSql(
+    ctx,
+    `UPDATE public.matters
+        SET opened_on = $3::date,
+            milestones_json = jsonb_set(
+              COALESCE(milestones_json, '{}'::jsonb),
+              '{openedAt}',
+              to_jsonb($3::text)
+            )
+      WHERE tenant_id = $1 AND id = $2`,
+    [ctx.tenantId, matterId, openedOnIso],
+  );
 }
 
 describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scoring & Retention Dates)', () => {
@@ -860,6 +883,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
       );
       expect(openRes.errors).toBeUndefined();
       const targetMatter = openRes.matter!;
+      await backdateMatterOpenedOnForTest(ctx, targetMatter.id, '2024-02-01');
 
       const countBeforeRes = await queryDirectSql<{ cnt: string }>(
         ctx,
@@ -1389,6 +1413,11 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         );
         expect(openAlpha.errors).toBeUndefined();
         alphaMatterId = openAlpha.matter!.id;
+        await backdateMatterOpenedOnForTest(
+          makeVerifiedTenantCtx(tenantAlpha, 'P-000004'),
+          alphaMatterId,
+          '2026-11-01',
+        );
         expect(openAlpha.matter!.riskRatingId).toBe('risk_rating.high');
 
         const closeAlpha = await updateMatterLifecycleStatusAction(
@@ -1481,7 +1510,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     await expect(freshCatRepo.getWorkTypeConfigs(forgedCtx)).rejects.toThrow();
 
     expect(runner).toBeDefined();
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0020');
+    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0021');
   });
 
   it('10. R495: ignores client destructionDueAt and retentionPeriod on create and update, rejects non-closing/future/pre-open closedAt with code and message, and audits old/new values', async () => {
@@ -1575,6 +1604,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
       );
       expect(createdRes.errors).toBeUndefined();
       const created = createdRes.matter!;
+      await backdateMatterOpenedOnForTest(ctx, created.id, '2026-06-15');
       expect(created.retentionPeriod).toBe('12 years');
       expect(created.destructionDueAt).toBeNull();
       expect(created.closedAt).toBeNull();
@@ -1795,6 +1825,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
       );
       expect(openRes.errors).toBeUndefined();
       let currentMatter = openRes.matter!;
+      await backdateMatterOpenedOnForTest(ctx, currentMatter.id, '2026-06-01');
 
       // Rename Active -> 'Open – live' and Closed -> 'Closed – archived' while keeping systemKey
       const statuses = await catRepo.listChoiceValuesForList<ChoiceValue>(
@@ -1932,6 +1963,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
       );
       expect(openRes.errors).toBeUndefined();
       const targetMatter = openRes.matter!;
+      await backdateMatterOpenedOnForTest(ctx, targetMatter.id, '2026-06-01');
 
       // Part A: Key date commits on an autonomous connection after close check starts
       const origGetKdConfig = kdRepo.getKeyDatesTenantConfig.bind(kdRepo);
@@ -2194,5 +2226,52 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         ),
       ).toBe(true);
     });
+  });
+
+  it('R592: resolveWorkTypeTaskPriorityId and resolveWorkTypeTaskTypeId resolve by systemKey when display labels are renamed', () => {
+    const renamedValues: ChoiceValue[] = [
+      {
+        id: 'task_type.unrelated_first',
+        listKey: 'task_type',
+        label: 'General Admin',
+        systemKey: 'general',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'task_type.custom_onboarding',
+        listKey: 'task_type',
+        label: 'Finish Onboarding',
+        systemKey: 'complete_matter_opening',
+        sortOrder: 2,
+        active: true,
+      },
+      {
+        id: 'task_priority.custom_normal',
+        listKey: 'task_priority',
+        label: 'Routine Queue',
+        systemKey: 'normal',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'task_priority.custom_urgent',
+        listKey: 'task_priority',
+        label: 'Immediate Escalation',
+        systemKey: 'urgent',
+        sortOrder: 2,
+        active: true,
+      },
+    ];
+
+    expect(resolveWorkTypeTaskTypeId(renamedValues)).toBe(
+      'task_type.custom_onboarding',
+    );
+    expect(
+      resolveWorkTypeTaskPriorityId('task_priority.urgent', renamedValues),
+    ).toBe('task_priority.custom_urgent');
+    expect(
+      resolveWorkTypeTaskPriorityId('task_priority.missing', renamedValues),
+    ).toBe('task_priority.custom_normal');
   });
 });

@@ -278,7 +278,35 @@ describe('enquiries and tasks', () => {
     expect(unmapped.team?.name).toBe('Intake');
     expect(unmapped.isFallbackIntake).toBe(true);
 
+    // R592: Renaming the Intake team preserves fallback routing via systemKey: 'intake'
+    const renamedTeams = demo.teams.map((t) =>
+      t.id === unmapped.team?.id
+        ? { ...t, name: 'Client Triage Desk', systemKey: 'intake' }
+        : t,
+    );
+    const routedRenamed = resolveRoutedTeam('work_type.unknown_practice_area', renamedTeams);
+    expect(routedRenamed.team?.id).toBe(unmapped.team?.id);
+    expect(routedRenamed.isFallbackIntake).toBe(true);
+
     expect(findPracticeAreaRoutingClashes(demo.teams)).toEqual([]);
+  });
+
+  it('R616: valueBySystemKey ignores inactive values so deactivated statuses fail closed', () => {
+    const res = valueBySystemKey(
+      [
+        {
+          id: 'matter_status.prospective_enquiry',
+          listKey: 'matter_status',
+          label: 'Prospective / Enquiry',
+          systemKey: 'prospective',
+          sortOrder: 1,
+          active: false,
+        },
+      ],
+      'matter_status',
+      'prospective',
+    );
+    expect(res).toBeUndefined();
   });
 
   it('calculates working hours and working days respecting weekends and bank holidays', () => {

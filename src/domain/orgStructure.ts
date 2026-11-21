@@ -406,65 +406,120 @@ export function buildDefaultOrgStructure(options: {
 }
 
 /**
- * Maps a legacy `employee_role` choice value ID or label to the new `EmployeeRoleType` and default `EngagementType`.
+ * Maps an `employee_role` choice value ID or `metadata.systemKey` to the new `EmployeeRoleType` and default `EngagementType`.
  * Returns null if the role cannot be automatically mapped.
  */
 export function mapLegacyEmployeeRoleToRoleType(
-  employeeRoleIdOrLabel: string | null | undefined,
+  employeeRoleId: string | null | undefined,
+  values?: readonly ChoiceValue[],
 ): { roleType: EmployeeRoleType; engagementType: EngagementType; legacyEmployeeRoleId: string } | null {
-  if (!employeeRoleIdOrLabel) return null;
-  const raw = employeeRoleIdOrLabel.trim().toLowerCase();
+  if (!employeeRoleId) return null;
+  const trimmed = employeeRoleId.trim();
+  const raw = trimmed.toLowerCase();
 
-  if (raw === 'employee_role.partner' || raw === 'partner' || raw === 'partner/member') {
+  if (values && values.length > 0) {
+    const choiceVal = values.find(
+      (v) => v.active && v.listKey === 'employee_role' && v.id === trimmed,
+    );
+    const sysKey = choiceVal?.systemKey?.trim().toLowerCase();
+    if (sysKey === 'partner') {
+      return {
+        roleType: 'Partner/Member',
+        engagementType: 'LLP member',
+        legacyEmployeeRoleId: choiceVal!.id,
+      };
+    }
+    if (sysKey === 'fee_earner' || sysKey === 'senior_solicitor' || sysKey === 'solicitor') {
+      return {
+        roleType: 'Fee earner',
+        engagementType: 'Employee',
+        legacyEmployeeRoleId: choiceVal!.id,
+      };
+    }
+    if (sysKey === 'trainee_paralegal' || sysKey === 'trainee') {
+      return {
+        roleType: 'Trainee',
+        engagementType: 'Employee',
+        legacyEmployeeRoleId: choiceVal!.id,
+      };
+    }
+    if (sysKey === 'apprentice') {
+      return {
+        roleType: 'Apprentice',
+        engagementType: 'Employee',
+        legacyEmployeeRoleId: choiceVal!.id,
+      };
+    }
+    if (
+      sysKey === 'practice_manager' ||
+      sysKey === 'business_development' ||
+      sysKey === 'risk_and_compliance' ||
+      sysKey === 'finance' ||
+      sysKey === 'support_staff' ||
+      sysKey === 'system_administrator' ||
+      sysKey === 'supervisor' ||
+      sysKey === 'intake' ||
+      sysKey === 'enquiries_coordinator'
+    ) {
+      return {
+        roleType: 'Business services',
+        engagementType: 'Employee',
+        legacyEmployeeRoleId: choiceVal!.id,
+      };
+    }
+  }
+
+  if (raw === 'employee_role.partner') {
     return {
       roleType: 'Partner/Member',
       engagementType: 'LLP member',
       legacyEmployeeRoleId: 'employee_role.partner',
     };
   }
-  if (raw === 'employee_role.fee_earner' || raw === 'fee earner') {
+  if (
+    raw === 'employee_role.fee_earner' ||
+    raw === 'employee_role.solicitor' ||
+    raw === 'employee_role.senior_solicitor'
+  ) {
     return {
       roleType: 'Fee earner',
       engagementType: 'Employee',
       legacyEmployeeRoleId: 'employee_role.fee_earner',
     };
   }
-  if (raw === 'trainee' || raw === 'employee_role.trainee') {
+  if (raw === 'employee_role.trainee' || raw === 'employee_role.trainee_paralegal') {
     return {
       roleType: 'Trainee',
       engagementType: 'Employee',
       legacyEmployeeRoleId: 'employee_role.fee_earner',
     };
   }
-  if (raw === 'apprentice' || raw === 'employee_role.apprentice') {
+  if (raw === 'employee_role.apprentice') {
     return {
       roleType: 'Apprentice',
       engagementType: 'Employee',
       legacyEmployeeRoleId: 'employee_role.support_staff',
     };
   }
-  const businessServicesRoles: Record<string, string> = {
+  const businessServicesRoleIds: Record<string, string> = {
     'employee_role.practice_manager': 'employee_role.practice_manager',
-    'practice manager': 'employee_role.practice_manager',
     'employee_role.business_development': 'employee_role.business_development',
-    'business development': 'employee_role.business_development',
     'employee_role.risk_and_compliance': 'employee_role.risk_and_compliance',
-    'risk and compliance': 'employee_role.risk_and_compliance',
     'employee_role.finance': 'employee_role.finance',
-    finance: 'employee_role.finance',
     'employee_role.support_staff': 'employee_role.support_staff',
-    'support staff': 'employee_role.support_staff',
     'employee_role.system_administrator': 'employee_role.system_administrator',
-    'system administrator': 'employee_role.system_administrator',
-    'business services': 'employee_role.support_staff',
+    'employee_role.supervisor': 'employee_role.supervisor',
+    'employee_role.intake': 'employee_role.intake',
+    'employee_role.enquiries_coordinator': 'employee_role.enquiries_coordinator',
   };
-  if (businessServicesRoles[raw]) {
+  if (businessServicesRoleIds[raw]) {
     return {
       roleType: 'Business services',
       engagementType: 'Employee',
-      legacyEmployeeRoleId: businessServicesRoles[raw],
+      legacyEmployeeRoleId: businessServicesRoleIds[raw],
     };
   }
+
   return null;
 }
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createDirectMigrationClient,
+  loadAndValidateTenantConfig,
   mergeDeclarativeTenantConfigCustomFields,
   resolveTenantFromVerifiedToken,
   TenantAuditRepository,
@@ -15,9 +16,12 @@ import {
   type TenantCustomFieldDefinitionRecord,
   type TenantContext,
 } from '@platform/core';
+import type { Team } from '@/domain/types';
 import { isActionDenied } from '@/domain/actionResult';
 import {
   getActiveTenantConfiguration,
+  getActiveTenantRawBaseConfig,
+  getHrAndRbacRepository,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
@@ -39,18 +43,23 @@ import {
   addChoiceValue,
   getAppSnapshot,
   getCatalogueRepository,
+  getTaskWorkflowRepository,
   reorderChoiceValue,
   reorderCustomField,
   resetAllDemoData,
   saveCustomFieldDefinition,
+  saveEnquiryRecord,
   saveEnquirySettingsRecord,
   saveHomePagesConfig,
   saveMatterCostsConfig,
   saveMatterPartyRelationship,
   saveOrgStructure,
   saveTaskSettingsRecord,
+  saveTeamRecord,
   updateWorkTypeProfiles,
 } from '@/server/services';
+import { DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS } from '@/domain/orgStructure';
+import { resolveRoutedTeam } from '@/domain/tasks';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
@@ -1173,5 +1182,561 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
     );
     const getStoreMatches = [...actionsSrc.matchAll(/\bgetStore\s*\(/g)];
     expect(getStoreMatches).toHaveLength(0);
+  });
+
+  it('R605: validates EnquirySettings.fallbackTeamId against active teams, preserves & validates Team departmentId/orgTeamId/systemKey, and supports enquiries.fallbackTeamId schema config', async () => {
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const validatedWithFallback = loadAndValidateTenantConfig(
+      { ...rawBase, enquiries: { fallbackTeamId: 'TM-000008' } },
+      { environment: 'test' },
+    );
+    expect(validatedWithFallback.enquiries?.fallbackTeamId).toBe('TM-000008');
+
+    const { actorSession, ctx } = makeHostActorAndContext('P-000001');
+    await resetAllDemoData('P-000001', ctx);
+    const hrRepo = getHrAndRbacRepository();
+    try {
+      await runWithActiveActorSession(actorSession, async () => {
+        const allTeams = await hrRepo.listAllTeams<Team>(ctx);
+        const intakeTeam = allTeams.find((t) => t.systemKey === 'intake')!;
+        const altTeam = allTeams.find((t) => t.active && t.id !== intakeTeam.id)!;
+        expect(intakeTeam).toBeDefined();
+        expect(intakeTeam.departmentId).toBeDefined();
+
+        // 1. Unknown fallbackTeamId rejected server-side
+        const invalidFallback = (await saveEnquirySettingsRecord(
+          { fallbackTeamId: 'TM-DOES-NOT-EXIST' },
+          'P-000001',
+        )) as unknown as { error?: string };
+        expect(invalidFallback.error).toBeDefined();
+
+        // 2. Editing a team without metadata preserves departmentId, orgTeamId, and systemKey
+        const savedTeamRes = await saveTeamRecord(
+          {
+            id: intakeTeam.id,
+            name: 'Intake Renamed Preserved',
+            description: intakeTeam.description,
+            memberIds: intakeTeam.memberIds,
+            leadIds: intakeTeam.leadIds,
+            practiceAreaIds: intakeTeam.practiceAreaIds,
+            active: true,
+          },
+          'P-000001',
+        );
+        expect(savedTeamRes.error).toBeUndefined();
+        expect(savedTeamRes.team?.departmentId).toBe(intakeTeam.departmentId);
+        expect(savedTeamRes.team?.systemKey).toBe('intake');
+
+        // 3. Invalid departmentId rejected in saveTeamRecord
+        const badDeptTeam = await saveTeamRecord(
+          {
+            id: altTeam.id,
+            name: altTeam.name,
+            memberIds: altTeam.memberIds,
+            leadIds: altTeam.leadIds,
+            practiceAreaIds: altTeam.practiceAreaIds,
+            departmentId: 'DEPT-NONEXISTENT',
+          } as Parameters<typeof saveTeamRecord>[0],
+          'P-000001',
+        );
+        expect(badDeptTeam.error).toBeDefined();
+
+        // 4. Setting valid active fallbackTeamId persists and drives resolveRoutedTeam; deactivating it is rejected
+        const okFallback = await saveEnquirySettingsRecord(
+          { fallbackTeamId: altTeam.id },
+          'P-000001',
+        );
+        expect('error' in okFallback && okFallback.error).toBeFalsy();
+        const snap = await getAppSnapshot('P-000001');
+        expect(snap.enquirySettings.fallbackTeamId).toBe(altTeam.id);
+        expect(
+          resolveRoutedTeam(
+            'work_type.unmapped_r605',
+            snap.teams,
+            snap.enquirySettings.fallbackTeamId,
+          ).team?.id,
+        ).toBe(altTeam.id);
+
+        const deactivateFallbackRes = await saveTeamRecord(
+          {
+            id: altTeam.id,
+            name: altTeam.name,
+            memberIds: altTeam.memberIds,
+            leadIds: altTeam.leadIds,
+            practiceAreaIds: altTeam.practiceAreaIds,
+            active: false,
+          },
+          'P-000001',
+        );
+        expect(deactivateFallbackRes.error).toBeDefined();
+      });
+    } finally {
+      await resetAllDemoData('P-000001', ctx);
+    }
+  });
+
+  it('R619, R624 & R625: intake routing falls back cleanly with unassigned admin warning; null enquiry fallback does not mask config; deactivated existing dept allows team edit; removed practice groups stay removed; cross-tenant fallback/dept rejected', async () => {
+    const rawBase = structuredClone(
+      getActiveTenantRawBaseConfig() as Record<string, unknown>,
+    );
+    const { actorSession, ctx } = makeHostActorAndContext('P-000001');
+    const hrRepo = getHrAndRbacRepository();
+    const taskRepo = getTaskWorkflowRepository();
+
+    // Verify client-specific TPG-FIN-BANKING & TPG-REG-PUB are NOT in core orgStructure defaults
+    expect(
+      DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS.some(
+        (g) => g.id === 'TPG-FIN-BANKING' || g.id === 'TPG-REG-PUB',
+      ),
+    ).toBe(false);
+
+    try {
+      await runWithActiveActorSession(actorSession, async () => {
+        await resetAllDemoData('P-000001', ctx);
+
+        // 1. R625: Removing a practice group stays removed on subsequent reads and saves
+        const initialSnap = await getAppSnapshot('P-000001');
+        const removedGroupId = 'TPG-CORP-COM';
+        expect(
+          initialSnap.orgStructure.teamsOrPracticeGroups.some(
+            (g) => g.id === removedGroupId,
+          ),
+        ).toBe(true);
+        await saveOrgStructure(
+          {
+            ...initialSnap.orgStructure,
+            teamsOrPracticeGroups:
+              initialSnap.orgStructure.teamsOrPracticeGroups.filter(
+                (g) => g.id !== removedGroupId,
+              ),
+          },
+          'P-000001',
+        );
+        const readAfterDelete = await getAppSnapshot('P-000001');
+        expect(
+          readAfterDelete.orgStructure.teamsOrPracticeGroups.some(
+            (g) => g.id === removedGroupId,
+          ),
+        ).toBe(false);
+        await saveOrgStructure(
+          {
+            ...readAfterDelete.orgStructure,
+            defaultProbationMonths: 6,
+          },
+          'P-000001',
+        );
+        const readAfterResave = await getAppSnapshot('P-000001');
+        expect(
+          readAfterResave.orgStructure.teamsOrPracticeGroups.some(
+            (g) => g.id === removedGroupId,
+          ),
+        ).toBe(false);
+
+        // 2. R624.2: A team whose existing department was later deactivated can still be edited & deactivated; changing to a deactivated dept still fails
+        const allTeamsBefore = await hrRepo.listAllTeams<Team>(ctx);
+        const drTeam = allTeamsBefore.find((t) => t.departmentId === 'DEPT-DR')!;
+        expect(drTeam).toBeDefined();
+        await saveOrgStructure(
+          {
+            ...readAfterResave.orgStructure,
+            departments: readAfterResave.orgStructure.departments.map((d) =>
+              d.id === 'DEPT-DR' ? { ...d, active: false } : d,
+            ),
+          },
+          'P-000001',
+        );
+        const editWithExistingDeactivatedDept = await saveTeamRecord(
+          {
+            id: drTeam.id,
+            name: 'Dispute Resolution Renamed While Dept Inactive',
+            description: drTeam.description,
+            departmentId: 'DEPT-DR',
+            orgTeamId: drTeam.orgTeamId ?? null,
+            systemKey: drTeam.systemKey ?? null,
+            memberIds: drTeam.memberIds,
+            leadIds: drTeam.leadIds,
+            practiceAreaIds: drTeam.practiceAreaIds,
+            active: true,
+          },
+          'P-000001',
+        );
+        expect(editWithExistingDeactivatedDept.error).toBeUndefined();
+        const deactivateWithDeactivatedDept = await saveTeamRecord(
+          {
+            id: drTeam.id,
+            name: 'Dispute Resolution Renamed While Dept Inactive',
+            description: drTeam.description,
+            departmentId: 'DEPT-DR',
+            orgTeamId: drTeam.orgTeamId ?? null,
+            systemKey: drTeam.systemKey ?? null,
+            memberIds: drTeam.memberIds,
+            leadIds: drTeam.leadIds,
+            practiceAreaIds: drTeam.practiceAreaIds,
+            active: false,
+          },
+          'P-000001',
+        );
+        expect(deactivateWithDeactivatedDept.error).toBeUndefined();
+
+        const changeToDeactivatedDept = await saveTeamRecord(
+          {
+            id: allTeamsBefore.find((t) => t.departmentId === 'DEPT-RE')!.id,
+            name: 'Real Estate',
+            memberIds: ['P-000001'],
+            leadIds: ['P-000001'],
+            practiceAreaIds: ['work_type.real_estate_and_property'],
+            departmentId: 'DEPT-DR',
+          },
+          'P-000001',
+        );
+        expect(changeToDeactivatedDept.error).toMatch(/Department/);
+
+        // 3. R624.1 + R619: Saved fallbackTeamId: null does NOT override tenant config enquiries.fallbackTeamId;
+        //    removing 'intake' systemKey routes via config fallbackTeamId; when neither exists, saves unassigned with warning + admin notification
+        const targetFallbackTeam = (await hrRepo.listAllTeams<Team>(ctx)).find(
+          (t) => t.active && t.systemKey !== 'intake',
+        )!;
+        const intakeTeam = (await hrRepo.listAllTeams<Team>(ctx)).find(
+          (t) => t.systemKey === 'intake',
+        )!;
+        // Clear intake systemKey on TM-000008 so config fallbackTeamId is exercised
+        await hrRepo.putTeam(ctx, { ...intakeTeam, systemKey: undefined });
+
+        setActiveTenantConfigForTesting(
+          {
+            ...rawBase,
+            enquiries: { fallbackTeamId: targetFallbackTeam.id },
+          },
+          { environment: 'test' },
+        );
+        const afterUnrelatedSettingsSave = await saveEnquirySettingsRecord(
+          { emergencyHours: 3, fallbackTeamId: null },
+          'P-000001',
+        );
+        expect('error' in afterUnrelatedSettingsSave && afterUnrelatedSettingsSave.error).toBeFalsy();
+        const snapWithConfigFallback = await getAppSnapshot('P-000001');
+        expect(snapWithConfigFallback.enquirySettings.fallbackTeamId).toBe(
+          targetFallbackTeam.id,
+        );
+        expect(
+          resolveRoutedTeam(
+            'work_type.unmapped_r619',
+            snapWithConfigFallback.teams,
+            snapWithConfigFallback.enquirySettings.fallbackTeamId,
+          ).team?.id,
+        ).toBe(targetFallbackTeam.id);
+
+        // Now remove enquiries.fallbackTeamId from config as well -> neither systemKey 'intake' nor fallbackTeamId exists
+        setActiveTenantConfigForTesting(
+          {
+            ...rawBase,
+            enquiries: {},
+          },
+          { environment: 'test' },
+        );
+        expect(
+          resolveRoutedTeam('work_type.unmapped_r619', snapWithConfigFallback.teams, null),
+        ).toEqual({ team: null, isFallbackIntake: false });
+      });
+
+      // Have non-admin fee-earner P-000002 create an unmapped enquiry when no intake key or fallbackTeamId exists
+      const p2 = makeHostActorAndContext('P-000002');
+      await runWithActiveActorSession(p2.actorSession, async () => {
+        const dayOneNow = '2026-11-21T10:00:00.000Z';
+        const dayTwoNow = '2026-11-22T10:00:00.000Z';
+        const notifsBefore = await taskRepo.listAllNotificationsUnfiltered(ctx);
+        const unassignedRes = await saveEnquiryRecord(
+          {
+            firstName: 'Unrouted',
+            lastName: 'Prospect',
+            phone: '029 2000 0619',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.unmapped_r619',
+            summary: 'Unmapped enquiry without intake fallback',
+            notes: 'Caller requesting callback on unmapped practice area.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002', now: dayOneNow },
+        );
+        expect(unassignedRes.errors).toBeUndefined();
+        expect(unassignedRes.enquiry?.assignedTeamId).toBeNull();
+        expect(unassignedRes.enquiry?.routedToIntakeFallback).toBe(false);
+        expect(unassignedRes.routedTeamName).toBeUndefined();
+        expect(
+          (unassignedRes as { routingWarning?: string }).routingWarning,
+        ).toMatch(/no active fallback intake team/i);
+
+        const notifsAfter = await taskRepo.listAllNotificationsUnfiltered(ctx);
+        const newAdminWarnings = notifsAfter
+          .slice(notifsBefore.length)
+          .filter((n) => n.href === '/admin/enquiry-settings');
+        expect(newAdminWarnings.length).toBeGreaterThanOrEqual(1);
+        expect(JSON.stringify(newAdminWarnings)).not.toContain('Unrouted');
+        expect(JSON.stringify(newAdminWarnings)).not.toContain('029 2000 0619');
+
+        // Same-day second unrouted enquiry in the same tenant deduplicates the admin warning notification
+        const secondSameDayRes = await saveEnquiryRecord(
+          {
+            firstName: 'UnroutedTwo',
+            lastName: 'ProspectTwo',
+            phone: '029 2000 0620',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.unmapped_r619',
+            summary: 'Second unmapped enquiry same day',
+            notes: 'Should not duplicate admin fallback warning today.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002', now: dayOneNow },
+        );
+        expect(secondSameDayRes.errors).toBeUndefined();
+        expect(
+          (secondSameDayRes as { routingWarning?: string }).routingWarning,
+        ).toMatch(/no active fallback intake team/i);
+
+        const notifsAfterSecondSameDay =
+          await taskRepo.listAllNotificationsUnfiltered(ctx);
+        const dupSameDayWarnings = notifsAfterSecondSameDay
+          .slice(notifsAfter.length)
+          .filter((n) => n.href === '/admin/enquiry-settings');
+        expect(dupSameDayWarnings).toHaveLength(0);
+
+        // Next calendar day in the same tenant sends a fresh admin warning notification
+        await saveEnquiryRecord(
+          {
+            firstName: 'UnroutedNextDay',
+            lastName: 'ProspectThree',
+            phone: '029 2000 0621',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.unmapped_r619',
+            summary: 'Unmapped enquiry next calendar day',
+            notes: 'New day emits new admin warning.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002', now: dayTwoNow },
+        );
+        const notifsAfterDayTwo =
+          await taskRepo.listAllNotificationsUnfiltered(ctx);
+        const dayTwoWarnings = notifsAfterDayTwo
+          .slice(notifsAfterSecondSameDay.length)
+          .filter((n) => n.href === '/admin/enquiry-settings');
+        expect(dayTwoWarnings.length).toBeGreaterThanOrEqual(1);
+      });
+
+      // 4. R624.3: Two-tenant isolation — Tenant B's fallbackTeamId and departmentId are refused in Tenant A
+      setActiveTenantConfigForTesting(null);
+      const rawConfigA: Record<string, unknown> = {
+        ...structuredClone(rawBase),
+        tenantId: 'tenant-a',
+        displayName: 'Tenant A Law LLP',
+        hostingMode: 'multi_tenant',
+      };
+      const rawConfigB: Record<string, unknown> = {
+        ...structuredClone(rawBase),
+        tenantId: 'tenant-b',
+        displayName: 'Tenant B Chambers LLP',
+        hostingMode: 'multi_tenant',
+      };
+      const ctxA = makeTenantContext('tenant-a', 'P-000001');
+      const ctxB = makeTenantContext('tenant-b', 'P-000001');
+      setActiveTenantConfigForTesting(rawConfigA, {});
+      const tenantACfg = getActiveTenantConfiguration();
+      setActiveTenantConfigForTesting(rawConfigB, {});
+      const tenantBCfg = getActiveTenantConfiguration();
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxA,
+        store: createSeedStore(),
+        tenantConfig: tenantACfg,
+        clearFirst: true,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxB,
+        store: createSeedStore(),
+        tenantConfig: tenantBCfg,
+        clearFirst: true,
+      });
+
+      // Create Tenant B-exclusive department and team
+      setActiveTenantConfigForTesting(rawConfigB, {});
+      const bCookie = createSignedEntraSessionCookie({
+        personId: 'P-000001',
+        tenantId: 'tenant-b',
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000001',
+        email: `p1@${tenantBCfg.branding.primaryDomain}`,
+        displayName: 'Actor tenant-b',
+        entraRoles: ['admin', 'partner'],
+        mappedRoles: ['admin', 'partner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const bVerified = verifySignedEntraSessionCookie(bCookie)!;
+      setTestEntraSessionOverride(bVerified);
+      let tenantBTeamId = '';
+      await runWithActiveActorSession(
+        {
+          personId: 'P-000001',
+          tenantId: 'tenant-b',
+          tokenRoles: ['admin', 'partner'],
+          mfaVerified: true,
+          expiresAtMs: Date.now() + 3600_000,
+          verifiedSession: bVerified,
+        },
+        async () => {
+          const snapB = await getAppSnapshot('P-000001');
+          await saveOrgStructure(
+            {
+              ...snapB.orgStructure,
+              departments: [
+                ...snapB.orgStructure.departments,
+                {
+                  ...snapB.orgStructure.departments[0]!,
+                  id: 'DEPT-TENANT-B-ONLY',
+                  name: 'Tenant B Specialist Dept',
+                  code: 'TB-ONLY',
+                  parentDivisionId: snapB.orgStructure.divisions[0]!.id,
+                  active: true,
+                },
+              ],
+            },
+            'P-000001',
+          );
+          const teamBRes = await saveTeamRecord(
+            {
+              name: 'Tenant B Exclusive Team',
+              description: 'Only in Tenant B',
+              departmentId: 'DEPT-TENANT-B-ONLY',
+              memberIds: ['P-000001', 'P-000002'],
+              leadIds: ['P-000002'],
+              practiceAreaIds: [],
+            },
+            'P-000001',
+          );
+          expect(teamBRes.error).toBeUndefined();
+          tenantBTeamId = teamBRes.team!.id;
+
+          // Clear intake systemKey & fallback in Tenant B too -> Tenant B gets its own same-day admin warning independently of Tenant A
+          const teamsB = await hrRepo.listAllTeams<Team>(ctxB);
+          for (const t of teamsB) {
+            if (t.systemKey === 'intake') {
+              await hrRepo.putTeam(ctxB, { ...t, systemKey: undefined });
+            }
+          }
+          const notifsBBefore = await taskRepo.listAllNotificationsUnfiltered(ctxB);
+          const bP2Cookie = createSignedEntraSessionCookie({
+            personId: 'P-000002',
+            tenantId: 'tenant-b',
+            oid: '00000000-0000-4000-8000-000000000002',
+            tid: '11111111-2222-3333-4444-000000000000',
+            sub: 'P-000002',
+            email: `p2@${tenantBCfg.branding.primaryDomain}`,
+            displayName: 'Fee Earner tenant-b',
+            entraRoles: ['fee_earner'],
+            mappedRoles: ['fee_earner'],
+            entraGroups: [],
+            mfaVerified: false,
+            amr: ['pwd'],
+            authenticatedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          });
+          const bP2Verified = verifySignedEntraSessionCookie(bP2Cookie)!;
+          setTestEntraSessionOverride(bP2Verified);
+          await runWithActiveActorSession(
+            {
+              personId: 'P-000002',
+              tenantId: 'tenant-b',
+              tokenRoles: ['fee_earner'],
+              mfaVerified: false,
+              expiresAtMs: Date.now() + 3600_000,
+              verifiedSession: bP2Verified,
+            },
+            async () => {
+              const resB = await saveEnquiryRecord(
+                {
+                  firstName: 'BravoUnrouted',
+                  lastName: 'Prospect',
+                  phone: '029 2000 0622',
+                  channelId: 'enquiry_channel.phone',
+                  practiceAreaId: 'work_type.unmapped_r636',
+                  summary: 'Tenant B unmapped enquiry',
+                  notes: 'Independent daily warning check in Tenant B.',
+                  privacyNoticeGiven: true,
+                },
+                { byId: 'P-000002', now: '2026-11-21T11:00:00.000Z' },
+              );
+              expect(
+                (resB as { routingWarning?: string }).routingWarning,
+              ).toMatch(/no active fallback intake team/i);
+            },
+          );
+          setTestEntraSessionOverride(bVerified);
+          const notifsBAfter = await taskRepo.listAllNotificationsUnfiltered(ctxB);
+          const bravoWarnings = notifsBAfter
+            .slice(notifsBBefore.length)
+            .filter((n) => n.href === '/admin/enquiry-settings');
+          expect(bravoWarnings.length).toBeGreaterThanOrEqual(1);
+        },
+      );
+
+      // In Tenant A, both Tenant B's team (as fallbackTeamId) and Tenant B's department (on saveTeamRecord) are refused
+      setActiveTenantConfigForTesting(rawConfigA, {});
+      const aCookie = createSignedEntraSessionCookie({
+        personId: 'P-000001',
+        tenantId: 'tenant-a',
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '11111111-2222-3333-4444-000000000000',
+        sub: 'P-000001',
+        email: `p1@${tenantACfg.branding.primaryDomain}`,
+        displayName: 'Actor tenant-a',
+        entraRoles: ['admin', 'partner'],
+        mappedRoles: ['admin', 'partner'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const aVerified = verifySignedEntraSessionCookie(aCookie)!;
+      setTestEntraSessionOverride(aVerified);
+      await runWithActiveActorSession(
+        {
+          personId: 'P-000001',
+          tenantId: 'tenant-a',
+          tokenRoles: ['admin', 'partner'],
+          mfaVerified: true,
+          expiresAtMs: Date.now() + 3600_000,
+          verifiedSession: aVerified,
+        },
+        async () => {
+          const crossFallbackRes = (await saveEnquirySettingsRecord(
+            { fallbackTeamId: tenantBTeamId },
+            'P-000001',
+          )) as unknown as { error?: string };
+          expect(crossFallbackRes.error).toMatch(/Fallback enquiry team/);
+
+          const crossDeptTeamRes = await saveTeamRecord(
+            {
+              name: 'Cross Tenant Dept Attempt',
+              description: 'Should fail',
+              departmentId: 'DEPT-TENANT-B-ONLY',
+              memberIds: ['P-000001', 'P-000002'],
+              leadIds: ['P-000002'],
+              practiceAreaIds: [],
+            },
+            'P-000001',
+          );
+          expect(crossDeptTeamRes.error).toMatch(/Department/);
+        },
+      );
+    } finally {
+      setTestEntraSessionOverride(null);
+      setActiveTenantConfigForTesting(null);
+      await resetAllDemoData('P-000001', ctx);
+    }
   });
 });

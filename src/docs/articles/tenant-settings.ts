@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-19',
+  updated: '2026-11-21',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -31,6 +31,11 @@ Every leaf property in the tenant configuration schema is either actively read a
 | \`firm.website\` | \`""\` | Active | Public firm website URL or hostname for document headers and footers |
 | \`conflictReview.assigneeTeamKey\` | \`null\` | Active | Team ID or code receiving referred conflict review tasks |
 | \`conflictReview.assigneeRoleKey\` | \`null\` | Active | Role key used to select an assignee within the conflict review team |
+| \`enquiries.fallbackTeamId\` | \`null\` | Active | Optional active Team ID used as the default fallback intake team when no practice area matches (an explicit non-empty setting under **Admin → Enquiry settings** overrides this; when unset in Admin it falls back to \`enquiries.fallbackTeamId\`, then to an active team with \`systemKey: "intake"\`, or saves unmapped enquiries unassigned with a warning stating that no active fallback intake team is configured; repeated admin warnings for unrouted enquiries are deduplicated per tenant per calendar day) |
+
+#### Upgrade step: fallback intake team routing
+
+Before or straight after upgrading from \`develop\`, firms must ensure an explicit intake fallback is configured: set the intake team's \`systemKey\` to \`"intake"\` under **Admin → Teams**, or set \`enquiries.fallbackTeamId\` in tenant configuration (or **Admin → Enquiry settings**). Previously, fallback routing matched a team named \`"Intake"\`; without an active \`intake\` \`systemKey\` or \`fallbackTeamId\`, unmapped enquiries save unassigned with a \`"no active fallback intake team"\` warning and a once-daily per-tenant admin warning notification. For the demo tenant, running **Load demo dataset** in **Admin → Demo data** (or the \`seed-demo\` job) sets the intake team metadata automatically.
 
 ### Feature flags
 
@@ -87,6 +92,7 @@ Per-tenant Practice Management System (PMS) extract tables (\`pms_extract_metada
 | \`integrations.pmsSync.clientCodeAllocation\` | \`"onesquared"\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS client code allocation (\`F22\`) |
 | \`integrations.pmsSync.pollIntervalMinutes\` | \`15\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS delta polling interval (\`F22\`) |
 | \`integrations.pmsSync.fieldMappings\` | \`[]\` | Reserved (backlog, F22) | Post-Stage-0 live tenant-scoped PMS field-level synchronisation (\`F22\`) |
+| \`integrations.pmsSync.gradeRoleMap\` | \`{}\` | Active | Maps external PMS fee-earner grade strings (case-insensitive) to canonical \`employee_role.*\` IDs in \`createRecordFromPms\`; unmapped grades fall back to least-privileged \`employee_role.support_staff\` |
 
 ### Custom fields, extensions, RBAC, documents and key dates
 

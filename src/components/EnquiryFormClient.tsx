@@ -46,7 +46,11 @@ import {
   shouldSuggestNoResponse,
   type EnquiryFormState,
 } from '@/domain/enquiries';
-import { resolveLabel, valuesForList } from '@/domain/lists';
+import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
+import {
+  plainTextToSanitizedEmailHtml,
+  sanitizeEnquiryEmailHtml,
+} from '@/domain/emailHtmlSanitizer';
 import { formatConversionConflictWarningsNotice } from '@/domain/matterConflicts';
 import {
   resolveAddressSuggestion,
@@ -404,6 +408,7 @@ export function EnquiryFormClient({
   const [emailTo, setEmailTo] = useState('');
   const [emailSubject, setEmailSubject] = useState(`Response to enquiry to ${firmName}`);
   const [emailBodyHtml, setEmailBodyHtml] = useState('');
+  const [emailSubmissionId, setEmailSubmissionId] = useState('');
   const emailEditorRef = useRef<HTMLDivElement | null>(null);
   const [viewingSentEmail, setViewingSentEmail] = useState<{
     entry: AuditEntry;
@@ -571,8 +576,8 @@ export function EnquiryFormClient({
 
   const routedPreview = useMemo(() => {
     if (!practiceAreaId) return null;
-    return resolveRoutedTeam(practiceAreaId, teams);
-  }, [practiceAreaId, teams]);
+    return resolveRoutedTeam(practiceAreaId, teams, enquirySettings?.fallbackTeamId);
+  }, [practiceAreaId, teams, enquirySettings?.fallbackTeamId]);
 
   const combinedPeople = useMemo(
     () => mergePeopleWithEnquiries(people, enquiries, values, enquiry?.id ?? null),
@@ -1048,8 +1053,11 @@ export function EnquiryFormClient({
         showToast(`Enquiry ${res.enquiry.reference} changes saved.`);
         router.refresh();
       } else {
+        const resWithWarning = res as typeof res & { routingWarning?: string };
         showToast(
-          `Enquiry ${res.enquiry.reference} saved and routed to ${res.routedTeamName ?? 'Intake'}.`,
+          resWithWarning.routingWarning
+            ? `Enquiry ${res.enquiry.reference} saved unassigned: ${resWithWarning.routingWarning}`
+            : `Enquiry ${res.enquiry.reference} saved and routed to ${res.routedTeamName ?? 'the assigned team'}.`,
         );
         if (isSavedEnquiry) {
           router.refresh();
@@ -1294,6 +1302,11 @@ export function EnquiryFormClient({
     setEmailTo(resolvedEmail);
     setEmailSubject(`Response to enquiry to ${firmName}`);
     setEmailBodyHtml('');
+    setEmailSubmissionId(
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    );
     setSendEmailModalOpen(true);
     setTimeout(() => {
       if (emailEditorRef.current) {
@@ -1335,13 +1348,15 @@ export function EnquiryFormClient({
         subject: emailSubject.trim(),
         bodyHtml,
         bodyText,
+        ...(emailSubmissionId ? { submissionId: emailSubmissionId } : {}),
       });
       if (res.error) {
         showToast(res.error);
         return;
       }
       setSendEmailModalOpen(false);
-      showToast(`Email sent to ${emailTo.trim()} and logged in audit trail`);
+      setEmailSubmissionId('');
+      showToast('Email queued for delivery and logged in audit trail');
       router.refresh();
     });
   };
@@ -1362,20 +1377,20 @@ export function EnquiryFormClient({
     if (leadEmp?.employment?.supervisingPartnerId) {
       addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
     }
-    const colpEmp =
-      employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
-      employees.find((e) =>
-        (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('colp'),
-      );
+    const riskRoleId = valueBySystemKey(values, 'employee_role', 'risk_and_compliance')?.id;
+    const colpEmp = riskRoleId
+      ? employees.find((e) => e.employeeRoleId === riskRoleId)
+      : undefined;
     if (colpEmp) addPerson(colpEmp.id, 'COLP');
 
-    const practiceMgrEmp = employees.find((e) =>
-      (e.employment?.jobTitle || e.jobTitle || '').toLowerCase().includes('practice manager'),
-    );
+    const pmRoleId = valueBySystemKey(values, 'employee_role', 'practice_manager')?.id;
+    const practiceMgrEmp = pmRoleId
+      ? employees.find((e) => e.employeeRoleId === pmRoleId)
+      : undefined;
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [employees, enquiry?.assignedToId, currentUserId]);
+  }, [employees, enquiry?.assignedToId, currentUserId, values]);
 
   const handleCreateTask = (payload: CreateTaskSubmitPayload) => {
     if (!enquiry) return;
@@ -2060,14 +2075,24 @@ export function EnquiryFormClient({
         </div>
       ) : null}
 
-      {/* BANNER: Fallback Intake routing */}
-      {enquiry && enquiry.routedToIntakeFallback && open && routed ? (
+      {/* BANNER: Fallback Intake routing or unassigned warning */}
+      {enquiry && open && routed && !enquiry.assignedTeamId && !enquiry.assignedToId ? (
+        <div className="banner banner--warning" style={{ marginBottom: 14 }}>
+          <div>
+            <strong>Manual routing needed:</strong> No active team was mapped to{' '}
+            {practiceAreaLabel || 'this practice area'} and no active fallback intake team is configured, so
+            this enquiry is currently <strong>unassigned</strong>. Use <strong>Assign</strong> to route
+            it to a team or fee earner.
+          </div>
+        </div>
+      ) : null}
+      {enquiry && enquiry.routedToIntakeFallback && enquiry.assignedTeamId && open && routed ? (
         <div className="banner banner--warning" style={{ marginBottom: 14 }}>
           <div>
             <strong>Manual routing needed:</strong> No active team was mapped to{' '}
             {practiceAreaLabel || 'this practice area'}, so this enquiry was placed in the{' '}
-            <strong>Intake</strong> team queue. Use <strong>Assign</strong> to route it to a team or
-            fee earner.
+            <strong>{assignedTeam?.name ?? 'fallback intake'}</strong> team queue. Use{' '}
+            <strong>Assign</strong> to route it to a team or fee earner.
           </div>
         </div>
       ) : null}
@@ -4310,8 +4335,8 @@ export function EnquiryFormClient({
                 }}
                 dangerouslySetInnerHTML={{
                   __html:
-                    viewingSentEmail.email.bodyHtml ||
-                    viewingSentEmail.email.bodyText.replace(/\n/g, '<br />'),
+                    sanitizeEnquiryEmailHtml(viewingSentEmail.email.bodyHtml) ||
+                    plainTextToSanitizedEmailHtml(viewingSentEmail.email.bodyText),
                 }}
               />
             </div>

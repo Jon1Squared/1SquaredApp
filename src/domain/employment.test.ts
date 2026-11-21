@@ -203,6 +203,27 @@ describe('Employee section, conversion paths, migration & permissions', () => {
         roleType: 'Trainee',
         engagementType: 'Employee',
       });
+      // R626: Bare display labels must not match — only employee_role.* IDs or ChoiceValue.systemKey
+      expect(mapLegacyEmployeeRoleToRoleType('Partner')).toBeNull();
+      expect(mapLegacyEmployeeRoleToRoleType('Solicitor')).toBeNull();
+      expect(mapLegacyEmployeeRoleToRoleType('Senior Solicitor')).toBeNull();
+      expect(mapLegacyEmployeeRoleToRoleType('Practice manager')).toBeNull();
+      expect(
+        mapLegacyEmployeeRoleToRoleType('role.custom_solicitor', [
+          {
+            id: 'role.custom_solicitor',
+            listKey: 'employee_role',
+            label: 'Custom Role Title',
+            systemKey: 'solicitor',
+            sortOrder: 1,
+            active: true,
+          },
+        ]),
+      ).toMatchObject({
+        roleType: 'Fee earner',
+        engagementType: 'Employee',
+        legacyEmployeeRoleId: 'role.custom_solicitor',
+      });
 
       const org = buildDefaultOrgStructure({ legalName: 'Test Firm LLP' });
       const resolvedRealEstate = resolveOrgDepartment('department.real_estate', org);
@@ -1075,6 +1096,55 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(details.employment?.payroll?.pensionAutoEnrolmentStatus).toBe('Not recorded');
       expect(details.employment?.feeEarner?.chargeOutRateGbp).toBeNull();
       expect(details.employment?.systems?.dataProtectionTrainingCompletedAt).toBeNull();
+    });
+  });
+
+  describe('R592: Employee hierarchy uses role keys rather than job titles', () => {
+    it('R592: createDefaultEmploymentRecord determines isTopOfHierarchy from managing_partner role rather than jobTitle', () => {
+      const fakeTitleEmployee = createDefaultEmploymentRecord({
+        person: {
+          id: 'P-FAKE-TOP',
+          firstName: 'Sam',
+          surname: 'FakeTitle',
+          jobTitle: 'Acting Managing Partner',
+          roles: ['fee_earner'],
+          employeeRoleId: 'employee_role.fee_earner',
+          departmentId: 'DEPT-RE',
+        },
+        allPeople: [
+          {
+            id: 'P-REAL-MP',
+            firstName: 'Gethin',
+            surname: 'Lloyd',
+            roles: ['managing_partner'],
+            employeeRoleId: 'employee_role.practice_manager',
+            isEmployee: true,
+          } as Person,
+        ],
+        byId: 'P-000004',
+        nowIso: '2026-11-20T10:00:00.000Z',
+        primaryDomain: 'notalawfirm.example',
+      });
+      expect(fakeTitleEmployee.isTopOfHierarchy).toBe(false);
+      expect(fakeTitleEmployee.lineManagerId).toBe('P-REAL-MP');
+
+      const renamedMpRoleEmployee = createDefaultEmploymentRecord({
+        person: {
+          id: 'P-REAL-MP-2',
+          firstName: 'Angharad',
+          surname: 'Evans',
+          jobTitle: 'Senior Executive Chair',
+          roles: ['managing_partner'],
+          employeeRoleId: 'employee_role.practice_manager',
+          departmentId: 'DEPT-RE',
+        },
+        allPeople: [],
+        byId: 'P-000004',
+        nowIso: '2026-11-20T10:00:00.000Z',
+        primaryDomain: 'notalawfirm.example',
+      });
+      expect(renamedMpRoleEmployee.isTopOfHierarchy).toBe(true);
+      expect(renamedMpRoleEmployee.lineManagerId).toBeNull();
     });
   });
 });

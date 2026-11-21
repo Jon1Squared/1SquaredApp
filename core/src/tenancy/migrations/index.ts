@@ -2712,6 +2712,294 @@ DROP SEQUENCE IF EXISTS public.tenant_teams_outbox_id_seq;
 `.trim(),
   };
 
+// Retained `0021_stable_keys_and_team_metadata_backfill` name for applied-migration
+// stability after R619 removed English team-name matching in favour of explicit
+// team `systemKey: 'intake'` / `enquiries.fallbackTeamId` (configured via Admin
+// or `Load demo dataset`).
+export const STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021: TenantMigrationDefinition =
+  {
+    version: '0021',
+    name: '0021_stable_keys_and_team_metadata_backfill',
+    description:
+      'Reversible idempotent per-tenant backfill of canonical choice_values systemKeys and legacy conflict_check_draft / conflict_check_review task autoTrigger values without team layout assumptions (R600, R604, R619, R621).',
+    dependsOn: ['0020'],
+    tablesChanged: ['choice_values', 'tasks'],
+    upSql: `
+CREATE TABLE IF NOT EXISTS public.migration_0021_backfill_audit (
+  tenant_id TEXT NOT NULL,
+  entity_kind TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  written_value TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, entity_kind, record_id)
+);
+
+REVOKE ALL ON TABLE public.migration_0021_backfill_audit FROM PUBLIC;
+DO $$
+DECLARE
+  v_role TEXT := 'role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$');
+BEGIN
+  IF v_role IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+    EXECUTE format('REVOKE ALL ON TABLE public.migration_0021_backfill_audit FROM %I', v_role);
+  END IF;
+END $$;
+
+WITH choice_mapping(id, list_key, sys_key) AS (
+  VALUES
+    ('person_role.client_contact', 'person_role', 'client_contact'),
+    ('person_role.private_client', 'person_role', 'private_client'),
+    ('person_role.referrer', 'person_role', 'referrer'),
+    ('person_role.introducer', 'person_role', 'introducer'),
+    ('person_role.supplier_contact', 'person_role', 'supplier_contact'),
+    ('person_role.counsel', 'person_role', 'counsel'),
+    ('person_role.expert', 'person_role', 'expert'),
+    ('person_role.internal_colleague', 'person_role', 'internal_colleague'),
+    ('person_role.professional_adviser', 'person_role', 'professional_adviser'),
+    ('person_role.opposing_party', 'person_role', 'opposing_party'),
+    ('person_record_status.active', 'person_record_status', 'active'),
+    ('person_record_status.archived', 'person_record_status', 'archived'),
+    ('person_record_status.deceased', 'person_record_status', 'deceased'),
+    ('person_record_status.merged', 'person_record_status', 'merged'),
+    ('employee_role.partner', 'employee_role', 'partner'),
+    ('employee_role.fee_earner', 'employee_role', 'fee_earner'),
+    ('employee_role.senior_solicitor', 'employee_role', 'senior_solicitor'),
+    ('employee_role.solicitor', 'employee_role', 'solicitor'),
+    ('employee_role.trainee_paralegal', 'employee_role', 'trainee_paralegal'),
+    ('employee_role.practice_manager', 'employee_role', 'practice_manager'),
+    ('employee_role.business_development', 'employee_role', 'business_development'),
+    ('employee_role.risk_and_compliance', 'employee_role', 'risk_and_compliance'),
+    ('employee_role.finance', 'employee_role', 'finance'),
+    ('employee_role.support_staff', 'employee_role', 'support_staff'),
+    ('employee_role.system_administrator', 'employee_role', 'system_administrator'),
+    ('employee_role.supervisor', 'employee_role', 'supervisor'),
+    ('employee_role.intake', 'employee_role', 'intake'),
+    ('employee_role.enquiries_coordinator', 'employee_role', 'enquiries_coordinator'),
+    ('other_name_type.previous_name', 'other_name_type', 'previous_name'),
+    ('other_name_type.maiden_name', 'other_name_type', 'maiden_name'),
+    ('other_name_type.also_known_as', 'other_name_type', 'also_known_as'),
+    ('other_name_type.alias', 'other_name_type', 'alias'),
+    ('organisation_relationship_type.client', 'organisation_relationship_type', 'client'),
+    ('organisation_relationship_type.former_client', 'organisation_relationship_type', 'former_client'),
+    ('organisation_relationship_type.prospect', 'organisation_relationship_type', 'prospect'),
+    ('organisation_relationship_type.referrer', 'organisation_relationship_type', 'referrer'),
+    ('organisation_relationship_type.introducer', 'organisation_relationship_type', 'introducer'),
+    ('organisation_relationship_type.business_development_contact', 'organisation_relationship_type', 'business_development_contact'),
+    ('organisation_relationship_type.supplier', 'organisation_relationship_type', 'supplier'),
+    ('organisation_relationship_type.strategic_partner', 'organisation_relationship_type', 'strategic_partner'),
+    ('organisation_relationship_type.opposing_solicitors', 'organisation_relationship_type', 'opposing_solicitors'),
+    ('organisation_relationship_type.counterparty', 'organisation_relationship_type', 'counterparty'),
+    ('organisation_relationship_type.barristers', 'organisation_relationship_type', 'barristers'),
+    ('organisation_relationship_type.experts_and_consultants', 'organisation_relationship_type', 'experts_and_consultants'),
+    ('organisation_relationship_type.professional_adviser', 'organisation_relationship_type', 'professional_adviser'),
+    ('organisation_record_status.active', 'organisation_record_status', 'active'),
+    ('organisation_record_status.archived', 'organisation_record_status', 'archived'),
+    ('organisation_record_status.merged', 'organisation_record_status', 'merged'),
+    ('organisation_record_status.dissolved', 'organisation_record_status', 'dissolved'),
+    ('conflict_status.cleared', 'conflict_status', 'cleared'),
+    ('conflict_status.potential_conflict', 'conflict_status', 'potential_conflict'),
+    ('relationship_status.prospective', 'relationship_status', 'prospective'),
+    ('relationship_status.active', 'relationship_status', 'active'),
+    ('relationship_status.dormant', 'relationship_status', 'dormant'),
+    ('relationship_status.former', 'relationship_status', 'former'),
+    ('duplicate_status.none', 'duplicate_status', 'none'),
+    ('duplicate_status.possible_match', 'duplicate_status', 'possible_match'),
+    ('duplicate_status.confirmed_duplicate', 'duplicate_status', 'confirmed_duplicate'),
+    ('duplicate_status.merged', 'duplicate_status', 'merged'),
+    ('verification_status.not_started', 'verification_status', 'not_started'),
+    ('verification_status.in_progress', 'verification_status', 'in_progress'),
+    ('verification_status.verified', 'verification_status', 'verified'),
+    ('verification_status.expired', 'verification_status', 'expired'),
+    ('verification_status.not_required', 'verification_status', 'not_required'),
+    ('risk_rating.low', 'risk_rating', 'low'),
+    ('risk_rating.medium', 'risk_rating', 'medium'),
+    ('risk_rating.high', 'risk_rating', 'high'),
+    ('risk_rating.critical', 'risk_rating', 'critical'),
+    ('risk_rating.conflict_flagged', 'risk_rating', 'conflict_flagged'),
+    ('risk_rating.sensitive', 'risk_rating', 'sensitive'),
+    ('matter_status.prospective_enquiry', 'matter_status', 'prospective'),
+    ('matter_status.cmi_incomplete', 'matter_status', 'cmi_incomplete'),
+    ('matter_status.active', 'matter_status', 'active'),
+    ('matter_status.on_hold', 'matter_status', 'on_hold'),
+    ('matter_status.completed', 'matter_status', 'completed'),
+    ('matter_status.closed', 'matter_status', 'closed'),
+    ('matter_status.archived', 'matter_status', 'archived'),
+    ('matter_status.aborted_lost', 'matter_status', 'aborted'),
+    ('enquiry_channel.phone', 'enquiry_channel', 'phone'),
+    ('enquiry_channel.email', 'enquiry_channel', 'email'),
+    ('enquiry_channel.web_form', 'enquiry_channel', 'web_form'),
+    ('enquiry_channel.walk_in', 'enquiry_channel', 'walk_in'),
+    ('enquiry_channel.referral', 'enquiry_channel', 'referral'),
+    ('enquiry_channel.existing_client', 'enquiry_channel', 'existing_client'),
+    ('enquiry_urgency.standard', 'enquiry_urgency', 'standard'),
+    ('enquiry_urgency.urgent', 'enquiry_urgency', 'urgent'),
+    ('enquiry_urgency.emergency', 'enquiry_urgency', 'emergency'),
+    ('enquiry_close_reason.conflict', 'enquiry_close_reason', 'conflict'),
+    ('enquiry_close_reason.outside_our_expertise', 'enquiry_close_reason', 'outside_expertise'),
+    ('enquiry_close_reason.not_commercially_viable', 'enquiry_close_reason', 'not_viable'),
+    ('enquiry_close_reason.client_went_elsewhere', 'enquiry_close_reason', 'went_elsewhere'),
+    ('enquiry_close_reason.no_response', 'enquiry_close_reason', 'no_response'),
+    ('enquiry_close_reason.referred_out', 'enquiry_close_reason', 'referred_out'),
+    ('enquiry_close_reason.other', 'enquiry_close_reason', 'other'),
+    ('task_type.call_back', 'task_type', 'call_back'),
+    ('task_type.follow_up', 'task_type', 'follow_up'),
+    ('task_type.send_letter', 'task_type', 'send_letter'),
+    ('task_type.conflict_check', 'task_type', 'conflict_check'),
+    ('task_type.review', 'task_type', 'review'),
+    ('task_type.complete_matter_opening', 'task_type', 'complete_matter_opening'),
+    ('task_type.general', 'task_type', 'general'),
+    ('task_priority.low', 'task_priority', 'low'),
+    ('task_priority.normal', 'task_priority', 'normal'),
+    ('task_priority.high', 'task_priority', 'high'),
+    ('task_priority.urgent', 'task_priority', 'urgent'),
+    ('task_status.to_do', 'task_status', 'todo'),
+    ('task_status.in_progress', 'task_status', 'in_progress'),
+    ('task_status.waiting', 'task_status', 'waiting'),
+    ('task_status.done', 'task_status', 'done'),
+    ('task_status.cancelled', 'task_status', 'cancelled'),
+    ('matter_stage_group.default_group', 'matter_stage_group', 'default_group')
+),
+inserted_choice_audit AS (
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, written_value)
+  SELECT cv.tenant_id, 'choice_value', cv.id, cm.sys_key
+    FROM public.choice_values cv
+    JOIN choice_mapping cm ON cm.id = cv.id AND cm.list_key = cv.list_key
+   WHERE COALESCE(cv.metadata_json->>'systemKey', '') = ''
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.choice_values cv2
+        WHERE cv2.tenant_id = cv.tenant_id
+          AND cv2.list_key = cv.list_key
+          AND cv2.id <> cv.id
+          AND cv2.metadata_json->>'systemKey' = cm.sys_key
+     )
+  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
+  RETURNING tenant_id, record_id, written_value
+)
+UPDATE public.choice_values cv
+   SET metadata_json = jsonb_set(
+     COALESCE(cv.metadata_json, '{}'::jsonb),
+     '{systemKey}',
+     to_jsonb(ica.written_value),
+     true
+   )
+  FROM inserted_choice_audit ica
+  JOIN choice_mapping cm ON cm.id = ica.record_id
+ WHERE cv.tenant_id = ica.tenant_id
+   AND cv.id = ica.record_id
+   AND cv.list_key = cm.list_key
+   AND COALESCE(cv.metadata_json->>'systemKey', '') = ''
+   AND NOT EXISTS (
+     SELECT 1
+       FROM public.choice_values cv2
+      WHERE cv2.tenant_id = cv.tenant_id
+        AND cv2.list_key = cv.list_key
+        AND cv2.id <> cv.id
+        AND cv2.metadata_json->>'systemKey' = ica.written_value
+   );
+
+WITH task_matter_links AS (
+  SELECT tlr.tenant_id, tlr.task_id, tlr.record_id AS matter_id
+    FROM public.task_linked_records tlr
+   WHERE tlr.record_type = 'matter'
+  UNION
+  SELECT t.tenant_id, t.id AS task_id, lr.elem->>'recordId' AS matter_id
+    FROM public.tasks t
+   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.linked_records_json, '[]'::jsonb)) AS lr(elem)
+   WHERE lr.elem->>'recordType' = 'matter'
+     AND COALESCE(lr.elem->>'recordId', '') <> ''
+),
+eligible_matter_tasks AS (
+  SELECT
+    t.tenant_id,
+    tml.matter_id,
+    t.id,
+    t.created_at,
+    CASE
+      WHEN (
+        CASE
+          WHEN m.conflict_check_record_json IS NOT NULL
+            AND COALESCE(trim(m.conflict_check_record_json->>'status'), '') <> ''
+          THEN trim(m.conflict_check_record_json->>'status') = 'Referred'
+          ELSE trim(COALESCE(m.conflict_check_status, '')) IN (
+            'Referred',
+            'Pending conflict review',
+            'Potential conflict — escalated',
+            'Potential conflict - escalated',
+            'Potential conflict'
+          )
+        END
+      ) THEN 'conflict_check_review'
+      WHEN (
+        (
+          COALESCE(trim(m.conflict_check_record_json->>'savedDraftAtDisplay'), '') <> ''
+          AND COALESCE(trim(m.conflict_check_record_json->>'status'), '') IN ('In progress', 'Not started', '')
+        )
+        OR (
+          COALESCE(trim(m.conflict_check_record_json->>'status'), '') = ''
+          AND trim(COALESCE(m.conflict_check_status, '')) = 'Draft'
+        )
+      ) THEN 'conflict_check_draft'
+      ELSE NULL
+    END AS trigger_value
+  FROM public.tasks t
+  JOIN task_matter_links tml ON tml.tenant_id = t.tenant_id AND tml.task_id = t.id
+  JOIN public.matters m ON m.tenant_id = tml.tenant_id AND m.id = tml.matter_id
+  WHERE t.auto_trigger IS NULL
+    AND COALESCE(t.profile_json->>'autoTrigger', '') = ''
+    AND t.task_type_id = 'task_type.conflict_check'
+    AND t.status NOT IN ('Done', 'Cancelled')
+),
+task_candidates AS (
+  SELECT DISTINCT ON (tenant_id, matter_id)
+    tenant_id,
+    id,
+    trigger_value
+  FROM eligible_matter_tasks
+  WHERE trigger_value IS NOT NULL
+  ORDER BY tenant_id, matter_id, created_at DESC, id DESC
+),
+inserted_task_audit AS (
+  INSERT INTO public.migration_0021_backfill_audit (tenant_id, entity_kind, record_id, written_value)
+  SELECT tc.tenant_id, 'task', tc.id, tc.trigger_value
+    FROM task_candidates tc
+   WHERE tc.trigger_value IS NOT NULL
+  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
+  RETURNING tenant_id, record_id, written_value
+)
+UPDATE public.tasks t
+   SET auto_trigger = ita.written_value,
+       profile_json = jsonb_set(
+         COALESCE(t.profile_json, '{}'::jsonb),
+         '{autoTrigger}',
+         to_jsonb(ita.written_value),
+         true
+       )
+  FROM inserted_task_audit ita
+ WHERE t.tenant_id = ita.tenant_id
+   AND t.id = ita.record_id
+   AND t.auto_trigger IS NULL;
+`.trim(),
+    downSql: `
+UPDATE public.choice_values cv
+   SET metadata_json = COALESCE(cv.metadata_json, '{}'::jsonb) - 'systemKey'
+  FROM public.migration_0021_backfill_audit a
+ WHERE a.tenant_id = cv.tenant_id
+   AND a.entity_kind = 'choice_value'
+   AND a.record_id = cv.id
+   AND cv.metadata_json->>'systemKey' = a.written_value;
+
+UPDATE public.tasks t
+   SET auto_trigger = NULL,
+       profile_json = COALESCE(t.profile_json, '{}'::jsonb) - 'autoTrigger'
+  FROM public.migration_0021_backfill_audit a
+ WHERE a.tenant_id = t.tenant_id
+   AND a.entity_kind = 'task'
+   AND a.record_id = t.id
+   AND t.auto_trigger = a.written_value;
+
+DROP TABLE IF EXISTS public.migration_0021_backfill_audit CASCADE;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -2733,6 +3021,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   TENANT_SEARCH_INDEXES_MIGRATION_0018,
   EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019,
   TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020,
+  STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021,
 ];
 
 export function validateMigrationCatalogueOrder(

@@ -42,8 +42,16 @@ function find<T extends { dimension: string }>(arr: T[], dimension: string): T {
 const crm = taxonomy.crmAndRelationships;
 const cm = taxonomy.clientAndMatter;
 
-function fromTaxonomy(dim: { values: { name: string; description?: string; guidance?: string }[] }): Seed[] {
-  return dim.values.map((v) => ({ label: v.name, description: v.description, guidance: v.guidance }));
+function fromTaxonomy(
+  dim: { values: { name: string; description?: string; guidance?: string }[] },
+  systemKeysByName?: Record<string, string>,
+): Seed[] {
+  return dim.values.map((v) => ({
+    label: v.name,
+    description: v.description,
+    guidance: v.guidance,
+    ...(systemKeysByName?.[v.name] ? { systemKey: systemKeysByName[v.name] } : {}),
+  }));
 }
 
 const FLAT_LISTS: ListSeed[] = [
@@ -87,14 +95,14 @@ const FLAT_LISTS: ListSeed[] = [
     appliesTo: P,
     description: 'Each employee has exactly one role.',
     values: [
-      { label: 'Partner', description: 'Equity partner, salaried partner' },
-      { label: 'Fee earner', description: 'Solicitor, associate, legal executive, paralegal' },
-      { label: 'Practice manager', description: 'Oversees a practice area' },
-      { label: 'Business development', description: 'Manages client and referrer relationships' },
-      { label: 'Risk and compliance', description: 'Conflicts, onboarding and compliance' },
-      { label: 'Finance', description: 'Billing, credit control and financial administration' },
-      { label: 'Support staff', description: 'Legal secretary, administrator, operations support' },
-      { label: 'System administrator', description: 'Manages application configuration and access' },
+      { label: 'Partner', systemKey: 'partner', description: 'Equity partner, salaried partner' },
+      { label: 'Fee earner', systemKey: 'fee_earner', description: 'Solicitor, associate, legal executive, paralegal' },
+      { label: 'Practice manager', systemKey: 'practice_manager', description: 'Oversees a practice area' },
+      { label: 'Business development', systemKey: 'business_development', description: 'Manages client and referrer relationships' },
+      { label: 'Risk and compliance', systemKey: 'risk_and_compliance', description: 'Conflicts, onboarding and compliance' },
+      { label: 'Finance', systemKey: 'finance', description: 'Billing, credit control and financial administration' },
+      { label: 'Support staff', systemKey: 'support_staff', description: 'Legal secretary, administrator, operations support' },
+      { label: 'System administrator', systemKey: 'system_administrator', description: 'Manages application configuration and access' },
     ],
   },
   {
@@ -283,7 +291,21 @@ const FLAT_LISTS: ListSeed[] = [
   { key: 'pipeline_stage', label: 'Pipeline stage', group: 'taxonomy', appliesTo: O, description: find(crm, 'Pipeline Stage').description, values: fromTaxonomy(find(crm, 'Pipeline Stage')) },
   { key: 'sector', label: 'Client sector', group: 'taxonomy', appliesTo: O, description: find(cm, 'Client Sector').description, values: fromTaxonomy(find(cm, 'Client Sector')) },
   { key: 'client_tier', label: 'Client tier', group: 'taxonomy', appliesTo: O, description: find(cm, 'Client Tier').description, values: fromTaxonomy(find(cm, 'Client Tier')) },
-  { key: 'risk_rating', label: 'Risk rating', group: 'taxonomy', appliesTo: O, description: find(cm, 'Risk Rating').description, values: fromTaxonomy(find(cm, 'Risk Rating')) },
+  {
+    key: 'risk_rating',
+    label: 'Risk rating',
+    group: 'taxonomy',
+    appliesTo: O,
+    description: find(cm, 'Risk Rating').description,
+    values: fromTaxonomy(find(cm, 'Risk Rating'), {
+      Low: 'low',
+      Medium: 'medium',
+      High: 'high',
+      Critical: 'critical',
+      'Conflict Flagged': 'conflict_flagged',
+      Sensitive: 'sensitive',
+    }),
+  },
   { key: 'contact_type', label: 'Contact type', group: 'taxonomy', appliesTo: BOTH, description: find(crm, 'Contact Type').description, values: fromTaxonomy(find(crm, 'Contact Type')) },
 
   // ---------------- Matters and documents (flat) ----------------

@@ -78,6 +78,8 @@ export interface TenantTaskRecord {
     | 'enquiry_contact'
     | 'non_engagement_letter'
     | 'complete_matter_opening'
+    | 'conflict_check_draft'
+    | 'conflict_check_review'
     | 'work_type_auto_task'
     | null;
   linkedKeyDateId?: string | null;

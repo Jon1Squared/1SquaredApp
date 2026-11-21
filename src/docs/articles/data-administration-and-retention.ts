@@ -41,7 +41,7 @@ All administrative configuration mutations in the \`/admin\` console require mul
 
 ## 4. The firm audit log
 
-- **Append-only**: Audit entries are stored in the tenant's own PostgreSQL database. The application role may only insert and read them; any attempt to edit or delete an entry is refused by the database.
+- **Append-only (and pre-outbox historical rows, \`R616\`)**: Audit entries are stored in the tenant's own PostgreSQL database. The application role may only insert and read them; any attempt to edit or delete an entry is refused by the database. New enquiry emails write only \`email-queued\` outbox references with zero addresses or bodies (\`email_outbox\` payloads are scrubbed automatically after \`outboxContentRetentionDays\`); any historical pre-outbox \`email-sent\` audit rows remain subject to the append-only database audit retention model and cannot be retro-mutated by the application role.
 - **Written with the change it describes**: An audit entry is saved in the same transaction as the change it records (for example key-date and Document Generation changes). If either fails, neither is saved.
 - **Scoped views**: The **Firm audit log** section in **Admin** requires \`admin:access\` with verified MFA (\`MFA_REQUIRED\` if MFA is unverified) and shows up to 250 visible entries per page in reverse sequence order, with a **Next** cursor link (\`?auditBeforeSeq=…\`) to page through older entries. Entries about restricted staff matters and sensitive or payroll HR records are filtered out before filling each page for viewers without access.
 - **Demo reset**: Loading the demo dataset reloads the audit log from the demo data, so audit reference numbers (\`AU-…\`) start again from the demo sequence.

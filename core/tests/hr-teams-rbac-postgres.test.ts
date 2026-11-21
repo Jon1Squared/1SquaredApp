@@ -2056,4 +2056,64 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
       await resetAllDemoData('P-000001', ctx);
     }
   });
+
+  it('R592: savePersonRecord synchronises team membership via Team.departmentId even when the team display name is renamed', async () => {
+    const { ctx, actorSession } = makeHostActorAndContext('P-000004');
+    try {
+      await resetAllDemoData('P-000001', ctx);
+      const hrRepo = getHrAndRbacRepository();
+      const existingTeams = await hrRepo.listAllTeams<TenantTeamRecord>(ctx);
+      const corpTeam = existingTeams.find((t) =>
+        t.name.toLowerCase().includes('corporate'),
+      )!;
+      expect(corpTeam).toBeDefined();
+
+      // Admin renames team and ensures stable departmentId link
+      await hrRepo.putTeam(ctx, {
+        ...corpTeam,
+        name: 'Commercial Advisory Hub',
+        departmentId: 'DEPT-CORP',
+      });
+
+      const res = await runWithActiveActorSession(actorSession, () =>
+        savePersonRecord(
+          {
+            firstName: 'Nia',
+            surname: 'Griffiths',
+            dateOfBirth: '1988-05-12',
+            employeeRoleId: 'employee_role.partner',
+            emails: [
+              {
+                id: 'EM-R592-1',
+                address: 'nia.griffiths@notalawfirm.example',
+                typeId: 'email_type.work',
+                isPrimary: true,
+              },
+            ],
+          },
+          {
+            byId: 'P-000004',
+            worksAtFirm: true,
+            employmentSubmitted: {
+              departmentId: 'DEPT-CORP',
+              roleType: 'Partner/Member',
+              jobTitle: 'Commercial Partner',
+              employeeNumber: 'EMP-9592',
+            },
+          },
+        ),
+      );
+
+      expect(res.errors).toBeUndefined();
+      expect(res.person?.id).toBeTruthy();
+
+      const updatedTeam = (await hrRepo.listAllTeams<TenantTeamRecord>(ctx)).find(
+        (t) => t.id === corpTeam.id,
+      )!;
+      expect(updatedTeam.memberIds).toContain(res.person!.id);
+      expect(updatedTeam.leadIds).toContain(res.person!.id);
+    } finally {
+      await resetAllDemoData('P-000001', ctx);
+    }
+  });
 });
