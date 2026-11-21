@@ -1155,7 +1155,7 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
                 if (
                   txCtx.tenantId === 'tenant-alpha' &&
                   sql.includes('INSERT INTO public.job_runs') &&
-                  sql.includes("'succeeded'")
+                  (sql.includes("'succeeded'") || queryParams?.[6] === 'succeeded')
                 ) {
                   controller.abort(
                     Object.assign(
@@ -1304,7 +1304,7 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
         void tx.query('SELECT 1 / 0');
         return 'committed';
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: 'TENANCY_TRANSACTION_ABORTED' });
 
     expect(
       await taskRepo.getTaskById(ctxAlpha, unawaitedTaskId, {
@@ -1327,7 +1327,7 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
         }
         return 'committed';
       }),
-    ).rejects.toThrow();
+    ).rejects.toMatchObject({ code: 'TENANCY_TRANSACTION_ABORTED' });
 
     expect(
       await taskRepo.getTaskById(ctxAlpha, caughtTaskId, {
@@ -1390,6 +1390,99 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
         includeRestricted: true,
       }),
     ).toBeNull();
+
+    // 4. Swallowed 23505 unique violation inside withTenantTransaction wraps as TENANCY_TRANSACTION_ABORTED with SQLSTATE in cause
+    const swallowed23505TaskId = 'TSK-R632-SWALLOWED-23505';
+    let caught23505TxErr: unknown = null;
+    try {
+      await taskRepo.withTenantTransaction(ctxAlpha, async (tx) => {
+        await taskRepo.putTask(
+          ctxAlpha,
+          makeR632Task(
+            swallowed23505TaskId,
+            'T-R632-23505',
+            'Must roll back swallowed 23505',
+          ),
+        );
+        await tx.query(
+          'INSERT INTO tenant_record_sequences (tenant_id, counter_key, last_value) VALUES ($1, $2, 1)',
+          [ctxAlpha.tenantId, 'R632-DUP-KEY-4'],
+        );
+        try {
+          await tx.query(
+            'INSERT INTO tenant_record_sequences (tenant_id, counter_key, last_value) VALUES ($1, $2, 1)',
+            [ctxAlpha.tenantId, 'R632-DUP-KEY-4'],
+          );
+        } catch {
+          // Swallowed unique violation inside caller callback
+        }
+        return 'committed';
+      });
+    } catch (err) {
+      caught23505TxErr = err;
+    }
+    expect(caught23505TxErr).toMatchObject({
+      code: 'TENANCY_TRANSACTION_ABORTED',
+      cause: { code: '23505' },
+    });
+    expect(
+      await taskRepo.getTaskById(ctxAlpha, swallowed23505TaskId, {
+        includeRestricted: true,
+      }),
+    ).toBeNull();
+
+    // 5. Swallowed 23505 inside scheduled executeControlledTenantJobRun fails with TENANCY_TRANSACTION_ABORTED (never already_succeeded_today)
+    const jobRunRepo = getJobRunRepository();
+    let jobErr: unknown = null;
+    try {
+      await jobRunRepo.executeControlledTenantJobRun(ctxAlpha, {
+        jobKey: 'register-reminders',
+        triggerSource: 'scheduled',
+        triggeredById: 'system:register-reminders',
+        timeZone: 'UTC',
+        targetLocalHour: 0,
+        now: new Date('2026-07-07T03:00:00.000Z'),
+        work: async ({ tx }) => {
+          await tx.query(
+            'INSERT INTO tenant_record_sequences (tenant_id, counter_key, last_value) VALUES ($1, $2, 1)',
+            [ctxAlpha.tenantId, 'R632-DUP-KEY-5'],
+          );
+          try {
+            await tx.query(
+              'INSERT INTO tenant_record_sequences (tenant_id, counter_key, last_value) VALUES ($1, $2, 1)',
+              [ctxAlpha.tenantId, 'R632-DUP-KEY-5'],
+            );
+          } catch {
+            // Swallowed unique violation inside scheduled job work
+          }
+          return { result: 'unexpected', summary: { count: 1 } };
+        },
+      });
+    } catch (err) {
+      jobErr = err;
+    }
+    expect(jobErr).toMatchObject({
+      code: 'TENANCY_TRANSACTION_ABORTED',
+      cause: { code: '23505' },
+    });
+    const r632FailedRuns = await jobRunRepo.listJobRuns(ctxAlpha, {
+      jobKey: 'register-reminders',
+      localDate: '2026-07-07',
+    });
+    expect(r632FailedRuns.some((r) => r.status === 'succeeded')).toBe(false);
+    expect(
+      r632FailedRuns.some(
+        (r) =>
+          r.status === 'failed' &&
+          r.errorCode === 'TENANCY_TRANSACTION_ABORTED',
+      ),
+    ).toBe(true);
+    expect(
+      await jobRunRepo.listJobRuns(ctxBravo, {
+        jobKey: 'register-reminders',
+        localDate: '2026-07-07',
+      }),
+    ).toHaveLength(0);
 
     // Two-tenant positive control: Tenant Bravo commits cleanly
     const bravoTaskId = 'TSK-R632-BRAVO-OK';

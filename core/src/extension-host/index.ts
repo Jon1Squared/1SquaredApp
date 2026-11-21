@@ -74,7 +74,7 @@ export function isCoreApiRangeCompatible(
   }
   const validVersion = semver.valid(trimmedVersion);
   const validRange = semver.validRange(trimmedRange);
-  if (!validVersion || !validRange) {
+  if (!validVersion || !validRange || validRange === '*') {
     return false;
   }
   return semver.satisfies(validVersion, validRange, {

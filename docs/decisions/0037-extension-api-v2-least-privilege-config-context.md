@@ -1,7 +1,7 @@
 # ADR 0037: Extension API v2.0.0 — Least-Privilege Configuration Context
 
 - **Date:** 2026-11-21
-- **Status:** Proposed (awaiting owner approval)
+- **Status:** Accepted (2026-11-21) (Stage 0 exit decision D8 (ADR 0037))
 - **Related:** [ADR 0003: Field Catalogue Versioned Contract](./0003-field-catalogue-versioned-contract.md), [ADR 0022: Key Dates and Limitation Module](./0022-key-dates-and-limitation-module.md), [Extension API v2.0.0 Migration Guide](../../core/docs/extension-api-v2-migration.md), [Platform Architecture Standard](../architecture-standard.md) §§5, 6, 7
 
 ## Context
@@ -15,7 +15,7 @@ Platform Architecture Standard §6 and Rule 7 require breaking public contract c
 ## Decision
 
 1. **Major version bump (`CORE_API_VERSION = '2.0.0'`):** Advance `CORE_API_VERSION` in `core/src/api/index.ts` from `'1.1.0'` to `'2.0.0'`. Compatible extension manifests must declare `"supportedCoreApiRange": "^2.0.0"` (for example `client-not-a-law-firm/extensions/nalf-matter-costs-governance/manifest.json`).
-2. **Fail-closed compatibility gate:** `ExtensionHost.registerExtension` retains its strict semantic-version range check (`isCoreApiRangeCompatible` via `semver.satisfies`), rejecting any incompatible manifest (such as `^1.0.0` or `^2.2.0` against `2.1.0`) at registration with `EXTENSION_COMPATIBILITY_ERROR` rather than executing hooks with an unexpected `undefined` `ctx.config`.
+2. **Fail-closed compatibility gate:** `ExtensionHost.registerExtension` retains its strict full semantic-version range check (`isCoreApiRangeCompatible` via `semver.satisfies`, applying full semver ranges rather than major-only matching and explicitly rejecting unbounded wildcards such as `supportedCoreApiRange: '*'`, `'x'`, or `'*.*'`), rejecting any incompatible manifest (such as `'*'`, `^1.0.0`, or `^2.2.0` against `2.1.0`) at registration with `EXTENSION_COMPATIBILITY_ERROR` rather than executing hooks with an unexpected `undefined` `ctx.config`.
 3. **Recorded Stage 0 Rule 7 deprecation exception:** Wait-free immediate transition from `1.1.0` to `2.0.0` (without a overlapping deprecation period supporting unprivileged `config` reads) is explicitly recorded as an exception because:
    - The platform is in **Stage 0** with zero live client deployments and zero third-party or client-owned extensions in production—only the in-repo invented fixture extension (`nalf-matter-costs-governance`) exists.
    - Delaying enforcement of `config:read` to preserve backward compatibility would weaken tenant security boundaries (exposing Key Vault secret references, allow-lists, and module flags to extensions that never requested configuration read access).

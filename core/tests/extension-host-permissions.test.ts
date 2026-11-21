@@ -656,6 +656,9 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
     expect(isCoreApiRangeCompatible('2.0.0', '^1.0.0')).toBe(false);
     expect(isCoreApiRangeCompatible('2.0.0', '')).toBe(false);
     expect(isCoreApiRangeCompatible('2.0.0', '*')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0', 'x')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0', 'X')).toBe(false);
+    expect(isCoreApiRangeCompatible('2.0.0', '*.*')).toBe(false);
     expect(isCoreApiRangeCompatible('2.0.0-alpha.1', '^2.0.0')).toBe(false);
 
     const host = new ExtensionHost({ coreApiVersion: '2.1.0' });
@@ -674,5 +677,25 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
     expect(() => host.registerExtension(higherMinorExt)).toThrow(
       /EXTENSION_COMPATIBILITY_ERROR/,
     );
+    expect(() =>
+      host.registerExtension({
+        ...higherMinorExt,
+        manifest: {
+          ...higherMinorExt.manifest,
+          id: 'ext-wildcard-star',
+          supportedCoreApiRange: '*',
+        },
+      }),
+    ).toThrow(/EXTENSION_COMPATIBILITY_ERROR/);
+    expect(() =>
+      host.registerExtension({
+        ...higherMinorExt,
+        manifest: {
+          ...higherMinorExt.manifest,
+          id: 'ext-wildcard-x',
+          supportedCoreApiRange: 'x',
+        },
+      }),
+    ).toThrow(/EXTENSION_COMPATIBILITY_ERROR/);
   });
 });

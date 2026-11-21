@@ -10594,54 +10594,60 @@ export async function resetAllDemoData(
       err.code = 'DEMO_DATA_LIVE_FORBIDDEN';
       throw err;
     }
-    const [prevProfile, prevPeople] = await Promise.all([
-      getCatalogueRepository().getFirmProfile(ctx),
-      getPartyRepository().listAllPeople<Person>(ctx),
-    ]);
-    const actor = prevPeople.find((p) => p.id === byId) ?? null;
-    const actorName = actor ? personDisplayName(actor) : byId;
-    const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
-    if (
-      !prevProfile?.isCleanDeployment &&
-      getActiveTenantConfiguration().environment !== 'test'
-    ) {
-      for (const p of prevPeople) {
-        const email = primaryEmail(p).trim().toLowerCase();
-        if (email) {
-          prevSeededEntraByIdAndEmail.set(`${p.id}::${email}`, p.entraObjectId);
-        }
-      }
-    }
-    const includeSyntheticEntraOids =
-      getActiveTenantConfiguration().environment === 'test';
-    const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
-    if (prevSeededEntraByIdAndEmail.size > 0) {
-      for (const p of fresh.people) {
-        const email = primaryEmail(p).trim().toLowerCase();
-        const key = `${p.id}::${email}`;
-        if (email && prevSeededEntraByIdAndEmail.has(key)) {
-          const prevOid = prevSeededEntraByIdAndEmail.get(key);
-          if (prevOid === undefined) {
-            delete p.entraObjectId;
-          } else {
-            p.entraObjectId = prevOid;
+    await getCatalogueRepository().withTenantTransaction(
+      ctx,
+      async () => {
+        const [prevProfile, prevPeople] = await Promise.all([
+          getCatalogueRepository().getFirmProfile(ctx),
+          getPartyRepository().listAllPeople<Person>(ctx),
+        ]);
+        const actor = prevPeople.find((p) => p.id === byId) ?? null;
+        const actorName = actor ? personDisplayName(actor) : byId;
+        const prevSeededEntraByIdAndEmail = new Map<string, string | null | undefined>();
+        if (
+          !prevProfile?.isCleanDeployment &&
+          getActiveTenantConfiguration().environment !== 'test'
+        ) {
+          for (const p of prevPeople) {
+            const email = primaryEmail(p).trim().toLowerCase();
+            if (email) {
+              prevSeededEntraByIdAndEmail.set(`${p.id}::${email}`, p.entraObjectId);
+            }
           }
         }
-      }
-    }
-    await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
-    await appendTenantAuditEntries(ctx, [
-      {
-        recordType: 'system',
-        recordId: 'demo-data',
-        action: 'data-reset',
-        field: 'Reset demo data',
-        oldValue: null,
-        newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
-        byId,
-        at: new Date().toISOString(),
+        const includeSyntheticEntraOids =
+          getActiveTenantConfiguration().environment === 'test';
+        const fresh = createSeedStore(new Date(), { includeSyntheticEntraOids });
+        if (prevSeededEntraByIdAndEmail.size > 0) {
+          for (const p of fresh.people) {
+            const email = primaryEmail(p).trim().toLowerCase();
+            const key = `${p.id}::${email}`;
+            if (email && prevSeededEntraByIdAndEmail.has(key)) {
+              const prevOid = prevSeededEntraByIdAndEmail.get(key);
+              if (prevOid === undefined) {
+                delete p.entraObjectId;
+              } else {
+                p.entraObjectId = prevOid;
+              }
+            }
+          }
+        }
+        await importFirmStoreModulesToPostgres({ ctx, store: fresh, clearFirst: true });
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'system',
+            recordId: 'demo-data',
+            action: 'data-reset',
+            field: 'Reset demo data',
+            oldValue: null,
+            newValue: `Restored initial ${fresh.firm.name} dataset (by ${actorName} [${byId}])`,
+            byId,
+            at: new Date().toISOString(),
+          },
+        ]);
       },
-    ]);
+      { statementTimeoutMs: 60_000 },
+    );
 }
 
 export async function clearAllDataToCleanDeployment(
@@ -10658,28 +10664,34 @@ export async function clearAllDataToCleanDeployment(
       err.code = 'DEMO_DATA_LIVE_FORBIDDEN';
       throw err;
     }
-    const actor = await getPartyRepository().getPersonById<Person>(ctx, byId);
-    const actorName = actor ? personDisplayName(actor) : byId;
-    const clean = createCleanDeploymentStore(new Date());
-    await clearMigratedPostgresModulesForTenant({ ctx });
-    await importFirmStoreModulesToPostgres({
+    await getCatalogueRepository().withTenantTransaction(
       ctx,
-      store: clean,
-      modules: ['catalogues'],
-      clearFirst: false,
-    });
-    await appendTenantAuditEntries(ctx, [
-      {
-        recordType: 'system',
-        recordId: 'clean-deployment',
-        action: 'data-cleared',
-        field: 'Clear all data to clean deployment',
-        oldValue: null,
-        newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
-        byId,
-        at: new Date().toISOString(),
+      async () => {
+        const actor = await getPartyRepository().getPersonById<Person>(ctx, byId);
+        const actorName = actor ? personDisplayName(actor) : byId;
+        const clean = createCleanDeploymentStore(new Date());
+        await clearMigratedPostgresModulesForTenant({ ctx });
+        await importFirmStoreModulesToPostgres({
+          ctx,
+          store: clean,
+          modules: ['catalogues'],
+          clearFirst: false,
+        });
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'system',
+            recordId: 'clean-deployment',
+            action: 'data-cleared',
+            field: 'Clear all data to clean deployment',
+            oldValue: null,
+            newValue: `Cleared store to clean deployment (by ${actorName} [${byId}])`,
+            byId,
+            at: new Date().toISOString(),
+          },
+        ]);
       },
-    ]);
+      { statementTimeoutMs: 60_000 },
+    );
 }
 
 // ------------------------------------------------------------------ Notifications

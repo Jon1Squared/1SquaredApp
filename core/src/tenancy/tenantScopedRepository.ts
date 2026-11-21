@@ -317,12 +317,30 @@ export abstract class TenantScopedRepository {
         );
       }
 
+      const buildAbortedTransactionError = (causeError: Error): Error & { code: string } => {
+        // PostgreSQL marks the transaction aborted as soon as any statement fails; this latched
+        // `queuedQueryError` flag cannot be cleared by caller `try/catch` or `ROLLBACK TO SAVEPOINT`.
+        // Wrap as `TENANCY_TRANSACTION_ABORTED` with the original sanitised error (and SQLSTATE) in
+        // `cause` so callers such as `TenantJobRunRepository` do not mistake a swallowed `23505`
+        // error inside job work for `already_succeeded_today` (including when later queries run).
+        const abortErr = new Error(
+          `TENANCY_TRANSACTION_ABORTED: Transaction aborted because an earlier query failed (${causeError.message}).`,
+          { cause: causeError },
+        ) as Error & { code: string };
+        abortErr.code = 'TENANCY_TRANSACTION_ABORTED';
+        return abortErr;
+      };
+
       const wrappedTx: TenantSqlClient = {
         query: <TRow = Record<string, unknown>>(
           sql: string,
           params?: readonly unknown[],
         ): Promise<TenantQueryResult<TRow>> => {
           const runQuery = async (): Promise<TenantQueryResult<TRow>> => {
+            const priorError = queuedQueryError as Error | null;
+            if (priorError) {
+              throw buildAbortedTransactionError(priorError);
+            }
             try {
               const res = await rawClient.query(
                 sql,
@@ -373,8 +391,9 @@ export abstract class TenantScopedRepository {
       }
 
       await queryQueue.catch(() => undefined);
-      if (queuedQueryError) {
-        throw queuedQueryError;
+      const latchedQueryError = queuedQueryError as Error | null;
+      if (latchedQueryError) {
+        throw buildAbortedTransactionError(latchedQueryError);
       }
       const commitRes = await rawClient.query('COMMIT');
       inTransaction = false;

@@ -3,12 +3,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CORE_TENANT_MIGRATIONS,
   loadAndValidateTenantConfig,
   quotePgIdentifier,
   resolvePostgresMigrateUser,
   resolvePostgresRuntimeUser,
+  TenantAuditRepository,
+  TenantMigrationRunner,
 } from '@platform/core';
-import { provisionEntraPostgresClusterRolesAndDatabases } from '../../../core/src/tenancy/postgresAdminBootstrap';
+import {
+  provisionEntraPostgresClusterRolesAndDatabases,
+  provisionPostgresClusterRolesAndDatabases,
+} from '../../../core/src/tenancy/postgresAdminBootstrap';
 import { resolvePublicAppOrigin } from '@/server/entraAuth';
 import {
   runProvisionJobSweep,
@@ -34,7 +40,10 @@ import {
   loadCommittedSeedStore,
   loadCommittedSeedStoreRaw,
 } from '@/seed/seedSnapshot';
-import { createCleanDeploymentStore } from '@/seed/seedStoreBuilder';
+import {
+  createCleanDeploymentStore,
+  createSeedStore,
+} from '@/seed/seedStoreBuilder';
 import {
   clearAllDataToCleanDeployment,
   getAppSnapshot,
@@ -1186,4 +1195,215 @@ describe('S0-11b: Demo tenant configuration, clean store fallback, and seed:demo
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
+
+  it('R641: resetAllDemoData and clearAllDataToCleanDeployment execute import/clear and audit append in a single PostgreSQL transaction across two tenants', async () => {
+    const tenantAlpha = 'tenant-alpha';
+    const tenantBravo = 'tenant-bravo';
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+
+    const rawBase = getActiveTenantRawBaseConfig();
+    const alphaRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantAlpha,
+      displayName: 'Tenant Alpha LLP',
+    };
+    const bravoRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantBravo,
+      displayName: 'Tenant Bravo LLP',
+    };
+    const alphaValidated = loadAndValidateTenantConfig(
+      alphaRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+    const bravoValidated = loadAndValidateTenantConfig(
+      bravoRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+
+    const ctxAlpha = createVerifiedTenantContext(
+      {
+        sub: 'P-000001',
+        name: 'Alpha Admin',
+        email: 'alpha.admin@alpha.example',
+        tenantId: tenantAlpha,
+        roles: ['admin'],
+        mfaVerified: true,
+        correlationId: 'corr-r641-alpha',
+      },
+      alphaValidated,
+    );
+    const ctxBravo = createVerifiedTenantContext(
+      {
+        sub: 'P-000001',
+        name: 'Bravo Admin',
+        email: 'bravo.admin@bravo.example',
+        tenantId: tenantBravo,
+        roles: ['admin'],
+        mfaVerified: true,
+        correlationId: 'corr-r641-bravo',
+      },
+      bravoValidated,
+    );
+
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+    await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+
+    const alphaSeed = createSeedStore();
+    alphaSeed.people[0] = {
+      ...alphaSeed.people[0]!,
+      surname: 'R641PreservedAlpha',
+    };
+    const bravoSeed = createSeedStore();
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: alphaValidated,
+      store: alphaSeed,
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      tenantConfig: bravoValidated,
+      store: bravoSeed,
+      clearFirst: true,
+    });
+
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const catalogueRepo = getCatalogueRepository();
+    const auditRepo = new TenantAuditRepository();
+
+    const origAppendEntries = TenantAuditRepository.prototype.appendAuditEntries;
+    let appendSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+    try {
+      const alphaAuditBefore = await auditRepo.countAuditEntries(ctxAlpha);
+      const bravoAuditBefore = await auditRepo.countAuditEntries(ctxBravo);
+
+      setActiveTenantConfigForTesting(alphaRaw, {
+        tenantId: tenantAlpha,
+        environment: 'test',
+      });
+
+      appendSpy = vi
+        .spyOn(TenantAuditRepository.prototype, 'appendAuditEntries')
+        .mockImplementation(async function (
+          this: TenantAuditRepository,
+          targetCtx,
+          entries,
+        ) {
+          if (
+            entries.some(
+              (entry) =>
+                entry.action === 'data-cleared' ||
+                entry.action === 'data-reset',
+            )
+          ) {
+            throw new Error('SIMULATED_AUDIT_APPEND_FAILURE');
+          }
+          return origAppendEntries.call(this, targetCtx, entries);
+        });
+
+      await expect(
+        clearAllDataToCleanDeployment('P-000001', ctxAlpha),
+      ).rejects.toThrow(/SIMULATED_AUDIT_APPEND_FAILURE/);
+
+      expect(
+        (await partyRepo.listAllPeople(ctxAlpha)).find(
+          (p) => p.id === alphaSeed.people[0]!.id,
+        )?.surname,
+      ).toBe('R641PreservedAlpha');
+      expect(await matterRepo.listAllMattersUnfiltered(ctxAlpha)).toHaveLength(
+        alphaSeed.matters.length,
+      );
+      expect(
+        (await catalogueRepo.getFirmProfile(ctxAlpha))?.isCleanDeployment,
+      ).toBe(false);
+      expect(await auditRepo.countAuditEntries(ctxAlpha)).toBe(
+        alphaAuditBefore,
+      );
+
+      // Tenant Bravo untouched
+      expect(await matterRepo.listAllMattersUnfiltered(ctxBravo)).toHaveLength(
+        bravoSeed.matters.length,
+      );
+      expect(await auditRepo.countAuditEntries(ctxBravo)).toBe(
+        bravoAuditBefore,
+      );
+
+      await expect(
+        resetAllDemoData('P-000001', ctxAlpha),
+      ).rejects.toThrow(/SIMULATED_AUDIT_APPEND_FAILURE/);
+
+      // clearFirst + re-import inside resetAllDemoData also rolled back atomically
+      expect(
+        (await partyRepo.listAllPeople(ctxAlpha)).find(
+          (p) => p.id === alphaSeed.people[0]!.id,
+        )?.surname,
+      ).toBe('R641PreservedAlpha');
+      expect(await matterRepo.listAllMattersUnfiltered(ctxAlpha)).toHaveLength(
+        alphaSeed.matters.length,
+      );
+      expect(await auditRepo.countAuditEntries(ctxAlpha)).toBe(
+        alphaAuditBefore,
+      );
+
+      appendSpy.mockRestore();
+      appendSpy = null;
+
+      await clearAllDataToCleanDeployment('P-000001', ctxAlpha);
+      expect(await partyRepo.listAllPeople(ctxAlpha)).toHaveLength(0);
+      expect(await matterRepo.listAllMattersUnfiltered(ctxAlpha)).toHaveLength(0);
+      expect(
+        (await catalogueRepo.getFirmProfile(ctxAlpha))?.isCleanDeployment,
+      ).toBe(true);
+      expect(
+        (await catalogueRepo.listAllChoiceLists(ctxAlpha)).length,
+      ).toBeGreaterThan(0);
+      const clearedAudits = await auditRepo.listAuditEntriesForRecord(
+        ctxAlpha,
+        'system',
+        'clean-deployment',
+      );
+      expect(clearedAudits.some((e) => e.action === 'data-cleared')).toBe(true);
+      expect(await matterRepo.listAllMattersUnfiltered(ctxBravo)).toHaveLength(
+        bravoSeed.matters.length,
+      );
+
+      await resetAllDemoData('P-000001', ctxAlpha);
+      expect(await partyRepo.listAllPeople(ctxAlpha)).toHaveLength(
+        alphaSeed.people.length,
+      );
+      expect(await matterRepo.listAllMattersUnfiltered(ctxAlpha)).toHaveLength(
+        alphaSeed.matters.length,
+      );
+      expect(
+        (await catalogueRepo.getFirmProfile(ctxAlpha))?.isCleanDeployment,
+      ).toBe(false);
+      const resetAudits = await auditRepo.listAuditEntriesForRecord(
+        ctxAlpha,
+        'system',
+        'demo-data',
+      );
+      expect(resetAudits.some((e) => e.action === 'data-reset')).toBe(true);
+      expect(await matterRepo.listAllMattersUnfiltered(ctxBravo)).toHaveLength(
+        bravoSeed.matters.length,
+      );
+    } finally {
+      appendSpy?.mockRestore();
+      setActiveTenantConfigForTesting(null);
+    }
+  }, 30_000);
 });

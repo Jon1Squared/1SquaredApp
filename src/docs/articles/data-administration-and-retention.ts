@@ -6,7 +6,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How non-live demo data reset and clean-deployment clear operations are protected by admin-only MFA permissions and audited, and how scheduled and manual unconverted enquiry retention anonymisation is enforced.',
-  updated: '2026-11-20',
+  updated: '2026-11-21',
   body: `
 1Squared separates destructive environment data administration from routine firm configuration and enforces strict retention eligibility rules before personal data on closed enquiries can be anonymised.
 
@@ -16,7 +16,7 @@ The **Admin → Demo data** tools (**Load demo dataset** and **Clear all data**)
 
 1. **Non-live demo-enabled environments only**: Both \`resetDemoDataAction\` and \`clearAllDataAction\` check \`isDataResetAllowedEnvironment()\`, which delegates to \`isNonLiveDemoEnvironment()\`, and the underlying helpers (\`resetAllDemoData\`, \`clearAllDataToCleanDeployment\`, and \`importFirmStoreModulesToPostgres\`) also enforce an upfront \`DEMO_DATA_LIVE_FORBIDDEN\` guard (\`R598\`). They are allowed only when the tenant \`environment\` is \`dev\`, \`test\`, \`training\`, or \`demo\` (never \`live\`) **and** \`featureFlags.enableDemoMode\` is \`true\`. Eligibility is decided strictly by tenant configuration rather than \`NODE_ENV\` (see [Demo environment](/docs/demo-environment)).
 2. **System Administrator with MFA (\`admin:data_reset\`)**: Both actions require the \`admin:data_reset\` permission (\`requiresMfa: true\`), which is granted **exclusively to the built-in \`admin\` role** (and not to \`managing_partner\` or \`partner\`). An administrator signed in without multi-factor authentication receives \`MFA_REQUIRED\`.
-3. **Post-reset audit trail**: Before resetting or clearing the per-tenant database, 1Squared captures the acting administrator’s person ID and display name, clears and re-imports the tenant’s seed data via \`resetAllDemoData\` / \`clearAllDataToCleanDeployment\`, and records a \`data-reset\` or \`data-cleared\` audit entry in the same transaction. After clearing all data, the browser signs out cleanly via \`/api/auth/logout\` so stale session references cannot persist.
+3. **Single-transaction clear, import & audit trail**: Before resetting or clearing the tenant store, 1Squared captures the acting administrator’s person ID and display name and executes the full operation plus its firm audit entry inside one transaction (\`resetAllDemoData\` clears and re-imports the demo dataset and writes a \`data-reset\` audit entry, whereas \`clearAllDataToCleanDeployment\` clears operational and seeded records, imports clean baseline catalogues only without seed data, and writes a \`data-cleared\` audit entry). If the audit write fails, the reset or clear rolls back atomically; after clearing all data, the browser signs out cleanly via \`/api/auth/logout\` so stale session references cannot persist.
 
 ## 2. Enquiry retention anonymisation (\`enquiry:anonymise\` & \`enquiry:run_retention_anonymise\`)
 

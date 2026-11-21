@@ -8,9 +8,10 @@ This guide explains how to update extensions written against `@platform/core-api
    - `ExtensionHost` now enforces the `'config:read'` extension permission strictly at runtime.
    - Extensions whose `manifest.json` omits `'config:read'` receive `ctx.config === undefined`.
    - Note that for `beforeMatterOpen`, an unhandled `TypeError` when dereferencing `ctx.config` blocks matter opening (`allowProceed: false`).
-2. **`supportedCoreApiRange` requires `^2.0.0`:**
+2. **`supportedCoreApiRange` enforces full semantic version ranges:**
    - `CORE_API_VERSION` has moved from `'1.1.0'` to `'2.0.0'`.
-   - `ExtensionHost.registerExtension` fails closed at startup/registration with `EXTENSION_COMPATIBILITY_ERROR` for manifests declaring `^1.0.0` or `^1.1.0`.
+   - `ExtensionHost.registerExtension` and `isCoreApiRangeCompatible` evaluate full semantic version ranges via `semver.satisfies(validVersion, validRange, { includePrerelease: false })` (such as `^2.0.0`, `>=2.0.0 <3.0.0`, or `~2.0.0`).
+   - Unbounded wildcards (`supportedCoreApiRange: '*'`, `'x'`, `'X'`, or `'*.*'`) and incompatible ranges (such as `^1.0.0`, `^1.1.0`, or `^2.2.0` against `2.1.0`) fail closed at registration with `EXTENSION_COMPATIBILITY_ERROR`.
 3. **`manifest.hooks` is checked across every hook runner:**
    - Hook runners (`executeMatterCostsHook`, `executeMatterCostsHookSync`, `executeFieldProviders`, `executeKeyDate*`, `executeRegister*`, `executePmsOutboundCommandHook`, `executeMatterDocumentsLifecycleHook`) execute an enabled extension only if the invoked hook name appears in `manifest.hooks`.
 
