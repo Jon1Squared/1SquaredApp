@@ -240,14 +240,53 @@ export function resolveTenantBlobSigningKey(
     .digest('hex');
 }
 
+export function validateRuntimeDocumentStorageProvider(params: {
+  environment: TenantConfiguration['environment'];
+  configuredStorageProvider: string;
+  envStorageProvider?: string | undefined;
+}): { ok: true } | { ok: false; code: string; message: string } {
+  const configured = params.configuredStorageProvider;
+  const envProvider = params.envStorageProvider?.trim() || undefined;
+  const isLive = isLiveBlobEnvironment(params.environment);
+
+  if (envProvider && envProvider !== configured) {
+    return {
+      ok: false,
+      code: 'STORAGE_PROVIDER_MISMATCH',
+      message: `STORAGE_PROVIDER_MISMATCH: PLATFORM_DOCUMENT_STORAGE_PROVIDER ("${envProvider}") does not match tenant configuration documentGeneration.storageProvider ("${configured}").`,
+    };
+  }
+  if (configured === 'azure-blob' || envProvider === 'azure-blob') {
+    return {
+      ok: false,
+      code: 'AZURE_BLOB_STORAGE_NOT_IMPLEMENTED',
+      message:
+        'AZURE_BLOB_STORAGE_NOT_IMPLEMENTED: "azure-blob" document storage provider is not yet implemented.',
+    };
+  }
+  if (isLive && configured === 'local-fs') {
+    return {
+      ok: false,
+      code: 'STORAGE_LIVE_LOCAL_FS_FORBIDDEN',
+      message:
+        'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") is forbidden when tenant environment is "live".',
+    };
+  }
+  return { ok: true };
+}
+
 export function assertRuntimeStorageAllowedForActiveTenant(
   config: TenantConfiguration = getActiveTenantConfiguration(),
 ): void {
-  const isLive = isLiveBlobEnvironment(config.environment);
-  if (isLive && config.documentGeneration.storageProvider === 'local-fs') {
-    throw new Error(
-      'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") is forbidden when tenant environment is "live".',
-    );
+  const check = validateRuntimeDocumentStorageProvider({
+    environment: config.environment,
+    configuredStorageProvider: config.documentGeneration.storageProvider,
+    envStorageProvider: process.env.PLATFORM_DOCUMENT_STORAGE_PROVIDER,
+  });
+  if (!check.ok) {
+    const err = new Error(check.message) as Error & { code?: string };
+    err.code = check.code;
+    throw err;
   }
 }
 
@@ -1744,13 +1783,15 @@ export async function updateDocumentGenerationConfigService(
     merged,
   ) as DocumentGenerationConfig;
 
-  if (
-    isLiveBlobEnvironment(config.environment) &&
-    validated.storageProvider === 'local-fs'
-  ) {
-    throw new Error(
-      'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") cannot be configured when tenant environment is "live".',
-    );
+  const storageCheck = validateRuntimeDocumentStorageProvider({
+    environment: config.environment,
+    configuredStorageProvider: validated.storageProvider,
+    envStorageProvider: process.env.PLATFORM_DOCUMENT_STORAGE_PROVIDER,
+  });
+  if (!storageCheck.ok) {
+    const err = new Error(storageCheck.message) as Error & { code?: string };
+    err.code = storageCheck.code;
+    throw err;
   }
 
   await repo.withTenantTransaction(ctx, async () => {

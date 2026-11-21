@@ -31,6 +31,7 @@ import {
   getInitializedDocGenContext,
   getTemplateUsageReportService,
   resolveTenantBlobSigningKey,
+  updateDocumentGenerationConfigService,
 } from '@/server/documentGenerationServices';
 import { getMatterRepository, getPartyRepository } from '@/server/services';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
@@ -911,6 +912,61 @@ describe('Host Document Generation Domain & Server Services', () => {
       ).rejects.toThrow(/STORAGE_MALWARE_GATE/);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('R631: assertRuntimeStorageAllowedForActiveTenant and updateDocumentGenerationConfigService fail closed on PLATFORM_DOCUMENT_STORAGE_PROVIDER mismatch or azure-blob', async () => {
+    try {
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', 'azure-blob');
+      expect(() => assertRuntimeStorageAllowedForActiveTenant()).toThrow(
+        /AZURE_BLOB_STORAGE_NOT_IMPLEMENTED|STORAGE_PROVIDER_MISMATCH/,
+      );
+
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', 'sharepoint');
+      expect(() => assertRuntimeStorageAllowedForActiveTenant()).toThrow(
+        /STORAGE_PROVIDER_MISMATCH/,
+      );
+
+      vi.unstubAllEnvs();
+      const baseCfg = getActiveTenantConfiguration();
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+      const signed = createSignedEntraSessionCookie({
+        sub: 'P-000004',
+        tenantId: baseCfg.tenantId,
+        oid: '00000000-0000-0000-0000-000000000004',
+        tid: '11111111-2222-3333-4444-555555555555',
+        displayName: 'Admin User',
+        email: 'admin@notalawfirm.example',
+        personId: 'P-000004',
+        entraRoles: ['admin'],
+        mappedRoles: ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verified = verifySignedEntraSessionCookie(signed)!;
+
+      await expect(
+        runWithActiveActorSession(
+          {
+            personId: 'P-000004',
+            tenantId: baseCfg.tenantId,
+            tokenRoles: ['admin'],
+            expiresAtMs: Date.parse(expiresAt),
+            verifiedSession: verified,
+          },
+          () =>
+            updateDocumentGenerationConfigService(
+              { storageProvider: 'azure-blob' },
+              'P-000004',
+            ),
+        ),
+      ).rejects.toThrow(/AZURE_BLOB_STORAGE_NOT_IMPLEMENTED/);
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 });

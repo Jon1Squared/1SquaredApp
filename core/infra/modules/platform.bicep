@@ -199,6 +199,9 @@ var localFsSingleReplicaGuard = (documentStorageProvider == 'local-fs' && (webMi
 var localFsLiveGuard = (environment == 'live' && documentStorageProvider == 'local-fs')
   ? fail('STORAGE_LIVE_LOCAL_FS_FORBIDDEN: documentStorageProvider cannot be local-fs when environment is live.')
   : true
+var azureBlobUnimplementedGuard = (documentStorageProvider == 'azure-blob')
+  ? fail('AZURE_BLOB_STORAGE_NOT_IMPLEMENTED: documentStorageProvider cannot be azure-blob until AzureBlobDocumentStorageProvider is implemented (ADR 0008, R631).')
+  : true
 var alertRecipientGuard = ((environment == 'demo' || environment == 'live') && empty(alertRecipientEmail) && empty(alertActionGroupId))
   ? fail('ALERT_RECIPIENT_REQUIRED: Either alertRecipientEmail or alertActionGroupId is required when environment is demo or live.')
   : true
@@ -873,6 +876,10 @@ var runtimeCommonEnv = [
     value: postgresRuntimeRoleName
   }
   {
+    name: 'PLATFORM_DOCUMENT_STORAGE_PROVIDER'
+    value: documentStorageProvider
+  }
+  {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: appInsights.properties.ConnectionString
   }
@@ -988,7 +995,7 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
   ]
 }
 
-resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard && localFsSingleReplicaGuard && localFsLiveGuard) {
+resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard && localFsSingleReplicaGuard && localFsLiveGuard && azureBlobUnimplementedGuard) {
   name: webContainerAppName
   location: location
   tags: platformTags
@@ -1035,9 +1042,9 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
                 port: 3000
               }
               initialDelaySeconds: 5
-              periodSeconds: 5
+              periodSeconds: 10
               timeoutSeconds: 5
-              failureThreshold: 12
+              failureThreshold: 10
             }
             {
               type: 'Liveness'

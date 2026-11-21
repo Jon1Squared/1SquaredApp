@@ -87,7 +87,7 @@ describe('Health & readiness endpoints (R580)', () => {
         ),
       );
       expect(responses.every((r) => r.status === 200)).toBe(true);
-      expect(poolLookups).toBeLessThanOrEqual(1);
+      expect(poolLookups).toBe(1);
 
       // Subsequent call within 5s TTL serves cached readiness without extra DB probe
       const callsAfterBurst = poolLookups;
@@ -137,6 +137,58 @@ describe('Health & readiness endpoints (R580)', () => {
       expect(() => resetHealthReadinessCacheForTesting()).toThrow(/SECURITY_ERROR/);
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('R630 & R631: synchronous createVerifiedTenantContext throw does not poison in-flight readiness map after TTL expiry, and readiness fails 503 when PLATFORM_DOCUMENT_STORAGE_PROVIDER mismatches tenant config or is azure-blob', async () => {
+    resetHealthReadinessCacheForTesting();
+    const tenantRuntime = await import('@/platform/tenantRuntime');
+    const readyMod = (await import('@/app/api/health/ready/route')) as {
+      GET: (req: Request) => Promise<Response>;
+    };
+
+    const baseTime = new Date('2026-11-21T16:00:00.000Z').getTime();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(baseTime);
+    const ctxSpy = vi
+      .spyOn(tenantRuntime, 'createVerifiedTenantContext')
+      .mockImplementationOnce(() => {
+        throw new Error('SYNC_CONTEXT_THROW');
+      });
+
+    try {
+      const firstFail = await readyMod.GET(
+        new Request('http://localhost:3000/api/health/ready?r=r630-1'),
+      );
+      expect(firstFail.status).toBe(503);
+
+      // Advance past the 5-second cache TTL -> must run a fresh probe and recover 200 instead of returning a stuck failed promise
+      vi.setSystemTime(baseTime + 6000);
+      const recovered = await readyMod.GET(
+        new Request('http://localhost:3000/api/health/ready?r=r630-2'),
+      );
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toEqual({ status: 'ready' });
+    } finally {
+      ctxSpy.mockRestore();
+      vi.useRealTimers();
+      resetHealthReadinessCacheForTesting();
+    }
+
+    // R631: readiness fails 503 when PLATFORM_DOCUMENT_STORAGE_PROVIDER is azure-blob or disagrees with tenant config
+    for (const badEnvProvider of ['azure-blob', 'sharepoint'] as const) {
+      resetHealthReadinessCacheForTesting();
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', badEnvProvider);
+      try {
+        const mismatchRes = await readyMod.GET(
+          new Request('http://localhost:3000/api/health/ready'),
+        );
+        expect(mismatchRes.status, badEnvProvider).toBe(503);
+        expect(await mismatchRes.json()).toEqual({ status: 'not_ready' });
+      } finally {
+        vi.unstubAllEnvs();
+        resetHealthReadinessCacheForTesting();
+      }
     }
   });
 });

@@ -1,11 +1,11 @@
 import {
-  isLiveBlobStorageEnvironment,
   probeTenantDatabaseReadiness,
 } from '@platform/core';
 import {
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
 } from '@/platform/tenantRuntime';
+import { validateRuntimeDocumentStorageProvider } from '@/server/documentGenerationServices';
 
 export const READINESS_CACHE_TTL_MS = 5000;
 
@@ -36,8 +36,8 @@ function extractSafeErrorCode(err: unknown): string {
 
 /**
  * Probes per-tenant PostgreSQL readiness for the active process configuration with a 5-second
- * tenant-scoped TTL cache and single-flight in-flight deduplication (`R612`), logging probe
- * failures with `correlationId` and `tenantId` without exposing client data or connection strings.
+ * tenant-scoped TTL cache and single-flight in-flight deduplication (`R612`, `R630`, `R631`),
+ * logging probe failures with `correlationId` and `tenantId` without exposing client data or connection strings.
  */
 export async function checkTenantReadinessWithCache(params?: {
   correlationId?: string;
@@ -45,11 +45,14 @@ export async function checkTenantReadinessWithCache(params?: {
   const correlationId = params?.correlationId?.trim() || 'health-ready';
   const activeCfg = getActiveTenantConfiguration();
   const storageProvider = activeCfg.documentGeneration.storageProvider;
+  const envStorageProvider = process.env.PLATFORM_DOCUMENT_STORAGE_PROVIDER;
 
-  if (
-    isLiveBlobStorageEnvironment(activeCfg.environment) &&
-    storageProvider === 'local-fs'
-  ) {
+  const storageCheck = validateRuntimeDocumentStorageProvider({
+    environment: activeCfg.environment,
+    configuredStorageProvider: storageProvider,
+    envStorageProvider,
+  });
+  if (!storageCheck.ok) {
     console.warn(
       JSON.stringify({
         level: 'warn',
@@ -57,13 +60,13 @@ export async function checkTenantReadinessWithCache(params?: {
         tenantId: activeCfg.tenantId,
         correlationId,
         environment: activeCfg.environment,
-        errorCode: 'STORAGE_LIVE_LOCAL_FS_FORBIDDEN',
+        errorCode: storageCheck.code,
       }),
     );
     return { ready: false, status: 503 };
   }
 
-  const cacheKey = `${activeCfg.tenantId}:${activeCfg.environment}:${storageProvider}`;
+  const cacheKey = `${activeCfg.tenantId}:${activeCfg.environment}:${storageProvider}:${envStorageProvider?.trim() || 'unset'}`;
   const nowMs = Date.now();
   const cached = readinessCacheByKey.get(cacheKey);
   if (cached && nowMs < cached.expiresAtMs) {
@@ -75,7 +78,9 @@ export async function checkTenantReadinessWithCache(params?: {
     return existingInFlight;
   }
 
-  const probePromise = (async (): Promise<HealthReadinessCheckResult> => {
+  let settled = false;
+  let probePromise: Promise<HealthReadinessCheckResult> | null = null;
+  probePromise = (async (): Promise<HealthReadinessCheckResult> => {
     try {
       const ctx = createVerifiedTenantContext(
         {
@@ -115,11 +120,16 @@ export async function checkTenantReadinessWithCache(params?: {
       });
       return failResult;
     } finally {
-      inFlightReadinessByKey.delete(cacheKey);
+      settled = true;
+      if (probePromise && inFlightReadinessByKey.get(cacheKey) === probePromise) {
+        inFlightReadinessByKey.delete(cacheKey);
+      }
     }
   })();
 
-  inFlightReadinessByKey.set(cacheKey, probePromise);
+  if (!settled) {
+    inFlightReadinessByKey.set(cacheKey, probePromise);
+  }
   return probePromise;
 }
 

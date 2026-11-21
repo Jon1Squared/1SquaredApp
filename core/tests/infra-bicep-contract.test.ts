@@ -536,4 +536,42 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(webAppBlock).toMatch(/type:\s*'Liveness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
     expect(webAppBlock).toMatch(/type:\s*'Readiness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
   });
+
+  it('R620 & R631: enforces ARM probe bounds (failureThreshold 1..10, timeoutSeconds 1..240), Startup probe 5s/10s/5s/10x, azure-blob fail() guard, and PLATFORM_DOCUMENT_STORAGE_PROVIDER env wiring', () => {
+    const webAppBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource webContainerApp'),
+      platformNoComments.indexOf('resource provisionJob'),
+    );
+    const probeBlocks = Array.from(
+      webAppBlock.matchAll(
+        /\{\s*type:\s*'(Startup|Liveness|Readiness)'[\s\S]*?failureThreshold:\s*(\d+)\s*\}/g,
+      ),
+    );
+    expect(probeBlocks.map((m) => m[1])).toEqual(['Startup', 'Liveness', 'Readiness']);
+    for (const block of probeBlocks) {
+      const timeoutMatch = block[0].match(/timeoutSeconds:\s*(\d+)/);
+      expect(timeoutMatch, block[1]).not.toBeNull();
+      const timeoutSeconds = Number(timeoutMatch![1]);
+      const failureThreshold = Number(block[2]);
+      expect(timeoutSeconds, `${block[1]} timeoutSeconds`).toBeGreaterThanOrEqual(1);
+      expect(timeoutSeconds, `${block[1]} timeoutSeconds`).toBeLessThanOrEqual(240);
+      expect(failureThreshold, `${block[1]} failureThreshold`).toBeGreaterThanOrEqual(1);
+      expect(failureThreshold, `${block[1]} failureThreshold`).toBeLessThanOrEqual(10);
+    }
+
+    // R620: Startup probe explicitly sets 5s initial delay, 10s period, 5s timeout, failureThreshold 10 (~105s window)
+    expect(webAppBlock).toMatch(
+      /type:\s*'Startup'[\s\S]*?initialDelaySeconds:\s*5[\s\S]*?periodSeconds:\s*10[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*10/,
+    );
+
+    // R631: Bicep refuses unimplemented azure-blob at deployment time and passes PLATFORM_DOCUMENT_STORAGE_PROVIDER into runtimeCommonEnv
+    expect(platformBicep).toContain('AZURE_BLOB_STORAGE_NOT_IMPLEMENTED');
+    expect(platformBicep).toContain('var azureBlobUnimplementedGuard');
+    expect(platformBicep).toMatch(
+      /resource webContainerApp[^=]*= if\s*\([^)]*azureBlobUnimplementedGuard/,
+    );
+    expect(platformBicep).toMatch(
+      /name:\s*'PLATFORM_DOCUMENT_STORAGE_PROVIDER'\s+value:\s*documentStorageProvider/,
+    );
+  });
 });
