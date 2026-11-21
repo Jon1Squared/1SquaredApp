@@ -20830,7 +20830,6 @@ async function runPostCommitKeyDateCalendarSync(params: {
   existingSyncs?: KeyDateCalendarSync[];
   items: Array<{ keyDate: KeyDate; matter: Matter | null; enquiry: Enquiry | null }>;
   adapter?: GraphCalendarAdapter;
-  allowSystemSchedulerWrite?: boolean;
   leaseTtlMs?: number;
 }): Promise<{ calendarSyncWarning?: string }> {
   if (params.items.length === 0) return {};
@@ -20893,7 +20892,6 @@ async function runPostCommitKeyDateCalendarSync(params: {
                 await keyDateRepo.readKeyDateAndCalendarSyncForUpdate(
                   params.ctx,
                   keyDateId,
-                  { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
                 );
               if (!latestKd) {
                 return { status: 'missing' as const };
@@ -20925,7 +20923,6 @@ async function runPostCommitKeyDateCalendarSync(params: {
               const savedClaim = await keyDateRepo.putCalendarSync(
                 params.ctx,
                 claimedSync,
-                { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
               );
 
               const [latestMatter, latestEnquiry, latestConfig] = await Promise.all([
@@ -21029,7 +21026,6 @@ async function runPostCommitKeyDateCalendarSync(params: {
             await keyDateRepo.readKeyDateAndCalendarSyncForUpdate(
               params.ctx,
               keyDateId,
-              { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
             );
           if (!recheckedKd) {
             return {
@@ -21063,9 +21059,7 @@ async function runPostCommitKeyDateCalendarSync(params: {
               ...(updatedSync.lastError ? { lastError: updatedSync.lastError } : {}),
               attempts: updatedSync.attempts,
             };
-            await keyDateRepo.putCalendarSync(params.ctx, committedSync, {
-              allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
-            });
+            await keyDateRepo.putCalendarSync(params.ctx, committedSync);
             return {
               action: 'done' as const,
               finalSync: committedSync,
@@ -21112,9 +21106,7 @@ async function runPostCommitKeyDateCalendarSync(params: {
                   leaseExpiresAt: new Date(Date.now() + leaseTtlMs).toISOString(),
                 }),
           };
-          await keyDateRepo.putCalendarSync(params.ctx, skewedSync, {
-            allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
-          });
+          await keyDateRepo.putCalendarSync(params.ctx, skewedSync);
           return {
             action: isFinalAttempt ? ('failed' as const) : ('retry' as const),
             finalSync: skewedSync,
@@ -21171,7 +21163,6 @@ async function runPostCommitKeyDateCalendarSync(params: {
                   lastError: redacted,
                   attempts: recordedAttempts,
                 },
-                { allowSystemSchedulerWrite: params.allowSystemSchedulerWrite },
               );
             }
           }
@@ -21228,7 +21219,6 @@ async function commitKeyDateDomainWritesInPostgres(params: {
   tasksToDeleteIds?: readonly string[];
   notificationsToUpsert?: NotificationItem[];
   auditEntries: AuditEntry[];
-  allowSystemSchedulerWrite?: boolean;
 }): Promise<void> {
   const keyDateRepo = getKeyDateRepository();
   const taskRepo = getTaskWorkflowRepository();
@@ -21279,14 +21269,10 @@ async function commitKeyDateDomainWritesInPostgres(params: {
       await keyDateRepo.putNotApplicable(params.ctx, na);
     }
     for (const rs of params.reminderStatesToUpsert ?? []) {
-      await keyDateRepo.putReminderState(params.ctx, rs, {
-        allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
-      });
+      await keyDateRepo.putReminderState(params.ctx, rs);
     }
     for (const cs of params.calendarSyncsToUpsert ?? []) {
-      await keyDateRepo.putCalendarSync(params.ctx, cs, {
-        allowSystemSchedulerWrite: params.allowSystemSchedulerWrite,
-      });
+      await keyDateRepo.putCalendarSync(params.ctx, cs);
     }
     if (params.auditEntries.length > 0) {
       const auditInputs: FirmAuditEntryInput[] = params.auditEntries.map((a) => ({
@@ -22959,6 +22945,7 @@ export interface KeyDateRemindersJobSummary extends Record<string, number> {
   readonly notificationsCreated: number;
   readonly escalationsSent: number;
   readonly exceptionsFound: number;
+  readonly skippedCount: number;
 }
 
 export interface ExecuteKeyDateRemindersForTenantOptions {
@@ -22968,6 +22955,7 @@ export interface ExecuteKeyDateRemindersForTenantOptions {
   readonly defaultRunHourLocal?: number;
   readonly statementTimeoutMs?: number;
   readonly calendarAdapter?: GraphCalendarAdapter;
+  readonly skippedLockRetryDelayMs?: number;
 }
 
 /**
@@ -23083,9 +23071,25 @@ export async function executeKeyDateRemindersForTenant(
         }
       }
 
-      // Collect any failed Outlook calendar syncs to retry strictly post-commit (R628)
+      // Collect any failed Outlook calendar syncs to retry strictly post-commit (R628),
+      // respecting restricted-matter visibility unless running as a verified keydate:run_reminders job (R637).
       const snapshotKdById = new Map(keyDatesSnapshot.map((k) => [k.id, k]));
       const matterById = new Map(matters.map((m) => [m.id, m]));
+      const isSystemSchedulerCtx =
+        ctx.actorId.startsWith('system:') &&
+        Boolean(ctx.actorSub?.startsWith('system:')) &&
+        Boolean(ctx.jobPermissions?.includes('keydate:run_reminders'));
+      const isMatterVisibleToRunContext = (matterId?: string): boolean => {
+        if (isSystemSchedulerCtx || !matterId) return true;
+        const m = matterById.get(matterId);
+        if (!m) return false;
+        const allowIds = m.restrictedAccessUserIds ?? [];
+        const isRestricted =
+          Boolean(m.isStaffMatter) ||
+          Boolean(m.hasEthicalWall) ||
+          allowIds.length > 0;
+        return !isRestricted || allowIds.includes(ctx.actorId);
+      };
       const failedSyncItems: Array<{
         keyDate: KeyDate;
         matter: Matter | null;
@@ -23094,7 +23098,7 @@ export async function executeKeyDateRemindersForTenant(
       for (const cs of calendarSyncsWorking) {
         if (cs.state !== 'failed') continue;
         const failedKd = snapshotKdById.get(cs.keyDateId);
-        if (!failedKd) continue;
+        if (!failedKd || !isMatterVisibleToRunContext(failedKd.matterId)) continue;
         const failedEnquiry = failedKd.enquiryId
           ? ((await intakeRepo.getEnquiryById<Enquiry>(ctx, failedKd.enquiryId, {
               includeRestricted: true,
@@ -23188,6 +23192,17 @@ export async function executeKeyDateRemindersForTenant(
         }
       }
 
+      let manualRestrictedSkippedCount = 0;
+      if (!isSystemSchedulerCtx) {
+        for (const kdId of Array.from(candidateKeyDateIdSet)) {
+          const kd = snapshotKdById.get(kdId);
+          if (kd && !isMatterVisibleToRunContext(kd.matterId)) {
+            candidateKeyDateIdSet.delete(kdId);
+            manualRestrictedSkippedCount += 1;
+          }
+        }
+      }
+
       const keyDatesForExceptionsMap = new Map(keyDatesSnapshot.map((k) => [k.id, k]));
       const remindersForExceptionsMap = new Map(
         reminderStatesSnapshot.map((r) => [r.keyDateId, r]),
@@ -23195,6 +23210,7 @@ export async function executeKeyDateRemindersForTenant(
       let notApplicableWorking = notApplicableSnapshot;
       let result: ReturnType<typeof runTenantKeyDateReminderJob> = {
         ...dryResult,
+        evaluatedCount: Math.max(0, dryResult.evaluatedCount - manualRestrictedSkippedCount),
         stagesAdvancedCount: 0,
         escalationsTriggeredCount: 0,
         notificationsSentCount: 0,
@@ -23203,24 +23219,57 @@ export async function executeKeyDateRemindersForTenant(
       let changedTasks: Task[] = [];
       let deletedTaskIds: string[] = [];
       let newTasksCount = 0;
+      let stillSkippedIds: string[] = [];
       const createdNotifications: NotificationItem[] = [];
       const stagedAudit: AuditEntry[] = [];
 
       if (candidateKeyDateIdSet.size > 0) {
-        // Pass 2 (R629): lock ONLY candidates with FOR UPDATE SKIP LOCKED and evaluate fresh DB state
+        // Pass 2 (R629, R638): lock ONLY candidates with FOR UPDATE SKIP LOCKED; if any are temporarily locked,
+        // retry them once after a brief back-off pause before evaluating fresh DB state.
         const lockResult = await keyDateRepo.lockKeyDatesAndRemindersForSchedulerWrite(
           ctx,
           Array.from(candidateKeyDateIdSet),
         );
+        let lockedKeyDates = lockResult.keyDates;
+        let lockedReminderStates = lockResult.reminderStates;
+        stillSkippedIds = lockResult.skippedKeyDateIds;
+
+        if (stillSkippedIds.length > 0) {
+          const retryDelayMs = Math.max(0, options.skippedLockRetryDelayMs ?? 50);
+          if (retryDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          }
+          const retryLock =
+            await keyDateRepo.lockKeyDatesAndRemindersForSchedulerWrite(
+              ctx,
+              stillSkippedIds,
+            );
+          if (retryLock.keyDates.length > 0) {
+            lockedKeyDates = [...lockedKeyDates, ...retryLock.keyDates].sort(
+              (a, b) => a.id.localeCompare(b.id),
+            );
+            const mergedRemindersByKdId = new Map(
+              lockedReminderStates.map((r) => [r.keyDateId, r]),
+            );
+            for (const rs of retryLock.reminderStates) {
+              mergedRemindersByKdId.set(rs.keyDateId, rs);
+            }
+            lockedReminderStates = Array.from(mergedRemindersByKdId.values()).sort(
+              (a, b) => a.keyDateId.localeCompare(b.keyDateId),
+            );
+          }
+          stillSkippedIds = retryLock.skippedKeyDateIds;
+        }
+
         const [storeTasksFresh, notApplicableFresh] = await Promise.all([
           taskRepo.listAllTasksUnfiltered<Task>(ctx),
           keyDateRepo.listAllNotApplicableUnfilteredForScheduler(ctx),
         ]);
         notApplicableWorking = notApplicableFresh;
 
-        if (lockResult.keyDates.length > 0) {
-          const candidateKeyDates = structuredClone(lockResult.keyDates);
-          const candidateReminders = structuredClone(lockResult.reminderStates);
+        if (lockedKeyDates.length > 0) {
+          const candidateKeyDates = structuredClone(lockedKeyDates);
+          const candidateReminders = structuredClone(lockedReminderStates);
           const beforeReminderStageByKd = new Map(
             candidateReminders.map((rs) => [rs.keyDateId, rs.currentStageDaysBefore]),
           );
@@ -23259,7 +23308,8 @@ export async function executeKeyDateRemindersForTenant(
             ...candidateResult,
             evaluatedCount: Math.max(
               0,
-              dryResult.evaluatedCount - lockResult.skippedKeyDateIds.length,
+              dryResult.evaluatedCount -
+                (stillSkippedIds.length + manualRestrictedSkippedCount),
             ),
           };
 
@@ -23312,7 +23362,6 @@ export async function executeKeyDateRemindersForTenant(
               tasksToDeleteIds: deletedTaskIds,
               notificationsToUpsert: createdNotifications,
               auditEntries: stagedAudit,
-              allowSystemSchedulerWrite: true,
             });
           }
 
@@ -23327,12 +23376,14 @@ export async function executeKeyDateRemindersForTenant(
             ...result,
             evaluatedCount: Math.max(
               0,
-              dryResult.evaluatedCount - lockResult.skippedKeyDateIds.length,
+              dryResult.evaluatedCount -
+                (stillSkippedIds.length + manualRestrictedSkippedCount),
             ),
           };
         }
       }
 
+      const skippedCount = stillSkippedIds.length + manualRestrictedSkippedCount;
       const keyDatesWorking = Array.from(keyDatesForExceptionsMap.values());
       const reminderStatesWorking = Array.from(remindersForExceptionsMap.values());
 
@@ -23370,11 +23421,13 @@ export async function executeKeyDateRemindersForTenant(
         notificationsCreated: createdNotifications.length,
         escalationsSent: result.escalationsTriggeredCount,
         exceptionsFound: exceptions.length,
+        skippedCount,
       };
 
       return {
         result: { result, summary },
         summary,
+        ...(skippedCount > 0 ? { deferDailyCompletion: true } : {}),
       };
     },
   });
@@ -23393,7 +23446,6 @@ export async function executeKeyDateRemindersForTenant(
       nowIso: new Date().toISOString(),
       items: postCommitFailedSyncItems,
       adapter: options.calendarAdapter,
-      allowSystemSchedulerWrite: true,
     });
   }
 

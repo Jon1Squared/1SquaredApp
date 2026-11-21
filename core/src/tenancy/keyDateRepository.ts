@@ -1255,10 +1255,17 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   // Reminder States (1 per confirmed key date)
   // ============================================================================
 
+  private isSystemReminderSchedulerContext(ctx: TenantContext): boolean {
+    return (
+      ctx.actorId.startsWith('system:') &&
+      Boolean(ctx.actorSub?.startsWith('system:')) &&
+      Boolean(ctx.jobPermissions?.includes('keydate:run_reminders'))
+    );
+  }
+
   public async putReminderState(
     ctx: TenantContext,
     state: KeyDateReminderState,
-    options?: { allowSystemSchedulerWrite?: boolean },
   ): Promise<KeyDateReminderState> {
     if (
       state.lastSkippedReason !== undefined &&
@@ -1270,9 +1277,7 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       );
     }
 
-    const bypassMatterCheck =
-      options?.allowSystemSchedulerWrite === true ||
-      Boolean(ctx.jobPermissions?.includes('keydate:run_reminders'));
+    const bypassMatterCheck = this.isSystemReminderSchedulerContext(ctx);
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const kdRes = await tx.query<DbKeyDateRow>(
@@ -1538,11 +1543,8 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   public async putCalendarSync(
     ctx: TenantContext,
     sync: KeyDateCalendarSync,
-    options?: { allowSystemSchedulerWrite?: boolean },
   ): Promise<KeyDateCalendarSync> {
-    const bypassMatterCheck =
-      options?.allowSystemSchedulerWrite === true ||
-      Boolean(ctx.jobPermissions?.includes('keydate:run_reminders'));
+    const bypassMatterCheck = this.isSystemReminderSchedulerContext(ctx);
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const kdRes = await tx.query<DbKeyDateRow>(
@@ -1609,14 +1611,11 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
   public async readKeyDateAndCalendarSyncForUpdate(
     ctx: TenantContext,
     keyDateId: KeyDateId,
-    options?: { allowSystemSchedulerWrite?: boolean },
   ): Promise<{
     keyDate: KeyDate | null;
     calendarSync: KeyDateCalendarSync | null;
   }> {
-    const bypassMatterCheck =
-      options?.allowSystemSchedulerWrite === true ||
-      Boolean(ctx.jobPermissions?.includes('keydate:run_reminders'));
+    const bypassMatterCheck = this.isSystemReminderSchedulerContext(ctx);
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const kdRes = await tx.query<DbKeyDateRow>(

@@ -4,12 +4,15 @@ import {
   KEY_DATES_MIGRATION_0003,
   KEY_DATES_REMINDER_LAST_SKIPPED_REASON_MIGRATION_0004,
   resolveTenantFromVerifiedToken,
+  resolveTenantLocalDateAndHour,
   runTenantBackgroundJob,
   TenantKeyDateRepository,
   TenantMigrationRunner,
+  validateTenantRegistry,
   type KeyDate,
   type TenantContext,
 } from '../src/index';
+import { guardedJob } from '../../src/server/authorize';
 import {
   acknowledgeKeyDateReminderRecord,
   createOrProposeKeyDateRecord,
@@ -1551,7 +1554,6 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
           acknowledgedAt: undefined,
           lastNotifiedAt: '2026-11-21T03:00:00.000Z',
         },
-        { allowSystemSchedulerWrite: true },
       );
       expect(afterSameStageWrite.acknowledgedAt).toBe(ackRes.reminderState!.acknowledgedAt);
       expect(afterSameStageWrite.acknowledgedById).toBe('P-000001');
@@ -2468,7 +2470,6 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
           acknowledgedById: undefined,
           acknowledgedAt: undefined,
         },
-        { allowSystemSchedulerWrite: true },
       );
       expect(rearmedState.acknowledgedById).toBeUndefined();
       expect(rearmedState.acknowledgedAt).toBeUndefined();
@@ -2699,6 +2700,423 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
       }
     } finally {
       await kdRepo.clearTenantData(ctxB);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R637: only verified keydate:run_reminders job context bypasses restricted-matter checks on reminder state & calendar sync writes (ignoring caller flags) across two tenants', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const matterRepo = getMatterRepository();
+    const jobRunRepo = getJobRunRepository();
+    const ctxAdminAllowlisted = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxBravo = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    const registry = validateTenantRegistry({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: 'not-a-law-firm',
+          slug: 'not_a_law_firm',
+          environment: 'test',
+          postgresHost: process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1',
+          postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
+          postgresRoleName: 'role_tenant_not_a_law_firm_test',
+          keyVaultUri: 'https://kv-nalf-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    });
+
+    try {
+      await jobRunRepo.clearTenantJobRuns(ctxAdminAllowlisted);
+      const store = loadCommittedSeedStore();
+      const baseMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdConfig = await getKeyDatesConfig({
+        ctx: ctxAdminAllowlisted,
+        userId: 'P-000001',
+      });
+      const manualType =
+        (kdConfig.keyDateTypes ?? []).find((t) => t.allowManualEntry !== false) ??
+        kdConfig.keyDateTypes![0]!;
+      const firstTeam = store.teams.find((t) => t.active)!;
+
+      // Create an isolated restricted matter accessible ONLY to P-000010 (excluding admin P-000001)
+      const restrictedMatterId = 'MAT-R637-RESTRICTED';
+      await matterRepo.putMatter(
+        ctxAdminAllowlisted,
+        {
+          ...structuredClone(baseMatter),
+          id: restrictedMatterId,
+          matterNumber: restrictedMatterId,
+          title: 'R637 Restricted Staff Matter',
+          isStaffMatter: true,
+          restrictedAccessUserIds: ['P-000010'],
+        },
+        {
+          expectedRowVersion: null,
+          sqlRestrictedAccessUserIds: ['P-000010'],
+        },
+      );
+
+      // Seed key date on that restricted matter as allowlisted actor P-000010 (and similarly on Tenant B)
+      const ctxP10 = testTenantCtx('P-000010', { roles: ['partner'], mfaVerified: true });
+      const todayLocal = resolveTenantLocalDateAndHour(new Date(), 'Europe/London').localDate;
+      const restrictedKd = await kdRepo.putKeyDate(
+        ctxP10,
+        makeSampleKeyDate({
+          id: 'KD-R637-RESTR-1',
+          matterId: restrictedMatterId,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000010'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      await kdRepo.setMatterRestriction(ctxBravo, {
+        matterId: 'M-R637-BRAVO',
+        isRestricted: true,
+        restrictedAccessUserIds: ['P-BRAVO-1'],
+      });
+      await kdRepo.putKeyDate(
+        ctxBravo,
+        makeSampleKeyDate({
+          id: 'KD-R637-BRAVO-1',
+          matterId: 'M-R637-BRAVO',
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          responsiblePersonIds: ['P-BRAVO-1'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      // Unpermitted user context P-000001 must be denied across all 3 methods even if a caller passes a runtime flag
+      const unsafePutSync = kdRepo.putCalendarSync.bind(kdRepo) as unknown as (
+        c: TenantContext,
+        s: unknown,
+        o?: unknown,
+      ) => Promise<unknown>;
+      const unsafeReadForUpdate = kdRepo.readKeyDateAndCalendarSyncForUpdate.bind(
+        kdRepo,
+      ) as unknown as (c: TenantContext, id: string, o?: unknown) => Promise<unknown>;
+      const unsafePutReminder = kdRepo.putReminderState.bind(kdRepo) as unknown as (
+        c: TenantContext,
+        s: unknown,
+        o?: unknown,
+      ) => Promise<unknown>;
+
+      await expect(
+        unsafePutSync(
+          ctxAdminAllowlisted,
+          {
+            keyDateId: restrictedKd.id,
+            state: 'syncing',
+            externalEvents: [],
+            attempts: 1,
+          },
+          { allowSystemSchedulerWrite: true },
+        ),
+      ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+
+      await expect(
+        unsafeReadForUpdate(ctxAdminAllowlisted, restrictedKd.id, {
+          allowSystemSchedulerWrite: true,
+        }),
+      ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+
+      await expect(
+        unsafePutReminder(
+          ctxAdminAllowlisted,
+          {
+            keyDateId: restrictedKd.id,
+            taskId: 'TSK-FORGED-R637',
+            idempotencyKey: `keydate-reminder:not-a-law-firm:${restrictedKd.id}`,
+            reminderScheduleId: 'limitation',
+            currentStageDaysBefore: 0,
+            stageEnteredAt: '2026-11-21T00:00:00.000Z',
+            escalationLevel: 0,
+          },
+          { allowSystemSchedulerWrite: true },
+        ),
+      ).rejects.toThrow(/KEY_DATE_ACCESS_DENIED/);
+
+      // Manual scheduler run as unpermitted P-000001 must not crash with KEY_DATE_ACCESS_DENIED, must NOT write reminder state for restrictedKd,
+      // and must defer full-day completion so the system scheduler job still runs on the same day.
+      const manualOutcome = await executeKeyDateRemindersForTenant(
+        ctxAdminAllowlisted,
+        {
+          triggerSource: 'manual',
+          triggeredById: 'P-000001',
+          defaultRunHourLocal: 0,
+        },
+      );
+      expect(manualOutcome.outcome).toBe('executed');
+      if (manualOutcome.outcome === 'executed') {
+        expect(manualOutcome.result.summary.skippedCount).toBeGreaterThanOrEqual(1);
+        expect(manualOutcome.jobRun.status).toBe('running');
+      }
+      expect(await kdRepo.getReminderState(ctxP10, restrictedKd.id)).toBeNull();
+
+      // Verified guardedJob('key-date-reminders', ...) context holding keydate:run_reminders CAN read & write all three + evaluate restrictedKd
+      const scheduledJobOutcome = await guardedJob(
+        'key-date-reminders',
+        'not-a-law-firm',
+        async ({ tenantContext }) => {
+          expect(tenantContext.jobPermissions).toEqual(['keydate:run_reminders']);
+          await kdRepo.readKeyDateAndCalendarSyncForUpdate(
+            tenantContext,
+            restrictedKd.id,
+          );
+          await kdRepo.putCalendarSync(tenantContext, {
+            keyDateId: restrictedKd.id,
+            state: 'synced',
+            externalEvents: [],
+            attempts: 1,
+          });
+          return executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            defaultRunHourLocal: 0,
+          });
+        },
+        { registry },
+      );
+      expect(scheduledJobOutcome.outcome).toBe('executed');
+      const remAfterScheduler = await kdRepo.getReminderState(
+        ctxP10,
+        restrictedKd.id,
+      );
+      expect(remAfterScheduler).not.toBeNull();
+
+      // Tenant B's reminder state remains untouched (two-tenant isolation)
+      expect(await kdRepo.getReminderState(ctxBravo, 'KD-R637-BRAVO-1')).toBeNull();
+    } finally {
+      await kdRepo.clearTenantData(ctxBravo);
+      await jobRunRepo.clearTenantJobRuns(ctxAdminAllowlisted);
+      await resetAllDemoData('P-000001', testDataResetContext());
+    }
+  });
+
+  it('R638: retries locked key dates once after brief back-off and leaves the day open for the next hourly scheduled run when still locked (two-tenant isolated)', async () => {
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const kdRepo = getKeyDateRepository();
+    const jobRunRepo = getJobRunRepository();
+    const ctx = testTenantCtx('P-000001', {
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+    });
+    const ctxBravo = createVerifiedTenantContext('tenant-bravo', 'P-BRAVO-1');
+
+    const registry = validateTenantRegistry({
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId: 'not-a-law-firm',
+          slug: 'not_a_law_firm',
+          environment: 'test',
+          postgresHost: process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1',
+          postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
+          postgresRoleName: 'role_tenant_not_a_law_firm_test',
+          keyVaultUri: 'https://kv-nalf-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    });
+
+    try {
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      await jobRunRepo.clearTenantJobRuns(ctxBravo);
+      const store = loadCommittedSeedStore();
+      const targetMatter = store.matters.find((m) => !m.isStaffMatter)!;
+      const kdConfig = await getKeyDatesConfig({ ctx, userId: 'P-000001' });
+      const manualType =
+        (kdConfig.keyDateTypes ?? []).find((t) => t.allowManualEntry !== false) ??
+        kdConfig.keyDateTypes![0]!;
+      const firstTeam = store.teams.find((t) => t.active)!;
+      const todayLocal = resolveTenantLocalDateAndHour(new Date(), 'Europe/London').localDate;
+
+      const kdLocked = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R638-LOCKED',
+          matterId: targetMatter.id,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+      const kdUnlocked = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R638-UNLOCKED',
+          matterId: targetMatter.id,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+      const kdFastRelease = await kdRepo.putKeyDate(
+        ctx,
+        makeSampleKeyDate({
+          id: 'KD-R638-FAST-RELEASE',
+          matterId: targetMatter.id,
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          teamId: firstTeam.id,
+          responsiblePersonIds: ['P-000001'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      await kdRepo.setMatterRestriction(ctxBravo, {
+        matterId: 'M-R638-BRAVO',
+        isRestricted: false,
+        restrictedAccessUserIds: [],
+      });
+      await kdRepo.putKeyDate(
+        ctxBravo,
+        makeSampleKeyDate({
+          id: 'KD-R638-BRAVO-1',
+          matterId: 'M-R638-BRAVO',
+          keyDateTypeId: manualType.id,
+          dueDate: todayLocal,
+          responsiblePersonIds: ['P-BRAVO-1'],
+          status: 'confirmed',
+        }),
+        { expectedVersion: null },
+      );
+
+      // Part 1: Hold persistent lock on kdLocked and short lock on kdFastRelease (released during back-off)
+      let persistentLockReadyResolve!: () => void;
+      const persistentLockReady = new Promise<void>((r) => {
+        persistentLockReadyResolve = r;
+      });
+      let releasePersistentLock: () => void = () => {};
+      const persistentLockHold = new Promise<void>((r) => {
+        releasePersistentLock = r;
+      });
+      const persistentLockPromise = kdRepo.withAutonomousTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, kdLocked.id],
+        );
+        persistentLockReadyResolve();
+        await persistentLockHold;
+      });
+
+      let fastLockReadyResolve!: () => void;
+      const fastLockReady = new Promise<void>((r) => {
+        fastLockReadyResolve = r;
+      });
+      const fastLockPromise = kdRepo.withAutonomousTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM key_dates WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, kdFastRelease.id],
+        );
+        fastLockReadyResolve();
+        await new Promise((r) => setTimeout(r, 30));
+      });
+
+      try {
+        await Promise.all([persistentLockReady, fastLockReady]);
+
+        const firstRun = await guardedJob(
+          'key-date-reminders',
+          'not-a-law-firm',
+          ({ tenantContext }) =>
+            executeKeyDateRemindersForTenant(tenantContext, {
+              triggerSource: 'scheduled',
+              triggeredById: 'system:key-date-reminders',
+              defaultRunHourLocal: 0,
+              skippedLockRetryDelayMs: 90,
+            } as Parameters<typeof executeKeyDateRemindersForTenant>[1]),
+          { registry },
+        );
+        await fastLockPromise;
+
+        expect(firstRun.outcome).toBe('executed');
+        if (firstRun.outcome === 'executed') {
+          expect(
+            (firstRun.result.summary as { skippedCount?: number }).skippedCount,
+          ).toBe(1);
+          expect(firstRun.jobRun.status).toBe('running');
+          expect((firstRun.jobRun.summary as { scope?: string }).scope).toBe(
+            'partial',
+          );
+          expect(firstRun.jobRun.summary.skippedCount).toBe(1);
+        }
+        // Unlocked and fast-released key dates WERE processed in pass 1 / pass 2
+        expect(await kdRepo.getReminderState(ctx, kdUnlocked.id)).not.toBeNull();
+        expect(await kdRepo.getReminderState(ctx, kdFastRelease.id)).not.toBeNull();
+        expect(await kdRepo.getReminderState(ctx, kdLocked.id)).toBeNull();
+      } finally {
+        releasePersistentLock();
+        await Promise.allSettled([persistentLockPromise, fastLockPromise]);
+      }
+
+      const secondRunSameDay = await guardedJob(
+        'key-date-reminders',
+        'not-a-law-firm',
+        ({ tenantContext }) =>
+          executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            defaultRunHourLocal: 0,
+            skippedLockRetryDelayMs: 10,
+          }),
+        { registry },
+      );
+      expect(secondRunSameDay.outcome).toBe('executed');
+      if (secondRunSameDay.outcome === 'executed') {
+        expect(secondRunSameDay.result.summary.skippedCount).toBe(0);
+        expect(secondRunSameDay.jobRun.status).toBe('succeeded');
+        expect(secondRunSameDay.jobRun.summary.skippedCount).toBe(0);
+      }
+      expect(await kdRepo.getReminderState(ctx, kdLocked.id)).not.toBeNull();
+
+      // Third run on the same day is now idempotently skipped as already_succeeded_today
+      const thirdRunSameDay = await guardedJob(
+        'key-date-reminders',
+        'not-a-law-firm',
+        ({ tenantContext }) =>
+          executeKeyDateRemindersForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:key-date-reminders',
+            defaultRunHourLocal: 0,
+          }),
+        { registry },
+      );
+      expect(thirdRunSameDay.outcome).toBe('already_succeeded_today');
+
+      // Tenant B remains unaffected
+      expect(await kdRepo.getReminderState(ctxBravo, 'KD-R638-BRAVO-1')).toBeNull();
+      expect(await jobRunRepo.listJobRuns(ctxBravo, { jobKey: 'key-date-reminders' })).toEqual([]);
+    } finally {
+      await kdRepo.clearTenantData(ctxBravo);
+      await jobRunRepo.clearTenantJobRuns(ctx);
+      await jobRunRepo.clearTenantJobRuns(ctxBravo);
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
