@@ -37,6 +37,8 @@ COPY --from=builder --chown=node:node /app/${PLATFORM_TENANT_PACKAGE_DIR}/config
 COPY --from=builder --chown=node:node /app/data/seed-not-a-law-firm.json ./data/seed-not-a-law-firm.json
 COPY --from=builder --chown=node:node /app/data/pms/1Squared_PMS_Demo_Data.xlsx ./data/pms/1Squared_PMS_Demo_Data.xlsx
 
+RUN mkdir -p /app/data/storage && chown -R node:node /app/data
+
 USER node
 EXPOSE 3000
 

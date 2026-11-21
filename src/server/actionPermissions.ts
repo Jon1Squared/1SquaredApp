@@ -784,6 +784,16 @@ export const ROUTE_PERMISSIONS = {
     kind: 'public',
     reason: 'Clears session and PKCE cookies to sign out the current browser.',
   },
+  'GET /api/health/live': {
+    kind: 'public',
+    reason:
+      'Azure Container Apps liveness probe endpoint; confirms process responsiveness with no tenant data or DB queries (R580).',
+  },
+  'GET /api/health/ready': {
+    kind: 'public',
+    reason:
+      'Azure Container Apps readiness probe endpoint; checks PostgreSQL pool connectivity and required schema migrations with no tenant data in the response (R580).',
+  },
   'GET /api/documents/download': {
     kind: 'permission',
     key: { anyOf: ['document:download', 'document:view'] },

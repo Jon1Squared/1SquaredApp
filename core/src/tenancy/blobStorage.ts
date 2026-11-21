@@ -190,7 +190,9 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     const scannedAt = new Date().toISOString();
 
     this.scanStatuses.set(blobKey, scanStatus);
-    this.memoryBlobs.set(blobKey, new Uint8Array(input.bytes));
+    if (this.inMemoryOnly) {
+      this.memoryBlobs.set(blobKey, new Uint8Array(input.bytes));
+    }
 
     if (!this.inMemoryOnly) {
       const fs = getNodeFs();
@@ -403,7 +405,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
       }
     }
 
-    return 'clean';
+    return 'pending';
   }
 
   /** Helper for tests or Defender webhook callbacks to update scan status. */
@@ -419,12 +421,24 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
 
 export class LocalTenantStorageProvider extends BaseTenantStorageProvider {
   public readonly providerId: StorageProviderId = 'local-fs';
+
+  constructor(options?: TenantStorageProviderOptions | string) {
+    super(options);
+    const resolvedOptions: TenantStorageProviderOptions | undefined =
+      typeof options === 'string' ? { tokenSigningKey: options } : options;
+    if (isLiveBlobStorageEnvironment(resolvedOptions?.environment)) {
+      throw new Error(
+        'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") is forbidden when tenant environment is "live".',
+      );
+    }
+  }
 }
 
 export class AzureBlobDocumentStorageProvider implements DocumentStorageProvider {
   public readonly providerId: StorageProviderId = 'azure-blob';
 
-  constructor(_options?: TenantStorageProviderOptions) {
+  constructor(options?: TenantStorageProviderOptions) {
+    void options;
     throw new Error(
       'STORAGE_PROVIDER_NOT_SUPPORTED: AzureBlobDocumentStorageProvider ("azure-blob") requires an Azure Storage account and user-delegation SAS client and is not supported in local mode.',
     );
@@ -471,7 +485,13 @@ export function createDocumentStorageProvider(
     case 'azure_blob':
       return new AzureBlobDocumentStorageProvider(resolvedOptions);
     case 'local-fs':
-    default:
       return new LocalTenantStorageProvider(resolvedOptions);
+    default: {
+      const err = new Error(
+        `STORAGE_PROVIDER_NOT_SUPPORTED: Document storage provider "${String(providerId)}" is not implemented.`,
+      ) as Error & { code?: string };
+      err.code = 'STORAGE_PROVIDER_NOT_SUPPORTED';
+      throw err;
+    }
   }
 }

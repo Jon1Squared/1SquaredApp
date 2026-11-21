@@ -474,4 +474,114 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain("'seed-demo'");
     expect(platformBicep).toContain("name: 'DEMO_ENTRA_MAP_JSON'");
   });
+
+  it('R578, R580, R581, R582: enforces demo single-replica & /app/data writable ownership, /api/health/live + /api/health/ready probes, required alertRecipientEmail + Action Group in demo/live, and non-empty ca-pdf image guard', () => {
+    const dockerfile = fs.readFileSync(
+      path.join(REPO_ROOT, 'Dockerfile'),
+      'utf8',
+    );
+    const demoParams = fs.readFileSync(
+      path.join(INFRA_DIR, 'parameters', 'demo.bicepparam'),
+      'utf8',
+    );
+
+    // R578 (D4) & R613: local-fs web app pinned to 1 replica across all environments and /app/data writable by USER node
+    expect(platformBicep).toContain(
+      "param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10",
+    );
+    expect(platformBicep).toContain('LOCAL_FS_SINGLE_REPLICA_REQUIRED');
+    expect(demoParams).toContain("param documentStorageProvider = 'local-fs'");
+    expect(demoParams).toContain('param webMaxReplicas = 1');
+    const mkdirIdx = dockerfile.indexOf('chown -R node:node /app/data');
+    const userNodeIdx = dockerfile.indexOf('USER node');
+    expect(mkdirIdx).toBeGreaterThan(-1);
+    expect(userNodeIdx).toBeGreaterThan(mkdirIdx);
+
+    // R580: health probes target /api/health/live and /api/health/ready (not /login)
+    const webAppBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource webContainerApp'),
+      platformNoComments.indexOf('resource provisionJob'),
+    );
+    expect(webAppBlock).toContain("path: '/api/health/live'");
+    expect(webAppBlock).toContain("path: '/api/health/ready'");
+    expect(webAppBlock).not.toContain("path: '/login'");
+
+    // R581: Action Group provisioned from alertRecipientEmail and required in demo/live
+    expect(mainBicep).toContain("param alertRecipientEmail string = ''");
+    expect(platformBicep).toContain("param alertRecipientEmail string = ''");
+    expect(platformBicep).toContain('Microsoft.Insights/actionGroups');
+    expect(platformBicep).toContain('ALERT_RECIPIENT_REQUIRED');
+
+    // R582 (D5): ca-pdf cannot be enabled with an empty container image
+    expect(platformBicep).toContain('PDF_CONVERTER_IMAGE_REQUIRED');
+  });
+
+  it('R611 & R613: enforces Startup probe and 5s/3x probe thresholds, and guards local-fs single replica across all environments', () => {
+    // R613: documentStorageProvider parameter + global local-fs single-replica guard
+    expect(mainBicep).toMatch(/param documentStorageProvider string/);
+    expect(platformBicep).toMatch(/param documentStorageProvider string/);
+    expect(platformBicep).toContain(
+      "param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10",
+    );
+    expect(platformBicep).toContain('LOCAL_FS_SINGLE_REPLICA_REQUIRED');
+    expect(platformBicep).toContain("documentStorageProvider == 'local-fs'");
+    expect(platformBicep).toContain('STORAGE_LIVE_LOCAL_FS_FORBIDDEN');
+
+    // R611: Startup probe on /api/health/live + timeoutSeconds: 5 & failureThreshold: 3 on Liveness & Readiness
+    const webAppBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource webContainerApp'),
+      platformNoComments.indexOf('resource provisionJob'),
+    );
+    expect(webAppBlock).toContain("type: 'Startup'");
+    expect(webAppBlock).toMatch(/type:\s*'Liveness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
+    expect(webAppBlock).toMatch(/type:\s*'Readiness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
+  });
+
+  it('R620, R631 & R640: enforces ARM probe bounds (initialDelaySeconds 0..60, periodSeconds 1..240, failureThreshold 1..10, timeoutSeconds 1..240), Startup probe 5s/10s/5s/10x, azure-blob fail() guard, and PLATFORM_DOCUMENT_STORAGE_PROVIDER env wiring', () => {
+    const webAppBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource webContainerApp'),
+      platformNoComments.indexOf('resource provisionJob'),
+    );
+    const probeBlocks = Array.from(
+      webAppBlock.matchAll(
+        /\{\s*type:\s*'(Startup|Liveness|Readiness)'[\s\S]*?failureThreshold:\s*(\d+)\s*\}/g,
+      ),
+    );
+    expect(probeBlocks.map((m) => m[1])).toEqual(['Startup', 'Liveness', 'Readiness']);
+    for (const block of probeBlocks) {
+      const initialDelayMatch = block[0].match(/initialDelaySeconds:\s*(\d+)/);
+      const periodMatch = block[0].match(/periodSeconds:\s*(\d+)/);
+      const timeoutMatch = block[0].match(/timeoutSeconds:\s*(\d+)/);
+      expect(initialDelayMatch, block[1]).not.toBeNull();
+      expect(periodMatch, block[1]).not.toBeNull();
+      expect(timeoutMatch, block[1]).not.toBeNull();
+      const initialDelaySeconds = Number(initialDelayMatch![1]);
+      const periodSeconds = Number(periodMatch![1]);
+      const timeoutSeconds = Number(timeoutMatch![1]);
+      const failureThreshold = Number(block[2]);
+      expect(initialDelaySeconds, `${block[1]} initialDelaySeconds`).toBeGreaterThanOrEqual(0);
+      expect(initialDelaySeconds, `${block[1]} initialDelaySeconds`).toBeLessThanOrEqual(60);
+      expect(periodSeconds, `${block[1]} periodSeconds`).toBeGreaterThanOrEqual(1);
+      expect(periodSeconds, `${block[1]} periodSeconds`).toBeLessThanOrEqual(240);
+      expect(timeoutSeconds, `${block[1]} timeoutSeconds`).toBeGreaterThanOrEqual(1);
+      expect(timeoutSeconds, `${block[1]} timeoutSeconds`).toBeLessThanOrEqual(240);
+      expect(failureThreshold, `${block[1]} failureThreshold`).toBeGreaterThanOrEqual(1);
+      expect(failureThreshold, `${block[1]} failureThreshold`).toBeLessThanOrEqual(10);
+    }
+
+    // R620: Startup probe explicitly sets 5s initial delay, 10s period, 5s timeout, failureThreshold 10 (~105s window)
+    expect(webAppBlock).toMatch(
+      /type:\s*'Startup'[\s\S]*?initialDelaySeconds:\s*5[\s\S]*?periodSeconds:\s*10[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*10/,
+    );
+
+    // R631: Bicep refuses unimplemented azure-blob at deployment time and passes PLATFORM_DOCUMENT_STORAGE_PROVIDER into runtimeCommonEnv
+    expect(platformBicep).toContain('AZURE_BLOB_STORAGE_NOT_IMPLEMENTED');
+    expect(platformBicep).toContain('var azureBlobUnimplementedGuard');
+    expect(platformBicep).toMatch(
+      /resource webContainerApp[^=]*= if\s*\([^)]*azureBlobUnimplementedGuard/,
+    );
+    expect(platformBicep).toMatch(
+      /name:\s*'PLATFORM_DOCUMENT_STORAGE_PROVIDER'\s+value:\s*documentStorageProvider/,
+    );
+  });
 });

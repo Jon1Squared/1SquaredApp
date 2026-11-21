@@ -51,10 +51,10 @@ param containerRegistryName string = 'acronesquared${environment}${take(uniqueSt
 @description('Immutable container image reference (registry/repository@sha256:... or tag) for the web app and jobs (required when deployApps is true)')
 param appContainerImage string = ''
 
-@description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
+@description('Optional in Stage 0 (unused by app runtime; BuiltInOpenXmlPdfConverter handles Stage 0 PDF conversion per ADR 0024): whether to deploy a headless LibreOffice PDF converter internal Container App (carried to Stage 1)')
 param enablePdfConverterContainerApp bool = false
 
-@description('Container image reference for the internal PDF converter Container App (used when enablePdfConverterContainerApp is true)')
+@description('Optional in Stage 0 (unused by app runtime; carried to Stage 1): container image reference for the internal PDF converter Container App (required non-empty when enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
 
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
@@ -113,6 +113,9 @@ param logAnalyticsDailyQuotaGb int = environment == 'live' ? -1 : 2
 @description('Optional Azure Monitor Action Group resource ID to notify on Container Apps job failures or timeouts')
 param alertActionGroupId string = ''
 
+@description('Email address for the provisioned Azure Monitor Action Group receiving job-failure alerts (required when environment is demo or live unless alertActionGroupId is provided)')
+param alertRecipientEmail string = ''
+
 @description('PostgreSQL Flexible Server compute tier (Burstable for dev/test/demo, GeneralPurpose for training/live)')
 @allowed([
   'Burstable'
@@ -139,13 +142,20 @@ param postgresBackupRetentionDays int = environment == 'live' ? 35 : 7
 ])
 param postgresGeoRedundantBackup string = environment == 'live' ? 'Enabled' : 'Disabled'
 
+@description('Runtime document storage provider configured for the web app (ADR 0008, ADR 0024)')
+@allowed([
+  'local-fs'
+  'azure-blob'
+])
+param documentStorageProvider string = environment == 'live' ? 'azure-blob' : 'local-fs'
+
 @description('Minimum running replicas for the web Container App (at least 1 per ADR 0024)')
 @minValue(1)
 param webMinReplicas int = 1
 
-@description('Maximum replicas for the web Container App')
+@description('Maximum replicas for the web Container App (pinned to 1 across all environments while documentStorageProvider is local-fs per ADR 0008)')
 @minValue(1)
-param webMaxReplicas int = 10
+param webMaxReplicas int = documentStorageProvider == 'local-fs' ? 1 : 10
 
 @description('Optional additional dedicated Container Apps workload profiles beyond Consumption')
 param dedicatedWorkloadProfiles array = []
@@ -174,6 +184,7 @@ var enquiryAnonymiseJobName = take('caj-enq-anon-${environment}', 32)
 var registerRemindersJobName = take('caj-reg-rem-${environment}', 32)
 var outboxDrainJobName = take('caj-outbox-drain-${environment}', 32)
 var notificationDigestsJobName = take('caj-ntf-dig-${environment}', 32)
+var jobFailureActionGroupName = take('ag-jobs-${resourceSuffix}', 60)
 var jobFailureAlertRuleName = take('alrt-jobs-${resourceSuffix}', 60)
 
 var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
@@ -181,6 +192,21 @@ var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
   : true
 var deployAppsImageGuard = (deployApps && empty(appContainerImage))
   ? fail('APP_CONTAINER_IMAGE_REQUIRED: appContainerImage is required when deployApps is true.')
+  : true
+var localFsSingleReplicaGuard = (documentStorageProvider == 'local-fs' && (webMinReplicas != 1 || webMaxReplicas != 1))
+  ? fail('LOCAL_FS_SINGLE_REPLICA_REQUIRED: Web app must remain pinned to 1 replica across all environments while documentStorageProvider is local-fs (ADR 0008).')
+  : true
+var localFsLiveGuard = (environment == 'live' && documentStorageProvider == 'local-fs')
+  ? fail('STORAGE_LIVE_LOCAL_FS_FORBIDDEN: documentStorageProvider cannot be local-fs when environment is live.')
+  : true
+var azureBlobUnimplementedGuard = (documentStorageProvider == 'azure-blob')
+  ? fail('AZURE_BLOB_STORAGE_NOT_IMPLEMENTED: documentStorageProvider cannot be azure-blob until AzureBlobDocumentStorageProvider is implemented (ADR 0008, R631).')
+  : true
+var alertRecipientGuard = ((environment == 'demo' || environment == 'live') && empty(alertRecipientEmail) && empty(alertActionGroupId))
+  ? fail('ALERT_RECIPIENT_REQUIRED: Either alertRecipientEmail or alertActionGroupId is required when environment is demo or live.')
+  : true
+var pdfConverterImageGuard = (enablePdfConverterContainerApp && empty(pdfConverterContainerImage))
+  ? fail('PDF_CONVERTER_IMAGE_REQUIRED: pdfConverterContainerImage cannot be empty when enablePdfConverterContainerApp is true.')
   : true
 
 var keyVaultDnsSuffix = az.environment().suffixes.keyvaultDns
@@ -515,7 +541,29 @@ resource migrateAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAss
   }
 }
 
-resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+resource jobFailureActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (!empty(alertRecipientEmail)) {
+  name: jobFailureActionGroupName
+  location: 'global'
+  tags: platformTags
+  properties: {
+    groupShortName: take('1sq-${environment}', 12)
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'PlatformAlertRecipient'
+        emailAddress: alertRecipientEmail
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+var resolvedAlertActionGroupIds = concat(
+  !empty(alertActionGroupId) ? [alertActionGroupId] : [],
+  !empty(alertRecipientEmail) ? [jobFailureActionGroup!.id] : []
+)
+
+resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = if (alertRecipientGuard) {
   name: jobFailureAlertRuleName
   location: location
   tags: platformTags
@@ -583,11 +631,7 @@ union isfuzzy=true
       ]
     }
     actions: {
-      actionGroups: !empty(alertActionGroupId)
-        ? [
-            alertActionGroupId
-          ]
-        : []
+      actionGroups: resolvedAlertActionGroupIds
     }
   }
 }
@@ -832,6 +876,10 @@ var runtimeCommonEnv = [
     value: postgresRuntimeRoleName
   }
   {
+    name: 'PLATFORM_DOCUMENT_STORAGE_PROVIDER'
+    value: documentStorageProvider
+  }
+  {
     name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
     value: appInsights.properties.ConnectionString
   }
@@ -897,7 +945,7 @@ var pdfConverterEnv = (deployApps && enablePdfConverterContainerApp)
     ]
   : []
 
-resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && enablePdfConverterContainerApp) {
+resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && enablePdfConverterContainerApp && pdfConverterImageGuard) {
   name: pdfConverterAppName
   location: location
   tags: platformTags
@@ -947,7 +995,7 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
   ]
 }
 
-resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard) {
+resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard && localFsSingleReplicaGuard && localFsLiveGuard && azureBlobUnimplementedGuard) {
   name: webContainerAppName
   location: location
   tags: platformTags
@@ -988,22 +1036,37 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
           }
           probes: [
             {
+              type: 'Startup'
+              httpGet: {
+                path: '/api/health/live'
+                port: 3000
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 10
+            }
+            {
               type: 'Liveness'
               httpGet: {
-                path: '/login'
+                path: '/api/health/live'
                 port: 3000
               }
               initialDelaySeconds: 15
               periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
             }
             {
               type: 'Readiness'
               httpGet: {
-                path: '/login'
+                path: '/api/health/ready'
                 port: 3000
               }
               initialDelaySeconds: 10
               periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 3
             }
           ]
         }

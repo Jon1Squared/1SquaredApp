@@ -97,5 +97,14 @@ export interface DocumentStorageProvider {
 
 ## Consequences
 
-- The application works out of the box today using the tenant-isolated `local-fs` provider (`data/storage/tenant-<slug>-<env>/`) with zero Azure setup required.
+- **The application works out of the box today using the tenant-isolated `local-fs` provider (`data/storage/tenant-<slug>-<env>/`) with zero Azure setup required.**
 - Switching to Azure Blob Storage or a DMS later requires only changing `documentGeneration.storageProvider` in tenant configuration.
+
+## Stage 0 Exception & Removal Condition (Owner Decision D4, 20 November 2026)
+
+1. **Supersession of ADR 0001:** References above to ADR 0001 are superseded by [ADR 0028](./0028-tenant-database-and-repositories.md) and [ADR 0026](./0026-separate-demo-tenant.md); document metadata and template records live in per-tenant PostgreSQL (`TenantDocumentRepository`).
+2. **Stage 0 `local-fs` exception (`R578`):** `AzureBlobDocumentStorageProvider` (`azure-blob`) remains unimplemented (`STORAGE_PROVIDER_NOT_SUPPORTED`) in Stage 0. For Stage 0 only:
+   - `LocalTenantStorageProvider` (`local-fs`) and `assertRuntimeStorageAllowedForActiveTenant` **refuse to run when the environment is `live`** (`STORAGE_LIVE_LOCAL_FS_FORBIDDEN` at runtime startup, provider instantiation, `/api/health/ready`, and config saves).
+   - When `inMemoryOnly: false`, `LocalTenantStorageProvider` reads and writes strictly on disk (`memoryBlobs` stays empty) and returns `'pending'` (never `'clean'`) for unknown blob keys (`R579`).
+   - Any deployment configured with `documentStorageProvider == 'local-fs'` across any environment (`dev`, `test`, `training`, or `demo`) is pinned to **one replica** (`webMinReplicas <= 1`, `webMaxReplicas == 1`, guarded in `core/infra/modules/platform.bicep` by `LOCAL_FS_SINGLE_REPLICA_REQUIRED`, while `STORAGE_LIVE_LOCAL_FS_FORBIDDEN` blocks `local-fs` in `live`), and the container image grants `USER node` write ownership of `/app/data/storage` (`Dockerfile`).
+3. **Removal condition (recorded on `docs/roadmap/stage-0-plan.md`):** Before onboarding the first hosted live client, implement `AzureBlobDocumentStorageProvider` (`azure-blob`) backed by the per-tenant Azure Blob containers (`modules/tenant.bicep`) with short-lived user-delegation SAS tokens and Microsoft Defender for Storage scan status integration, then remove this exception and allow multi-replica scaling.

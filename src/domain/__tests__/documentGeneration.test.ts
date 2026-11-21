@@ -1,9 +1,13 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   BasicMergeEngine,
   canActorAccessGeneratedDocument,
   createDocumentStorageProvider,
   loadAndValidateTenantConfig,
+  LocalTenantStorageProvider,
   resolveDocumentPermissions,
   TenantDocumentRepository,
 } from '@platform/core';
@@ -19,6 +23,7 @@ import {
   resolvePersonDocumentPermissions,
 } from '@/domain/documentGeneration';
 import {
+  assertRuntimeStorageAllowedForActiveTenant,
   downloadGeneratedDocumentService,
   generateDocumentService,
   getDocumentGenerationSnapshotForUser,
@@ -26,11 +31,13 @@ import {
   getInitializedDocGenContext,
   getTemplateUsageReportService,
   resolveTenantBlobSigningKey,
+  updateDocumentGenerationConfigService,
 } from '@/server/documentGenerationServices';
 import { getMatterRepository, getPartyRepository } from '@/server/services';
 import { resolveEmployeeRoles } from '@/domain/homeConfig';
 import { runWithActiveActorSession } from '@/domain/rbac';
 import {
+  createVerifiedTenantContext,
   getActiveTenantConfiguration,
   resolveCurrentTenantContext,
   setActiveTenantConfigForTesting,
@@ -750,21 +757,214 @@ describe('Host Document Generation Domain & Server Services', () => {
         }),
       ).toThrow(/STORAGE_CONFIG_ERROR/);
 
-      // R562: when live signing key is configured, getDocumentStorage caches the live provider instance per cacheKey
+      // R578 (D4): When storageProvider is 'local-fs' in 'live', both LocalTenantStorageProvider and getDocumentStorage refuse to start
       vi.stubEnv(
         'PLATFORM_BLOB_SIGNING_KEY',
         'live-blob-signing-key-for-r562-cache-test-01',
       );
       const liveCfg = { ...baseCfg, environment: 'live' as const };
-      const firstLive = getDocumentStorage(liveCfg);
-      const secondLive = getDocumentStorage(liveCfg);
-      expect(secondLive).toBe(firstLive);
+      expect(() =>
+        new LocalTenantStorageProvider({
+          environment: 'live',
+          tokenSigningKey: 'live-blob-signing-key-for-r562-cache-test-01',
+        }),
+      ).toThrow(/STORAGE_LIVE_LOCAL_FS_FORBIDDEN/);
+      expect(() =>
+        createDocumentStorageProvider('local-fs', {
+          environment: 'live',
+          tokenSigningKey: 'live-blob-signing-key-for-r562-cache-test-01',
+        }),
+      ).toThrow(/STORAGE_LIVE_LOCAL_FS_FORBIDDEN/);
+      expect(() => getDocumentStorage(liveCfg)).toThrow(
+        /STORAGE_LIVE_LOCAL_FS_FORBIDDEN/,
+      );
+      expect(() => assertRuntimeStorageAllowedForActiveTenant(liveCfg)).toThrow(
+        /STORAGE_LIVE_LOCAL_FS_FORBIDDEN/,
+      );
 
-      const otherTenantLive = getDocumentStorage({
-        ...liveCfg,
+      // R562: when training signing key is configured, getDocumentStorage caches the provider instance per cacheKey
+      vi.stubEnv('PLATFORM_ENVIRONMENT', 'training');
+      const trainingCfg = { ...baseCfg, environment: 'training' as const };
+      const firstTraining = getDocumentStorage(trainingCfg);
+      const secondTraining = getDocumentStorage(trainingCfg);
+      expect(secondTraining).toBe(firstTraining);
+
+      const otherTenantTraining = getDocumentStorage({
+        ...trainingCfg,
         tenantId: 'tenant-alpha',
       });
-      expect(otherTenantLive).not.toBe(firstLive);
+      expect(otherTenantTraining).not.toBe(firstTraining);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('R579: disk-backed LocalTenantStorageProvider (inMemoryOnly: false) does not retain bytes in memoryBlobs and returns pending for unknown scan keys', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), '1sq-r579-storage-'));
+    try {
+      const storage = new LocalTenantStorageProvider({
+        inMemoryOnly: false,
+        rootDir: tmpRoot,
+        environment: 'test',
+        tokenSigningKey: 'r579-disk-storage-test-signing-key-32bytes',
+      });
+      const baseTenantCfg = getActiveTenantConfiguration();
+      const ctx = createVerifiedTenantContext(
+        {
+          sub: 'P-000001',
+          name: 'Admin User',
+          email: 'admin@notalawfirm.example',
+          tenantId: 'not-a-law-firm',
+          roles: ['admin'],
+          mfaVerified: true,
+          correlationId: 'corr-r579-a',
+        },
+        {
+          ...baseTenantCfg,
+          tenantId: 'not-a-law-firm',
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+        },
+      );
+      const ctxOtherTenant = createVerifiedTenantContext(
+        {
+          sub: 'P-BRAVO-1',
+          name: 'Bravo User',
+          email: 'user@bravo.example',
+          tenantId: 'tenant-bravo',
+          roles: ['admin'],
+          mfaVerified: true,
+          correlationId: 'corr-r579-b',
+        },
+        {
+          ...baseTenantCfg,
+          tenantId: 'tenant-bravo',
+          hostingMode: 'multi_tenant',
+          environment: 'test',
+        },
+      );
+
+      const payloadBytes = new Uint8Array([80, 75, 3, 4, 82, 53, 55, 57]);
+      const stored = await storage.putObject(ctx, {
+        category: 'documents',
+        objectId: 'DOC-R579-DISK',
+        fileName: 'disk-only.docx',
+        contentType:
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        bytes: payloadBytes,
+      });
+
+      const memoryMap = (
+        storage as unknown as { memoryBlobs: Map<string, Uint8Array> }
+      ).memoryBlobs;
+      expect(memoryMap.size).toBe(0);
+
+      // Cross-tenant read with Tenant A's blobKey is blocked
+      await expect(
+        storage.getObjectBytes(ctxOtherTenant, { blobKey: stored.blobKey }),
+      ).rejects.toThrow();
+
+      const diskPath = path.join(tmpRoot, ...stored.blobKey.split('/'));
+      expect(fs.existsSync(diskPath)).toBe(true);
+      expect(await storage.getObjectBytes(ctx, { blobKey: stored.blobKey })).toEqual(
+        payloadBytes,
+      );
+
+      // R618: Simulated process restart (fresh LocalTenantStorageProvider with empty caches) reads disk blob as clean and serves it
+      const restartedStorage = new LocalTenantStorageProvider({
+        inMemoryOnly: false,
+        rootDir: tmpRoot,
+        environment: 'test',
+        tokenSigningKey: 'r579-disk-storage-test-signing-key-32bytes',
+      });
+      expect(
+        await restartedStorage.getMalwareScanStatus(ctx, stored.blobKey),
+      ).toBe('clean');
+      const token = await restartedStorage.issueScopedDownloadToken(ctx, {
+        blobKey: stored.blobKey,
+        fileName: 'disk-only.docx',
+        documentId: 'DOC-R579-DISK',
+      });
+      const verifiedToken = await restartedStorage.verifyScopedDownloadToken(
+        ctx,
+        token.token,
+      );
+      expect(verifiedToken.blobKey).toBe(stored.blobKey);
+      expect(
+        await restartedStorage.getObjectBytes(ctx, { blobKey: stored.blobKey }),
+      ).toEqual(payloadBytes);
+
+      // Deleting the file on disk (e.g. another replica deleted it) must NOT serve a stale in-memory copy
+      fs.unlinkSync(diskPath);
+      await expect(
+        storage.getObjectBytes(ctx, { blobKey: stored.blobKey }),
+      ).rejects.toThrow(/STORAGE_NOT_FOUND/);
+
+      // Unknown blobKey must return 'pending' (never 'clean') and refuse download tokens
+      const unknownKey = `${ctx.blobContainerName}/documents/DOC-NEVER-UPLOADED/missing.docx`;
+      expect(await storage.getMalwareScanStatus(ctx, unknownKey)).toBe('pending');
+      await expect(
+        storage.issueScopedDownloadToken(ctx, {
+          blobKey: unknownKey,
+          fileName: 'missing.docx',
+          documentId: 'DOC-NEVER-UPLOADED',
+        }),
+      ).rejects.toThrow(/STORAGE_MALWARE_GATE/);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('R631: assertRuntimeStorageAllowedForActiveTenant and updateDocumentGenerationConfigService fail closed on PLATFORM_DOCUMENT_STORAGE_PROVIDER mismatch or azure-blob', async () => {
+    try {
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', 'azure-blob');
+      expect(() => assertRuntimeStorageAllowedForActiveTenant()).toThrow(
+        /AZURE_BLOB_STORAGE_NOT_IMPLEMENTED|STORAGE_PROVIDER_MISMATCH/,
+      );
+
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', 'sharepoint');
+      expect(() => assertRuntimeStorageAllowedForActiveTenant()).toThrow(
+        /STORAGE_PROVIDER_MISMATCH/,
+      );
+
+      vi.unstubAllEnvs();
+      const baseCfg = getActiveTenantConfiguration();
+      const nowIso = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 3600_000).toISOString();
+      const signed = createSignedEntraSessionCookie({
+        sub: 'P-000004',
+        tenantId: baseCfg.tenantId,
+        oid: '00000000-0000-0000-0000-000000000004',
+        tid: '11111111-2222-3333-4444-555555555555',
+        displayName: 'Admin User',
+        email: 'admin@notalawfirm.example',
+        personId: 'P-000004',
+        entraRoles: ['admin'],
+        mappedRoles: ['admin'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: nowIso,
+        expiresAt,
+      });
+      const verified = verifySignedEntraSessionCookie(signed)!;
+
+      await expect(
+        runWithActiveActorSession(
+          {
+            personId: 'P-000004',
+            tenantId: baseCfg.tenantId,
+            tokenRoles: ['admin'],
+            expiresAtMs: Date.parse(expiresAt),
+            verifiedSession: verified,
+          },
+          () =>
+            updateDocumentGenerationConfigService(
+              { storageProvider: 'azure-blob' },
+              'P-000004',
+            ),
+        ),
+      ).rejects.toThrow(/AZURE_BLOB_STORAGE_NOT_IMPLEMENTED/);
     } finally {
       vi.unstubAllEnvs();
     }

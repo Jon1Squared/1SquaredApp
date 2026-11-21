@@ -387,3 +387,34 @@ export abstract class TenantScopedRepository {
     }
   }
 }
+
+/**
+ * Verifies live PostgreSQL connectivity and that all required per-tenant schema
+ * migrations are applied (`public.tenant_schema_migrations`, R580).
+ * Reads no client/matter business rows.
+ */
+export async function probeTenantDatabaseReadiness(
+  ctx: TenantContext,
+  options?: { requiredSchemaVersion?: string },
+): Promise<void> {
+  const requiredVersion =
+    options?.requiredSchemaVersion ?? CORE_REQUIRED_SCHEMA_VERSION;
+  const repo = new (class extends TenantScopedRepository {})({
+    requiredSchemaVersion: requiredVersion,
+    statementTimeoutMs: 5_000,
+  });
+  await repo.withTenantReadTransaction(ctx, async (tx) => {
+    const res = await tx.query<{ version: string }>(
+      'SELECT version FROM public.tenant_schema_migrations ORDER BY version ASC',
+    );
+    const applied = new Set(res.rows.map((r) => r.version));
+    const missing = listRequiredSchemaVersions(requiredVersion).find(
+      (v) => !applied.has(v),
+    );
+    if (missing) {
+      throw new Error(
+        `TENANT_SCHEMA_NOT_READY: Missing required schema migration ${missing}.`,
+      );
+    }
+  });
+}

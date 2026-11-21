@@ -8,10 +8,16 @@ export async function register(): Promise<void> {
   const [
     { emitPlatformStartupTelemetry, initializeAzureMonitorTelemetry },
     { resolveRequestCorrelationId },
+    { assertRuntimeStorageAllowedForActiveTenant },
   ] = await Promise.all([
     import('@platform/core'),
     import('./server/correlationId'),
+    import('./server/documentGenerationServices'),
   ]);
+
+  if (process.env.NEXT_PHASE !== 'phase-production-build') {
+    assertRuntimeStorageAllowedForActiveTenant();
+  }
 
   const { enabled } = await initializeAzureMonitorTelemetry({
     loadAzureMonitor: () => import('@azure/monitor-opentelemetry'),

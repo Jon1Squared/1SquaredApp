@@ -6,7 +6,7 @@ export const documentGenerationArticle: DocArticle = {
   section: 'documents-dms',
   summary:
     'How to author .docx precedent templates, map Field Catalogue placeholders, approve template versions with separation of duties, generate merged documents, and review template usage.',
-  updated: '2026-11-19',
+  updated: '2026-11-20',
   body: `
 1Squared includes a built-in **Document Generation & Precedent Management** engine that merges live client, matter, party, fee earner, and financial data into Word (\`.docx\`) templates while enforcing role-based field permissions, restricted-matter controls, and two-person template approval.
 
@@ -22,7 +22,7 @@ Users with the \`document:generate\` permission can generate letters, attendance
 
 ## 2. Scoped download tokens & access control
 
-Generated documents are stored in the tenant’s isolated document storage container and linked to the originating Matter or Client record, while all template, version, generated document, link, usage, and tenant configuration records live exclusively in the firm’s isolated PostgreSQL database (\`TenantDocumentRepository\`, running every read and write inside a transaction with \`SET LOCAL ROLE\`):
+Generated documents are stored in the tenant’s isolated document storage container and linked to the originating Matter or Client record, while all template, version, generated document, link, usage, and tenant configuration records live exclusively in the firm’s isolated database: in Stage 0, \`LocalTenantStorageProvider\` (\`local-fs\`, single-replica demo container, reading strictly from disk when \`inMemoryOnly: false\` and returning \`'pending'\` for unknown scan keys) refuses to start in \`live\` environments; per-tenant Azure Blob Storage (\`azure-blob\`) is not yet enabled (deployment, start-up, readiness, settings saves, and effective per-tenant document generation checks fail closed if \`azure-blob\`, another unimplemented provider, or a mismatched storage provider is selected without falling back to \`local-fs\`; a \`live\` web deployment is refused until \`azure-blob\` exists) and Stage 0 PDF rendering uses the built-in \`BuiltInOpenXmlPdfConverter\` (ADR 0008 and ADR 0024).
 
 - Viewing generated document metadata requires \`document:view\` and access to the underlying Matter or Client record (including \`matter:restricted:access\` or allow-list membership on restricted staff matters). Roles holding \`document:view\` without \`document_template:view\` can still view generated documents linked to accessible matters via \`getDocumentGenerationSnapshotAction\` (template definitions and Field Catalogue metadata remain omitted unless \`document_template:view\` is also held). Generating new documents requires both \`document:generate\` and \`document_template:view\`.
 - Downloading a generated file requires \`document:download\`. 1Squared issues a short-lived, HMAC-signed scoped download token bound to your \`tenantId\`, user \`sub\`, \`documentId\`, and \`blobKey\`. When the download endpoint is called, 1Squared verifies both the token signature and your live session permissions before streaming the file.

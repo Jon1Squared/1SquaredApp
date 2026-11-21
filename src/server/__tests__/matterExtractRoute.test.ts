@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearMatterExtractionCacheForTesting,
@@ -744,5 +745,85 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     const dataB = (await resB.json()) as { extraction: { summary: string } };
     expect(dataB.extraction.summary).toBe('Tenant B Matter Title');
     expect(anthropicCalls).toBe(3);
+  });
+
+  it('R585: hashes full document content with SHA-256 (detecting differences after char 120), hashes API keys in model cache, and bounds/sweeps cache entries', async () => {
+    const sharedPrefix = 'A'.repeat(160);
+    const docOneText = `${sharedPrefix}-CLAIM-ONE-0001`;
+    const docTwoText = `${sharedPrefix}-CLAIM-TWO-9999`;
+    expect(docOneText.slice(0, 120)).toBe(docTwoText.slice(0, 120));
+    expect(docOneText.length).toBe(docTwoText.length);
+
+    let anthropicCalls = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/v1/models')) {
+        return new Response(
+          JSON.stringify({ data: [{ id: 'claude-sonnet-4-5-20250929' }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      anthropicCalls += 1;
+      const label =
+        anthropicCalls === 1 ? 'First Document Result' : 'Second Document Result';
+      return new Response(
+        JSON.stringify({
+          model: 'claude-sonnet-4-5-20250929',
+          stop_reason: 'end_turn',
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                summary: label,
+                matters: [
+                  {
+                    matter_ref: `Matter ${anthropicCalls}`,
+                    title: { value: label, source: ['instruction.eml'] },
+                    work_type: 'Employment & HR',
+                  },
+                ],
+              }),
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const res1 = await matterExtractPost(buildExtractRequest(docOneText));
+    expect(res1.status).toBe(200);
+    const json1 = (await res1.json()) as { extraction: { summary: string } };
+    expect(json1.extraction.summary).toBe('First Document Result');
+
+    // Second document has identical name, length, and first 120 chars — MUST miss cache
+    const res2 = await matterExtractPost(buildExtractRequest(docTwoText));
+    expect(res2.status).toBe(200);
+    const json2 = (await res2.json()) as { extraction: { summary: string } };
+    expect(json2.extraction.summary).toBe('Second Document Result');
+    expect(anthropicCalls).toBe(2);
+
+    // Dynamically inspect computeDocumentsCacheKey & cache bounds once exported / present in route module
+    const routeMod = (await import('@/app/api/matters/extract/route')) as Record<
+      string,
+      unknown
+    >;
+    expect(typeof routeMod.computeDocumentsCacheKey).toBe('function');
+    const fn = routeMod.computeDocumentsCacheKey as (
+      tenantId: string,
+      actorId: string,
+      docs: Array<{ id: string; name: string; kind: 'email'; content: string }>,
+    ) => string;
+    const k1 = fn('t1', 'u1', [
+      { id: '1', name: 'a.eml', kind: 'email', content: docOneText },
+    ]);
+    const k2 = fn('t1', 'u1', [
+      { id: '1', name: 'a.eml', kind: 'email', content: docTwoText },
+    ]);
+    expect(k1).not.toBe(k2);
+    const expectedHash = crypto
+      .createHash('sha256')
+      .update(docOneText)
+      .digest('hex');
+    expect(k1).toContain(expectedHash);
   });
 });

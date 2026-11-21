@@ -6,7 +6,7 @@ export const aiMatterExtractionArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How AI matter extraction pre-fills the matter opening form from uploaded emails and documents, who can use it, how per-tenant settings govern it, and what data flows to the configured AI provider.',
-  updated: '2026-11-19',
+  updated: '2026-11-20',
   body: `## What AI matter extraction does
 
 When opening a new matter, the **Pre-fill from emails & documents (AI)** panel parses uploaded or pasted intake documents (\`.eml\`, \`.msg\`, \`.pdf\`, \`.docx\`, \`.txt\`) and pre-fills:
@@ -61,7 +61,7 @@ AI matter extraction runs **only** when **both** tenant configuration settings a
 | **Data never sent** | Existing CRM people, organisations, matters, enquiries, quotes, finance data, HR/payroll data, or other tenants' records (CRM matching happens locally on the server after the AI response returns) |
 | **Model training policy** | **No training on client content.** Under Anthropic's commercial API terms, prompts and documents submitted via the API are never used to train or fine-tune models |
 | **Data residency** | Anthropic commercial API endpoints operate outside UK Azure regions. Tenants requiring strict UK-only data residency must keep \`integrations.aiProviderChoice\` set to \`'disabled'\` until the \`'azure_openai_uk'\` adapter is enabled |
-| **Caching and logging** | In-memory extraction cache keys are scoped by \`tenantId\` and \`actor.personId\`. Application error logs record only \`correlationId\`, \`tenantId\`, and a stable error code (\`EXTRACTION_FAILED\`)—never document content or personal data |
+| **Caching and logging** | In-memory extraction cache keys are scoped by \`tenantId\`, \`actor.personId\`, and the full SHA-256 content hash of each uploaded document (never truncated previews), with deterministic TTL eviction and entry-count bounds; model-discovery caches key on a SHA-256 hash of the API key. Application error logs record only \`correlationId\`, \`tenantId\`, and a stable error code (\`EXTRACTION_FAILED\`)—never document content or personal data |
 | **Configured tenants** | \`not-a-law-firm\` (\`base.json\`, \`environments/dev.json\`, \`environments/test.json\`): \`enableAiMatterExtraction: true\`, \`aiProviderChoice: 'anthropic'\`. Default for all new tenants: \`enableAiMatterExtraction: false\`, \`aiProviderChoice: 'disabled'\` |
 `,
 };

@@ -47,6 +47,7 @@ Stage 0 delivers everything listed under "What’s missing" for items 28 to 32, 
 **Out of scope:** new features from stages 1 to 5. B2 and B6 stay in stage 1, although B6 becomes simple once matter numbers come from a database sequence (slice S0-16). Undertakings, complaints and the other registers are built on the engine in stages 2 and 3, not here.
 
 **Before the first hosted client (not stage 0; recorded so they aren't lost):**
+- `azure-blob` document storage provider with short-lived user-delegation SAS tokens and Defender scan integration (Owner Decision D4 / ADR 0008; removes the Stage 0 single-replica `local-fs` demo exception)
 - per-tenant backup and restore, tested (standard 8.9)
 - offboarding process (8.10)
 - per-tenant rate limits (8.12)
