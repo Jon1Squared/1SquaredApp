@@ -9852,12 +9852,30 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       correlationId: 'corr-ue-bravo-recent',
     });
 
+    const rawBaseConfigForPurge = getActiveTenantRawBaseConfig();
+    const tenantConfigAlphaForPurge = loadAndValidateTenantConfig(
+      rawBaseConfigForPurge,
+      { tenantId: 'tenant-alpha', environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    const tenantConfigBravoForPurge = loadAndValidateTenantConfig(
+      rawBaseConfigForPurge,
+      { tenantId: 'tenant-bravo', environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(sweepNowIso));
     let purgeSummary;
     try {
       purgeSummary = await runScheduledUsageRetentionPurgeJobSweep({
         registry,
+        tenantConfigOverrideByTenantId: {
+          'tenant-alpha': tenantConfigAlphaForPurge,
+          'tenant-bravo': tenantConfigBravoForPurge,
+        },
       });
     } finally {
       vi.useRealTimers();
@@ -10170,6 +10188,20 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       notes: 'Bravo 30m prospect notes',
     });
 
+    const rawBaseConfigForAnon = getActiveTenantRawBaseConfig();
+    const tenantConfigAlphaForAnon = loadAndValidateTenantConfig(
+      rawBaseConfigForAnon,
+      { tenantId: 'tenant-alpha', environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    const tenantConfigBravoForAnon = loadAndValidateTenantConfig(
+      rawBaseConfigForAnon,
+      { tenantId: 'tenant-bravo', environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+
     // Attack 3: Tampered specificEnquiryId from Tenant Alpha targeting Tenant Bravo's expired enquiry touches 0 rows in Tenant Bravo
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-06-15T01:30:00.000Z'));
@@ -10181,6 +10213,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           triggerSource: 'manual',
           actorId: 'P-000001',
           specificEnquiryId: bravo30mId,
+          tenantConfig: tenantConfigAlphaForAnon,
         },
       );
     } finally {
@@ -10210,6 +10243,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     try {
       sweepSummary = await runScheduledEnquiryRetentionAnonymisationJobSweep({
         registry,
+        tenantConfigOverrideByTenantId: {
+          'tenant-alpha': tenantConfigAlphaForAnon,
+          'tenant-bravo': tenantConfigBravoForAnon,
+        },
       });
     } finally {
       vi.useRealTimers();

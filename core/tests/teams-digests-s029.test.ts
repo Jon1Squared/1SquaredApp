@@ -512,6 +512,10 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
 
   it('2. S4 defaults across all 13 kinds, self-service preferences CRUD, self-only & jobOnly guards, and digest_sent_at preservation on markNotificationRead', async () => {
     const ctxAdmin = await setupCleanMigratedTenant('s029-prefs');
+    setActiveTenantConfigForTesting({
+      ...(structuredClone(getActiveTenantRawBaseConfig()) as Record<string, unknown>),
+      tenantId: 's029-prefs',
+    });
     const partyRepo = getPartyRepository();
     const outboxRepo = getOutboxRepository();
     const taskRepo = getTaskWorkflowRepository();

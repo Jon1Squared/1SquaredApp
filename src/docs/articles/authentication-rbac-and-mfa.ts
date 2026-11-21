@@ -6,7 +6,7 @@ export const authenticationRbacAndMfaArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How Microsoft Entra ID OIDC sign-in and sign-out work in 1Squared, how role-based access control (RBAC) and Entra identity mapping are configured, and which administrative actions require multi-factor authentication (MFA).',
-  updated: '2026-11-19',
+  updated: '2026-11-20',
   body: `
 1Squared authenticates every user through **Microsoft Entra ID (OpenID Connect with PKCE)** and evaluates access on every server action and API route through the central **Role-Based Access Control (RBAC)** engine in \`@platform/core\`.
 
@@ -68,7 +68,7 @@ Permissions are grouped into built-in and custom roles in the tenant RBAC config
 
 ### Per-person permission overrides & escalation guards
 
-In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_overrides\` can grant or revoke individual permissions on a specific employee record (with live debounced effective-permission previews computed on the server via \`previewRbacOverridesAction\` and \`resolvePersonPermissions\`, requiring \`rbac:manage_user_overrides\`, \`rbac:manage_config\`, or \`admin:access\`, \`mfaVerified === true\`, and schema-valid \`rbacConfig\`) and bind their Entra Object ID. Three mandatory security invariants apply to all role and override changes:
+In **Admin → RBAC & Entra ID**, administrators holding \`rbac:manage_user_overrides\` can grant or revoke individual permissions on a specific employee record (with live debounced effective-permission previews computed on the server via \`previewRbacOverridesAction\` and \`resolvePersonPermissions\`, requiring \`rbac:manage_user_overrides\`, \`rbac:manage_config\`, or \`admin:access\`, \`mfaVerified === true\`, and schema-valid \`rbacConfig\`) and bind their Entra Object ID. Effective permissions are computed freshly on each call without retaining a mutable permission cache (\`R596\`), so role, team-lead, and override changes take effect immediately. Three mandatory security invariants apply to all role and override changes:
 
 1. **No Self-Modification**: No user—including a System Administrator—can modify their own roles or permission overrides, or add themselves as a team lead (\`leadIds\`) in **Admin → Teams** (\`saveTeamAction\` / \`saveTeamRecord\`, which enforces \`SELF_MODIFICATION_FORBIDDEN\` because team leadership grants relationship permissions such as \`employee:edit_core\`).
 2. **No Granting Unheld Permissions**: A user cannot grant a permission or assign a role containing a permission that the acting user does not themselves hold.

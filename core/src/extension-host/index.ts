@@ -13,6 +13,7 @@
 
 import type {
   ExtensionExecutionContext,
+  ExtensionHookName,
   FieldCatalogueEntry,
   FieldProviderHookInput,
   FieldProviderHookResult,
@@ -179,6 +180,31 @@ export class ExtensionHost {
       .filter((ext): ext is PlatformExtension => Boolean(ext));
   }
 
+  private buildScopedContextForExtension(
+    tenantCtx: TenantContext,
+    tenantConfig: TenantConfiguration,
+    ext: PlatformExtension,
+  ): ExtensionExecutionContext {
+    const canReadConfig = ext.manifest.permissions.includes('config:read');
+    return Object.freeze({
+      tenant: Object.freeze({
+        tenantId: tenantCtx.tenantId,
+        hostingMode: tenantCtx.hostingMode,
+        environment: tenantCtx.environment,
+        correlationId: tenantCtx.correlationId,
+        actorRoles: tenantCtx.actorRoles,
+      }),
+      ...(canReadConfig ? { config: Object.freeze({ ...tenantConfig }) } : {}),
+    });
+  }
+
+  private isHookDeclaredInManifest(
+    ext: PlatformExtension,
+    hookName: ExtensionHookName,
+  ): boolean {
+    return ext.manifest.hooks.includes(hookName);
+  }
+
   public async executeMatterCostsHook(
     hookName: 'beforeMatterCostsCalculate' | 'beforeMatterOpen',
     tenantCtx: TenantContext,
@@ -196,20 +222,24 @@ export class ExtensionHost {
     let requiresPartnerSignOff = false;
     let allowProceed = true;
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks[hookName];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, hookName)) {
+        if (hookName === 'beforeMatterOpen') {
+          allowProceed = false;
+        }
+        aggregatedWarnings.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "${hookName}" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -281,20 +311,24 @@ export class ExtensionHost {
     let requiresPartnerSignOff = false;
     let allowProceed = true;
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks[hookName];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, hookName)) {
+        if (hookName === 'beforeMatterOpen') {
+          allowProceed = false;
+        }
+        aggregatedWarnings.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "${hookName}" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -360,20 +394,24 @@ export class ExtensionHost {
     }
 
     const active = this.getActiveExtensionsForTenant(tenantConfig);
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
 
     for (const ext of active) {
       const fn = ext.hooks.onPmsOutboundCommand;
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'onPmsOutboundCommand')) {
+        return {
+          commandId: command.id,
+          status: 'Failed',
+          syncedAt: new Date().toISOString(),
+          errorMessage: `[Extension permission denied: ${ext.manifest.id}] Hook "onPmsOutboundCommand" is not declared in manifest.hooks.`,
+        };
+      }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -432,20 +470,15 @@ export class ExtensionHost {
     const resolvedValues: Record<string, unknown> = {};
     const isolatedErrors: string[] = [];
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks.provideDocumentFields;
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'provideDocumentFields')) {
+        isolatedErrors.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "provideDocumentFields" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
 
       if (!ext.manifest.permissions.includes('document:fields:provide')) {
         isolatedErrors.push(
@@ -453,6 +486,12 @@ export class ExtensionHost {
         );
         continue;
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? Math.min(this.defaultHookTimeoutMs, 500);
@@ -550,20 +589,15 @@ export class ExtensionHost {
     const active = this.getActiveExtensionsForTenant(tenantConfig);
     const isolatedErrors: string[] = [];
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks[hookName];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, hookName)) {
+        isolatedErrors.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "${hookName}" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
 
       if (!ext.manifest.permissions.includes('document:read')) {
         isolatedErrors.push(
@@ -571,6 +605,12 @@ export class ExtensionHost {
         );
         continue;
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -621,20 +661,19 @@ export class ExtensionHost {
     let rejectionReason: string | undefined;
     let currentInput: KeyDateBeforeCreateHookInput = { ...input };
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks['keyDate.beforeCreate'];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'keyDate.beforeCreate')) {
+        const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "keyDate.beforeCreate" is not declared in manifest.hooks.`;
+        isolatedErrors.push(msg);
+        return {
+          allowProceed: false,
+          rejectionReason: msg,
+          enrichedInput: currentInput,
+          isolatedErrors,
+        };
+      }
 
       if (!ext.manifest.permissions.includes('keydate:write')) {
         isolatedErrors.push(
@@ -642,6 +681,12 @@ export class ExtensionHost {
         );
         continue;
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -701,20 +746,15 @@ export class ExtensionHost {
     const active = this.getActiveExtensionsForTenant(tenantConfig);
     const isolatedErrors: string[] = [];
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks['keyDate.afterStatusChange'];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'keyDate.afterStatusChange')) {
+        isolatedErrors.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "keyDate.afterStatusChange" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
 
       if (
         !ext.manifest.permissions.includes('keydate:read') &&
@@ -725,6 +765,12 @@ export class ExtensionHost {
         );
         continue;
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -770,20 +816,15 @@ export class ExtensionHost {
     const active = this.getActiveExtensionsForTenant(tenantConfig);
     const isolatedErrors: string[] = [];
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks['keyDate.calculateCustomRule'];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'keyDate.calculateCustomRule')) {
+        isolatedErrors.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "keyDate.calculateCustomRule" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
 
       if (
         !ext.manifest.permissions.includes('keydate:read') &&
@@ -794,6 +835,12 @@ export class ExtensionHost {
         );
         continue;
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -860,20 +907,21 @@ export class ExtensionHost {
     let dueAt = input.draft.dueAt;
     let reviewAt = input.draft.reviewAt;
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks['register.beforeCreate'];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'register.beforeCreate')) {
+        const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "register.beforeCreate" is not declared in manifest.hooks.`;
+        isolatedErrors.push(msg);
+        return {
+          allowProceed: false,
+          rejectionReason: msg,
+          mergedFieldValues,
+          dueAt,
+          reviewAt,
+          isolatedErrors,
+        };
+      }
 
       if (!ext.manifest.permissions.includes('register:write')) {
         const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "register.beforeCreate" requires permission "register:write".`;
@@ -887,6 +935,12 @@ export class ExtensionHost {
           isolatedErrors,
         };
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -986,20 +1040,19 @@ export class ExtensionHost {
       ...(input.fieldUpdates ?? {}),
     };
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks['register.beforeTransition'];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'register.beforeTransition')) {
+        const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "register.beforeTransition" is not declared in manifest.hooks.`;
+        isolatedErrors.push(msg);
+        return {
+          allowProceed: false,
+          rejectionReason: msg,
+          mergedFieldUpdates,
+          isolatedErrors,
+        };
+      }
 
       if (!ext.manifest.permissions.includes('register:write')) {
         const msg = `[Extension permission denied: ${ext.manifest.id}] Hook "register.beforeTransition" requires permission "register:write".`;
@@ -1011,6 +1064,12 @@ export class ExtensionHost {
           isolatedErrors,
         };
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;
@@ -1085,20 +1144,15 @@ export class ExtensionHost {
     const active = this.getActiveExtensionsForTenant(tenantConfig);
     const isolatedErrors: string[] = [];
 
-    const scopedContext: ExtensionExecutionContext = Object.freeze({
-      tenant: Object.freeze({
-        tenantId: tenantCtx.tenantId,
-        hostingMode: tenantCtx.hostingMode,
-        environment: tenantCtx.environment,
-        correlationId: tenantCtx.correlationId,
-        actorRoles: tenantCtx.actorRoles,
-      }),
-      config: Object.freeze({ ...tenantConfig }),
-    });
-
     for (const ext of active) {
       const fn = ext.hooks['register.afterTransition'];
       if (!fn) continue;
+      if (!this.isHookDeclaredInManifest(ext, 'register.afterTransition')) {
+        isolatedErrors.push(
+          `[Extension permission denied: ${ext.manifest.id}] Hook "register.afterTransition" is not declared in manifest.hooks.`,
+        );
+        continue;
+      }
 
       if (
         !ext.manifest.permissions.includes('register:read') &&
@@ -1109,6 +1163,12 @@ export class ExtensionHost {
         );
         continue;
       }
+
+      const scopedContext = this.buildScopedContextForExtension(
+        tenantCtx,
+        tenantConfig,
+        ext,
+      );
 
       const timeoutMs =
         ext.manifest.hookTimeoutMs ?? this.defaultHookTimeoutMs;

@@ -93,6 +93,7 @@ import {
   appendTenantAuditEntries,
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
+  resolveVerifiedTenantConfiguration,
   getCatalogueRepository,
   getHrAndRbacRepository,
   getMatterRepository,
@@ -332,8 +333,9 @@ export function getDocumentStorage(
 export async function getEffectiveTenantConfig(
   ctx: TenantContext,
   repo: TenantDocumentRepository,
+  explicitConfig?: TenantConfiguration,
 ): Promise<TenantConfiguration> {
-  const baseCfg = getActiveTenantConfiguration();
+  const baseCfg = resolveVerifiedTenantConfiguration(ctx, explicitConfig);
   const override = await repo.getDocumentGenerationTenantConfig(ctx);
   if (!override) {
     return baseCfg;

@@ -297,6 +297,13 @@ export async function importFirmStoreModulesToPostgres(
 ): Promise<ImportStoreModulesResult> {
   const { ctx } = options;
   const tenantConfig = options.tenantConfig ?? getActiveTenantConfiguration();
+  if (ctx.environment === 'live' || tenantConfig.environment === 'live') {
+    const err = new Error(
+      'DEMO_DATA_LIVE_FORBIDDEN: Demo/seed store imports are forbidden in the live environment.',
+    ) as Error & { code?: string };
+    err.code = 'DEMO_DATA_LIVE_FORBIDDEN';
+    throw err;
+  }
   if (tenantConfig.tenantId !== ctx.tenantId) {
     throw new Error(
       'STORE_IMPORT_TENANT_MISMATCH: Tenant configuration does not belong to the caller tenant context.',

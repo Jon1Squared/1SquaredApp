@@ -6,7 +6,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How non-live demo data reset and clean-deployment clear operations are protected by admin-only MFA permissions and audited, and how scheduled and manual unconverted enquiry retention anonymisation is enforced.',
-  updated: '2026-11-15',
+  updated: '2026-11-20',
   body: `
 1Squared separates destructive environment data administration from routine firm configuration and enforces strict retention eligibility rules before personal data on closed enquiries can be anonymised.
 
@@ -14,7 +14,7 @@ export const dataAdministrationAndRetentionArticle: DocArticle = {
 
 The **Admin → Demo data** tools (**Load demo dataset** and **Clear all data**) are restricted by three independent controls:
 
-1. **Non-live demo-enabled environments only**: Both \`resetDemoDataAction\` and \`clearAllDataAction\` check \`isDataResetAllowedEnvironment()\`, which delegates to \`isNonLiveDemoEnvironment()\`. They are allowed only when the tenant \`environment\` is \`dev\`, \`test\`, \`training\`, or \`demo\` (never \`live\`) **and** \`featureFlags.enableDemoMode\` is \`true\`. Eligibility is decided strictly by tenant configuration rather than \`NODE_ENV\` (see [Demo environment](/docs/demo-environment)).
+1. **Non-live demo-enabled environments only**: Both \`resetDemoDataAction\` and \`clearAllDataAction\` check \`isDataResetAllowedEnvironment()\`, which delegates to \`isNonLiveDemoEnvironment()\`, and the underlying helpers (\`resetAllDemoData\`, \`clearAllDataToCleanDeployment\`, and \`importFirmStoreModulesToPostgres\`) also enforce an upfront \`DEMO_DATA_LIVE_FORBIDDEN\` guard (\`R598\`). They are allowed only when the tenant \`environment\` is \`dev\`, \`test\`, \`training\`, or \`demo\` (never \`live\`) **and** \`featureFlags.enableDemoMode\` is \`true\`. Eligibility is decided strictly by tenant configuration rather than \`NODE_ENV\` (see [Demo environment](/docs/demo-environment)).
 2. **System Administrator with MFA (\`admin:data_reset\`)**: Both actions require the \`admin:data_reset\` permission (\`requiresMfa: true\`), which is granted **exclusively to the built-in \`admin\` role** (and not to \`managing_partner\` or \`partner\`). An administrator signed in without multi-factor authentication receives \`MFA_REQUIRED\`.
 3. **Post-reset audit trail**: Before resetting or clearing the per-tenant PostgreSQL database, 1Squared captures the acting administrator’s person ID and display name, clears and re-imports all per-tenant PostgreSQL tables via \`clearMigratedPostgresModulesForTenant\` and \`importFirmStoreModulesToPostgres\` (\`src/server/storePostgresImport.ts\`, seeded from \`src/seed/seedStoreBuilder.ts\`), and writes a \`data-reset\` or \`data-cleared\` audit entry into \`public.audit_entries\`. After clearing all data, the browser signs out cleanly via \`/api/auth/logout\` so stale session references cannot persist.
 

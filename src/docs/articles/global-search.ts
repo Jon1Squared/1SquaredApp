@@ -6,7 +6,7 @@ export const globalSearchArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How global search queries PostgreSQL full-text and trigram indexes across nine record types whilst enforcing permissions and restricted-matter rules before ranking or counting.',
-  updated: '2026-11-16',
+  updated: '2026-11-20',
   body: `
 The global search bar on **Home** and in the top navigation bar runs debounced queries exclusively on the server via \`searchGlobalRecordsAction\` and \`TenantSearchRepository\` (\`core/src/tenancy/searchRepository.ts\`). The full searchable estate is never built or shipped into browser memory on page load (\`getAppSnapshot\` returns an empty client \`searchIndex\`).
 
@@ -33,7 +33,7 @@ Migration \`0018_tenant_search_indexes_expand\` installs \`pg_trgm\` in the tena
 
 ## 3. Permissions, ethical walls and privacy
 
-All access control executes inside PostgreSQL \`WHERE\` clauses **before** ranking, counting or pagination—so restricted or unpermitted records never contribute to either search hits or facet totals:
+All access control executes inside PostgreSQL \`WHERE\` clauses **before** ranking, counting or pagination—so restricted or unpermitted records never contribute to either search hits or facet totals (and two-tenant isolation tests verify that exact cross-tenant record ID and reference queries return zero hits across tenants, \`R587\`):
 
 - **Staff matters & ethical walls**: Matters with \`isStaffMatter\`, \`hasEthicalWall\`, or a non-empty allowlist (\`restrictedAccessUserIdsFallback\`) are visible only to users holding \`matter:restricted:access\`, named partners/supervisors/fee earners/team members, or explicit allowlist members. Linked enquiries, quotes, tasks, documents (\`document_links\` and \`primary_matter_id\`), key dates, and register records inherit the same restriction.
 - **Role permissions**:

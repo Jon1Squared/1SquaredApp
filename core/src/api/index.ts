@@ -1574,7 +1574,7 @@ export interface ExtensionExecutionContext {
     TenantContext,
     'tenantId' | 'hostingMode' | 'environment' | 'correlationId' | 'actorRoles'
   >;
-  readonly config: Readonly<TenantConfiguration>;
+  readonly config?: Readonly<TenantConfiguration>;
 }
 
 export interface PlatformExtension {

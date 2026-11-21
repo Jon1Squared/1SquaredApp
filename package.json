@@ -16,7 +16,7 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "ci": "node scripts/verify-ci.mjs",
-    "pms:import": "tsx scripts/import-pms.ts",
+    "pms:import": "tsx --conditions react-server scripts/import-pms.ts",
     "seed:demo": "tsx --conditions react-server scripts/seed-demo-tenant.ts",
     "teams:package": "node scripts/package-teams-app.mjs"
   },

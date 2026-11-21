@@ -44,6 +44,7 @@ import {
   getTenantConfigurationForRegistryEntry,
   isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
+  resolveVerifiedTenantConfiguration,
 } from '@/platform/tenantRuntime';
 export {
   getCatalogueRepository,
@@ -1064,12 +1065,28 @@ async function loadTenantCatalogueStoreView(
 async function loadEffectiveTenantRbacConfig(
   ctx: TenantContext,
   preloadedOverride?: Partial<RbacConfiguration> | null,
+  explicitTenantConfig?: TenantConfiguration,
 ): Promise<RbacConfiguration> {
   const activeCfg = getActiveTenantConfiguration();
-  const base =
-    ctx.tenantId === activeCfg.tenantId
-      ? getDefaultTenantRbacConfig(ctx.tenantId)
-      : activeCfg.rbac;
+  let base: RbacConfiguration;
+  if (explicitTenantConfig) {
+    if (explicitTenantConfig.tenantId !== ctx.tenantId) {
+      const mismatchErr = new Error(
+        `TENANT_CONFIG_MISMATCH: Supplied TenantConfiguration tenantId "${explicitTenantConfig.tenantId}" does not match caller context tenantId "${ctx.tenantId}".`,
+      ) as Error & { code?: string };
+      mismatchErr.code = 'TENANT_CONFIG_MISMATCH';
+      throw mismatchErr;
+    }
+    base = explicitTenantConfig.rbac;
+  } else if (ctx.tenantId === activeCfg.tenantId) {
+    base = getDefaultTenantRbacConfig(ctx.tenantId);
+  } else {
+    const mismatchErr = new Error(
+      `TENANT_CONFIG_MISMATCH: Active process TenantConfiguration tenantId "${activeCfg.tenantId}" does not match caller context tenantId "${ctx.tenantId}", and no explicit tenantConfig was supplied.`,
+    ) as Error & { code?: string };
+    mismatchErr.code = 'TENANT_CONFIG_MISMATCH';
+    throw mismatchErr;
+  }
   const override =
     preloadedOverride !== undefined
       ? preloadedOverride
@@ -1318,21 +1335,32 @@ function writeAudit(
 export async function getKeyDatesConfig(
   storeOrOptions?:
     | FirmStore
-    | { ctx?: TenantContext; userId?: string },
+    | {
+        ctx?: TenantContext;
+        userId?: string;
+        tenantConfig?: TenantConfiguration;
+      },
 ): Promise<KeyDatesConfig> {
-  const activeTenantConfig = getActiveTenantConfiguration();
   const isOptionsObj =
     Boolean(storeOrOptions) &&
     typeof storeOrOptions === 'object' &&
     !('lists' in (storeOrOptions as Record<string, unknown>));
   const opts = isOptionsObj
-    ? (storeOrOptions as { ctx?: TenantContext; userId?: string })
+    ? (storeOrOptions as {
+        ctx?: TenantContext;
+        userId?: string;
+        tenantConfig?: TenantConfiguration;
+      })
     : undefined;
 
   const ctx =
     opts?.ctx ?? resolveDefaultServiceTenantContext(null, opts?.userId);
+  const tenantConfig = resolveVerifiedTenantConfiguration(
+    ctx,
+    opts?.tenantConfig,
+  );
   const override = await getKeyDateRepository().getKeyDatesTenantConfig(ctx);
-  const raw = override ?? activeTenantConfig.keyDates ?? { enabled: false };
+  const raw = override ?? tenantConfig.keyDates ?? { enabled: false };
   return validateKeyDatesConfig(raw) as unknown as KeyDatesConfig;
 }
 
@@ -10556,6 +10584,16 @@ export async function resetAllDemoData(
   byId: string,
   ctx: TenantContext,
 ): Promise<void> {
+    if (
+      ctx.environment === 'live' ||
+      getActiveTenantConfiguration().environment === 'live'
+    ) {
+      const err = new Error(
+        'DEMO_DATA_LIVE_FORBIDDEN: Demo data reset is forbidden in the live environment.',
+      ) as Error & { code?: string };
+      err.code = 'DEMO_DATA_LIVE_FORBIDDEN';
+      throw err;
+    }
     const [prevProfile, prevPeople] = await Promise.all([
       getCatalogueRepository().getFirmProfile(ctx),
       getPartyRepository().listAllPeople<Person>(ctx),
@@ -10610,6 +10648,16 @@ export async function clearAllDataToCleanDeployment(
   byId: string,
   ctx: TenantContext,
 ): Promise<void> {
+    if (
+      ctx.environment === 'live' ||
+      getActiveTenantConfiguration().environment === 'live'
+    ) {
+      const err = new Error(
+        'DEMO_DATA_LIVE_FORBIDDEN: Clean deployment reset is forbidden in the live environment.',
+      ) as Error & { code?: string };
+      err.code = 'DEMO_DATA_LIVE_FORBIDDEN';
+      throw err;
+    }
     const actor = await getPartyRepository().getPersonById<Person>(ctx, byId);
     const actorName = actor ? personDisplayName(actor) : byId;
     const clean = createCleanDeploymentStore(new Date());
@@ -10738,7 +10786,7 @@ async function canRecipientReceiveNotification(
   const [effectiveRbac, fetchedTask, directRecipient] = await Promise.all([
     preloaded
       ? Promise.resolve(preloaded.effectiveRbac)
-      : loadEffectiveTenantRbacConfig(ctx, options?.tenantConfig?.rbac ?? undefined),
+      : loadEffectiveTenantRbacConfig(ctx, undefined, options?.tenantConfig),
     options?.knownTask !== undefined
       ? Promise.resolve(options.knownTask)
       : item.recordId
@@ -15116,6 +15164,8 @@ export interface RunEnquiryRetentionAnonymisationForTenantOptions {
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
   readonly statementTimeoutMs?: number;
+  readonly tenantConfig?: TenantConfiguration;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -15143,7 +15193,7 @@ export async function runEnquiryRetentionAnonymisationForTenant(
     readonly anonymisedIds: readonly string[];
   }>
 > {
-  const tenantConfig = getActiveTenantConfiguration();
+  const tenantConfig = resolveVerifiedTenantConfiguration(ctx, opts.tenantConfig);
   const effectiveTimeZone =
     opts.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const now = new Date();
@@ -15178,6 +15228,7 @@ export async function runEnquiryRetentionAnonymisationForTenant(
     targetLocalHour: opts.defaultRunHourLocal ?? 2,
     now,
     statementTimeoutMs: opts.statementTimeoutMs,
+    signal: opts.signal,
     work: async () => {
       if (opts.triggerSource === 'scheduled') {
         if (
@@ -15205,6 +15256,7 @@ export async function runEnquiryRetentionAnonymisationForTenant(
         const effectiveRbac = await loadEffectiveTenantRbacConfig(
           ctx,
           rbacOverride,
+          tenantConfig,
         );
         const actor = people.find((p) => p.id === actorId) ?? null;
         const permSet = resolvePersonPermissionSet(actor, {
@@ -22956,6 +23008,8 @@ export interface ExecuteKeyDateRemindersForTenantOptions {
   readonly statementTimeoutMs?: number;
   readonly calendarAdapter?: GraphCalendarAdapter;
   readonly skippedLockRetryDelayMs?: number;
+  readonly tenantConfig?: TenantConfiguration;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -22979,7 +23033,10 @@ export async function executeKeyDateRemindersForTenant(
     summary: KeyDateRemindersJobSummary;
   }>
 > {
-  const tenantConfig = getActiveTenantConfiguration();
+  const tenantConfig = resolveVerifiedTenantConfiguration(
+    ctx,
+    options.tenantConfig,
+  );
   const effectiveTimeZone =
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const now = new Date();
@@ -22998,6 +23055,7 @@ export async function executeKeyDateRemindersForTenant(
     targetLocalHour: options.defaultRunHourLocal ?? 2,
     now,
     statementTimeoutMs: options.statementTimeoutMs,
+    signal: options.signal,
     work: async ({ localDate }) => {
       const keyDateRepo = getKeyDateRepository();
       const taskRepo = getTaskWorkflowRepository();
@@ -23030,10 +23088,14 @@ export async function executeKeyDateRemindersForTenant(
         taskRepo.listAllTasksUnfiltered<Task>(ctx),
         hrRepo.listAllTeams<Team>(ctx),
         catalogueRepo.listAllChoiceValues<ChoiceValue>(ctx),
-        getKeyDatesConfig({ ctx, userId: options.triggeredById }),
+        getKeyDatesConfig({
+          ctx,
+          userId: options.triggeredById,
+          tenantConfig,
+        }),
         keyDateRepo.listAllNotApplicableUnfilteredForScheduler(ctx),
         keyDateRepo.listAllCalendarSyncsUnfilteredForScheduler(ctx),
-        loadEffectiveTenantRbacConfig(ctx),
+        loadEffectiveTenantRbacConfig(ctx, undefined, tenantConfig),
       ]);
       const recipientRbacOptions: ResolvePersonPermissionsOptions = {
         allPeople: people,
@@ -23464,6 +23526,8 @@ export interface ExecuteUsageRetentionPurgeForTenantOptions {
   readonly timeZone?: string;
   readonly defaultRunHourLocal?: number;
   readonly statementTimeoutMs?: number;
+  readonly tenantConfig?: TenantConfiguration;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -23480,7 +23544,10 @@ export async function executeUsageRetentionPurgeForTenant(
     retentionMonths: number;
   }>
 > {
-  const tenantConfig = getActiveTenantConfiguration();
+  const tenantConfig = resolveVerifiedTenantConfiguration(
+    ctx,
+    options.tenantConfig,
+  );
   const effectiveTimeZone =
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const triggeredById =
@@ -23496,9 +23563,14 @@ export async function executeUsageRetentionPurgeForTenant(
     targetLocalHour: options.defaultRunHourLocal ?? 2,
     now,
     statementTimeoutMs: options.statementTimeoutMs,
+    signal: options.signal,
     work: async ({ localDate }) => {
       const docRepo = getDocumentRepository();
-      const effectiveConfig = await getEffectiveTenantConfig(ctx, docRepo);
+      const effectiveConfig = await getEffectiveTenantConfig(
+        ctx,
+        docRepo,
+        tenantConfig,
+      );
       const retentionMonths =
         effectiveConfig.documentGeneration.usage.retentionMonths ??
         tenantConfig.documentGeneration.usage.retentionMonths;
@@ -23546,6 +23618,7 @@ export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -23567,14 +23640,23 @@ export async function runScheduledEnquiryRetentionAnonymisationJobSweep(options?
       const outcome = await guardedJob(
         'enquiry-retention-anonymise',
         entry,
-        async ({ tenantContext, tenantEntry, timeoutMs }) =>
-          runEnquiryRetentionAnonymisationForTenant(tenantContext, {
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return runEnquiryRetentionAnonymisationForTenant(tenantContext, {
             triggerSource: 'scheduled',
             actorId: 'system:enquiry-retention-anonymise',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
             statementTimeoutMs: timeoutMs,
-          }),
+            tenantConfig,
+            signal,
+          });
+        },
         {
           registry,
           timeoutMs: options?.timeoutMs,
@@ -23628,6 +23710,7 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -23649,14 +23732,23 @@ export async function runScheduledKeyDateRemindersJobSweep(options?: {
       const outcome = await guardedJob(
         'key-date-reminders',
         entry,
-        async ({ tenantContext, tenantEntry, timeoutMs }) =>
-          executeKeyDateRemindersForTenant(tenantContext, {
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeKeyDateRemindersForTenant(tenantContext, {
             triggerSource: 'scheduled',
             triggeredById: 'system:key-date-reminders',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
             statementTimeoutMs: timeoutMs,
-          }),
+            tenantConfig,
+            signal,
+          });
+        },
         {
           registry,
           timeoutMs: options?.timeoutMs,
@@ -23693,6 +23785,7 @@ export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -23714,14 +23807,23 @@ export async function runScheduledUsageRetentionPurgeJobSweep(options?: {
       const outcome = await guardedJob(
         'usage-retention-purge',
         entry,
-        async ({ tenantContext, tenantEntry, timeoutMs }) =>
-          executeUsageRetentionPurgeForTenant(tenantContext, {
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeUsageRetentionPurgeForTenant(tenantContext, {
             triggerSource: 'scheduled',
             triggeredById: 'system:usage-retention-purge',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal ?? 2,
             statementTimeoutMs: timeoutMs,
-          }),
+            tenantConfig,
+            signal,
+          });
+        },
         {
           registry,
           timeoutMs: options?.timeoutMs,
@@ -26335,12 +26437,14 @@ export async function executeRegisterRemindersForTenant(
     timeZone?: string;
     defaultRunHourLocal?: number;
     statementTimeoutMs?: number;
+    signal?: AbortSignal;
+    tenantConfig?: TenantConfiguration;
   },
 ): Promise<ControlledJobRunOutcome<{ summary: RegisterRemindersJobSummary }>> {
-  const tenantConfig = getActiveTenantConfiguration();
+  const tenantConfig = resolveVerifiedTenantConfiguration(ctx, options.tenantConfig);
   const effectiveTimeZone =
     options.timeZone?.trim() ||
-    (ctx.tenantId === tenantConfig.tenantId ? tenantConfig.timeZone : 'Europe/London') ||
+    tenantConfig.timeZone ||
     'Europe/London';
   const now = new Date();
   const nowIso = now.toISOString();
@@ -26349,10 +26453,7 @@ export async function executeRegisterRemindersForTenant(
     ctx,
     'registers',
   );
-  const baseRegisters =
-    ctx.tenantId === tenantConfig.tenantId
-      ? tenantConfig.registers
-      : DEFAULT_REGISTERS_CONFIG;
+  const baseRegisters = tenantConfig.registers ?? DEFAULT_REGISTERS_CONFIG;
   const preMergedConfig = mergeRegistersConfigurations(baseRegisters, preModuleOverride);
   const targetLocalHour =
     options.defaultRunHourLocal ?? getEffectiveReminderHourLocal(preMergedConfig);
@@ -26365,6 +26466,7 @@ export async function executeRegisterRemindersForTenant(
     targetLocalHour,
     now,
     statementTimeoutMs: options.statementTimeoutMs,
+    signal: options.signal,
     work: async ({ localDate }) => {
       const registerRepo = getRegisterRepository();
       const taskRepo = getTaskWorkflowRepository();
@@ -26388,7 +26490,7 @@ export async function executeRegisterRemindersForTenant(
       const typeByKey = new Map(effectiveTypes.map((t) => [t.key, t] as const));
       const matterById = new Map(matters.map((m) => [m.id, m] as const));
       const personById = new Map(people.map((p) => [p.id, p] as const));
-      const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride);
+      const rbacConfig = await loadEffectiveTenantRbacConfig(ctx, rbacOverride, tenantConfig);
 
       let candidatesEvaluated = 0;
       let remindersDispatched = 0;
@@ -26593,6 +26695,7 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
   readonly timeoutMs?: number;
   readonly defaultRunHourLocal?: number;
   readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
 }): Promise<ScheduledTenantJobSweepSummary> {
   const registry = options?.registry ?? loadActiveTenantRegistry();
   const succeededTenants: string[] = [];
@@ -26612,14 +26715,23 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
       const outcome = await guardedJob(
         'register-reminders',
         entry,
-        async ({ tenantContext, tenantEntry, timeoutMs }) =>
-          executeRegisterRemindersForTenant(tenantContext, {
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeRegisterRemindersForTenant(tenantContext, {
             triggerSource: 'scheduled',
             triggeredById: 'system:register-reminders',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal,
             statementTimeoutMs: timeoutMs,
-          }),
+            tenantConfig,
+            signal,
+          });
+        },
         {
           registry,
           timeoutMs: options?.timeoutMs,
@@ -26961,6 +27073,7 @@ export async function executeNotificationDigestsForTenant(
     readonly now?: Date;
     readonly localDateOverride?: string;
     readonly statementTimeoutMs?: number;
+    readonly signal?: AbortSignal;
     readonly tenantConfig?: TenantConfiguration;
     readonly emailSender?: EmailSender;
     readonly secretReader?: KeyVaultSecretReader;
@@ -26968,7 +27081,7 @@ export async function executeNotificationDigestsForTenant(
     readonly drainAfterCommit?: boolean;
   } = {},
 ): Promise<NotificationDigestsJobOutcome> {
-  const tenantConfig = options.tenantConfig ?? getActiveTenantConfiguration();
+  const tenantConfig = resolveVerifiedTenantConfiguration(ctx, options.tenantConfig);
   const effectiveTimeZone =
     options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
   const triggeredById =
@@ -27003,6 +27116,7 @@ export async function executeNotificationDigestsForTenant(
       now,
       localDateOverride: options.localDateOverride,
       statementTimeoutMs: options.statementTimeoutMs,
+      signal: options.signal,
       work: async ({ tx, localDate, nowIso }) => {
         const taskRepo = getTaskWorkflowRepository();
         const partyRepo = getPartyRepository();
@@ -27038,7 +27152,7 @@ export async function executeNotificationDigestsForTenant(
           keyDateRepo.listAllKeyDatesUnfilteredForScheduler(ctx),
           registerRepo.listAllRegisterRecordsUnfiltered(ctx),
           outboxRepo.listAllNotificationPreferences(ctx),
-          loadEffectiveTenantRbacConfig(ctx, tenantConfig.rbac),
+          loadEffectiveTenantRbacConfig(ctx, undefined, tenantConfig),
         ]);
 
         const personById = new Map(people.map((p) => [p.id, p]));
@@ -27322,7 +27436,7 @@ export async function runScheduledNotificationDigestsJobSweep(options?: {
       const outcome = await guardedJob(
         'notification-digests',
         entry,
-        async ({ tenantContext, tenantEntry, timeoutMs }) => {
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
           const tenantConfig =
             options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
             getTenantConfigurationForRegistryEntry(
@@ -27335,6 +27449,7 @@ export async function runScheduledNotificationDigestsJobSweep(options?: {
             timeZone: tenantEntry.timeZone,
             digestHourLocal: options?.digestHourLocal,
             statementTimeoutMs: timeoutMs,
+            signal,
             tenantConfig,
             emailSender: options?.emailSender,
             secretReader: options?.secretReader,

@@ -19,7 +19,7 @@ function evaluatePartnerCostGovernance(
   input: MatterCostsHookInput,
   stage: 'calculate' | 'open',
 ): MatterCostsHookResult {
-  const threshold = ctx.config.matterCosts.partnerSignOffThresholdGbp ?? 25000;
+  const threshold = ctx.config?.matterCosts.partnerSignOffThresholdGbp ?? 25000;
   const requiresPartnerSignOff = input.estimatedFeeGbp >= threshold;
   const warnings: string[] = [];
 
