@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { NextRequest } from 'next/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ZodError } from 'zod';
 import {
   ALL_DOCUMENT_PERMISSION_KEYS,
@@ -62,6 +62,7 @@ import {
 } from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import {
+  generateDocumentService,
   getDocumentGenerationSnapshotForUser,
   getInitializedDocGenContext,
   resolveTenantBlobSigningKey,
@@ -2274,4 +2275,202 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
       );
     }
   });
+
+  it('18. R640: effective tenant config storageProvider DB override mismatching PLATFORM_DOCUMENT_STORAGE_PROVIDER or using unimplemented sharepoint/azure-blob fails closed at document generation time for only the affected tenant', async () => {
+    const tenantAlpha = 'tenant-alpha';
+    const tenantBravo = 'tenant-bravo';
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Alpha Admin',
+        email: 'alpha.admin@alpha.example',
+        tenantId: tenantAlpha,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r640-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Bravo Admin',
+        email: 'bravo.admin@bravo.example',
+        tenantId: tenantBravo,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-r640-bravo',
+    });
+
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const rawBase = getActiveTenantRawBaseConfig();
+    const alphaRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantAlpha,
+      displayName: 'Tenant Alpha LLP',
+    };
+    const bravoRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantBravo,
+      displayName: 'Tenant Bravo LLP',
+    };
+
+    const alphaValidated = loadAndValidateTenantConfig(
+      alphaRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+    const bravoValidated = loadAndValidateTenantConfig(
+      bravoRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+
+    const alphaSeed = createSeedStore();
+    const bravoSeed = createSeedStore();
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: alphaValidated,
+      store: alphaSeed,
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      tenantConfig: bravoValidated,
+      store: bravoSeed,
+      clearFirst: true,
+    });
+
+    const docRepo = new TenantDocumentRepository();
+    const origAlphaOverride = await docRepo.getDocumentGenerationTenantConfig(
+      ctxAlpha,
+    );
+    const origBravoOverride = await docRepo.getDocumentGenerationTenantConfig(
+      ctxBravo,
+    );
+
+    const alphaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: tenantAlpha,
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+      email: 'admin@alpha.example',
+    });
+    const bravoAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: tenantBravo,
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+      email: 'admin@bravo.example',
+    });
+
+    try {
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        {
+          ...alphaValidated.documentGeneration,
+          storageProvider: 'sharepoint',
+        },
+        'P-000001',
+      );
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxBravo,
+        {
+          ...bravoValidated.documentGeneration,
+          storageProvider: 'local-fs',
+        },
+        'P-000001',
+      );
+
+      setActiveTenantConfigForTesting(alphaRaw);
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', 'local-fs');
+
+      await expect(
+        getInitializedDocGenContext('P-000001', alphaAdminSession),
+      ).rejects.toThrow(/STORAGE_PROVIDER_MISMATCH/);
+      await expect(
+        getDocumentGenerationSnapshotForUser('P-000001', alphaAdminSession),
+      ).rejects.toThrow(/STORAGE_PROVIDER_MISMATCH/);
+      await expect(
+        generateDocumentService(
+          {
+            templateId: 'missing',
+            sourceEntityType: 'matter',
+            matterId: 'M-000001',
+          },
+          'P-000001',
+          alphaAdminSession,
+        ),
+      ).rejects.toThrow(/STORAGE_PROVIDER_MISMATCH/);
+
+      // Tenant Bravo remains unaffected on 'local-fs'
+      setActiveTenantConfigForTesting(bravoRaw);
+      const bravoCtx = await getInitializedDocGenContext(
+        'P-000001',
+        bravoAdminSession,
+      );
+      expect(bravoCtx.config.tenantId).toBe(tenantBravo);
+      expect(bravoCtx.config.documentGeneration.storageProvider).toBe(
+        'local-fs',
+      );
+
+      // Even without PLATFORM_DOCUMENT_STORAGE_PROVIDER env set, unimplemented DB overrides fail closed (never falling back to local-fs)
+      setActiveTenantConfigForTesting(alphaRaw);
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', '');
+      await expect(
+        getInitializedDocGenContext('P-000001', alphaAdminSession),
+      ).rejects.toThrow(/STORAGE_PROVIDER_NOT_SUPPORTED/);
+      expect(() =>
+        createDocumentStorageProvider(
+          'sharepoint',
+          'test-signing-key-at-least-16-chars',
+        ),
+      ).toThrow(/STORAGE_PROVIDER_NOT_SUPPORTED/);
+
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        {
+          ...alphaValidated.documentGeneration,
+          storageProvider: 'azure-blob',
+        },
+        'P-000001',
+      );
+      await expect(
+        getInitializedDocGenContext('P-000001', alphaAdminSession),
+      ).rejects.toThrow(/AZURE_BLOB_STORAGE_NOT_IMPLEMENTED/);
+    } finally {
+      vi.unstubAllEnvs();
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        origAlphaOverride,
+        'P-000001',
+      );
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxBravo,
+        origBravoOverride,
+        'P-000001',
+      );
+    }
+  }, 30_000);
 });

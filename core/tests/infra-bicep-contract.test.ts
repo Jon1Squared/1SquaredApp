@@ -537,7 +537,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(webAppBlock).toMatch(/type:\s*'Readiness'[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
   });
 
-  it('R620 & R631: enforces ARM probe bounds (failureThreshold 1..10, timeoutSeconds 1..240), Startup probe 5s/10s/5s/10x, azure-blob fail() guard, and PLATFORM_DOCUMENT_STORAGE_PROVIDER env wiring', () => {
+  it('R620, R631 & R640: enforces ARM probe bounds (initialDelaySeconds 0..60, periodSeconds 1..240, failureThreshold 1..10, timeoutSeconds 1..240), Startup probe 5s/10s/5s/10x, azure-blob fail() guard, and PLATFORM_DOCUMENT_STORAGE_PROVIDER env wiring', () => {
     const webAppBlock = platformNoComments.slice(
       platformNoComments.indexOf('resource webContainerApp'),
       platformNoComments.indexOf('resource provisionJob'),
@@ -549,10 +549,20 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     );
     expect(probeBlocks.map((m) => m[1])).toEqual(['Startup', 'Liveness', 'Readiness']);
     for (const block of probeBlocks) {
+      const initialDelayMatch = block[0].match(/initialDelaySeconds:\s*(\d+)/);
+      const periodMatch = block[0].match(/periodSeconds:\s*(\d+)/);
       const timeoutMatch = block[0].match(/timeoutSeconds:\s*(\d+)/);
+      expect(initialDelayMatch, block[1]).not.toBeNull();
+      expect(periodMatch, block[1]).not.toBeNull();
       expect(timeoutMatch, block[1]).not.toBeNull();
+      const initialDelaySeconds = Number(initialDelayMatch![1]);
+      const periodSeconds = Number(periodMatch![1]);
       const timeoutSeconds = Number(timeoutMatch![1]);
       const failureThreshold = Number(block[2]);
+      expect(initialDelaySeconds, `${block[1]} initialDelaySeconds`).toBeGreaterThanOrEqual(0);
+      expect(initialDelaySeconds, `${block[1]} initialDelaySeconds`).toBeLessThanOrEqual(60);
+      expect(periodSeconds, `${block[1]} periodSeconds`).toBeGreaterThanOrEqual(1);
+      expect(periodSeconds, `${block[1]} periodSeconds`).toBeLessThanOrEqual(240);
       expect(timeoutSeconds, `${block[1]} timeoutSeconds`).toBeGreaterThanOrEqual(1);
       expect(timeoutSeconds, `${block[1]} timeoutSeconds`).toBeLessThanOrEqual(240);
       expect(failureThreshold, `${block[1]} failureThreshold`).toBeGreaterThanOrEqual(1);

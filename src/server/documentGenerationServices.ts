@@ -272,6 +272,13 @@ export function validateRuntimeDocumentStorageProvider(params: {
         'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") is forbidden when tenant environment is "live".',
     };
   }
+  if (configured !== 'local-fs') {
+    return {
+      ok: false,
+      code: 'STORAGE_PROVIDER_NOT_SUPPORTED',
+      message: `STORAGE_PROVIDER_NOT_SUPPORTED: "${configured}" document storage provider is not yet implemented.`,
+    };
+  }
   return { ok: true };
 }
 
@@ -840,6 +847,7 @@ export async function getInitializedDocGenContext(
     values: catalogueSnap.values,
     customFields: catalogueSnap.customFields,
   };
+  assertRuntimeStorageAllowedForActiveTenant(config);
   const storage = getDocumentStorage(config);
 
   await ensureSeedDocumentTemplates(ctx, store, people, repo, storage);

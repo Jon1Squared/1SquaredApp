@@ -485,7 +485,13 @@ export function createDocumentStorageProvider(
     case 'azure_blob':
       return new AzureBlobDocumentStorageProvider(resolvedOptions);
     case 'local-fs':
-    default:
       return new LocalTenantStorageProvider(resolvedOptions);
+    default: {
+      const err = new Error(
+        `STORAGE_PROVIDER_NOT_SUPPORTED: Document storage provider "${String(providerId)}" is not implemented.`,
+      ) as Error & { code?: string };
+      err.code = 'STORAGE_PROVIDER_NOT_SUPPORTED';
+      throw err;
+    }
   }
 }
