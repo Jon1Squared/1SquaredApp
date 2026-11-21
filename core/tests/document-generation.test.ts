@@ -1180,10 +1180,18 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     const hostInit = await runAsTestEmployee('P-000004', () =>
       getInitializedDocGenContext('P-000004'),
     );
+    const hostStored = await hostInit.storage.putObject(hostInit.ctx, {
+      category: 'documents',
+      objectId: 'DOC-HOST-1',
+      fileName: 'host-letter.docx',
+      contentType:
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      bytes: new Uint8Array([1, 2, 3, 4]),
+    });
     const hostIssued = await hostInit.storage.issueScopedDownloadToken(
       hostInit.ctx,
       {
-        blobKey: `${hostInit.ctx.blobContainerName}/documents/DOC-HOST-1/v1.docx`,
+        blobKey: hostStored.blobKey,
         fileName: 'host-letter.docx',
         documentId: 'DOC-HOST-1',
       },

@@ -474,4 +474,44 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain("'seed-demo'");
     expect(platformBicep).toContain("name: 'DEMO_ENTRA_MAP_JSON'");
   });
+
+  it('R578, R580, R581, R582: enforces demo single-replica & /app/data writable ownership, /api/health/live + /api/health/ready probes, required alertRecipientEmail + Action Group in demo/live, and non-empty ca-pdf image guard', () => {
+    const dockerfile = fs.readFileSync(
+      path.join(REPO_ROOT, 'Dockerfile'),
+      'utf8',
+    );
+    const demoParams = fs.readFileSync(
+      path.join(INFRA_DIR, 'parameters', 'demo.bicepparam'),
+      'utf8',
+    );
+
+    // R578 (D4): demo web app pinned to 1 replica and /app/data writable by USER node
+    expect(platformBicep).toContain(
+      "param webMaxReplicas int = environment == 'demo' ? 1 : 10",
+    );
+    expect(platformBicep).toContain('DEMO_SINGLE_REPLICA_REQUIRED');
+    expect(demoParams).toContain('param webMaxReplicas = 1');
+    const mkdirIdx = dockerfile.indexOf('chown -R node:node /app/data');
+    const userNodeIdx = dockerfile.indexOf('USER node');
+    expect(mkdirIdx).toBeGreaterThan(-1);
+    expect(userNodeIdx).toBeGreaterThan(mkdirIdx);
+
+    // R580: health probes target /api/health/live and /api/health/ready (not /login)
+    const webAppBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource webContainerApp'),
+      platformNoComments.indexOf('resource provisionJob'),
+    );
+    expect(webAppBlock).toContain("path: '/api/health/live'");
+    expect(webAppBlock).toContain("path: '/api/health/ready'");
+    expect(webAppBlock).not.toContain("path: '/login'");
+
+    // R581: Action Group provisioned from alertRecipientEmail and required in demo/live
+    expect(mainBicep).toContain("param alertRecipientEmail string = ''");
+    expect(platformBicep).toContain("param alertRecipientEmail string = ''");
+    expect(platformBicep).toContain('Microsoft.Insights/actionGroups');
+    expect(platformBicep).toContain('ALERT_RECIPIENT_REQUIRED');
+
+    // R582 (D5): ca-pdf cannot be enabled with an empty container image
+    expect(platformBicep).toContain('PDF_CONVERTER_IMAGE_REQUIRED');
+  });
 });

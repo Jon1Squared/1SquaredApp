@@ -51,10 +51,10 @@ param containerRegistryName string = 'acronesquared${environment}${take(uniqueSt
 @description('Immutable container image reference (registry/repository@sha256:... or tag) for the web app and jobs (required when deployApps is true)')
 param appContainerImage string = ''
 
-@description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
+@description('Optional in Stage 0 (unused by app runtime; BuiltInOpenXmlPdfConverter handles Stage 0 PDF conversion per ADR 0024): whether to deploy a headless LibreOffice PDF converter internal Container App (carried to Stage 1)')
 param enablePdfConverterContainerApp bool = false
 
-@description('Container image reference for the internal PDF converter Container App (used when enablePdfConverterContainerApp is true)')
+@description('Optional in Stage 0 (unused by app runtime; carried to Stage 1): container image reference for the internal PDF converter Container App (required non-empty when enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
 
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
@@ -113,6 +113,9 @@ param logAnalyticsDailyQuotaGb int = environment == 'live' ? -1 : 2
 @description('Optional Azure Monitor Action Group resource ID to notify on Container Apps job failures or timeouts')
 param alertActionGroupId string = ''
 
+@description('Email address for the provisioned Azure Monitor Action Group receiving job-failure alerts (required when environment is demo or live unless alertActionGroupId is provided)')
+param alertRecipientEmail string = ''
+
 @description('PostgreSQL Flexible Server compute tier (Burstable for dev/test/demo, GeneralPurpose for training/live)')
 @allowed([
   'Burstable'
@@ -143,9 +146,9 @@ param postgresGeoRedundantBackup string = environment == 'live' ? 'Enabled' : 'D
 @minValue(1)
 param webMinReplicas int = 1
 
-@description('Maximum replicas for the web Container App')
+@description('Maximum replicas for the web Container App (pinned to 1 in demo while using container-local storage per ADR 0008)')
 @minValue(1)
-param webMaxReplicas int = 10
+param webMaxReplicas int = environment == 'demo' ? 1 : 10
 
 @description('Optional additional dedicated Container Apps workload profiles beyond Consumption')
 param dedicatedWorkloadProfiles array = []
@@ -174,6 +177,7 @@ var enquiryAnonymiseJobName = take('caj-enq-anon-${environment}', 32)
 var registerRemindersJobName = take('caj-reg-rem-${environment}', 32)
 var outboxDrainJobName = take('caj-outbox-drain-${environment}', 32)
 var notificationDigestsJobName = take('caj-ntf-dig-${environment}', 32)
+var jobFailureActionGroupName = take('ag-jobs-${resourceSuffix}', 60)
 var jobFailureAlertRuleName = take('alrt-jobs-${resourceSuffix}', 60)
 
 var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
@@ -181,6 +185,15 @@ var seedDemoLiveGuard = (environment == 'live' && enableSeedDemoJob)
   : true
 var deployAppsImageGuard = (deployApps && empty(appContainerImage))
   ? fail('APP_CONTAINER_IMAGE_REQUIRED: appContainerImage is required when deployApps is true.')
+  : true
+var demoWebReplicasGuard = (environment == 'demo' && (webMinReplicas != 1 || webMaxReplicas != 1))
+  ? fail('DEMO_SINGLE_REPLICA_REQUIRED: Demo web app must remain pinned to 1 replica while using container-local document storage (ADR 0008).')
+  : true
+var alertRecipientGuard = ((environment == 'demo' || environment == 'live') && empty(alertRecipientEmail) && empty(alertActionGroupId))
+  ? fail('ALERT_RECIPIENT_REQUIRED: Either alertRecipientEmail or alertActionGroupId is required when environment is demo or live.')
+  : true
+var pdfConverterImageGuard = (enablePdfConverterContainerApp && empty(pdfConverterContainerImage))
+  ? fail('PDF_CONVERTER_IMAGE_REQUIRED: pdfConverterContainerImage cannot be empty when enablePdfConverterContainerApp is true.')
   : true
 
 var keyVaultDnsSuffix = az.environment().suffixes.keyvaultDns
@@ -515,7 +528,29 @@ resource migrateAppInsightsMetricsPublisherRole 'Microsoft.Authorization/roleAss
   }
 }
 
-resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+resource jobFailureActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (!empty(alertRecipientEmail)) {
+  name: jobFailureActionGroupName
+  location: 'global'
+  tags: platformTags
+  properties: {
+    groupShortName: take('1sq-${environment}', 12)
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'PlatformAlertRecipient'
+        emailAddress: alertRecipientEmail
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+var resolvedAlertActionGroupIds = concat(
+  !empty(alertActionGroupId) ? [alertActionGroupId] : [],
+  !empty(alertRecipientEmail) ? [jobFailureActionGroup!.id] : []
+)
+
+resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = if (alertRecipientGuard) {
   name: jobFailureAlertRuleName
   location: location
   tags: platformTags
@@ -583,11 +618,7 @@ union isfuzzy=true
       ]
     }
     actions: {
-      actionGroups: !empty(alertActionGroupId)
-        ? [
-            alertActionGroupId
-          ]
-        : []
+      actionGroups: resolvedAlertActionGroupIds
     }
   }
 }
@@ -897,7 +928,7 @@ var pdfConverterEnv = (deployApps && enablePdfConverterContainerApp)
     ]
   : []
 
-resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && enablePdfConverterContainerApp) {
+resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && enablePdfConverterContainerApp && pdfConverterImageGuard) {
   name: pdfConverterAppName
   location: location
   tags: platformTags
@@ -947,7 +978,7 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
   ]
 }
 
-resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard) {
+resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployApps && deployAppsImageGuard && demoWebReplicasGuard) {
   name: webContainerAppName
   location: location
   tags: platformTags
@@ -990,7 +1021,7 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
             {
               type: 'Liveness'
               httpGet: {
-                path: '/login'
+                path: '/api/health/live'
                 port: 3000
               }
               initialDelaySeconds: 15
@@ -999,7 +1030,7 @@ resource webContainerApp 'Microsoft.App/containerApps@2025-07-01' = if (deployAp
             {
               type: 'Readiness'
               httpGet: {
-                path: '/login'
+                path: '/api/health/ready'
                 port: 3000
               }
               initialDelaySeconds: 10

@@ -240,6 +240,17 @@ export function resolveTenantBlobSigningKey(
     .digest('hex');
 }
 
+export function assertRuntimeStorageAllowedForActiveTenant(
+  config: TenantConfiguration = getActiveTenantConfiguration(),
+): void {
+  const isLive = isLiveBlobEnvironment(config.environment);
+  if (isLive && config.documentGeneration.storageProvider === 'local-fs') {
+    throw new Error(
+      'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") is forbidden when tenant environment is "live".',
+    );
+  }
+}
+
 export function getDocumentStorage(
   config: TenantConfiguration,
 ): DocumentStorageProvider {
@@ -1732,6 +1743,15 @@ export async function updateDocumentGenerationConfigService(
   const validated = DocumentGenerationConfigSchema.parse(
     merged,
   ) as DocumentGenerationConfig;
+
+  if (
+    isLiveBlobEnvironment(config.environment) &&
+    validated.storageProvider === 'local-fs'
+  ) {
+    throw new Error(
+      'STORAGE_LIVE_LOCAL_FS_FORBIDDEN: Local filesystem document storage ("local-fs") cannot be configured when tenant environment is "live".',
+    );
+  }
 
   await repo.withTenantTransaction(ctx, async () => {
     await repo.putDocumentGenerationTenantConfig(ctx, validated, user.id);

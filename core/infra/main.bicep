@@ -77,11 +77,19 @@ param enableCloudBlobStorage bool = false
 @description('Monthly GB cap for Microsoft Defender for Storage on-upload malware scanning')
 param defenderMalwareScanCapGbPerMonth int = 500
 
-@description('Whether to deploy the optional headless LibreOffice PDF converter internal Container App')
+@description('Optional in Stage 0 (unused by app runtime; BuiltInOpenXmlPdfConverter handles Stage 0 PDF conversion per ADR 0024): whether to deploy a headless LibreOffice PDF converter internal Container App (carried to Stage 1)')
 param enablePdfConverterContainerApp bool = false
 
-@description('Container image reference for the internal PDF converter Container App')
+@description('Optional in Stage 0 (unused by app runtime; carried to Stage 1): container image reference for the internal PDF converter Container App (required non-empty if enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
+
+@description('Minimum running replicas for the web Container App (at least 1 per ADR 0024)')
+@minValue(1)
+param webMinReplicas int = 1
+
+@description('Maximum replicas for the web Container App (pinned to 1 in demo while using container-local storage per ADR 0008)')
+@minValue(1)
+param webMaxReplicas int = environment == 'demo' ? 1 : 10
 
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
 param enableSchedulerJobs bool = true
@@ -142,6 +150,9 @@ param privateEndpointsSubnetPrefix string = '10.24.2.0/27'
 @description('Optional Azure Monitor Action Group resource ID to notify on Container Apps job failures or timeouts')
 param alertActionGroupId string = ''
 
+@description('Email address for the provisioned Azure Monitor Action Group receiving job-failure alerts (required in demo and live unless alertActionGroupId is supplied)')
+param alertRecipientEmail string = ''
+
 var platformSlug = hostingMode == 'single_tenant' ? tenantSlug : 'platform'
 
 var effectiveTenants TenantDeploymentInput[] = !empty(tenants)
@@ -185,7 +196,10 @@ module platform 'modules/platform.bicep' = {
     entraTenantId: entraTenantId
     entraRedirectUri: entraRedirectUri
     tenantPackageDir: tenantPackageDir
+    webMinReplicas: webMinReplicas
+    webMaxReplicas: webMaxReplicas
     alertActionGroupId: alertActionGroupId
+    alertRecipientEmail: alertRecipientEmail
   }
 }
 

@@ -2,8 +2,9 @@
 // Non-secret parameters for the hosted `not-a-law-firm` demo deployment in UK South (`rg-onesquared-demo-uksouth`).
 // Secrets are stored exclusively in Azure Key Vault (`platformKeyVault`) and never in this file (Rule 5).
 //
-// Stage 1 (foundation): pass `--parameters deployApps=false`
-// Stage 2 (apps & jobs): pass `--parameters deployApps=true appContainerImage=<acrLoginServer>/onesquared-web:<tag>`
+// Stage 1 (foundation): pass `--parameters deployApps=false alertRecipientEmail=<owner-email>`
+// Stage 2 (apps & jobs): pass `--parameters deployApps=true appContainerImage=<acrLoginServer>/onesquared-web:<tag> alertRecipientEmail=<owner-email>`
+// Note: alertRecipientEmail is required at deployment time (stage plan section 8 manual owner task: confirm Action Group verification email).
 
 using '../main.bicep'
 
@@ -12,6 +13,8 @@ param hostingMode = 'multi_tenant'
 param location = 'uksouth'
 param tenantSlug = 'not-a-law-firm'
 param defaultCostCentre = 'CC-DEMO'
+param webMinReplicas = 1
+param webMaxReplicas = 1
 param enableCloudBlobStorage = true
 param enablePdfConverterContainerApp = false
 param enableSchedulerJobs = true

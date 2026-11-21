@@ -347,16 +347,48 @@ function parseEmlText(raw: string): string {
   return [bodyText, ...embeddedAttachmentTexts].filter(Boolean).join('\n\n');
 }
 
-const cachedModelsByKeyPrefix = new Map<string, { models: string[]; cachedAt: number }>();
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_MODEL_CACHE_ENTRIES = 32;
+const EXTRACTION_CACHE_TTL_MS = 30 * 60 * 1000;
+const MAX_EXTRACTION_CACHE_ENTRIES = 100;
+
+function sweepAndCapCache<T extends { cachedAt: number }>(
+  cache: Map<string, T>,
+  ttlMs: number,
+  maxEntries: number,
+  nowMs = Date.now(),
+): void {
+  for (const [k, entry] of cache.entries()) {
+    if (nowMs - entry.cachedAt >= ttlMs) {
+      cache.delete(k);
+    }
+  }
+  while (cache.size >= maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+const cachedModelsByKeyHash = new Map<string, { models: string[]; cachedAt: number }>();
 
 async function resolveAvailableClaudeModels(
   apiKey: string,
   tenantId: string,
 ): Promise<string[]> {
-  const keyPrefix = `${tenantId}:${apiKey.slice(0, 18)}`;
-  const cached = cachedModelsByKeyPrefix.get(keyPrefix);
-  if (cached && Date.now() - cached.cachedAt < 10 * 60 * 1000) {
+  const nowMs = Date.now();
+  const keyHash = crypto
+    .createHash('sha256')
+    .update(apiKey)
+    .digest('hex')
+    .slice(0, 16);
+  const modelCacheKey = `${tenantId}:${keyHash}`;
+  const cached = cachedModelsByKeyHash.get(modelCacheKey);
+  if (cached && nowMs - cached.cachedAt < MODEL_CACHE_TTL_MS) {
     return cached.models;
+  }
+  if (cached) {
+    cachedModelsByKeyHash.delete(modelCacheKey);
   }
 
   // Prioritize fast, stable Sonnet 4.5 / 3.7 / 3.5 models first (which do not false-positive refuse
@@ -417,7 +449,8 @@ async function resolveAvailableClaudeModels(
     if (!candidates.includes(fid)) candidates.push(fid);
   }
 
-  cachedModelsByKeyPrefix.set(keyPrefix, { models: candidates, cachedAt: Date.now() });
+  sweepAndCapCache(cachedModelsByKeyHash, MODEL_CACHE_TTL_MS, MAX_MODEL_CACHE_ENTRIES);
+  cachedModelsByKeyHash.set(modelCacheKey, { models: candidates, cachedAt: Date.now() });
   return candidates;
 }
 
@@ -1704,21 +1737,26 @@ export function clearMatterExtractionCacheForTesting(): void {
     );
   }
   extractionResultCache.clear();
-  cachedModelsByKeyPrefix.clear();
+  cachedModelsByKeyHash.clear();
 }
 
-function computeDocumentsCacheKey(
+export function computeDocumentsCacheKey(
   tenantId: string,
   actorId: string,
-  documents: IntakeSourceDocument[],
+  documents: readonly Pick<
+    IntakeSourceDocument,
+    'name' | 'sizeLabel' | 'base64Data' | 'content'
+  >[],
 ): string {
   const docsPart = documents
-    .map(
-      (d) =>
-        `${d.name.trim().toLowerCase()}:${d.sizeLabel || ''}:${(d.base64Data || d.content || '').length}:${(
-          d.base64Data || d.content || ''
-        ).slice(0, 120)}`,
-    )
+    .map((d) => {
+      const rawBody = d.base64Data || d.content || '';
+      const contentSha256 = crypto
+        .createHash('sha256')
+        .update(rawBody)
+        .digest('hex');
+      return `${d.name.trim().toLowerCase()}:${d.sizeLabel || ''}:${rawBody.length}:${contentSha256}`;
+    })
     .sort()
     .join('|');
   return `tenant:${tenantId}|actor:${actorId}|${docsPart}`;
@@ -1731,11 +1769,15 @@ async function extractWithClaude(
   tenantId: string,
   actorId: string,
 ): Promise<MatterAiExtractionResult> {
-  // 1. Check in-memory session cache first (scoped by tenantId and actorId)
+  // 1. Check in-memory session cache first (scoped by tenantId and actorId, with SHA-256 content hash)
+  const nowMs = Date.now();
   const cacheKey = computeDocumentsCacheKey(tenantId, actorId, documents);
   const cachedHit = extractionResultCache.get(cacheKey);
-  if (cachedHit && Date.now() - cachedHit.cachedAt < 30 * 60 * 1000) {
+  if (cachedHit && nowMs - cachedHit.cachedAt < EXTRACTION_CACHE_TTL_MS) {
     return structuredClone(cachedHit.result);
+  }
+  if (cachedHit) {
+    extractionResultCache.delete(cacheKey);
   }
 
   const contentBlocks: Array<Record<string, unknown>> = [];
@@ -2006,6 +2048,11 @@ Important rules for speed and accuracy:
   }
 
   const finalResult = normaliseClaudeJsonToExtractionResult(parsedJson, usedModel);
+  sweepAndCapCache(
+    extractionResultCache,
+    EXTRACTION_CACHE_TTL_MS,
+    MAX_EXTRACTION_CACHE_ENTRIES,
+  );
   extractionResultCache.set(cacheKey, {
     result: structuredClone(finalResult),
     cachedAt: Date.now(),
