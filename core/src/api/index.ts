@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '1.1.0';
+export const CORE_API_VERSION = '2.0.0';
 
 import type {
   FeeArrangementCapEntry,
@@ -1574,7 +1574,7 @@ export interface ExtensionExecutionContext {
     TenantContext,
     'tenantId' | 'hostingMode' | 'environment' | 'correlationId' | 'actorRoles'
   >;
-  readonly config: Readonly<TenantConfiguration>;
+  readonly config?: Readonly<TenantConfiguration>;
 }
 
 export interface PlatformExtension {

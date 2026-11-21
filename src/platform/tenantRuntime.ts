@@ -747,14 +747,45 @@ export function getTenantConfigurationForRegistryEntry(
     hostingModeOverride ??
     (process.env.PLATFORM_HOSTING_MODE as HostingMode | undefined) ??
     'multi_tenant';
-  return deepFreeze(
-    loadAndValidateTenantConfig(
-      baseCfg,
-      overlayCfg,
-      entry.environment,
-      hostingMode,
-    ),
+  const validated = loadAndValidateTenantConfig(
+    baseCfg,
+    overlayCfg,
+    entry.environment,
+    hostingMode,
   );
+  if (validated.tenantId !== entry.tenantId) {
+    const mismatchErr = new Error(
+      `TENANT_CONFIG_MISMATCH: Registry tenantId "${entry.tenantId}" does not match package configuration tenantId "${validated.tenantId}".`,
+    ) as Error & { code?: string };
+    mismatchErr.code = 'TENANT_CONFIG_MISMATCH';
+    throw mismatchErr;
+  }
+  return deepFreeze(validated);
+}
+
+export function resolveVerifiedTenantConfiguration(
+  ctx: TenantContext,
+  explicitConfig?: TenantConfiguration,
+): TenantConfiguration {
+  if (explicitConfig) {
+    if (explicitConfig.tenantId !== ctx.tenantId) {
+      const mismatchErr = new Error(
+        `TENANT_CONFIG_MISMATCH: Supplied TenantConfiguration tenantId "${explicitConfig.tenantId}" does not match caller context tenantId "${ctx.tenantId}".`,
+      ) as Error & { code?: string };
+      mismatchErr.code = 'TENANT_CONFIG_MISMATCH';
+      throw mismatchErr;
+    }
+    return explicitConfig;
+  }
+  const activeCfg = getActiveTenantConfiguration();
+  if (activeCfg.tenantId === ctx.tenantId) {
+    return activeCfg;
+  }
+  const mismatchErr = new Error(
+    `TENANT_CONFIG_MISMATCH: Active process TenantConfiguration tenantId "${activeCfg.tenantId}" does not match caller context tenantId "${ctx.tenantId}", and no explicit tenantConfig was supplied.`,
+  ) as Error & { code?: string };
+  mismatchErr.code = 'TENANT_CONFIG_MISMATCH';
+  throw mismatchErr;
 }
 
 /**

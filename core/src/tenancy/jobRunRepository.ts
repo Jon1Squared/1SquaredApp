@@ -227,6 +227,16 @@ function mapJobRunRow(row: DbJobRunRow): JobRunRecord {
   });
 }
 
+function throwIfJobAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const err = new Error(
+      'JOB_TENANT_TIMEOUT: Background job aborted after exceeding per-tenant execution timeout.',
+    ) as Error & { code?: string };
+    err.code = 'JOB_TENANT_TIMEOUT';
+    throw err;
+  }
+}
+
 export class TenantJobRunRepository extends TenantScopedRepository {
   public buildAdvisoryLockKey(jobKey: string, tenantId: string): string {
     return `onesquared_job:${jobKey}:${tenantId}`;
@@ -243,6 +253,7 @@ export class TenantJobRunRepository extends TenantScopedRepository {
       readonly localDateOverride?: string;
       readonly targetLocalHour?: number;
       readonly statementTimeoutMs?: number;
+      readonly signal?: AbortSignal;
       readonly work: (info: {
         readonly tx: TenantSqlClient;
         readonly localDate: string;
@@ -281,6 +292,8 @@ export class TenantJobRunRepository extends TenantScopedRepository {
       return await this.withTenantTransaction(
         ctx,
         async (tx) => {
+          throwIfJobAborted(params.signal);
+
           // 1. Acquire transaction-scoped advisory lock on this tenant DB connection
           const lockRes = await tx.query<{ acquired: boolean }>(
             'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',
@@ -323,6 +336,8 @@ export class TenantJobRunRepository extends TenantScopedRepository {
             }
           }
 
+          throwIfJobAborted(params.signal);
+
           // 3. Execute all reads, domain work, and audit_entries writes on the same transaction client
           const { result, summary, deferDailyCompletion } = await params.work({
             tx,
@@ -330,6 +345,9 @@ export class TenantJobRunRepository extends TenantScopedRepository {
             localHour,
             nowIso,
           });
+
+          // R588: Refuse to insert 'succeeded' or commit if guardedJob timed out while work was running.
+          throwIfJobAborted(params.signal);
 
           const cleanSummary = sanitizeJobSummaryCounts(summary);
           const effectiveSummary: Record<string, JobSummaryValue> =
@@ -369,6 +387,9 @@ export class TenantJobRunRepository extends TenantScopedRepository {
           );
           const inserted = insertRes.rows[0]!;
           this.assertRowTenant(ctx, inserted.tenant_id, 'JobRun');
+
+          // R614: Re-check abort signal right after inserting 'succeeded' before returning to COMMIT.
+          throwIfJobAborted(params.signal);
 
           return {
             outcome: 'executed' as const,

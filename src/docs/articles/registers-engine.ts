@@ -8,11 +8,11 @@ export const registersEngineArticle: DocArticle = {
     'How the Configurable Registers Engine manages undertakings, complaints, SRA breaches, periodic file reviews, partner sign-offs, tenant custom registers, extension hooks, and automated due/review reminders.',
   updated: '2026-11-16',
   body: `
-The **Registers** workspace (\`/registers\`) provides a single, configurable per-tenant engine for regulatory and practice registers, persisted in PostgreSQL (\`0017_registers_engine_expand\`, \`TenantRegisterRepository\`) with full state-transition history (\`public.register_transitions\`), reminder deduplication (\`public.register_reminder_states\`), and same-transaction audit logging (\`public.audit_entries\`).
+The **Registers** workspace (\`/registers\`) provides a single, configurable per-tenant engine for regulatory and practice registers, persisted per tenant (\`0017_registers_engine_expand\`, \`TenantRegisterRepository\`) with full state-transition history, reminder deduplication, and same-transaction audit logging.
 
 ## 1. Built-in register types and direct undertaking creation
 
-1Squared ships four core register definitions in \`CORE_REGISTER_TYPES\` (with tenant-defined custom registers such as periodic file reviews configured per firm in \`tenant_module_configs['registers']\`):
+1Squared ships four core register definitions in \`CORE_REGISTER_TYPES\` (with tenant-defined custom registers such as periodic file reviews configured per firm in \`registers\` module config):
 
 | Key | Label | Initial Status | Creation & Governance |
 | --- | --- | --- | --- |
@@ -21,7 +21,7 @@ The **Registers** workspace (\`/registers\`) provides a single, configurable per
 | \`complaint\` | Client Complaint | \`open\` | Stages from \`open\` → \`investigating\` → \`resolved\` / \`closed\` |
 | \`breach\` | Compliance Breach | \`logged\` | Stages from \`logged\` → \`remediation\` → \`closed\` (requiring \`register:approve\` with no self-approval) |
 
-Undertakings live exclusively in the **Registers** engine rather than the partner sign-off queue (\`SignOffKind\` covers \`write_off\` and \`matter_opening\` only, and historical undertaking rows from \`public.sign_offs\` are backfilled into \`public.register_records\` during migration \`0017\`).
+Undertakings live exclusively in the **Registers** engine rather than the partner sign-off queue (\`SignOffKind\` covers \`write_off\` and \`matter_opening\` only, and historical undertaking records are consolidated into the unified register engine during migration \`0017\`).
 
 ## 2. Permissions and role separation (\`undertaking:manage\`)
 
@@ -60,6 +60,6 @@ An unattended scheduled Container Apps Job (\`caj-reg-rem-<env>\`, CLI job \`reg
 
 - Inspects open, non-terminal register records whose \`dueAt\` or \`reviewAt\` matches a configured \`dueDaysBefore\` / \`reviewDaysBefore\` threshold (including overdue day \`0\`).
 - Filters candidate recipients by \`recipientMode\` (\`owner_and_approver\`, \`owner_only\`, or \`matter_team_and_owner\`), \`register:view\` / \`undertaking:manage\` permission, and restricted-matter access.
-- Records deduplicated keys in \`public.register_reminder_states\` in the same PostgreSQL transaction as in-app notifications (\`kind: 'register_reminder'\`) and \`public.audit_entries\`, guaranteeing idempotency across retries and scheduled sweeps.
+- Records deduplicated keys in the register reminder state store in the same transaction as in-app notifications (\`kind: 'register_reminder'\`) and the firm audit log, guaranteeing idempotency across retries and scheduled sweeps.
 `,
 };

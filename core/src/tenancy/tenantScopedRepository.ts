@@ -246,6 +246,8 @@ export abstract class TenantScopedRepository {
 
     let inTransaction = false;
     let fnThrew = false;
+    let queryQueue: Promise<unknown> = Promise.resolve();
+    let queuedQueryError: Error | null = null;
     try {
       await rawClient.query(readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
       inTransaction = true;
@@ -315,13 +317,30 @@ export abstract class TenantScopedRepository {
         );
       }
 
-      let queryQueue: Promise<unknown> = Promise.resolve();
+      const buildAbortedTransactionError = (causeError: Error): Error & { code: string } => {
+        // PostgreSQL marks the transaction aborted as soon as any statement fails; this latched
+        // `queuedQueryError` flag cannot be cleared by caller `try/catch` or `ROLLBACK TO SAVEPOINT`.
+        // Wrap as `TENANCY_TRANSACTION_ABORTED` with the original sanitised error (and SQLSTATE) in
+        // `cause` so callers such as `TenantJobRunRepository` do not mistake a swallowed `23505`
+        // error inside job work for `already_succeeded_today` (including when later queries run).
+        const abortErr = new Error(
+          `TENANCY_TRANSACTION_ABORTED: Transaction aborted because an earlier query failed (${causeError.message}).`,
+          { cause: causeError },
+        ) as Error & { code: string };
+        abortErr.code = 'TENANCY_TRANSACTION_ABORTED';
+        return abortErr;
+      };
+
       const wrappedTx: TenantSqlClient = {
         query: <TRow = Record<string, unknown>>(
           sql: string,
           params?: readonly unknown[],
         ): Promise<TenantQueryResult<TRow>> => {
           const runQuery = async (): Promise<TenantQueryResult<TRow>> => {
+            const priorError = queuedQueryError as Error | null;
+            if (priorError) {
+              throw buildAbortedTransactionError(priorError);
+            }
             try {
               const res = await rawClient.query(
                 sql,
@@ -336,7 +355,11 @@ export abstract class TenantScopedRepository {
                 // A missing relation means the schema changed under us (R437): re-check next time.
                 this.poolManager.invalidateSchemaReadiness(target.databaseName);
               }
-              throw sanitizePostgresError(queryErr, 'query');
+              const sanitizedErr = sanitizePostgresError(queryErr, 'query');
+              if (!queuedQueryError) {
+                queuedQueryError = sanitizedErr;
+              }
+              throw sanitizedErr;
             }
           };
           const next = queryQueue.then(runQuery, runQuery);
@@ -367,11 +390,25 @@ export abstract class TenantScopedRepository {
         scope.closed = true;
       }
 
-      await rawClient.query('COMMIT');
+      await queryQueue.catch(() => undefined);
+      const latchedQueryError = queuedQueryError as Error | null;
+      if (latchedQueryError) {
+        throw buildAbortedTransactionError(latchedQueryError);
+      }
+      const commitRes = await rawClient.query('COMMIT');
       inTransaction = false;
+      if (commitRes.command !== 'COMMIT') {
+        await rawClient.query('ROLLBACK').catch(() => {});
+        const abortErr = new Error(
+          `TENANCY_TRANSACTION_ABORTED: PostgreSQL answered COMMIT with "${commitRes.command ?? 'UNKNOWN'}" instead of COMMIT.`,
+        ) as Error & { code: string };
+        abortErr.code = 'TENANCY_TRANSACTION_ABORTED';
+        throw abortErr;
+      }
       return result;
     } catch (err) {
       if (inTransaction) {
+        await queryQueue.catch(() => undefined);
         await rawClient.query('ROLLBACK').catch(() => {});
       }
       const errCode = (err as { code?: unknown })?.code;

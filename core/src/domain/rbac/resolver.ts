@@ -158,15 +158,10 @@ export class AuthorisationError extends Error {
 }
 
 /**
- *Bounded LRU-style request cache keyed by `(tenantId, correlationId, actorCacheKey)`.
- * Prevents cross-tenant or cross-request leakage while avoiding redundant recomputation within a request.
+ * Retained as a backwards-compatible no-op after removing the unused
+ * module-level `REQUEST_PERMISSION_CACHE` write-only Map (R596).
  */
-const REQUEST_PERMISSION_CACHE = new Map<string, ResolvedPermissionSet>();
-const MAX_CACHE_ENTRIES = 256;
-
-export function clearPermissionRequestCache(): void {
-  REQUEST_PERMISSION_CACHE.clear();
-}
+export function clearPermissionRequestCache(): void {}
 
 function resolveEffectiveRbacConfig(
   config?: ResolvePermissionsInput['config'],
@@ -546,15 +541,6 @@ export function resolvePermissions(
       return finalPermissions.has(permission);
     },
   };
-
-  if (correlationId) {
-    const cacheKey = `${tenantId}:${correlationId}:${actorUserId}:${authoritativeRoles.join(',')}:${deptIds.join(',')}:${Boolean(rel?.isTeamLeadOfAnyTeam)}:${Boolean(rel?.isTeamLeadOfTargetTeam)}:${effectiveOverrides.grant.join(',')}:${effectiveOverrides.revoke.join(',')}:${mfaVerified}:${isLiveEnvironment ? 'live' : 'nonlive'}:${requireMfaForAdminPermissions}`;
-    if (REQUEST_PERMISSION_CACHE.size >= MAX_CACHE_ENTRIES) {
-      const oldestKey = REQUEST_PERMISSION_CACHE.keys().next().value;
-      if (oldestKey) REQUEST_PERMISSION_CACHE.delete(oldestKey);
-    }
-    REQUEST_PERMISSION_CACHE.set(cacheKey, resolved);
-  }
 
   return resolved;
 }

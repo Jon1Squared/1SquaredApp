@@ -12,7 +12,7 @@ export const sharepointDocumentStoreArticle: DocArticle = {
 
 > **Core security principle**: Whenever a user views, uploads, downloads, or deletes a document in 1Squared, the action is performed **as that individual user** via Microsoft Graph On-Behalf-Of (OBO) authentication using least-privilege **\`Sites.Selected\`** permissions (see [Granting least-privilege SharePoint access with Sites.Selected](/docs/sharepoint-sites-selected-setup)). SharePoint enforces each user’s own permissions and records their identity in the Microsoft 365 audit trail.
 
-- **Zero Document Copies & Per-Tenant PostgreSQL Metadata**: 1Squared stores SharePoint folder pointers, folder scopes, lifecycle jobs, drift reconciliation findings, audit events, and store configuration overrides exclusively in the firm’s isolated PostgreSQL database (\`TenantDocumentStoreRepository\`, running every read and write inside a transaction with \`SET LOCAL ROLE\`), never in the transitional JSON store. Client documents themselves remain in Microsoft 365 SharePoint Online.
+- **Zero Document Copies & Per-Tenant Metadata**: 1Squared stores SharePoint folder pointers, folder scopes, lifecycle jobs, drift reconciliation findings, audit events, and store configuration overrides exclusively in the firm’s isolated tenant store (\`TenantDocumentStoreRepository\`), never in the transitional JSON store. Client documents themselves remain in Microsoft 365 SharePoint Online.
 
 ## 1. How matter folders are organised in SharePoint
 

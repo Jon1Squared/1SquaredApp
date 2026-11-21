@@ -9,6 +9,7 @@ import {
   TenantMatterRepository,
   TenantMigrationRunner,
   TenantPostgresPoolManager,
+  TenantRegisterRepository,
   TenantSearchRepository,
   getPlatformTelemetryRecorder,
   loadAndValidateTenantConfig,
@@ -1200,6 +1201,291 @@ describe('S0-25: Server-Side Full-Text & Trigram Search, Pre-Rank SQL RBAC, Pagi
         const bravoActionRes = await searchGlobalRecordsAction({ query: alphaSecret });
         expect(bravoActionRes.hits).toEqual([]);
         expect(bravoActionRes.totalCount).toBe(0);
+      },
+      { tenantId: tenantBravo, mfaVerified: true },
+    );
+  });
+
+  it('6. R587: cross-tenant exact record ID and reference search returns zero hits across two tenants', async () => {
+    const tenantAlpha = 's025-alpha';
+    const tenantBravo = 's025-bravo';
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+
+    const ctxAlpha = makeVerifiedTenantCtx(tenantAlpha);
+    const ctxBravo = makeVerifiedTenantCtx(tenantBravo);
+
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+    await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+
+    const rawBase = getActiveTenantRawBaseConfig();
+    const alphaRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantAlpha,
+      displayName: 'Alpha Search IDs',
+    };
+    const bravoRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantBravo,
+      displayName: 'Bravo Search IDs',
+    };
+    const alphaCfg = loadAndValidateTenantConfig(alphaRaw, {}, 'test', 'multi_tenant');
+    const bravoCfg = loadAndValidateTenantConfig(bravoRaw, {}, 'test', 'multi_tenant');
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: alphaCfg,
+      store: createSeedStore(),
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      tenantConfig: bravoCfg,
+      store: createSeedStore(),
+      clearFirst: true,
+    });
+
+    const alphaRecordTokens: string[] = [];
+    const bravoRecordTokens: string[] = [];
+
+    const seedTenantUniqueRecords = async (
+      tenantId: string,
+      tenantRaw: Record<string, unknown>,
+      ctx: TenantContext,
+      suffix: string,
+      outTokens: string[],
+    ) => {
+      setActiveTenantConfigForTesting(tenantRaw);
+      const matterRepo = new TenantMatterRepository();
+      const intakeRepo = new TenantIntakeQuoteRepository();
+      const kdRepo = new TenantKeyDateRepository();
+      const seedStore = createSeedStore();
+      const baseMatter = seedStore.matters.find((m) => m.id === 'M-000011')!;
+
+      const orgId = `O-${suffix}`;
+      const matterId = `M-${suffix}`;
+      const matterNumber = `${suffix}88`;
+      const enqId = `ENQ-${suffix}`;
+      const kdId = `KD-${suffix}`;
+      let regId = '';
+      let regRef = '';
+
+      await runAsActionActor(
+        'P-000004',
+        async () => {
+          const kdCfg = await getKeyDatesConfig({ ctx, userId: 'P-000004', tenantConfig: loadAndValidateTenantConfig(tenantRaw, {}, 'test', 'multi_tenant') });
+          await saveKeyDatesConfigRecord(
+            { ...kdCfg, enabled: true },
+            `Enable key dates for exact-ref search ${suffix}`,
+            'P-000004',
+            { mfaVerified: true },
+          );
+
+          await saveOrganisationRecord(
+            {
+              id: orgId,
+              legalName: `${suffix} Holdings Ltd`,
+              companyNumber: `${suffix}0099`,
+            } as Parameters<typeof saveOrganisationRecord>[0],
+            { byId: 'P-000004' },
+          );
+
+          await matterRepo.putMatter(
+            ctx,
+            {
+              ...structuredClone(baseMatter),
+              id: matterId,
+              matterNumber,
+              title: `${suffix} Commercial Matter`,
+              clientId: orgId,
+              isStaffMatter: false,
+              hasEthicalWall: false,
+              restrictedAccessUserIds: [],
+              teamMemberIds: ['P-000004'],
+            } as unknown as Parameters<typeof matterRepo.putMatter>[1],
+            { expectedRowVersion: null, sqlRestrictedAccessUserIds: [] },
+          );
+
+          await intakeRepo.putEnquiry(ctx, {
+            id: enqId,
+            reference: `${suffix}77`,
+            receivedAt: '2026-10-01T10:00:00.000Z',
+            takenById: 'P-000004',
+            channelId: 'enquiry_channel.phone',
+            firstName: `Prospect${suffix}`,
+            lastName: `Case${suffix}`,
+            callingOnBehalfOf: '',
+            linkedOrganisationId: orgId,
+            email: `prospect-${suffix.toLowerCase()}@invented.example`,
+            phone: '07700 900777',
+            preferredContactMethodId: null,
+            bestTimeToCall: '',
+            address: null,
+            practiceAreaId: 'work_type.real_estate_and_property',
+            workTypeSubcategoryId: null,
+            summary: `${suffix} Initial Instruction`,
+            otherPartiesNamed: '',
+            urgencyId: 'urgency.standard',
+            keyDate: null,
+            keyDateLabel: '',
+            sourceId: 'origin.website',
+            referrerPersonId: null,
+            privacyNoticeGiven: true,
+            notes: '',
+            linkedPersonId: null,
+            assignedTeamId: 'TM-000001',
+            assignedToId: 'P-000004',
+            status: 'New',
+            firstContactDueAt: null,
+            nextActionDate: null,
+            closeReasonId: null,
+            closeNotes: '',
+            referredToOrganisationId: null,
+            convertedMatterId: null,
+            contactLog: [],
+            conflictSnapshot: null,
+            anonymisedAt: null,
+            createdById: 'P-000004',
+            createdAt: '2026-10-01T10:00:00.000Z',
+            updatedById: 'P-000004',
+            updatedAt: '2026-10-01T10:00:00.000Z',
+          });
+
+          await kdRepo.setMatterRestriction(ctx, {
+            matterId,
+            isRestricted: false,
+            restrictedAccessUserIds: [],
+          });
+          await insertKeyDateForSearchTest(ctx, {
+            id: kdId,
+            matterId,
+            teamId: 'TM-000001',
+            title: `${suffix} Statutory Deadline`,
+          });
+
+          const regRepo = new TenantRegisterRepository();
+          const createdReg = await regRepo.createRegisterRecord(ctx, {
+            id: `${suffix}REGID`,
+            registerTypeKey: 'complaint',
+            reference: `${suffix}REGREF`,
+            title: `${suffix} Register Entry`,
+            status: 'open',
+            matterId,
+            ownerId: 'P-000004',
+            dueAt: '2027-05-01T00:00:00.000Z',
+            fieldValues: {
+              complainantName: `Complainant ${suffix}`,
+              complaintSummary: `${suffix} Complaint Summary`,
+            },
+            createdById: 'P-000004',
+          });
+          regId = createdReg.id;
+          regRef = createdReg.reference;
+        },
+        { tenantId, mfaVerified: true },
+      );
+
+      outTokens.push(
+        orgId,
+        matterId,
+        matterNumber,
+        enqId,
+        `${suffix}77`,
+        kdId,
+        regId,
+        regRef,
+      );
+    };
+
+    await seedTenantUniqueRecords(
+      tenantAlpha,
+      alphaRaw,
+      ctxAlpha,
+      'KESTREL941',
+      alphaRecordTokens,
+    );
+    await seedTenantUniqueRecords(
+      tenantBravo,
+      bravoRaw,
+      ctxBravo,
+      'SOLSTICE873',
+      bravoRecordTokens,
+    );
+
+    const freshPoolMgr = new TenantPostgresPoolManager();
+    openPoolManagers.push(freshPoolMgr);
+    const freshSearchRepo = new TenantSearchRepository({ poolManager: freshPoolMgr });
+    const fullActor = {
+      actorId: 'P-000004',
+      hasRestrictedMatterAccess: true,
+      canViewDocuments: true,
+      canViewQuotes: true,
+      canViewFinance: true,
+      canViewKeyDates: true,
+      permittedDiaryTeamIds: ['TM-000001'],
+      canViewRegisters: true,
+      canManageUndertakings: true,
+    };
+
+    // Positive controls: each tenant finds every one of its own IDs/references
+    for (const token of alphaRecordTokens) {
+      const hit = await freshSearchRepo.searchRecords(ctxAlpha, {
+        query: token,
+        actor: fullActor,
+      });
+      expect(hit.totalCount, `Alpha should find own ID/ref "${token}"`).toBeGreaterThanOrEqual(1);
+    }
+    for (const token of bravoRecordTokens) {
+      const hit = await freshSearchRepo.searchRecords(ctxBravo, {
+        query: token,
+        actor: fullActor,
+      });
+      expect(hit.totalCount, `Bravo should find own ID/ref "${token}"`).toBeGreaterThanOrEqual(1);
+    }
+
+    // Cross-tenant exact ID & reference queries must all return zero hits (via repository AND guarded action)
+    setActiveTenantConfigForTesting(alphaRaw);
+    await runAsActionActor(
+      'P-000004',
+      async () => {
+        for (const bravoToken of bravoRecordTokens) {
+          const repoRes = await freshSearchRepo.searchRecords(ctxAlpha, {
+            query: bravoToken,
+            actor: fullActor,
+          });
+          expect(repoRes.hits, `Alpha repo query for Bravo "${bravoToken}"`).toEqual([]);
+          expect(repoRes.totalCount).toBe(0);
+
+          const actionRes = await searchGlobalRecordsAction({ query: bravoToken });
+          expect(actionRes.hits, `Alpha action query for Bravo "${bravoToken}"`).toEqual([]);
+          expect(actionRes.totalCount).toBe(0);
+        }
+      },
+      { tenantId: tenantAlpha, mfaVerified: true },
+    );
+
+    setActiveTenantConfigForTesting(bravoRaw);
+    await runAsActionActor(
+      'P-000004',
+      async () => {
+        for (const alphaToken of alphaRecordTokens) {
+          const repoRes = await freshSearchRepo.searchRecords(ctxBravo, {
+            query: alphaToken,
+            actor: fullActor,
+          });
+          expect(repoRes.hits, `Bravo repo query for Alpha "${alphaToken}"`).toEqual([]);
+          expect(repoRes.totalCount).toBe(0);
+
+          const actionRes = await searchGlobalRecordsAction({ query: alphaToken });
+          expect(actionRes.hits, `Bravo action query for Alpha "${alphaToken}"`).toEqual([]);
+          expect(actionRes.totalCount).toBe(0);
+        }
       },
       { tenantId: tenantBravo, mfaVerified: true },
     );
