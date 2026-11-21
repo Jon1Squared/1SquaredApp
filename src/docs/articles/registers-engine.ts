@@ -6,9 +6,9 @@ export const registersEngineArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the Configurable Registers Engine manages undertakings, complaints, SRA breaches, periodic file reviews, partner sign-offs, tenant custom registers, extension hooks, and automated due/review reminders.',
-  updated: '2026-11-16',
+  updated: '2026-11-21',
   body: `
-The **Registers** workspace (\`/registers\`) provides a single, configurable per-tenant engine for regulatory and practice registers, persisted per tenant (\`0017_registers_engine_expand\`, \`TenantRegisterRepository\`) with full state-transition history, reminder deduplication, and same-transaction audit logging.
+The **Registers** workspace (\`/registers\`) provides a single, configurable per-tenant engine for regulatory and practice registers, persisted per tenant (\`0017_registers_engine_expand\`, \`TenantRegisterRepository\`) with full state-transition history across both \`/registers\` and the Home partner sign-off queue (\`approveSignOff\`, \`discussSignOff\`, and \`flagMatterWriteOff\`), single-allocator \`SO-\` reference numbering, reminder deduplication, and same-transaction audit logging.
 
 ## 1. Built-in register types and direct undertaking creation
 
@@ -16,9 +16,9 @@ The **Registers** workspace (\`/registers\`) provides a single, configurable per
 
 | Key | Label | Initial Status | Creation & Governance |
 | --- | --- | --- | --- |
-| \`sign_off\` | Sign-Off | \`pending_approval\` | Supports \`write_off\` and \`matter_opening\` sign-offs; transitions through \`pending_approval\` → \`discussing\` → \`approved\` / \`rejected\` with the no-self-approval rule enforced on the server |
+| \`sign_off\` | Sign-Off | \`pending_approval\` | Supports \`write_off\` (via **Flag write-off**) and schema-defined \`matter_opening\`; transitions through \`pending_approval\` → \`discussing\` → \`approved\` / \`rejected\` via \`transitionRegisterRecordService\` with \`row_version\` optimistic concurrency, no-self-approval, and approver notifications |
 | \`undertaking\` | Undertaking | \`open\` | **Direct creation without two-person approval** (\`approvalRules: null\`): any permitted fee earner (\`undertaking:manage\`) records an undertaking directly as \`open\` and can record variations (\`varied\`), mark overdue (\`overdue\`), reopen (\`open\`), discharge (\`discharged\`), or cancel (\`cancelled\`) |
-| \`complaint\` | Client Complaint | \`open\` | Stages from \`open\` → \`investigating\` → \`resolved\` / \`closed\` |
+| \`complaint\` | Client Complaint | \`open\` | Stages from \`open\` → \`investigating\` → \`resolved\` / \`closed\`; supports optional assigned reviewer (\`register_review_assigned\`) |
 | \`breach\` | Compliance Breach | \`logged\` | Stages from \`logged\` → \`remediation\` → \`closed\` (requiring \`register:approve\` with no self-approval) |
 
 Undertakings live exclusively in the **Registers** engine rather than the partner sign-off queue (\`SignOffKind\` covers \`write_off\` and \`matter_opening\` only, and historical undertaking records are consolidated into the unified register engine during migration \`0017\`).
@@ -30,21 +30,25 @@ Access to registers and undertakings is governed by six user permissions and one
 - \`register:view\`: View register records in \`/registers\`, on Home panels, and on linked matter profiles.
 - \`register:create\`: Create new non-undertaking register records (for example complaints, SRA breaches, and file reviews).
 - \`register:edit\`: Update metadata and execute non-approval workflow transitions on accessible register records.
-- \`register:approve\`: Execute formal approval/decision transitions on register types configured with approval rules (never permitting self-approval).
+- \`register:approve\`: Execute formal approval/decision transitions on register types configured with approval rules (never permitting self-approval). Home-queue approvals via \`signoff:approve\` also enforce these same engine rules through \`transitionRegisterRecordService\`.
 - \`register:configure\` (**requires MFA**): Configure firm register overrides, reminder schedules, and custom register types in **Administration → Registers**.
 - \`undertaking:manage\`: Create, edit, vary, and discharge undertakings. **Restricted to fee-earning roles (\`fee_earner\`, \`supervisor\`, \`partner\`, and \`managing_partner\`)**—excluded from \`admin\` by default and protected by override escalation guards so non-fee-earning administrators cannot exercise undertaking authority on their own behalf without explicit, authorised role/override governance.
 - \`register:run_reminders\` (\`jobOnly: true\`): Reserved exclusively for the unattended \`register-reminders\` background job; never grantable to interactive users or roles.
 
-## 3. Custom firm registers & configuration (\`tenant_module_configs['registers']\`)
+## 3. Custom firm registers & configuration
 
 Administrators with \`register:configure\` (and verified MFA) can open **Administration → Registers** (\`saveRegistersConfigAction\`) to:
 
 - Enable or disable specific core register types, adjust default reminder lead days (\`defaultDueDaysBefore\`, \`defaultReviewDaysBefore\`, and \`defaultReminderHourLocal\`), or override labels, navigation visibility, reminder schedules, and \`additionalFields\` on built-in types.
 - Add client-specific **custom register types** (custom \`key\`, \`referencePrefix\`, fields, states, transitions, and optional approval rules) validated against \`core/schemas/registers.config.schema.json\` with zero client code in platform core.
 
-## 4. Matter visibility and restricted matters
+## 4. Matter visibility, approvals & notifications
 
-When a register record links to a matter (\`matterId\`), both SQL repository queries (\`REGISTER_RECORD_VISIBLE_SQL_PREDICATE\`) and server services enforce \`canAccessMatter\`. Records linked to a restricted staff matter (\`isStaffMatter\`) or ethical-wall matter (\`hasEthicalWall\`) are omitted from lists, detail lookups, Home workspace panels, matter tabs, notifications, and reminder dispatches for any user without matter access.
+When a register record links to a matter (\`matterId\`), both repository visibility queries and server services enforce \`canAccessMatter\`. Records linked to a restricted staff matter (\`isStaffMatter\`) or ethical-wall matter (\`hasEthicalWall\`) are omitted from lists, detail lookups, Home workspace panels, matter tabs, notifications, and reminder dispatches for any user without matter access.
+
+- **Approval requests (\`approval_requested\`):** Sent via \`pushNotification\` when an approval-governed record (\`sign_off\` or \`breach\`) is created or reassigned to a designated approver.
+- **Approval decisions (\`approval_decided\`):** Sent to the record owner when an approver approves, rejects, or requests discussion on a sign-off or approval-governed register record.
+- **Review assignments (\`register_review_assigned\`):** Sent when a non-approval register record is assigned to a reviewer or given a scheduled periodic review.
 
 ## 5. Extension hooks (executed outside write transactions)
 
@@ -60,6 +64,6 @@ An unattended scheduled Container Apps Job (\`caj-reg-rem-<env>\`, CLI job \`reg
 
 - Inspects open, non-terminal register records whose \`dueAt\` or \`reviewAt\` matches a configured \`dueDaysBefore\` / \`reviewDaysBefore\` threshold (including overdue day \`0\`).
 - Filters candidate recipients by \`recipientMode\` (\`owner_and_approver\`, \`owner_only\`, or \`matter_team_and_owner\`), \`register:view\` / \`undertaking:manage\` permission, and restricted-matter access.
-- Records deduplicated keys in the register reminder state store in the same transaction as in-app notifications (\`kind: 'register_reminder'\`) and the firm audit log, guaranteeing idempotency across retries and scheduled sweeps.
+- Records deduplicated keys in the register reminder state store in the same transaction as in-app notifications (\`kind: 'register_reminder'\`) and the firm audit log, and enqueues immediate outbound email (\`emailFrequency === 'immediate'\`) and opt-in Microsoft Teams activity alerts (\`teamsEnabled === true\`) atomically in that transaction followed by a post-commit outbox drain, guaranteeing idempotency across retries and scheduled sweeps.
 `,
 };

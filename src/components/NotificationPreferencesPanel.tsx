@@ -68,24 +68,6 @@ const NOTIFICATION_KIND_METADATA: readonly NotificationKindMeta[] = [
     defaultFrequency: 'daily_digest',
   },
   {
-    kind: 'task_due_soon',
-    label: 'Task due soon',
-    description: 'Upcoming task deadline reminders.',
-    defaultFrequency: 'daily_digest',
-  },
-  {
-    kind: 'key_date_approaching',
-    label: 'Key date approaching',
-    description: 'Limitation, court, and matter milestone reminder stages.',
-    defaultFrequency: 'daily_digest',
-  },
-  {
-    kind: 'credit_control_escalation',
-    label: 'Credit control escalation',
-    description: 'Overdue invoice and credit control escalation notices.',
-    defaultFrequency: 'daily_digest',
-  },
-  {
     kind: 'register_reminder',
     label: 'Register compliance reminder',
     description: 'Scheduled periodic review and due-date reminders on firm registers.',

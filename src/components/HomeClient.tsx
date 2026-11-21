@@ -3538,7 +3538,7 @@ export function HomeClient({
                           type="button"
                           className="btn btn--primary btn--sm"
                           onClick={async () => {
-                            const res = await approveSignOffAction(so.id);
+                            const res = await approveSignOffAction(so.id, so.rowVersion);
                             if (isActionDenied(res)) {
                               showToast(res.message);
                               return;
@@ -5305,7 +5305,11 @@ export function HomeClient({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                const res = await discussSignOffAction(discussSignOffItem.id, discussNote);
+                const res = await discussSignOffAction(
+                  discussSignOffItem.id,
+                  discussNote,
+                  discussSignOffItem.rowVersion,
+                );
                 if (isActionDenied(res)) {
                   showToast(res.message);
                   return;

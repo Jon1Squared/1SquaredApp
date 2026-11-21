@@ -31,7 +31,10 @@ import {
   ENQUIRY_VISIBLE_SQL_PREDICATE,
   QUOTE_VISIBLE_SQL_PREDICATE,
 } from './intakeQuoteRepository';
-import { REGISTER_RECORD_VISIBLE_SQL_PREDICATE } from './registerRepository';
+import {
+  REGISTER_RECORD_VISIBLE_SQL_PREDICATE,
+  TenantRegisterRepository,
+} from './registerRepository';
 export interface TenantTaskLinkedRecord {
   recordType: 'matter' | 'person' | 'organisation' | 'enquiry' | 'quote';
   recordId: string;
@@ -120,6 +123,7 @@ export interface TenantSignOffRecord {
   approvedById?: string | null;
   approvedAt?: string | null;
   discussionNote?: string | null;
+  rowVersion?: number;
 }
 
 interface TaskRow extends Record<string, unknown> {
@@ -190,6 +194,7 @@ interface RegisterSignOffRow extends Record<string, unknown> {
   decided_by_id: string | null;
   decided_at: Date | string | null;
   field_values_json: Record<string, unknown> | null;
+  row_version?: number | string | null;
   created_at: Date | string;
 }
 
@@ -467,15 +472,22 @@ function mapRowToSignOff(row: RegisterSignOffRow): TenantSignOffRecord {
   }
   if (row.decided_by_id !== null && row.decided_by_id !== undefined) {
     result.approvedById = row.decided_by_id;
+  } else {
+    delete result.approvedById;
   }
   if (row.decided_at !== null && row.decided_at !== undefined) {
     result.approvedAt =
       typeof nestedPayload.approvedAt === 'string' && nestedPayload.approvedAt
         ? nestedPayload.approvedAt
         : toIsoString(row.decided_at);
+  } else {
+    delete result.approvedAt;
   }
   if (typeof fields.discussionNote === 'string') {
     result.discussionNote = fields.discussionNote;
+  }
+  if (row.row_version !== undefined && row.row_version !== null) {
+    result.rowVersion = Number(row.row_version);
   }
   return result;
 }
@@ -603,6 +615,7 @@ export const SIGN_OFF_VISIBLE_SQL_PREDICATE = `(
 
 export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   private readonly auditRepo: TenantAuditRepository;
+  private readonly registerRepo: TenantRegisterRepository;
 
   public constructor(options?: {
     poolManager?: TenantPostgresPoolManager;
@@ -611,6 +624,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   }) {
     super(options);
     this.auditRepo = new TenantAuditRepository(options);
+    this.registerRepo = new TenantRegisterRepository(options);
   }
 
   // ---------------------------------------------------------------------------
@@ -620,12 +634,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   private async allocateSequenceIds(
     ctx: TenantContext,
     params: {
-      prefix: 'TSK' | 'NTF' | 'SO';
+      prefix: 'TSK' | 'NTF';
       sequenceName:
         | 'tenant_task_id_seq'
-        | 'tenant_notification_id_seq'
-        | 'tenant_sign_off_id_seq';
-      tableName: 'tasks' | 'notifications' | 'register_records';
+        | 'tenant_notification_id_seq';
+      tableName: 'tasks' | 'notifications';
       count: number;
       padDigits: number;
     },
@@ -726,11 +739,8 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     count: number,
     options?: { padDigits?: number },
   ): Promise<string[]> {
-    return this.allocateSequenceIds(ctx, {
-      prefix: 'SO',
-      sequenceName: 'tenant_sign_off_id_seq',
-      tableName: 'register_records',
-      count,
+    return this.registerRepo.allocateNextRecordIds(ctx, count, {
+      idPrefix: 'SO',
       padDigits: options?.padDigits ?? 6,
     });
   }
@@ -1424,6 +1434,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     tx: TenantSqlClient,
     ctx: TenantContext,
     signOff: TenantSignOffRecord,
+    options?: { allowSeedIdempotentUpsert?: boolean },
   ): Promise<void> {
     if (!signOff?.id?.trim()) {
       throw createTaskWorkflowError('SIGN_OFF_VALIDATION_ERROR', 'Sign-off id is required.');
@@ -1467,49 +1478,78 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       legacyPayload: signOff,
     };
 
-    await tx.query(
-      `INSERT INTO public.register_records (
-         tenant_id, id, register_type_key, reference, title, status,
-         matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
-         field_values_json, row_version, created_by_id, created_at, updated_by_id, updated_at
-       )
-       VALUES (
-         $1, $2, 'sign_off', $3, $4, $5,
-         $6, $7, $8, $9, $10::timestamptz,
-         $11::jsonb, 1, $12, $13::timestamptz, $14, $15::timestamptz
-       )
-       ON CONFLICT (tenant_id, id) DO UPDATE SET
-         register_type_key = 'sign_off',
-         reference = EXCLUDED.reference,
-         title = EXCLUDED.title,
-         status = EXCLUDED.status,
-         matter_id = EXCLUDED.matter_id,
-         owner_id = EXCLUDED.owner_id,
-         assigned_approver_id = EXCLUDED.assigned_approver_id,
-         decided_by_id = EXCLUDED.decided_by_id,
-         decided_at = EXCLUDED.decided_at,
-         field_values_json = EXCLUDED.field_values_json,
-         row_version = public.register_records.row_version + 1,
-         updated_by_id = EXCLUDED.updated_by_id,
-         updated_at = EXCLUDED.updated_at`,
-      [
-        ctx.tenantId,
-        signOff.id,
-        signOff.id,
-        signOff.title ?? '',
-        canonicalStatus,
-        signOff.matterId ?? null,
-        signOff.requestedById || null,
-        signOff.assignedPartnerId || null,
-        signOff.approvedById ?? null,
-        signOff.approvedAt ?? null,
-        JSON.stringify(fieldValues),
-        signOff.requestedById || ctx.actorId || 'system',
-        requestedAt,
-        signOff.approvedById || signOff.requestedById || ctx.actorId || 'system',
-        signOff.approvedAt ?? requestedAt,
-      ],
-    );  }
+    const insertParams = [
+      ctx.tenantId,
+      signOff.id,
+      signOff.id,
+      signOff.title ?? '',
+      canonicalStatus,
+      signOff.matterId ?? null,
+      signOff.requestedById || null,
+      signOff.assignedPartnerId || null,
+      signOff.approvedById ?? null,
+      signOff.approvedAt ?? null,
+      JSON.stringify(fieldValues),
+      signOff.requestedById || ctx.actorId || 'system',
+      requestedAt,
+      signOff.approvedById || signOff.requestedById || ctx.actorId || 'system',
+      signOff.approvedAt ?? requestedAt,
+    ];
+
+    if (options?.allowSeedIdempotentUpsert) {
+      await tx.query(
+        `INSERT INTO public.register_records (
+           tenant_id, id, register_type_key, reference, title, status,
+           matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+           field_values_json, row_version, created_by_id, created_at, updated_by_id, updated_at
+         )
+         VALUES (
+           $1, $2, 'sign_off', $3, $4, $5,
+           $6, $7, $8, $9, $10::timestamptz,
+           $11::jsonb, 1, $12, $13::timestamptz, $14, $15::timestamptz
+         )
+         ON CONFLICT (tenant_id, id) DO UPDATE SET
+           register_type_key = 'sign_off',
+           reference = EXCLUDED.reference,
+           title = EXCLUDED.title,
+           status = EXCLUDED.status,
+           matter_id = EXCLUDED.matter_id,
+           owner_id = EXCLUDED.owner_id,
+           assigned_approver_id = EXCLUDED.assigned_approver_id,
+           decided_by_id = EXCLUDED.decided_by_id,
+           decided_at = EXCLUDED.decided_at,
+           field_values_json = EXCLUDED.field_values_json,
+           row_version = public.register_records.row_version + 1,
+           updated_by_id = EXCLUDED.updated_by_id,
+           updated_at = EXCLUDED.updated_at`,
+        insertParams,
+      );
+      return;
+    }
+
+    try {
+      await tx.query(
+        `INSERT INTO public.register_records (
+           tenant_id, id, register_type_key, reference, title, status,
+           matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
+           field_values_json, row_version, created_by_id, created_at, updated_by_id, updated_at
+         )
+         VALUES (
+           $1, $2, 'sign_off', $3, $4, $5,
+           $6, $7, $8, $9, $10::timestamptz,
+           $11::jsonb, 1, $12, $13::timestamptz, $14, $15::timestamptz
+         )`,
+        insertParams,
+      );
+    } catch (err) {
+      if ((err as { code?: string })?.code === '23505') {
+        throw createTaskWorkflowError(
+          'SIGN_OFF_ID_CONFLICT',
+          `Sign-off "${signOff.id}" already exists.`,
+        );
+      }
+      throw err;
+    }  }
 
   public async putSignOff<T = TenantSignOffRecord>(
     ctx: TenantContext,
@@ -1524,7 +1564,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       const res = await tx.query<RegisterSignOffRow>(
         `SELECT tenant_id, id, register_type_key, reference, title, status,
                 matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
-                field_values_json, created_at
+                field_values_json, row_version, created_at
          FROM public.register_records
          WHERE tenant_id = $1 AND id = $2 AND register_type_key = 'sign_off'`,
         [ctx.tenantId, signOff.id],
@@ -1544,11 +1584,16 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   public async putSignOffs(
     ctx: TenantContext,
     signOffs: readonly TenantSignOffRecord[],
-    options?: { auditEntries?: readonly AppendTenantAuditEntryInput[] },
+    options?: {
+      auditEntries?: readonly AppendTenantAuditEntryInput[];
+      allowSeedIdempotentUpsert?: boolean;
+    },
   ): Promise<void> {
     await this.withTenantTransaction(ctx, async (tx) => {
       for (const s of signOffs) {
-        await this.upsertSignOffInTx(tx, ctx, s);
+        await this.upsertSignOffInTx(tx, ctx, s, {
+          allowSeedIdempotentUpsert: options?.allowSeedIdempotentUpsert,
+        });
       }
       if (options?.auditEntries?.length) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
@@ -1568,7 +1613,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         ? await tx.query<RegisterSignOffRow>(
             `SELECT tenant_id, id, register_type_key, reference, title, status,
                     matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
-                    field_values_json, created_at
+                    field_values_json, row_version, created_at
              FROM public.register_records r
              WHERE r.tenant_id = $1 AND r.register_type_key = 'sign_off' AND r.id = $2`,
             [ctx.tenantId, signOffId],
@@ -1576,7 +1621,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         : await tx.query<RegisterSignOffRow>(
             `SELECT tenant_id, id, register_type_key, reference, title, status,
                     matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
-                    field_values_json, created_at
+                    field_values_json, row_version, created_at
              FROM public.register_records r
              WHERE r.tenant_id = $1
                AND r.register_type_key = 'sign_off'
@@ -1629,7 +1674,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       const res = await tx.query<RegisterSignOffRow>(
         `SELECT tenant_id, id, register_type_key, reference, title, status,
                 matter_id, owner_id, assigned_approver_id, decided_by_id, decided_at,
-                field_values_json, created_at
+                field_values_json, row_version, created_at
          FROM public.register_records r
          WHERE ${clauses.join(' AND ')}
          ORDER BY r.created_at DESC, r.id ASC`,

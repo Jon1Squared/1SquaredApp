@@ -230,17 +230,27 @@ export class TenantRegisterRepository extends TenantScopedRepository {
              ) AS max_id
              FROM public.register_records
              WHERE tenant_id = $1 AND (id LIKE $4 OR reference LIKE $4)
+           ),
+           legacy_counter AS (
+             SELECT COALESCE(MAX(last_value), 0) AS legacy_val
+             FROM public.tenant_record_sequences
+             WHERE tenant_id = $1 AND $5 = 'SO' AND counter_key = 'SO'
            )
            INSERT INTO public.tenant_record_sequences (tenant_id, counter_key, last_value)
-           SELECT $1, $2, GREATEST((SELECT val FROM seq), (SELECT max_id FROM max_existing) + 1)
+           SELECT $1, $2, GREATEST(
+             (SELECT val FROM seq),
+             (SELECT max_id FROM max_existing) + 1,
+             (SELECT legacy_val FROM legacy_counter) + 1
+           )
            ON CONFLICT (tenant_id, counter_key) DO UPDATE
              SET last_value = GREATEST(
                public.tenant_record_sequences.last_value + 1,
                EXCLUDED.last_value,
-               (SELECT max_id FROM max_existing) + 1
+               (SELECT max_id FROM max_existing) + 1,
+               (SELECT legacy_val FROM legacy_counter) + 1
              )
            RETURNING tenant_id, last_value::text AS last_value`,
-          [ctx.tenantId, counterKey, regexPattern, likePattern],
+          [ctx.tenantId, counterKey, regexPattern, likePattern, prefix],
         );
         const row = res.rows[0]!;
         this.assertRowTenant(ctx, row.tenant_id, 'register_records.allocateNextRecordIds');

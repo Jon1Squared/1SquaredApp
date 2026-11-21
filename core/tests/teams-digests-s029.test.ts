@@ -43,6 +43,7 @@ import {
   TenantMigrationRunner,
   TenantOutboxRepository,
   TenantPartyRepository,
+  TenantRegisterRepository,
   TenantTaskWorkflowRepository,
   type FetchLike,
   type KeyVaultSecretReader,
@@ -68,16 +69,19 @@ import {
 } from '@/app/actions';
 import { JOB_PERMISSIONS } from '@/server/actionPermissions';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
-import { setTestActorSession } from '@/server/testSupport/auditTestSupport';
+import { runAsTestActor, setTestActorSession } from '@/server/testSupport/auditTestSupport';
 import {
+  createRegisterRecordService,
   enqueueNotificationTeamsActivityIfEnabled,
   executeNotificationDigestsForTenant,
   getMyNotificationPreferences,
   markNotificationRead,
   runScheduledNotificationDigestsJobSweep,
   runScheduledOutboxDrainJobSweep,
+  transitionRegisterRecordService,
   updateMyNotificationPreferences,
   updatePersonPermissionOverrides,
+  updateRegisterRecordDetailsService,
   updateTenantRbacConfig,
 } from '@/server/services';
 import type { NotificationItem, Person } from '@/domain/types';
@@ -1741,5 +1745,426 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
     }
     expect(rootEntryNames).toEqual(['manifest.json', 'color.png', 'outline.png']);
     expect(extractedManifest?.toString('utf8')).toBe(manifestRaw);
+  });
+
+  it('R646: dispatches approval_requested, approval_decided, and register_review_assigned notifications respecting preferences and restricted-matter isolation across two tenants', async () => {
+    const ctxAlpha = await setupCleanMigratedTenant('s029-r646-alpha', 'test');
+    const ctxBravo = await setupCleanMigratedTenant('s029-r646-bravo', 'test');
+    const regRepo = new TenantRegisterRepository();
+    await regRepo.clearTenantData(ctxAlpha);
+    await regRepo.clearTenantData(ctxBravo);
+
+    const baseRaw = getActiveTenantRawBaseConfig();
+    const alphaOverlay = {
+      tenantId: 's029-r646-alpha',
+      environment: 'test' as const,
+      integrations: {
+        email: {
+          provider: 'dev_catcher' as const,
+          senderAddress: 'noreply@notalawfirm.example',
+          recipientAllowList: ['@notalawfirm.example'],
+          devCatcher: { host: '127.0.0.1', port: 1025, secure: false },
+        },
+        teams: {
+          provider: 'dev_catcher' as const,
+          teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
+          recipientAllowList: ['@notalawfirm.example'],
+          devCatcher: { endpointUrl: 'http://127.0.0.1:1099/teams' },
+        },
+      },
+    };
+    const bravoOverlay = {
+      ...alphaOverlay,
+      tenantId: 's029-r646-bravo',
+    };
+    const alphaCfg = loadAndValidateTenantConfig(baseRaw, alphaOverlay);
+    const bravoCfg = loadAndValidateTenantConfig(baseRaw, bravoOverlay);
+    setActiveTenantConfigForTesting(baseRaw, alphaOverlay);
+
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const taskRepo = getTaskWorkflowRepository();
+    const outboxRepo = getOutboxRepository();
+
+    const seedActors = async (ctx: TenantContext) => {
+      await partyRepo.putPerson(
+        ctx,
+        makeEmployeeRecord({
+          id: 'P-000001',
+          firstName: 'Rhian',
+          surname: 'Morgan',
+          email: 'rhian.morgan@notalawfirm.example',
+          roles: ['partner', 'fee_earner'],
+          appRole: 'partner',
+          entraObjectId: 'oid-r646-p1',
+        }),
+      );
+      await partyRepo.putPerson(
+        ctx,
+        makeEmployeeRecord({
+          id: 'P-000002',
+          firstName: 'Dafydd',
+          surname: 'Evans',
+          email: 'dafydd.evans@notalawfirm.example',
+          roles: ['fee_earner'],
+          appRole: 'fee_earner',
+          entraObjectId: 'oid-r646-p2',
+        }),
+      );
+      await partyRepo.putPerson(
+        ctx,
+        makeEmployeeRecord({
+          id: 'P-000005',
+          firstName: 'Elin',
+          surname: 'Davies',
+          email: 'elin.davies@notalawfirm.example',
+          roles: ['partner', 'risk_compliance'],
+          appRole: 'partner',
+          entraObjectId: 'oid-r646-p5',
+        }),
+      );
+    };
+
+    await seedActors(ctxAlpha);
+    await seedActors(ctxBravo);
+
+    await matterRepo.putMatter(ctxAlpha, {
+      id: 'M-R646-PUB',
+      matterNumber: 'PUB-2026-0001',
+      title: 'Public Commercial Matter',
+      description: 'Accessible matter for R646 notifications',
+      clientId: 'ORG-1',
+      statusId: 'matter_status.active',
+      practiceAreaId: 'practice_area.dispute_resolution',
+      teamId: 'TM-000001',
+      responsiblePartnerId: 'P-000001',
+      supervisingPartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000002',
+      teamMemberIds: ['P-000001', 'P-000002', 'P-000005'],
+      createdById: 'P-000001',
+      createdAt: '2026-01-10T09:00:00.000Z',
+      updatedById: 'P-000001',
+      updatedAt: '2026-01-10T09:00:00.000Z',
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+    } as never);
+
+    await matterRepo.putMatter(ctxAlpha, {
+      id: 'M-R646-WALL',
+      matterNumber: 'WAL-2026-0002',
+      title: 'Restricted Ethical Wall Matter',
+      description: 'Strictly accessible to P-000005 only',
+      clientId: 'ORG-2',
+      statusId: 'matter_status.active',
+      practiceAreaId: 'practice_area.dispute_resolution',
+      teamId: 'TM-000001',
+      responsiblePartnerId: 'P-000005',
+      supervisingPartnerId: 'P-000005',
+      leadFeeEarnerId: 'P-000005',
+      teamMemberIds: ['P-000005'],
+      createdById: 'P-000005',
+      createdAt: '2026-01-10T09:00:00.000Z',
+      updatedById: 'P-000005',
+      updatedAt: '2026-01-10T09:00:00.000Z',
+      isStaffMatter: true,
+      hasEthicalWall: true,
+      restrictedAccessUserIds: ['P-000005'],
+    } as never);
+
+    for (const pid of ['P-000001', 'P-000002', 'P-000005']) {
+      for (const kind of [
+        'approval_requested',
+        'approval_decided',
+        'register_review_assigned',
+      ] as const) {
+        await outboxRepo.upsertNotificationPreference(ctxAlpha, {
+          personId: pid,
+          notificationKind: kind,
+          emailFrequency: 'immediate',
+          teamsEnabled: true,
+        });
+      }
+    }
+
+    const actorCtx = (actorId: string, roles: string[]): TenantContext =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: actorId,
+          tenantId: 's029-r646-alpha',
+          name: actorId,
+          email: `${actorId.toLowerCase()}@notalawfirm.example`,
+          roles,
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: `corr-r646-${actorId}-${Date.now()}`,
+      });
+
+    // 1. approval_requested on create (sign_off -> P-000001)
+    const signOffCreated = await runAsTestActor('P-000002', () =>
+      createRegisterRecordService(
+        {
+          registerTypeKey: 'sign_off',
+          title: 'R646 Accessible Write-off Sign-Off',
+          matterId: 'M-R646-PUB',
+          assignedApproverId: 'P-000001',
+          fieldValues: { signOffKind: 'write_off', amountGbp: 500 },
+        },
+        'P-000002',
+        {
+          tenantCtx: actorCtx('P-000002', ['fee_earner']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(signOffCreated.ok).toBe(true);
+    if (!signOffCreated.ok) throw new Error(signOffCreated.message);
+
+    const p1NotifsAfterCreate = await taskRepo.listNotificationsForUser(ctxAlpha, 'P-000001');
+    const reqNotif = p1NotifsAfterCreate.find(
+      (n) => n.kind === 'approval_requested' && n.recordId === signOffCreated.record.id,
+    );
+    expect(reqNotif).toBeDefined();
+
+    // 2. approval_decided on discuss & approve (sign_off -> P-000002)
+    const discussed = await runAsTestActor('P-000001', () =>
+      transitionRegisterRecordService(
+        {
+          recordId: signOffCreated.record.id,
+          transitionKey: 'discuss',
+          comment: 'Please check time ledger first',
+          expectedRowVersion: signOffCreated.record.rowVersion,
+        },
+        'P-000001',
+        {
+          tenantCtx: actorCtx('P-000001', ['partner', 'fee_earner']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(discussed.ok).toBe(true);
+    if (!discussed.ok) throw new Error(discussed.message);
+
+    const approved = await runAsTestActor('P-000001', () =>
+      transitionRegisterRecordService(
+        {
+          recordId: signOffCreated.record.id,
+          transitionKey: 'approve',
+          comment: 'Approved for billing',
+          expectedRowVersion: discussed.record.rowVersion,
+        },
+        'P-000001',
+        {
+          tenantCtx: actorCtx('P-000001', ['partner', 'fee_earner']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(approved.ok).toBe(true);
+
+    const p2NotifsAfterDecide = await taskRepo.listNotificationsForUser(ctxAlpha, 'P-000002');
+    const decidedNotifs = p2NotifsAfterDecide.filter(
+      (n) => n.kind === 'approval_decided' && n.recordId === signOffCreated.record.id,
+    );
+    expect(decidedNotifs.length).toBeGreaterThanOrEqual(2);
+
+    // 3. register_review_assigned on create (P-000001) and update (P-000005)
+    const complaintCreated = await runAsTestActor('P-000002', () =>
+      createRegisterRecordService(
+        {
+          registerTypeKey: 'complaint',
+          title: 'R646 Fee Complaint Review',
+          matterId: 'M-R646-PUB',
+          assignedApproverId: 'P-000001',
+          reviewAt: '2026-06-20T09:00:00.000Z',
+          fieldValues: {
+            complainantName: 'Test Client',
+            complaintSummary: 'Billing query requiring review',
+          },
+        },
+        'P-000002',
+        {
+          tenantCtx: actorCtx('P-000002', ['fee_earner']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(complaintCreated.ok).toBe(true);
+    if (!complaintCreated.ok) throw new Error(complaintCreated.message);
+
+    const p1ReviewNotifs = await taskRepo.listNotificationsForUser(ctxAlpha, 'P-000001');
+    expect(
+      p1ReviewNotifs.some(
+        (n) =>
+          n.kind === 'register_review_assigned' && n.recordId === complaintCreated.record.id,
+      ),
+    ).toBe(true);
+
+    const complaintReassigned = await runAsTestActor('P-000002', () =>
+      updateRegisterRecordDetailsService(
+        {
+          recordId: complaintCreated.record.id,
+          expectedRowVersion: complaintCreated.record.rowVersion,
+          assignedApproverId: 'P-000005',
+        },
+        'P-000002',
+        {
+          tenantCtx: actorCtx('P-000002', ['fee_earner']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(complaintReassigned.ok).toBe(true);
+
+    const p5ReviewNotifs = await taskRepo.listNotificationsForUser(ctxAlpha, 'P-000005');
+    expect(
+      p5ReviewNotifs.some(
+        (n) =>
+          n.kind === 'register_review_assigned' && n.recordId === complaintCreated.record.id,
+      ),
+    ).toBe(true);
+
+    // Outbox verification for immediate + Teams preferences on accessible notifications
+    const alphaOutboxCounts = await outboxRepo.withTenantReadTransaction(ctxAlpha, async (tx) => {
+      const emailRes = await tx.query<{ template_key: string }>(
+        `SELECT template_key FROM public.email_outbox WHERE tenant_id = $1`,
+        [ctxAlpha.tenantId],
+      );
+      const teamsRes = await tx.query<{ recipient_person_id: string }>(
+        `SELECT recipient_person_id FROM public.teams_activity_outbox WHERE tenant_id = $1`,
+        [ctxAlpha.tenantId],
+      );
+      return {
+        emailTemplates: emailRes.rows.map((r) => r.template_key),
+        teamsRecipients: teamsRes.rows.map((r) => r.recipient_person_id),
+      };
+    });
+    expect(alphaOutboxCounts.emailTemplates).toContain('notification.approval_requested');
+    expect(alphaOutboxCounts.emailTemplates).toContain('notification.approval_decided');
+    expect(alphaOutboxCounts.emailTemplates).toContain('notification.register_review_assigned');
+    expect(alphaOutboxCounts.teamsRecipients).toContain('P-000001');
+    expect(alphaOutboxCounts.teamsRecipients).toContain('P-000002');
+
+    // 4. Restricted-matter negative controls: unpermitted P-000001 / P-000002 receive ZERO rows
+    const walledSignOff = await runAsTestActor('P-000005', () =>
+      createRegisterRecordService(
+        {
+          registerTypeKey: 'sign_off',
+          title: 'Walled Sign-off Negative Control',
+          matterId: 'M-R646-WALL',
+          assignedApproverId: 'P-000001',
+          fieldValues: { signOffKind: 'write_off', amountGbp: 999 },
+        },
+        'P-000005',
+        {
+          tenantCtx: actorCtx('P-000005', ['partner', 'risk_compliance']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(walledSignOff.ok).toBe(true);
+    if (!walledSignOff.ok) throw new Error(walledSignOff.message);
+
+    const walledComplaint = await runAsTestActor('P-000005', () =>
+      createRegisterRecordService(
+        {
+          registerTypeKey: 'complaint',
+          title: 'Walled Complaint Negative Control',
+          matterId: 'M-R646-WALL',
+          assignedApproverId: 'P-000002',
+          reviewAt: '2026-06-25T09:00:00.000Z',
+          fieldValues: {
+            complainantName: 'Confidential Client',
+            complaintSummary: 'Must not leak to P-000002',
+          },
+        },
+        'P-000005',
+        {
+          tenantCtx: actorCtx('P-000005', ['partner', 'risk_compliance']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(walledComplaint.ok).toBe(true);
+    if (!walledComplaint.ok) throw new Error(walledComplaint.message);
+
+    const walledBreachId = await regRepo.allocateNextRecordId(ctxAlpha, { idPrefix: 'REG' });
+    const walledBreachRef = await regRepo.allocateNextRecordId(ctxAlpha, { idPrefix: 'BRC' });
+    await regRepo.createRegisterRecord(ctxAlpha, {
+      id: walledBreachId,
+      registerTypeKey: 'breach',
+      reference: walledBreachRef,
+      title: 'Walled Breach Decision Negative Control',
+      status: 'logged',
+      matterId: 'M-R646-WALL',
+      ownerId: 'P-000002',
+      assignedApproverId: 'P-000005',
+      fieldValues: {
+        regulatoryCategory: 'Confidentiality / Security',
+        breachSummary: 'Walled breach incident for R646 negative control.',
+      },
+      createdById: 'P-000002',
+    });
+    const walledDecided = await runAsTestActor('P-000005', () =>
+      transitionRegisterRecordService(
+        {
+          recordId: walledBreachId,
+          transitionKey: 'close_breach',
+          comment: 'Closed by COLP',
+        },
+        'P-000005',
+        {
+          tenantCtx: actorCtx('P-000005', ['partner', 'risk_compliance']),
+          tenantConfig: alphaCfg,
+        },
+      ),
+    );
+    expect(walledDecided.ok).toBe(true);
+
+    const p1AllNotifs = await taskRepo.listNotificationsForUser(ctxAlpha, 'P-000001');
+    const p2AllNotifs = await taskRepo.listNotificationsForUser(ctxAlpha, 'P-000002');
+    expect(p1AllNotifs.some((n) => n.recordId === walledSignOff.record.id)).toBe(false);
+    expect(p2AllNotifs.some((n) => n.recordId === walledComplaint.record.id)).toBe(false);
+    expect(p2AllNotifs.some((n) => n.recordId === walledBreachId)).toBe(false);
+
+    const walledOutboxLeaks = await outboxRepo.withTenantReadTransaction(ctxAlpha, async (tx) => {
+      const walledIds = [walledSignOff.record.id, walledComplaint.record.id, walledBreachId];
+      const eRes = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.email_outbox WHERE tenant_id = $1 AND (subject ILIKE '%Walled%' OR text_body ~ $2)`,
+        [ctxAlpha.tenantId, walledIds.join('|')],
+      );
+      const tRes = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.teams_activity_outbox WHERE tenant_id = $1 AND deep_link_path ~ $2`,
+        [ctxAlpha.tenantId, walledIds.join('|')],
+      );
+      return Number(eRes.rows[0]?.count ?? 0) + Number(tRes.rows[0]?.count ?? 0);
+    });
+    expect(walledOutboxLeaks).toBe(0);
+
+    // 5. Two-tenant isolation: Tenant Bravo has zero notifications or outbox rows from Alpha
+    const bravoCounts = await outboxRepo.withTenantReadTransaction(ctxBravo, async (tx) => {
+      const nRes = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.notifications WHERE tenant_id = $1`,
+        [ctxBravo.tenantId],
+      );
+      const eRes = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.email_outbox WHERE tenant_id = $1`,
+        [ctxBravo.tenantId],
+      );
+      const tRes = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.teams_activity_outbox WHERE tenant_id = $1`,
+        [ctxBravo.tenantId],
+      );
+      return (
+        Number(nRes.rows[0]?.count ?? 0) +
+        Number(eRes.rows[0]?.count ?? 0) +
+        Number(tRes.rows[0]?.count ?? 0)
+      );
+    });
+    expect(bravoCounts).toBe(0);
+    expect(bravoCfg.tenantId).toBe('s029-r646-bravo');
   });
 });

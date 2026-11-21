@@ -107,7 +107,7 @@ export const CORE_REGISTER_TYPES: Readonly<
       {
         key: 'discuss',
         label: 'Request discussion',
-        fromStatuses: ['pending_approval'],
+        fromStatuses: ['pending_approval', 'discussing'],
         toStatus: 'discussing',
         requiredPermission: 'register:approve',
         forbidSelfAction: true,
