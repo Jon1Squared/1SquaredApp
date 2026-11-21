@@ -1,8 +1,10 @@
 # ADR-0021: Matter Folder Template Resolution, Inheritance, and Additive Versioning
 
 - **Date:** 2026-11-02
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Related:** [ADR-0017](./0017-document-store-provider-abstraction.md), [ADR-0019](./0019-inheritance-based-document-permission-model.md)
+
+> **Implementation notes (2026-11-20):** `matter_document_locations` and folder scopes persist in per-tenant PostgreSQL (`TenantDocumentStoreRepository`, `S0-14`); department-to-practice-area routing uses hierarchical `work_type` picklists persisted in `TenantCatalogueRepository` (`S0-17c`, `S0-22`).
 
 ## Context
 

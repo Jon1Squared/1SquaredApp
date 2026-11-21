@@ -1,8 +1,10 @@
 # ADR-0015: Unified Per-Person Permission Overrides, Self-Modification Prevention, and MFA Controls
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Supersedes:** Override aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
+
+> **Implementation notes (2026-11-20):** Per-person `permissionOverrides` persist in per-tenant PostgreSQL (`public.people` via `TenantPartyRepository` / `updatePersonPermissionOverrides`), reject `jobOnly: true` grants (`FORBIDDEN`), and `savePersonRecord` strips `permissionOverrides` and `entraObjectId` from non-RBAC-admin responses (`R555`).
 
 ## Context
 

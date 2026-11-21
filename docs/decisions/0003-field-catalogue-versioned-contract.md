@@ -1,7 +1,7 @@
 # ADR-0003: Field Catalogue as a Versioned Public Contract and HR/Payroll Exclusions
 
 - **Date:** 2026-04-20
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 
 ## Context
 

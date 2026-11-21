@@ -1,8 +1,10 @@
 # ADR-0017: External Document Store Provider Abstraction (`DocumentStoreProvider`)
 
 - **Date:** 2026-11-02
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Related:** [ADR-0008](./0008-document-storage-provider-abstraction.md)
+
+> **Implementation notes (2026-11-20):** SharePoint document store metadata, folder scopes, lifecycle jobs, reconciliation findings, and audit events persist solely in per-tenant PostgreSQL (`TenantDocumentStoreRepository`, [ADR 0028](./0028-tenant-database-and-repositories.md), `S0-14`). Non-live environments use `MockSharePointGraphBackend` (`simulated: true`), while `live` environments fail closed (`"SharePoint live connection not yet available."`, `R523`) until live Microsoft Graph transport is connected. `documentAccess.autoRemediateDrift` stays `[x-reserved:backlog]` (`F23`).
 
 ## Context
 

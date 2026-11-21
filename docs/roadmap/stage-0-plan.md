@@ -47,12 +47,20 @@ Stage 0 delivers everything listed under "What’s missing" for items 28 to 32, 
 **Out of scope:** new features from stages 1 to 5. B2 and B6 stay in stage 1, although B6 becomes simple once matter numbers come from a database sequence (slice S0-16). Undertakings, complaints and the other registers are built on the engine in stages 2 and 3, not here.
 
 **Before the first hosted client (not stage 0; recorded so they aren't lost):**
-- `azure-blob` document storage provider with short-lived user-delegation SAS tokens and Defender scan integration (Owner Decision D4 / ADR 0008; removes the Stage 0 single-replica `local-fs` demo exception)
+- `azure-blob` document storage provider with short-lived user-delegation SAS tokens and Defender scan integration (Owner Decision D4 / [ADR 0008](../decisions/0008-document-storage-provider-abstraction.md); removes the Stage 0 single-replica `local-fs` demo exception)
+- move hosted web compute from one Container App / container image per tenant ([ADR 0036](../decisions/0036-stage-0-per-tenant-hosted-web-app.md)) to shared multi-tenant web compute loading tenant configurations and extensions per request without per-tenant images (standard §7)
+- build and publish one immutable container image from CI (`ci.yml`) and promote that digest across environments rather than per-environment manual `az acr build` runs (standard §2, §7)
+- add an ESLint / CI rule enforcing that client extensions import only from `@platform/core-api`, and extend the client-name check to cover tenant slugs and `.bicep` / `.bicepparam` files such as `demo.bicepparam` (standard §4)
+- add `description` to the 116 schema properties and `default` to the 83 leaf properties missing them in `core/schemas/`, enforced by a schema lint test (standard §5)
 - per-tenant backup and restore, tested (standard 8.9)
 - offboarding process (8.10)
 - per-tenant rate limits (8.12)
 - per-tenant encryption keys (8.5)
-- runbooks (13)
+- break-glass emergency access procedures and controls for platform staff (standard §9)
+- audit entries for every interactive sign-in and every data/report export (standard §10)
+- release tags and a `training` environment (standard §11)
+- automated dependency vulnerability scanning and static analysis in CI (standard §12)
+- runbooks, per-tenant Cost Management budgets, and per-tenant operational dashboards (standard §13)
 - an independent penetration test (8)
 
 ## 4. Decisions to make before building
@@ -74,7 +82,7 @@ Each of these gets a decision record in `docs/decisions/` before the slices that
 | D11 | Teams delivery and digests | Digests: scheduled `notification-digests` job (`guardedJob`, `'notification:send_digests'`, `08:00` local `tenantConfig.timeZone`, `job_runs` + `digest_sent_at`) builds a per-user daily or weekly summary (default `daily_digest` per S4) of unread notifications, tasks due and key dates, respecting `public.user_notification_preferences` (12 exact `NotificationKind`s) and sending via `public.email_outbox` / `EmailSender`. Teams: activity-feed notifications via Microsoft Graph (`TeamsActivity.Send`) resolved by `recipientPersonId` -> `entraObjectId`, behind per-tenant `TeamsNotifier` (`integrations.teams`, default `disabled`) writing to `public.teams_activity_outbox` drained by `outbox-drain` with allow-list and content-scrubbing rules. Amends ADR 0027 pt 5 (“Teams delivery later”). [ADR 0035](../decisions/0035-digests-and-teams-delivery.md). | Accepted | S0-29 |
 | D12 | AI provider choice for matter extraction | Add `anthropic` to `integrations.aiProviderChoice` (additive; default stays `disabled`). AI matter extraction runs only when `featureFlags.enableAiMatterExtraction` is true **and** `aiProviderChoice === 'anthropic'`. `azure_openai_uk` stays reserved for a UK-resident option. [ADR 0031](../decisions/0031-ai-provider-choice-anthropic.md). | Decided | S0-06 |
 
-All decision records in this table except D4 (Proposed draft [ADR 0029](../decisions/0029-finance-data-delivery.md)) are Decided or Accepted (`D3`, `D6`, `D7`, `D8`, `D9` + ADR 0027 amendment, `D10` and `D11` are Accepted). Any future or amended decision record is approved before the slice that depends on it is built.
+All decision records in this table (`D1`–`D12`, ADRs `0024`–`0035`) plus [ADR 0036](../decisions/0036-stage-0-per-tenant-hosted-web-app.md) and foundational ADRs `0002`–`0003`, `0005`–`0023` are Decided or Accepted ([ADR 0029](../decisions/0029-finance-data-delivery.md) Accepted 8 November 2026; [ADR 0004](../decisions/0004-document-permissions-and-finance-view.md) Superseded by Accepted ADRs `0010`–`0015`; [ADR 0001](../decisions/0001-shared-repo-and-transitional-store.md) Superseded by Accepted ADRs `0028` and `0026`; [Owner Decision D7](../decisions/0002-template-storage-and-layer-separation.md) Accepted 20 November 2026). Any future or amended decision record is approved before the slice that depends on it is built.
 
 ## 5. Phases and slices
 
@@ -246,6 +254,8 @@ These need a person with the right admin access. Claude Code should list them in
 | Turn on GitHub secret scanning and push protection for the repository. | S0-01 | **Done** (confirmed 6 November 2026). Complements the CI scan. |
 | Put `ANTHROPIC_API_KEY` in Key Vault (and local `.env.local`) for environments that use AI extraction. | S0-01 | **Local `.env.local` done** (6 November 2026). Key Vault follows when an Azure environment exists (S0-13). The browser key box is removed. |
 | Create the demo deployment's Entra app registration and test users for each role. | S0-11b, S0-27 | **Done** (confirmed 14–15 November 2026; `1Squared Demo` app registration + 8 invented demo personas seeded via `demo-entra-map` in Key Vault). |
+| Temporarily open Key Vault `publicNetworkAccess` (scoped to the operator's IP) during manual secret seeding in `docs/runbooks/demo-deployment.md`, and return both platform and tenant Key Vaults to `publicNetworkAccess: 'Disabled'` immediately afterwards. | S0-11b, S0-13, Stage 0 exit (`R595`) | Manual operational step (`docs/runbooks/demo-deployment.md`); must be verified disabled on every environment check. |
+| Supply `alertRecipientEmail` (for `demo` and `live` deployments) and confirm the Azure Monitor Action Group subscription email so `jobFailureAlertRule` alerts reach an active inbox. | S0-13, Stage 0 exit (`R581`) | Owner sets `alertRecipientEmail` in Bicep parameters / Key Vault deployment and confirms the Action Group email link. |
 
 ## 9. Decisions log
 

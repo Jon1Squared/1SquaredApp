@@ -1,8 +1,10 @@
 # ADR-0014: Restricted Staff-Matter Access by Permission and Dynamic Matter Participation
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
 - **Supersedes:** Staff-matter access aspects of [ADR-0004](./0004-document-permissions-and-finance-view.md)
+
+> **Implementation notes (2026-11-20):** When `matter.restrictedAccessUserIds` is non-empty, it is decisive for non-oversight users across both TypeScript `canAccessMatter` and PostgreSQL repository visibility predicates (`TASK_VISIBLE_SQL_PREDICATE`, `SIGN_OFF_VISIBLE_SQL_PREDICATE`, `ENQUIRY_VISIBLE_SQL_PREDICATE`, `QUOTE_VISIBLE_SQL_PREDICATE`, `REGISTER_RECORD_VISIBLE_SQL_PREDICATE`, `TenantMatterRepository`, `TenantKeyDateRepository`, `TenantSearchRepository`, `R546`/`R570`); empty-allow-list staff/ethical-wall matters fall back to named participants only (`B12`).
 
 ## Context
 

@@ -1,7 +1,9 @@
 # ADR-0013: "Viewing As" Role as Presentation Only and Permission-Driven Navigation
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
+
+> **Implementation notes (2026-11-20):** System Administrators holding the built-in `'admin'` role may also preview any configured Home role in the presentation-only `"Viewing as"` dropdown without granting underlying permissions (`resolveActiveViewingRole`).
 
 ## Context
 

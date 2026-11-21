@@ -1,7 +1,9 @@
 # ADR-0016: Transition and Retirement of `AppRole`
 
 - **Date:** 2026-11-01
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
+
+> **Implementation notes (2026-11-20):** `resolveUserAppRole` (`src/domain/tasks.ts`) now derives `AppRole` strictly from resolved permissions (`admin:access`, `enquiry:intake_view`, `finance:view_matter`) and active team-lead membership with zero display-label matching (`R594`).
 
 ## Context
 

@@ -1,7 +1,9 @@
 # ADR-0006: Template Usage Tracking, Aggregation, Privacy, and Retention
 
 - **Date:** 2026-04-20
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20)
+
+> **Implementation notes (2026-11-20):** Usage tables (`template_usage_events`, `template_usage_daily_summaries`) persist in per-tenant PostgreSQL (`TenantDocumentRepository`, [ADR 0028](./0028-tenant-database-and-repositories.md), `S0-14`), and daily retention purging (`documentGeneration.usage.retentionMonths`) executes via the `usage-retention-purge` scheduled job (`executeUsageRetentionPurgeForTenant`, [ADR 0030](./0030-tenant-aware-scheduler.md), `S0-19`).
 
 ## Context
 

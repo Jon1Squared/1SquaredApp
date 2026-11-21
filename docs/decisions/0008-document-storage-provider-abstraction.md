@@ -1,7 +1,9 @@
 # ADR-0008: Document Storage Provider Abstraction, Transitional Local Tenant Storage, and Azure Blob Isolation
 
 - **Date:** 2026-04-20
-- **Status:** Proposed
+- **Status:** Accepted (2026-11-20; Stage 0 D4 exception recorded below)
+
+> **Implementation notes (2026-11-20):** References below to [ADR 0001](./0001-shared-repo-and-transitional-store.md) are superseded by [ADR 0028](./0028-tenant-database-and-repositories.md) and [ADR 0026](./0026-separate-demo-tenant.md). See **Stage 0 Exception & Removal Condition (Owner Decision D4, 20 November 2026)** at the end of this record: `LocalTenantStorageProvider` (`local-fs`) fails closed in `live`, reads/writes on disk without retaining `memoryBlobs`, returns `'pending'` for unknown scan keys, and runs on a single-replica demo container until `azure-blob` is implemented before the first hosted client.
 
 ## Context
 
