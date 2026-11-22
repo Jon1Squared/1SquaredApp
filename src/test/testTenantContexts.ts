@@ -14,3 +14,17 @@ export function testDataResetContext(): TenantContext {
     jobKey: 'test-data-reset',
   });
 }
+
+/** Context used by tests that query a provisioned second tenant database in two-tenant checks. */
+export function testSecondTenantContext(
+  tenantId = 'fictional-chambers-uk',
+): TenantContext {
+  return buildSystemJobTenantContext({
+    tenantConfig: {
+      tenantId,
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+    },
+    jobKey: 'test-second-tenant',
+  });
+}

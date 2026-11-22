@@ -1,6 +1,5 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { resolveTenantFromVerifiedToken } from '@platform/core';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { getMissingRoutingFields, validateEnquiryInput } from '@/domain/enquiries';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
@@ -9,6 +8,7 @@ import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { getIntakeQuoteRepository, saveEnquiryRecord } from '@/server/services';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { runAsTestActor, testTenantCtx } from '@/server/testSupport/auditTestSupport';
+import { testSecondTenantContext } from '@/test/testTenantContexts';
 import { EnquiryFormClient } from '@/components/EnquiryFormClient';
 import { MatterFormClient } from '@/components/MatterFormClient';
 import { ToastProvider } from '@/components/Toast';
@@ -116,20 +116,7 @@ describe('R656: Enquiry privacy-notice routing requirement & unmapped form error
     }
 
     // Two-tenant isolation check: second tenant DB cannot see saved enquiry created in not-a-law-firm
-    const ctxB = resolveTenantFromVerifiedToken({
-      verifiedToken: {
-        __verifiedByOidcMiddleware: true,
-        sub: 'user-b1',
-        tenantId: 'fictional-chambers-uk',
-        email: 'partner@fictionalchambers.co.uk',
-        name: 'Bernard Sterling',
-        roles: ['partner'],
-        mfaVerified: true,
-      },
-      hostingMode: 'multi_tenant',
-      environment: 'test',
-      correlationId: 'corr-r656-tenant-b',
-    });
+    const ctxB = testSecondTenantContext('fictional-chambers-uk');
     expect(ctxB.postgresDatabaseName).not.toBe(
       testTenantCtx('P-000002').postgresDatabaseName,
     );
