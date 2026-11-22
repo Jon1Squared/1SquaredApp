@@ -4210,8 +4210,9 @@ export class TenantPartyRepository extends TenantScopedRepository {
         params.push(`%${escapeSqlLikePattern(searchTerm)}%`, searchTerm);
         const likeIdx = params.length - 1;
         const trgmIdx = params.length;
+        const otherNameValueSql = `COALESCE(elem->>'name', CASE WHEN jsonb_typeof(elem) = 'string' THEN elem #>> '{}' ELSE '' END)`;
         orClauses.push(
-          `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(COALESCE(legal_name, '') || ' ' || COALESCE(trading_name, ''))) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25)`,
+          `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(COALESCE(legal_name, '') || ' ' || COALESCE(trading_name, ''))) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25 OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(profile_json->'otherNames') = 'array' THEN profile_json->'otherNames' ELSE '[]'::jsonb END) AS elem WHERE ${otherNameValueSql} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(${otherNameValueSql})) >= 0.28 OR similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.25))`,
         );
       }
 

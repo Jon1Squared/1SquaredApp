@@ -11,6 +11,7 @@ import {
   TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantMigrationRunner,
+  TenantPartyRepository,
   TenantPostgresPoolManager,
   TenantScopedRepository,
   TenantTaskWorkflowRepository,
@@ -20,6 +21,10 @@ import {
   type TenantMigrationDefinition,
   type TenantRegistry,
 } from '@platform/core';
+import {
+  computeOrganisationLookupKeys,
+  computePersonLookupKeys,
+} from '../src/tenancy/candidateKeys';
 import type { Team } from '@/domain/types';
 import { resolveRoutedTeam } from '@/domain/tasks';
 import * as corePkg from '@platform/core';
@@ -2076,6 +2081,172 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
       expect(reapplied.map((m) => m.version)).toEqual(['0024']);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('R660: 0024 backfills exact compute*LookupKeys for accented names (ŵ, ñ, ø, æ, ß) and multiple otherNames, and SQL search matches profile_json->otherNames', async () => {
+    const tenantId = 'mig-s102a-r660';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+    const preMigrations = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0024');
+    await runner.applyUp(ctx, preMigrations);
+    await runner.rollbackVersion(ctx, '0024');
+
+    const personFixture = {
+      firstName: 'Gŵyl',
+      preferredName: 'Peña',
+      surname: 'Sørensen-Strauß',
+      otherNames: [{ name: 'Æthelred' }, { name: 'Ŵyndham' }],
+      phones: [{ number: '+44 7700 900777' }],
+      addresses: [{ postcode: 'CF10 1AA' }],
+    };
+    const orgFixture = {
+      legalName: 'Peña & Gŵyl Holdings Ltd',
+      otherNames: [
+        { name: 'Sørensen & Strauß Ltd' },
+        { name: 'Æthelred Cyf' },
+        { name: 'Former Ŵestminster Co' },
+      ],
+      companyNumber: 'GB01234567',
+      generalEmail: 'hello@pena-gwyl.example',
+      mainPhone: '029 2018 0999',
+      website: 'https://www.pena-gwyl.example',
+      registeredAddress: { postcode: 'CF10 1AB' },
+      correspondenceAddress: { postcode: 'NP20 1AA' },
+      billingAddress: { postcode: 'SA1 1AA' },
+    };
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await client.query(
+        `DELETE FROM public.people WHERE tenant_id = $1 AND id = 'P-R660-1'`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.organisations WHERE tenant_id = $1 AND id = 'O-R660-1'`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.people (
+           tenant_id, id, first_name, preferred_name, other_names, surname,
+           phones_json, addresses_json, profile_json
+         ) VALUES ($1, 'P-R660-1', $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb)`,
+        [
+          tenantId,
+          personFixture.firstName,
+          personFixture.preferredName,
+          personFixture.otherNames.map((n) => n.name).join('; '),
+          personFixture.surname,
+          JSON.stringify(personFixture.phones),
+          JSON.stringify(personFixture.addresses),
+          JSON.stringify({ otherNames: personFixture.otherNames }),
+        ],
+      );
+      await client.query(
+        `INSERT INTO public.organisations (
+           tenant_id, id, legal_name, trading_name, company_number, general_email,
+           main_phone, website, registered_address_json, trading_address_json, profile_json
+         ) VALUES ($1, 'O-R660-1', $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb)`,
+        [
+          tenantId,
+          orgFixture.legalName,
+          orgFixture.otherNames[0]!.name,
+          orgFixture.companyNumber,
+          orgFixture.generalEmail,
+          orgFixture.mainPhone,
+          orgFixture.website,
+          JSON.stringify(orgFixture.registeredAddress),
+          JSON.stringify(orgFixture.correspondenceAddress),
+          JSON.stringify({
+            otherNames: orgFixture.otherNames,
+            billingAddress: orgFixture.billingAddress,
+          }),
+        ],
+      );
+
+      await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+      const personRowRes = await client.query<{
+        phone_last9_keys: string[];
+        postcode_keys: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT phone_last9_keys, postcode_keys, phonetic_keys
+           FROM public.people WHERE tenant_id = $1 AND id = 'P-R660-1'`,
+        [tenantId],
+      );
+      const expectedPersonKeys = computePersonLookupKeys(personFixture);
+      expect(personRowRes.rows[0]?.phone_last9_keys).toEqual(
+        expectedPersonKeys.phoneLast9Keys,
+      );
+      expect(personRowRes.rows[0]?.postcode_keys).toEqual(
+        expectedPersonKeys.postcodeKeys,
+      );
+      expect(personRowRes.rows[0]?.phonetic_keys).toEqual(
+        expectedPersonKeys.phoneticKeys,
+      );
+
+      const orgRowRes = await client.query<{
+        norm_company_number: string;
+        email_domains: string[];
+        phone_last9_keys: string[];
+        postcode_keys: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT norm_company_number, email_domains, phone_last9_keys, postcode_keys, phonetic_keys
+           FROM public.organisations WHERE tenant_id = $1 AND id = 'O-R660-1'`,
+        [tenantId],
+      );
+      const expectedOrgKeys = computeOrganisationLookupKeys(orgFixture);
+      expect(orgRowRes.rows[0]?.norm_company_number).toBe(
+        expectedOrgKeys.normCompanyNumber,
+      );
+      expect(orgRowRes.rows[0]?.email_domains).toEqual(
+        expectedOrgKeys.emailDomains,
+      );
+      expect(orgRowRes.rows[0]?.phone_last9_keys).toEqual(
+        expectedOrgKeys.phoneLast9Keys,
+      );
+      expect(orgRowRes.rows[0]?.postcode_keys).toEqual(
+        expectedOrgKeys.postcodeKeys,
+      );
+      expect(orgRowRes.rows[0]?.phonetic_keys).toEqual(
+        expectedOrgKeys.phoneticKeys,
+      );
+
+      // SQL duplicate search must match an organisation by a 2nd/3rd otherNames entry stored in profile_json
+      const partyRepo = new TenantPartyRepository();
+      const orgMatchesByFormerName = await partyRepo.findSqlDuplicateCandidates(
+        ctx,
+        {
+          kind: 'organisation',
+          legalName: 'Former Ŵestminster Co',
+          fuzzy: true,
+        },
+      );
+      expect(orgMatchesByFormerName.some((o) => o.id === 'O-R660-1')).toBe(true);
+
+      // Second tenant isolation: Bravo sees zero records and zero backfilled rows from Alpha
+      const tenantBravoId = 'mig-s102a-r660-bravo';
+      await provisionPostgresClusterRolesAndDatabases({
+        tenants: [{ tenantId: tenantBravoId, environment: 'test' }],
+      });
+      const ctxBravo = makeTestTenantContext(tenantBravoId);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+      const bravoMatches = await partyRepo.findSqlDuplicateCandidates(
+        ctxBravo,
+        {
+          kind: 'organisation',
+          legalName: 'Former Ŵestminster Co',
+          fuzzy: true,
+        },
+      );
+      expect(bravoMatches).toEqual([]);
     } finally {
       await client.end();
     }

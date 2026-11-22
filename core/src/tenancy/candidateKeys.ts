@@ -300,6 +300,7 @@ export function computeOrganisationLookupKeys(org: {
   readonly website?: string;
   readonly registeredAddress?: { readonly postcode?: string } | null;
   readonly correspondenceAddress?: { readonly postcode?: string } | null;
+  readonly billingAddress?: { readonly postcode?: string } | null;
   readonly otherNames?: readonly { readonly name?: string }[];
 }): {
   readonly normCompanyNumber: string;
@@ -323,7 +324,11 @@ export function computeOrganisationLookupKeys(org: {
   if (phoneL9) phoneSet.add(phoneL9);
 
   const postcodeSet = new Set<string>();
-  for (const addr of [org.registeredAddress, org.correspondenceAddress]) {
+  for (const addr of [
+    org.registeredAddress,
+    org.correspondenceAddress,
+    org.billingAddress,
+  ]) {
     if (addr && isValidUkPostcodeKey(addr.postcode)) {
       postcodeSet.add(normalisePostcodeKey(addr.postcode));
     }

@@ -8,7 +8,12 @@
  */
 
 import crypto from 'node:crypto';
+import type * as PgTypes from 'pg';
 import type { TenantContext } from '../../api/index';
+import {
+  computeOrganisationLookupKeys,
+  computePersonLookupKeys,
+} from '../candidateKeys';
 import {
   assertValidPostgresTenantContext,
   createDirectMigrationClient,
@@ -29,6 +34,16 @@ export interface TenantMigrationDefinition {
   readonly downSql: string;
   readonly tablesChanged: readonly string[];
   readonly dependsOn?: readonly string[];
+  /**
+   * Optional TypeScript backfill hook run inside the migration transaction immediately after
+   * `upSql` (for canonical candidate-key computation shared with repository writes).
+   */
+  readonly afterUpSql?: (client: PgTypes.Client, ctx: TenantContext) => Promise<void>;
+  /**
+   * Deterministic signature hashed into `computeMigrationChecksum` when `afterUpSql` is used,
+   * leaving checksums for pure-SQL migrations untouched when `undefined`.
+   */
+  readonly backfillSignature?: string;
   /**
    * Checksums recorded by earlier releases of this same migration whose `upSql` is
    * unchanged and only `downSql` was corrected. Never list a checksum whose `upSql` differs.
@@ -3093,6 +3108,7 @@ export const SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024: TenantMigration
       'Expand-phase migration adding indexed lookup/candidate columns on public.people and public.organisations plus restricted-matter partial index for server-side B15 SQL scoping.',
     dependsOn: ['0009', '0018'],
     tablesChanged: ['people', 'organisations', 'matters'],
+    backfillSignature: 'ts-candidate-keys-v1',
     upSql: `
 ALTER TABLE public.people
   ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
@@ -3105,229 +3121,6 @@ ALTER TABLE public.organisations
   ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
   ADD COLUMN IF NOT EXISTS postcode_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
   ADD COLUMN IF NOT EXISTS phonetic_keys TEXT[] NOT NULL DEFAULT '{}'::text[];
-
-CREATE OR REPLACE FUNCTION pg_temp.s102a_phone_last9(raw TEXT) RETURNS TEXT
-LANGUAGE plpgsql AS $$
-DECLARE
-  cleaned TEXT;
-BEGIN
-  cleaned := regexp_replace(COALESCE(raw, ''), '[^0-9+]', '', 'g');
-  IF left(cleaned, 3) = '+44' THEN
-    cleaned := '0' || substr(cleaned, 4);
-  ELSIF left(cleaned, 4) = '0044' THEN
-    cleaned := '0' || substr(cleaned, 5);
-  END IF;
-  cleaned := regexp_replace(cleaned, '[^0-9]', '', 'g');
-  cleaned := regexp_replace(cleaned, '^0+', '');
-  IF length(cleaned) < 9 THEN
-    RETURN '';
-  END IF;
-  RETURN right(cleaned, 9);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION pg_temp.s102a_norm_postcode(raw TEXT) RETURNS TEXT
-LANGUAGE plpgsql AS $$
-DECLARE
-  pc TEXT;
-BEGIN
-  pc := upper(regexp_replace(COALESCE(raw, ''), '\\s+', '', 'g'));
-  IF pc ~ '^[A-Z]{1,2}[0-9][A-Z0-9]?[0-9][A-Z]{2}$' THEN
-    RETURN pc;
-  END IF;
-  RETURN '';
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION pg_temp.s102a_phonetic_key(raw TEXT) RETURNS TEXT
-LANGUAGE plpgsql AS $$
-DECLARE
-  w TEXT;
-  len INT;
-  i INT;
-  c TEXT;
-  p TEXT;
-  n1 TEXT;
-  n2 TEXT;
-  res TEXT := '';
-  vowels CONSTANT TEXT := 'aeiou';
-  folded TEXT := '';
-BEGIN
-  w := lower(regexp_replace(
-    translate(COALESCE(raw, ''), 'ÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜàáâãäåèéêëìíîïòóôõöùúûüŷŶÿŸçÇ', 'aaaaaaeeeeiiiiooooouuuuaaaaaaeeeeiiiiooooouuuuyyyycC'),
-    '[^a-z]',
-    '',
-    'gi'
-  ));
-  IF w = '' THEN RETURN ''; END IF;
-  IF left(w, 2) IN ('kn', 'gn', 'pn', 'wr', 'ps') THEN w := substr(w, 2); END IF;
-  IF left(w, 1) = 'x' THEN w := 's' || substr(w, 2); END IF;
-  IF left(w, 2) = 'wh' THEN w := 'w' || substr(w, 3); END IF;
-  IF left(w, 2) = 'mc' THEN w := 'mac' || substr(w, 3); END IF;
-
-  len := length(w);
-  i := 1;
-  WHILE i <= len LOOP
-    c := substr(w, i, 1);
-    p := CASE WHEN i > 1 THEN substr(w, i - 1, 1) ELSE '' END;
-    n1 := CASE WHEN i < len THEN substr(w, i + 1, 1) ELSE '' END;
-    n2 := CASE WHEN i + 1 < len THEN substr(w, i + 2, 1) ELSE '' END;
-    IF NOT (c = p AND c <> 'c') THEN
-      IF strpos(vowels, c) > 0 THEN
-        IF i = 1 THEN res := res || upper(c); END IF;
-      ELSIF c = 'b' THEN
-        IF NOT (p = 'm' AND i = len) THEN res := res || 'B'; END IF;
-      ELSIF c = 'c' THEN
-        IF n1 = 'i' AND n2 = 'a' THEN res := res || 'X';
-        ELSIF n1 = 'h' THEN res := res || CASE WHEN p = 's' THEN 'K' ELSE 'X' END;
-        ELSIF n1 IN ('i', 'e', 'y') THEN
-          IF p <> 's' THEN res := res || 'S'; END IF;
-        ELSE res := res || 'K';
-        END IF;
-      ELSIF c = 'd' THEN
-        IF n1 = 'g' AND n2 IN ('e', 'i', 'y') THEN res := res || 'J';
-        ELSE res := res || 'T';
-        END IF;
-      ELSIF c = 'g' THEN
-        IF n1 = 'h' AND NOT (i + 2 > len OR strpos(vowels, n2) > 0) THEN NULL;
-        ELSIF n1 = 'n' AND (i + 2 > len OR (n2 = 'e' AND substr(w, i + 3, 1) = 'd')) THEN NULL;
-        ELSIF p = 'g' THEN NULL;
-        ELSIF n1 IN ('e', 'i', 'y') THEN res := res || 'J';
-        ELSE res := res || 'K';
-        END IF;
-      ELSIF c = 'h' THEN
-        IF p <> '' AND strpos('cgpstrw', p) > 0 THEN NULL;
-        ELSIF NOT (strpos(vowels, n1) > 0 OR n1 = 'y') THEN NULL;
-        ELSIF strpos(vowels, p) > 0 AND NOT (strpos(vowels, n1) > 0) THEN NULL;
-        ELSE res := res || 'H';
-        END IF;
-      ELSIF c = 'k' THEN
-        IF p <> 'c' THEN res := res || 'K'; END IF;
-      ELSIF c = 'p' THEN
-        IF n1 = 'h' THEN res := res || 'F';
-        ELSIF p = 'm' AND n1 IN ('s', 't') THEN NULL;
-        ELSE res := res || 'P';
-        END IF;
-      ELSIF c = 'q' THEN res := res || 'K';
-      ELSIF c = 's' THEN
-        IF n1 = 'h' OR (n1 = 'i' AND n2 IN ('o', 'a')) THEN res := res || 'X';
-        ELSE res := res || 'S';
-        END IF;
-      ELSIF c = 't' THEN
-        IF n1 = 'i' AND n2 IN ('o', 'a') THEN res := res || 'X';
-        ELSIF n1 = 'h' THEN res := res || '0';
-        ELSIF NOT (n1 = 'c' AND n2 = 'h') THEN res := res || 'T';
-        END IF;
-      ELSIF c = 'v' THEN res := res || 'F';
-      ELSIF c IN ('w', 'y') THEN
-        IF n1 <> '' AND strpos(vowels, n1) > 0 THEN res := res || upper(c); END IF;
-      ELSIF c = 'x' THEN res := res || 'KS';
-      ELSIF c = 'z' THEN res := res || 'S';
-      ELSE res := res || upper(c);
-      END IF;
-    END IF;
-    i := i + 1;
-  END LOOP;
-  folded := regexp_replace(res, '(.)\\1+', '\\1', 'g');
-  RETURN folded;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION pg_temp.s102a_token_keys(raw_text TEXT) RETURNS TEXT[]
-LANGUAGE plpgsql AS $$
-DECLARE
-  norm TEXT;
-  tok TEXT;
-  pk TEXT;
-  sk TEXT;
-  acc TEXT[] := '{}'::text[];
-BEGIN
-  norm := trim(regexp_replace(
-    regexp_replace(
-      regexp_replace(
-        replace(lower(translate(COALESCE(raw_text, ''), 'ÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜàáâãäåèéêëìíîïòóôõöùúûüŷŶÿŸçÇ', 'aaaaaaeeeeiiiiooooouuuuaaaaaaeeeeiiiiooooouuuuyyyycC')), '&', ' and '),
-        '[''’' || chr(96) || ']', '', 'g'
-      ),
-      '[^a-z0-9\\s]', ' ', 'g'
-    ),
-    '\\s+', ' ', 'g'
-  ));
-  IF norm = '' THEN RETURN acc; END IF;
-  FOREACH tok IN ARRAY string_to_array(norm, ' ') LOOP
-    IF tok = '' OR tok IN ('mr','mrs','ms','miss','mx','dr','prof','rev','sir','dame','lord','lady','ltd','limited','llp','plc','lp','inc','cyf','cyfyngedig','ccc','company','co') THEN
-      CONTINUE;
-    END IF;
-    IF length(tok) >= 4 THEN
-      pk := pg_temp.s102a_phonetic_key(tok);
-      IF length(pk) >= 2 THEN acc := array_append(acc, 'P:' || pk); END IF;
-    ELSE
-      sk := regexp_replace(regexp_replace(tok, '[hwy]', '', 'g'), '(.)\\1+', '\\1', 'g');
-      IF sk <> '' THEN acc := array_append(acc, 'S:' || sk); END IF;
-    END IF;
-    acc := array_append(acc, 'I:' || left(tok, 1));
-  END LOOP;
-  RETURN COALESCE((SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(acc) AS x), '{}'::text[]);
-END;
-$$;
-
-UPDATE public.people p
-SET
-  phone_last9_keys = COALESCE((
-    SELECT array_agg(DISTINCT l9 ORDER BY l9)
-    FROM jsonb_array_elements(COALESCE(p.phones_json, '[]'::jsonb)) AS elem,
-         LATERAL (SELECT pg_temp.s102a_phone_last9(COALESCE(elem->>'number', elem #>> '{}')) AS l9) s
-    WHERE l9 <> ''
-  ), '{}'::text[]),
-  postcode_keys = COALESCE((
-    SELECT array_agg(DISTINCT pc ORDER BY pc)
-    FROM jsonb_array_elements(COALESCE(p.addresses_json, '[]'::jsonb)) AS elem,
-         LATERAL (SELECT pg_temp.s102a_norm_postcode(elem->>'postcode') AS pc) s
-    WHERE pc <> ''
-  ), '{}'::text[]),
-  phonetic_keys = pg_temp.s102a_token_keys(
-    COALESCE(p.first_name, '') || ' ' ||
-    COALESCE(p.preferred_name, '') || ' ' ||
-    COALESCE(p.surname, '') || ' ' ||
-    COALESCE(p.other_names, '')
-  );
-
-UPDATE public.organisations o
-SET
-  norm_company_number = regexp_replace(upper(regexp_replace(COALESCE(o.company_number, ''), '[^a-zA-Z0-9]', '', 'g')), '^GB', ''),
-  email_domains = COALESCE((
-    SELECT array_agg(DISTINCT dom ORDER BY dom)
-    FROM unnest(ARRAY[
-      CASE WHEN o.general_email ~* '^[^\\s@]+@[^\\s@]+\\.[a-z0-9]{2,}$'
-           THEN lower(split_part(o.general_email, '@', 2)) ELSE '' END,
-      CASE WHEN NULLIF(trim(o.website), '') IS NOT NULL
-           THEN split_part(regexp_replace(regexp_replace(lower(trim(o.website)), '^https?://', ''), '^www\\.', ''), '/', 1)
-           ELSE '' END
-    ]) AS dom
-    WHERE dom <> ''
-      AND dom LIKE '%.%'
-      AND dom NOT IN ('gmail.com','googlemail.com','outlook.com','hotmail.com','hotmail.co.uk','live.com','yahoo.com','yahoo.co.uk','icloud.com','me.com','btinternet.com','aol.com','sky.com','virginmedia.com','talktalk.net')
-  ), '{}'::text[]),
-  phone_last9_keys = CASE
-    WHEN pg_temp.s102a_phone_last9(o.main_phone) <> ''
-      THEN ARRAY[pg_temp.s102a_phone_last9(o.main_phone)]
-    ELSE '{}'::text[]
-  END,
-  postcode_keys = COALESCE((
-    SELECT array_agg(DISTINCT pc ORDER BY pc)
-    FROM unnest(ARRAY[
-      pg_temp.s102a_norm_postcode(o.registered_address_json->>'postcode'),
-      pg_temp.s102a_norm_postcode(o.trading_address_json->>'postcode')
-    ]) AS pc
-    WHERE pc <> ''
-  ), '{}'::text[]),
-  phonetic_keys = pg_temp.s102a_token_keys(
-    COALESCE(o.legal_name, '') || ' ' || COALESCE(o.trading_name, '')
-  );
-
-DROP FUNCTION IF EXISTS pg_temp.s102a_token_keys(TEXT);
-DROP FUNCTION IF EXISTS pg_temp.s102a_phonetic_key(TEXT);
-DROP FUNCTION IF EXISTS pg_temp.s102a_norm_postcode(TEXT);
-DROP FUNCTION IF EXISTS pg_temp.s102a_phone_last9(TEXT);
 
 CREATE INDEX IF NOT EXISTS idx_people_phone_last9_gin
   ON public.people USING GIN (phone_last9_keys);
@@ -3375,6 +3168,172 @@ ALTER TABLE public.people
   DROP COLUMN IF EXISTS postcode_keys,
   DROP COLUMN IF EXISTS phone_last9_keys;
 `.trim(),
+    afterUpSql: async (client: PgTypes.Client, ctx: TenantContext) => {
+      const BATCH_SIZE = 500;
+      const parseOtherNames = (
+        prof: unknown,
+        fallbackText?: string,
+      ): Array<{ name?: string }> => {
+        const profObj =
+          prof && typeof prof === 'object' && !Array.isArray(prof)
+            ? (prof as Record<string, unknown>)
+            : {};
+        if (Array.isArray(profObj.otherNames) && profObj.otherNames.length > 0) {
+          return profObj.otherNames
+            .map((entry) =>
+              typeof entry === 'string'
+                ? { name: entry }
+                : { name: String((entry as { name?: unknown })?.name ?? '') },
+            )
+            .filter((entry) => entry.name.trim().length > 0);
+        }
+        if (fallbackText && fallbackText.trim()) {
+          return fallbackText
+            .split(/[;,]+/)
+            .map((s) => ({ name: s.trim() }))
+            .filter((entry) => entry.name.length > 0);
+        }
+        return [];
+      };
+
+      const peopleRes = await client.query<{
+        id: string;
+        first_name: string | null;
+        preferred_name: string | null;
+        other_names: string | null;
+        surname: string | null;
+        phones_json: unknown;
+        addresses_json: unknown;
+        profile_json: unknown;
+      }>(
+        `SELECT id, first_name, preferred_name, other_names, surname,
+                phones_json, addresses_json, profile_json
+           FROM public.people
+          WHERE tenant_id = $1
+          ORDER BY id ASC`,
+        [ctx.tenantId],
+      );
+      for (let i = 0; i < peopleRes.rows.length; i += BATCH_SIZE) {
+        const chunk = peopleRes.rows.slice(i, i + BATCH_SIZE).map((row) => {
+          const phones = Array.isArray(row.phones_json)
+            ? row.phones_json.map((p) =>
+                typeof p === 'string'
+                  ? { number: p }
+                  : { number: String((p as { number?: unknown })?.number ?? '') },
+              )
+            : [];
+          const addresses = Array.isArray(row.addresses_json)
+            ? row.addresses_json.map((a) => ({
+                postcode: String((a as { postcode?: unknown })?.postcode ?? ''),
+              }))
+            : [];
+          const keys = computePersonLookupKeys({
+            firstName: row.first_name ?? '',
+            preferredName: row.preferred_name ?? '',
+            surname: row.surname ?? '',
+            otherNames: parseOtherNames(row.profile_json, row.other_names ?? ''),
+            phones,
+            addresses,
+          });
+          return {
+            id: row.id,
+            phoneLast9Keys: keys.phoneLast9Keys,
+            postcodeKeys: keys.postcodeKeys,
+            phoneticKeys: keys.phoneticKeys,
+          };
+        });
+        if (chunk.length > 0) {
+          await client.query(
+            `UPDATE public.people AS p
+                SET phone_last9_keys = v."phoneLast9Keys",
+                    postcode_keys = v."postcodeKeys",
+                    phonetic_keys = v."phoneticKeys"
+               FROM jsonb_to_recordset($2::jsonb) AS v(
+                 id text,
+                 "phoneLast9Keys" text[],
+                 "postcodeKeys" text[],
+                 "phoneticKeys" text[]
+               )
+              WHERE p.tenant_id = $1 AND p.id = v.id`,
+            [ctx.tenantId, JSON.stringify(chunk)],
+          );
+        }
+      }
+
+      const orgRes = await client.query<{
+        id: string;
+        legal_name: string | null;
+        trading_name: string | null;
+        company_number: string | null;
+        general_email: string | null;
+        main_phone: string | null;
+        website: string | null;
+        registered_address_json: { postcode?: string } | null;
+        trading_address_json: { postcode?: string } | null;
+        profile_json: unknown;
+      }>(
+        `SELECT id, legal_name, trading_name, company_number, general_email,
+                main_phone, website, registered_address_json, trading_address_json,
+                profile_json
+           FROM public.organisations
+          WHERE tenant_id = $1
+          ORDER BY id ASC`,
+        [ctx.tenantId],
+      );
+      for (let i = 0; i < orgRes.rows.length; i += BATCH_SIZE) {
+        const chunk = orgRes.rows.slice(i, i + BATCH_SIZE).map((row) => {
+          const prof =
+            row.profile_json &&
+            typeof row.profile_json === 'object' &&
+            !Array.isArray(row.profile_json)
+              ? (row.profile_json as Record<string, unknown>)
+              : {};
+          const billingAddr =
+            prof.billingAddress && typeof prof.billingAddress === 'object'
+              ? (prof.billingAddress as { postcode?: string })
+              : null;
+          const keys = computeOrganisationLookupKeys({
+            legalName: row.legal_name ?? '',
+            companyNumber: row.company_number ?? '',
+            generalEmail: row.general_email ?? '',
+            mainPhone: row.main_phone ?? '',
+            website: row.website ?? '',
+            registeredAddress: row.registered_address_json,
+            correspondenceAddress: row.trading_address_json,
+            billingAddress: billingAddr,
+            otherNames: parseOtherNames(row.profile_json, row.trading_name ?? ''),
+          });
+          return {
+            id: row.id,
+            normCompanyNumber: keys.normCompanyNumber,
+            emailDomains: keys.emailDomains,
+            phoneLast9Keys: keys.phoneLast9Keys,
+            postcodeKeys: keys.postcodeKeys,
+            phoneticKeys: keys.phoneticKeys,
+          };
+        });
+        if (chunk.length > 0) {
+          await client.query(
+            `UPDATE public.organisations AS o
+                SET norm_company_number = v."normCompanyNumber",
+                    email_domains = v."emailDomains",
+                    phone_last9_keys = v."phoneLast9Keys",
+                    postcode_keys = v."postcodeKeys",
+                    phonetic_keys = v."phoneticKeys"
+               FROM jsonb_to_recordset($2::jsonb) AS v(
+                 id text,
+                 "normCompanyNumber" text,
+                 "emailDomains" text[],
+                 "phoneLast9Keys" text[],
+                 "postcodeKeys" text[],
+                 "phoneticKeys" text[]
+               )
+              WHERE o.tenant_id = $1 AND o.id = v.id`,
+            [ctx.tenantId, JSON.stringify(chunk)],
+          );
+        }
+      }
+    },
   };
 
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
@@ -3425,10 +3384,13 @@ validateMigrationCatalogueOrder(CORE_TENANT_MIGRATIONS);
 export function computeMigrationChecksum(
   migration: TenantMigrationDefinition,
 ): string {
+  const sigPart = migration.backfillSignature
+    ? `:${migration.backfillSignature}`
+    : '';
   return crypto
     .createHash('sha256')
     .update(
-      `${migration.version}:${migration.name}:${migration.upSql}:${migration.downSql}`,
+      `${migration.version}:${migration.name}:${migration.upSql}:${migration.downSql}${sigPart}`,
     )
     .digest('hex');
 }
@@ -3555,6 +3517,9 @@ export class TenantMigrationRunner {
           }
 
           await client.query(migration.upSql);
+          if (migration.afterUpSql) {
+            await migration.afterUpSql(client, ctx);
+          }
 
           await client.query(
             `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, ${runtimeIdent}`,
