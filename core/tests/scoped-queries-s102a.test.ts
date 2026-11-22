@@ -490,4 +490,99 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       verifyFinanceActorAndPermission(forgedCtx, 'finance:view'),
     ).rejects.toThrow();
   });
+
+  it('R662: findSqlConflictCandidates traverses multi-hop merge_history chains before hydrating people and organisations across two tenants', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const partyRepo = new TenantPartyRepository();
+    await partyRepo.clearTenantData(ctxAlpha);
+    await partyRepo.clearTenantData(ctxBravo);
+
+    await partyRepo.putPerson(ctxAlpha, {
+      id: 'P-R662-OLDEST',
+      recordType: 'person',
+      firstName: 'OldestAlias',
+      surname: 'MergeChainOne',
+      mergedIntoId: 'P-R662-MID',
+      emails: [],
+      phones: [],
+      addresses: [],
+      relationshipRoleIds: [],
+      notDuplicateOf: [],
+    } as never);
+    await partyRepo.putPerson(ctxAlpha, {
+      id: 'P-R662-MID',
+      recordType: 'person',
+      firstName: 'MiddleAlias',
+      surname: 'MergeChainTwo',
+      mergedIntoId: 'P-R662-SURVIVOR',
+      emails: [],
+      phones: [],
+      addresses: [],
+      relationshipRoleIds: [],
+      notDuplicateOf: [],
+    } as never);
+    await partyRepo.putPerson(ctxAlpha, {
+      id: 'P-R662-SURVIVOR',
+      recordType: 'person',
+      firstName: 'SurvivorActual',
+      surname: 'MergeChainThree',
+      mergedIntoId: null,
+      emails: [],
+      phones: [],
+      addresses: [],
+      relationshipRoleIds: [],
+      notDuplicateOf: [],
+    } as never);
+
+    await partyRepo.putMergeHistory(ctxAlpha, {
+      id: 'MRG-R662-1',
+      recordType: 'person',
+      mergedId: 'P-R662-OLDEST',
+      survivorId: 'P-R662-MID',
+      byId: 'P-000001',
+      at: '2026-11-01T10:00:00Z',
+    } as never);
+    await partyRepo.putMergeHistory(ctxAlpha, {
+      id: 'MRG-R662-2',
+      recordType: 'person',
+      mergedId: 'P-R662-MID',
+      survivorId: 'P-R662-SURVIVOR',
+      byId: 'P-000001',
+      at: '2026-11-01T11:00:00Z',
+    } as never);
+
+    const bySeedId = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+      linkedPersonIds: ['P-R662-OLDEST'],
+    });
+    const bySeedIds = bySeedId.people.map((p) => p.id);
+    expect(bySeedIds).toContain('P-R662-OLDEST');
+    expect(bySeedIds).toContain('P-R662-MID');
+    expect(bySeedIds).toContain('P-R662-SURVIVOR');
+
+    const byMergedTerm = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+      terms: ['OldestAlias MergeChainOne'],
+    });
+    const byTermIds = byMergedTerm.people.map((p) => p.id);
+    expect(byTermIds).toContain('P-R662-OLDEST');
+    expect(byTermIds).toContain('P-R662-SURVIVOR');
+
+    // Second tenant isolation: Bravo sees zero Alpha merge chain records
+    const bravoBySeed = await partyRepo.findSqlConflictCandidates(ctxBravo, {
+      linkedPersonIds: ['P-R662-OLDEST'],
+    });
+    expect(bravoBySeed.people).toEqual([]);
+  });
 });

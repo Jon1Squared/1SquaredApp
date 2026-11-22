@@ -4281,27 +4281,58 @@ export class TenantPartyRepository extends TenantScopedRepository {
     const personMap = new Map<string, TPerson>();
     const orgMap = new Map<string, TOrg>();
 
-    // Step 1: Resolve seed IDs + merge history chain targets if any linked ID was merged
-    const seedCombinedIds = [...seedPersonIds, ...seedOrgIds];
-    if (seedCombinedIds.length > 0) {
-      const [directPeople, directOrgs, mergeLinks] = await Promise.all([
+    const expandMergeHistoryIds = async (
+      personIds: Set<string>,
+      orgIds: Set<string>,
+    ): Promise<void> => {
+      const checkedIds = new Set<string>();
+      for (let hop = 0; hop < 3; hop += 1) {
+        const frontier = [
+          ...Array.from(personIds),
+          ...Array.from(orgIds),
+        ].filter((id) => id && !checkedIds.has(id));
+        if (frontier.length === 0) break;
+        for (const id of frontier) checkedIds.add(id);
+        const mergeLists = await Promise.all(
+          frontier.map((id) => this.listMergeHistoryForEntity(ctx, id)),
+        );
+        let discoveredNew = false;
+        for (const list of mergeLists) {
+          for (const mh of list) {
+            if (mh.recordType === 'person') {
+              if (mh.survivorId && !personIds.has(mh.survivorId)) {
+                personIds.add(mh.survivorId);
+                discoveredNew = true;
+              }
+              if (mh.mergedId && !personIds.has(mh.mergedId)) {
+                personIds.add(mh.mergedId);
+                discoveredNew = true;
+              }
+            } else if (mh.recordType === 'organisation') {
+              if (mh.survivorId && !orgIds.has(mh.survivorId)) {
+                orgIds.add(mh.survivorId);
+                discoveredNew = true;
+              }
+              if (mh.mergedId && !orgIds.has(mh.mergedId)) {
+                orgIds.add(mh.mergedId);
+                discoveredNew = true;
+              }
+            }
+          }
+        }
+        if (!discoveredNew) break;
+      }
+    };
+
+    // Step 1: Traverse multi-hop merge history chains BEFORE loading seed people/organisations
+    if (seedPersonIds.size > 0 || seedOrgIds.size > 0) {
+      await expandMergeHistoryIds(seedPersonIds, seedOrgIds);
+      const [directPeople, directOrgs] = await Promise.all([
         this.listPeopleByIds<TPerson>(ctx, Array.from(seedPersonIds)),
         this.listOrganisationsByIds<TOrg>(ctx, Array.from(seedOrgIds)),
-        Promise.all(seedCombinedIds.map((id) => this.listMergeHistoryForEntity(ctx, id))),
       ]);
       for (const p of directPeople) personMap.set(p.id, p);
       for (const o of directOrgs) orgMap.set(o.id, o);
-      for (const list of mergeLinks) {
-        for (const mh of list) {
-          if (mh.recordType === 'person') {
-            seedPersonIds.add(mh.survivorId);
-            seedPersonIds.add(mh.mergedId);
-          } else if (mh.recordType === 'organisation') {
-            seedOrgIds.add(mh.survivorId);
-            seedOrgIds.add(mh.mergedId);
-          }
-        }
-      }
     }
 
     // Step 2: Query people & organisations matching terms/emails/phones/postcodes/companyNos
@@ -4319,6 +4350,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           phones: cleanPhones,
           postcodes: cleanPostcodes,
           fuzzy: true,
+          includeMerged: true,
         }),
         this.findSqlDuplicateCandidates<TOrg>(ctx, {
           kind: 'organisation',
@@ -4329,6 +4361,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           phones: cleanPhones,
           postcodes: cleanPostcodes,
           fuzzy: true,
+          includeMerged: true,
         }),
       ]);
       for (const p of pHits) personMap.set(p.id, p);
@@ -4348,6 +4381,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           emails: cleanEmails,
           phones: cleanPhones,
           postcodes: cleanPostcodes,
+          includeMerged: true,
         }),
         this.findSqlDuplicateCandidates<TOrg>(ctx, {
           kind: 'organisation',
@@ -4355,10 +4389,32 @@ export class TenantPartyRepository extends TenantScopedRepository {
           emails: cleanEmails,
           phones: cleanPhones,
           postcodes: cleanPostcodes,
+          includeMerged: true,
         }),
       ]);
       for (const p of pHits) personMap.set(p.id, p);
       for (const o of oHits) orgMap.set(o.id, o);
+    }
+
+    // Expand merge chains for any Step 2 hits so merged hits resolve their survivors & prior siblings
+    if (personMap.size > 0 || orgMap.size > 0) {
+      const chainPersonIds = new Set(personMap.keys());
+      const chainOrgIds = new Set(orgMap.keys());
+      await expandMergeHistoryIds(chainPersonIds, chainOrgIds);
+      const missingChainPersonIds = Array.from(chainPersonIds).filter(
+        (id) => !personMap.has(id),
+      );
+      const missingChainOrgIds = Array.from(chainOrgIds).filter(
+        (id) => !orgMap.has(id),
+      );
+      if (missingChainPersonIds.length > 0 || missingChainOrgIds.length > 0) {
+        const [chainPeople, chainOrgs] = await Promise.all([
+          this.listPeopleByIds<TPerson>(ctx, missingChainPersonIds),
+          this.listOrganisationsByIds<TOrg>(ctx, missingChainOrgIds),
+        ]);
+        for (const p of chainPeople) personMap.set(p.id, p);
+        for (const o of chainOrgs) orgMap.set(o.id, o);
+      }
     }
 
     const directPersonIds = Array.from(personMap.keys());
