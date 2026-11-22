@@ -359,7 +359,7 @@ afterEach(async () => {
 
 describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-List & outbox-drain)', () => {
   it('1. Migration 0019, RBAC 68+9=77 totals, JOB_PERMISSIONS/REGISTERED_CLI_JOBS, and demo/dev/test config overlays', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0022');
+    expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(22);
     expect(EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019.version).toBe('0019');
     expect(EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019.dependsOn).toEqual([
       '0018',

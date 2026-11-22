@@ -1192,6 +1192,38 @@ export const TenantConfigurationSchema = z
           .describe(
             'Tenant Microsoft Teams Activity Feed delivery configuration (ADR 0035, S0-29)',
           ),
+        intakeChecks: z
+          .object({
+            idVerification: z
+              .object({
+                provider: z.enum(['manual']).default('manual'),
+              })
+              .strict()
+              .default(() => ({ provider: 'manual' as const })),
+            sanctionsPep: z
+              .object({
+                provider: z.enum(['manual']).default('manual'),
+              })
+              .strict()
+              .default(() => ({ provider: 'manual' as const })),
+            eSignature: z
+              .object({
+                provider: z.enum(['manual']).default('manual'),
+              })
+              .strict()
+              .default(() => ({ provider: 'manual' as const })),
+            payments: z
+              .object({
+                provider: z.enum(['manual']).default('manual'),
+              })
+              .strict()
+              .default(() => ({ provider: 'manual' as const })),
+          })
+          .strict()
+          .optional()
+          .describe(
+            'Stage 1 manual intake check provider configuration (ADR 0038, S1-03)',
+          ),
       })
       .strict(),
     customFields: z
@@ -3381,6 +3413,29 @@ export function loadAndValidateTenantConfig(
   const overlayTeamsDevCatcher = overlayTeams?.devCatcher as
     | Record<string, unknown>
     | undefined;
+  const baseIntakeChecks = baseIntegrations?.intakeChecks as
+    | Record<string, unknown>
+    | undefined;
+  const overlayIntakeChecks = overlayIntegrations?.intakeChecks as
+    | Record<string, unknown>
+    | undefined;
+  const mergeIntakeCheckSub = (key: string) => {
+    const baseSub = baseIntakeChecks?.[key] as
+      | Record<string, unknown>
+      | undefined;
+    const overlaySub = overlayIntakeChecks?.[key] as
+      | Record<string, unknown>
+      | undefined;
+    if (!baseSub && !overlaySub) return undefined;
+    return {
+      ...(baseSub ?? {}),
+      ...(overlaySub ?? {}),
+    };
+  };
+  const mergedIdVerification = mergeIntakeCheckSub('idVerification');
+  const mergedSanctionsPep = mergeIntakeCheckSub('sanctionsPep');
+  const mergedESignature = mergeIntakeCheckSub('eSignature');
+  const mergedPayments = mergeIntakeCheckSub('payments');
 
   const baseMatterCosts = baseConfig.matterCosts as
     | Record<string, unknown>
@@ -3505,6 +3560,22 @@ export function loadAndValidateTenantConfig(
                     },
                   }
                 : {}),
+            },
+          }
+        : {}),
+      ...(baseIntakeChecks || overlayIntakeChecks
+        ? {
+            intakeChecks: {
+              ...(baseIntakeChecks ?? {}),
+              ...(overlayIntakeChecks ?? {}),
+              ...(mergedIdVerification
+                ? { idVerification: mergedIdVerification }
+                : {}),
+              ...(mergedSanctionsPep
+                ? { sanctionsPep: mergedSanctionsPep }
+                : {}),
+              ...(mergedESignature ? { eSignature: mergedESignature } : {}),
+              ...(mergedPayments ? { payments: mergedPayments } : {}),
             },
           }
         : {}),

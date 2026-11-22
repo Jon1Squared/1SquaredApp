@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '2.0.0';
+export const CORE_API_VERSION = '2.1.0';
 
 import type {
   FeeArrangementCapEntry,
@@ -607,7 +607,7 @@ export interface DocumentStorageProvider {
   putObject(
     ctx: TenantContext,
     input: {
-      category: 'templates' | 'documents';
+      category: 'templates' | 'documents' | 'evidence';
       objectId: string;
       fileName: string;
       contentType: string;
@@ -885,6 +885,7 @@ export interface TenantConfiguration {
     pmsSync?: PmsIntegrationSyncConfig;
     email?: TenantEmailIntegrationConfig;
     teams?: TenantTeamsIntegrationConfig;
+    intakeChecks?: TenantIntakeChecksIntegrationConfig;
   };
   customFields: CustomFieldConfigEntry[];
   enabledExtensions: string[];
@@ -1834,6 +1835,7 @@ export type FirmAuditRecordType =
   | 'registers_config'
   | 'email_outbox'
   | 'teams_activity_outbox'
+  | 'intake_check'
   | 'notification_digest'
   | 'notification_preferences';
 
@@ -1907,12 +1909,39 @@ export interface TenantEmailIntegrationConfig {
   devCatcher?: TenantEmailDevCatcherConfig;
 }
 
+export const MAX_EMAIL_TOTAL_ATTACHMENT_BYTES = 3_000_000;
+
 export interface EmailAttachmentRef {
+  readonly kind?: 'blob';
   readonly blobKey: string;
   readonly externalId?: string;
   readonly fileName: string;
   readonly contentType: string;
 }
+
+export interface EmailInlineAttachment {
+  readonly kind: 'inline';
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly contentBytes: Uint8Array;
+  readonly sha256?: string;
+  readonly byteSize?: number;
+}
+
+export interface EmailOutboxAttachmentMetadata {
+  readonly source: 'outbox';
+  readonly ordinal: number;
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+}
+
+export type OutgoingEmailAttachment = EmailAttachmentRef | EmailInlineAttachment;
+
+export type EmailOutboxStoredAttachment =
+  | EmailAttachmentRef
+  | EmailOutboxAttachmentMetadata;
 
 export interface EmailRecipientList {
   readonly to: readonly string[];
@@ -1929,7 +1958,7 @@ export interface OutgoingEmail {
   readonly subject: string;
   readonly htmlBody: string;
   readonly textBody: string;
-  readonly attachments?: readonly EmailAttachmentRef[];
+  readonly attachments?: readonly OutgoingEmailAttachment[];
   readonly createdByPersonId?: string | null;
 }
 
@@ -1973,7 +2002,7 @@ export interface EmailOutboxRecord {
   readonly subject: string | null;
   readonly htmlBody: string | null;
   readonly textBody: string | null;
-  readonly attachments: readonly EmailAttachmentRef[];
+  readonly attachments: readonly EmailOutboxStoredAttachment[];
   readonly status: EmailOutboxStatus;
   readonly attemptCount: number;
   readonly nextAttemptAt: string;
@@ -2108,5 +2137,235 @@ export interface TeamsActivityOutboxRecord {
   readonly createdAt: string;
   readonly updatedAt: string;
 }
+
+// ------------------------------------------------------------------ Intake Check Interfaces & Manual Contracts (ADR 0038, S1-03)
+
+export type IntakeCheckProviderMode = 'manual';
+
+export type IntakeCheckKind =
+  | 'identity_verification'
+  | 'sanctions_pep'
+  | 'e_signature'
+  | 'payment_request';
+
+export type IntakeCheckSubjectType =
+  | 'person'
+  | 'organisation'
+  | 'matter'
+  | 'quote';
+
+export interface IntakeEvidenceArtifactRef {
+  readonly blobKey: string;
+  readonly sha256: string;
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly scanStatus: MalwareScanStatus | 'quarantined';
+}
+
+export type IdentityVerificationOutcome =
+  | 'verified'
+  | 'failed'
+  | 'pending'
+  | 'expired';
+
+export interface IdentityVerificationRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly checkKind: 'identity_verification';
+  readonly provider: IntakeCheckProviderMode;
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: IdentityVerificationOutcome;
+  readonly verificationMethod: string;
+  readonly referenceCode: string | null;
+  readonly expiresAt: string | null;
+  readonly notes: string | null;
+  readonly evidenceRefs: readonly IntakeEvidenceArtifactRef[];
+  readonly recordedByPersonId: string;
+  readonly recordedAt: string;
+  readonly correlationId: string;
+}
+
+export interface RecordManualIdentityVerificationInput {
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: IdentityVerificationOutcome;
+  readonly verificationMethod: string;
+  readonly referenceCode?: string | null;
+  readonly expiresAt?: string | null;
+  readonly notes?: string | null;
+  readonly evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
+}
+
+export interface IdentityVerificationProvider {
+  readonly providerId: IntakeCheckProviderMode;
+  recordManualCheck(
+    ctx: TenantContext,
+    input: RecordManualIdentityVerificationInput,
+  ): Promise<IdentityVerificationRecord>;
+  getLatestCheckForSubject(
+    ctx: TenantContext,
+    subject: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+    },
+  ): Promise<IdentityVerificationRecord | null>;
+}
+
+export type SanctionsPepOutcome = 'clear' | 'match_flagged' | 'pending';
+
+export interface SanctionsPepScreeningRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly checkKind: 'sanctions_pep';
+  readonly provider: IntakeCheckProviderMode;
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: SanctionsPepOutcome;
+  readonly screeningScope: string;
+  readonly referenceCode: string | null;
+  readonly notes: string | null;
+  readonly evidenceRefs: readonly IntakeEvidenceArtifactRef[];
+  readonly recordedByPersonId: string;
+  readonly recordedAt: string;
+  readonly correlationId: string;
+}
+
+export interface RecordManualSanctionsPepInput {
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: SanctionsPepOutcome;
+  readonly screeningScope: string;
+  readonly referenceCode?: string | null;
+  readonly notes?: string | null;
+  readonly evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
+}
+
+export interface SanctionsPepScreeningProvider {
+  readonly providerId: IntakeCheckProviderMode;
+  recordManualScreening(
+    ctx: TenantContext,
+    input: RecordManualSanctionsPepInput,
+  ): Promise<SanctionsPepScreeningRecord>;
+  getLatestScreeningForSubject(
+    ctx: TenantContext,
+    subject: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+    },
+  ): Promise<SanctionsPepScreeningRecord | null>;
+}
+
+export type ESignatureOutcome =
+  | 'requested_manual'
+  | 'signed_uploaded'
+  | 'declined';
+
+export interface ESignatureEnvelopeRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly checkKind: 'e_signature';
+  readonly provider: IntakeCheckProviderMode;
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: ESignatureOutcome;
+  readonly referenceCode: string | null;
+  readonly documentId: string | null;
+  readonly notes: string | null;
+  readonly evidenceRefs: readonly IntakeEvidenceArtifactRef[];
+  readonly recordedByPersonId: string;
+  readonly recordedAt: string;
+  readonly correlationId: string;
+}
+
+export interface RecordManualESignatureInput {
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: ESignatureOutcome;
+  readonly referenceCode?: string | null;
+  readonly documentId?: string | null;
+  readonly notes?: string | null;
+  readonly evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
+}
+
+export interface ESignatureProvider {
+  readonly providerId: IntakeCheckProviderMode;
+  recordManualRequest(
+    ctx: TenantContext,
+    input: RecordManualESignatureInput,
+  ): Promise<ESignatureEnvelopeRecord>;
+  recordManualSignedDocument(
+    ctx: TenantContext,
+    input: RecordManualESignatureInput,
+  ): Promise<ESignatureEnvelopeRecord>;
+  getLatestEnvelope(
+    ctx: TenantContext,
+    subject: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+    },
+  ): Promise<ESignatureEnvelopeRecord | null>;
+}
+
+export type PaymentRequestOutcome =
+  | 'requested_manual'
+  | 'receipt_recorded_manual'
+  | 'cancelled';
+
+export interface PaymentRequestRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly checkKind: 'payment_request';
+  readonly provider: IntakeCheckProviderMode;
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly outcome: PaymentRequestOutcome;
+  readonly amountMinorUnits: bigint;
+  readonly currency: 'GBP';
+  readonly clientAccountReference: string;
+  readonly bankStatementReference: string | null;
+  readonly referenceCode: string | null;
+  readonly notes: string | null;
+  readonly evidenceRefs: readonly IntakeEvidenceArtifactRef[];
+  readonly recordedByPersonId: string;
+  readonly recordedAt: string;
+  readonly correlationId: string;
+}
+
+export interface RecordManualPaymentRequestInput {
+  readonly subjectType: IntakeCheckSubjectType;
+  readonly subjectId: string;
+  readonly amountMinorUnits: bigint;
+  readonly currency?: 'GBP';
+  readonly clientAccountReference: string;
+  readonly bankStatementReference?: string | null;
+  readonly referenceCode?: string | null;
+  readonly notes?: string | null;
+  readonly evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
+}
+
+export interface PaymentRequestProvider {
+  readonly providerId: IntakeCheckProviderMode;
+  recordManualPaymentRequest(
+    ctx: TenantContext,
+    input: RecordManualPaymentRequestInput,
+  ): Promise<PaymentRequestRecord>;
+  recordManualReceipt(
+    ctx: TenantContext,
+    input: RecordManualPaymentRequestInput,
+  ): Promise<PaymentRequestRecord>;
+  getPaymentRequest(
+    ctx: TenantContext,
+    id: string,
+  ): Promise<PaymentRequestRecord | null>;
+}
+
+export interface TenantIntakeChecksIntegrationConfig {
+  readonly idVerification: { readonly provider: IntakeCheckProviderMode };
+  readonly sanctionsPep: { readonly provider: IntakeCheckProviderMode };
+  readonly eSignature: { readonly provider: IntakeCheckProviderMode };
+  readonly payments: { readonly provider: IntakeCheckProviderMode };
+}
+
 
 

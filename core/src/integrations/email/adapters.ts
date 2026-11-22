@@ -35,20 +35,22 @@ function getNodeBuiltin<T>(specifier: string, errorCode: string): T {
   }
   return mod;
 }
-import type {
-  DocumentStorageProvider,
-  EmailAttachmentRef,
-  EmailProviderId,
-  EmailRecipientList,
-  EmailSender,
-  EmailSendResult,
-  OutgoingEmail,
-  TenantConfiguration,
-  TenantContext,
-  TenantEmailAcsConfig,
-  TenantEmailDevCatcherConfig,
-  TenantEmailGraphConfig,
-  TenantEmailIntegrationConfig,
+import {
+  MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
+  type DocumentStorageProvider,
+  type EmailInlineAttachment,
+  type EmailProviderId,
+  type EmailRecipientList,
+  type EmailSender,
+  type EmailSendResult,
+  type OutgoingEmail,
+  type OutgoingEmailAttachment,
+  type TenantConfiguration,
+  type TenantContext,
+  type TenantEmailAcsConfig,
+  type TenantEmailDevCatcherConfig,
+  type TenantEmailGraphConfig,
+  type TenantEmailIntegrationConfig,
 } from '../../api/index';
 import { assertTenantOwnsKeyVaultSecretRef } from '../../tenancy/keyVaultSecrets';
 import { evaluateEmailAllowList } from './allowList';
@@ -361,26 +363,63 @@ async function sendSmtpViaTcpCatcher(params: {
   }
 }
 
+function isInlineAttachment(
+  att: OutgoingEmailAttachment,
+): att is EmailInlineAttachment {
+  return (att as EmailInlineAttachment).kind === 'inline';
+}
+
 async function resolveLoadedAttachments(
   ctx: TenantContext,
-  refs: readonly EmailAttachmentRef[],
+  refs: readonly OutgoingEmailAttachment[],
   storageProvider?: DocumentStorageProvider,
 ): Promise<LoadedEmailAttachment[]> {
   if (refs.length === 0) {
     return [];
   }
-  if (!storageProvider) {
-    throw new EmailIntegrationError(
-      'EMAIL_ATTACHMENT_STORAGE_UNAVAILABLE',
-      'Cannot resolve outbound email attachments without a configured DocumentStorageProvider.',
-    );
-  }
   const loaded: LoadedEmailAttachment[] = [];
+  let totalBytes = 0;
+
   for (const att of refs) {
+    if (isInlineAttachment(att)) {
+      if (!(att.contentBytes instanceof Uint8Array) || att.contentBytes.length === 0) {
+        throw new EmailIntegrationError(
+          'EMAIL_ATTACHMENT_INVALID',
+          'Inline email attachment bytes must be a non-empty Uint8Array.',
+        );
+      }
+      totalBytes += att.contentBytes.length;
+      if (totalBytes > MAX_EMAIL_TOTAL_ATTACHMENT_BYTES) {
+        throw new EmailIntegrationError(
+          'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED',
+          `Total email attachment bytes (${totalBytes}) exceeds the ${MAX_EMAIL_TOTAL_ATTACHMENT_BYTES} byte limit.`,
+        );
+      }
+      loaded.push({
+        fileName: att.fileName,
+        contentType: att.contentType,
+        contentBase64: Buffer.from(att.contentBytes).toString('base64'),
+      });
+      continue;
+    }
+
+    if (!storageProvider) {
+      throw new EmailIntegrationError(
+        'EMAIL_ATTACHMENT_STORAGE_UNAVAILABLE',
+        'Cannot resolve outbound email attachment references without a configured DocumentStorageProvider.',
+      );
+    }
     const bytes = await storageProvider.getObjectBytes(ctx, {
       blobKey: att.blobKey,
       ...(att.externalId ? { externalId: att.externalId } : {}),
     });
+    totalBytes += bytes.length;
+    if (totalBytes > MAX_EMAIL_TOTAL_ATTACHMENT_BYTES) {
+      throw new EmailIntegrationError(
+        'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED',
+        `Total email attachment bytes (${totalBytes}) exceeds the ${MAX_EMAIL_TOTAL_ATTACHMENT_BYTES} byte limit.`,
+      );
+    }
     loaded.push({
       fileName: att.fileName,
       contentType: att.contentType,

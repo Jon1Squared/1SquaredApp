@@ -80,6 +80,10 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 | \`integrations.teams.teamsAppId\` | Optional | Active | Entra / Teams manifest application ID used for Teams entity deep-link \`webUrl\` generation |
 | \`integrations.teams.recipientAllowList\` | \`[]\` | Active | Non-live recipient domain suffixes (e.g. \`@notalawfirm.example\`) and permitted person IDs (\`P-xxxxxx\`); empty allow-list fails closed outside \`live\` |
 | \`integrations.teams.recipientAllowListVaultRef\` | Optional | Active | Tenant Key Vault secret ref (\`kv://...\`) storing non-live permitted Teams recipients without committing PII to git |
+| \`integrations.intakeChecks.idVerification.provider\` | \`"manual"\` | Active | Stage 1 identity verification adapter (\`"manual"\` only; live provider deferred to \`F24\`, ADR 0038) |
+| \`integrations.intakeChecks.sanctionsPep.provider\` | \`"manual"\` | Active | Stage 1 sanctions and PEP screening adapter (\`"manual"\` only; live provider deferred to \`F25\`, ADR 0038) |
+| \`integrations.intakeChecks.eSignature.provider\` | \`"manual"\` | Active | Stage 1 engagement letter e-signature adapter (\`"manual"\` only; live provider deferred to \`F26\`, ADR 0038) |
+| \`integrations.intakeChecks.payments.provider\` | \`"manual"\` | Active | Stage 1 money-on-account payment request adapter (\`"manual"\` only; live payment links deferred to \`F27\`, ADR 0038) |
 | \`integrations.teams.devCatcher.endpointUrl\` | Optional | Active | HTTP endpoint URL for local Teams Activity catcher testing in \`dev\` and \`test\` (forbidden in \`live\`) |
 | \`integrations.teams.graph.*\` | Optional | Active | Microsoft Graph application-only certificate settings (\`tenantId\`, \`clientId\`, \`certificateVaultRef\`, optional 40-hex \`certificateThumbprint\` required when \`provider === "graph"\`) |
 | \`notifications.digestHourLocal\` | \`8\` | Active | Tenant-local hour (\`0\`–\`23\`, default \`8\`) at or after which the Monday–Friday \`notification-digests\` scheduler job queues daily and weekly email digests across GMT/BST transitions |

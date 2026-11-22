@@ -169,7 +169,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
   public async putObject(
     ctx: TenantContext,
     input: {
-      category: 'templates' | 'documents';
+      category: 'templates' | 'documents' | 'evidence';
       objectId: string;
       fileName: string;
       contentType: string;
@@ -178,6 +178,15 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     },
   ): Promise<StoredBlobMetadata> {
     ensureValidTenantContext(ctx);
+    if (
+      input.category !== 'templates' &&
+      input.category !== 'documents' &&
+      input.category !== 'evidence'
+    ) {
+      throw new Error(
+        `STORAGE_INVALID_CATEGORY: Unsupported storage category "${String(input.category)}".`,
+      );
+    }
     const safeName = sanitizeFileName(input.fileName);
     const safeId = input.objectId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const blobKey = `${ctx.blobContainerName}/${input.category}/${safeId}/${safeName}`;

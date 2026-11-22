@@ -131,6 +131,31 @@ export async function drainEmailOutboxForTenant(
         (row.recipients.bcc?.length ?? 0);
 
       try {
+        const hasOutboxAttachments = row.attachments.some(
+          (att) =>
+            'source' in att && att.source === 'outbox',
+        );
+        const dispatchAttachments = hasOutboxAttachments
+          ? await outboxRepo.getClaimedOutboxAttachmentBytes(ctx, {
+              outboxId: row.id,
+              claimToken: row.claimToken,
+            })
+          : row.attachments.filter(
+              (att): att is import('../../api/index').EmailAttachmentRef =>
+                !('source' in att),
+            );
+        if (
+          hasOutboxAttachments &&
+          dispatchAttachments.length !==
+            row.attachments.filter(
+              (att) => 'source' in att && att.source === 'outbox',
+            ).length
+        ) {
+          throw new Error(
+            'EMAIL_OUTBOX_ATTACHMENT_MISSING: Expected outbox-held attachment bytes were missing for claimed message.',
+          );
+        }
+
         const result = await sender.send(ctx, {
           idempotencyKey: row.idempotencyKey,
           templateKey: row.templateKey,
@@ -138,7 +163,7 @@ export async function drainEmailOutboxForTenant(
           subject: row.subject,
           htmlBody: row.htmlBody,
           textBody: row.textBody,
-          attachments: row.attachments,
+          attachments: dispatchAttachments,
           createdByPersonId: row.createdByPersonId,
         });
 

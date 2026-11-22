@@ -624,9 +624,15 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('R599: CORE_API_VERSION is 2.0.0, bundled nalf-matter-costs-governance declares ^2.0.0, and legacy ^1.0.0 manifests fail closed with EXTENSION_COMPATIBILITY_ERROR', () => {
-    expect(CORE_API_VERSION).toBe('2.0.0');
+  it('R599: CORE_API_VERSION is 2.1.0, bundled nalf-matter-costs-governance declares ^2.0.0, and legacy ^1.0.0 manifests fail closed with EXTENSION_COMPATIBILITY_ERROR', () => {
+    expect(CORE_API_VERSION).toBe('2.1.0');
     expect(nalfManifestJson.supportedCoreApiRange).toBe('^2.0.0');
+    expect(
+      isCoreApiRangeCompatible(
+        CORE_API_VERSION,
+        nalfManifestJson.supportedCoreApiRange,
+      ),
+    ).toBe(true);
     expect(nalfManifestJson.permissions).toContain('config:read');
 
     const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });

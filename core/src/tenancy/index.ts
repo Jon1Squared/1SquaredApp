@@ -46,6 +46,7 @@ export * from './rateOverrideRepository';
 export * from './registerRepository';
 export * from './searchRepository';
 export * from './outboxRepository';
+export * from './intakeCheckRepository';
 
 export {
   isEntraMfaVerified,
