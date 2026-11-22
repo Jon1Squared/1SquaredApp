@@ -16,7 +16,7 @@ This section explains how 1Squared works: what each screen does, the rules behin
 - **Key dates and limitation**: capturing, calculating, verifying, reminding on, and reporting on limitation and other critical dates across matters and enquiries — start with [Overview: what key dates are, and why the system suggests while people confirm](/docs/key-dates-overview).
 - **Documents & SharePoint DMS**: how 1Squared connects to Microsoft SharePoint Online, provisions matter folder trees by work type, enforces per-user permissions and ethical walls, and detects permission drift — see [SharePoint document store, matter folder templates & permissions](/docs/sharepoint-document-store).
 - **Enquiries**: taking and handling new enquiries, including the [quick conflict check](/docs/quick-conflict-check) and carrying key dates onto matters on conversion.
-- **People & Organisations**: contact records, including [duplicate checks](/docs/duplicate-checks).
+- **People & Organisations**: canonical client, contact, link, and party records in [clients, contacts & matter parties](/docs/clients-and-contacts), plus [duplicate checks](/docs/duplicate-checks).
 
 ## Finding help on a screen
 

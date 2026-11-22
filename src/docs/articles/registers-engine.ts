@@ -16,7 +16,7 @@ The **Registers** workspace (\`/registers\`) provides a single, configurable per
 
 | Key | Label | Initial Status | Creation & Governance |
 | --- | --- | --- | --- |
-| \`sign_off\` | Sign-Off | \`pending_approval\` | Supports \`write_off\` (via **Flag write-off**) and schema-defined \`matter_opening\`; transitions through \`pending_approval\` → \`discussing\` → \`approved\` / \`rejected\` via \`transitionRegisterRecordService\` with \`row_version\` optimistic concurrency, no-self-approval, and approver notifications |
+| \`sign_off\` | Sign-Off | \`pending_approval\` | Supports \`write_off\` (via **Flag write-off**) and schema-defined \`matter_opening\`; transitions through \`pending_approval\` → \`discussing\` → \`approved\` / \`rejected\` via \`transitionRegisterRecordService\` with \`expectedRowVersion\` optimistic concurrency, no-self-approval, and approver notifications |
 | \`undertaking\` | Undertaking | \`open\` | **Direct creation without two-person approval** (\`approvalRules: null\`): any permitted fee earner (\`undertaking:manage\`) records an undertaking directly as \`open\` and can record variations (\`varied\`), mark overdue (\`overdue\`), reopen (\`open\`), discharge (\`discharged\`), or cancel (\`cancelled\`) |
 | \`complaint\` | Client Complaint | \`open\` | Stages from \`open\` → \`investigating\` → \`resolved\` / \`closed\`; supports optional assigned reviewer (\`register_review_assigned\`) |
 | \`breach\` | Compliance Breach | \`logged\` | Stages from \`logged\` → \`remediation\` → \`closed\` (requiring \`register:approve\` with no self-approval) |
