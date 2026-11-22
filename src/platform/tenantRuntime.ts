@@ -107,6 +107,23 @@ export function setActiveTenantConfigForTesting(
   cachedHostLoadErrors = [];
 }
 
+export function resetTenantRuntimeForTesting(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(
+      'SECURITY_ERROR: resetTenantRuntimeForTesting is only permitted when NODE_ENV === "test".',
+    );
+  }
+  fileJsonCache.clear();
+  envOverlayPathCache.clear();
+  testBaseConfigOverride = null;
+  testDevOverlayOverride = undefined;
+  cachedValidatedTenantConfig = null;
+  loggedReservedSettingKeys.clear();
+  cachedHost = null;
+  cachedHostKey = null;
+  cachedHostLoadErrors = [];
+}
+
 function resolveTenantPackageDir(): string {
   const configured = process.env.PLATFORM_TENANT_PACKAGE_DIR?.trim();
   if (configured) {
@@ -268,8 +285,14 @@ export interface ExtensionLoadError {
   tenantId: string;
   extensionDir: string;
   extensionId?: string;
+  errorCode: string;
   declaredHooks: readonly string[] | null;
   error: string;
+}
+
+export interface ExtensionReadinessResult {
+  readonly ok: boolean;
+  readonly errorCode?: string;
 }
 
 let cachedHost: ExtensionHost | null = null;
@@ -372,6 +395,7 @@ function loadTenantPackageExtensions(
           tenantId: tenantConfig.tenantId,
           extensionDir: extDirName,
           extensionId: extDirName,
+          errorCode: 'EXTENSION_MANIFEST_NOT_FOUND',
           declaredHooks: null,
           error: safeMessage,
         });
@@ -486,6 +510,7 @@ function loadTenantPackageExtensions(
         tenantId: tenantConfig.tenantId,
         extensionDir: extDirName,
         extensionId: resolvedExtensionId,
+        errorCode,
         declaredHooks,
         error: safeMessage,
       });
@@ -535,6 +560,7 @@ function loadTenantPackageExtensions(
         tenantId: tenantConfig.tenantId,
         extensionDir: enabledId,
         extensionId: enabledId,
+        errorCode: 'EXTENSION_NOT_REGISTERED',
         declaredHooks: null,
         error: safeMessage,
       });
@@ -582,6 +608,41 @@ export function getPlatformExtensionHost(): ExtensionHost {
     cachedHostKey = hostKey;
   }
   return cachedHost;
+}
+
+/**
+ * Verifies that every extension enabled for the active tenant loaded and registered cleanly (`R655`).
+ * Returns a safe `errorCode` only so readiness probes and startup checks never expose file paths or secrets.
+ */
+export function checkActiveTenantExtensionsReadiness(): ExtensionReadinessResult {
+  const activeCfg = getActiveTenantConfiguration();
+  const enabledIds = activeCfg.enabledExtensions ?? [];
+  if (enabledIds.length === 0) {
+    return { ok: true };
+  }
+  const host = getPlatformExtensionHost();
+  const enabledSet = new Set(enabledIds);
+  const matchingError = getExtensionHostLoadErrors().find(
+    (err) =>
+      err.tenantId === activeCfg.tenantId &&
+      ((err.extensionId && enabledSet.has(err.extensionId)) ||
+        enabledSet.has(err.extensionDir)),
+  );
+  if (matchingError) {
+    return {
+      ok: false,
+      errorCode: matchingError.errorCode || 'EXTENSION_LOAD_FAILED',
+    };
+  }
+  const registeredIds = new Set(
+    host.getActiveExtensionsForTenant(activeCfg).map((ext) => ext.manifest.id),
+  );
+  for (const enabledId of enabledIds) {
+    if (!registeredIds.has(enabledId)) {
+      return { ok: false, errorCode: 'EXTENSION_NOT_REGISTERED' };
+    }
+  }
+  return { ok: true };
 }
 
 

@@ -33,8 +33,25 @@ interface RegistersWorkspaceClientProps {
   people: Person[];
   initialRecordId?: string;
   initialTypeKey?: string;
+  initialOpenCreateTypeKey?: string;
+  workspaceRef?: React.Ref<{ openCreatePanel: (preferredTypeKey?: string) => void }>;
   lockedMatterId?: string;
   embedded?: boolean;
+}
+
+function buildDefaultFieldValuesForType(
+  def: RegisterTypeDefinition | undefined,
+  currentUserId: string,
+): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const f of def?.fields ?? []) {
+    if (f.defaultValue !== undefined) {
+      defaults[f.key] = f.defaultValue;
+    } else if (f.type === 'person' && f.required) {
+      defaults[f.key] = currentUserId;
+    }
+  }
+  return defaults;
 }
 
 function mapToneToPill(
@@ -95,6 +112,8 @@ export function RegistersWorkspaceClient({
   people,
   initialRecordId,
   initialTypeKey,
+  initialOpenCreateTypeKey,
+  workspaceRef,
   lockedMatterId,
   embedded = false,
 }: RegistersWorkspaceClientProps) {
@@ -112,12 +131,24 @@ export function RegistersWorkspaceClient({
   const peopleById = useMemo(() => new Map(people.map((p) => [p.id, p] as const)), [people]);
   const mattersById = useMemo(() => new Map(matters.map((m) => [m.id, m] as const)), [matters]);
 
+  // Creation form state
+  const creatableTypes = useMemo(
+    () => enabledTypes.filter((t) => permSet.has(t.createPermission)),
+    [enabledTypes, permSet],
+  );
+  const resolvedInitialCreateTypeKey =
+    initialOpenCreateTypeKey &&
+    creatableTypes.some((t) => t.key === initialOpenCreateTypeKey)
+      ? initialOpenCreateTypeKey
+      : null;
+
   const [records, setRecords] = useState<RegisterRecord[]>(initialRecords);
   const [transitionsByRecordId, setTransitionsByRecordId] = useState<
     Record<string, RegisterTransition[]>
   >(initialTransitionsByRecordId);
   const [activeTypeFilter, setActiveTypeFilter] = useState<string>(
-    initialTypeKey && typeByKey.has(initialTypeKey) ? initialTypeKey : 'all',
+    resolvedInitialCreateTypeKey ??
+      (initialTypeKey && typeByKey.has(initialTypeKey) ? initialTypeKey : 'all'),
   );
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -128,24 +159,31 @@ export function RegistersWorkspaceClient({
     return initialRecords[0]?.id ?? null;
   });
 
-  // Creation form state
-  const creatableTypes = useMemo(
-    () => enabledTypes.filter((t) => permSet.has(t.createPermission)),
-    [enabledTypes, permSet],
+  const defaultCreateTypeKey =
+    resolvedInitialCreateTypeKey ??
+    (initialTypeKey && creatableTypes.some((t) => t.key === initialTypeKey)
+      ? initialTypeKey
+      : undefined) ??
+    creatableTypes.find((t) => t.key === 'undertaking')?.key ??
+    creatableTypes[0]?.key ??
+    'undertaking';
+  const [showCreateForm, setShowCreateForm] = useState<boolean>(
+    Boolean(resolvedInitialCreateTypeKey),
   );
-  const [showCreateForm, setShowCreateForm] = useState<boolean>(false);
-  const [createTypeKey, setCreateTypeKey] = useState<string>(() => {
-    if (initialTypeKey && creatableTypes.some((t) => t.key === initialTypeKey)) {
-      return initialTypeKey;
-    }
-    return creatableTypes.find((t) => t.key === 'undertaking')?.key ?? creatableTypes[0]?.key ?? 'undertaking';
-  });
+  const [createTypeKey, setCreateTypeKey] = useState<string>(defaultCreateTypeKey);
   const [createTitle, setCreateTitle] = useState<string>('');
   const [createMatterId, setCreateMatterId] = useState<string>(lockedMatterId ?? '');
   const [createApproverId, setCreateApproverId] = useState<string>('');
   const [createDueDate, setCreateDueDate] = useState<string>('');
   const [createReviewDate, setCreateReviewDate] = useState<string>('');
-  const [createFieldValues, setCreateFieldValues] = useState<Record<string, unknown>>({});
+  const [createFieldValues, setCreateFieldValues] = useState<Record<string, unknown>>(() =>
+    resolvedInitialCreateTypeKey
+      ? buildDefaultFieldValuesForType(
+          typeByKey.get(resolvedInitialCreateTypeKey),
+          currentUserId,
+        )
+      : {},
+  );
   const [submittingCreate, setSubmittingCreate] = useState<boolean>(false);
 
   // Transition state
@@ -204,14 +242,7 @@ export function RegistersWorkspaceClient({
           creatableTypes[0]?.key ??
           'undertaking';
     const def = typeByKey.get(nextKey);
-    const defaults: Record<string, unknown> = {};
-    for (const f of def?.fields ?? []) {
-      if (f.defaultValue !== undefined) {
-        defaults[f.key] = f.defaultValue;
-      } else if (f.type === 'person' && f.required) {
-        defaults[f.key] = currentUserId;
-      }
-    }
+    const defaults = buildDefaultFieldValuesForType(def, currentUserId);
     setCreateTypeKey(nextKey);
     setCreateTitle('');
     setCreateMatterId(lockedMatterId ?? '');
@@ -221,6 +252,10 @@ export function RegistersWorkspaceClient({
     setCreateFieldValues(defaults);
     setShowCreateForm(true);
   };
+
+  React.useImperativeHandle(workspaceRef, () => ({
+    openCreatePanel,
+  }));
 
   async function handleCreateSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -435,22 +470,36 @@ export function RegistersWorkspaceClient({
           ) : null}
         </div>
       ) : (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Link href="/registers" className="panel-link">
               Open full registers workspace →
             </Link>
           </div>
           {creatableTypes.length > 0 ? (
-            <button
-              type="button"
-              className="btn btn--primary btn--sm"
-              onClick={() =>
-                openCreatePanel(permSet.has('undertaking:manage') ? 'undertaking' : undefined)
-              }
-            >
-              + New entry / undertaking
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {permSet.has('undertaking:manage') &&
+              creatableTypes.some((t) => t.key === 'undertaking') ? (
+                <button
+                  type="button"
+                  className="btn btn--primary btn--sm"
+                  onClick={() => openCreatePanel('undertaking')}
+                >
+                  + New undertaking
+                </button>
+              ) : null}
+              {creatableTypes.some((t) => t.key !== 'undertaking') ? (
+                <button
+                  type="button"
+                  className="btn btn--secondary btn--sm"
+                  onClick={() =>
+                    openCreatePanel(creatableTypes.find((t) => t.key !== 'undertaking')?.key)
+                  }
+                >
+                  + New register entry
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       )}

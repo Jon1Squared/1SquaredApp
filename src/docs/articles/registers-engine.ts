@@ -6,7 +6,7 @@ export const registersEngineArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the Configurable Registers Engine manages undertakings, complaints, SRA breaches, periodic file reviews, partner sign-offs, tenant custom registers, extension hooks, and automated due/review reminders.',
-  updated: '2026-11-21',
+  updated: '2026-11-22',
   body: `
 The **Registers** workspace (\`/registers\`) provides a single, configurable per-tenant engine for regulatory and practice registers, persisted per tenant (\`0017_registers_engine_expand\`, \`TenantRegisterRepository\`) with full state-transition history across both \`/registers\` and the Home partner sign-off queue (\`approveSignOff\`, \`discussSignOff\`, and \`flagMatterWriteOff\`), single-allocator \`SO-\` reference numbering, reminder deduplication, and same-transaction audit logging.
 
@@ -23,7 +23,26 @@ The **Registers** workspace (\`/registers\`) provides a single, configurable per
 
 Undertakings live exclusively in the **Registers** engine rather than the partner sign-off queue (\`SignOffKind\` covers \`write_off\` and \`matter_opening\` only, and historical undertaking records are consolidated into the unified register engine during migration \`0017\`).
 
-## 2. Permissions and role separation (\`undertaking:manage\`)
+## 2. How to record and discharge an undertaking (step by step)
+
+Practising fee earners holding \`undertaking:manage\` can record an undertaking directly from either a **Matter profile** or the firm-wide **Registers** workspace without waiting for partner approval:
+
+### From a Matter profile
+1. Open the matter (\`/matters/<id>\`).
+2. Click **New undertaking** in the top-right page header, or click **+ New undertaking** on the **Undertakings & registers** card in the **Overview** right sidebar, or open the **Compliance** tab, scroll to **Matter registers & undertakings**, and click **+ New undertaking**.
+3. The **New Undertaking** creation form opens pre-linked to that matter. Enter the **Title**, due/compliance deadline (and optional periodic review date), **Recipient / counterparty**, **Terms of undertaking**, and **Given by fee earner** (pre-filled with your own name by default).
+4. Click **Create Undertaking**. The undertaking is assigned a \`UND-\` reference and opens immediately in \`open\` status.
+
+### From the Registers workspace
+1. Open **Registers** (\`/registers\`) from the left navigation rail.
+2. Click **+ Record undertaking** in the top-right header.
+3. Choose the **Linked matter** (or leave firm-wide if appropriate), complete the **Title**, due date, **Recipient / counterparty**, **Terms of undertaking**, and **Given by fee earner**, then click **Create Undertaking**.
+
+### Varying, monitoring, or discharging an undertaking
+1. Open an undertaking from **Registers** (\`/registers\`) or from the matter's **Compliance** tab (**Matter registers & undertakings**).
+2. Use the workflow action buttons on the record detail pane to **Record variation** (requires a comment), **Mark overdue**, **Reopen undertaking**, **Discharge undertaking** (moves to terminal \`discharged\` status), or **Cancel / withdraw** (requires a comment). Every transition is audited with optimistic concurrency protection.
+
+## 3. Permissions and role separation (\`undertaking:manage\`)
 
 Access to registers and undertakings is governed by six user permissions and one background job permission:
 
@@ -35,14 +54,14 @@ Access to registers and undertakings is governed by six user permissions and one
 - \`undertaking:manage\`: Create, edit, vary, and discharge undertakings. **Restricted to fee-earning roles (\`fee_earner\`, \`supervisor\`, \`partner\`, and \`managing_partner\`)**—excluded from \`admin\` by default and protected by override escalation guards so non-fee-earning administrators cannot exercise undertaking authority on their own behalf without explicit, authorised role/override governance.
 - \`register:run_reminders\` (\`jobOnly: true\`): Reserved exclusively for the unattended \`register-reminders\` background job; never grantable to interactive users or roles.
 
-## 3. Custom firm registers & configuration
+## 4. Custom firm registers & configuration
 
 Administrators with \`register:configure\` (and verified MFA) can open **Administration → Registers** (\`saveRegistersConfigAction\`) to:
 
 - Enable or disable specific core register types, adjust default reminder lead days (\`defaultDueDaysBefore\`, \`defaultReviewDaysBefore\`, and \`defaultReminderHourLocal\`), or override labels, navigation visibility, reminder schedules, and \`additionalFields\` on built-in types.
 - Add client-specific **custom register types** (custom \`key\`, \`referencePrefix\`, fields, states, transitions, and optional approval rules) validated against \`core/schemas/registers.config.schema.json\` with zero client code in platform core.
 
-## 4. Matter visibility, approvals & notifications
+## 5. Matter visibility, approvals & notifications
 
 When a register record links to a matter (\`matterId\`), both repository visibility queries and server services enforce \`canAccessMatter\`. Records linked to a restricted staff matter (\`isStaffMatter\`) or ethical-wall matter (\`hasEthicalWall\`) are omitted from lists, detail lookups, Home workspace panels, matter tabs, notifications, and reminder dispatches for any user without matter access.
 
@@ -50,7 +69,7 @@ When a register record links to a matter (\`matterId\`), both repository visibil
 - **Approval decisions (\`approval_decided\`):** Sent to the record owner when an approver approves, rejects, or requests discussion on a sign-off or approval-governed register record.
 - **Review assignments (\`register_review_assigned\`):** Sent when a non-approval register record is assigned to a reviewer or given a scheduled periodic review.
 
-## 5. Extension hooks (executed outside write transactions)
+## 6. Extension hooks (executed outside write transactions)
 
 Client extensions declaring \`register:read\` or \`register:write\` in their manifest may subscribe to three extension points:
 
@@ -58,7 +77,7 @@ Client extensions declaring \`register:read\` or \`register:write\` in their man
 2. \`register.beforeTransition\`: Runs **before** opening the transition transaction; throwing or returning \`allowProceed: false\` aborts the transition before any database write.
 3. \`register.afterTransition\`: Runs **after** the PostgreSQL transaction commits; hook errors or timeouts are logged and isolated so committed transitions are never rolled back.
 
-## 6. Automated due & review reminders (\`register-reminders\`)
+## 7. Automated due & review reminders (\`register-reminders\`)
 
 An unattended scheduled Container Apps Job (\`caj-reg-rem-<env>\`, CLI job \`register-reminders\`) runs hourly (\`0 * * * *\`) under synthetic actor \`system:register-reminders\` with permission \`register:run_reminders\`:
 

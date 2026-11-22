@@ -228,10 +228,10 @@ test.describe('S0-27: Role journey smoke tests (8 seeded roles)', () => {
       // 2. Left menu shows exactly what getLeftRailVisibility gives that role
       await assertLeftRailMatchesRole(page, actor.roleKey, actor.mappedRoles);
 
-      // 3. Main action: open Matters list and click into a matter workspace
+      // 3. Main action: open Matters list and click into the seeded commercial lease matter
       await page.locator('aside.left-rail a.rail-item[href="/matters"]').click();
       await expect(page).toHaveURL(/\/matters$/);
-      const matterLink = page.locator('a[href^="/matters/M-"]').first();
+      const matterLink = page.locator('a[href="/matters/M-000001"]').first();
       await expect(matterLink).toBeVisible();
       await matterLink.click();
       await expect(page).toHaveURL(/\/matters\/M-\d+/);
@@ -550,5 +550,176 @@ test.describe('S0-27: Role journey smoke tests (8 seeded roles)', () => {
         await context.close();
       }
     });
+  });
+});
+
+test.describe.serial('R657: Core intake-to-matter journeys (seeded demo dataset)', () => {
+  let createdEnquiryId = '';
+
+  test('1. Enquiries coordinator creates an enquiry and sends it to a team', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/enquiries/new');
+      await expect(page.locator('#enq-privacy-notice')).toBeVisible();
+      await expect(page.locator('#enq-privacy-notice')).toHaveValue('no');
+
+      // R656 / R657: Fill every field while leaving Privacy notice given at "No",
+      // press Send to Team, and assert the inline error blocks submission and creation.
+      await page.locator('#enq-first-name').fill('Aelwen');
+      await page.locator('#enq-last-name').fill('Meredith');
+      await page.locator('#enq-phone').fill('029 2010 7788');
+      await page
+        .locator('#enq-practice-area')
+        .selectOption('work_type.real_estate_and_property');
+      await page
+        .locator('#enq-subcat')
+        .selectOption('work_type.real_estate_and_property_commercial_property');
+      await page
+        .locator('#enq-summary')
+        .fill('Commercial lease review for Bridgend retail unit');
+      await page.locator('#enq-other-parties').fill('Ogmore Fabrication Group Ltd');
+      await page
+        .locator('#enq-notes')
+        .fill('Caller requested lease terms review ahead of heads of terms.');
+
+      await page.getByRole('button', { name: 'Send to Team' }).first().click();
+
+      const privacyFieldError = page.locator('.field-error', {
+        hasText: 'Please confirm the privacy notice was read or sent to the caller.',
+      });
+      await expect(privacyFieldError).toBeVisible();
+      await expect(page).toHaveURL(/\/enquiries\/new$/);
+
+      const verifyPage = await context.newPage();
+      try {
+        await verifyPage.goto('/enquiries');
+        await verifyPage.getByRole('tab', { name: /^All open/ }).click();
+        await expect(verifyPage.locator('.main-area')).not.toContainText('Aelwen Meredith');
+        await verifyPage.getByRole('tab', { name: /^My drafts/ }).click();
+        await expect(verifyPage.locator('.main-area')).not.toContainText('Aelwen Meredith');
+      } finally {
+        await verifyPage.close();
+      }
+
+      await page.locator('#enq-privacy-notice').selectOption('yes');
+      await page.getByRole('button', { name: 'Send to Team' }).first().click();
+
+      await expect(page.locator('[data-testid="enquiry-error-summary"]')).toHaveCount(0);
+      await expect(page).toHaveURL(/\/enquiries\/(ENQ-\d+)$/, { timeout: 20_000 });
+      const match = /\/enquiries\/(ENQ-\d+)$/.exec(page.url());
+      expect(match?.[1]).toBeTruthy();
+      createdEnquiryId = match![1]!;
+
+      await expect(page.locator('.new-enquiry-badge--warn')).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Convert to matter' }).first(),
+      ).toBeVisible();
+      await expect(page.locator('.main-area')).toContainText(
+        'Routes to team: Real Estate & Property',
+      );
+      await expect(page.locator('.main-area')).toContainText(
+        'Contact new enquiry: Aelwen Meredith',
+      );
+      await expect(page.locator('.main-area')).not.toContainText(
+        'no active fallback intake team',
+      );
+
+      await page.goto('/enquiries');
+      await page.getByRole('tab', { name: /^All open/ }).click();
+      const enqRow = page
+        .locator('tr', { has: page.locator(`a[href="/enquiries/${createdEnquiryId}"]`) })
+        .first();
+      await expect(enqRow).toBeVisible();
+      await expect(enqRow).toContainText('New');
+      await expect(enqRow).toContainText('Real Estate & Property');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('2. Fee earner converts enquiry, runs conflict search, and opens a matter', async ({
+    browser,
+  }) => {
+    expect(createdEnquiryId).toMatch(/^ENQ-\d+$/);
+
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto(`/enquiries/${createdEnquiryId}`);
+      await expect(page.locator('.main-area')).toContainText(createdEnquiryId);
+
+      await page.getByRole('button', { name: 'Convert to matter' }).first().click();
+      await expect(
+        page.getByRole('heading', { name: `Convert ${createdEnquiryId} to a matter` }),
+      ).toBeVisible();
+      await page
+        .getByRole('button', { name: /Continue to pre-filled New Matter form/ })
+        .click();
+
+      await expect(page).toHaveURL(/\/matters\/new\?/, { timeout: 20_000 });
+
+      const conflictSearchSection = page.getByRole('region', {
+        name: '5 · CONFLICT SEARCH',
+      });
+      const conflictMaxBtn = conflictSearchSection.getByRole('button', {
+        name: 'Maximise',
+      });
+      if (await conflictMaxBtn.isVisible()) {
+        await conflictMaxBtn.click();
+      }
+
+      await page.getByRole('button', { name: 'Run conflict search' }).first().click();
+      await expect(conflictSearchSection).toContainText('Reviewed', {
+        timeout: 15_000,
+      });
+
+      const outcomeSection = page.getByRole('region', {
+        name: '6 · OUTCOME AND DECLARATION',
+      });
+      const outcomeMaxBtn = outcomeSection.getByRole('button', {
+        name: 'Maximise',
+      });
+      if (await outcomeMaxBtn.isVisible()) {
+        await outcomeMaxBtn.click();
+      }
+
+      await expect(outcomeSection).toContainText(
+        /Cleared by fee earner|Referred to risk for review/,
+        { timeout: 15_000 },
+      );
+
+      await page
+        .getByLabel(/I confirm the parties listed are complete/)
+        .check();
+
+      const submitBtn = page.getByRole('button', { name: 'Submit', exact: true });
+      await expect(submitBtn).toBeEnabled();
+      await submitBtn.click();
+
+      await expect(page.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
+      await expect(page).toHaveURL(/\/matters\/M-\d+$/, { timeout: 25_000 });
+      await expect(page.locator('.main-area')).toContainText(
+        'Commercial lease review for Bridgend retail unit',
+      );
+      await expect(page.locator('.main-area')).toContainText(/\b[A-Z]{3}\d{3}-\d{4}\b/);
+      await expect(
+        page.locator('[data-testid="matter-header-new-undertaking"]'),
+      ).toBeVisible();
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
   });
 });

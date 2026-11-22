@@ -13474,17 +13474,20 @@ export async function saveEnquiryRecord(
   );
 
   if (!asDraft) {
-    const missingFields = getMissingRoutingFields(mergedInput, store.customFields);
+    const isLegacyUnconfirmedRoutedEnquiry = Boolean(
+      existing &&
+        existing.status !== 'Draft' &&
+        !existing.privacyNoticeGiven &&
+        !mergedInput.privacyNoticeGiven,
+    );
+    const missingFields = getMissingRoutingFields(mergedInput, store.customFields, {
+      requirePrivacyNotice: !isLegacyUnconfirmedRoutedEnquiry,
+    });
     const errors: Record<string, string> = {
       ...cfValidation.errors,
       ...validateEnquiryInput(mergedInput),
     };
-    if (
-      existing &&
-      existing.status !== 'Draft' &&
-      !existing.privacyNoticeGiven &&
-      !mergedInput.privacyNoticeGiven
-    ) {
+    if (isLegacyUnconfirmedRoutedEnquiry) {
       delete errors.privacyNoticeGiven;
     }
     if (!mergedInput.firstName) errors.firstName = 'First name is required.';

@@ -232,6 +232,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(routeAttempt.errors).toBeDefined();
     expect(routeAttempt.missingFields).toEqual([
       'phone or email',
+      'privacy notice',
       'practice area',
       'summary',
     ]);
@@ -273,7 +274,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     expect(saveBar.pillLabel).toBe('Still needed');
     expect(saveBar.pillTone).toBe('alert');
     expect(saveBar.message).toContain(
-      'phone or email, practice area, summary, enquiry notes',
+      'phone or email, privacy notice, practice area, summary, enquiry notes',
     );
   });
 

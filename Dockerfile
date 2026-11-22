@@ -17,6 +17,11 @@ RUN test -n "${PLATFORM_TENANT_PACKAGE_DIR}" || (echo 'PLATFORM_TENANT_PACKAGE_D
 RUN PLATFORM_TENANT_PACKAGE_DIR=${PLATFORM_TENANT_PACKAGE_DIR} \
     PLATFORM_ENVIRONMENT=${PLATFORM_ENVIRONMENT} \
     npm run build
+RUN mkdir -p /tmp/runtime-tenant-extensions/extensions && \
+    if [ -d "/app/${PLATFORM_TENANT_PACKAGE_DIR}/extensions" ]; then \
+      cd "/app/${PLATFORM_TENANT_PACKAGE_DIR}" && \
+      find extensions -mindepth 2 -maxdepth 2 -name "manifest.json" -exec cp --parents {} /tmp/runtime-tenant-extensions/ \; ; \
+    fi
 
 FROM node:24-bookworm-slim AS runner
 WORKDIR /app
@@ -34,6 +39,7 @@ COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/dist/jobs ./dist/jobs
 COPY --from=builder --chown=node:node /app/core/schemas ./core/schemas
 COPY --from=builder --chown=node:node /app/${PLATFORM_TENANT_PACKAGE_DIR}/config ./${PLATFORM_TENANT_PACKAGE_DIR}/config
+COPY --from=builder --chown=node:node /tmp/runtime-tenant-extensions/ ./${PLATFORM_TENANT_PACKAGE_DIR}/
 COPY --from=builder --chown=node:node /app/data/seed-not-a-law-firm.json ./data/seed-not-a-law-firm.json
 COPY --from=builder --chown=node:node /app/data/pms/1Squared_PMS_Demo_Data.xlsx ./data/pms/1Squared_PMS_Demo_Data.xlsx
 

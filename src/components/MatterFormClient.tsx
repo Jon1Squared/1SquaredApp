@@ -167,6 +167,10 @@ import {
   type CreateTaskSubmitPayload,
   type SuggestedTaskAssignee,
 } from './CreateTaskModal';
+import {
+  collectUnmappedFormErrors,
+  FormServerErrorSummary,
+} from './FormServerErrorSummary';
 import { OrganisationFormClient } from './OrganisationFormClient';
 import { PersonFormClient } from './PersonFormClient';
 import { StatusPill } from './SearchBox';
@@ -210,6 +214,7 @@ interface MatterFormClientProps {
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
   enableMatterCostsGovernance?: boolean;
   tenantId: string;
+  initialServerSaveErrors?: Record<string, string>;
 }
 
 type OptionalTabKey =
@@ -313,6 +318,7 @@ export function MatterFormClient({
   aiProviderChoice = 'disabled',
   enableMatterCostsGovernance = false,
   tenantId,
+  initialServerSaveErrors = {},
 }: MatterFormClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -4249,7 +4255,44 @@ export function MatterFormClient({
   const [savedMatterRowVersion, setSavedMatterRowVersion] = useState<number>(
     existing?.rowVersion ?? 1,
   );
-  const [serverSaveErrors, setServerSaveErrors] = useState<Record<string, string>>({});
+  const [serverSaveErrors, setServerSaveErrors] = useState<Record<string, string>>(
+    initialServerSaveErrors,
+  );
+  const matterErrorSummaryRef = useRef<HTMLElement | null>(null);
+
+  const visibleInlineMatterErrorKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (section1Open) {
+      keys.add('owningDepartmentId');
+      keys.add('owningTeamId');
+    }
+    if (sectionCostsOpen) {
+      keys.add('matterCosts');
+    }
+    return keys;
+  }, [section1Open, sectionCostsOpen]);
+
+  const unmappedMatterSaveErrors = useMemo(
+    () => collectUnmappedFormErrors(serverSaveErrors, visibleInlineMatterErrorKeys),
+    [serverSaveErrors, visibleInlineMatterErrorKeys],
+  );
+
+  function applyServerSaveErrors(
+    nextErrors: Record<string, string>,
+    fallbackToast: string,
+  ) {
+    setServerSaveErrors(nextErrors);
+    const unmapped = collectUnmappedFormErrors(nextErrors, visibleInlineMatterErrorKeys);
+    if (unmapped.length > 0 && typeof window !== 'undefined') {
+      requestAnimationFrame(() => {
+        matterErrorSummaryRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+        });
+      });
+    }
+    showToast(unmapped[0]?.message ?? Object.values(nextErrors)[0] ?? fallbackToast);
+  }
   const [partnerCostSignOff, setPartnerCostSignOff] =
     useState<PartnerCostSignOffRecord | null>(
       () =>
@@ -4466,8 +4509,7 @@ export function MatterFormClient({
       );
       setSaving(false);
       if (res.errors && Object.keys(res.errors).length > 0) {
-        setServerSaveErrors(res.errors);
-        showToast(Object.values(res.errors)[0] ?? 'Could not save draft');
+        applyServerSaveErrors(res.errors, 'Could not save draft');
         return;
       }
       if (res.matter) {
@@ -4580,9 +4622,8 @@ export function MatterFormClient({
           },
         );
         if (draftRes.errors && Object.keys(draftRes.errors).length > 0) {
-          setServerSaveErrors(draftRes.errors);
           setAssignSubmitting(false);
-          showToast(Object.values(draftRes.errors)[0] ?? 'Could not save draft');
+          applyServerSaveErrors(draftRes.errors, 'Could not save draft');
           return;
         }
         if (draftRes.matter) {
@@ -4846,8 +4887,7 @@ export function MatterFormClient({
       );
       setSaving(false);
       if (res.errors && Object.keys(res.errors).length > 0) {
-        setServerSaveErrors(res.errors);
-        showToast(Object.values(res.errors)[0] ?? 'Could not save matter changes');
+        applyServerSaveErrors(res.errors, 'Could not save matter changes');
         return;
       }
       if (res.matter) {
@@ -4971,8 +5011,7 @@ export function MatterFormClient({
         );
         setSaving(false);
         if (res.errors && Object.keys(res.errors).length > 0) {
-          setServerSaveErrors(res.errors);
-          showToast(Object.values(res.errors)[0] ?? 'Could not open matter');
+          applyServerSaveErrors(res.errors, 'Could not open matter');
           return;
         }
         if (res.matter) {
@@ -5050,8 +5089,7 @@ export function MatterFormClient({
         );
         setSaving(false);
         if (res.errors && Object.keys(res.errors).length > 0) {
-          setServerSaveErrors(res.errors);
-          showToast(Object.values(res.errors)[0] ?? 'Could not submit matter');
+          applyServerSaveErrors(res.errors, 'Could not submit matter');
           return;
         }
         if (res.matter) {
@@ -5280,6 +5318,13 @@ export function MatterFormClient({
               </div>
             </div>
           </div>
+
+          <FormServerErrorSummary
+            errors={unmappedMatterSaveErrors}
+            title="Matter could not be saved"
+            dataTestId="matter-error-summary"
+            containerRef={matterErrorSummaryRef}
+          />
 
           {/* SAVED DRAFT REOPENED / CONVERSION BANNERS */}
           {initialQuote ? (
@@ -6826,34 +6871,6 @@ export function MatterFormClient({
                   </div>
                 ) : null}
               </div>
-              {serverSaveErrors.matterCosts ||
-              serverSaveErrors.costsGovernance ||
-              serverSaveErrors.extensions ||
-              serverSaveErrors.keyDates ||
-              serverSaveErrors.conflict ||
-              serverSaveErrors.permission ||
-              serverSaveErrors.access ? (
-                <div
-                  className="field-group field-group--full"
-                  role="alert"
-                  style={{
-                    padding: '10px 12px',
-                    borderRadius: 8,
-                    background: 'rgba(220, 38, 38, 0.08)',
-                    border: '1px solid var(--status-alert)',
-                    color: 'var(--status-alert)',
-                    fontSize: 13,
-                  }}
-                >
-                  {serverSaveErrors.matterCosts ||
-                    serverSaveErrors.costsGovernance ||
-                    serverSaveErrors.extensions ||
-                    serverSaveErrors.keyDates ||
-                    serverSaveErrors.conflict ||
-                    serverSaveErrors.permission ||
-                    serverSaveErrors.access}
-                </div>
-              ) : null}
 
               {/* Responsible partner and fee earner */}
               <div className="field-group">
