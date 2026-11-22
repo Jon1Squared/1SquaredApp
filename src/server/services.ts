@@ -16675,7 +16675,13 @@ export async function getMatterPmsViewBundle(
   if (!auth.ok) return auth;
 
   const { ctx, actor, permSet, tokenRoles, visiblePmsLinks, tenantPmsLinks, people, matters, teams } = auth;
-  const matter = matters.find((m) => m.id === matterId && !m.mergedIntoId);
+  const fetchedMatter =
+    matters.find((m) => m.id === matterId && !m.mergedIntoId) ??
+    (await getMatterRepository().getMatterById<Matter>(ctx, matterId, {
+      includeRestricted: true,
+    }));
+  const matter =
+    fetchedMatter && !fetchedMatter.mergedIntoId ? fetchedMatter : undefined;
   if (
     !matter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
