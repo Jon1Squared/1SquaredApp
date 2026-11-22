@@ -2,98 +2,103 @@
 
 | | |
 |---|---|
-| Backlog | Item `46`, `E1`, `E5`, `E9` |
-| Decision | [ADR 0009](../../decisions/0009-docx-library-and-pdf-conversion.md) (`LibreOfficeHttpPdfConverter`), [ADR 0024](../../decisions/0024-azure-container-apps-hosting.md) (`Stage 0 exit decision D5`), [platform architecture standard](../../architecture-standard.md) §§6, 7, 13, 14 |
-| Stage plan | `docs/roadmap/stage-1-plan.md`, WP1 (`S1-10`) |
-| Branch | `s1-10-pdf-converter`, stacked on `s1-03-intake-check-interfaces`, targeting `develop` |
-| Change class | Infrastructure (`docker/pdf-converter/`, `.github/workflows/ci.yml`, `core/infra/`) + Configuration option (`core/schemas/`, `core/src/config-engine/`) + Core integration/domain adapter (`core/src/domain/document-generation/`, `src/server/documentGenerationServices.ts`) |
-| Layer | Infrastructure + Core (`@platform/core`, `@platform/core-api`) + Host wiring (`src/server/`) |
+| Backlog | Item `46`, `E1`, `E5`, `E9`, `P7` |
+| Decision | Stage 1 plan `S1-10` (**Option A Accepted**, 22 November 2026); [ADR 0009](../../decisions/0009-docx-library-and-pdf-conversion.md) (`LibreOfficeHttpPdfConverter`); [ADR 0024](../../decisions/0024-azure-container-apps-hosting.md) (Stage 0 exit decision D5); [ADR 0038](../../decisions/0038-intake-check-interfaces-and-manual-adapters.md) (core API `2.1.0`); [platform architecture standard](../../architecture-standard.md) §§6, 7, 13, 14 |
+| Stage plan | [docs/roadmap/stage-1-plan.md](../stage-1-plan.md), WP1 (`S1-10`) |
+| Branch | `s1-10-pdf-converter`, stacked on `s1-02a-scoped-queries-server`, targeting `develop` |
+| Change class | Infrastructure (`docker/pdf-converter/`, `.github/workflows/ci.yml`, `core/infra/`) + Configuration options (`core/schemas/`, `core/src/config-engine/`) + Core API & domain adapter (`core/src/api/`, `core/src/domain/document-generation/`, `src/server/documentGenerationServices.ts`) |
+| Layer | Infrastructure + Core (`@platform/core-api`, `@platform/core`) + Host wiring (`src/server/`) |
 | Size | M |
-| Depends on | `–` in dependency graph (stacked on `S1-03` for WP1 serial review) |
-| Blocking manual tasks | Building/pushing `pdfConverterContainerImage` in ACR and flipping `enablePdfConverterContainerApp = true` in Azure demo deployment (optional at first; disabled by default) |
+| Depends on | `–` in dependency graph (stacked on `S1-02a` for WP1 serial order `S1-01` -> `S1-03` -> `S1-02a` -> `S1-10`; uses additive `CORE_API_VERSION = '2.1.0'` introduced in `S1-03`) |
+| Blocking manual tasks | Building/pushing `pdfConverterContainerImage` in ACR and flipping `enablePdfConverterContainerApp = true` in Azure demo deployment parameters when ready (disabled by default) |
 | Baseline | `develop` at `7c2ba3e` |
 
-## Converter architecture choice & trade-offs (`Stage1-WP1-prompt.md` line `122`)
+## Converter architecture decision (**Option A accepted**)
 
-| Criterion | Option A: Minimal self-built `libreoffice-writer-nogui` + Node 24 HTTP wrapper *(Recommended)* | Option B: Pinned upstream Gotenberg 8 (`gotenberg/gotenberg:8.x`) |
+| Criterion | Option A: Minimal self-built `libreoffice-writer-nogui` + Node 24 HTTP wrapper *(Accepted)* | Option B: Pinned upstream Gotenberg 8 (`gotenberg/gotenberg:8.x`) *(Rejected)* |
 |---|---|---|
-| **Security patching** | Base `node:24-bookworm-slim` matches our existing web container (`Dockerfile:1`), rebuilds directly from our repository in CI with full control over OS updates (`apt-get upgrade`), zero third-party Docker Hub supply-chain lag, non-root `USER node`, no Chromium or extra daemons installed. | Requires tracking third-party Go/Debian/Chromium/PDFtk CVE releases and pulling an upstream image that bundles headless Chromium (not needed for `.docx` → `.pdf`) alongside LibreOffice. |
-| **Image size & memory** | ~650–750 MB compressed (`node:24-bookworm-slim` + `libreoffice-writer-nogui` + liberation/noto fonts without GUI/Impress/Calc/Chromium); comfortably fits `ca-pdf` (`1.0 vCPU` / `2Gi` RAM in `platform.bicep:981-985`). | Typically ~1.5–1.8 GB because official images ship Chromium, unoconv/uno, and PDFtk alongside LibreOffice. |
-| **Licence** | Node 24 HTTP server is proprietary platform code; Debian `libreoffice-writer-nogui` is `MPL-2.0` invoked out-of-process over HTTP as a separate container process (zero linking or viral copyleft risk). | Gotenberg is `MIT`, wrapping `MPL-2.0` LibreOffice + `GPL-2.0` PDFtk CLI binaries out-of-process. |
-| **Attack surface** | Minimal single-purpose server exposing **only** `GET /health/live`, `GET /health/ready`, and `POST /convert` (accepts raw `.docx` bytes, rejects non-ZIP/oversized payloads, isolated per-request temp dir cleaned in `finally`), no URL-fetching / Chromium SSRF surface. | Richer multi-engine API (Chromium HTML/URL routes) requiring flags (`--chromium-disable-javascript`, etc.) to harden unused attack surface. |
+| **Security patching** | Base `node:24-bookworm-slim` matches the existing web container (`Dockerfile:1`), rebuilds directly from this repository in CI with full control over OS updates (`apt-get upgrade`), zero third-party Docker Hub lag, non-root `USER node`, no Chromium or extra daemons. | Depends on third-party Go/Debian/Chromium/PDFtk rebuilds and ships headless Chromium (unnecessary for `.docx` -> `.pdf`). |
+| **Image size & memory** | ~650–750 MB compressed (`node:24-bookworm-slim` + `libreoffice-writer-nogui` + liberation/noto fonts without GUI/Impress/Calc/Chromium); fits cleanly inside `ca-pdf` (`1.0 vCPU` / `2Gi` RAM in `platform.bicep:981-985`). | Typically ~1.5–1.8 GB due to bundled Chromium and extra engines. |
+| **Licence** | Node 24 HTTP server is proprietary platform code; Debian `libreoffice-writer-nogui` is `MPL-2.0` invoked out-of-process over HTTP in a dedicated container (zero linking). | Gotenberg is `MIT` wrapping `MPL-2.0` LibreOffice + `GPL-2.0` PDFtk CLI binaries out-of-process. |
+| **Attack surface** | Minimal single-purpose server exposing **only** `GET /health/live`, `GET /health/ready`, and `POST /convert` (accepts raw `.docx` bytes, checks `PK\x03\x04` header + byte limit, isolated temp dir per request cleaned in `finally`), zero URL-fetch / Chromium SSRF surface. | Richer multi-engine API (Chromium HTML/URL routes) requiring flags to harden unused attack surface. |
 
-**Recommendation:** Use **Option A** — a minimal Debian `node:24-bookworm-slim` + `libreoffice-writer-nogui` HTTP wrapper in `docker/pdf-converter/` (`Dockerfile` + `server.mjs`), built and smoke-tested in GitHub CI (`ci.yml`) on every PR.
+**Accepted decision:** Implement **Option A** in `docker/pdf-converter/` (`Dockerfile`, `server.mjs`, `README.md`), built and smoke-tested in GitHub CI (`.github/workflows/ci.yml`).
 
 ## What exists today
 
 Checked against `develop` (`7c2ba3e`):
 
 1. **PDF conversion interface & callers (`core/src/api/index.ts:573-580`, `core/src/domain/document-generation/pdfConverter.ts:101-359`):**
-   - `DocumentPdfConverter` exposes `{ readonly converterId: string; convertDocxToPdf(input: { docxBytes: Uint8Array; title: string; authorName?: string }): Promise<Uint8Array> }` (currently lacks optional `{ tenantId?: string; correlationId?: string }` for zero-PII outbound correlation logging).
+   - `DocumentPdfConverter` exposes `{ readonly converterId: string; convertDocxToPdf(input: { docxBytes: Uint8Array; title: string; authorName?: string }): Promise<Uint8Array> }` and lacks optional `tenantId?: string` and `correlationId?: string` for zero-PII outbound correlation logging (`SF-8`).
    - Only `BuiltInOpenXmlPdfConverter` exists; no HTTP LibreOffice adapter or tenant-config converter factory exists.
    - Plug-in points verified:
-     - `previewTemplateVersion` (`core/src/domain/document-generation/generationService.ts:295-308`, fallback `new BuiltInOpenXmlPdfConverter()` at **`:296`**)
-     - `generateDocumentFromTemplate` (`core/src/domain/document-generation/generationService.ts:513-521`, fallback at **`:514`**)
-     - `previewTemplateService` (`src/server/documentGenerationServices.ts:1388`, passed at **`:1439`**)
-     - `generateDocumentService` (`src/server/documentGenerationServices.ts:1483`, passed at **`:1543`**)
-2. **Infrastructure scaffold (`core/infra/main.bicep:80-85, 190-191, 250`, `core/infra/modules/platform.bicep:54-58, 177, 208-210, 939-996, 1032`, `core/infra/parameters/demo.bicepparam:20`):**
+     - `previewTemplateVersion` (`core/src/domain/document-generation/generationService.ts:295-308`, fallback `new BuiltInOpenXmlPdfConverter()` at `:296`)
+     - `generateDocumentFromTemplate` (`core/src/domain/document-generation/generationService.ts:513-521`, fallback at `:514`)
+     - `previewTemplateService` (`src/server/documentGenerationServices.ts:1388`, passed at `:1439`)
+     - `generateDocumentService` (`src/server/documentGenerationServices.ts:1483`, passed at `:1543`)
+2. **Infrastructure scaffold (`core/infra/main.bicep:54-58, 80-85`, `core/infra/modules/platform.bicep:939-1665`, `core/infra/parameters/demo.bicepparam:20`):**
    - `platform.bicep:948-996` already declares `pdfConverterContainerApp` (`ca-pdf-*`) with `external: false`, `allowInsecure: false`, `targetPort: 8080`, `enablePdfConverterContainerApp: false`, `PDF_CONVERTER_IMAGE_REQUIRED` fail-closed guard (`:208-210`), and `pdfConverterEnv` setting `DOC_CONVERTER_URL = https://${pdfConverterAppName}.internal.${containerAppsEnv.properties.defaultDomain}` (`:941`).
-   - **Gaps to close in `S1-10`:**
-     - `pdfConverterContainerApp` (`:977-986`) has **no `Startup`, `Liveness`, or `Readiness` probes**;
-     - `pdfConverterEnv` (`DOC_CONVERTER_URL`) is concatenated **only** onto `webContainerApp` (`:1032`), **not** onto Container Apps jobs (`caj-*`);
-     - `core/schemas/tenant-config.schema.json:744-960` (`documentGeneration`) has **no** `pdfConverter` or fallback setting yet.
+   - **Gaps (`SF-8`) to close in `S1-10`:**
+     - `pdfConverterContainerApp` (`:977-990`) has **no `Startup`, `Liveness`, or `Readiness` probes**;
+     - `scale.minReplicas` is hardcoded to `0` (`:988`) with no Bicep parameter (`pdfConverterMinReplicas`);
+     - `pdfConverterEnv` (`DOC_CONVERTER_URL`) is wired onto `webContainerApp` (`:1032`), **not** onto scheduled Container Apps jobs (`keyDateRemindersJob` `:1369`, `usageRetentionPurgeJob` `:1427`, `enquiryAnonymisationJob` `:1485`, `registerRemindersJob` `:1543`, `outboxDrainJob` `:1601`, `notificationDigestsJob` `:1659`);
+     - `core/schemas/tenant-config.schema.json:744-960` (`documentGeneration`) lacks `pdfConverter` and `pdfConverterFallback` settings.
 
 ## Files and changes
 
 1. **Container image (`docker/pdf-converter/Dockerfile`, `docker/pdf-converter/server.mjs`, `docker/pdf-converter/README.md`):**
-   - Multi-step or slim `FROM node:24-bookworm-slim` installing `libreoffice-writer-nogui` + clean liberation fonts, running as non-root `USER node` on port `8080`.
-   - `server.mjs` (zero external npm dependencies needed):
+   - Minimal Debian `FROM node:24-bookworm-slim` installing `libreoffice-writer-nogui` and Liberation/Noto fonts cleanly (`rm -rf /var/lib/apt/lists/*`), running as non-root `USER node` on port `8080`.
+   - `server.mjs` (zero third-party npm dependencies):
      - `GET /health/live`: HTTP `200` `{"status":"live"}`.
-     - `GET /health/ready`: HTTP `200` `{"status":"ready"}` once `soffice --version` check succeeds (HTTP `503` otherwise).
-     - `POST /convert`: enforces `MAX_DOCX_BYTES` (e.g. 25 MiB, HTTP `413`), checks `PK\x03\x04` header (HTTP `400`), writes input to a unique per-request temp dir (`--headless --norestore --nodefault --nolockcheck -env:UserInstallation=file:///tmp/... --convert-to pdf`), enforces conversion timeout (`45s` max subprocess, HTTP `504`), validates output `%PDF-` magic header, returns `application/pdf`, cleans temp dir in `finally`, and logs **only** `{ correlationId, tenantIdHeader?, outcome, durationMs, inputBytes, outputBytes, errorCode }` (never document title or contents).
+     - `GET /health/ready`: HTTP `200` `{"status":"ready"}` once `soffice --version` readiness check succeeds (`503` otherwise).
+     - `POST /convert`: enforces `MAX_DOCX_BYTES` (`25 MiB`, HTTP `413`), verifies ZIP `PK\x03\x04` signature (HTTP `400`), writes to an isolated per-request temp dir (`--headless --norestore --nodefault --nolockcheck -env:UserInstallation=file:///tmp/... --convert-to pdf`), enforces `45_000` ms subprocess timeout (HTTP `504`), validates `%PDF-` output signature, returns `application/pdf`, cleans temp dir in `finally`, reads `x-correlation-id` / `x-tenant-id` headers when present, and logs **only** `{ event, correlationId, tenantId?, outcome, durationMs, inputBytes, outputBytes, errorCode }` (never document title or bytes).
 2. **CI build & container readiness smoke step (`.github/workflows/ci.yml`):**
-   - Build `onesquared-pdf:test` from `docker/pdf-converter/Dockerfile`, start `onesquared-pdf-smoke` without `--rm` (`EXIT` trap cleanup), wait up to 60 seconds on `/health/ready`, perform a tiny valid `.docx` -> `%PDF-` `POST /convert` round-trip smoke check, and print `docker logs --tail 200 onesquared-pdf-smoke` if it fails.
-3. **Bicep infrastructure (`core/infra/modules/platform.bicep`, `core/infra/main.bicep`, `core/tests/infra-bicep-contract.test.ts`):**
+   - Build `onesquared-pdf:test` from `docker/pdf-converter/Dockerfile`, start `onesquared-pdf-smoke` without `--rm` (`EXIT` trap cleanup), poll `/health/ready` (up to `60s`), run a real `.docx` -> `%PDF-` `POST /convert` round-trip check, and print `docker logs --tail 200 onesquared-pdf-smoke` on failure.
+3. **Bicep infrastructure & `SF-8` hardening (`core/infra/main.bicep`, `core/infra/modules/platform.bicep`, `core/infra/parameters/demo.bicepparam`, `core/tests/infra-bicep-contract.test.ts`):**
    - Keep `enablePdfConverterContainerApp bool = false` default (`demo.bicepparam:20`), `external: false`, `allowInsecure: false`, and zero secrets in parameters.
-   - Add `Startup` (`/health/live`, initialDelaySeconds `5`, periodSeconds `10`, timeoutSeconds `5`, failureThreshold `10`), `Liveness` (`/health/live`, initialDelaySeconds `15`, periodSeconds `30`, timeoutSeconds `5`, failureThreshold `3`), and `Readiness` (`/health/ready`, initialDelaySeconds `10`, periodSeconds `15`, timeoutSeconds `5`, failureThreshold `3`) probes on `pdfConverterContainerApp` (`core/infra/modules/platform.bicep:977-986`), keeping resource declarations cleanly ordered for `infra-bicep-contract.test.ts`.
-   - Wire `pdfConverterEnv` (`DOC_CONVERTER_URL`) into **all** `Microsoft.App/jobs` containers alongside `webContainerApp` (`:1032`) when `deployApps && enablePdfConverterContainerApp`.
-4. **Configuration & HTTP `DocumentPdfConverter` adapter (`core/schemas/`, `core/src/config-engine/`, `core/src/api/`, `core/src/domain/document-generation/`, `src/server/`):**
-   - `core/schemas/tenant-config.schema.json` & `core/src/config-engine/index.ts` (including nested `documentGeneration` merge in `loadAndValidateTenantConfig`): add additive backward-compatible options under `documentGeneration`:
+   - Add configurable `@minValue(0) @maxValue(4) param pdfConverterMinReplicas int = 0` in `main.bicep` and `platform.bicep` (`minReplicas: pdfConverterMinReplicas` on `pdfConverterContainerApp`), keeping `demo.bicepparam` at default `0` while allowing hosted/busy environments to set `1+`.
+   - Add `Startup` (`/health/live`, `initialDelaySeconds: 5`, `periodSeconds: 10`, `timeoutSeconds: 5`, `failureThreshold: 10`), `Liveness` (`/health/live`, `initialDelaySeconds: 15`, `periodSeconds: 30`, `timeoutSeconds: 5`, `failureThreshold: 3`), and `Readiness` (`/health/ready`, `initialDelaySeconds: 10`, `periodSeconds: 15`, `timeoutSeconds: 5`, `failureThreshold: 3`) probes on `pdfConverterContainerApp` (`core/infra/modules/platform.bicep:977-990`).
+   - Inject `pdfConverterEnv` (`concat(runtimeCommonEnv, pdfConverterEnv)`) onto **all** scheduled Container Apps jobs (`keyDateRemindersJob`, `usageRetentionPurgeJob`, `enquiryAnonymisationJob`, `registerRemindersJob`, `outboxDrainJob`, `notificationDigestsJob`) alongside `webContainerApp` when `deployApps && enablePdfConverterContainerApp`.
+4. **Core API `2.1.0` addition, config options & `HttpPdfConverter` (`core/schemas/`, `core/src/config-engine/`, `core/src/api/`, `core/src/domain/document-generation/`, `src/server/`):**
+   - `core/src/api/index.ts:573-580`: add optional `readonly tenantId?: string; readonly correlationId?: string;` on `DocumentPdfConverter.convertDocxToPdf` input (part of the additive `CORE_API_VERSION = '2.1.0'` surface introduced in `S1-03`; note in `core/docs/CHANGELOG.md`).
+   - `core/schemas/tenant-config.schema.json` & `core/src/config-engine/index.ts` (including nested `documentGeneration` merge in `loadAndValidateTenantConfig`): add backward-compatible options under `documentGeneration`:
      - `pdfConverter`: `'builtin' | 'container'` (default `'builtin'`)
-     - `pdfConverterFallback`: `'builtin' | 'fail'` (default `'builtin'`, controls behaviour when `'container'` is selected and `DOC_CONVERTER_URL` is unreachable/unconfigured/5xx)
-   - `core/src/api/index.ts:573-580`: add optional `tenantId?: string; correlationId?: string;` to `DocumentPdfConverter.convertDocxToPdf` input.
-   - `core/src/domain/document-generation/pdfConverter.ts`: implement `HttpPdfConverter` (with timeout via `AbortController`, byte-size limit, `%PDF-` response check, typed `PDF_CONVERTER_*` errors), `FallbackAwarePdfConverter` (explicitly logging `document_generation.pdf_converter_fallback` with `tenantId`, `correlationId`, `errorCode` — never silent, never document content — or failing cleanly when `pdfConverterFallback === 'fail'`), and `selectDocumentPdfConverter(tenantConfig, options)` helper.
-   - Plug into `generationService.ts:296, 514` (keeping `BuiltInOpenXmlPdfConverter` fallback when optional dependency omitted) and `src/server/documentGenerationServices.ts:1388` (`1439`) & `:1483` (`1543`) (passing `tenantConfig`, `process.env.DOC_CONVERTER_URL`, `tenantId`, `correlationId`).
+     - `pdfConverterFallback`: `'builtin' | 'fail'` (default `'builtin'`)
+   - `core/src/domain/document-generation/pdfConverter.ts`:
+     - `HttpPdfConverter`: `AbortController` timeout defaulting to **`60_000` ms** (explicitly sizing `15s` headroom above the `45s` `soffice` subprocess timeout so Container Apps `minReplicas: 0` cold starts succeed cleanly), byte-size ceiling, `%PDF-` response validation, forwarding `x-tenant-id` / `x-correlation-id` headers when present, typed `PDF_CONVERTER_*` errors, and configurable constructor `timeoutMs`.
+     - `FallbackAwarePdfConverter`: emits structured zero-PII warning `document_generation.pdf_converter_fallback` (`tenantId`, `correlationId`, `errorCode` — never document title/content) when falling back to `BuiltInOpenXmlPdfConverter`, or throws cleanly when `pdfConverterFallback === 'fail'`.
+     - `selectDocumentPdfConverter(tenantConfig, options)` reading both `pdfConverter` and `pdfConverterFallback`.
+   - Plug into `generationService.ts:296, 514` and `src/server/documentGenerationServices.ts:1388` (`1439`) & `:1483` (`1543`), passing `tenantConfig`, `process.env.DOC_CONVERTER_URL`, `tenantId`, and `correlationId`.
 
 ## Tests
 
 *(Record fail-first evidence before implementation in `Stage1-WP1-report.md`.)*
 
 1. **HTTP converter adapter unit tests (`core/tests/pdf-converter-adapter.test.ts`):**
-   - Against an in-process fake HTTP `node:http` server:
-     - `200` valid PDF (`%PDF-`) returns bytes cleanly and sends `x-correlation-id`;
-     - Request timeout aborts cleanly via `AbortController` (`PDF_CONVERTER_TIMEOUT`);
-     - HTTP `500` / `503` / non-PDF payload fails cleanly (`PDF_CONVERTER_HTTP_ERROR` / `PDF_CONVERTER_INVALID_OUTPUT`);
-     - Oversized input or oversized response fails before/at limit (`PDF_CONVERTER_SIZE_LIMIT`);
-     - Unreachable / missing `DOC_CONVERTER_URL` with `pdfConverter: 'container'`: falls back to `BuiltInOpenXmlPdfConverter` and logs `document_generation.pdf_converter_fallback` (zero document content/title) when `pdfConverterFallback: 'builtin'`, and fails loudly when `pdfConverterFallback: 'fail'`.
+   - Against an in-process `node:http` test server:
+     - `200` valid `%PDF-` returns bytes cleanly and transmits `x-correlation-id` and `x-tenant-id` headers (zero document title/PII in logs);
+     - Cold-start / slow response within `timeoutMs` (`60_000` ms default; tested with short injected `timeoutMs`) succeeds; exceeding `timeoutMs` aborts cleanly (`PDF_CONVERTER_TIMEOUT`);
+     - HTTP `500` / `503` / non-`%PDF-` output / oversized payload fail cleanly (`PDF_CONVERTER_HTTP_ERROR` / `PDF_CONVERTER_INVALID_OUTPUT` / `PDF_CONVERTER_SIZE_LIMIT`);
+     - Unreachable / missing `DOC_CONVERTER_URL` with `pdfConverter: 'container'` falls back to `BuiltInOpenXmlPdfConverter` with `document_generation.pdf_converter_fallback` log when `pdfConverterFallback: 'builtin'`, and fails loudly when `pdfConverterFallback: 'fail'`.
 2. **Configuration & selection tests (`core/tests/document-generation.test.ts` & `core/tests/tenant-config-usage.test.ts`):**
-   - Configuration (`pdfConverter: 'builtin' | 'container'`, `pdfConverterFallback`) selects the expected converter in `previewTemplateService` and `generateDocumentService`; `tenant-config-usage.test.ts` verifies both new schema leaves are referenced in runtime code.
+   - `pdfConverter` (`'builtin' | 'container'`) and `pdfConverterFallback` (`'builtin' | 'fail'`) select the expected converter in `previewTemplateService` and `generateDocumentService`; `tenant-config-usage.test.ts` confirms every new schema leaf is read in runtime code.
 3. **Bicep contract tests (`core/tests/infra-bicep-contract.test.ts`):**
-   - `bicep build`, `bicep lint`, and `bicep build-params` pass.
-   - Contract test verifies `ca-pdf` has `external: false`, `allowInsecure: false`, valid probe bounds, `enablePdfConverterContainerApp: false` default (`demo.bicepparam`), `PDF_CONVERTER_IMAGE_REQUIRED` guard, and `DOC_CONVERTER_URL` wired on both `webContainerApp` and Container Apps jobs without secrets.
+   - `az bicep build` and `az bicep lint` pass.
+   - Contract assertions verify `ca-pdf` has `external: false`, `allowInsecure: false`, valid `Startup` / `Liveness` / `Readiness` probe bounds, `pdfConverterMinReplicas` parameter (`default: 0`), `enablePdfConverterContainerApp: false` default (`demo.bicepparam`), `PDF_CONVERTER_IMAGE_REQUIRED` guard, and `DOC_CONVERTER_URL` wired onto `webContainerApp` **and** all 6 scheduled Container Apps jobs without secrets.
 
 ## Help and documentation (rule 11)
 
-- `src/docs/articles/document-generation.ts`: document `Built-in OpenXML` vs `Dedicated Container` converter modes, fallback behaviour, limits, and fidelity differences.
+- `src/docs/articles/document-generation.ts`: document `Built-in OpenXML` vs `Dedicated Container` converter modes, cold-start timeout/fallback behaviour, and fidelity differences.
 - `src/docs/articles/tenant-settings.ts`: document `documentGeneration.pdfConverter` and `documentGeneration.pdfConverterFallback`.
-- `src/docs/articles/deployment-and-security.ts`: document `ca-pdf` internal-only Container App (`DOC_CONVERTER_URL`), non-root LibreOffice image build, and zero-PII conversion logging.
+- `src/docs/articles/deployment-and-security.ts`: document `ca-pdf` internal-only Container App (`DOC_CONVERTER_URL`), `pdfConverterMinReplicas`, health probes, job injection, non-root LibreOffice image build, and zero-PII logging.
+- `core/docs/CHANGELOG.md`: note optional `tenantId` / `correlationId` on `DocumentPdfConverter.convertDocxToPdf` under v`2.1.0`.
 - `docs/roadmap/feature-list.md`: update row `46` (`Completed` once image + CI smoke + adapter + Bicep pass, noting `enablePdfConverterContainerApp = false` default in `demo.bicepparam` until pushed to ACR), `E1`, `E5`, `E9`, and `P7`.
 - `docs/release-notes.md`: add `S1-10` entry under `Unreleased`.
 
 ## Acceptance criteria
 
-- `docker/pdf-converter/Dockerfile` builds in CI, passes `/health/ready` and a `.docx` → `.pdf` smoke conversion in CI, and Bicep wires `ca-pdf` with internal-only ingress, probes, disabled default, and `DOC_CONVERTER_URL` on web app + jobs.
-- `previewTemplateService` and `generateDocumentService` honour `documentGeneration.pdfConverter` / `pdfConverterFallback` with timeouts, size limits, zero-PII logging, and non-silent fallback, covered by fake-HTTP, config-selection, and Bicep contract tests.
+- `docker/pdf-converter/Dockerfile` builds in CI, passes `/health/ready` and a `.docx` -> `.pdf` smoke conversion in CI, and Bicep wires `ca-pdf` with internal-only ingress, `Startup`/`Liveness`/`Readiness` probes, configurable `pdfConverterMinReplicas`, disabled default, and `DOC_CONVERTER_URL` on `webContainerApp` plus all 6 scheduled Container Apps jobs.
+- `previewTemplateService` and `generateDocumentService` honour `documentGeneration.pdfConverter` / `pdfConverterFallback` with cold-start-tolerant timeouts, size limits, optional `tenantId`/`correlationId` correlation logging, and non-silent fallback, covered by unit, config-selection, and Bicep contract tests.
 
 ## Manual blockers
 
@@ -101,10 +106,10 @@ Checked against `develop` (`7c2ba3e`):
 
 ## Rollback
 
-- Default remains `enablePdfConverterContainerApp = false` and `documentGeneration.pdfConverter = 'builtin'`, so existing runtime behaviour is unaffected if disabled; revert `s1-10-pdf-converter` cleanly with zero database migrations.
+- Default remains `enablePdfConverterContainerApp = false` and `documentGeneration.pdfConverter = 'builtin'`; revert `s1-10-pdf-converter` cleanly with zero database migrations.
 
 ## Pull request description must state
 
-- **Change class:** Infrastructure (`docker/pdf-converter/`, `.github/workflows/ci.yml`, `core/infra/`), configuration options (`documentGeneration.pdfConverter`, `documentGeneration.pdfConverterFallback`), and Core/Host PDF converter adapter (item `46`).
-- **Both hosting models:** Identical `HttpPdfConverter` + internal `ca-pdf` container design across `Model A` (`single_tenant`) and `Model B` (`multi_tenant`), with per-request isolated temp directories and zero persisted state or PII.
-- **Migration and rollback:** No database migration; `git revert` restores `BuiltInOpenXmlPdfConverter`-only behaviour immediately.
+- **Change class:** Infrastructure (`docker/pdf-converter/`, `.github/workflows/ci.yml`, `core/infra/`), configuration options (`documentGeneration.pdfConverter`, `documentGeneration.pdfConverterFallback`, `pdfConverterMinReplicas`), and Core/Host PDF converter adapter (item `46`).
+- **Both hosting models:** Identical `HttpPdfConverter` + internal `ca-pdf` container architecture across Model A (`single_tenant`) and Model B (`multi_tenant`), with per-request isolated temp directories and zero persisted state or PII.
+- **Migration and rollback:** No database migration; `git revert` restores `BuiltInOpenXmlPdfConverter`-only behaviour cleanly.
