@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ClipboardCheck,
   Download,
   Edit3,
   FileText,
@@ -373,7 +374,51 @@ export function MatterProfileClient({
   const [lifecycleReason, setLifecycleReason] = useState('');
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [savingLifecycle, setSavingLifecycle] = useState(false);
+  const [pendingRegisterCreateTypeKey, setPendingRegisterCreateTypeKey] = useState<
+    string | undefined
+  >(undefined);
+  const registersSectionRef = useRef<HTMLElement | null>(null);
+  const registersWorkspaceRef = useRef<{
+    openCreatePanel: (preferredTypeKey?: string) => void;
+  } | null>(null);
   const isMatterCurrentlyClosed = isClosedMatterStatus(matter.matterStatusId, values);
+
+  const canViewMatterRegisters = Boolean(
+    registersConfig &&
+      (userPermissions.includes('register:view') ||
+        userPermissions.includes('undertaking:manage')),
+  );
+  const canCreateMatterUndertaking = Boolean(
+    registersConfig &&
+      userPermissions.includes('undertaking:manage') &&
+      registerTypes.some(
+        (t) => t.key === 'undertaking' && t.enabled && t.showInNavigation !== false,
+      ),
+  );
+  const matterUndertakingRecords = useMemo(
+    () => matterRegisterRecords.filter((r) => r.registerTypeKey === 'undertaking'),
+    [matterRegisterRecords],
+  );
+  const openMatterUndertakingsCount = useMemo(
+    () =>
+      matterUndertakingRecords.filter(
+        (r) => r.status === 'open' || r.status === 'varied' || r.status === 'overdue',
+      ).length,
+    [matterUndertakingRecords],
+  );
+
+  function handleOpenNewUndertaking(): void {
+    if (tab === 'compliance' && registersWorkspaceRef.current) {
+      registersWorkspaceRef.current.openCreatePanel('undertaking');
+      registersSectionRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    setPendingRegisterCreateTypeKey('undertaking');
+    setTab('compliance');
+    setTimeout(() => {
+      registersSectionRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  }
 
   const nameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -1105,7 +1150,10 @@ export function MatterProfileClient({
           </div>
         </div>
 
-        <div className="page-header__actions" style={{ flexShrink: 0, display: 'flex', gap: 10 }}>
+        <div
+          className="page-header__actions"
+          style={{ flexShrink: 0, display: 'flex', gap: 10, flexWrap: 'wrap' }}
+        >
           <button
             type="button"
             className="btn btn--secondary"
@@ -1128,6 +1176,17 @@ export function MatterProfileClient({
             >
               <ShieldCheck size={16} />
               <span>Lift restriction</span>
+            </button>
+          ) : null}
+          {canCreateMatterUndertaking ? (
+            <button
+              type="button"
+              className="btn btn--secondary"
+              data-testid="matter-header-new-undertaking"
+              onClick={handleOpenNewUndertaking}
+            >
+              <ClipboardCheck size={16} />
+              <span>New undertaking</span>
             </button>
           ) : null}
           <button
@@ -1450,7 +1509,10 @@ export function MatterProfileClient({
           role="tab"
           aria-selected={tab === 'compliance'}
           className={`tab-btn ${tab === 'compliance' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('compliance')}
+          onClick={() => {
+            setPendingRegisterCreateTypeKey(undefined);
+            setTab('compliance');
+          }}
         >
           Compliance
         </button>
@@ -2188,7 +2250,10 @@ export function MatterProfileClient({
                   <li
                     className="worklist-row"
                     style={{ cursor: 'pointer' }}
-                    onClick={() => setTab('compliance')}
+                    onClick={() => {
+                      setPendingRegisterCreateTypeKey(undefined);
+                      setTab('compliance');
+                    }}
                   >
                     <div
                       className="worklist-main"
@@ -2220,6 +2285,74 @@ export function MatterProfileClient({
                 </ul>
               </div>
             </section>
+
+            {/* UNDERTAKINGS & REGISTERS PANEL */}
+            {canViewMatterRegisters ? (
+              <section className="home-panel" aria-label="Undertakings and registers">
+                <div className="panel-header">
+                  <div className="panel-title-group">
+                    <h2 className="panel-title">Undertakings &amp; registers</h2>
+                  </div>
+                  <div className="panel-actions">
+                    {canCreateMatterUndertaking ? (
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        data-testid="matter-overview-new-undertaking"
+                        onClick={handleOpenNewUndertaking}
+                      >
+                        + New undertaking
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="panel-link"
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          padding: 0,
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => {
+                          setPendingRegisterCreateTypeKey(undefined);
+                          setTab('compliance');
+                        }}
+                      >
+                        View registers →
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="panel-body">
+                  <ul className="worklist">
+                    <li
+                      className="worklist-row"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => {
+                        setPendingRegisterCreateTypeKey(undefined);
+                        setTab('compliance');
+                      }}
+                    >
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          {openMatterUndertakingsCount} open{' '}
+                          {openMatterUndertakingsCount === 1 ? 'undertaking' : 'undertakings'}
+                        </div>
+                        <div className="worklist-meta">
+                          {matterRegisterRecords.length} total register{' '}
+                          {matterRegisterRecords.length === 1 ? 'entry' : 'entries'} linked to this
+                          matter
+                        </div>
+                      </div>
+                      <div className="worklist-right">
+                        <span className="worklist-meta">Compliance tab →</span>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+              </section>
+            ) : null}
 
             {/* TEAM PANEL */}
             <section className="home-panel">
@@ -3396,7 +3529,11 @@ export function MatterProfileClient({
           {registersConfig &&
           (userPermissions.includes('register:view') ||
             userPermissions.includes('undertaking:manage')) ? (
-            <section className="home-panel" aria-label="Matter registers and undertakings">
+            <section
+              ref={registersSectionRef}
+              className="home-panel"
+              aria-label="Matter registers and undertakings"
+            >
               <div className="panel-header">
                 <div className="panel-title-group">
                   <h2 className="panel-title">
@@ -3416,6 +3553,8 @@ export function MatterProfileClient({
                   initialTransitionsByRecordId={matterRegisterTransitions}
                   matters={[matter]}
                   people={people}
+                  initialOpenCreateTypeKey={pendingRegisterCreateTypeKey}
+                  workspaceRef={registersWorkspaceRef}
                 />
               </div>
             </section>
