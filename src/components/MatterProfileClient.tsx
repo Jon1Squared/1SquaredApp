@@ -391,9 +391,7 @@ export function MatterProfileClient({
   const canCreateMatterUndertaking = Boolean(
     registersConfig &&
       userPermissions.includes('undertaking:manage') &&
-      registerTypes.some(
-        (t) => t.key === 'undertaking' && t.enabled && t.showInNavigation !== false,
-      ),
+      registerTypes.some((t) => t.key === 'undertaking' && t.enabled),
   );
   const matterUndertakingRecords = useMemo(
     () => matterRegisterRecords.filter((r) => r.registerTypeKey === 'undertaking'),

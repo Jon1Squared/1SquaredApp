@@ -153,7 +153,7 @@ jobs:
           docker run --rm -e PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" -e PLATFORM_ENVIRONMENT=demo onesquared-ci:test node dist/jobs/run-job.mjs --verify-extensions
           docker run --rm onesquared-ci:test grep -rq "nalf-matter-costs-governance" .next/server
           trap 'docker rm -f onesquared-ready-smoke >/dev/null 2>&1 || true' EXIT
-          docker run -d --rm --name onesquared-ready-smoke --network host \
+          docker run -d --name onesquared-ready-smoke --network host \
             -e PORT=3199 \
             -e PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" \
             -e PLATFORM_ENVIRONMENT=test \
@@ -163,13 +163,17 @@ jobs:
             -e PLATFORM_POSTGRES_PORT=6432 \
             -e PLATFORM_POSTGRES_RUNTIME_PASSWORD="$PLATFORM_POSTGRES_RUNTIME_PASSWORD" \
             onesquared-ci:test
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:3199/api/health/ready | grep -q '"ready"'; then
               break
             fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:3199/api/health/ready | grep -q '"ready"'
+          if ! curl -sf http://127.0.0.1:3199/api/health/ready | grep -q '"ready"'; then
+            echo "Container readiness check failed; last 200 log lines from onesquared-ready-smoke:" >&2
+            docker logs --tail 200 onesquared-ready-smoke || true
+            exit 1
+          fi
 
   e2e:
     name: Role Journey Smoke Tests (Playwright)

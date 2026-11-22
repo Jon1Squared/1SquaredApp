@@ -568,8 +568,10 @@ test.describe.serial('R657: Core intake-to-matter journeys (seeded demo dataset)
     try {
       await page.goto('/enquiries/new');
       await expect(page.locator('#enq-privacy-notice')).toBeVisible();
+      await expect(page.locator('#enq-privacy-notice')).toHaveValue('no');
 
-      await page.locator('#enq-privacy-notice').selectOption('yes');
+      // R656 / R657: Fill every field while leaving Privacy notice given at "No",
+      // press Send to Team, and assert the inline error blocks submission and creation.
       await page.locator('#enq-first-name').fill('Aelwen');
       await page.locator('#enq-last-name').fill('Meredith');
       await page.locator('#enq-phone').fill('029 2010 7788');
@@ -587,6 +589,26 @@ test.describe.serial('R657: Core intake-to-matter journeys (seeded demo dataset)
         .locator('#enq-notes')
         .fill('Caller requested lease terms review ahead of heads of terms.');
 
+      await page.getByRole('button', { name: 'Send to Team' }).first().click();
+
+      const privacyFieldError = page.locator('.field-error', {
+        hasText: 'Please confirm the privacy notice was read or sent to the caller.',
+      });
+      await expect(privacyFieldError).toBeVisible();
+      await expect(page).toHaveURL(/\/enquiries\/new$/);
+
+      const verifyPage = await context.newPage();
+      try {
+        await verifyPage.goto('/enquiries');
+        await verifyPage.getByRole('tab', { name: /^All open/ }).click();
+        await expect(verifyPage.locator('.main-area')).not.toContainText('Aelwen Meredith');
+        await verifyPage.getByRole('tab', { name: /^My drafts/ }).click();
+        await expect(verifyPage.locator('.main-area')).not.toContainText('Aelwen Meredith');
+      } finally {
+        await verifyPage.close();
+      }
+
+      await page.locator('#enq-privacy-notice').selectOption('yes');
       await page.getByRole('button', { name: 'Send to Team' }).first().click();
 
       await expect(page.locator('[data-testid="enquiry-error-summary"]')).toHaveCount(0);
