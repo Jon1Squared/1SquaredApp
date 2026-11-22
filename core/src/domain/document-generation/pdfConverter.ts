@@ -10,8 +10,78 @@
  * 2. Active from day one so users can generate and download `.pdf` or `.docx` out of the box.
  */
 
-import type { DocumentPdfConverter } from '../../api/index';
+import type {
+  DocumentPdfConverter,
+  DocumentPdfConverterFallbackMode,
+  TenantConfiguration,
+} from '../../api/index';
 import { readAndValidateDocxZip, unescapeXmlText } from './docxEngine';
+
+export const DEFAULT_HTTP_PDF_CONVERTER_TIMEOUT_MS = 60_000;
+export const DEFAULT_HTTP_PDF_CONVERTER_MAX_DOCX_BYTES = 25 * 1024 * 1024;
+
+export type PdfConverterErrorCode =
+  | 'PDF_CONVERTER_UNCONFIGURED'
+  | 'PDF_CONVERTER_SIZE_LIMIT'
+  | 'PDF_CONVERTER_TIMEOUT'
+  | 'PDF_CONVERTER_UNREACHABLE'
+  | 'PDF_CONVERTER_HTTP_ERROR'
+  | 'PDF_CONVERTER_INVALID_OUTPUT';
+
+export class PdfConverterError extends Error {
+  public readonly code: PdfConverterErrorCode;
+  public readonly statusCode?: number;
+
+  public constructor(
+    code: PdfConverterErrorCode,
+    message: string,
+    statusCode?: number,
+  ) {
+    super(message);
+    this.name = 'PdfConverterError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
+export interface PdfConverterFallbackWarningEvent {
+  readonly event: 'document_generation.pdf_converter_fallback';
+  readonly tenantId?: string;
+  readonly correlationId?: string;
+  readonly errorCode: string;
+  readonly fallbackConverterId: string;
+}
+
+function defaultEmitFallbackWarning(event: PdfConverterFallbackWarningEvent): void {
+  // Structured log intentionally excludes document title, filename, and content (S1-10, Rule 10 / Standard §14).
+  console.warn(
+    JSON.stringify({
+      level: 'warn',
+      event: event.event,
+      ...(event.tenantId ? { tenantId: event.tenantId } : {}),
+      ...(event.correlationId ? { correlationId: event.correlationId } : {}),
+      errorCode: event.errorCode,
+      fallbackConverterId: event.fallbackConverterId,
+    }),
+  );
+}
+
+function hasPdfMagicSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.byteLength >= 5 &&
+    bytes[0] === 0x25 && // %
+    bytes[1] === 0x50 && // P
+    bytes[2] === 0x44 && // D
+    bytes[3] === 0x46 && // F
+    bytes[4] === 0x2d // -
+  );
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: unknown }).name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
 
 interface PdfRenderLine {
   text: string;
@@ -356,4 +426,197 @@ export class BuiltInOpenXmlPdfConverter implements DocumentPdfConverter {
 
     return new TextEncoder().encode(pdfContent);
   }
+}
+
+export class HttpPdfConverter implements DocumentPdfConverter {
+  public readonly converterId = 'libreoffice-http-pdf';
+  public readonly baseUrl: string;
+  public readonly timeoutMs: number;
+  public readonly maxDocxBytes: number;
+  private readonly fetchImpl: typeof fetch;
+
+  public constructor(options: {
+    baseUrl: string;
+    timeoutMs?: number;
+    maxDocxBytes?: number;
+    fetchImpl?: typeof fetch;
+  }) {
+    this.baseUrl = options.baseUrl.trim().replace(/\/+$/, '');
+    this.timeoutMs =
+      options.timeoutMs ?? DEFAULT_HTTP_PDF_CONVERTER_TIMEOUT_MS;
+    this.maxDocxBytes =
+      options.maxDocxBytes ?? DEFAULT_HTTP_PDF_CONVERTER_MAX_DOCX_BYTES;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  public async convertDocxToPdf(input: {
+    docxBytes: Uint8Array;
+    title: string;
+    authorName?: string;
+    readonly tenantId?: string;
+    readonly correlationId?: string;
+  }): Promise<Uint8Array> {
+    if (!this.baseUrl) {
+      throw new PdfConverterError(
+        'PDF_CONVERTER_UNCONFIGURED',
+        'DOC_CONVERTER_URL is not configured for container PDF conversion.',
+      );
+    }
+
+    if (input.docxBytes.byteLength > this.maxDocxBytes) {
+      throw new PdfConverterError(
+        'PDF_CONVERTER_SIZE_LIMIT',
+        `DOCX payload (${input.docxBytes.byteLength} bytes) exceeds maximum PDF converter limit (${this.maxDocxBytes} bytes).`,
+      );
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(
+        new PdfConverterError(
+          'PDF_CONVERTER_TIMEOUT',
+          `PDF converter container request timed out after ${this.timeoutMs} ms.`,
+        ),
+      );
+    }, this.timeoutMs);
+
+    try {
+      const headers: Record<string, string> = {
+        'content-type':
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      };
+      if (input.tenantId?.trim()) {
+        headers['x-tenant-id'] = input.tenantId.trim();
+      }
+      if (input.correlationId?.trim()) {
+        headers['x-correlation-id'] = input.correlationId.trim();
+      }
+
+      const response = await this.fetchImpl(`${this.baseUrl}/convert`, {
+        method: 'POST',
+        headers,
+        body: Buffer.from(input.docxBytes),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new PdfConverterError(
+          'PDF_CONVERTER_HTTP_ERROR',
+          `PDF converter container responded with HTTP ${response.status}.`,
+          response.status,
+        );
+      }
+
+      const pdfBytes = new Uint8Array(await response.arrayBuffer());
+      if (!hasPdfMagicSignature(pdfBytes)) {
+        throw new PdfConverterError(
+          'PDF_CONVERTER_INVALID_OUTPUT',
+          'PDF converter container response did not start with a valid %PDF- header.',
+        );
+      }
+
+      return pdfBytes;
+    } catch (err) {
+      if (err instanceof PdfConverterError) {
+        throw err;
+      }
+      if (controller.signal.aborted || isAbortLikeError(err)) {
+        throw new PdfConverterError(
+          'PDF_CONVERTER_TIMEOUT',
+          `PDF converter container request timed out after ${this.timeoutMs} ms.`,
+        );
+      }
+      throw new PdfConverterError(
+        'PDF_CONVERTER_UNREACHABLE',
+        'PDF converter container could not be reached over DOC_CONVERTER_URL.',
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+export class FallbackAwarePdfConverter implements DocumentPdfConverter {
+  public readonly converterId: string;
+  private readonly primary: DocumentPdfConverter;
+  private readonly fallback: DocumentPdfConverter;
+  private readonly fallbackMode: DocumentPdfConverterFallbackMode;
+  private readonly onFallbackWarning: (
+    event: PdfConverterFallbackWarningEvent,
+  ) => void;
+
+  public constructor(options: {
+    primary: DocumentPdfConverter;
+    fallback: DocumentPdfConverter;
+    fallbackMode: DocumentPdfConverterFallbackMode;
+    onFallbackWarning?: (event: PdfConverterFallbackWarningEvent) => void;
+  }) {
+    this.primary = options.primary;
+    this.fallback = options.fallback;
+    this.fallbackMode = options.fallbackMode;
+    this.onFallbackWarning =
+      options.onFallbackWarning ?? defaultEmitFallbackWarning;
+    this.converterId = `${options.primary.converterId}+fallback:${options.fallbackMode}`;
+  }
+
+  public async convertDocxToPdf(input: {
+    docxBytes: Uint8Array;
+    title: string;
+    authorName?: string;
+    readonly tenantId?: string;
+    readonly correlationId?: string;
+  }): Promise<Uint8Array> {
+    try {
+      return await this.primary.convertDocxToPdf(input);
+    } catch (err) {
+      if (this.fallbackMode === 'fail') {
+        throw err;
+      }
+      const errorCode =
+        err instanceof PdfConverterError ? err.code : 'PDF_CONVERTER_FAILED';
+      this.onFallbackWarning({
+        event: 'document_generation.pdf_converter_fallback',
+        ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+        ...(input.correlationId ? { correlationId: input.correlationId } : {}),
+        errorCode,
+        fallbackConverterId: this.fallback.converterId,
+      });
+      return this.fallback.convertDocxToPdf(input);
+    }
+  }
+}
+
+export function selectDocumentPdfConverter(
+  tenantConfig: Pick<TenantConfiguration, 'documentGeneration'>,
+  options?: {
+    converterUrl?: string;
+    timeoutMs?: number;
+    maxDocxBytes?: number;
+    fetchImpl?: typeof fetch;
+    onFallbackWarning?: (event: PdfConverterFallbackWarningEvent) => void;
+  },
+): DocumentPdfConverter {
+  const converterMode = tenantConfig.documentGeneration.pdfConverter ?? 'builtin';
+  const fallbackMode =
+    tenantConfig.documentGeneration.pdfConverterFallback ?? 'builtin';
+
+  const builtin = new BuiltInOpenXmlPdfConverter();
+  if (converterMode !== 'container') {
+    return builtin;
+  }
+
+  const baseUrl = (options?.converterUrl ?? process.env.DOC_CONVERTER_URL ?? '').trim();
+  const primary = new HttpPdfConverter({
+    baseUrl,
+    timeoutMs: options?.timeoutMs,
+    maxDocxBytes: options?.maxDocxBytes,
+    fetchImpl: options?.fetchImpl,
+  });
+
+  return new FallbackAwarePdfConverter({
+    primary,
+    fallback: builtin,
+    fallbackMode,
+    onFallbackWarning: options?.onFallbackWarning,
+  });
 }

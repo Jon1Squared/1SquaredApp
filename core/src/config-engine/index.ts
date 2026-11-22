@@ -154,6 +154,8 @@ export const DEFAULT_DOCUMENT_GENERATION_CONFIG: DocumentGenerationConfig = {
   defaultOutputFormat: 'docx',
   allowUserFormatOverride: true,
   storageProvider: 'local-fs',
+  pdfConverter: 'builtin',
+  pdfConverterFallback: 'builtin',
   approval: {
     requireApproval: true,
     allowSelfApproval: false,
@@ -586,6 +588,18 @@ export const DocumentGenerationConfigSchema = z
       .default('local-fs')
       .describe(
         'Configured document storage provider (local-fs temporary tenant storage by default, switchable to azure-blob or DMS)',
+      ),
+    pdfConverter: z
+      .enum(['builtin', 'container'])
+      .default('builtin')
+      .describe(
+        'DOCX-to-PDF converter engine (builtin in-process OpenXML renderer or container over DOC_CONVERTER_URL)',
+      ),
+    pdfConverterFallback: z
+      .enum(['builtin', 'fail'])
+      .default('builtin')
+      .describe(
+        'Fallback behaviour when pdfConverter is container and the converter service is unconfigured or unreachable',
       ),
     approval: z
       .object({
@@ -1238,6 +1252,9 @@ export const TenantConfigurationSchema = z
       .describe('List of extension IDs enabled for this tenant'),
     documentGeneration: DocumentGenerationConfigSchema.default(() => ({
       ...DEFAULT_DOCUMENT_GENERATION_CONFIG,
+      pdfConverter: DEFAULT_DOCUMENT_GENERATION_CONFIG.pdfConverter ?? 'builtin',
+      pdfConverterFallback:
+        DEFAULT_DOCUMENT_GENERATION_CONFIG.pdfConverterFallback ?? 'builtin',
       approval: { ...DEFAULT_DOCUMENT_GENERATION_CONFIG.approval },
       usage: { ...DEFAULT_DOCUMENT_GENERATION_CONFIG.usage },
       permissions: {

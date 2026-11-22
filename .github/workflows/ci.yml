@@ -176,6 +176,18 @@ jobs:
             exit 1
           fi
 
+      - name: Build dedicated PDF converter image and run readiness & .docx conversion smoke test (S1-10)
+        run: |
+          docker build -f docker/pdf-converter/Dockerfile -t onesquared-pdf:test docker/pdf-converter
+          trap 'docker rm -f onesquared-pdf-smoke >/dev/null 2>&1 || true' EXIT
+          docker rm -f onesquared-pdf-smoke >/dev/null 2>&1 || true
+          docker run -d --name onesquared-pdf-smoke -p 127.0.0.1:8199:8080 onesquared-pdf:test
+          if ! node scripts/smoke-pdf-converter.mjs http://127.0.0.1:8199; then
+            echo "PDF converter container smoke check failed; last 200 log lines from onesquared-pdf-smoke:" >&2
+            docker logs --tail 200 onesquared-pdf-smoke || true
+            exit 1
+          fi
+
   e2e:
     name: Role Journey Smoke Tests (Playwright)
     runs-on: ubuntu-latest

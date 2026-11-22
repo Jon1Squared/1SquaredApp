@@ -15,7 +15,7 @@ import {
   BasicMergeEngine,
   CLIENT_CARE_DOCUMENT_TYPE,
   buildAutoMappingsForPlaceholders,
-  BuiltInOpenXmlPdfConverter,
+  selectDocumentPdfConverter,
   buildValidDocxArchive,
   canActorAccessGeneratedDocument,
   createDocumentStorageProvider,
@@ -1488,7 +1488,9 @@ export async function previewTemplateService(
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
-  const pdfConverter = new BuiltInOpenXmlPdfConverter();
+  const pdfConverter = selectDocumentPdfConverter(config, {
+    converterUrl: process.env.DOC_CONVERTER_URL,
+  });
 
   const accessibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, user.id, user, {
@@ -1596,7 +1598,9 @@ export async function generateDocumentService(
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
-  const pdfConverter = new BuiltInOpenXmlPdfConverter();
+  const pdfConverter = selectDocumentPdfConverter(config, {
+    converterUrl: process.env.DOC_CONVERTER_URL,
+  });
 
   const matter = input.matterId
     ? matters.find((m) => m.id === input.matterId)

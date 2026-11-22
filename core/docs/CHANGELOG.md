@@ -14,6 +14,9 @@ All notable changes to `@platform/core` and `@platform/core-api` are documented 
   - Added `integrations.intakeChecks` (`idVerification`, `sanctionsPep`, `eSignature`, `payments`, each defaulting to `'manual'`) to `TenantConfiguration` schema, Zod parser, and deep-merge defaults.
 - **Database Migration `0023` & Manual Providers (`@platform/core`, `core/src/tenancy/`, `core/src/integrations/intake-checks/`):**
   - Added migration `0023_intake_checks_and_outbox_attachments_expand` (`CORE_REQUIRED_SCHEMA_VERSION = '0023'`), `TenantIntakeCheckRepository`, manual provider implementations, and transactional `public.email_outbox_attachments` storage with retention cleanup.
+- **Additive v`2.1.0` PDF Converter Additions (`S1-10`, item `46`, `@platform/core-api`, `@platform/core`):**
+  - Added optional `tenantId` and `correlationId` inputs on `DocumentPdfConverter.convertDocxToPdf` for zero-PII outbound correlation logging, plus `DocumentPdfConverterMode` (`'builtin' | 'container'`) and `DocumentPdfConverterFallbackMode` (`'builtin' | 'fail'`) on `DocumentGenerationConfig`.
+  - Added `HttpPdfConverter` (`60s` default cold-start-tolerant timeout, `25 MiB` DOCX size limit, `%PDF-` signature validation), `FallbackAwarePdfConverter` (structured zero-PII fallback warning logs or fail-closed mode), and `selectDocumentPdfConverter`.
 
 ## 2026-11-21 — Extension API v2.0.0 (Least-Privilege `config:read`, `manifest.hooks` Gate & Registry Update)
 

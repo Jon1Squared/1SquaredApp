@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { NextRequest } from 'next/server';
 import { describe, expect, it, vi } from 'vitest';
 import { ZodError } from 'zod';
@@ -65,6 +67,7 @@ import {
   generateDocumentService,
   getDocumentGenerationSnapshotForUser,
   getInitializedDocGenContext,
+  previewTemplateService,
   resolveTenantBlobSigningKey,
   updateDocumentGenerationConfigService,
 } from '@/server/documentGenerationServices';
@@ -2471,6 +2474,259 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
         origBravoOverride,
         'P-000001',
       );
+    }
+  }, 30_000);
+
+  it('19. S1-10: previewTemplateService and generateDocumentService route container PDF rendering over DOC_CONVERTER_URL and enforce builtin vs fail fallback modes', async () => {
+    const tenantAlpha = 'tenant-alpha';
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: tenantAlpha, environment: 'test' }],
+    });
+
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Alpha Admin',
+        email: 'alpha.admin@alpha.example',
+        tenantId: tenantAlpha,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-s110-service',
+    });
+
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+
+    const rawBase = getActiveTenantRawBaseConfig();
+    const alphaRaw = {
+      ...structuredClone(rawBase),
+      tenantId: tenantAlpha,
+      displayName: 'Tenant Alpha LLP',
+    };
+    const alphaValidated = loadAndValidateTenantConfig(
+      alphaRaw,
+      {},
+      'test',
+      'multi_tenant',
+    );
+    const alphaSeed = createSeedStore();
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: alphaValidated,
+      store: alphaSeed,
+      clearFirst: true,
+    });
+
+    const docRepo = new TenantDocumentRepository();
+    const origAlphaOverride = await docRepo.getDocumentGenerationTenantConfig(
+      ctxAlpha,
+    );
+    const alphaAdminSession = buildSignedTestSession({
+      personId: 'P-000001',
+      tenantId: tenantAlpha,
+      roles: ['admin', 'managing_partner'],
+      mfaVerified: true,
+      email: 'admin@alpha.example',
+    });
+
+    const seenConverterTenantIds: Array<string | string[] | undefined> = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        if (req.url === '/convert' && req.method === 'POST') {
+          seenConverterTenantIds.push(req.headers['x-tenant-id']);
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/pdf');
+          res.end(
+            Buffer.from('%PDF-1.7\n%S110-CONTAINER-PDF\n%%EOF\n', 'latin1'),
+          );
+          return;
+        }
+        res.statusCode = 404;
+        res.end();
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address() as AddressInfo;
+    const fakeConverterUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      setActiveTenantConfigForTesting(alphaRaw);
+      vi.stubEnv('PLATFORM_DOCUMENT_STORAGE_PROVIDER', 'local-fs');
+      vi.stubEnv('DOC_CONVERTER_URL', fakeConverterUrl);
+
+      const { storage: alphaStorage } = await getInitializedDocGenContext(
+        'P-000001',
+        alphaAdminSession,
+      );
+      const docxBytes = buildValidDocxArchive({
+        paragraphs: [
+          { text: 'Dear {{ client.name }}, reference {{ matter.reference }}.' },
+        ],
+      });
+      const autoApproveCfg = {
+        ...alphaValidated,
+        documentGeneration: {
+          ...alphaValidated.documentGeneration,
+          approval: { requireApproval: false, allowSelfApproval: true },
+        },
+      };
+      const actor = {
+        id: 'P-000001',
+        tenantId: tenantAlpha,
+        roles: ['admin', 'managing_partner'],
+        mfaVerified: true,
+      };
+      const created = await createOrUploadDraftTemplateVersion({
+        ctx: ctxAlpha,
+        repo: docRepo,
+        storage: alphaStorage,
+        engine: new BasicMergeEngine(),
+        catalogue: buildFullFieldCatalogueForTenant(),
+        actor,
+        config: autoApproveCfg,
+        input: {
+          code: `S110-CTR-${Date.now()}`,
+          name: 'S1-10 Container Letter',
+          description: 'S1-10 HTTP converter integration test template',
+          category: 'Correspondence',
+          outputDocumentType: 'letter',
+          filenamePattern: '{{matter.reference}} - S110 Letter',
+          availabilityRules: { sourceContexts: ['matter', 'client'] },
+          fileName: 's110.docx',
+          docxBytes,
+          promptedFields: [],
+          fieldMappings: {
+            'matter.reference': {
+              placeholder: 'matter.reference',
+              sourceType: 'catalogue',
+              catalogueKey: 'matter.reference',
+              required: true,
+            },
+            'client.name': {
+              placeholder: 'client.name',
+              sourceType: 'catalogue',
+              catalogueKey: 'client.name',
+              required: true,
+            },
+          },
+        },
+      });
+      await submitTemplateVersionForApproval({
+        ctx: ctxAlpha,
+        repo: docRepo,
+        catalogue: buildFullFieldCatalogueForTenant(),
+        actor,
+        config: autoApproveCfg,
+        versionId: created.version.id,
+      });
+
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        {
+          ...alphaValidated.documentGeneration,
+          pdfConverter: 'container',
+          pdfConverterFallback: 'builtin',
+        },
+        'P-000001',
+      );
+
+      const previewRes = await previewTemplateService(
+        {
+          versionId: created.version.id,
+          matterId: 'M-000001',
+          outputFormat: 'pdf',
+        },
+        'P-000001',
+        alphaAdminSession,
+      );
+      expect(
+        Buffer.from(previewRes.fileBase64, 'base64').toString('latin1'),
+      ).toContain('S110-CONTAINER-PDF');
+
+      const genRes = await generateDocumentService(
+        {
+          templateId: created.template.id,
+          sourceEntityType: 'matter',
+          matterId: 'M-000001',
+          outputFormat: 'pdf',
+        },
+        'P-000001',
+        alphaAdminSession,
+      );
+      expect(genRes.status).toBe('generated');
+      expect(
+        Buffer.from(genRes.fileBase64 ?? '', 'base64').toString('latin1'),
+      ).toContain('S110-CONTAINER-PDF');
+      expect(seenConverterTenantIds).toEqual([tenantAlpha, tenantAlpha]);
+
+      // Unreachable URL + fallback:'builtin' logs structured warning and renders %PDF-1.4
+      vi.stubEnv('DOC_CONVERTER_URL', 'http://127.0.0.1:1');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const fallbackGen = await generateDocumentService(
+        {
+          templateId: created.template.id,
+          sourceEntityType: 'matter',
+          matterId: 'M-000001',
+          outputFormat: 'pdf',
+        },
+        'P-000001',
+        alphaAdminSession,
+      );
+      expect(fallbackGen.status).toBe('generated');
+      expect(
+        Buffer.from(fallbackGen.fileBase64 ?? '', 'base64')
+          .toString('latin1')
+          .startsWith('%PDF-1.4'),
+      ).toBe(true);
+      expect(
+        warnSpy.mock.calls.some((args) =>
+          String(args[0] ?? '').includes(
+            'document_generation.pdf_converter_fallback',
+          ),
+        ),
+      ).toBe(true);
+      warnSpy.mockRestore();
+
+      // fallback:'fail' refuses silently falling back when DOC_CONVERTER_URL is unreachable
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        {
+          ...alphaValidated.documentGeneration,
+          pdfConverter: 'container',
+          pdfConverterFallback: 'fail',
+        },
+        'P-000001',
+      );
+      await expect(
+        previewTemplateService(
+          {
+            versionId: created.version.id,
+            matterId: 'M-000001',
+            outputFormat: 'pdf',
+          },
+          'P-000001',
+          alphaAdminSession,
+        ),
+      ).rejects.toMatchObject({ code: 'PDF_CONVERTER_UNREACHABLE' });
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      setActiveTenantConfigForTesting(null);
+      setTestEntraSessionOverride(undefined);
+      await docRepo.putDocumentGenerationTenantConfig(
+        ctxAlpha,
+        origAlphaOverride,
+        'P-000001',
+      );
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 30_000);
 });

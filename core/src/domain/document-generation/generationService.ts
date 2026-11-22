@@ -33,7 +33,7 @@ import type {
 } from '../../api/index';
 import type { TenantDocumentRepository } from '../../tenancy/documentRepository';
 import { resolveCatalogueValues } from './fieldCatalogue';
-import { BuiltInOpenXmlPdfConverter } from './pdfConverter';
+import { selectDocumentPdfConverter } from './pdfConverter';
 import {
   canActorAccessGeneratedDocument,
   canActorAccessMatterRecord,
@@ -293,11 +293,13 @@ export async function previewTemplateVersion(params: {
   );
 
   if (format === 'pdf') {
-    const converter = params.pdfConverter ?? new BuiltInOpenXmlPdfConverter();
+    const converter = params.pdfConverter ?? selectDocumentPdfConverter(config);
     const pdfBytes = await converter.convertDocxToPdf({
       docxBytes: rendered.outputBytes,
       title: template.name,
       authorName: ctx.actorName,
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
     });
     return {
       outputBytes: pdfBytes,
@@ -511,11 +513,13 @@ export async function generateDocumentFromTemplate(params: {
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
   if (format === 'pdf') {
-    const converter = params.pdfConverter ?? new BuiltInOpenXmlPdfConverter();
+    const converter = params.pdfConverter ?? selectDocumentPdfConverter(config);
     finalBytes = await converter.convertDocxToPdf({
       docxBytes: rendered.outputBytes,
       title: template.name,
       authorName: ctx.actorName,
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
     });
     mimeType = 'application/pdf';
   }

@@ -77,11 +77,16 @@ param enableCloudBlobStorage bool = false
 @description('Monthly GB cap for Microsoft Defender for Storage on-upload malware scanning')
 param defenderMalwareScanCapGbPerMonth int = 500
 
-@description('Optional in Stage 0 (unused by app runtime; BuiltInOpenXmlPdfConverter handles Stage 0 PDF conversion per ADR 0024): whether to deploy a headless LibreOffice PDF converter internal Container App (carried to Stage 1)')
+@description('Whether to deploy the internal headless LibreOffice PDF converter Container App (ca-pdf, Stage 1 item 46; disabled by default until image is pushed to ACR)')
 param enablePdfConverterContainerApp bool = false
 
-@description('Optional in Stage 0 (unused by app runtime; carried to Stage 1): container image reference for the internal PDF converter Container App (required non-empty if enablePdfConverterContainerApp is true)')
+@description('Container image reference for the internal headless LibreOffice PDF converter Container App (required non-empty if enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
+
+@description('Minimum running replicas for the internal PDF converter Container App (0 scales to zero; set 1+ in busy environments to eliminate cold starts)')
+@minValue(0)
+@maxValue(4)
+param pdfConverterMinReplicas int = 0
 
 @description('Runtime document storage provider configured for the web app (ADR 0008, ADR 0024)')
 @allowed([
@@ -192,6 +197,7 @@ module platform 'modules/platform.bicep' = {
     appContainerImage: appContainerImage
     enablePdfConverterContainerApp: enablePdfConverterContainerApp
     pdfConverterContainerImage: pdfConverterContainerImage
+    pdfConverterMinReplicas: pdfConverterMinReplicas
     enableSchedulerJobs: enableSchedulerJobs
     enableKeyDateRemindersJob: enableKeyDateRemindersJob
     enableUsageRetentionPurgeJob: enableUsageRetentionPurgeJob
