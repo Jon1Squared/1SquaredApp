@@ -584,4 +584,18 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       /name:\s*'PLATFORM_DOCUMENT_STORAGE_PROVIDER'\s+value:\s*documentStorageProvider/,
     );
   });
+
+  it('R655: copies tenant extension manifests into the Docker runtime stage for bundled-only execution', () => {
+    const dockerfile = fs.readFileSync(
+      path.join(REPO_ROOT, 'Dockerfile'),
+      'utf8',
+    );
+    const runnerStage = dockerfile.slice(dockerfile.indexOf('AS runner'));
+    const userNodeIdx = runnerStage.indexOf('USER node');
+    const copyManifestsIdx = runnerStage.indexOf('runtime-tenant-extensions');
+    expect(copyManifestsIdx).toBeGreaterThan(-1);
+    expect(userNodeIdx).toBeGreaterThan(copyManifestsIdx);
+    expect(dockerfile).toContain('manifest.json');
+    expect(runnerStage).toContain('--chown=node:node');
+  });
 });

@@ -30,6 +30,11 @@ import {
 } from '../core/src/tenancy/postgresAdminBootstrap';
 import { guardedJob, type GuardedJobOptions } from '../src/server/authorize';
 import {
+  checkActiveTenantExtensionsReadiness,
+  getActiveTenantConfiguration,
+  getPlatformExtensionHost,
+} from '../src/platform/tenantRuntime';
+import {
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledKeyDateRemindersJobSweep,
   runScheduledNotificationDigestsJobSweep,
@@ -424,6 +429,36 @@ export async function executeCliJobRunner(
       `${JSON.stringify({
         runner: 'onesquared-job-runner',
         jobs: REGISTERED_CLI_JOBS,
+      })}\n`,
+    );
+    return 0;
+  }
+
+  if (args.length === 1 && args[0] === '--verify-extensions') {
+    const activeCfg = getActiveTenantConfiguration();
+    const host = getPlatformExtensionHost();
+    const readiness = checkActiveTenantExtensionsReadiness();
+    const registeredExtensions = host
+      .getActiveExtensionsForTenant(activeCfg)
+      .map((ext) => ({ id: ext.manifest.id, version: ext.manifest.version }));
+    if (!readiness.ok) {
+      writeErr(
+        `${JSON.stringify({
+          event: 'job.verify-extensions.failed',
+          tenantId: activeCfg.tenantId,
+          environment: activeCfg.environment,
+          errorCode: readiness.errorCode ?? 'EXTENSION_LOAD_FAILED',
+        })}\n`,
+      );
+      return 1;
+    }
+    writeOut(
+      `${JSON.stringify({
+        event: 'job.verify-extensions.succeeded',
+        tenantId: activeCfg.tenantId,
+        environment: activeCfg.environment,
+        enabledExtensions: activeCfg.enabledExtensions ?? [],
+        registeredExtensions,
       })}\n`,
     );
     return 0;

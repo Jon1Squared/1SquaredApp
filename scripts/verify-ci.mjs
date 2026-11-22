@@ -313,12 +313,18 @@ runStep(
   liveBuildEnv,
 );
 
-console.log('\n=== [CI Verify] 10b/12 Verify bundled CLI job entry point (dist/jobs/run-job.mjs --list, R404) ===');
+console.log('\n=== [CI Verify] 10b/12 Verify bundled CLI job entry point (dist/jobs/run-job.mjs --list & --verify-extensions, R404, R655) ===');
 runStep(
   '10b/12 Execute node dist/jobs/run-job.mjs --list',
   process.execPath,
   ['dist/jobs/run-job.mjs', '--list'],
   liveBuildEnv,
+);
+runStep(
+  '10b/12 Execute node dist/jobs/run-job.mjs --verify-extensions (demo)',
+  process.execPath,
+  ['dist/jobs/run-job.mjs', '--verify-extensions'],
+  { ...liveBuildEnv, PLATFORM_ENVIRONMENT: 'demo' },
 );
 const dockerInfoRes = spawnSync(isWin ? 'docker.exe' : 'docker', ['info'], {
   stdio: 'ignore',
@@ -339,9 +345,32 @@ if (dockerInfoRes.status === 0) {
     liveBuildEnv,
   );
   runStep(
-    '10d/12 Execute bundled job runner inside container image',
+    '10d/12 Execute bundled job runner and extension verification inside container image',
     isWin ? 'docker.exe' : 'docker',
     ['run', '--rm', 'onesquared-ci:test', 'node', 'dist/jobs/run-job.mjs', '--list'],
+    liveBuildEnv,
+  );
+  runStep(
+    '10d/12 Verify enabled tenant extensions load from bundled registry inside container image (R655)',
+    isWin ? 'docker.exe' : 'docker',
+    [
+      'run',
+      '--rm',
+      '-e',
+      `PLATFORM_TENANT_PACKAGE_DIR=${liveBuildEnv.PLATFORM_TENANT_PACKAGE_DIR}`,
+      '-e',
+      'PLATFORM_ENVIRONMENT=demo',
+      'onesquared-ci:test',
+      'node',
+      'dist/jobs/run-job.mjs',
+      '--verify-extensions',
+    ],
+    liveBuildEnv,
+  );
+  runStep(
+    '10d/12 Verify standalone server chunks include bundled extension registry (R655)',
+    isWin ? 'docker.exe' : 'docker',
+    ['run', '--rm', 'onesquared-ci:test', 'grep', '-rq', 'nalf-matter-costs-governance', '.next/server'],
     liveBuildEnv,
   );
 } else {

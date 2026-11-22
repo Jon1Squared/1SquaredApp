@@ -2,6 +2,7 @@ import {
   probeTenantDatabaseReadiness,
 } from '@platform/core';
 import {
+  checkActiveTenantExtensionsReadiness,
   createVerifiedTenantContext,
   getActiveTenantConfiguration,
 } from '@/platform/tenantRuntime';
@@ -66,7 +67,24 @@ export async function checkTenantReadinessWithCache(params?: {
     return { ready: false, status: 503 };
   }
 
-  const cacheKey = `${activeCfg.tenantId}:${activeCfg.environment}:${storageProvider}:${envStorageProvider?.trim() || 'unset'}`;
+  const extensionCheck = checkActiveTenantExtensionsReadiness();
+  if (!extensionCheck.ok) {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'health.readiness_failed',
+        tenantId: activeCfg.tenantId,
+        correlationId,
+        environment: activeCfg.environment,
+        errorCode: extensionCheck.errorCode ?? 'EXTENSION_LOAD_FAILED',
+      }),
+    );
+    return { ready: false, status: 503 };
+  }
+
+  const packageDir = process.env.PLATFORM_TENANT_PACKAGE_DIR?.trim() || 'default';
+  const enabledExtensionsKey = (activeCfg.enabledExtensions ?? []).join(',');
+  const cacheKey = `${activeCfg.tenantId}:${activeCfg.environment}:${packageDir}:${enabledExtensionsKey}:${storageProvider}:${envStorageProvider?.trim() || 'unset'}`;
   const nowMs = Date.now();
   const cached = readinessCacheByKey.get(cacheKey);
   if (cached && nowMs < cached.expiresAtMs) {

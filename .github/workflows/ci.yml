@@ -144,11 +144,32 @@ jobs:
       - name: Verify client bundle contains no API keys
         run: '! grep -rEq "\bak_[A-Za-z0-9]{20,}\b|sk-ant-" .next/static'
 
-      - name: Verify bundled job entry point and container image (R404)
+      - name: Verify bundled job entry point and container image (R404, R655)
         run: |
           node dist/jobs/run-job.mjs --list
+          PLATFORM_ENVIRONMENT=demo node dist/jobs/run-job.mjs --verify-extensions
           docker build --build-arg PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" -t onesquared-ci:test .
           docker run --rm onesquared-ci:test node dist/jobs/run-job.mjs --list
+          docker run --rm -e PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" -e PLATFORM_ENVIRONMENT=demo onesquared-ci:test node dist/jobs/run-job.mjs --verify-extensions
+          docker run --rm onesquared-ci:test grep -rq "nalf-matter-costs-governance" .next/server
+          trap 'docker rm -f onesquared-ready-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --rm --name onesquared-ready-smoke --network host \
+            -e PORT=3199 \
+            -e PLATFORM_TENANT_PACKAGE_DIR="$PLATFORM_TENANT_PACKAGE_DIR" \
+            -e PLATFORM_ENVIRONMENT=test \
+            -e PLATFORM_HOSTING_MODE=multi_tenant \
+            -e PLATFORM_DOCUMENT_STORAGE_PROVIDER=local-fs \
+            -e PLATFORM_POSTGRES_HOST=127.0.0.1 \
+            -e PLATFORM_POSTGRES_PORT=6432 \
+            -e PLATFORM_POSTGRES_RUNTIME_PASSWORD="$PLATFORM_POSTGRES_RUNTIME_PASSWORD" \
+            onesquared-ci:test
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3199/api/health/ready | grep -q '"ready"'; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:3199/api/health/ready | grep -q '"ready"'
 
   e2e:
     name: Role Journey Smoke Tests (Playwright)
