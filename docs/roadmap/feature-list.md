@@ -2,6 +2,8 @@
 
 This is the master backlog for 1Squared. The Word document is a copy for sharing; when the two differ, this file wins. Last updated 22 November 2026.
 
+Stage 0 exit signed off on 22 November 2026; see [`stage-0-exit-report.md`](stage-0-exit-report.md).
+
 ## How to maintain this file (people and AI tools)
 
 - **Never renumber.** IDs (1–46, F1–F23, P1–P13, B1–B21, E1–E9, Q1–Q2) are stable references used in plans, branches and pull requests. New items take the next free number in their series.

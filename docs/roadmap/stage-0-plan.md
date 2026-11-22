@@ -2,8 +2,9 @@
 
 | | |
 |---|---|
-| Status | Draft v3: checked against the code at `a0a5534` (no code changes since the review); ADRs 0024–0027 written for D1, D2, D5 and D9. D1, D5 and D9 confirmed by the product owner on 6 November 2026; D2 proposed. For review by Antigravity, then approval. |
+| Status | **Complete.** Exit criteria met (some with recorded caveats) and signed off by the product owner on 22 November 2026. See [stage-0-exit-report.md](stage-0-exit-report.md). |
 | Baseline | `fix/testing-fixes`, commit `a0a5534` (6 November 2026) |
+| Exit baseline | `develop` at `b3bcce1` (22 November 2026), deployed to the Azure demo |
 | Backlog | `docs/roadmap/feature-list.md` (IDs in this plan refer to it) |
 | Standard | Platform Architecture Standard, especially sections 8, 9 and 14 |
 
@@ -14,6 +15,8 @@ Make what already exists safe, tenant-isolated and shared, so that stages 1 to 5
 Stage 0 adds no new user-facing features, apart from the registers engine and the search and notification improvements that later stages depend on.
 
 ## 2. Exit criteria
+
+Outcome: all criteria met, six with caveats (S2, S4, O2, O5, O7 and H2). See [the exit report](stage-0-exit-report.md), section 2.
 
 Stage 0 is done when every statement below is true and has been confirmed by re-running the status review.
 
@@ -164,7 +167,7 @@ S0-24 (the registers engine) can start once S0-17a and S0-19 are done, and can r
 >    - `S0-28a` + `S0-28b` complete `30` and advance `3`, `F1`; `S0-24` closes `31` (`Built differently` -> `Completed`), advances `20` and `E8`, and removes demo sign-off `'SO-000003'`; `S0-25` advances `32` (`Partly built` until `S0-29`).
 >    - `S0-26` advances `32` (`Partly built`) and `P6`; `S0-29` completes `32` and advances `P9`. Live Graph mail (`S0-26`) and live Graph Teams (`S0-29`) remain gated on Section 8 manual tasks while all mocked/dev-catcher/two-tenant CI tests run unblocked.
 
-**Exit review:** re-run the status review against section 2 of this plan. Stage 1 planning starts when every exit criterion is met.
+**Exit review:** re-run the status review against section 2 of this plan. Stage 1 planning starts when every exit criterion is met. Done 19–22 November 2026 in four sessions; see [stage-0-exit-report.md](stage-0-exit-report.md).
 
 ## 5a. Coverage of the stage 0 backlog
 
@@ -283,4 +286,12 @@ These need a person with the right admin access. Claude Code should list them in
 | 15 Nov 2026 | Owner approved WP5 Phase 1 plan adjustments: split `S0-28` (`L`) into `S0-28a` (`M`, negotiated overrides + `0016`) and `S0-28b` (`M`, CFA/DBA & statutory caps), resize `S0-26` from `M` to `L`, and re-tag `documentAccess.autoRemediateDrift` from `[x-reserved:S0-25]` to `backlog`; authorised WP5 Checkpoint 5a (`S0-21` -> `S0-22` -> `S0-23`). |
 | 18 Nov 2026 | R485 live verification completed in `rg-onesquared-demo-uksouth` (`law-platform-demo`): verified 3 consecutive nights (`16–18 Nov 2026`, `02:00 GMT`) of scheduled job runs (`caj-kd-rem-demo`, `caj-doc-prg-demo`, `caj-enq-anon-demo`) plus live `caj-reg-rem-demo`, `caj-ntf-dig-demo`, and `caj-outbox-drain-demo` runs; fixed case-sensitive `BackOffLimitExceeded` KQL and CLI job OpenTelemetry flush on `fix/r485-job-failure-alert-and-telemetry`, redeployed `alrt-jobs-platform-demo`, and confirmed forced job failure `caj-seed-demo-demo-0mv6m7v` fired `alrt-jobs-platform-demo` (`Sev2`, `Fired` at `2026-11-18T18:16:59Z`), closing `P12` as `Completed`. |
 | 18 Nov 2026 | **Agreed exception (P5 Stage 0 exit):** Product owner agreed to keep the current Ideal Postcodes test key for now (to be replaced soon anyway), rather than rotating it before Stage 0 exit. Standing conditions remain in force (§8): rotate before any real client data goes in, before anyone else gets repository access, and in any case when the key is replaced (`P5` stays `Partly built`). Changing `/api/address-lookup` from `GET` to `POST` with a multi-premise address picker (`R371`) moves to Stage 1 item `34`. |
+| 20 Nov 2026 | **Stage 0 exit decision D4 ([ADR 0008](../decisions/0008-document-storage-provider-abstraction.md)):** local disk document storage (`local-fs`, pinned to 1 replica) is permitted for the non-live demo only, `live` refuses `local-fs` fail-closed, and the `azure-blob` provider with short-lived user-delegation SAS tokens moves to "Before the first hosted client" (R578, R613). |
+| 20 Nov 2026 | **Stage 0 exit decision D5 ([ADR 0024](../decisions/0024-azure-container-apps-hosting.md)):** the built-in OpenXML PDF converter is the Stage 0 converter (`enablePdfConverterContainerApp = false` in `demo.bicepparam`), and the dedicated PDF converter Container App is carried to Stage 1 as item `46` (R582). |
+| 20 Nov 2026 | **Stage 0 exit decision D6 (B21):** PMS floating-point pound columns and sums (`DOUBLE PRECISION`) remain unchanged for Stage 0 and are carried to Stage 1 as bug `B21` (R583). |
+| 20 Nov 2026 | **Stage 0 exit decision D7 (foundational ADRs):** foundational Proposed ADRs `0002`–`0003` and `0005`–`0023` relied on by the codebase are marked `Accepted (2026-11-20)` in [docs/decisions/](../decisions/) (R594). |
 | 21 Nov 2026 | **Stage 0 exit decision D8 (ADR 0037) accepted & exit decisions D4–D8 disambiguated (`R642`):** Product owner approved [ADR 0037](../decisions/0037-extension-api-v2-least-privilege-config-context.md) (`Accepted (2026-11-21)`) for `@platform/core-api` `2.0.0` (strict `config:read` context narrowing, `manifest.hooks` enforcement, and Stage 0 Rule 7 exception). Documentation across `docs/` now names the five Stage 0 exit decisions explicitly in full—**Stage 0 exit decision D4 (ADR 0008)**, **Stage 0 exit decision D5 (ADR 0024)**, **Stage 0 exit decision D6 (B21)**, **Stage 0 exit decision D7 (foundational ADRs)**, and **Stage 0 exit decision D8 (ADR 0037)**—to keep them distinct from §4 plan decisions `D4`–`D8` above. |
+| 21 Nov 2026 | Stage 0 exit decision D9: negotiated rate override writes are limited to `matter:costs:sign_off`, `finance:credit_control` or `admin:access`, and client override writes need MFA (R643). |
+| 21 Nov 2026 | Stage 0 exit decision D10: PR #1 and its commits and tests are accepted as closure evidence for R1–R189 ([fix-ID register](stage-0-fix-id-register.md)). |
+| 22 Nov 2026 | Live-checklist faults fixed and re-tested on the demo. Matter opening failed because extension manifests weren't in the runtime image (R655). The enquiry privacy notice wasn't shown as required (R656). The demo was redeployed at `b3bcce1`. |
+| 22 Nov 2026 | **Stage 0 exit signed off by the product owner.** The items carried into Stage 1 and to "Before the first hosted client" are listed in section 9 of [the exit report](stage-0-exit-report.md). |
