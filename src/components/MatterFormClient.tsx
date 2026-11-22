@@ -200,6 +200,7 @@ interface MatterFormClientProps {
   matterCostsConfig: MatterCostsConfig;
   canReassignOwnership?: boolean;
   canSignOffCosts?: boolean;
+  canManageMatterRateOverrides?: boolean;
   initialSignOffEstimateGbp?: number | null;
   suggestedMatterGovernanceAssignees?: {
     riskReviewerId: string | null;
@@ -305,6 +306,7 @@ export function MatterFormClient({
   matterCostsConfig,
   canReassignOwnership = false,
   canSignOffCosts = false,
+  canManageMatterRateOverrides = false,
   initialSignOffEstimateGbp = null,
   suggestedMatterGovernanceAssignees,
   enableAiMatterExtraction = false,
@@ -8000,7 +8002,7 @@ export function MatterFormClient({
                     </div>
 
                     {/* Tier 1: Effective-dated matter rate overrides when saved & permitted */}
-                    {existing?.id && costsConfig.allowMatterRateOverrides ? (
+                    {existing?.id && (costsConfig.allowMatterRateOverrides || matterRateOverrides.length > 0) ? (
                       <div
                         style={{
                           marginTop: 12,
@@ -8028,7 +8030,7 @@ export function MatterFormClient({
                               Effective-dated hourly rates specific to this matter (supersede client &amp; group rates).
                             </div>
                           </div>
-                          {!isReadOnlyFeeEarner ? (
+                          {canManageMatterRateOverrides && costsConfig.allowMatterRateOverrides && !isReadOnlyFeeEarner ? (
                             <button
                               type="button"
                               className="btn btn--secondary btn--sm"
@@ -8043,7 +8045,7 @@ export function MatterFormClient({
                           ) : null}
                         </div>
 
-                        {matterOvrFormOpen && !isReadOnlyFeeEarner ? (
+                        {matterOvrFormOpen && canManageMatterRateOverrides && costsConfig.allowMatterRateOverrides && !isReadOnlyFeeEarner ? (
                           <div
                             style={{
                               padding: 12,
@@ -8215,7 +8217,7 @@ export function MatterFormClient({
                                   {ovr.effectiveTo ?? 'open-ended'})
                                   {ovr.notes ? ` · ${ovr.notes}` : ''}
                                 </span>
-                                {!isReadOnlyFeeEarner ? (
+                                {!isReadOnlyFeeEarner && canManageMatterRateOverrides ? (
                                   <button
                                     type="button"
                                     className="btn btn--ghost btn--sm"

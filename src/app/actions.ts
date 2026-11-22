@@ -164,7 +164,7 @@ import type {
   StandstillPeriod,
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
-import { buildActionDenied } from '@/domain/actionResult';
+import { buildActionDenied, isActionDenied } from '@/domain/actionResult';
 import { maskPayrollDetails } from '@/domain/employment';
 import {
   getActiveTenantConfiguration,
@@ -1060,7 +1060,9 @@ export async function recordInvoiceCreditControlActionAction(input: {
 export async function saveOrgStructureAction(nextCatalogue: OrgStructureCatalogue) {
   return guardedAction('saveOrgStructureAction', async ({ personId: byId }) => {
     const res = await saveOrgStructure(nextCatalogue, byId);
-    revalidateAll();
+    if (!isActionDenied(res) && res.ok !== false) {
+      revalidateAll();
+    }
     return res;
   });
 }

@@ -97,6 +97,9 @@ export default async function MatterProfilePage({
           matterCostsConfig={snap.matterCostsConfig}
           canReassignOwnership={snap.currentUserPermissions.includes('matter:reassign_ownership')}
           canSignOffCosts={snap.canSignOffCostsByMatterId[matter.id] ?? false}
+          canManageMatterRateOverrides={snap.currentUserPermissions.some((p) =>
+            ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(p),
+          )}
           initialSignOffEstimateGbp={snap.signOffEstimateGbpByMatterId[matter.id] ?? null}
           suggestedMatterGovernanceAssignees={snap.suggestedMatterGovernanceAssignees}
           enableAiMatterExtraction={snap.enableAiMatterExtraction}

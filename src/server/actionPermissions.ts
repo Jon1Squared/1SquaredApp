@@ -656,13 +656,17 @@ export const ACTION_PERMISSIONS = {
   },
   saveClientRateOverrideAction: {
     kind: 'permission',
-    key: { anyOf: ['finance:view', 'finance:credit_control', 'admin:access'] },
-    enforcedBy: 'action',
+    key: {
+      anyOf: ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'],
+    },
+    enforcedBy: 'service',
   },
   deleteClientRateOverrideAction: {
     kind: 'permission',
-    key: { anyOf: ['finance:view', 'finance:credit_control', 'admin:access'] },
-    enforcedBy: 'action',
+    key: {
+      anyOf: ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'],
+    },
+    enforcedBy: 'service',
   },
   listMatterRateOverridesAction: {
     kind: 'permission',
@@ -681,10 +685,7 @@ export const ACTION_PERMISSIONS = {
     kind: 'permission',
     key: {
       anyOf: [
-        'matter:create',
-        'matter:edit',
         'matter:costs:sign_off',
-        'finance:view',
         'finance:credit_control',
         'admin:access',
       ],
@@ -695,10 +696,7 @@ export const ACTION_PERMISSIONS = {
     kind: 'permission',
     key: {
       anyOf: [
-        'matter:create',
-        'matter:edit',
         'matter:costs:sign_off',
-        'finance:view',
         'finance:credit_control',
         'admin:access',
       ],

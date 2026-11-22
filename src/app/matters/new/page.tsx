@@ -110,6 +110,9 @@ export default async function NewMatterPage({
             ? snap.canSignOffCostsByMatterId[draftMatter.id] ?? false
             : snap.currentUserPermissions.includes('matter:costs:sign_off')
         }
+        canManageMatterRateOverrides={snap.currentUserPermissions.some((p) =>
+          ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(p),
+        )}
         initialSignOffEstimateGbp={
           draftMatter
             ? snap.signOffEstimateGbpByMatterId[draftMatter.id] ?? null

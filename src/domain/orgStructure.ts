@@ -4,6 +4,7 @@
  * Legal Entity -> Office
  * Department -> Cost Centre & Profit Centre
  */
+import { z } from 'zod';
 import type {
   ChoiceValue,
   EmployeeRoleType,
@@ -17,6 +18,316 @@ import type {
   OrgStructureCatalogue,
   OrgTeamOrPracticeGroup,
 } from './types';
+
+export const ORG_STRUCTURE_VALIDATION_ERROR_CODE =
+  'ORG_STRUCTURE_VALIDATION_ERROR' as const;
+
+const NonEmptyTrimmedStringSchema = z.string().trim().min(1);
+
+const OrgLegalEntitySchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    isDefault: z.boolean().optional(),
+    active: z.boolean(),
+  })
+  .strict();
+
+const OrgDivisionSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    parentLegalEntityId: NonEmptyTrimmedStringSchema,
+    active: z.boolean(),
+  })
+  .strict();
+
+const OrgDepartmentSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    parentDivisionId: NonEmptyTrimmedStringSchema,
+    defaultCostCentreId: z.string().trim(),
+    defaultProfitCentreId: z.string().trim(),
+    legacyChoiceValueId: z.string().nullable().optional(),
+    practiceAreaIds: z.array(NonEmptyTrimmedStringSchema).optional(),
+    active: z.boolean(),
+  })
+  .strict();
+
+const OrgTeamOrPracticeGroupSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    parentDepartmentId: NonEmptyTrimmedStringSchema,
+    active: z.boolean(),
+  })
+  .strict();
+
+const OrgAddressSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    typeId: z.string().nullable(),
+    line1: z.string(),
+    line2: z.string(),
+    town: z.string(),
+    county: z.string(),
+    postcode: z.string(),
+    countryId: z.string().nullable(),
+  })
+  .strict();
+
+const OrgOfficeSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    parentLegalEntityId: NonEmptyTrimmedStringSchema,
+    address: OrgAddressSchema,
+    active: z.boolean(),
+  })
+  .strict();
+
+const OrgCostCentreSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    parentDepartmentId: NonEmptyTrimmedStringSchema.nullable(),
+    active: z.boolean(),
+  })
+  .strict();
+
+const OrgProfitCentreSchema = z
+  .object({
+    id: NonEmptyTrimmedStringSchema,
+    code: NonEmptyTrimmedStringSchema,
+    name: NonEmptyTrimmedStringSchema,
+    parentDepartmentId: NonEmptyTrimmedStringSchema.nullable(),
+    active: z.boolean(),
+  })
+  .strict();
+
+function assertUniqueOrgCollectionIds(
+  items: ReadonlyArray<{ readonly id: string }>,
+  collectionKey: keyof OrgStructureCatalogue,
+  ctx: z.RefinementCtx,
+): Set<string> {
+  const ids = new Set<string>();
+  items.forEach((item, index) => {
+    if (ids.has(item.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [collectionKey, index, 'id'],
+        message: `Duplicate ID "${item.id}" in ${String(collectionKey)}.`,
+      });
+    } else {
+      ids.add(item.id);
+    }
+  });
+  return ids;
+}
+
+export const OrgStructureCatalogueSchema = z
+  .object({
+    legalEntities: z.array(OrgLegalEntitySchema).min(1),
+    divisions: z.array(OrgDivisionSchema),
+    departments: z.array(OrgDepartmentSchema),
+    teamsOrPracticeGroups: z.array(OrgTeamOrPracticeGroupSchema),
+    offices: z.array(OrgOfficeSchema),
+    costCentres: z.array(OrgCostCentreSchema),
+    profitCentres: z.array(OrgProfitCentreSchema),
+    externalPayrollOnly: z.boolean().optional(),
+    defaultProbationMonths: z.number().int().min(0).max(60).optional(),
+  })
+  .strict()
+  .superRefine((catalogue, ctx) => {
+    const legalEntityIds = assertUniqueOrgCollectionIds(
+      catalogue.legalEntities,
+      'legalEntities',
+      ctx,
+    );
+    const divisionIds = assertUniqueOrgCollectionIds(
+      catalogue.divisions,
+      'divisions',
+      ctx,
+    );
+    const departmentIds = assertUniqueOrgCollectionIds(
+      catalogue.departments,
+      'departments',
+      ctx,
+    );
+    assertUniqueOrgCollectionIds(
+      catalogue.teamsOrPracticeGroups,
+      'teamsOrPracticeGroups',
+      ctx,
+    );
+    assertUniqueOrgCollectionIds(catalogue.offices, 'offices', ctx);
+    const costCentreIds = assertUniqueOrgCollectionIds(
+      catalogue.costCentres,
+      'costCentres',
+      ctx,
+    );
+    const profitCentreIds = assertUniqueOrgCollectionIds(
+      catalogue.profitCentres,
+      'profitCentres',
+      ctx,
+    );
+
+    catalogue.divisions.forEach((div, index) => {
+      if (!legalEntityIds.has(div.parentLegalEntityId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['divisions', index, 'parentLegalEntityId'],
+          message: `Division "${div.id}" references missing legal entity parentLegalEntityId "${div.parentLegalEntityId}".`,
+        });
+      }
+    });
+
+    catalogue.offices.forEach((office, index) => {
+      if (!legalEntityIds.has(office.parentLegalEntityId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['offices', index, 'parentLegalEntityId'],
+          message: `Office "${office.id}" references missing legal entity parentLegalEntityId "${office.parentLegalEntityId}".`,
+        });
+      }
+    });
+
+    catalogue.departments.forEach((dept, index) => {
+      if (!divisionIds.has(dept.parentDivisionId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['departments', index, 'parentDivisionId'],
+          message: `Department "${dept.id}" references missing division parentDivisionId "${dept.parentDivisionId}".`,
+        });
+      }
+      if (
+        dept.defaultCostCentreId &&
+        !costCentreIds.has(dept.defaultCostCentreId)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['departments', index, 'defaultCostCentreId'],
+          message: `Department "${dept.id}" references missing cost centre defaultCostCentreId "${dept.defaultCostCentreId}".`,
+        });
+      }
+      if (
+        dept.defaultProfitCentreId &&
+        !profitCentreIds.has(dept.defaultProfitCentreId)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['departments', index, 'defaultProfitCentreId'],
+          message: `Department "${dept.id}" references missing profit centre defaultProfitCentreId "${dept.defaultProfitCentreId}".`,
+        });
+      }
+    });
+
+    catalogue.teamsOrPracticeGroups.forEach((team, index) => {
+      if (!departmentIds.has(team.parentDepartmentId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['teamsOrPracticeGroups', index, 'parentDepartmentId'],
+          message: `Team/practice group "${team.id}" references missing department parentDepartmentId "${team.parentDepartmentId}".`,
+        });
+      }
+    });
+
+    catalogue.costCentres.forEach((cc, index) => {
+      if (cc.parentDepartmentId && !departmentIds.has(cc.parentDepartmentId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['costCentres', index, 'parentDepartmentId'],
+          message: `Cost centre "${cc.id}" references missing department parentDepartmentId "${cc.parentDepartmentId}".`,
+        });
+      }
+    });
+
+    catalogue.profitCentres.forEach((pc, index) => {
+      if (pc.parentDepartmentId && !departmentIds.has(pc.parentDepartmentId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['profitCentres', index, 'parentDepartmentId'],
+          message: `Profit centre "${pc.id}" references missing department parentDepartmentId "${pc.parentDepartmentId}".`,
+        });
+      }
+    });
+  });
+
+/**
+ * Validates a full organisation structure catalogue against the strict Zod schema,
+ * duplicate ID constraints, and referential integrity rules (`R644`).
+ */
+export function validateOrgStructureCatalogue(
+  input: unknown,
+):
+  | { ok: true; data: OrgStructureCatalogue }
+  | {
+      ok: false;
+      code: typeof ORG_STRUCTURE_VALIDATION_ERROR_CODE;
+      error: string;
+    } {
+  const parsed = OrgStructureCatalogueSchema.safeParse(input);
+  if (!parsed.success) {
+    const summary = parsed.error.issues
+      .slice(0, 5)
+      .map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.join('.') : 'orgStructure';
+        return `${path}: ${issue.message}`;
+      })
+      .join('; ');
+    return {
+      ok: false,
+      code: ORG_STRUCTURE_VALIDATION_ERROR_CODE,
+      error: `${ORG_STRUCTURE_VALIDATION_ERROR_CODE}: ${summary || 'Invalid organisation structure.'}`,
+    };
+  }
+  return { ok: true, data: parsed.data };
+}
+
+/**
+ * Produces a deterministic, zero-PII structural summary for audit before/after entries (`R644`).
+ */
+export function formatOrgStructureAuditSummary(
+  cat: OrgStructureCatalogue,
+): string {
+  const sortById = <T extends { id: string }>(items: readonly T[]): T[] =>
+    [...items].sort((a, b) => a.id.localeCompare(b.id));
+  const entities = sortById(cat.legalEntities)
+    .map((e) => `${e.id}:${e.active ? '1' : '0'}`)
+    .join(',');
+  const divisions = sortById(cat.divisions)
+    .map((d) => `${d.id}->${d.parentLegalEntityId}:${d.active ? '1' : '0'}`)
+    .join(',');
+  const departments = sortById(cat.departments)
+    .map(
+      (d) =>
+        `${d.id}->${d.parentDivisionId}(pa=${(d.practiceAreaIds ?? []).length}):${d.active ? '1' : '0'}`,
+    )
+    .join(',');
+  const teams = sortById(cat.teamsOrPracticeGroups)
+    .map((t) => `${t.id}->${t.parentDepartmentId}:${t.active ? '1' : '0'}`)
+    .join(',');
+  const offices = sortById(cat.offices)
+    .map((o) => `${o.id}->${o.parentLegalEntityId}:${o.active ? '1' : '0'}`)
+    .join(',');
+  return [
+    `entities(${cat.legalEntities.length})=[${entities}]`,
+    `divisions(${cat.divisions.length})=[${divisions}]`,
+    `departments(${cat.departments.length})=[${departments}]`,
+    `teams(${cat.teamsOrPracticeGroups.length})=[${teams}]`,
+    `offices(${cat.offices.length})=[${offices}]`,
+    `costCentres=${cat.costCentres.length}`,
+    `profitCentres=${cat.profitCentres.length}`,
+    `externalPayrollOnly=${Boolean(cat.externalPayrollOnly)}`,
+    `defaultProbationMonths=${cat.defaultProbationMonths ?? 6}`,
+  ].join('; ');
+}
 
 export const DEFAULT_LEGAL_ENTITY_ID = 'LE-PRIMARY';
 
