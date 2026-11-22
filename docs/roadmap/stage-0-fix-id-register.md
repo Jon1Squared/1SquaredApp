@@ -1,11 +1,11 @@
-# Stage 0 fix-ID register (`R1`–`R654`)
+# Stage 0 fix-ID register (`R1`–`R658`)
 
 Maintained for Stage 0 exit review plan step 5 (`docs/roadmap/stage-0-plan.md`, `R653`, Owner Decision `D10`): *"Every R-ID raised (R1 to the latest) and every deferred follow-up must be closed with evidence or carried into Stage 1 by name."*
 
-Originally compiled on 21 November 2026 from `C:\1Squared\PlanReviews\*.md` / `*.txt` and `develop` (`8949aa5`), and completed on `docs/s0-shared-backlog-and-help` following Session 3 fixes (`fix/s0-shared-rates-and-org` with `D9 = (a)`, `fix/s0-shared-notifications-and-signoffs`, and `docs/s0-shared-backlog-and-help` with `D10 = accept`).
+Originally compiled on 21 November 2026 from `C:\1Squared\PlanReviews\*.md` / `*.txt` and `develop` (`8949aa5`), completed on `docs/s0-shared-backlog-and-help` following Session 3 fixes (`fix/s0-shared-rates-and-org` with `D9 = (a)`, `fix/s0-shared-notifications-and-signoffs`, and `docs/s0-shared-backlog-and-help` with `D10 = accept`), and updated on 22 November 2026 following Session 4 (`fix/s0-exit-live-journeys`, `R655`–`R658`).
 
 **Definitions of status used here**
-- **Closed (verified):** a later review file, Session 3 verification, or Stage 0 Session 3 PR records the fix as complete and tested on `develop` / the stacked Session 3 branch line.
+- **Closed (verified):** a later review file, Session 3/4 verification, or Stage 0 Session 3/4 branch records the fix as complete and tested on `develop` / `fix/s0-exit-live-journeys`.
 - **Closed (`D10` accepted):** Owner Decision `D10` (21 November 2026) accepts PR #1 (`c7ee9e7`), its `"resolve re-test N findings"` commits, and test citations as closure evidence for `R1`–`R189`, recording the nine untraceable IDs (`R26`, `R46`, `R64`–`R69`, `R72`) as `"closed by PR #1, definition not retained"`.
 - **Closed (merged, re-check not on file):** the fix commit or PR is on `develop`, with no subsequent Claude Code re-check note on file.
 - **Exception:** deferred, carried, or partly done follow-up. Every open exception and named follow-up is recorded in `docs/roadmap/feature-list.md` and/or `docs/roadmap/stage-0-plan.md` (`0` unrecorded items).
@@ -14,12 +14,12 @@ Originally compiled on 21 November 2026 from `C:\1Squared\PlanReviews\*.md` / `*
 
 | Measure | Count |
 |---|---|
-| R-IDs in `R1`–`R654` | 654 |
+| R-IDs in `R1`–`R658` | 658 |
 | Pre-folder IDs closed under Owner Decision `D10` (`R1`–`R189`) | 189 (115 in PR #1 commit messages, 65 cited in tests/comments, 9 untraceable: `"closed by PR #1, definition not retained"`) |
 | Numbering gaps (not defined / deliberately unused) | 3 (`R227`, `R501`, `R517`) |
-| Defined in the review sources (`R190`–`R654`, less `R227`, `R501`, `R517`) | 462 |
-| Severity of the 462 | Blocking 51 · Should fix 317 · Suggestion 91 · other 3 (R226 unlabelled Part C, R373 "pre-existing, high", R507 follow-up row) |
-| Closed (verified) | 409 (395 prior verified + `R312` verified in Session 3 + `R396` verified on `develop` + 12 Session 3 IDs `R643`–`R654`) |
+| Defined in the review sources (`R190`–`R658`, less `R227`, `R501`, `R517`) | 466 |
+| Severity of the 466 | Blocking 53 · Should fix 319 · Suggestion 91 · other 3 (R226 unlabelled Part C, R373 "pre-existing, high", R507 follow-up row) |
+| Closed (verified) | 413 (395 prior verified + `R312` verified in Session 3 + `R396` verified on `develop` + 12 Session 3 IDs `R643`–`R654` + 4 Session 4 IDs `R655`–`R658`) |
 | Closed (merged, re-check not on file) | 41 |
 | Exceptions (carried / deferred / follow-up) | 12 (`R206`, `R236`, `R371`, `R372`, `R397`, `R430`, `R572`, `R582`, `R583`, `R597`, `R598`, `R639`) |
 | … recorded in `docs/roadmap/feature-list.md` / `stage-0-plan.md` | 12 |
@@ -50,6 +50,7 @@ Severity counts come from the inline label (`· Blocking ·`, `(Should fix)`) or
 | Exit session 1 (`Stage0-exit-session1-safe.md`, `-fixes.md`, `-fixes-review.md`, `-fixes-round2.md`) | `R508`–`R574` (`R517` unused) | 66 | 9 / 34 / 23 / 0 | Fixes review + Round 2: `R508`–`R571`, `R573`–`R574` fixed (`Verdict: approved to merge`, PRs #58–#63); `R572` covered by a Help note with backfill deferred. | `R572` |
 | Exit session 2 (`Stage0-exit-session2-solid.md`, `-fixes.md`, `-fixes-round2.md`, `-round3.md`, `-round4.md`, AG reports, `-merge-report.md`) | `R575`–`R642` | 68 | 6 / 54 / 8 / 0 | Round 2 / 3 / 4 reviews list each item fixed (`Result 21 Nov: R635–R642 are fixed… Verdict: approved to merge`, PRs #64–#68 `2a5c801`…`8949aa5`). `R598` `ctx.jobPermissions` sub-item closed by `R637`. | `R582`, `R583`, `R597`, `R598`, `R639` |
 | Exit session 3 (`Stage0-exit-session3-shared.md`) | `R643`–`R654` | 12 | 0 / 11 / 1 / 0 | Fixed, fail-first + two-tenant PostgreSQL tested, documented, and audited across stacked branches `fix/s0-shared-rates-and-org` (`D9 = (a)`), `fix/s0-shared-notifications-and-signoffs`, and `docs/s0-shared-backlog-and-help` (`D10 = accept`). | — |
+| Exit session 4 (`Stage0-exit-session4-fixes.md`) | `R655`–`R658` | 4 | 2 / 2 / 0 / 0 | Fixed, fail-first unit/component/integration + two-tenant PostgreSQL + Playwright E2E + CI `--verify-extensions` tested and documented on branch `fix/s0-exit-live-journeys`. | — |
 
 ## Exceptions (`12` total, all recorded in backlog / stage plan)
 
@@ -117,7 +118,7 @@ Every R-ID that is carried, deferred, or partly done is listed below alongside i
 | `P5` Ideal Postcodes test key not rotated | Owner agreed exception (18 Nov 2026) | Agreed exception with standing conditions | `docs/roadmap/feature-list.md` `P5`; `docs/roadmap/stage-0-plan.md` §8 & §9 (18 Nov) |
 | Session 4 owner live checklist (`R484` directory role confirmation, action-group email check, **Load demo dataset** as admin, test enquiry team routing check) | Session 2 / Session 3 merge & deploy | Owner manual verification pending on live Azure demo | `docs/roadmap/stage-0-plan.md` §8 & Session 4 owner live checklist |
 
-## Appendix: per-ID index (`R190`–`R654`)
+## Appendix: per-ID index (`R190`–`R658`)
 
 Generated from the first definition of each ID. Titles are truncated; "Closed (PRs …)" means the round's approval section plus the listed merges (see the summary table). Severity is taken from the inline label or enclosing heading.
 
@@ -588,3 +589,7 @@ Generated from the first definition of each ID. Titles are truncated; "Closed (P
 | R652 | Should fix | Stage0-exit-session3-shared.md:155 | Reported · Backlog corrections (docs/roadmap/feature-list.md) | Closed (docs/s0-shared-backlog-and-help) |
 | R653 | Should fix | Stage0-exit-session3-shared.md:171 | Record the open fix-ID exceptions in the backlog by name & permanent register (D10) | Closed (docs/s0-shared-backlog-and-help) |
 | R654 | Suggestion | Stage0-exit-session3-shared.md:199 | clients-and-contacts Help article, B-row test citations, row 46, ADR 0032 §3 note & Stage 0 bug count | Closed (docs/s0-shared-backlog-and-help) |
+| R655 | Blocking | Stage0-exit-session4-fixes.md:45 | Extensions are missing from the runtime image, so no matter can be opened | Closed (fix/s0-exit-live-journeys) |
+| R656 | Blocking | Stage0-exit-session4-fixes.md:54 | An enquiry can't be saved or sent to a team on the demo | Closed (fix/s0-exit-live-journeys) |
+| R657 | Should fix | Stage0-exit-session4-fixes.md:68 | No end-to-end test creates an enquiry or opens a matter | Closed (fix/s0-exit-live-journeys) |
+| R658 | Should fix | Stage0-exit-session4-fixes.md:75 | Owner couldn't find where to create an undertaking (checklist 9.1) | Closed (fix/s0-exit-live-journeys) |
