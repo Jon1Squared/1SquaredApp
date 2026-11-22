@@ -4539,7 +4539,11 @@ export function MatterProfileClient({
             !matter.engagementLetterSentAt &&
             !matter.engagementLetterSignedAt
           ) {
-            await markEngagementLetterDraftedAction(matter.id);
+            try {
+              await markEngagementLetterDraftedAction(matter.id);
+            } catch {
+              // Server generateDocumentService already advances status when permitted; keep toast & refresh resilient.
+            }
           }
           showToast(`Generated ${doc.fileName}`);
           router.refresh();

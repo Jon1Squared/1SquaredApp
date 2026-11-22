@@ -14531,7 +14531,15 @@ export async function closeEnquiryRecord(
       closeReasonSystemKey !== 'no_response';
     if (shouldConsiderNonEngagementTask) {
       const taskRepo = getTaskWorkflowRepository();
-      const existingTasks = await taskRepo.listAllTasksUnfiltered<Task>(enqCtx);
+      const existingTasks = await taskRepo.listVisibleTasks<Task>(
+        enqCtx,
+        enqCtx.actorId,
+        {
+          linkedRecordType: 'enquiry',
+          linkedRecordId: enq.id,
+          includeRestricted: true,
+        },
+      );
       const alreadyHasOpenTask = existingTasks.some(
         (t) =>
           t.autoTrigger === 'non_engagement_letter' &&

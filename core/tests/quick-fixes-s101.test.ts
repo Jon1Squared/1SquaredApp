@@ -406,6 +406,24 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       engagementLetterSentAt: '2026-11-10T09:00:00.000Z',
       engagementLetterSignedAt: null,
     };
+    const sentToClientMatter: Matter = {
+      ...baseOpenMatter,
+      id: 'M-S101-SENT-CLIENT',
+      matterNumber: 'S101-9005',
+      title: 'S101 Sent to Client Engagement Matter',
+      engagementLetterStatus: 'Sent to client',
+      engagementLetterSentAt: '2026-11-10T09:00:00.000Z',
+      engagementLetterSignedAt: null,
+    };
+    const signedMatter: Matter = {
+      ...baseOpenMatter,
+      id: 'M-S101-SIGNED',
+      matterNumber: 'S101-9006',
+      title: 'S101 Signed Engagement Matter',
+      engagementLetterStatus: 'Signed',
+      engagementLetterSentAt: '2026-11-10T09:00:00.000Z',
+      engagementLetterSignedAt: '2026-11-12T09:30:00.000Z',
+    };
     const signedReturnedMatter: Matter = {
       ...baseOpenMatter,
       id: 'M-S101-SIGNED-RET',
@@ -419,6 +437,8 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       draftingMatter,
       blankLetterMatter,
       sentMatter,
+      sentToClientMatter,
+      signedMatter,
       signedReturnedMatter,
     ]) {
       await matterRepo.createMatter(nalfAdminCtx, m);
@@ -496,8 +516,13 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     );
     expect(blankAfterCorr?.engagementLetterStatus).toBe('');
 
-    // Non-regression guard ('Sent' and 'Signed & returned')
-    for (const protectedId of [sentMatter.id, signedReturnedMatter.id]) {
+    // Non-regression guard ('Sent', 'Sent to client', 'Signed', and 'Signed & returned')
+    for (const protectedId of [
+      sentMatter.id,
+      sentToClientMatter.id,
+      signedMatter.id,
+      signedReturnedMatter.id,
+    ]) {
       const before = (await matterRepo.getMatterById<Matter>(
         nalfAdminCtx,
         protectedId,
@@ -534,12 +559,32 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       );
     }
 
-    // Permission check: finance user without matter:edit cannot mark drafted
+    // Permission check: finance user without matter:edit cannot mark drafted directly or via docgen
     const noEditRes = await wrapActor(financeSession, () =>
       markEngagementLetterDrafted(blankLetterMatter.id, financeOnly.id),
     );
     expect(noEditRes.matter).toBeNull();
     expect(noEditRes.errors?.permission).toMatch(/matter:edit/i);
+
+    const financeDocGen = await wrapActor(financeSession, () =>
+      generateDocumentService(
+        {
+          templateId: 'TPL-SEED-CCL',
+          sourceEntityType: 'matter',
+          matterId: blankLetterMatter.id,
+          outputFormat: 'docx',
+        },
+        financeOnly.id,
+        financeSession,
+      ),
+    );
+    expect(financeDocGen.status).toBe('generated');
+    const afterFinanceDocGen = await matterRepo.getMatterById<Matter>(
+      nalfAdminCtx,
+      blankLetterMatter.id,
+      { viewerUserId: partner.id, hasRestrictedMatterAccess: true },
+    );
+    expect(afterFinanceDocGen?.engagementLetterStatus).toBe('');
 
     // Cross-tenant isolation + tampered matterId + forged TenantContext claim
     await matterRepo.clearTenantData(bravoCtx, { resetMatterNumberSequences: true });
