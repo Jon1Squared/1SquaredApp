@@ -8222,7 +8222,15 @@ export async function markEngagementLetterDrafted(
       },
     };
   }
-  if (existing.engagementLetterStatus === 'Signed') {
+  if (
+    existing.engagementLetterStatus === 'Drafted' ||
+    existing.engagementLetterStatus === 'Sent' ||
+    existing.engagementLetterStatus === 'Sent to client' ||
+    existing.engagementLetterStatus === 'Signed' ||
+    existing.engagementLetterStatus === 'Signed & returned' ||
+    Boolean(existing.engagementLetterSentAt) ||
+    Boolean(existing.engagementLetterSignedAt)
+  ) {
     return { matter: existing };
   }
   const prevStatus = existing.engagementLetterStatus;
@@ -13883,6 +13891,8 @@ export async function saveEnquiryRecord(
           }),
       );
       if (adminRecipients.length > 0) {
+        const unroutedWarningRecordId =
+          'system:enquiry_unrouted_no_fallback_team';
         const unroutedWarningTitle =
           'Admin warning: enquiry saved without a fallback intake team';
         const effectiveTimeZone =
@@ -13902,7 +13912,7 @@ export async function saveEnquiryRecord(
             existingNotifications
               .filter(
                 (n) =>
-                  n.title === unroutedWarningTitle &&
+                  n.recordId === unroutedWarningRecordId &&
                   resolveTenantLocalDateAndHour(
                     new Date(n.createdAt),
                     effectiveTimeZone,
@@ -13921,7 +13931,7 @@ export async function saveEnquiryRecord(
               detail:
                 'No active team matched the enquiry practice area and no active fallback intake team is configured. Set a fallback team in Admin → Enquiry settings.',
               href: '/admin/enquiry-settings',
-              recordId: enquiry.id,
+              recordId: unroutedWarningRecordId,
               preloaded: enquiryPreloadedCtx,
               byId: opts.byId,
               at: now,
@@ -14365,7 +14375,10 @@ export async function closeEnquiryRecord(
     referredToName?: string;
   },
   byId: string,
-): Promise<{ enquiry?: Enquiry; error?: string } & Partial<ActionDenied>> {
+): Promise<
+  { enquiry?: Enquiry; nonEngagementTask?: Task | null; error?: string } &
+    Partial<ActionDenied>
+> {
   return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
@@ -14419,6 +14432,7 @@ export async function closeEnquiryRecord(
 
   const now = new Date().toISOString();
   const prevStatus = enq.status;
+  const priorAssignedToId = enq.assignedToId;
   enq.status = input.targetStatus;
   enq.closeReasonId =
     input.closeReasonId ||
@@ -14443,6 +14457,7 @@ export async function closeEnquiryRecord(
   enq.updatedById = byId;
 
   const reasonLabel = resolveLabel(store.values, enq.closeReasonId) || input.targetStatus;
+  let nonEngagementTask: Task | null = null;
   await intakeRepo.withTenantTransaction(enqCtx, async (tx) => {
     writeAudit(store, {
       recordType: 'enquiry',
@@ -14490,6 +14505,10 @@ export async function closeEnquiryRecord(
             'DELETE FROM person_organisation_links WHERE tenant_id = $1 AND person_id = $2',
             [enqCtx.tenantId, linkedId],
           );
+          await tx.query(
+            'DELETE FROM public.person_emails WHERE tenant_id = $1 AND person_id = $2',
+            [enqCtx.tenantId, linkedId],
+          );
           await tx.query('DELETE FROM people WHERE tenant_id = $1 AND id = $2', [
             enqCtx.tenantId,
             linkedId,
@@ -14500,9 +14519,102 @@ export async function closeEnquiryRecord(
     }
 
     await intakeRepo.putEnquiry(enqCtx, enq);
+
+    // Raise `non_engagement_letter` automatic task after orphan person cleanup so dead person IDs
+    // are never linked, skipping drafts, No response, went_elsewhere, and duplicate open tasks.
+    const closeReasonSystemKey =
+      store.values.find((v) => v.id === enq.closeReasonId)?.systemKey ?? null;
+    const shouldConsiderNonEngagementTask =
+      prevStatus !== 'Draft' &&
+      input.targetStatus !== 'No response' &&
+      closeReasonSystemKey !== 'went_elsewhere' &&
+      closeReasonSystemKey !== 'no_response';
+    if (shouldConsiderNonEngagementTask) {
+      const taskRepo = getTaskWorkflowRepository();
+      const existingTasks = await taskRepo.listAllTasksUnfiltered<Task>(enqCtx);
+      const alreadyHasOpenTask = existingTasks.some(
+        (t) =>
+          t.autoTrigger === 'non_engagement_letter' &&
+          t.status !== 'Done' &&
+          t.status !== 'Cancelled' &&
+          t.linkedRecords.some(
+            (lr) => lr.recordType === 'enquiry' && lr.recordId === enq.id,
+          ),
+      );
+      if (!alreadyHasOpenTask) {
+        const tpl = store.taskSettings.templates.find(
+          (t) => t.trigger === 'non_engagement_letter',
+        );
+        const offsetDays = tpl?.dueWorkingDaysOffset ?? 2;
+        const dueDate = toIsoDate(
+          addWorkingDays(
+            new Date(now),
+            offsetDays,
+            workingHoursConfigFromStore(store),
+          ),
+        );
+        const activeAssignee = priorAssignedToId
+          ? people.find(
+              (p) =>
+                p.id === priorAssignedToId &&
+                p.isEmployee &&
+                !p.demo &&
+                !p.mergedIntoId &&
+                p.employment?.status !== 'Leaver',
+            ) ??
+            people.find(
+              (p) =>
+                p.id === priorAssignedToId &&
+                p.isEmployee &&
+                !p.mergedIntoId &&
+                p.employment?.status !== 'Leaver',
+            ) ??
+            null
+          : null;
+        const assignedPersonId = activeAssignee?.id ?? byId;
+        const linkedRecords: TaskLinkedRecord[] = [
+          { recordType: 'enquiry', recordId: enq.id },
+        ];
+        if (enq.linkedPersonId) {
+          linkedRecords.push({
+            recordType: 'person',
+            recordId: enq.linkedPersonId,
+          });
+        }
+        if (enq.linkedOrganisationId) {
+          linkedRecords.push({
+            recordType: 'organisation',
+            recordId: enq.linkedOrganisationId,
+          });
+        }
+        const enquiryDisplayName =
+          `${enq.firstName} ${enq.lastName}`.trim() ||
+          enq.callingOnBehalfOf ||
+          enq.reference;
+        nonEngagementTask = await raiseAutomaticTask(
+          enqCtx,
+          store as FirmStore,
+          'non_engagement_letter',
+          { name: enquiryDisplayName },
+          {
+            dueAt: dueDate,
+            assignedTeamId: enq.assignedTeamId ?? null,
+            assignedPersonId,
+            linkedRecords,
+            description: `Send a non-engagement letter confirming ${enq.reference} was closed as ${input.targetStatus} (${reasonLabel}).`,
+            byId,
+            now,
+          },
+        );
+      }
+    }
+
     await flushStagedAuditEntries(enqCtx);
   });
-  return { enquiry: enq };
+  if (nonEngagementTask) {
+    await drainNotificationOutboxesBestEffort(enqCtx, undefined, byId);
+  }
+  return { enquiry: enq, nonEngagementTask };
   });
 }
 

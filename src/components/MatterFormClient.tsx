@@ -11819,7 +11819,10 @@ export function MatterFormClient({
                       >
                         <option value="">Unknown value</option>
                         <option value="Drafting">Drafting</option>
+                        <option value="Drafted">Drafted</option>
+                        <option value="Sent">Sent</option>
                         <option value="Sent to client">Sent to client</option>
+                        <option value="Signed">Signed</option>
                         <option value="Signed & returned">Signed &amp; returned</option>
                       </select>
                     </div>

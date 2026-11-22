@@ -911,7 +911,7 @@ export function buildFieldResolutionContextForRecord(params: {
       hourlyRate:
         costsSnapshot?.associateRateGbp ??
         feeEarnerPerson?.employment?.feeEarner?.chargeOutRateGbp ??
-        285,
+        0,
       wipBalance:
         (matter.fieldValues?.['wipBalanceGbp'] as number | undefined) ?? 0,
       unbilledDisbursements: costsSnapshot?.disbursementsTotalGbp ?? 0,
@@ -929,7 +929,7 @@ export function buildFieldResolutionContextForRecord(params: {
         (matter.fieldValues?.['officeAccountBalanceGbp'] as
           | number
           | undefined) ?? 0,
-      retainerAmount: costsSnapshot?.paymentOnAccountAmountGbp ?? 1500,
+      retainerAmount: costsSnapshot?.paymentOnAccountAmountGbp ?? 0,
     };
   }
 

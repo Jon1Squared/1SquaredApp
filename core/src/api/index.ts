@@ -648,6 +648,8 @@ export interface DocumentStorageProvider {
   ): Promise<MalwareScanStatus>;
 }
 
+export const CLIENT_CARE_DOCUMENT_TYPE = 'client_care' as const;
+
 export type TemplateStatus =
   | 'Draft'
   | 'Submitted'

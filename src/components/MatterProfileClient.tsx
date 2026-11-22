@@ -3,6 +3,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { CLIENT_CARE_DOCUMENT_TYPE } from '@platform/core-api';
 import {
   AlertCircle,
   Calendar,
@@ -245,7 +246,9 @@ export function resolveMatterIntakeComplianceRows(
     : matter.amlStatus || 'Not recorded';
 
   const engagementSigned =
-    Boolean(matter.engagementLetterSignedAt) || matter.engagementLetterStatus === 'Signed';
+    Boolean(matter.engagementLetterSignedAt) ||
+    matter.engagementLetterStatus === 'Signed' ||
+    matter.engagementLetterStatus === 'Signed & returned';
   const engagementLabel = engagementSigned ? 'Engagement letter signed' : 'Engagement letter';
   const engagementDetail = matter.engagementLetterSignedAt
     ? formatShortDayMonth(matter.engagementLetterSignedAt)
@@ -4525,12 +4528,18 @@ export function MatterProfileClient({
         organisations={organisations}
         values={values}
         currentUserId={currentUserId}
-        onDocumentGenerated={(doc) => {
+        onDocumentGenerated={async (doc) => {
           if (
-            doc.documentType === 'Client Care Letter' &&
-            matter.engagementLetterStatus !== 'Signed'
+            doc.documentType === CLIENT_CARE_DOCUMENT_TYPE &&
+            matter.engagementLetterStatus !== 'Drafted' &&
+            matter.engagementLetterStatus !== 'Sent' &&
+            matter.engagementLetterStatus !== 'Sent to client' &&
+            matter.engagementLetterStatus !== 'Signed' &&
+            matter.engagementLetterStatus !== 'Signed & returned' &&
+            !matter.engagementLetterSentAt &&
+            !matter.engagementLetterSignedAt
           ) {
-            void markEngagementLetterDraftedAction(matter.id);
+            await markEngagementLetterDraftedAction(matter.id);
           }
           showToast(`Generated ${doc.fileName}`);
           router.refresh();

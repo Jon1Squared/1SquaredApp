@@ -3927,13 +3927,38 @@ describe('External Document Store Integration (Sections 1–14)', () => {
             .length,
         ).toBe(matterCountBeforeMissingId);
 
-        // R138 (b): markEngagementLetterDrafted updates only engagementLetterStatus: 'Drafted' on the existing matter
-        const draftedRes = await runAsStoreEmployee('P-000001', async () =>
+        // R138 (b) & B2: markEngagementLetterDrafted does not regress a Signed/Sent matter and advances an eligible open matter to 'Drafted'
+        const protectedRes = await runAsStoreEmployee('P-000001', async () =>
           markEngagementLetterDrafted(openMatter.id, 'P-000001'),
         );
-        expect(draftedRes.errors).toBeUndefined();
-        expect(draftedRes.matter?.id).toBe(openMatter.id);
-        expect(draftedRes.matter?.engagementLetterStatus).toBe('Drafted');
+        expect(protectedRes.errors).toBeUndefined();
+        expect(protectedRes.matter?.id).toBe(openMatter.id);
+        expect(protectedRes.matter?.engagementLetterStatus).toBe(
+          openMatter.engagementLetterStatus,
+        );
+
+        const draftableMatterId = 'M-R138B-DRAFT';
+        await getMatterRepository().createMatter(testTenantCtx('P-000001'), {
+          ...openMatter,
+          id: draftableMatterId,
+          matterNumber: 'R138B-001',
+          engagementLetterStatus: 'Drafting',
+          engagementLetterSentAt: null,
+          engagementLetterSignedAt: null,
+        });
+        try {
+          const draftedRes = await runAsStoreEmployee('P-000001', async () =>
+            markEngagementLetterDrafted(draftableMatterId, 'P-000001'),
+          );
+          expect(draftedRes.errors).toBeUndefined();
+          expect(draftedRes.matter?.id).toBe(draftableMatterId);
+          expect(draftedRes.matter?.engagementLetterStatus).toBe('Drafted');
+        } finally {
+          await getMatterRepository().deleteMatterById(
+            testTenantCtx('P-000001'),
+            draftableMatterId,
+          );
+        }
 
         // R134: Editing title on an existing matter whose owningDepartmentId/owningTeamId was archived succeeds; changing to an archived department/team fails
         const targetDept = store.orgStructure!.departments.find(
@@ -3961,7 +3986,7 @@ describe('External Document Store Integration (Sections 1–14)', () => {
           const legacyDeptTitleSave = await runAsStoreEmployee('P-000001', async () =>
             saveMatterRecord(
               {
-                ...draftedRes.matter!,
+                ...protectedRes.matter!,
                 title: `${openMatter.title} (Updated on Legacy Archived Dept)`,
               },
               { id: openMatter.id, byId: 'P-000001' },

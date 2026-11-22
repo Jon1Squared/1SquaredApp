@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { CLIENT_CARE_DOCUMENT_TYPE } from '@platform/core-api';
 import {
   AlertTriangle,
   BarChart3,
@@ -902,7 +903,7 @@ export function DocumentTemplatesAdminPanel({
                   onChange={(e) => setNewOutputDocType(e.target.value)}
                 >
                   <option value="letter">Letter</option>
-                  <option value="client_care">Client Care Letter</option>
+                  <option value={CLIENT_CARE_DOCUMENT_TYPE}>Client Care Letter</option>
                   <option value="attendance_note">Attendance Note</option>
                   <option value="court_form">Court / Tribunal Form</option>
                   <option value="agreement">Agreement / Contract</option>

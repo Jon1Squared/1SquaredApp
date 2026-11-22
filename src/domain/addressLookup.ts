@@ -67,12 +67,14 @@ export async function searchAddressSuggestions(
     return { suggestions: cached };
   }
 
-  const url = `/api/address-lookup?q=${encodeURIComponent(trimmed)}`;
-
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
+    const res = await fetch('/api/address-lookup', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ q: trimmed }),
       signal,
     });
 
@@ -141,12 +143,14 @@ export async function resolveAddressSuggestion(
     return { address: sessionCached };
   }
 
-  const url = `/api/address-lookup?id=${encodeURIComponent(trimmedId)}`;
-
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
+    const res = await fetch('/api/address-lookup', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ id: trimmedId }),
     });
 
     const data = await res.json().catch(() => null);

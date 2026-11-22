@@ -11,7 +11,11 @@ import {
   savePersonAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
-import { resolveAddressSuggestion, searchAddressSuggestions } from '@/domain/addressLookup';
+import {
+  resolveAddressSuggestion,
+  searchAddressSuggestions,
+  type AddressSuggestion,
+} from '@/domain/addressLookup';
 import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
 import {
   buildSensitiveSubmissionPayload,
@@ -309,6 +313,16 @@ export function PersonFormClient({
         ],
   );
   const [addressModalOpen, setAddressModalOpen] = useState(false);
+  const [modalAddressSuggestions, setModalAddressSuggestions] = useState<
+    AddressSuggestion[]
+  >([]);
+  const [modalAddressSearching, setModalAddressSearching] = useState(false);
+  const [modalAddressError, setModalAddressError] = useState<string | null>(
+    null,
+  );
+  const [modalResolvingAddressId, setModalResolvingAddressId] = useState<
+    string | null
+  >(null);
 
   const primaryAddr: Address = addresses[0] ?? {
     id: 'addr-primary',
@@ -1188,59 +1202,50 @@ export function PersonFormClient({
     setAddressModalOpen(true);
     const clean = (primaryAddr.postcode ?? '').replace(/\s+/g, '').toUpperCase();
     if (!clean) {
+      setModalAddressSuggestions([]);
+      setModalAddressError(null);
       return;
     }
-    for (const p of allPeople) {
-      const addr = p.addresses.find(
-        (a) => (a.postcode ?? '').replace(/\s+/g, '').toUpperCase() === clean,
-      );
-      if (addr) {
-        updatePrimaryAddress({
-          line1: addr.line1,
-          line2: addr.line2,
-          town: addr.town,
-          county: addr.county,
-          postcode: addr.postcode,
-          ...(addr.countryId ? { countryId: addr.countryId } : {}),
-        });
-        showToast(`Filled address for ${addr.postcode}`);
-        return;
-      }
-    }
-    for (const o of organisations) {
-      const addr = o.registeredAddress;
-      if (addr && (addr.postcode ?? '').replace(/\s+/g, '').toUpperCase() === clean) {
-        updatePrimaryAddress({
-          line1: addr.line1,
-          line2: addr.line2,
-          town: addr.town,
-          county: addr.county,
-          postcode: addr.postcode,
-          ...(addr.countryId ? { countryId: addr.countryId } : {}),
-        });
-        showToast(`Filled address for ${addr.postcode}`);
-        return;
-      }
-    }
+    setModalAddressSearching(true);
+    setModalAddressError(null);
     const lookup = await searchAddressSuggestions(clean);
+    setModalAddressSearching(false);
     if (lookup.error) {
+      setModalAddressSuggestions([]);
+      setModalAddressError(lookup.error);
       showToast(`${lookup.error} — enter address manually`);
       return;
     }
-    const suggestion = lookup.suggestions[0];
-    const resolved = suggestion ? await resolveAddressSuggestion(suggestion.id) : null;
-    if (resolved?.address) {
-      updatePrimaryAddress({
-        line1: resolved.address.line1,
-        line2: resolved.address.line2,
-        town: resolved.address.town,
-        county: resolved.address.county,
-        postcode: resolved.address.postcode,
-      });
-      showToast(`Filled address for ${resolved.address.postcode}`);
+    setModalAddressSuggestions(lookup.suggestions);
+    if (lookup.suggestions.length === 0) {
+      showToast(
+        `No address found for ${primaryAddr.postcode.toUpperCase()} — enter address manually`,
+      );
+    }
+  };
+
+  const handleSelectModalAddressSuggestion = async (
+    item: AddressSuggestion,
+  ) => {
+    setModalResolvingAddressId(item.id);
+    setModalAddressError(null);
+    const resolved = await resolveAddressSuggestion(item.id);
+    setModalResolvingAddressId(null);
+    if (resolved.error || !resolved.address) {
+      const msg = resolved.error ?? 'Unable to resolve selected address.';
+      setModalAddressError(msg);
+      showToast(`${msg} — enter address manually`);
       return;
     }
-    showToast(`No address found for ${primaryAddr.postcode.toUpperCase()} — enter address manually`);
+    updatePrimaryAddress({
+      line1: resolved.address.line1,
+      line2: resolved.address.line2,
+      town: resolved.address.town,
+      county: resolved.address.county,
+      postcode: resolved.address.postcode,
+    });
+    setModalAddressSuggestions([]);
+    showToast(`Filled address for ${resolved.address.postcode}`);
   };
 
   const submitPerson = (forceFlagDuplicate = false) => {
@@ -5338,12 +5343,80 @@ export function PersonFormClient({
                         showToast('Enter a postcode first (e.g. CF10 1AA).');
                         return;
                       }
-                      handleFindAddress();
+                      void handleFindAddress();
                     }}
                   >
                     Find address
                   </button>
                 </div>
+                {modalAddressSearching ||
+                modalAddressError ||
+                modalAddressSuggestions.length > 0 ? (
+                  <div
+                    role="listbox"
+                    aria-label="Matching UK addresses"
+                    style={{
+                      marginTop: 6,
+                      maxHeight: 200,
+                      overflowY: 'auto',
+                      border: '1px solid var(--border-subtle, #d1d5db)',
+                      borderRadius: 8,
+                      background: 'var(--surface-card, #ffffff)',
+                    }}
+                  >
+                    {modalAddressError ? (
+                      <div
+                        className="field-error"
+                        style={{ padding: '8px 12px', fontSize: 12.5 }}
+                      >
+                        {modalAddressError}
+                      </div>
+                    ) : modalAddressSuggestions.length === 0 ? (
+                      <div
+                        className="muted"
+                        style={{ padding: '8px 12px', fontSize: 12.5 }}
+                      >
+                        Searching Ideal Postcodes…
+                      </div>
+                    ) : (
+                      modalAddressSuggestions.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          role="option"
+                          aria-selected={false}
+                          disabled={Boolean(modalResolvingAddressId)}
+                          onClick={() =>
+                            void handleSelectModalAddressSuggestion(item)
+                          }
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            width: '100%',
+                            textAlign: 'left',
+                            padding: '8px 10px',
+                            border: 'none',
+                            borderBottom:
+                              '1px solid var(--border-subtle, #e5e7eb)',
+                            background: 'transparent',
+                            cursor: modalResolvingAddressId
+                              ? 'progress'
+                              : 'pointer',
+                            fontSize: 13,
+                          }}
+                        >
+                          <span>{item.suggestion}</span>
+                          {modalResolvingAddressId === item.id ? (
+                            <span className="muted" style={{ fontSize: 11.5 }}>
+                              Selecting…
+                            </span>
+                          ) : null}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                ) : null}
               </div>
 
               <div className="field-group">
