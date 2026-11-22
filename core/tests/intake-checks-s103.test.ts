@@ -366,7 +366,13 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         verificationMethod: 'Tampered cross-tenant blob',
         evidenceRefs: [evidRefBravo],
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/STORAGE_TENANCY_ISOLATION_ERROR/);
+    expect(
+      await providers.idVerification.getLatestCheckForSubject(ctxAlpha, {
+        subjectType: 'person',
+        subjectId: 'P-C-002',
+      }),
+    ).toBeNull();
 
     await expect(
       providers.idVerification.recordManualCheck(ctxAlpha, {
@@ -466,6 +472,135 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         subjectId: 'M-INVALID-OUTCOME-REPO',
       }),
     ).toBeNull();
+
+    // R667: Forged TenantContext claims, mismatched blob container / database / role, and tampered tokens fail closed with zero rows written
+    const forgedEmptyTenantCtx = Object.freeze({
+      ...ctxAlpha,
+      tenantId: '',
+    }) as unknown as TenantContext;
+    await expect(
+      repo.recordCheck(forgedEmptyTenantCtx, {
+        checkKind: 'identity_verification',
+        provider: 'manual',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-EMPTY',
+        outcome: 'verified',
+        metadata: {},
+        evidenceRefs: [],
+      }),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+
+    const forgedBlobContainerCtx: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      blobContainerName: ctxBravo.blobContainerName,
+    });
+    await expect(
+      providers.idVerification.recordManualCheck(forgedBlobContainerCtx, {
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-BLOB',
+        outcome: 'verified',
+        verificationMethod: 'Forged blob container check',
+        evidenceRefs: [evidRefBravo],
+      }),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    expect(
+      await providers.idVerification.getLatestCheckForSubject(ctxAlpha, {
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-BLOB',
+      }),
+    ).toBeNull();
+    expect(
+      await providers.idVerification.getLatestCheckForSubject(ctxBravo, {
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-BLOB',
+      }),
+    ).toBeNull();
+
+    const forgedDbCtx: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      postgresDatabaseName: ctxBravo.postgresDatabaseName,
+    });
+    await expect(
+      repo.recordCheck(forgedDbCtx, {
+        checkKind: 'identity_verification',
+        provider: 'manual',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-DB',
+        outcome: 'verified',
+        metadata: {},
+        evidenceRefs: [],
+      }),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    expect(
+      await repo.getLatestCheckForSubject(ctxAlpha, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-DB',
+      }),
+    ).toBeNull();
+    expect(
+      await repo.getLatestCheckForSubject(ctxBravo, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-DB',
+      }),
+    ).toBeNull();
+
+    const forgedRoleCtx: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      tenantId: ctxBravo.tenantId,
+    });
+    await expect(
+      repo.recordCheck(forgedRoleCtx, {
+        checkKind: 'identity_verification',
+        provider: 'manual',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ROLE',
+        outcome: 'verified',
+        metadata: {},
+        evidenceRefs: [],
+      }),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    expect(
+      await repo.getLatestCheckForSubject(ctxAlpha, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ROLE',
+      }),
+    ).toBeNull();
+    expect(
+      await repo.getLatestCheckForSubject(ctxBravo, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ROLE',
+      }),
+    ).toBeNull();
+
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-ALPHA-1',
+          tenantId: ctxAlpha.tenantId,
+          name: 'Alpha User',
+          email: 'alpha@tenant-alpha.example',
+          roles: ['admin'],
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-forged-override',
+        untrustedRequestTenantOverride: ctxBravo.tenantId,
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    const alphaEvidenceToken = await storage.issueScopedDownloadToken(ctxAlpha, {
+      blobKey: evidRefAlpha.blobKey,
+      fileName: 'Celyn-Pritchard-Passport-Private.pdf',
+    });
+    await expect(
+      storage.verifyScopedDownloadToken(ctxBravo, alphaEvidenceToken.token),
+    ).rejects.toThrow(/STORAGE_TOKEN_FORGERY/);
 
     // Unknown runtime provider fails closed
     expect(() =>
@@ -600,6 +735,53 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       { outboxId: enqFirst.record.id, claimToken: 'wrong-claim-token' },
     );
     expect(wrongClaimBytes).toEqual([]);
+
+    // R667: Forged TenantContext claims on getClaimedOutboxAttachmentBytes & enqueueEmail fail closed with zero rows written
+    const outboxForgedEmpty = Object.freeze({
+      ...ctxAlpha,
+      tenantId: '',
+    }) as unknown as TenantContext;
+    await expect(
+      outboxRepo.getClaimedOutboxAttachmentBytes(outboxForgedEmpty, {
+        outboxId: enqFirst.record.id,
+        claimToken: 'claim-token-alpha-check',
+      }),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+
+    const outboxForgedDb: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      postgresDatabaseName: ctxBravo.postgresDatabaseName,
+    });
+    await expect(
+      outboxRepo.getClaimedOutboxAttachmentBytes(outboxForgedDb, {
+        outboxId: enqFirst.record.id,
+        claimToken: 'claim-token-alpha-check',
+      }),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      outboxRepo.enqueueEmail(outboxForgedDb, {
+        idempotencyKey: 's103-forged-db-1',
+        templateKey: 'quote_send',
+        recipients: { to: ['client@invented.example'] },
+        subject: 'Forged DB',
+        htmlBody: '<p>Forged</p>',
+        textBody: 'Forged',
+        attachments: [inlineAttachment],
+      }),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    expect(await outboxRepo.listOutboxRecords(ctxBravo)).toHaveLength(0);
+
+    const outboxForgedRole: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      tenantId: ctxBravo.tenantId,
+    });
+    await expect(
+      outboxRepo.getClaimedOutboxAttachmentBytes(outboxForgedRole, {
+        outboxId: enqFirst.record.id,
+        claimToken: 'claim-token-alpha-check',
+      }),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+
     // Release back to pending so drain test exercises full claim -> send flow
     await outboxRepo.markOutboxAttemptFailed(ctxAlpha, {
       id: enqFirst.record.id,

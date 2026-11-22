@@ -45,6 +45,12 @@ function ensureValidTenantContext(ctx: TenantContext): void {
       'STORAGE_TENANCY_ERROR: Storage operations require a valid TenantContext.',
     );
   }
+  const expectedPrefix = `tenant-${ctx.tenantId}-`;
+  if (!ctx.blobContainerName.startsWith(expectedPrefix)) {
+    throw new Error(
+      `TENANCY_ISOLATION_ERROR: Storage container "${ctx.blobContainerName}" does not belong to tenant "${ctx.tenantId}".`,
+    );
+  }
 }
 
 function sanitizeFileName(fileName: string): string {
