@@ -26,8 +26,10 @@ import {
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import {
   generateDocumentService,
+  getDocumentRepository,
   getInitializedDocGenContext,
 } from '@/server/documentGenerationServices';
+import { readAndValidateDocxZip } from '../src/domain/document-generation/docxEngine';
 import {
   closeEnquiryRecord,
   markEngagementLetterDrafted,
@@ -112,7 +114,7 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     vi.restoreAllMocks();
   });
 
-  it('SG-4: buildFieldResolutionContextForRecord removes hardcoded 285/1500 fallbacks when rate/costs are absent', () => {
+  it('SG-4 / R661: buildFieldResolutionContextForRecord leaves unset financial fields undefined instead of £0.00/285/1500 fallbacks', () => {
     const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => !m.isStaffMatter && !m.hasEthicalWall)!;
     const matterNoSnapshot: Matter = {
@@ -137,8 +139,134 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
 
     const financial = ctx.financial as Record<string, unknown> | null;
     expect(financial).not.toBeNull();
-    expect(financial?.hourlyRate).toBe(0);
-    expect(financial?.retainerAmount).toBe(0);
+    expect(financial?.feeEstimate).toBeUndefined();
+    expect(financial?.agreedFeeCap).toBeUndefined();
+    expect(financial?.hourlyRate).toBeUndefined();
+    expect(financial?.wipBalance).toBeUndefined();
+    expect(financial?.unbilledDisbursements).toBeUndefined();
+    expect(financial?.billedTotal).toBeUndefined();
+    expect(financial?.unpaidInvoiceBalance).toBeUndefined();
+    expect(financial?.clientAccountBalance).toBeUndefined();
+    expect(financial?.officeAccountBalance).toBeUndefined();
+    expect(financial?.retainerAmount).toBeUndefined();
+
+    // Explicit zero still formats as 0 when intentionally set
+    const explicitZeroMatter: Matter = {
+      ...matterNoSnapshot,
+      fieldValues: {
+        matterCostsSnapshot: { paymentOnAccountAmountGbp: 0 },
+      },
+    };
+    const zeroCtx = buildFieldResolutionContextForRecord({
+      tenantId: 'not-a-law-firm',
+      matter: explicitZeroMatter,
+      people: [feeEarnerNoRate],
+      organisations: store.organisations,
+      values: store.values,
+      currentUser: feeEarnerNoRate,
+    });
+    expect(zeroCtx.financial?.retainerAmount).toBe(0);
+  });
+
+  it('R661: matter with no payment on account cannot produce a Client Care Letter showing £0.00 and blocks when required', async () => {
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId: 'not-a-law-firm', environment: 'test' }],
+    });
+    const nalfCtx = makeServiceCtx('not-a-law-firm', 'P-000001');
+    await new TenantMigrationRunner().applyUp(nalfCtx);
+    await resetAllDemoData('P-000001', testDataResetContext());
+    const baseCfg = getActiveTenantConfiguration();
+    setActiveTenantConfigForTesting({
+      ...baseCfg,
+      featureFlags: { ...baseCfg.featureFlags, enableDemoMode: true },
+    });
+
+    const partyRepo = getPartyRepository();
+    const matterRepo = getMatterRepository();
+    const docRepo = getDocumentRepository();
+    const seededPeople = await partyRepo.listAllPeople<Person>(nalfCtx);
+    const seedStore = loadCommittedSeedStore();
+    const baseMatter = seedStore.matters.find((m) => !m.isStaffMatter && !m.hasEthicalWall)!;
+    const partner = seededPeople.find((p) => p.id === 'P-000001')!;
+    const partnerSession = makeSession(
+      partner.id,
+      'not-a-law-firm',
+      partner.roles ?? ['partner'],
+      'partner@notalawfirm.example',
+      'Test Partner',
+    );
+
+    const matterNoRetainer: Matter = {
+      ...baseMatter,
+      id: 'M-R661-NO-POA',
+      matterNumber: 'R661-0001',
+      title: 'R661 Missing Payment On Account Matter',
+      feeEstimateGbp: null,
+      agreedFeeCapGbp: null,
+      retainerMoniesOnAccountGbp: null,
+      fieldValues: {},
+      engagementLetterStatus: 'Drafting',
+    };
+    await matterRepo.createMatter(nalfCtx, matterNoRetainer);
+
+    await wrapActor(partnerSession, () =>
+      getInitializedDocGenContext(partner.id, partnerSession),
+    );
+
+    const genBlank = await wrapActor(partnerSession, () =>
+      generateDocumentService(
+        {
+          templateId: 'TPL-SEED-CCL',
+          sourceEntityType: 'matter',
+          matterId: matterNoRetainer.id,
+          outputFormat: 'docx',
+        },
+        partner.id,
+        partnerSession,
+      ),
+    );
+    expect(genBlank.status).toBe('generated');
+    const docxZip = readAndValidateDocxZip(
+      new Uint8Array(Buffer.from(genBlank.fileBase64!, 'base64')),
+      10,
+    );
+    const docXml = new TextDecoder('utf-8').decode(docxZip.get('word/document.xml')!.data);
+    expect(docXml).not.toContain('£0.00');
+    expect(docXml.toLowerCase()).not.toContain('zero pounds');
+
+    // When financial.retainerAmount is required, generation fails closed with blocked_missing_required
+    const tplVer = (await docRepo.getTemplateVersionById(nalfCtx, 'TPL-SEED-CCL-V1'))!;
+    try {
+      await docRepo.putTemplateVersion(nalfCtx, {
+        ...tplVer,
+        fieldMappings: {
+          ...tplVer.fieldMappings,
+          'financial.retainerAmount': {
+            ...tplVer.fieldMappings['financial.retainerAmount'],
+            placeholder: 'financial.retainerAmount',
+            sourceType: 'catalogue',
+            catalogueKey: 'financial.retainerAmount',
+            required: true,
+          },
+        },
+      });
+      const blocked = await wrapActor(partnerSession, () =>
+        generateDocumentService(
+          {
+            templateId: 'TPL-SEED-CCL',
+            sourceEntityType: 'matter',
+            matterId: matterNoRetainer.id,
+            outputFormat: 'docx',
+          },
+          partner.id,
+          partnerSession,
+        ),
+      );
+      expect(blocked.status).toBe('blocked_missing_required');
+      expect(blocked.missingRequiredFields).toContain('financial.retainerAmount');
+    } finally {
+      await docRepo.putTemplateVersion(nalfCtx, tplVer);
+    }
   });
 
   it('R598: CoreEmailDispatcher enforces email.senderAddress over caller message.from on Graph', async () => {

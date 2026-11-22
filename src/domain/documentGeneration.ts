@@ -902,34 +902,40 @@ export function buildFieldResolutionContextForRecord(params: {
 
     financialData = {
       feeEstimate:
-        costsSnapshot?.totalEstimateGbp ?? matter.feeEstimateGbp ?? 0,
+        costsSnapshot?.totalEstimateGbp ?? matter.feeEstimateGbp ?? undefined,
       agreedFeeCap:
         costsSnapshot?.agreedCapGbp ??
         matter.agreedFeeCapGbp ??
         matter.feeEstimateGbp ??
-        0,
+        undefined,
       hourlyRate:
         costsSnapshot?.associateRateGbp ??
         feeEarnerPerson?.employment?.feeEarner?.chargeOutRateGbp ??
-        0,
+        undefined,
       wipBalance:
-        (matter.fieldValues?.['wipBalanceGbp'] as number | undefined) ?? 0,
-      unbilledDisbursements: costsSnapshot?.disbursementsTotalGbp ?? 0,
+        (matter.fieldValues?.['wipBalanceGbp'] as number | undefined) ??
+        undefined,
+      unbilledDisbursements:
+        costsSnapshot?.disbursementsTotalGbp ?? undefined,
       billedTotal:
-        (matter.fieldValues?.['billedTotalGbp'] as number | undefined) ?? 0,
+        (matter.fieldValues?.['billedTotalGbp'] as number | undefined) ??
+        undefined,
       unpaidInvoiceBalance:
         (matter.fieldValues?.['unpaidInvoiceBalanceGbp'] as
           | number
-          | undefined) ?? 0,
+          | undefined) ?? undefined,
       clientAccountBalance:
         (matter.fieldValues?.['clientAccountBalanceGbp'] as
           | number
-          | undefined) ?? 0,
+          | undefined) ?? undefined,
       officeAccountBalance:
         (matter.fieldValues?.['officeAccountBalanceGbp'] as
           | number
-          | undefined) ?? 0,
-      retainerAmount: costsSnapshot?.paymentOnAccountAmountGbp ?? 0,
+          | undefined) ?? undefined,
+      retainerAmount:
+        costsSnapshot?.paymentOnAccountAmountGbp ??
+        matter.retainerMoniesOnAccountGbp ??
+        undefined,
     };
   }
 

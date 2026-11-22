@@ -73,7 +73,7 @@ Checked against `develop` (`7c2ba3e`):
 4. **Carry-overs (`R636`, `R598`, hardcoded `documentGeneration.ts` fallbacks) & CI branch trigger:**
    - `src/server/services.ts:13886-13930` (`R636`): key once-daily unrouted-enquiry admin warning deduplication on a stable non-display key (e.g. `recordId: 'system:enquiry_unrouted_no_fallback_team'` matched against today's tenant-local notifications) rather than title text.
    - `core/src/integrations/email/adapters.ts:475-476` (`R598`): enforce `email.senderAddress?.trim() || message.from?.trim() || ''` so tenant-configured `integrations.email.senderAddress` always takes precedence over caller-supplied `message.from`.
-   - `src/domain/documentGeneration.ts:914, 932`: replace `?? 285` (`hourlyRate`) and `?? 1500` (`retainerAmount`) with `?? 0`.
+   - `src/domain/documentGeneration.ts:903-934`: replace `?? 285` (`hourlyRate`), `?? 1500` (`retainerAmount`), and unset `?? 0` fallbacks with `undefined` (`R661`).
    - `.github/workflows/ci.yml:11`: add `- 's1-*'` alongside `- 's0-*'` in push triggers.
 5. **Documentation, backlog, inventory & Help (`Rule 11`):**
    - `docs/roadmap/feature-list.md`: remove `"Live Azure deployment awaits a manual task"` from rows `1`, `1a`, `2`; update row `1` (`R636`), row `5`, row `6`, row `32` (`R598`), row `33`, row `34` (+ new named backlog rows `F24`–`F28` in `Future / Additional items` for ID verification provider, sanctions & PEP screening provider, e-signature provider, payment links, and HM Land Registry / live Companies House alignment without renumbering existing IDs), `B2`, `B15`, and `P5`.
@@ -95,7 +95,7 @@ Checked against `develop` (`7c2ba3e`):
 4. **Carry-over unit/service tests:**
    - `R598`: `CoreEmailDispatcher.send` uses configured `email.senderAddress` over `message.from` (`core/tests/email-notifications-s026.test.ts`).
    - `R636`: unmapped-enquiry warning deduplicates on stable key even when title varies.
-   - `documentGeneration.ts`: missing fee earner / costs snapshot produces `0` for `hourlyRate` and `retainerAmount` (never `285` / `1500`).
+   - `documentGeneration.ts`: missing fee earner / costs snapshot leaves financial merge fields `undefined` so Client Care letters never print `£0.00` (and block with `blocked_missing_required` when required, `R661`).
 
 ## Help and documentation (rule 11)
 
