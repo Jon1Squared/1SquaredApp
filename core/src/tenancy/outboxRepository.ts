@@ -497,7 +497,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         const sha256 = createHash('sha256')
           .update(inline.contentBytes)
           .digest('hex');
-        const ordinal = preparedInlineAttachments.length;
+        const ordinal = idx;
         preparedInlineAttachments.push({
           ordinal,
           fileName,
@@ -516,14 +516,21 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         });
       } else {
         const ref = rawAtt as EmailAttachmentRef;
+        const blobKey = ref?.blobKey?.trim() ?? '';
+        const fileName = ref?.fileName?.trim() ?? '';
+        const contentType = ref?.contentType?.trim() ?? '';
+        if (!blobKey || !fileName || !contentType) {
+          throw new Error(
+            'EMAIL_ATTACHMENT_INVALID: Attachment references require blobKey, fileName, and contentType.',
+          );
+        }
         attachmentsJson.push({
-          blobKey: ref.blobKey,
+          blobKey,
           ...(ref.externalId ? { externalId: ref.externalId } : {}),
-          fileName: ref.fileName,
-          contentType: ref.contentType,
+          fileName,
+          contentType,
         });
       }
-      void idx;
     }
 
     return this.withTenantTransaction(ctx, async (tx) => {
@@ -701,7 +708,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
   public async getClaimedOutboxAttachmentBytes(
     ctx: TenantContext,
     params: { readonly outboxId: string; readonly claimToken: string },
-  ): Promise<readonly EmailInlineAttachment[]> {
+  ): Promise<ReadonlyArray<EmailInlineAttachment & { readonly ordinal: number }>> {
     const outboxId = params.outboxId?.trim() ?? '';
     const claimToken = params.claimToken?.trim() ?? '';
     if (!outboxId || !claimToken) {
@@ -744,6 +751,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
           );
         }
         return {
+          ordinal: Number(row.ordinal),
           kind: 'inline' as const,
           fileName: row.file_name,
           contentType: row.content_type,

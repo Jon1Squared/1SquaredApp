@@ -26,6 +26,7 @@ import {
   TenantIntakeCheckRepository,
   TenantMigrationRunner,
   TenantOutboxRepository,
+  type EmailAttachmentRef,
   type EmailInlineAttachment,
   type IntakeEvidenceArtifactRef,
   type TenantContext,
@@ -687,5 +688,132 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
     );
     expect(JSON.stringify(firstOutboxAudit)).not.toContain(secretFileName);
     expect(JSON.stringify(firstOutboxAudit)).not.toContain(b64Payload);
+
+    // 8. R666: Mixed attachments ([blobRef0, inlinePdf1, blobRef2]) preserve all attachments in ordinal order
+    //    when drained with storageProvider, and fail closed (retried, never silently dropped) when storageProvider is undefined.
+    const storageForMixed = new LocalTenantStorageProvider({
+      inMemoryOnly: true,
+      environment: 'test',
+      tokenSigningKey: 's103-mixed-att-signing-key-32chars',
+    });
+    const blobBytes0 = new TextEncoder().encode('%PDF-1.4\n%Stored Blob Attachment Zero');
+    const blobBytes2 = new TextEncoder().encode('%PDF-1.4\n%Stored Blob Attachment Two');
+    const stored0 = await storageForMixed.putObject(ctxAlpha, {
+      category: 'documents',
+      objectId: 'DOC-MIXED-0',
+      fileName: 'Terms-Part-Zero.pdf',
+      contentType: 'application/pdf',
+      bytes: blobBytes0,
+    });
+    const stored2 = await storageForMixed.putObject(ctxAlpha, {
+      category: 'documents',
+      objectId: 'DOC-MIXED-2',
+      fileName: 'Schedule-Part-Two.pdf',
+      contentType: 'application/pdf',
+      bytes: blobBytes2,
+    });
+    const blobRef0: EmailAttachmentRef = {
+      blobKey: stored0.blobKey,
+      fileName: 'Terms-Part-Zero.pdf',
+      contentType: 'application/pdf',
+    };
+    const inlinePdf1: EmailInlineAttachment = {
+      kind: 'inline',
+      fileName: 'Quote-Middle-One.pdf',
+      contentType: 'application/pdf',
+      contentBytes: new TextEncoder().encode('%PDF-1.4\n%Inline Quote Attachment One'),
+    };
+    const blobRef2: EmailAttachmentRef = {
+      blobKey: stored2.blobKey,
+      fileName: 'Schedule-Part-Two.pdf',
+      contentType: 'application/pdf',
+    };
+
+    const enqMixed = await outboxRepo.enqueueEmail(ctxAlpha, {
+      idempotencyKey: 's103-r666-mixed-1',
+      templateKey: 'quote_send',
+      recipients: { to: ['client-mixed@invented.example'] },
+      subject: 'Mixed Attachments Order Check',
+      htmlBody: '<p>Three attachments in order.</p>',
+      textBody: 'Three attachments in order.',
+      attachments: [blobRef0, inlinePdf1, blobRef2],
+    });
+    expect(enqMixed.record.attachments[1]).toMatchObject({
+      source: 'outbox',
+      ordinal: 1,
+      fileName: 'Quote-Middle-One.pdf',
+    });
+
+    // Without storageProvider, drain must fail closed & retry rather than silently dropping blobRef0/blobRef2
+    const catcherNoStorage = await startLocalSmtpCatcher();
+    try {
+      const cfgMixed = loadAndValidateTenantConfig(
+        {
+          ...notALawFirmBaseConfig,
+          integrations: {
+            ...(notALawFirmBaseConfig.integrations ?? {}),
+            email: {
+              provider: 'dev_catcher',
+              senderAddress: 'enquiries@notalawfirm.example',
+              recipientAllowList: ['@invented.example'],
+              devCatcher: { host: catcherNoStorage.host, port: catcherNoStorage.port },
+            },
+          },
+        },
+        { environment: 'test' },
+        'test',
+        'multi_tenant',
+      );
+      const drainNoStorage = await drainEmailOutboxForTenant(ctxAlpha, {
+        tenantConfig: cfgMixed,
+        outboxRepository: outboxRepo,
+        baseBackoffSeconds: 0,
+        now: new Date(),
+      });
+      expect(drainNoStorage.sentCount).toBe(0);
+      expect(drainNoStorage.retriedCount).toBe(1);
+      expect(catcherNoStorage.messages).toHaveLength(0);
+    } finally {
+      await catcherNoStorage.close();
+    }
+
+    // With storageProvider, Graph sendMail receives all 3 attachments in exact [blobRef0, inlinePdf1, blobRef2] order
+    const mixedGraphPayloads: Array<Record<string, unknown>> = [];
+    const mixedGraphDispatcher = new CoreEmailDispatcher({
+      emailConfig: cfgGraph.integrations!.email!,
+      storageProvider: storageForMixed,
+      secretReader: { readSecret: async () => 'mock-secret' },
+      graphTokenProvider: new (class extends GraphAppTokenProvider {
+        public override async acquireAppToken(): Promise<string> {
+          return 'mock-graph-token';
+        }
+      })(),
+      fetchFn: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('/sendMail')) {
+          mixedGraphPayloads.push(JSON.parse(String(init?.body ?? '{}')));
+          return new Response(null, { status: 202 });
+        }
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch,
+    });
+    const drainMixedOk = await drainOutboxForTenant(ctxAlpha, {
+      tenantConfig: cfgGraph,
+      emailSender: mixedGraphDispatcher,
+      outboxRepository: outboxRepo,
+      actorId: 'system:outbox-drain',
+      now: new Date(Date.now() + 5_000),
+    });
+    expect(drainMixedOk.sentCount).toBe(1);
+    const mixedSentAtts = (
+      mixedGraphPayloads[0]!.message as {
+        attachments?: Array<{ name?: string; contentBytes?: string }>;
+      }
+    ).attachments!;
+    expect(mixedSentAtts.map((a) => a.name)).toEqual([
+      'Terms-Part-Zero.pdf',
+      'Quote-Middle-One.pdf',
+      'Schedule-Part-Two.pdf',
+    ]);
   });
 });

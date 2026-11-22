@@ -131,30 +131,45 @@ export async function drainEmailOutboxForTenant(
         (row.recipients.bcc?.length ?? 0);
 
       try {
-        const hasOutboxAttachments = row.attachments.some(
-          (att) =>
+        const outboxEntries = row.attachments.filter(
+          (att): att is import('../../api/index').EmailOutboxAttachmentMetadata =>
             'source' in att && att.source === 'outbox',
         );
-        const dispatchAttachments = hasOutboxAttachments
-          ? await outboxRepo.getClaimedOutboxAttachmentBytes(ctx, {
-              outboxId: row.id,
-              claimToken: row.claimToken,
-            })
-          : row.attachments.filter(
-              (att): att is import('../../api/index').EmailAttachmentRef =>
-                !('source' in att),
-            );
+        const claimedInline =
+          outboxEntries.length > 0
+            ? await outboxRepo.getClaimedOutboxAttachmentBytes(ctx, {
+                outboxId: row.id,
+                claimToken: row.claimToken,
+              })
+            : [];
         if (
-          hasOutboxAttachments &&
-          dispatchAttachments.length !==
-            row.attachments.filter(
-              (att) => 'source' in att && att.source === 'outbox',
-            ).length
+          outboxEntries.length > 0 &&
+          claimedInline.length !== outboxEntries.length
         ) {
           throw new Error(
             'EMAIL_OUTBOX_ATTACHMENT_MISSING: Expected outbox-held attachment bytes were missing for claimed message.',
           );
         }
+        const claimedByOrdinal = new Map(
+          claimedInline.map((item) => [item.ordinal, item]),
+        );
+        let fallbackCursor = 0;
+        const dispatchAttachments: import('../../api/index').OutgoingEmailAttachment[] =
+          row.attachments.map((att) => {
+            if ('source' in att && att.source === 'outbox') {
+              const matched =
+                claimedByOrdinal.get(att.ordinal) ??
+                claimedInline[fallbackCursor];
+              fallbackCursor += 1;
+              if (!matched) {
+                throw new Error(
+                  'EMAIL_OUTBOX_ATTACHMENT_MISSING: Expected outbox-held attachment bytes were missing for claimed message.',
+                );
+              }
+              return matched;
+            }
+            return att as import('../../api/index').EmailAttachmentRef;
+          });
 
         const result = await sender.send(ctx, {
           idempotencyKey: row.idempotencyKey,
