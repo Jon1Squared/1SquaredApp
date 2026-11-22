@@ -242,6 +242,7 @@ export interface BuildTenantContextOptions {
   session?: VerifiedEntraSessionPayload;
   mfaVerified?: boolean;
   correlationId?: string;
+  organisationIds?: readonly string[];
 }
 
 export async function buildTenantContextForUser(
@@ -293,9 +294,20 @@ export async function buildTenantContextForUser(
   const partyRepo = getPartyRepository();
   const hrRepo = getHrAndRbacRepository();
   const catalogueRepo = getCatalogueRepository();
+  const scopedOrgIds = Array.from(
+    new Set(
+      (options?.organisationIds ?? []).filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    ),
+  );
   const [people, organisations, teams, orgStructureRow, values] = await Promise.all([
-    partyRepo.listAllPeople<Person>(prelimCtx),
-    partyRepo.listAllOrganisations<Organisation>(prelimCtx),
+    partyRepo.listAllPeople<Person>(prelimCtx, {
+      employeesAndLeaversOnly: true,
+    }),
+    scopedOrgIds.length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(prelimCtx, scopedOrgIds)
+      : Promise.resolve<Organisation[]>([]),
     hrRepo.listAllTeams<Team>(prelimCtx),
     catalogueRepo.getOrgStructureConfig<OrgStructureCatalogue>(prelimCtx),
     catalogueRepo.listAllChoiceValues<ChoiceValue>(prelimCtx),
@@ -793,7 +805,8 @@ export async function ensureMatterDocumentStoreProvisioned(
     matterId,
   );
 
-  const subject = buildMatterRoutingSubject(matter, store, people, organisations);
+  const matterOrgs = await loadOrganisationsForMatters(ctx, [matter]);
+  const subject = buildMatterRoutingSubject(matter, store, people, matterOrgs);
   if (existing.length === 0) {
     const provisioned = await provisionMatterDocumentsJob({
       ctx,
@@ -855,17 +868,28 @@ export async function ensureMatterDocumentStoreProvisioned(
   return { locations: existing, jobs };
 }
 
+async function loadOrganisationsForMatters(
+  ctx: TenantContext,
+  matters: readonly Matter[],
+): Promise<Organisation[]> {
+  const clientIds = Array.from(
+    new Set(
+      matters
+        .map((m) => m.clientId)
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0),
+    ),
+  );
+  if (clientIds.length === 0) return [];
+  return getPartyRepository().listOrganisationsByIds<Organisation>(ctx, clientIds);
+}
+
 async function loadMatterByIdForAccessCheck(
   ctx: TenantContext,
   matterId: string,
 ): Promise<Matter | null> {
-  const visible = await getMatterRepository().getMatterById<Matter>(
-    ctx,
-    matterId,
-  );
-  if (visible) return visible;
-  const all = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-  return all.find((m) => m.id === matterId) ?? null;
+  return getMatterRepository().getMatterById<Matter>(ctx, matterId, {
+    includeRestricted: true,
+  });
 }
 
 /**
@@ -924,7 +948,8 @@ export async function retryMatterDocumentProvisioning(
     );
   }
 
-  const subject = buildMatterRoutingSubject(matter, store, people, organisations);
+  const matterOrgs = await loadOrganisationsForMatters(ctx, [matter]);
+  const subject = buildMatterRoutingSubject(matter, store, people, matterOrgs);
   const res = await provisionMatterDocumentsJob({
     ctx,
     deps,
@@ -1010,7 +1035,8 @@ export async function linkExistingMatterDocumentFolder(params: {
     );
   }
 
-  const subject = buildMatterRoutingSubject(matter, store, people, organisations);
+  const matterOrgs = await loadOrganisationsForMatters(ctx, [matter]);
+  const subject = buildMatterRoutingSubject(matter, store, people, matterOrgs);
   return linkExistingMatterFolderJob({
     ctx,
     deps,
@@ -1055,7 +1081,8 @@ export async function syncMatterLifecycleToDocumentStore(params: {
     return { locations: [], jobs: [] };
   }
 
-  const subject = buildMatterRoutingSubject(matter, store, people, organisations);
+  const matterOrgs = await loadOrganisationsForMatters(ctx, [matter]);
+  const subject = buildMatterRoutingSubject(matter, store, people, matterOrgs);
   if (params.event === 'closed') {
     return closeMatterFolderJob({ ctx, deps, subject });
   }
@@ -1132,6 +1159,9 @@ export function syncMatterLifecycleOnSaveSync(params: {
       {
         session: params.session,
         correlationId: params.correlationId,
+        organisationIds: [params.matter.clientId, params.previousMatter?.clientId].filter(
+          (id): id is string => typeof id === 'string' && id.trim().length > 0,
+        ),
       },
     );
     const repo = getRepositorySingleton();
@@ -1389,7 +1419,8 @@ export async function browseMatterDocumentStoreFolder(params: {
     };
   }
 
-  const subject = buildMatterRoutingSubject(matter, store, people, organisations);
+  const matterOrgs = await loadOrganisationsForMatters(ctx, [matter]);
+  const subject = buildMatterRoutingSubject(matter, store, people, matterOrgs);
 
   if (!ctx.entraObjectId) {
     const [existingLocs, existingJobs] = await Promise.all([
@@ -2347,8 +2378,9 @@ export async function applyAdminTemplateAdditionsToOpenMatters(
 
   const deps = buildLifecycleDependencies(ctx, store, config, people);
   const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
+  const matterOrgs = await loadOrganisationsForMatters(ctx, allMatters);
   const openSubjects = allMatters
-    .map((m) => buildMatterRoutingSubject(m, store, people, organisations))
+    .map((m) => buildMatterRoutingSubject(m, store, people, matterOrgs))
     .filter((s) => !s.isClosed);
 
   const res = await applyTemplateAdditionsToOpenMattersJob({

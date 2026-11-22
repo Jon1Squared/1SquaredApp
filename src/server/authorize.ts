@@ -190,7 +190,9 @@ export async function buildGuardedActorContext(
   const [allPeople, teams, rbacOverride] = await Promise.all([
     actor.allPeople
       ? Promise.resolve([...actor.allPeople])
-      : getPartyRepository().listAllPeople<Person>(tenantContext),
+      : getPartyRepository().listAllPeople<Person>(tenantContext, {
+          employeesAndLeaversOnly: true,
+        }),
     actor.teams
       ? Promise.resolve([...actor.teams])
       : getHrAndRbacRepository().listAllTeams<Team>(tenantContext),

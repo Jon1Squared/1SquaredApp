@@ -32,6 +32,17 @@ import {
   INVALID_PARENT_ORGANISATION_CODE,
   ORGANISATION_PARENT_CYCLE_CODE,
 } from './rateOverrideRepository';
+import {
+  computeOrganisationLookupKeys,
+  computePersonLookupKeys,
+  extractEmailDomainKey,
+  extractTokenPhoneticKeys,
+  FREE_EMAIL_DOMAINS_SET,
+  normaliseComparableNameKey,
+  normalisePhoneLast9Key,
+  normalisePostcodeKey,
+  normaliseRegNumberKey,
+} from './candidateKeys';
 
 function escapeSqlLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, '\\$&');
@@ -1261,9 +1272,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
       .filter(Boolean)
       .join('; ');
     const cleanEntraOid = person.entraObjectId?.trim() || null;
+    const personLookupKeys = computePersonLookupKeys(person);
 
     const res = await tx.query<DbPersonRow>(
-      `INSERT INTO public.people (${PEOPLE_EXPLICIT_COLUMNS}) VALUES (
+      `INSERT INTO public.people (${PEOPLE_EXPLICIT_COLUMNS},
+         phone_last9_keys, postcode_keys, phonetic_keys
+       ) VALUES (
          $1, $2, $3, $4, $5, $6,
          $7, $8, $9, $10, $11,
          $12, $13, $14, $15,
@@ -1272,7 +1286,8 @@ export class TenantPartyRepository extends TenantScopedRepository {
          $24, $25, $26::timestamptz, $27::timestamptz,
          $28::jsonb, $29::jsonb, $30::jsonb, $31::jsonb,
          $32::jsonb, $33::jsonb, $34::jsonb,
-         $35::jsonb, $36::jsonb
+         $35::jsonb, $36::jsonb,
+         $37::text[], $38::text[], $39::text[]
        )
        ON CONFLICT (tenant_id, id) DO UPDATE SET
          first_name = EXCLUDED.first_name,
@@ -1308,7 +1323,10 @@ export class TenantPartyRepository extends TenantScopedRepository {
          permission_overrides_json = EXCLUDED.permission_overrides_json,
          dismissed_duplicate_ids_json = EXCLUDED.dismissed_duplicate_ids_json,
          custom_fields_json = EXCLUDED.custom_fields_json,
-         profile_json = EXCLUDED.profile_json
+         profile_json = EXCLUDED.profile_json,
+         phone_last9_keys = EXCLUDED.phone_last9_keys,
+         postcode_keys = EXCLUDED.postcode_keys,
+         phonetic_keys = EXCLUDED.phonetic_keys
        RETURNING ${PEOPLE_EXPLICIT_COLUMNS}`,
       [
         ctx.tenantId,
@@ -1350,6 +1368,9 @@ export class TenantPartyRepository extends TenantScopedRepository {
         JSON.stringify(person.notDuplicateOf ?? []),
         JSON.stringify(person.customFields ?? {}),
         JSON.stringify(profileJson),
+        personLookupKeys.phoneLast9Keys,
+        personLookupKeys.postcodeKeys,
+        personLookupKeys.phoneticKeys,
       ],
     );
 
@@ -1569,10 +1590,15 @@ export class TenantPartyRepository extends TenantScopedRepository {
 
   public async listAllPeople<TPerson extends TenantPersonRecord = TenantPersonRecord>(
     ctx: TenantContext,
-    options?: { includeMerged?: boolean; employeesOnly?: boolean },
+    options?: {
+      includeMerged?: boolean;
+      employeesOnly?: boolean;
+      employeesAndLeaversOnly?: boolean;
+    },
   ): Promise<TPerson[]> {
     const includeMerged = options?.includeMerged ?? true;
     const employeesOnly = options?.employeesOnly ?? false;
+    const employeesAndLeaversOnly = options?.employeesAndLeaversOnly ?? false;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const clauses = ['p.tenant_id = $1'];
       if (!includeMerged) {
@@ -1580,6 +1606,10 @@ export class TenantPartyRepository extends TenantScopedRepository {
       }
       if (employeesOnly) {
         clauses.push('p.is_employee = TRUE');
+      } else if (employeesAndLeaversOnly) {
+        clauses.push(
+          `(p.is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records eer_chk WHERE eer_chk.tenant_id = p.tenant_id AND eer_chk.person_id = p.id))`,
+        );
       }
       const res = await tx.query<DbPersonRow>(
         `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
@@ -1787,6 +1817,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
 
     const tradingName = org.otherNames?.[0]?.name ?? '';
     const sectorIds = org.sectorId ? [org.sectorId] : [];
+    const orgLookupKeys = computeOrganisationLookupKeys(org);
 
     const res = await tx.query<DbOrganisationRow>(
       `INSERT INTO public.organisations (
@@ -1796,7 +1827,8 @@ export class TenantPartyRepository extends TenantScopedRepository {
          conflict_status, aml_status_id, client_status_id, created_from_enquiry_id,
          merged_into_id, created_at, updated_at, registered_address_json,
          trading_address_json, relationship_type_ids_json, sector_ids_json,
-         dismissed_duplicate_ids_json, custom_fields_json, profile_json
+         dismissed_duplicate_ids_json, custom_fields_json, profile_json,
+         norm_company_number, email_domains, phone_last9_keys, postcode_keys, phonetic_keys
        ) VALUES (
          $1, $2, $3, $4, $5,
          $6, $7, $8, $9,
@@ -1804,7 +1836,8 @@ export class TenantPartyRepository extends TenantScopedRepository {
          $14, $15, $16, $17,
          $18, $19::timestamptz, $20::timestamptz, $21::jsonb,
          $22::jsonb, $23::jsonb, $24::jsonb,
-         $25::jsonb, $26::jsonb, $27::jsonb
+         $25::jsonb, $26::jsonb, $27::jsonb,
+         $28, $29::text[], $30::text[], $31::text[], $32::text[]
        )
        ON CONFLICT (tenant_id, id) DO UPDATE SET
          legal_name = EXCLUDED.legal_name,
@@ -1831,7 +1864,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
          sector_ids_json = EXCLUDED.sector_ids_json,
          dismissed_duplicate_ids_json = EXCLUDED.dismissed_duplicate_ids_json,
          custom_fields_json = EXCLUDED.custom_fields_json,
-         profile_json = EXCLUDED.profile_json
+         profile_json = EXCLUDED.profile_json,
+         norm_company_number = EXCLUDED.norm_company_number,
+         email_domains = EXCLUDED.email_domains,
+         phone_last9_keys = EXCLUDED.phone_last9_keys,
+         postcode_keys = EXCLUDED.postcode_keys,
+         phonetic_keys = EXCLUDED.phonetic_keys
        RETURNING *`,
       [
         ctx.tenantId,
@@ -1863,6 +1901,11 @@ export class TenantPartyRepository extends TenantScopedRepository {
         JSON.stringify(org.notDuplicateOf ?? []),
         JSON.stringify(org.customFields ?? {}),
         JSON.stringify(profileJson),
+        orgLookupKeys.normCompanyNumber,
+        orgLookupKeys.emailDomains,
+        orgLookupKeys.phoneLast9Keys,
+        orgLookupKeys.postcodeKeys,
+        orgLookupKeys.phoneticKeys,
       ],
     );
 
@@ -3746,6 +3789,635 @@ export class TenantPartyRepository extends TenantScopedRepository {
   }
 
   // ============================================================================
+  // S1-02a Scoped Lookups & Candidate Graph Selection
+  // ============================================================================
+
+  public async listPeopleByIds<TPerson extends TenantPersonRecord = TenantPersonRecord>(
+    ctx: TenantContext,
+    personIds: readonly string[],
+  ): Promise<TPerson[]> {
+    const cleanIds = Array.from(
+      new Set(personIds.map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbPersonRow>(
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE p.tenant_id = $1
+           AND p.id = ANY($2::text[])
+         ORDER BY p.id ASC`,
+        [ctx.tenantId, cleanIds],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Person');
+        return mapPersonRow<TPerson>(row);
+      });
+    });
+  }
+
+  public async listOrganisationsByIds<TOrg extends TenantOrganisationRecord = TenantOrganisationRecord>(
+    ctx: TenantContext,
+    organisationIds: readonly string[],
+  ): Promise<TOrg[]> {
+    const cleanIds = Array.from(
+      new Set(organisationIds.map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbOrganisationRow>(
+        `SELECT * FROM public.organisations
+         WHERE tenant_id = $1 AND id = ANY($2::text[])
+         ORDER BY id ASC`,
+        [ctx.tenantId, cleanIds],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
+      });
+    });
+  }
+
+  public async listLinksForEntities<TLink extends TenantPersonOrganisationLinkRecord = TenantPersonOrganisationLinkRecord>(
+    ctx: TenantContext,
+    filter: {
+      readonly personIds?: readonly string[];
+      readonly organisationIds?: readonly string[];
+    },
+  ): Promise<TLink[]> {
+    const pIds = Array.from(
+      new Set((filter.personIds ?? []).map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    const oIds = Array.from(
+      new Set((filter.organisationIds ?? []).map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (pIds.length === 0 && oIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const clauses: string[] = [];
+      const params: unknown[] = [ctx.tenantId];
+      if (pIds.length > 0) {
+        params.push(pIds);
+        clauses.push(`person_id = ANY($${params.length}::text[])`);
+      }
+      if (oIds.length > 0) {
+        params.push(oIds);
+        clauses.push(`organisation_id = ANY($${params.length}::text[])`);
+      }
+      const res = await tx.query<DbLinkRow>(
+        `SELECT * FROM public.person_organisation_links
+         WHERE tenant_id = $1 AND (${clauses.join(' OR ')})
+         ORDER BY id ASC`,
+        params,
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Link');
+        return mapLinkRow<TLink>(row);
+      });
+    });
+  }
+
+  public async listNotesForRecords<TNote extends TenantNoteRecord = TenantNoteRecord>(
+    ctx: TenantContext,
+    records: readonly { readonly recordType: string; readonly recordId: string }[],
+  ): Promise<TNote[]> {
+    const clean = records.filter((r) => r.recordType?.trim() && r.recordId?.trim());
+    if (clean.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const recordIds = Array.from(new Set(clean.map((r) => r.recordId)));
+      const recordTypes = Array.from(new Set(clean.map((r) => r.recordType)));
+      const res = await tx.query<DbNoteRow>(
+        `SELECT * FROM public.notes
+         WHERE tenant_id = $1
+           AND record_type = ANY($2::text[])
+           AND record_id = ANY($3::text[])
+         ORDER BY created_at DESC, id DESC`,
+        [ctx.tenantId, recordTypes, recordIds],
+      );
+      const wanted = new Set(clean.map((r) => `${r.recordType}::${r.recordId}`));
+      return res.rows
+        .filter((row) => {
+          this.assertRowTenant(ctx, row.tenant_id, 'Note');
+          return wanted.has(`${row.record_type}::${row.record_id}`);
+        })
+        .map((row) => mapNoteRow<TNote>(row));
+    });
+  }
+
+  public async listMergeHistoryForEntity<TMerge extends TenantMergeHistoryRecord = TenantMergeHistoryRecord>(
+    ctx: TenantContext,
+    entityId: string,
+    recordType?: string,
+  ): Promise<TMerge[]> {
+    if (!entityId?.trim()) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const params: unknown[] = [ctx.tenantId, entityId.trim()];
+      let typeClause = '';
+      if (recordType) {
+        params.push(recordType);
+        typeClause = ` AND record_type = $${params.length}`;
+      }
+      const res = await tx.query<DbMergeHistoryRow>(
+        `SELECT * FROM public.merge_history
+         WHERE tenant_id = $1
+           AND (survivor_id = $2 OR merged_id = $2)${typeClause}
+         ORDER BY merged_at DESC, id DESC`,
+        params,
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'MergeHistory');
+        return mapMergeHistoryRow<TMerge>(row);
+      });
+    });
+  }
+
+  public async expandCorporateGroupOrganisationIds<TOrg extends TenantOrganisationRecord = TenantOrganisationRecord>(
+    ctx: TenantContext,
+    seedOrganisationIds: readonly string[],
+  ): Promise<TOrg[]> {
+    const cleanSeeds = Array.from(
+      new Set(seedOrganisationIds.map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanSeeds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbOrganisationRow>(
+        `WITH RECURSIVE
+         ancestors(id, depth) AS (
+           SELECT id, 0
+           FROM public.organisations
+           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND merged_into_id IS NULL
+           UNION ALL
+           SELECT parent.id, a.depth + 1
+           FROM ancestors a
+           JOIN public.organisations child
+             ON child.tenant_id = $1 AND child.id = a.id
+           JOIN public.organisations parent
+             ON parent.tenant_id = $1 AND parent.id = child.parent_organisation_id
+           WHERE parent.merged_into_id IS NULL AND a.depth < 10
+         ),
+         descendants(id, depth) AS (
+           SELECT id, 0
+           FROM public.organisations
+           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND merged_into_id IS NULL
+           UNION ALL
+           SELECT child.id, d.depth + 1
+           FROM descendants d
+           JOIN public.organisations child
+             ON child.tenant_id = $1 AND child.parent_organisation_id = d.id
+           WHERE child.merged_into_id IS NULL AND d.depth < 10
+         ),
+         all_group_ids AS (
+           SELECT id FROM ancestors
+           UNION
+           SELECT id FROM descendants
+         )
+         SELECT o.*
+         FROM public.organisations o
+         JOIN all_group_ids g ON o.id = g.id
+         WHERE o.tenant_id = $1
+         ORDER BY o.id ASC`,
+        [ctx.tenantId, cleanSeeds],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
+      });
+    });
+  }
+
+  public async findSqlDuplicateCandidates<
+    TRecord extends TenantPersonRecord | TenantOrganisationRecord =
+      | TenantPersonRecord
+      | TenantOrganisationRecord,
+  >(
+    ctx: TenantContext,
+    query:
+      | {
+          readonly kind: 'person';
+          readonly id?: string;
+          readonly firstName?: string;
+          readonly preferredName?: string;
+          readonly surname?: string;
+          readonly otherNames?: readonly string[];
+          readonly emails?: readonly string[];
+          readonly phones?: readonly string[];
+          readonly postcodes?: readonly string[];
+          readonly fuzzy?: boolean;
+          readonly includeMerged?: boolean;
+        }
+      | {
+          readonly kind: 'organisation';
+          readonly id?: string;
+          readonly legalName?: string;
+          readonly otherNames?: readonly string[];
+          readonly companyNumber?: string;
+          readonly emails?: readonly string[];
+          readonly phones?: readonly string[];
+          readonly postcodes?: readonly string[];
+          readonly fuzzy?: boolean;
+          readonly includeMerged?: boolean;
+        },
+  ): Promise<TRecord[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      if (query.kind === 'person') {
+        const emails = Array.from(
+          new Set(
+            (query.emails ?? [])
+              .map((e) => e.trim().toLowerCase())
+              .filter(Boolean),
+          ),
+        );
+        const phoneLast9s = Array.from(
+          new Set(
+            (query.phones ?? []).map(normalisePhoneLast9Key).filter(Boolean),
+          ),
+        );
+        const postcodes = Array.from(
+          new Set(
+            (query.postcodes ?? []).map(normalisePostcodeKey).filter(Boolean),
+          ),
+        );
+        const nameTexts = [
+          query.firstName,
+          query.preferredName,
+          query.surname,
+          ...(query.otherNames ?? []),
+        ].filter(Boolean) as string[];
+        const phoneticOnly = extractTokenPhoneticKeys(nameTexts).filter(
+          (k) => k.startsWith('P:') || k.startsWith('S:'),
+        );
+        const surnameTokens = [query.surname]
+          .map(normaliseComparableNameKey)
+          .filter(Boolean);
+        const firstTokens = [query.firstName, query.preferredName]
+          .map(normaliseComparableNameKey)
+          .filter(Boolean);
+        const fullTerms = Array.from(
+          new Set(
+            [
+              `${query.firstName ?? ''} ${query.surname ?? ''}`.trim(),
+              `${query.preferredName ?? ''} ${query.surname ?? ''}`.trim(),
+              query.firstName?.trim() ?? '',
+              query.surname?.trim() ?? '',
+              ...(query.otherNames ?? []).map((n) => n.trim()),
+            ].filter((t) => t.length >= 2),
+          ),
+        );
+
+        const orClauses: string[] = [];
+        const params: unknown[] = [ctx.tenantId];
+
+        if (query.id?.trim()) {
+          params.push(query.id.trim());
+          orClauses.push(`p.id = $${params.length}`);
+        }
+        if (emails.length > 0) {
+          params.push(emails);
+          const idx = params.length;
+          orClauses.push(
+            `(p.primary_email_lower = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.person_emails pe WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower = ANY($${idx}::text[])))`,
+          );
+        }
+        if (phoneLast9s.length > 0) {
+          params.push(phoneLast9s);
+          orClauses.push(`p.phone_last9_keys && $${params.length}::text[]`);
+        }
+        if (postcodes.length > 0) {
+          params.push(postcodes);
+          orClauses.push(`p.postcode_keys && $${params.length}::text[]`);
+        }
+        if (phoneticOnly.length > 0 && surnameTokens.length > 0) {
+          const surnameKeys = extractTokenPhoneticKeys(surnameTokens).filter(
+            (k) => !k.startsWith('I:'),
+          );
+          if (surnameKeys.length > 0) {
+            params.push(surnameKeys);
+            orClauses.push(`p.phonetic_keys && $${params.length}::text[]`);
+          }
+        } else if (phoneticOnly.length > 0 && fullTerms.length > 0) {
+          params.push(phoneticOnly);
+          orClauses.push(`p.phonetic_keys && $${params.length}::text[]`);
+        }
+        // Initial + surname or first-token matches when both exist (e.g. "J. Smith" vs "John Smith")
+        if (firstTokens.length > 0 && surnameTokens.length > 0) {
+          const firstInitials = firstTokens
+            .map((t) => `I:${t[0]}`)
+            .filter(Boolean);
+          const surnameKeys = extractTokenPhoneticKeys(surnameTokens).filter(
+            (k) => !k.startsWith('I:'),
+          );
+          if (firstInitials.length > 0 && surnameKeys.length > 0) {
+            params.push(firstInitials, surnameKeys);
+            orClauses.push(
+              `(p.phonetic_keys && $${params.length - 1}::text[] AND p.phonetic_keys && $${params.length}::text[])`,
+            );
+          }
+        }
+        for (const term of fullTerms.slice(0, 6)) {
+          params.push(`%${escapeSqlLikePattern(term)}%`);
+          const likeIdx = params.length;
+          params.push(term);
+          const termIdx = params.length;
+          orClauses.push(
+            `(COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} OR word_similarity($${termIdx}, lower(COALESCE(p.first_name, '') || ' ' || COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.other_names, '') || ' ' || COALESCE(p.surname, ''))) >= 0.28)`,
+          );
+        }
+
+        if (orClauses.length === 0) return [];
+        const mergedClause = query.includeMerged
+          ? ''
+          : ' AND p.merged_into_id IS NULL';
+        const res = await tx.query<DbPersonRow>(
+          `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+           ${PEOPLE_LEFT_JOIN_HR}
+           WHERE p.tenant_id = $1${mergedClause}
+             AND (${orClauses.join(' OR ')})
+           ORDER BY p.id ASC`,
+          params,
+        );
+        return res.rows.map((row) => {
+          this.assertRowTenant(ctx, row.tenant_id, 'Person');
+          return mapPersonRow<TenantPersonRecord>(row) as TRecord;
+        });
+      }
+
+      // Organisation candidate lookup
+      const companyNos = query.companyNumber
+        ? [normaliseRegNumberKey(query.companyNumber)].filter(Boolean)
+        : [];
+      const emails = Array.from(
+        new Set(
+          (query.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean),
+        ),
+      );
+      const emailDomains = Array.from(
+        new Set(
+          emails
+            .map(extractEmailDomainKey)
+            .filter((d) => d && !FREE_EMAIL_DOMAINS_SET.has(d)),
+        ),
+      );
+      const phoneLast9s = Array.from(
+        new Set(
+          (query.phones ?? []).map(normalisePhoneLast9Key).filter(Boolean),
+        ),
+      );
+      const postcodes = Array.from(
+        new Set(
+          (query.postcodes ?? []).map(normalisePostcodeKey).filter(Boolean),
+        ),
+      );
+      const orgNames = [query.legalName, ...(query.otherNames ?? [])]
+        .map((n) => n?.trim() ?? '')
+        .filter((n) => n.length >= 2);
+      const phoneticKeys = extractTokenPhoneticKeys(orgNames).filter(
+        (k) => !k.startsWith('I:'),
+      );
+
+      const orClauses: string[] = [];
+      const params: unknown[] = [ctx.tenantId];
+
+      if (query.id?.trim()) {
+        params.push(query.id.trim());
+        orClauses.push(`id = $${params.length}`);
+      }
+      if (companyNos.length > 0) {
+        params.push(companyNos);
+        orClauses.push(`norm_company_number = ANY($${params.length}::text[])`);
+      }
+      if (emails.length > 0) {
+        params.push(emails);
+        orClauses.push(`lower(general_email) = ANY($${params.length}::text[])`);
+      }
+      if (emailDomains.length > 0) {
+        params.push(emailDomains);
+        orClauses.push(`email_domains && $${params.length}::text[]`);
+      }
+      if (phoneLast9s.length > 0) {
+        params.push(phoneLast9s);
+        orClauses.push(`phone_last9_keys && $${params.length}::text[]`);
+      }
+      if (postcodes.length > 0) {
+        params.push(postcodes);
+        orClauses.push(`postcode_keys && $${params.length}::text[]`);
+      }
+      if (phoneticKeys.length > 0) {
+        params.push(phoneticKeys);
+        orClauses.push(`phonetic_keys && $${params.length}::text[]`);
+      }
+      for (const name of orgNames.slice(0, 5)) {
+        const comp = normaliseComparableNameKey(name);
+        const searchTerm = comp || name;
+        params.push(`%${escapeSqlLikePattern(searchTerm)}%`, searchTerm);
+        const likeIdx = params.length - 1;
+        const trgmIdx = params.length;
+        orClauses.push(
+          `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(COALESCE(legal_name, '') || ' ' || COALESCE(trading_name, ''))) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25)`,
+        );
+      }
+
+      if (orClauses.length === 0) return [];
+      const mergedClause = query.includeMerged
+        ? ''
+        : ' AND merged_into_id IS NULL';
+      const res = await tx.query<DbOrganisationRow>(
+        `SELECT * FROM public.organisations
+         WHERE tenant_id = $1${mergedClause}
+           AND (${orClauses.join(' OR ')})
+         ORDER BY id ASC`,
+        params,
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TenantOrganisationRecord>(row) as TRecord;
+      });
+    });
+  }
+
+  public async findSqlConflictCandidates<
+    TPerson extends TenantPersonRecord = TenantPersonRecord,
+    TOrg extends TenantOrganisationRecord = TenantOrganisationRecord,
+    TLink extends TenantPersonOrganisationLinkRecord = TenantPersonOrganisationLinkRecord,
+  >(
+    ctx: TenantContext,
+    params: {
+      readonly terms?: readonly string[];
+      readonly emails?: readonly string[];
+      readonly phones?: readonly string[];
+      readonly postcodes?: readonly string[];
+      readonly companyNumbers?: readonly string[];
+      readonly linkedPersonIds?: readonly string[];
+      readonly linkedOrganisationIds?: readonly string[];
+    },
+  ): Promise<{
+    readonly people: TPerson[];
+    readonly organisations: TOrg[];
+    readonly links: TLink[];
+    readonly directPersonIds: string[];
+    readonly directOrganisationIds: string[];
+  }> {
+    const cleanTerms = Array.from(
+      new Set((params.terms ?? []).map((t) => t.trim()).filter(Boolean)),
+    );
+    const cleanEmails = Array.from(
+      new Set((params.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean)),
+    );
+    const cleanPhones = Array.from(
+      new Set((params.phones ?? []).map(normalisePhoneLast9Key).filter(Boolean)),
+    );
+    const cleanPostcodes = Array.from(
+      new Set((params.postcodes ?? []).map(normalisePostcodeKey).filter(Boolean)),
+    );
+    const cleanCompanyNos = Array.from(
+      new Set((params.companyNumbers ?? []).map(normaliseRegNumberKey).filter(Boolean)),
+    );
+    const seedPersonIds = new Set(
+      (params.linkedPersonIds ?? []).map((x) => x.trim()).filter(Boolean),
+    );
+    const seedOrgIds = new Set(
+      (params.linkedOrganisationIds ?? []).map((x) => x.trim()).filter(Boolean),
+    );
+
+    const personMap = new Map<string, TPerson>();
+    const orgMap = new Map<string, TOrg>();
+
+    // Step 1: Resolve seed IDs + merge history chain targets if any linked ID was merged
+    const seedCombinedIds = [...seedPersonIds, ...seedOrgIds];
+    if (seedCombinedIds.length > 0) {
+      const [directPeople, directOrgs, mergeLinks] = await Promise.all([
+        this.listPeopleByIds<TPerson>(ctx, Array.from(seedPersonIds)),
+        this.listOrganisationsByIds<TOrg>(ctx, Array.from(seedOrgIds)),
+        Promise.all(seedCombinedIds.map((id) => this.listMergeHistoryForEntity(ctx, id))),
+      ]);
+      for (const p of directPeople) personMap.set(p.id, p);
+      for (const o of directOrgs) orgMap.set(o.id, o);
+      for (const list of mergeLinks) {
+        for (const mh of list) {
+          if (mh.recordType === 'person') {
+            seedPersonIds.add(mh.survivorId);
+            seedPersonIds.add(mh.mergedId);
+          } else if (mh.recordType === 'organisation') {
+            seedOrgIds.add(mh.survivorId);
+            seedOrgIds.add(mh.mergedId);
+          }
+        }
+      }
+    }
+
+    // Step 2: Query people & organisations matching terms/emails/phones/postcodes/companyNos
+    for (const term of cleanTerms) {
+      const tokens = normaliseComparableNameKey(term).split(' ').filter(Boolean);
+      const firstNameGuess = tokens.length >= 2 ? tokens[0] : term;
+      const surnameGuess = tokens.length >= 2 ? tokens[tokens.length - 1] : undefined;
+      const [pHits, oHits] = await Promise.all([
+        this.findSqlDuplicateCandidates<TPerson>(ctx, {
+          kind: 'person',
+          firstName: firstNameGuess,
+          surname: surnameGuess,
+          otherNames: [term],
+          emails: cleanEmails,
+          phones: cleanPhones,
+          postcodes: cleanPostcodes,
+          fuzzy: true,
+        }),
+        this.findSqlDuplicateCandidates<TOrg>(ctx, {
+          kind: 'organisation',
+          legalName: term,
+          otherNames: [term],
+          companyNumber: cleanCompanyNos[0],
+          emails: cleanEmails,
+          phones: cleanPhones,
+          postcodes: cleanPostcodes,
+          fuzzy: true,
+        }),
+      ]);
+      for (const p of pHits) personMap.set(p.id, p);
+      for (const o of oHits) orgMap.set(o.id, o);
+    }
+
+    if (
+      cleanTerms.length === 0 &&
+      (cleanEmails.length > 0 ||
+        cleanPhones.length > 0 ||
+        cleanPostcodes.length > 0 ||
+        cleanCompanyNos.length > 0)
+    ) {
+      const [pHits, oHits] = await Promise.all([
+        this.findSqlDuplicateCandidates<TPerson>(ctx, {
+          kind: 'person',
+          emails: cleanEmails,
+          phones: cleanPhones,
+          postcodes: cleanPostcodes,
+        }),
+        this.findSqlDuplicateCandidates<TOrg>(ctx, {
+          kind: 'organisation',
+          companyNumber: cleanCompanyNos[0],
+          emails: cleanEmails,
+          phones: cleanPhones,
+          postcodes: cleanPostcodes,
+        }),
+      ]);
+      for (const p of pHits) personMap.set(p.id, p);
+      for (const o of oHits) orgMap.set(o.id, o);
+    }
+
+    const directPersonIds = Array.from(personMap.keys());
+    const directOrganisationIds = Array.from(orgMap.keys());
+
+    // Step 3: Expand corporate groups (ancestors & descendants) and 2-hop person-organisation links
+    if (orgMap.size > 0) {
+      const groupOrgs = await this.expandCorporateGroupOrganisationIds<TOrg>(
+        ctx,
+        Array.from(orgMap.keys()),
+      );
+      for (const o of groupOrgs) orgMap.set(o.id, o);
+    }
+
+    const linksHop1 = await this.listLinksForEntities<TLink>(ctx, {
+      personIds: Array.from(personMap.keys()),
+      organisationIds: Array.from(orgMap.keys()),
+    });
+
+    const missingPersonIds = new Set<string>();
+    const missingOrgIds = new Set<string>();
+    for (const ln of linksHop1) {
+      if (ln.personId && !personMap.has(ln.personId)) missingPersonIds.add(ln.personId);
+      if (ln.organisationId && !orgMap.has(ln.organisationId)) {
+        missingOrgIds.add(ln.organisationId);
+      }
+    }
+
+    if (missingPersonIds.size > 0 || missingOrgIds.size > 0) {
+      const [extraPeople, extraOrgs, groupOrgsHop2] = await Promise.all([
+        this.listPeopleByIds<TPerson>(ctx, Array.from(missingPersonIds)),
+        this.listOrganisationsByIds<TOrg>(ctx, Array.from(missingOrgIds)),
+        missingOrgIds.size > 0
+          ? this.expandCorporateGroupOrganisationIds<TOrg>(
+              ctx,
+              Array.from(missingOrgIds),
+            )
+          : Promise.resolve([]),
+      ]);
+      for (const p of extraPeople) personMap.set(p.id, p);
+      for (const o of extraOrgs) orgMap.set(o.id, o);
+      for (const o of groupOrgsHop2) orgMap.set(o.id, o);
+    }
+
+    // Fetch all links touching the expanded person/org closure so searchMatterConflicts link checks are complete
+    const allLinks = await this.listLinksForEntities<TLink>(ctx, {
+      personIds: Array.from(personMap.keys()),
+      organisationIds: Array.from(orgMap.keys()),
+    });
+
+    return {
+      people: Array.from(personMap.values()),
+      organisations: Array.from(orgMap.values()),
+      links: allLinks,
+      directPersonIds,
+      directOrganisationIds,
+    };
+  }
+
+  // ============================================================================
   // Counts & Clear
   // ============================================================================
 
@@ -3784,6 +4456,57 @@ export class TenantPartyRepository extends TenantScopedRepository {
         notes: Number(row?.n_cnt ?? 0),
         mergeHistory: Number(row?.mrg_cnt ?? 0),
       };
+    });
+  }
+
+  public async listPeopleOwnedByPerson<
+    TPerson extends TenantPersonRecord = TenantPersonRecord,
+  >(ctx: TenantContext, ownerPersonId: string): Promise<TPerson[]> {
+    const cleanId = ownerPersonId?.trim();
+    if (!cleanId) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbPersonRow>(
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE p.tenant_id = $1
+           AND p.merged_into_id IS NULL
+           AND (
+             p.profile_json->>'recordOwnerId' = $2
+             OR p.profile_json->>'relationshipOwnerId' = $2
+             OR p.profile_json->>'verificationReviewerId' = $2
+           )
+         ORDER BY p.id ASC`,
+        [ctx.tenantId, cleanId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Person');
+        return mapPersonRow<TPerson>(row);
+      });
+    });
+  }
+
+  public async listOrganisationsOwnedByPerson<
+    TOrg extends TenantOrganisationRecord = TenantOrganisationRecord,
+  >(ctx: TenantContext, ownerPersonId: string): Promise<TOrg[]> {
+    const cleanId = ownerPersonId?.trim();
+    if (!cleanId) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbOrganisationRow>(
+        `SELECT * FROM public.organisations
+         WHERE tenant_id = $1
+           AND merged_into_id IS NULL
+           AND (
+             relationship_partner_id = $2
+             OR profile_json->>'recordOwnerId' = $2
+             OR profile_json->>'reviewerId' = $2
+           )
+         ORDER BY id ASC`,
+        [ctx.tenantId, cleanId],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
+      });
     });
   }
 

@@ -3085,6 +3085,298 @@ DROP SEQUENCE IF EXISTS public.tenant_intake_check_id_seq;
 `.trim(),
   };
 
+export const SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024: TenantMigrationDefinition =
+  {
+    version: '0024',
+    name: '0024_scoped_lookup_and_candidate_indexes_expand',
+    description:
+      'Expand-phase migration adding indexed lookup/candidate columns on public.people and public.organisations plus restricted-matter partial index for server-side B15 SQL scoping.',
+    dependsOn: ['0009', '0018'],
+    tablesChanged: ['people', 'organisations', 'matters'],
+    upSql: `
+ALTER TABLE public.people
+  ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS postcode_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS phonetic_keys TEXT[] NOT NULL DEFAULT '{}'::text[];
+
+ALTER TABLE public.organisations
+  ADD COLUMN IF NOT EXISTS norm_company_number TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS email_domains TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS postcode_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS phonetic_keys TEXT[] NOT NULL DEFAULT '{}'::text[];
+
+CREATE OR REPLACE FUNCTION pg_temp.s102a_phone_last9(raw TEXT) RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+  cleaned TEXT;
+BEGIN
+  cleaned := regexp_replace(COALESCE(raw, ''), '[^0-9+]', '', 'g');
+  IF left(cleaned, 3) = '+44' THEN
+    cleaned := '0' || substr(cleaned, 4);
+  ELSIF left(cleaned, 4) = '0044' THEN
+    cleaned := '0' || substr(cleaned, 5);
+  END IF;
+  cleaned := regexp_replace(cleaned, '[^0-9]', '', 'g');
+  cleaned := regexp_replace(cleaned, '^0+', '');
+  IF length(cleaned) < 9 THEN
+    RETURN '';
+  END IF;
+  RETURN right(cleaned, 9);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pg_temp.s102a_norm_postcode(raw TEXT) RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+  pc TEXT;
+BEGIN
+  pc := upper(regexp_replace(COALESCE(raw, ''), '\\s+', '', 'g'));
+  IF pc ~ '^[A-Z]{1,2}[0-9][A-Z0-9]?[0-9][A-Z]{2}$' THEN
+    RETURN pc;
+  END IF;
+  RETURN '';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pg_temp.s102a_phonetic_key(raw TEXT) RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+  w TEXT;
+  len INT;
+  i INT;
+  c TEXT;
+  p TEXT;
+  n1 TEXT;
+  n2 TEXT;
+  res TEXT := '';
+  vowels CONSTANT TEXT := 'aeiou';
+  folded TEXT := '';
+BEGIN
+  w := lower(regexp_replace(
+    translate(COALESCE(raw, ''), 'ÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜàáâãäåèéêëìíîïòóôõöùúûüŷŶÿŸçÇ', 'aaaaaaeeeeiiiiooooouuuuaaaaaaeeeeiiiiooooouuuuyyyycC'),
+    '[^a-z]',
+    '',
+    'gi'
+  ));
+  IF w = '' THEN RETURN ''; END IF;
+  IF left(w, 2) IN ('kn', 'gn', 'pn', 'wr', 'ps') THEN w := substr(w, 2); END IF;
+  IF left(w, 1) = 'x' THEN w := 's' || substr(w, 2); END IF;
+  IF left(w, 2) = 'wh' THEN w := 'w' || substr(w, 3); END IF;
+  IF left(w, 2) = 'mc' THEN w := 'mac' || substr(w, 3); END IF;
+
+  len := length(w);
+  i := 1;
+  WHILE i <= len LOOP
+    c := substr(w, i, 1);
+    p := CASE WHEN i > 1 THEN substr(w, i - 1, 1) ELSE '' END;
+    n1 := CASE WHEN i < len THEN substr(w, i + 1, 1) ELSE '' END;
+    n2 := CASE WHEN i + 1 < len THEN substr(w, i + 2, 1) ELSE '' END;
+    IF NOT (c = p AND c <> 'c') THEN
+      IF strpos(vowels, c) > 0 THEN
+        IF i = 1 THEN res := res || upper(c); END IF;
+      ELSIF c = 'b' THEN
+        IF NOT (p = 'm' AND i = len) THEN res := res || 'B'; END IF;
+      ELSIF c = 'c' THEN
+        IF n1 = 'i' AND n2 = 'a' THEN res := res || 'X';
+        ELSIF n1 = 'h' THEN res := res || CASE WHEN p = 's' THEN 'K' ELSE 'X' END;
+        ELSIF n1 IN ('i', 'e', 'y') THEN
+          IF p <> 's' THEN res := res || 'S'; END IF;
+        ELSE res := res || 'K';
+        END IF;
+      ELSIF c = 'd' THEN
+        IF n1 = 'g' AND n2 IN ('e', 'i', 'y') THEN res := res || 'J';
+        ELSE res := res || 'T';
+        END IF;
+      ELSIF c = 'g' THEN
+        IF n1 = 'h' AND NOT (i + 2 > len OR strpos(vowels, n2) > 0) THEN NULL;
+        ELSIF n1 = 'n' AND (i + 2 > len OR (n2 = 'e' AND substr(w, i + 3, 1) = 'd')) THEN NULL;
+        ELSIF p = 'g' THEN NULL;
+        ELSIF n1 IN ('e', 'i', 'y') THEN res := res || 'J';
+        ELSE res := res || 'K';
+        END IF;
+      ELSIF c = 'h' THEN
+        IF p <> '' AND strpos('cgpstrw', p) > 0 THEN NULL;
+        ELSIF NOT (strpos(vowels, n1) > 0 OR n1 = 'y') THEN NULL;
+        ELSIF strpos(vowels, p) > 0 AND NOT (strpos(vowels, n1) > 0) THEN NULL;
+        ELSE res := res || 'H';
+        END IF;
+      ELSIF c = 'k' THEN
+        IF p <> 'c' THEN res := res || 'K'; END IF;
+      ELSIF c = 'p' THEN
+        IF n1 = 'h' THEN res := res || 'F';
+        ELSIF p = 'm' AND n1 IN ('s', 't') THEN NULL;
+        ELSE res := res || 'P';
+        END IF;
+      ELSIF c = 'q' THEN res := res || 'K';
+      ELSIF c = 's' THEN
+        IF n1 = 'h' OR (n1 = 'i' AND n2 IN ('o', 'a')) THEN res := res || 'X';
+        ELSE res := res || 'S';
+        END IF;
+      ELSIF c = 't' THEN
+        IF n1 = 'i' AND n2 IN ('o', 'a') THEN res := res || 'X';
+        ELSIF n1 = 'h' THEN res := res || '0';
+        ELSIF NOT (n1 = 'c' AND n2 = 'h') THEN res := res || 'T';
+        END IF;
+      ELSIF c = 'v' THEN res := res || 'F';
+      ELSIF c IN ('w', 'y') THEN
+        IF n1 <> '' AND strpos(vowels, n1) > 0 THEN res := res || upper(c); END IF;
+      ELSIF c = 'x' THEN res := res || 'KS';
+      ELSIF c = 'z' THEN res := res || 'S';
+      ELSE res := res || upper(c);
+      END IF;
+    END IF;
+    i := i + 1;
+  END LOOP;
+  folded := regexp_replace(res, '(.)\\1+', '\\1', 'g');
+  RETURN folded;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pg_temp.s102a_token_keys(raw_text TEXT) RETURNS TEXT[]
+LANGUAGE plpgsql AS $$
+DECLARE
+  norm TEXT;
+  tok TEXT;
+  pk TEXT;
+  sk TEXT;
+  acc TEXT[] := '{}'::text[];
+BEGIN
+  norm := trim(regexp_replace(
+    regexp_replace(
+      regexp_replace(
+        replace(lower(translate(COALESCE(raw_text, ''), 'ÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜàáâãäåèéêëìíîïòóôõöùúûüŷŶÿŸçÇ', 'aaaaaaeeeeiiiiooooouuuuaaaaaaeeeeiiiiooooouuuuyyyycC')), '&', ' and '),
+        '[''’' || chr(96) || ']', '', 'g'
+      ),
+      '[^a-z0-9\\s]', ' ', 'g'
+    ),
+    '\\s+', ' ', 'g'
+  ));
+  IF norm = '' THEN RETURN acc; END IF;
+  FOREACH tok IN ARRAY string_to_array(norm, ' ') LOOP
+    IF tok = '' OR tok IN ('mr','mrs','ms','miss','mx','dr','prof','rev','sir','dame','lord','lady','ltd','limited','llp','plc','lp','inc','cyf','cyfyngedig','ccc','company','co') THEN
+      CONTINUE;
+    END IF;
+    IF length(tok) >= 4 THEN
+      pk := pg_temp.s102a_phonetic_key(tok);
+      IF length(pk) >= 2 THEN acc := array_append(acc, 'P:' || pk); END IF;
+    ELSE
+      sk := regexp_replace(regexp_replace(tok, '[hwy]', '', 'g'), '(.)\\1+', '\\1', 'g');
+      IF sk <> '' THEN acc := array_append(acc, 'S:' || sk); END IF;
+    END IF;
+    acc := array_append(acc, 'I:' || left(tok, 1));
+  END LOOP;
+  RETURN COALESCE((SELECT array_agg(DISTINCT x ORDER BY x) FROM unnest(acc) AS x), '{}'::text[]);
+END;
+$$;
+
+UPDATE public.people p
+SET
+  phone_last9_keys = COALESCE((
+    SELECT array_agg(DISTINCT l9 ORDER BY l9)
+    FROM jsonb_array_elements(COALESCE(p.phones_json, '[]'::jsonb)) AS elem,
+         LATERAL (SELECT pg_temp.s102a_phone_last9(COALESCE(elem->>'number', elem #>> '{}')) AS l9) s
+    WHERE l9 <> ''
+  ), '{}'::text[]),
+  postcode_keys = COALESCE((
+    SELECT array_agg(DISTINCT pc ORDER BY pc)
+    FROM jsonb_array_elements(COALESCE(p.addresses_json, '[]'::jsonb)) AS elem,
+         LATERAL (SELECT pg_temp.s102a_norm_postcode(elem->>'postcode') AS pc) s
+    WHERE pc <> ''
+  ), '{}'::text[]),
+  phonetic_keys = pg_temp.s102a_token_keys(
+    COALESCE(p.first_name, '') || ' ' ||
+    COALESCE(p.preferred_name, '') || ' ' ||
+    COALESCE(p.surname, '') || ' ' ||
+    COALESCE(p.other_names, '')
+  );
+
+UPDATE public.organisations o
+SET
+  norm_company_number = regexp_replace(upper(regexp_replace(COALESCE(o.company_number, ''), '[^a-zA-Z0-9]', '', 'g')), '^GB', ''),
+  email_domains = COALESCE((
+    SELECT array_agg(DISTINCT dom ORDER BY dom)
+    FROM unnest(ARRAY[
+      CASE WHEN o.general_email ~* '^[^\\s@]+@[^\\s@]+\\.[a-z0-9]{2,}$'
+           THEN lower(split_part(o.general_email, '@', 2)) ELSE '' END,
+      CASE WHEN NULLIF(trim(o.website), '') IS NOT NULL
+           THEN split_part(regexp_replace(regexp_replace(lower(trim(o.website)), '^https?://', ''), '^www\\.', ''), '/', 1)
+           ELSE '' END
+    ]) AS dom
+    WHERE dom <> ''
+      AND dom LIKE '%.%'
+      AND dom NOT IN ('gmail.com','googlemail.com','outlook.com','hotmail.com','hotmail.co.uk','live.com','yahoo.com','yahoo.co.uk','icloud.com','me.com','btinternet.com','aol.com','sky.com','virginmedia.com','talktalk.net')
+  ), '{}'::text[]),
+  phone_last9_keys = CASE
+    WHEN pg_temp.s102a_phone_last9(o.main_phone) <> ''
+      THEN ARRAY[pg_temp.s102a_phone_last9(o.main_phone)]
+    ELSE '{}'::text[]
+  END,
+  postcode_keys = COALESCE((
+    SELECT array_agg(DISTINCT pc ORDER BY pc)
+    FROM unnest(ARRAY[
+      pg_temp.s102a_norm_postcode(o.registered_address_json->>'postcode'),
+      pg_temp.s102a_norm_postcode(o.trading_address_json->>'postcode')
+    ]) AS pc
+    WHERE pc <> ''
+  ), '{}'::text[]),
+  phonetic_keys = pg_temp.s102a_token_keys(
+    COALESCE(o.legal_name, '') || ' ' || COALESCE(o.trading_name, '')
+  );
+
+DROP FUNCTION IF EXISTS pg_temp.s102a_token_keys(TEXT);
+DROP FUNCTION IF EXISTS pg_temp.s102a_phonetic_key(TEXT);
+DROP FUNCTION IF EXISTS pg_temp.s102a_norm_postcode(TEXT);
+DROP FUNCTION IF EXISTS pg_temp.s102a_phone_last9(TEXT);
+
+CREATE INDEX IF NOT EXISTS idx_people_phone_last9_gin
+  ON public.people USING GIN (phone_last9_keys);
+CREATE INDEX IF NOT EXISTS idx_people_postcode_keys_gin
+  ON public.people USING GIN (postcode_keys);
+CREATE INDEX IF NOT EXISTS idx_people_phonetic_keys_gin
+  ON public.people USING GIN (phonetic_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_email_domains_gin
+  ON public.organisations USING GIN (email_domains);
+CREATE INDEX IF NOT EXISTS idx_organisations_phone_last9_gin
+  ON public.organisations USING GIN (phone_last9_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_postcode_keys_gin
+  ON public.organisations USING GIN (postcode_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_phonetic_keys_gin
+  ON public.organisations USING GIN (phonetic_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_tenant_norm_company_no
+  ON public.organisations (tenant_id, norm_company_number)
+  WHERE norm_company_number <> '';
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_restricted_acl
+  ON public.matters (tenant_id, id)
+  WHERE (
+    is_staff_matter = TRUE
+    OR has_ethical_wall = TRUE
+    OR jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) > 0
+  );
+`.trim(),
+    downSql: `
+DROP INDEX IF EXISTS public.idx_matters_tenant_restricted_acl;
+DROP INDEX IF EXISTS public.idx_organisations_tenant_norm_company_no;
+DROP INDEX IF EXISTS public.idx_organisations_phonetic_keys_gin;
+DROP INDEX IF EXISTS public.idx_organisations_postcode_keys_gin;
+DROP INDEX IF EXISTS public.idx_organisations_phone_last9_gin;
+DROP INDEX IF EXISTS public.idx_organisations_email_domains_gin;
+DROP INDEX IF EXISTS public.idx_people_phonetic_keys_gin;
+DROP INDEX IF EXISTS public.idx_people_postcode_keys_gin;
+DROP INDEX IF EXISTS public.idx_people_phone_last9_gin;
+ALTER TABLE public.organisations
+  DROP COLUMN IF EXISTS phonetic_keys,
+  DROP COLUMN IF EXISTS postcode_keys,
+  DROP COLUMN IF EXISTS phone_last9_keys,
+  DROP COLUMN IF EXISTS email_domains,
+  DROP COLUMN IF EXISTS norm_company_number;
+ALTER TABLE public.people
+  DROP COLUMN IF EXISTS phonetic_keys,
+  DROP COLUMN IF EXISTS postcode_keys,
+  DROP COLUMN IF EXISTS phone_last9_keys;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3109,6 +3401,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021,
   KEY_DATE_CALENDAR_SYNC_LEASE_MIGRATION_0022,
   INTAKE_CHECKS_AND_OUTBOX_ATTACHMENTS_MIGRATION_0023,
+  SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024,
 ];
 
 export function validateMigrationCatalogueOrder(

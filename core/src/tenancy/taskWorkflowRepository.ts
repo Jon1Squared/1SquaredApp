@@ -28,7 +28,9 @@ import {
 } from './tenantScopedRepository';
 import { TenantAuditRepository } from './auditRepository';
 import {
+  ENQUIRY_DRAFT_ONLY_SQL_PREDICATE,
   ENQUIRY_VISIBLE_SQL_PREDICATE,
+  QUOTE_DRAFT_ONLY_SQL_PREDICATE,
   QUOTE_VISIBLE_SQL_PREDICATE,
 } from './intakeQuoteRepository';
 import {
@@ -595,6 +597,29 @@ export const TASK_VISIBLE_SQL_PREDICATE = `(
   )
 )`;
 
+export const TASK_DRAFT_ONLY_SQL_PREDICATE = `(
+  NOT EXISTS (
+    SELECT 1 FROM task_linked_records tlr
+    JOIN enquiries e
+      ON e.tenant_id = tlr.tenant_id
+     AND e.id = tlr.record_id
+    WHERE tlr.tenant_id = t.tenant_id
+      AND tlr.task_id = t.id
+      AND tlr.record_type = 'enquiry'
+      AND NOT ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM task_linked_records tlr
+    JOIN quotes q
+      ON q.tenant_id = tlr.tenant_id
+     AND q.id = tlr.record_id
+    WHERE tlr.tenant_id = t.tenant_id
+      AND tlr.task_id = t.id
+      AND tlr.record_type = 'quote'
+      AND NOT ${QUOTE_DRAFT_ONLY_SQL_PREDICATE}
+  )
+)`;
+
 /**
  * SQL predicate returning TRUE when a sign-off row `s` (`s.tenant_id = $1`) is visible to `viewerId` (`$2`).
  */
@@ -947,11 +972,21 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   public async getTaskById<T = TenantTaskRecord>(
     ctx: TenantContext,
     taskId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
   ): Promise<T | null> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
       const viewerId = options?.viewerId ?? ctx.actorId;
+      const pred = hasRestrictedMatterAccess
+        ? TASK_DRAFT_ONLY_SQL_PREDICATE
+        : TASK_VISIBLE_SQL_PREDICATE;
       const res = includeRestricted
         ? await tx.query<TaskRow>(
             `SELECT * FROM tasks t WHERE t.tenant_id = $1 AND t.id = $2`,
@@ -961,7 +996,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
             `SELECT * FROM tasks t
              WHERE t.tenant_id = $1
                AND t.id = $3
-               AND ${TASK_VISIBLE_SQL_PREDICATE}`,
+               AND ${pred}`,
             [ctx.tenantId, viewerId, taskId],
           );
       const row = res.rows[0];
@@ -984,16 +1019,24 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       linkedRecordType?: string;
       linkedRecordId?: string;
       includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
       const params: unknown[] = includeRestricted
         ? [ctx.tenantId]
         : [ctx.tenantId, viewerId];
       const clauses: string[] = ['t.tenant_id = $1'];
       if (!includeRestricted) {
-        clauses.push(TASK_VISIBLE_SQL_PREDICATE);
+        clauses.push(
+          hasRestrictedMatterAccess
+            ? TASK_DRAFT_ONLY_SQL_PREDICATE
+            : TASK_VISIBLE_SQL_PREDICATE,
+        );
       }
       if (options?.status) {
         params.push(options.status);
@@ -1645,18 +1688,21 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       status?: string;
       matterId?: string;
       includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const includeRestricted = Boolean(options?.includeRestricted);
-      const params: unknown[] = includeRestricted
+      const bypassRestricted =
+        Boolean(options?.includeRestricted) ||
+        Boolean(options?.hasRestrictedMatterAccess);
+      const params: unknown[] = bypassRestricted
         ? [ctx.tenantId]
         : [ctx.tenantId, viewerId];
       const clauses: string[] = [
         'r.tenant_id = $1',
         "r.register_type_key = 'sign_off'",
       ];
-      if (!includeRestricted) {
+      if (!bypassRestricted) {
         clauses.push(REGISTER_RECORD_VISIBLE_SQL_PREDICATE);
       }
       if (options?.status) {
@@ -1693,6 +1739,180 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     return (await this.listVisibleSignOffs(ctx, ctx.actorId, {
       includeRestricted: true,
     })) as unknown as T[];
+  }
+
+  // ---------------------------------------------------------------------------
+  // S1-02a Scoped Task Queries
+  // ---------------------------------------------------------------------------
+
+  public async listTasksByIds<T = TenantTaskRecord>(
+    ctx: TenantContext,
+    taskIds: readonly string[],
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<T[]> {
+    const cleanIds = Array.from(
+      new Set(taskIds.map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
+      const viewerId = options?.viewerId ?? ctx.actorId;
+      const pred = hasRestrictedMatterAccess
+        ? TASK_DRAFT_ONLY_SQL_PREDICATE
+        : TASK_VISIBLE_SQL_PREDICATE;
+      const res = includeRestricted
+        ? await tx.query<TaskRow>(
+            `SELECT * FROM tasks t
+             WHERE t.tenant_id = $1 AND t.id = ANY($2::text[])
+             ORDER BY t.created_at DESC, t.id ASC`,
+            [ctx.tenantId, cleanIds],
+          )
+        : await tx.query<TaskRow>(
+            `SELECT * FROM tasks t
+             WHERE t.tenant_id = $1
+               AND t.id = ANY($3::text[])
+               AND ${pred}
+             ORDER BY t.created_at DESC, t.id ASC`,
+            [ctx.tenantId, viewerId, cleanIds],
+          );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'tasks.listTasksByIds');
+      }
+      const linkedMap = await this.loadTaskLinkedRecordsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return res.rows.map(
+        (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
+      );
+    });
+  }
+
+  public async listTasksLinkedToRecord<T = TenantTaskRecord>(
+    ctx: TenantContext,
+    recordType: string,
+    recordId: string,
+  ): Promise<T[]> {
+    if (!recordType?.trim() || !recordId?.trim()) return [];
+    return this.listVisibleTasks<T>(ctx, ctx.actorId, {
+      linkedRecordType: recordType.trim(),
+      linkedRecordId: recordId.trim(),
+      includeRestricted: true,
+    });
+  }
+
+  public async listTasksByIdsOrIdempotencyKeys<T = TenantTaskRecord>(
+    ctx: TenantContext,
+    filter: {
+      readonly ids?: readonly string[];
+      readonly keyDateIds?: readonly string[];
+      readonly idempotencyKeys?: readonly string[];
+    },
+  ): Promise<T[]> {
+    const ids = Array.from(
+      new Set((filter.ids ?? []).map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    const keyDateIds = Array.from(
+      new Set(
+        (filter.keyDateIds ?? []).map((x) => x?.trim()).filter(Boolean) as string[],
+      ),
+    );
+    const idempotencyKeys = Array.from(
+      new Set(
+        (filter.idempotencyKeys ?? [])
+          .map((x) => x?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    if (ids.length === 0 && keyDateIds.length === 0 && idempotencyKeys.length === 0) {
+      return [];
+    }
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<TaskRow>(
+        `SELECT * FROM tasks t
+         WHERE t.tenant_id = $1
+           AND (
+             t.id = ANY($2::text[])
+             OR t.linked_key_date_id = ANY($3::text[])
+             OR (t.profile_json->>'idempotencyKey') = ANY($4::text[])
+           )
+         ORDER BY t.id ASC`,
+        [ctx.tenantId, ids, keyDateIds, idempotencyKeys],
+      );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'tasks.listTasksByIdsOrIdempotencyKeys');
+      }
+      const linkedMap = await this.loadTaskLinkedRecordsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return res.rows.map(
+        (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
+      );
+    });
+  }
+
+  public async listTasksOwnedByPerson<T = TenantTaskRecord>(
+    ctx: TenantContext,
+    personId: string,
+  ): Promise<T[]> {
+    if (!personId?.trim()) return [];
+    const pid = personId.trim();
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<TaskRow>(
+        `SELECT * FROM tasks t
+         WHERE t.tenant_id = $1
+           AND (
+             t.assigned_person_id = $2
+             OR t.assigned_person_ids_json ? $2
+             OR t.created_by_id = $2
+           )
+         ORDER BY t.id ASC`,
+        [ctx.tenantId, pid],
+      );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'tasks.listTasksOwnedByPerson');
+      }
+      const linkedMap = await this.loadTaskLinkedRecordsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return res.rows.map(
+        (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
+      );
+    });
+  }
+
+  public async listHiddenTaskIds(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean },
+  ): Promise<string[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? TASK_DRAFT_ONLY_SQL_PREDICATE
+        : TASK_VISIBLE_SQL_PREDICATE;
+      const res = await tx.query<{ tenant_id: string; id: string }>(
+        `SELECT t.tenant_id, t.id FROM tasks t
+         WHERE t.tenant_id = $1 AND NOT ${pred}
+         ORDER BY t.id ASC`,
+        [ctx.tenantId, viewerId],
+      );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'tasks.listHiddenTaskIds');
+        return r.id;
+      });
+    });
   }
 
   public async deleteSignOffById(

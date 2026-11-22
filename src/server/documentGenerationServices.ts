@@ -805,9 +805,17 @@ async function ensureSeedDocumentTemplatesInner(
   });
 }
 
+export interface DocGenContextScope {
+  readonly loadVisibleMatters?: boolean;
+  readonly matterIds?: readonly string[];
+  readonly organisationIds?: readonly string[];
+  readonly personIds?: readonly string[];
+}
+
 export async function getInitializedDocGenContext(
   userId: string,
   session?: VerifiedEntraSessionPayload,
+  scope?: DocGenContextScope,
 ): Promise<{
   store: DocGenCatalogueStoreView;
   ctx: TenantContext;
@@ -826,13 +834,82 @@ export async function getInitializedDocGenContext(
     session,
   );
   const repo = getDocumentRepository();
-  const [people, organisations, matters, teams, config] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getPartyRepository().listAllOrganisations<Organisation>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+  const [staffPeople, teams, config] = await Promise.all([
+    getPartyRepository().listAllPeople<Person>(ctx, {
+      employeesAndLeaversOnly: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     getEffectiveTenantConfig(ctx, repo),
   ]);
+  const hasRestrictedAccess = hasPersonPermission(
+    user,
+    'matter:restricted:access',
+    { allPeople: staffPeople, teams, config },
+  );
+  const scopedMatterIds = Array.from(
+    new Set(
+      (scope?.matterIds ?? []).filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    ),
+  );
+  const matters =
+    scopedMatterIds.length > 0
+      ? await getMatterRepository().listMattersByIds<Matter>(
+          ctx,
+          scopedMatterIds,
+          { viewerId: user.id, includeRestricted: true },
+        )
+      : scope?.loadVisibleMatters
+        ? await getMatterRepository().listVisibleMatters<Matter>(ctx, {
+            viewerId: user.id,
+            hasRestrictedMatterAccess: hasRestrictedAccess,
+          })
+        : [];
+
+  const staffIdSet = new Set(staffPeople.map((p) => p.id));
+  const extraPersonIds = new Set<string>();
+  const scopedOrgIds = new Set<string>();
+  for (const id of scope?.personIds ?? []) {
+    if (id?.trim() && !staffIdSet.has(id.trim())) extraPersonIds.add(id.trim());
+  }
+  for (const id of scope?.organisationIds ?? []) {
+    if (id?.trim()) scopedOrgIds.add(id.trim());
+  }
+  for (const m of matters) {
+    if (m.clientId?.trim()) {
+      scopedOrgIds.add(m.clientId.trim());
+      if (!staffIdSet.has(m.clientId.trim())) extraPersonIds.add(m.clientId.trim());
+    }
+    for (const party of m.parties ?? []) {
+      if (party.entityType === 'organisation' && party.linkedRecordId?.trim()) {
+        scopedOrgIds.add(party.linkedRecordId.trim());
+      } else if (party.linkedRecordId?.trim()) {
+        if (!staffIdSet.has(party.linkedRecordId.trim())) {
+          extraPersonIds.add(party.linkedRecordId.trim());
+        }
+        if (party.entityType !== 'person') {
+          scopedOrgIds.add(party.linkedRecordId.trim());
+        }
+      }
+    }
+  }
+
+  const [extraPeople, organisations] = await Promise.all([
+    extraPersonIds.size > 0
+      ? getPartyRepository().listPeopleByIds<Person>(
+          ctx,
+          Array.from(extraPersonIds),
+        )
+      : Promise.resolve<Person[]>([]),
+    scopedOrgIds.size > 0
+      ? getPartyRepository().listOrganisationsByIds<Organisation>(
+          ctx,
+          Array.from(scopedOrgIds),
+        )
+      : Promise.resolve<Organisation[]>([]),
+  ]);
+  const people = [...staffPeople, ...extraPeople];
   const catalogueSnap = await getCatalogueRepository().getFullCatalogueAndConfigsSnapshot<
     DocGenFirmIdentity,
     ChoiceList,
@@ -862,7 +939,7 @@ export async function getDocumentGenerationSnapshotForUser(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<DocumentGenerationClientSnapshot | ActionDenied> {
-  const { store, ctx, user, matters, config, repo } =
+  const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
   const canViewTemplates = hasDocumentPermission(
@@ -914,8 +991,26 @@ export async function getDocumentGenerationSnapshotForUser(
   let accessibleDocs: GeneratedDocumentRecord[] = [];
   let documentLinks: DocumentLinkRecord[] = [];
   if (canViewDocuments) {
+    const referencedMatterIds = Array.from(
+      new Set([
+        ...allDocs
+          .map((d) => d.primaryMatterId)
+          .filter((id): id is string => Boolean(id)),
+        ...allLinks
+          .filter((l) => l.entityType === 'matter')
+          .map((l) => l.entityId),
+      ]),
+    );
+    const referencedMatters =
+      referencedMatterIds.length > 0
+        ? await getMatterRepository().listMattersByIds<Matter>(
+            ctx,
+            referencedMatterIds,
+            { includeRestricted: true },
+          )
+        : [];
     const mattersById = new Map(
-      matters.map((m) => [m.id, toMatterAccessSubject(m)!]),
+      referencedMatters.map((m) => [m.id, toMatterAccessSubject(m)!]),
     );
 
     const linksByDocId = new Map<string, DocumentLinkRecord[]>();
@@ -1382,7 +1477,14 @@ export async function previewTemplateService(
   missingRequiredFields: string[];
 }> {
   const { store, ctx, user, people, organisations, matters, teams, config, repo, storage } =
-    await getInitializedDocGenContext(userId, session);
+    await getInitializedDocGenContext(userId, session, {
+      loadVisibleMatters: !input.matterId,
+      matterIds: input.matterId ? [input.matterId] : [],
+      organisationIds: input.organisationId ? [input.organisationId] : [],
+      personIds: [input.personId, input.recipientPartyId].filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    });
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
@@ -1477,7 +1579,20 @@ export async function generateDocumentService(
   missingRequiredFields: string[];
 }> {
   const { store, ctx, user, people, organisations, matters, teams, config, repo, storage } =
-    await getInitializedDocGenContext(userId, session);
+    await getInitializedDocGenContext(userId, session, {
+      matterIds: input.matterId ? [input.matterId] : [],
+      organisationIds: [
+        input.organisationId,
+        input.recipientPartyEntityType === 'organisation'
+          ? input.recipientPartyId
+          : null,
+      ].filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+      personIds: [input.personId, input.recipientPartyId].filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    });
   const actor = buildDocumentActorFromPerson(user, ctx);
   const catalogue = buildFullCatalogueFromStoreCustomFields(store.customFields);
   const engine = new BasicMergeEngine();
@@ -1630,7 +1745,7 @@ export async function downloadGeneratedDocumentService(
   mimeType: string;
   downloadToken: ScopedDownloadToken;
 }> {
-  const { ctx, user, matters, config, repo, storage } =
+  const { ctx, user, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
 
@@ -1639,14 +1754,33 @@ export async function downloadGeneratedDocumentService(
     throw new Error('DOCUMENT_NOT_FOUND: Document not found.');
   }
 
+  const docLinks = await repo.listLinksForDocument(ctx, doc.id);
+  const linkedMatterIds = Array.from(
+    new Set([
+      ...(doc.primaryMatterId ? [doc.primaryMatterId] : []),
+      ...docLinks
+        .filter((link) => link.entityType === 'matter')
+        .map((link) => link.entityId),
+    ]),
+  );
+  const referencedMatters =
+    linkedMatterIds.length > 0
+      ? await getMatterRepository().listMattersByIds<Matter>(
+          ctx,
+          linkedMatterIds,
+          { includeRestricted: true },
+        )
+      : [];
+  const referencedMattersById = new Map(referencedMatters.map((m) => [m.id, m]));
+
   const linkedMatters = [];
   if (doc.primaryMatterId) {
-    const m = matters.find((x) => x.id === doc.primaryMatterId);
+    const m = referencedMattersById.get(doc.primaryMatterId);
     if (m) linkedMatters.push(toMatterAccessSubject(m)!);
   }
-  for (const link of await repo.listLinksForDocument(ctx, doc.id)) {
+  for (const link of docLinks) {
     if (link.entityType === 'matter') {
-      const m = matters.find((x) => x.id === link.entityId);
+      const m = referencedMattersById.get(link.entityId);
       if (m && !linkedMatters.some((x) => x.id === m.id)) {
         linkedMatters.push(toMatterAccessSubject(m)!);
       }
@@ -1681,9 +1815,30 @@ export async function deleteGeneratedDocumentService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<GeneratedDocumentRecord> {
-  const { ctx, user, matters, config, repo, storage } =
+  const { ctx, user, config, repo, storage } =
     await getInitializedDocGenContext(userId, session);
   const actor = buildDocumentActorFromPerson(user, ctx);
+
+  const existingDoc = await repo.getDocumentById(ctx, documentId);
+  const existingLinks = existingDoc
+    ? await repo.listLinksForDocument(ctx, existingDoc.id)
+    : [];
+  const referencedMatterIds = Array.from(
+    new Set([
+      ...(existingDoc?.primaryMatterId ? [existingDoc.primaryMatterId] : []),
+      ...existingLinks
+        .filter((l) => l.entityType === 'matter')
+        .map((l) => l.entityId),
+    ]),
+  );
+  const referencedMatters =
+    referencedMatterIds.length > 0
+      ? await getMatterRepository().listMattersByIds<Matter>(
+          ctx,
+          referencedMatterIds,
+          { includeRestricted: true },
+        )
+      : [];
 
   return repo.withTenantTransaction(ctx, async () => {
     const deleted = await deleteGeneratedDocument({
@@ -1694,7 +1849,7 @@ export async function deleteGeneratedDocumentService(
       config,
       documentId,
       resolveMatterSubject: (matterId) => {
-        const m = matters.find((x) => x.id === matterId);
+        const m = referencedMatters.find((x) => x.id === matterId);
         return m ? toMatterAccessSubject(m) : null;
       },
     });
@@ -1738,8 +1893,17 @@ export async function getTemplateUsageReportService(
 
   const userDisplayNamesById: Record<string, string> = {};
   if (report.userLevelDetailPermitted && report.byUser) {
+    const knownPeopleIds = new Set(people.map((p) => p.id));
+    const missingUserIds = report.byUser
+      .map((u) => u.userId)
+      .filter((id) => Boolean(id) && !knownPeopleIds.has(id));
+    const extraPeople =
+      missingUserIds.length > 0
+        ? await getPartyRepository().listPeopleByIds<Person>(ctx, missingUserIds)
+        : [];
+    const lookupPeople = [...people, ...extraPeople];
     for (const u of report.byUser) {
-      const found = people.find((p) => p.id === u.userId);
+      const found = lookupPeople.find((p) => p.id === u.userId);
       userDisplayNamesById[u.userId] = found
         ? `${found.firstName} ${found.surname}`.trim() || found.id
         : u.userId;
