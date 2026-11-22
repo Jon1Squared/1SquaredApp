@@ -31,9 +31,28 @@ import type {
 } from '../../api/index';
 import { assertBlobKeyBelongsToTenant } from '../../tenancy/blobStorage';
 import {
+  ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND,
   TenantIntakeCheckRepository,
   type StoredIntakeCheckRow,
 } from '../../tenancy/intakeCheckRepository';
+
+const IDENTITY_OUTCOMES = new Set(
+  ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND.identity_verification,
+);
+const SANCTIONS_OUTCOMES = new Set(
+  ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND.sanctions_pep,
+);
+const ESIG_REQUEST_OUTCOMES = new Set<ESignatureOutcome>([
+  'requested_manual',
+  'declined',
+]);
+const ESIG_SIGNED_OUTCOMES = new Set<ESignatureOutcome>([
+  'signed_uploaded',
+  'declined',
+]);
+const PAYMENT_OUTCOMES = new Set(
+  ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND.payment_request,
+);
 
 export class IntakeCheckIntegrationError extends Error {
   public readonly code: string;
@@ -219,6 +238,12 @@ export class ManualIdentityVerificationProvider
     input: RecordManualIdentityVerificationInput,
   ): Promise<IdentityVerificationRecord> {
     assertValidContext(ctx);
+    if (typeof input.outcome !== 'string' || !IDENTITY_OUTCOMES.has(input.outcome)) {
+      throw new IntakeCheckIntegrationError(
+        'INTAKE_CHECK_INVALID_OUTCOME',
+        `Invalid identity verification outcome "${String(input.outcome)}".`,
+      );
+    }
     const evidenceRefs = await verifyEvidenceArtifacts(
       ctx,
       this.deps.storageProvider,
@@ -273,6 +298,12 @@ export class ManualSanctionsPepScreeningProvider
     input: RecordManualSanctionsPepInput,
   ): Promise<SanctionsPepScreeningRecord> {
     assertValidContext(ctx);
+    if (typeof input.outcome !== 'string' || !SANCTIONS_OUTCOMES.has(input.outcome)) {
+      throw new IntakeCheckIntegrationError(
+        'INTAKE_CHECK_INVALID_OUTCOME',
+        `Invalid sanctions/PEP screening outcome "${String(input.outcome)}".`,
+      );
+    }
     const evidenceRefs = await verifyEvidenceArtifacts(
       ctx,
       this.deps.storageProvider,
@@ -323,9 +354,17 @@ export class ManualESignatureProvider implements ESignatureProvider {
     ctx: TenantContext,
     input: RecordManualESignatureInput,
   ): Promise<ESignatureEnvelopeRecord> {
+    const resolvedOutcome: ESignatureOutcome =
+      input.outcome === undefined ? 'requested_manual' : input.outcome;
+    if (!ESIG_REQUEST_OUTCOMES.has(resolvedOutcome)) {
+      throw new IntakeCheckIntegrationError(
+        'INTAKE_CHECK_INVALID_OUTCOME',
+        `Invalid e-signature request outcome "${String(input.outcome)}".`,
+      );
+    }
     return this.recordEnvelope(ctx, {
       ...input,
-      outcome: input.outcome === 'declined' ? 'declined' : 'requested_manual',
+      outcome: resolvedOutcome,
     });
   }
 
@@ -333,9 +372,17 @@ export class ManualESignatureProvider implements ESignatureProvider {
     ctx: TenantContext,
     input: RecordManualESignatureInput,
   ): Promise<ESignatureEnvelopeRecord> {
+    const resolvedOutcome: ESignatureOutcome =
+      input.outcome === undefined ? 'signed_uploaded' : input.outcome;
+    if (!ESIG_SIGNED_OUTCOMES.has(resolvedOutcome)) {
+      throw new IntakeCheckIntegrationError(
+        'INTAKE_CHECK_INVALID_OUTCOME',
+        `Invalid e-signature signed-document outcome "${String(input.outcome)}".`,
+      );
+    }
     return this.recordEnvelope(ctx, {
       ...input,
-      outcome: input.outcome === 'declined' ? 'declined' : 'signed_uploaded',
+      outcome: resolvedOutcome,
     });
   }
 
@@ -410,6 +457,12 @@ export class ManualPaymentRequestProvider implements PaymentRequestProvider {
     outcome: PaymentRequestOutcome,
   ): Promise<PaymentRequestRecord> {
     assertValidContext(ctx);
+    if (!PAYMENT_OUTCOMES.has(outcome)) {
+      throw new IntakeCheckIntegrationError(
+        'INTAKE_CHECK_INVALID_OUTCOME',
+        `Invalid payment request outcome "${String(outcome)}".`,
+      );
+    }
     if (
       typeof input.amountMinorUnits !== 'bigint' ||
       input.amountMinorUnits < BigInt(0)

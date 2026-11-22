@@ -18,6 +18,32 @@ import { TenantAuditRepository } from './auditRepository';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
 import { TenantScopedRepository, toIsoString } from './tenantScopedRepository';
 
+export const ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND: Readonly<
+  Record<IntakeCheckKind, readonly string[]>
+> = Object.freeze({
+  identity_verification: Object.freeze(['verified', 'failed', 'pending', 'expired']),
+  sanctions_pep: Object.freeze(['clear', 'match_flagged', 'pending']),
+  e_signature: Object.freeze(['requested_manual', 'signed_uploaded', 'declined']),
+  payment_request: Object.freeze([
+    'requested_manual',
+    'receipt_recorded_manual',
+    'cancelled',
+  ]),
+});
+
+export function assertValidIntakeCheckOutcome(
+  checkKind: IntakeCheckKind,
+  outcome: unknown,
+): string {
+  const allowed = ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND[checkKind];
+  if (!allowed || typeof outcome !== 'string' || !allowed.includes(outcome)) {
+    throw new Error(
+      `INTAKE_CHECK_INVALID_OUTCOME: Invalid outcome "${String(outcome)}" for intake check kind "${checkKind}".`,
+    );
+  }
+  return outcome;
+}
+
 export interface StoredIntakeCheckRow {
   readonly id: string;
   readonly tenantId: string;
@@ -129,6 +155,7 @@ export class TenantIntakeCheckRepository extends TenantScopedRepository {
         'INTAKE_CHECK_INVALID_SUBJECT: Non-empty subjectId is required.',
       );
     }
+    const outcome = assertValidIntakeCheckOutcome(input.checkKind, input.outcome);
 
     return this.withTenantTransaction(ctx, async (tx) => {
       const seqRes = await tx.query<{ seq: string }>(
@@ -159,7 +186,7 @@ export class TenantIntakeCheckRepository extends TenantScopedRepository {
           input.provider,
           input.subjectType,
           subjectId,
-          input.outcome,
+          outcome,
           amountStr,
           input.currency ?? null,
           input.referenceCode ?? null,

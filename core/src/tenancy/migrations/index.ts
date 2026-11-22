@@ -3049,6 +3049,12 @@ CREATE TABLE IF NOT EXISTS public.intake_check_records (
   recorded_by_person_id TEXT NOT NULL,
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   correlation_id TEXT NOT NULL,
+  CONSTRAINT chk_intake_check_records_outcome_by_kind CHECK (
+    (check_kind = 'identity_verification' AND outcome IN ('verified', 'failed', 'pending', 'expired'))
+    OR (check_kind = 'sanctions_pep' AND outcome IN ('clear', 'match_flagged', 'pending'))
+    OR (check_kind = 'e_signature' AND outcome IN ('requested_manual', 'signed_uploaded', 'declined'))
+    OR (check_kind = 'payment_request' AND outcome IN ('requested_manual', 'receipt_recorded_manual', 'cancelled'))
+  ),
   PRIMARY KEY (tenant_id, id)
 );
 

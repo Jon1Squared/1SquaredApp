@@ -2015,5 +2015,21 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const activeReapplied = await runner.getActiveTables(ctx);
     expect(activeReapplied).toContain('intake_check_records');
     expect(activeReapplied).toContain('email_outbox_attachments');
+
+    // R668: DB CHECK constraint enforces valid outcomes per check_kind
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await expect(
+        client.query(
+          `INSERT INTO public.intake_check_records (
+             tenant_id, id, check_kind, provider, subject_type, subject_id,
+             outcome, recorded_by_person_id, correlation_id
+           ) VALUES ($1, 'ICHK-BAD-OUTCOME', 'identity_verification', 'manual', 'person', 'P-1', 'clear', 'P-1', 'corr-1')`,
+          [tenantId],
+        ),
+      ).rejects.toThrow(/chk_intake_check_records_outcome_by_kind|check constraint/i);
+    } finally {
+      await client.end();
+    }
   });
 });

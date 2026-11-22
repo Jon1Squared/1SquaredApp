@@ -387,6 +387,86 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
     const bravoGetById = await repo.getCheckById(ctxBravo, idRec.id);
     expect(bravoGetById).toBeNull();
 
+    // R668: Invalid intake check outcomes are refused at runtime in providers & repository with zero rows written
+    await expect(
+      providers.idVerification.recordManualCheck(ctxAlpha, {
+        subjectType: 'person',
+        subjectId: 'P-C-INVALID-OUTCOME',
+        outcome: 'clear' as never,
+        verificationMethod: 'Invalid outcome check',
+      }),
+    ).rejects.toThrow(/INTAKE_CHECK_INVALID_OUTCOME/);
+    expect(
+      await providers.idVerification.getLatestCheckForSubject(ctxAlpha, {
+        subjectType: 'person',
+        subjectId: 'P-C-INVALID-OUTCOME',
+      }),
+    ).toBeNull();
+
+    await expect(
+      providers.sanctionsPep.recordManualScreening(ctxAlpha, {
+        subjectType: 'organisation',
+        subjectId: 'O-C-INVALID-OUTCOME',
+        outcome: 'verified' as never,
+        screeningScope: 'Invalid outcome check',
+      }),
+    ).rejects.toThrow(/INTAKE_CHECK_INVALID_OUTCOME/);
+    expect(
+      await providers.sanctionsPep.getLatestScreeningForSubject(ctxAlpha, {
+        subjectType: 'organisation',
+        subjectId: 'O-C-INVALID-OUTCOME',
+      }),
+    ).toBeNull();
+
+    await expect(
+      providers.eSignature.recordManualRequest(ctxAlpha, {
+        subjectType: 'matter',
+        subjectId: 'M-INVALID-OUTCOME-REQ',
+        outcome: 'signed_uploaded' as never,
+      }),
+    ).rejects.toThrow(/INTAKE_CHECK_INVALID_OUTCOME/);
+    expect(
+      await providers.eSignature.getLatestEnvelope(ctxAlpha, {
+        subjectType: 'matter',
+        subjectId: 'M-INVALID-OUTCOME-REQ',
+      }),
+    ).toBeNull();
+
+    await expect(
+      providers.eSignature.recordManualSignedDocument(ctxAlpha, {
+        subjectType: 'matter',
+        subjectId: 'M-INVALID-OUTCOME-SIGN',
+        outcome: 'bogus_status' as never,
+      }),
+    ).rejects.toThrow(/INTAKE_CHECK_INVALID_OUTCOME/);
+    expect(
+      await providers.eSignature.getLatestEnvelope(ctxAlpha, {
+        subjectType: 'matter',
+        subjectId: 'M-INVALID-OUTCOME-SIGN',
+      }),
+    ).toBeNull();
+
+    await expect(
+      repo.recordCheck(ctxAlpha, {
+        checkKind: 'payment_request',
+        provider: 'manual',
+        subjectType: 'matter',
+        subjectId: 'M-INVALID-OUTCOME-REPO',
+        outcome: 'magic_paid',
+        amountMinorUnits: BigInt(1000),
+        currency: 'GBP',
+        metadata: {},
+        evidenceRefs: [],
+      }),
+    ).rejects.toThrow(/INTAKE_CHECK_INVALID_OUTCOME/);
+    expect(
+      await repo.getLatestCheckForSubject(ctxAlpha, {
+        checkKind: 'payment_request',
+        subjectType: 'matter',
+        subjectId: 'M-INVALID-OUTCOME-REPO',
+      }),
+    ).toBeNull();
+
     // Unknown runtime provider fails closed
     expect(() =>
       createTenantIntakeCheckProviders({
