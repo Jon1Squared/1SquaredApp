@@ -86,6 +86,10 @@ import {
   type SuggestedTaskAssignee,
 } from './CreateTaskModal';
 import { CustomFieldGroupItems } from './FormControls';
+import {
+  collectUnmappedFormErrors,
+  FormServerErrorSummary,
+} from './FormServerErrorSummary';
 import { InfoPopover } from './InfoPopover';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -119,6 +123,7 @@ interface Props {
   canAnonymise?: boolean;
   firmName?: string;
   tenantId: string;
+  initialErrors?: Record<string, string>;
 }
 
 export function EnquiryFormClient({
@@ -141,14 +146,21 @@ export function EnquiryFormClient({
   canAnonymise = false,
   firmName = 'the firm',
   tenantId,
+  initialErrors = {},
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';
   const isRoutedOrClosedMode = isSavedEnquiry && enquiry?.status !== 'Draft';
+  const isPrivacyNoticeRequired = !(
+    enquiry &&
+    enquiry.status !== 'Draft' &&
+    !enquiry.privacyNoticeGiven
+  );
   const router = useRouter();
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
   const firstInputRef = useRef<HTMLInputElement | null>(null);
+  const errorSummaryRef = useRef<HTMLElement | null>(null);
 
   const channels = useMemo(
     () => valuesForList(values, 'enquiry_channel').filter((v) => v.active),
@@ -347,7 +359,7 @@ export function EnquiryFormClient({
     [enquiryCustomDefs],
   );
 
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>(initialErrors);
 
   // Save bar & dirty tracking state
   const [savedBaseline, setSavedBaseline] = useState<EnquiryFormState>(initialFormState);
@@ -542,11 +554,25 @@ export function EnquiryFormClient({
           practiceAreaId,
           summary,
           notes,
+          privacyNoticeGiven,
           customFields: cfValues,
         },
         customFields,
+        { requirePrivacyNotice: isPrivacyNoticeRequired },
       ),
-    [firstName, lastName, phone, email, practiceAreaId, summary, notes, cfValues, customFields],
+    [
+      firstName,
+      lastName,
+      phone,
+      email,
+      practiceAreaId,
+      summary,
+      notes,
+      privacyNoticeGiven,
+      cfValues,
+      customFields,
+      isPrivacyNoticeRequired,
+    ],
   );
 
   useEffect(() => {
@@ -731,6 +757,7 @@ export function EnquiryFormClient({
   const callerMissingCount =
     (!firstName.trim() ? 1 : 0) +
     (!lastName.trim() ? 1 : 0) +
+    (isPrivacyNoticeRequired && !privacyNoticeGiven ? 1 : 0) +
     callerCustomDefs.filter((d) => isCustomFieldValueMissing(d, cfValues[d.id])).length;
   const contactCustomMissingCount = contactCustomDefs.filter((d) =>
     isCustomFieldValueMissing(d, cfValues[d.id]),
@@ -932,6 +959,31 @@ export function EnquiryFormClient({
     }
   };
 
+  const mappedEnquiryFieldKeys = useMemo(() => {
+    const keys = new Set<string>([
+      'name',
+      'firstName',
+      'lastName',
+      'privacyNoticeGiven',
+      'channelId',
+      'contact',
+      'email',
+      'practiceAreaId',
+      'urgencyId',
+      'summary',
+      'notes',
+    ]);
+    for (const def of enquiryCustomDefs) {
+      keys.add(def.id);
+    }
+    return keys;
+  }, [enquiryCustomDefs]);
+
+  const unmappedServerErrors = useMemo(
+    () => collectUnmappedFormErrors(errors, mappedEnquiryFieldKeys),
+    [errors, mappedEnquiryFieldKeys],
+  );
+
   const submitForm = (asDraft: boolean) => {
     if (!asDraft && missingItems.length > 0) {
       setAttemptedRouteWithMissing(true);
@@ -941,6 +993,10 @@ export function EnquiryFormClient({
       }
       if (!phone.trim() && !email.trim()) {
         nextErrors.contact = 'Provide at least a phone number or an email address.';
+      }
+      if (isPrivacyNoticeRequired && !privacyNoticeGiven) {
+        nextErrors.privacyNoticeGiven =
+          'Please confirm the privacy notice was read or sent to the caller.';
       }
       if (!practiceAreaId) {
         nextErrors.practiceAreaId = 'Select a practice area.';
@@ -1015,7 +1071,17 @@ export function EnquiryFormClient({
         if (res.missingFields && res.missingFields.length > 0) {
           setAttemptedRouteWithMissing(true);
         }
-        showToast('Please complete the required fields before saving.');
+        const unmapped = collectUnmappedFormErrors(res.errors, mappedEnquiryFieldKeys);
+        if (unmapped.length > 0) {
+          requestAnimationFrame(() => {
+            errorSummaryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          });
+        }
+        showToast(
+          unmapped[0]?.message ??
+            Object.values(res.errors)[0] ??
+            'Please complete the required fields before saving.',
+        );
         return;
       }
 
@@ -2145,6 +2211,13 @@ export function EnquiryFormClient({
               </div>
             ) : null}
 
+            <FormServerErrorSummary
+              errors={unmappedServerErrors}
+              title="Could not save enquiry"
+              dataTestId="enquiry-error-summary"
+              containerRef={errorSummaryRef}
+            />
+
             {/* ==============================================================
                 1 · CALLER
                 ============================================================== */}
@@ -2177,6 +2250,9 @@ export function EnquiryFormClient({
                       </option>
                     ))}
                   </select>
+                  {errors.channelId ? (
+                    <span className="field-error">{errors.channelId}</span>
+                  ) : null}
                 </div>
 
                 <div className="field-group">
@@ -2227,7 +2303,10 @@ export function EnquiryFormClient({
 
                 <div className="field-group">
                   <label className="field-label" htmlFor="enq-privacy-notice">
-                    Privacy notice given
+                    Privacy notice given{' '}
+                    {isPrivacyNoticeRequired ? (
+                      <span style={{ color: 'var(--coral)' }}>*</span>
+                    ) : null}
                   </label>
                   <select
                     id="enq-privacy-notice"
@@ -2238,6 +2317,9 @@ export function EnquiryFormClient({
                     <option value="no">No</option>
                     <option value="yes">Yes</option>
                   </select>
+                  {errors.privacyNoticeGiven ? (
+                    <span className="field-error">{errors.privacyNoticeGiven}</span>
+                  ) : null}
                 </div>
 
                 <div className="field-group">
@@ -2254,6 +2336,9 @@ export function EnquiryFormClient({
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
                   />
+                  {!errors.name && errors.firstName ? (
+                    <span className="field-error">{errors.firstName}</span>
+                  ) : null}
                 </div>
 
                 <div className="field-group">
@@ -2268,6 +2353,9 @@ export function EnquiryFormClient({
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
                   />
+                  {!errors.name && errors.lastName ? (
+                    <span className="field-error">{errors.lastName}</span>
+                  ) : null}
                 </div>
 
                 <div className="field-group">
@@ -2684,6 +2772,9 @@ export function EnquiryFormClient({
                     );
                   })}
                 </div>
+                {errors.urgencyId ? (
+                  <span className="field-error">{errors.urgencyId}</span>
+                ) : null}
               </div>
             </div>
 

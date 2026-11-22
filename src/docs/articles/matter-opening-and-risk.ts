@@ -6,7 +6,7 @@ export const matterOpeningAndRiskArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the five-step Matter Opening wizard works, how the seven-section risk questionnaire is scored, and how the server validates answers and derives the matter risk rating.',
-  updated: '2026-11-20',
+  updated: '2026-11-22',
   body: `
 This guide explains the **Matter Opening wizard** (\`/matters/new\` and \`/matters/[id]/edit\`), how the **Matter Risk Assessment** questionnaire is structured and completed, how the server validates answers, calculates the risk snapshot, and sets the matter's risk rating, and how monotonic matter numbering and optimistic concurrency (\`rowVersion\`) are enforced (\`S0-16\`).
 
@@ -18,7 +18,7 @@ Opening a new matter (requires \`matter:create\`) or editing a matter in progres
 2. **Matter costs**: Fee basis (fixed fee, hourly, conditional/damages-based, or other), fee estimate, agreed fee cap, disbursements, and retainer monies on account. Matters whose estimate exceeds the tenant's governance threshold require partner cost sign-off (\`matter:costs:sign_off\`) before opening.
 3. **Matter risk assessment**: Seven-section risk questionnaire covering instruction rationale, Money Laundering Regulations (MLR) scope, client relationship and due diligence, geography, funds and payments, delivery and resourcing, fees and liability, and reputation, regulation, and data.
 4. **Parties & conflict check**: Structured party capture (with relationship and capacity codes) and a server-side conflict search across all tenant matters and enquiries. Matches must be reviewed with a disposition and explanation before submission; potential conflicts or matches on restricted records are referred to Risk & Compliance (\`risk:view\`).
-5. **Declaration & submission**: Confirmation that all known parties have been searched and recorded, allowing the fee earner to **Save draft**, **Open matter** (\`submit_cleared\`), or **Refer to Risk** (\`submit_referred\`).
+5. **Declaration & submission**: Confirmation that all known parties have been searched and recorded, allowing the fee earner to **Save draft**, **Open matter** (\`submit_cleared\`), or **Refer to Risk** (\`submit_referred\`). Any server-side opening, extension, key-date, costs-governance, or risk-scoring error without a visible inline field appears in an alert summary banner at the top of the Matter Opening screen.
 
 ### Monotonic per-tenant matter numbering (\`B6\`) and optimistic concurrency (\`rowVersion\`, \`R409\`, \`R448\`)
 

@@ -91,14 +91,19 @@ export function getMissingRoutingFields(
     practiceAreaId?: string;
     summary?: string;
     notes?: string;
+    privacyNoticeGiven?: boolean;
     customFields?: Record<string, unknown>;
   },
   customFieldDefs: CustomFieldDefinition[] = [],
+  options?: { requirePrivacyNotice?: boolean },
 ): string[] {
   const list: string[] = [];
   if (!input.firstName?.trim()) list.push('first name');
   if (!input.lastName?.trim()) list.push('last name');
   if (!input.phone?.trim() && !input.email?.trim()) list.push('phone or email');
+  if (options?.requirePrivacyNotice !== false && !input.privacyNoticeGiven) {
+    list.push('privacy notice');
+  }
   if (!input.practiceAreaId?.trim()) list.push('practice area');
   if (!input.summary?.trim()) list.push('summary');
   if (!input.notes?.trim()) list.push('enquiry notes');
