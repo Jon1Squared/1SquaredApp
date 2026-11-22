@@ -15,6 +15,7 @@ import {
   TenantJobRunRepository,
   TenantMatterRepository,
   TenantMigrationRunner,
+  TenantOutboxRepository,
   TenantPartyRepository,
   TenantPostgresPoolManager,
   TenantRegisterRepository,
@@ -28,6 +29,7 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import {
   createRegisterRecordAction,
+  discussSignOffAction,
   getRegisterRecordDetailAction,
   listRegistersWorkspaceAction,
   saveRegistersConfigAction,
@@ -48,8 +50,11 @@ import { createSeedStore } from '@/seed/seedStoreBuilder';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { JOB_PERMISSIONS } from '@/server/actionPermissions';
 import {
+  approveSignOff,
   createRegisterRecordService,
+  discussSignOff,
   executeRegisterRemindersForTenant,
+  flagMatterWriteOff,
   getAppSnapshot,
   getRegisterRecordDetailRecord,
   listRegistersWorkspaceDataRecord,
@@ -1463,5 +1468,401 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     if (!listedAlpha.ok) throw new Error('Expected Alpha list ok');
     expect(listedAlpha.registerTypes.some((t) => t.key === 'bravo_seal')).toBe(false);
     expect(listedAlpha.records.some((r) => r.id === createdBravo.record.id)).toBe(false);
+  });
+
+  it('11 (R647): executeRegisterRemindersForTenant enqueues email and Teams outbox rows for Immediate recipients and skips None preferences', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000002');
+    const rawBaseCfg = getActiveTenantRawBaseConfig();
+    const reminderOverlay = {
+      integrations: {
+        email: {
+          provider: 'dev_catcher' as const,
+          senderAddress: 'noreply@notalawfirm.example',
+          recipientAllowList: ['@notalawfirm.example'],
+          devCatcher: { host: '127.0.0.1', port: 1025, secure: false },
+        },
+        teams: {
+          provider: 'dev_catcher' as const,
+          teamsAppId: '76474047-ac1f-49ee-83f3-5a2a58c2b3f8',
+          recipientAllowList: ['@notalawfirm.example'],
+          devCatcher: { endpointUrl: 'http://127.0.0.1:1099/teams' },
+        },
+      },
+    };
+    const reminderCfg = loadAndValidateTenantConfig(rawBaseCfg, reminderOverlay);
+    setActiveTenantConfigForTesting(rawBaseCfg, reminderOverlay);
+
+    const partyRepo = new TenantPartyRepository();
+    const outboxRepo = new TenantOutboxRepository();
+    const twRepo = new TenantTaskWorkflowRepository();
+
+    // Ensure both recipients have allow-listed emails and bound Entra object IDs
+    const p2 = (await partyRepo.getPersonById<Person>(ctx, 'P-000002'))!;
+    p2.emails = [
+      {
+        id: 'EM-R647-P2',
+        typeId: 'email_type.work',
+        address: 'dafydd.evans@notalawfirm.example',
+        isPrimary: true,
+        active: true,
+      },
+    ];
+    p2.entraObjectId = 'oid-s024-p2';
+    await partyRepo.putPerson(ctx, p2);
+
+    const p5 = (await partyRepo.getPersonById<Person>(ctx, 'P-000005'))!;
+    p5.emails = [
+      {
+        id: 'EM-R647-P5',
+        typeId: 'email_type.work',
+        address: 'elin.davies@notalawfirm.example',
+        isPrimary: true,
+        active: true,
+      },
+    ];
+    p5.entraObjectId = 'oid-s024-p5';
+    await partyRepo.putPerson(ctx, p5);
+
+    await outboxRepo.upsertNotificationPreference(ctx, {
+      personId: 'P-000002',
+      notificationKind: 'register_reminder',
+      emailFrequency: 'immediate',
+      teamsEnabled: true,
+    });
+    await outboxRepo.upsertNotificationPreference(ctx, {
+      personId: 'P-000005',
+      notificationKind: 'register_reminder',
+      emailFrequency: 'none',
+      teamsEnabled: false,
+    });
+
+    const dueTomorrowIso =
+      new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10) + 'T17:00:00.000Z';
+
+    const p2Und = await runAsActionActor(
+      'P-000002',
+      () =>
+        createRegisterRecordService(
+          {
+            registerTypeKey: 'undertaking',
+            title: 'R647 Immediate Email & Teams Reminder',
+            matterId: 'M-000001',
+            dueAt: dueTomorrowIso,
+            fieldValues: {
+              recipientName: 'Immediate Recipient Bank',
+              undertakingTerms: 'Confirm completion undertakings.',
+              givenByPersonId: 'P-000002',
+            },
+          },
+          'P-000002',
+          { tenantConfig: reminderCfg },
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(p2Und.ok).toBe(true);
+    if (!p2Und.ok) throw new Error(p2Und.message);
+
+    const p5Und = await runAsActionActor(
+      'P-000005',
+      () =>
+        createRegisterRecordService(
+          {
+            registerTypeKey: 'undertaking',
+            title: 'R647 Opt-Out Reminder',
+            matterId: 'M-000001',
+            dueAt: dueTomorrowIso,
+            fieldValues: {
+              recipientName: 'OptOut Recipient Bank',
+              undertakingTerms: 'No outbox dispatch expected for P-000005.',
+              givenByPersonId: 'P-000005',
+            },
+          },
+          'P-000005',
+          { tenantConfig: reminderCfg },
+        ),
+      { roles: ['partner', 'fee_earner'], mfaVerified: true },
+    );
+    expect(p5Und.ok).toBe(true);
+    if (!p5Und.ok) throw new Error(p5Und.message);
+
+    await new TenantJobRunRepository().clearTenantJobRuns(ctx);
+    const sweepRes = await executeRegisterRemindersForTenant(ctx, {
+      triggerSource: 'scheduled',
+      triggeredById: 'system:register-reminders',
+      defaultRunHourLocal: 0,
+      tenantConfig: reminderCfg,
+    });
+    expect(sweepRes.outcome).toBe('executed');
+
+    const p2ReminderNotifs = (await twRepo.listNotificationsForUser(ctx, 'P-000002')).filter(
+      (n) => n.kind === 'register_reminder' && n.recordId === p2Und.record.id,
+    );
+    expect(p2ReminderNotifs).toHaveLength(1);
+    const p5ReminderNotifs = (await twRepo.listNotificationsForUser(ctx, 'P-000005')).filter(
+      (n) => n.kind === 'register_reminder' && n.recordId === p5Und.record.id,
+    );
+    expect(p5ReminderNotifs).toHaveLength(1);
+
+    const outboxStats = await outboxRepo.withTenantReadTransaction(ctx, async (tx) => {
+      const eP2 = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.email_outbox WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [ctx.tenantId, `notification:${ctx.tenantId}:${p2ReminderNotifs[0]!.id}`],
+      );
+      const tP2 = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.teams_activity_outbox WHERE tenant_id = $1 AND recipient_person_id = 'P-000002' AND deep_link_path LIKE $2`,
+        [ctx.tenantId, `%${p2Und.record.id}%`],
+      );
+      const eP5 = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.email_outbox WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [ctx.tenantId, `notification:${ctx.tenantId}:${p5ReminderNotifs[0]!.id}`],
+      );
+      const tP5 = await tx.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM public.teams_activity_outbox WHERE tenant_id = $1 AND recipient_person_id = 'P-000005' AND deep_link_path LIKE $2`,
+        [ctx.tenantId, `%${p5Und.record.id}%`],
+      );
+      return {
+        p2Emails: Number(eP2.rows[0]?.count ?? 0),
+        p2Teams: Number(tP2.rows[0]?.count ?? 0),
+        p5Emails: Number(eP5.rows[0]?.count ?? 0),
+        p5Teams: Number(tP5.rows[0]?.count ?? 0),
+      };
+    });
+    expect(outboxStats.p2Emails).toBe(1);
+    expect(outboxStats.p2Teams).toBe(1);
+    expect(outboxStats.p5Emails).toBe(0);
+    expect(outboxStats.p5Teams).toBe(0);
+  });
+
+  it('12 (R648): approveSignOff and discussSignOff route through transitionRegisterRecordService, write register_transitions, increment row_version, invoke hooks, create follow-up task, and reject stale expectedRowVersion', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const regRepo = new TenantRegisterRepository();
+    const twRepo = new TenantTaskWorkflowRepository();
+    const rawBaseCfg = getActiveTenantRawBaseConfig();
+
+    const hookExtId = `s024-r648-hook-${Date.now()}`;
+    let beforeTransitionCount = 0;
+    let afterTransitionCount = 0;
+    setActiveTenantConfigForTesting({
+      ...rawBaseCfg,
+      enabledExtensions: [
+        ...(Array.isArray(rawBaseCfg.enabledExtensions) ? rawBaseCfg.enabledExtensions : []),
+        hookExtId,
+      ],
+    });
+    getPlatformExtensionHost().registerExtension({
+      manifest: {
+        id: hookExtId,
+        name: 'R648 SignOff Hook Observer',
+        version: '1.0.0',
+        description: 'Observes Home sign-off transitions routed through the Registers Engine',
+        supportedCoreApiRange: '^2.0.0',
+        permissions: ['register:read', 'register:write'],
+        hooks: ['register.beforeTransition', 'register.afterTransition'],
+        hookTimeoutMs: 500,
+      },
+      hooks: {
+        'register.beforeTransition': () => {
+          beforeTransitionCount += 1;
+          return {};
+        },
+        'register.afterTransition': () => {
+          afterTransitionCount += 1;
+        },
+      },
+    });
+
+    const beforeReg = (await regRepo.getRegisterRecordById(ctx, 'SO-000001', { includeRestricted: true }))!;
+    expect(beforeReg.rowVersion).toBe(1);
+
+    const discRes = await runAsActionActor(
+      'P-000001',
+      () => discussSignOffAction('SO-000001', 'Confirm client billing cap first'),
+      { roles: ['partner', 'fee_earner'], mfaVerified: true },
+    );
+    expect(isActionDenied(discRes)).toBe(false);
+
+    const afterDiscussReg = (await regRepo.getRegisterRecordById(ctx, 'SO-000001', { includeRestricted: true }))!;
+    expect(afterDiscussReg.status).toBe('discussing');
+    expect(afterDiscussReg.rowVersion).toBe(2);
+
+    const transitionsAfterDiscuss = await regRepo.listTransitionsForRecord(ctx, 'SO-000001', {
+      includeRestricted: true,
+    });
+    expect(
+      transitionsAfterDiscuss.some(
+        (t) =>
+          t.transitionKey === 'discuss' &&
+          t.fromStatus === 'pending_approval' &&
+          t.toStatus === 'discussing',
+      ),
+    ).toBe(true);
+    expect(beforeTransitionCount).toBeGreaterThanOrEqual(1);
+    expect(afterTransitionCount).toBeGreaterThanOrEqual(1);
+
+    // Same-TX follow-up task created for requester P-000002
+    const allTasks = await twRepo.listAllTasksUnfiltered(ctx);
+    expect(
+      allTasks.some(
+        (t) =>
+          t.assignedPersonId === 'P-000002' &&
+          t.title.includes('Discuss partner sign-off:'),
+      ),
+    ).toBe(true);
+
+    // Stale expectedRowVersion=1 is refused when record is at rowVersion=2
+    const staleApprove = await runAsActionActor(
+      'P-000001',
+      () => approveSignOff('SO-000001', 'P-000001', { expectedRowVersion: 1 }),
+      { roles: ['partner', 'fee_earner'], mfaVerified: true },
+    );
+    expect(isActionDenied(staleApprove)).toBe(true);
+
+    const discussStale = await runAsActionActor(
+      'P-000001',
+      () =>
+        discussSignOff('SO-000001', 'Stale discuss', 'P-000001', {
+          expectedRowVersion: 1,
+        }),
+      { roles: ['partner', 'fee_earner'], mfaVerified: true },
+    );
+    expect(isActionDenied(discussStale)).toBe(true);
+
+    const currentApprove = await runAsActionActor(
+      'P-000001',
+      () => approveSignOff('SO-000001', 'P-000001', { expectedRowVersion: 2 }),
+      { roles: ['partner', 'fee_earner'], mfaVerified: true },
+    );
+    expect(isActionDenied(currentApprove)).toBe(false);
+
+    const afterApproveReg = (await regRepo.getRegisterRecordById(ctx, 'SO-000001', { includeRestricted: true }))!;
+    expect(afterApproveReg.status).toBe('approved');
+    expect(afterApproveReg.rowVersion).toBe(3);
+
+    const transitionsAfterApprove = await regRepo.listTransitionsForRecord(ctx, 'SO-000001', {
+      includeRestricted: true,
+    });
+    expect(
+      transitionsAfterApprove.some(
+        (t) =>
+          t.transitionKey === 'approve' &&
+          t.fromStatus === 'discussing' &&
+          t.toStatus === 'approved',
+      ),
+    ).toBe(true);
+  });
+
+  it('13 (R649): flagMatterWriteOff creates sign-off through Registers Engine with audit entry and approval_requested notification', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000009');
+    const regRepo = new TenantRegisterRepository();
+    const twRepo = new TenantTaskWorkflowRepository();
+    const auditPos = await markAuditPosition();
+
+    const woRes = await runAsActionActor(
+      'P-000009',
+      () => flagMatterWriteOff('SEV001-0001', 1250, 'P-000009'),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(isActionDenied(woRes)).toBe(false);
+    if (isActionDenied(woRes)) throw new Error(woRes.message);
+    expect(woRes.signOffId).toMatch(/^SO-/);
+
+    const regRec = await regRepo.getRegisterRecordById(ctx, woRes.signOffId!, {
+      includeRestricted: true,
+    });
+    expect(regRec).not.toBeNull();
+    expect(regRec?.registerTypeKey).toBe('sign_off');
+    expect(regRec?.assignedApproverId).toBeTruthy();
+
+    const transitions = await regRepo.listTransitionsForRecord(ctx, woRes.signOffId!, {
+      includeRestricted: true,
+    });
+    expect(transitions.length).toBeGreaterThanOrEqual(1);
+
+    const newAudits = await auditEntriesSince(auditPos);
+    expect(
+      newAudits.some((a) => a.action === 'create' && a.recordId === woRes.signOffId),
+    ).toBe(true);
+
+    const approverNotifs = await twRepo.listNotificationsForUser(
+      ctx,
+      regRec!.assignedApproverId!,
+    );
+    expect(
+      approverNotifs.some(
+        (n) => n.kind === 'approval_requested' && n.recordId === woRes.signOffId,
+      ),
+    ).toBe(true);
+  });
+
+  it('14 (R650): unifies SO- ID allocation across legacy & engine paths and rejects duplicate putSignOff writes with SIGN_OFF_ID_CONFLICT', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const twRepo = new TenantTaskWorkflowRepository();
+
+    const [idLegacy1, idLegacy2, engRes1, engRes2] = await Promise.all([
+      twRepo.allocateNextSignOffId(ctx),
+      twRepo.allocateNextSignOffId(ctx),
+      runAsActionActor(
+        'P-000001',
+        () =>
+          createRegisterRecordService(
+            {
+              registerTypeKey: 'sign_off',
+              title: 'R650 Concurrent Sign-Off A',
+              matterId: 'M-000001',
+              fieldValues: { signOffKind: 'write_off' },
+            },
+            'P-000001',
+          ),
+        { roles: ['partner', 'fee_earner'], mfaVerified: true },
+      ),
+      runAsActionActor(
+        'P-000001',
+        () =>
+          createRegisterRecordService(
+            {
+              registerTypeKey: 'sign_off',
+              title: 'R650 Concurrent Sign-Off B',
+              matterId: 'M-000001',
+              fieldValues: { signOffKind: 'write_off' },
+            },
+            'P-000001',
+          ),
+        { roles: ['partner', 'fee_earner'], mfaVerified: true },
+      ),
+    ]);
+    expect(engRes1.ok).toBe(true);
+    expect(engRes2.ok).toBe(true);
+    if (!engRes1.ok || !engRes2.ok) throw new Error('Expected concurrent creations to succeed');
+
+    const ids = [idLegacy1, idLegacy2, engRes1.record.id, engRes2.record.id];
+    expect(new Set(ids).size).toBe(4);
+    for (const id of ids) {
+      expect(id).toMatch(/^SO-\d{6}$/);
+    }
+
+    // Attempting putSignOff with an existing engine record ID must fail closed instead of overwriting
+    await expect(
+      twRepo.putSignOff(ctx, {
+        id: engRes1.record.id,
+        kind: 'write_off',
+        title: 'Tampered Duplicate Overwrite',
+        subtitle: 'Should fail on conflict',
+        requestedById: 'P-000002',
+        requestedAt: new Date().toISOString(),
+        assignedPartnerId: 'P-000001',
+        status: 'Pending',
+      }),
+    ).rejects.toMatchObject({ code: 'SIGN_OFF_ID_CONFLICT' });
+
+    const unchanged = await new TenantRegisterRepository().getRegisterRecordById(
+      ctx,
+      engRes1.record.id,
+      { includeRestricted: true },
+    );
+    expect(unchanged?.title).toBe('R650 Concurrent Sign-Off A');
   });
 });

@@ -159,6 +159,7 @@ export function RegistersWorkspaceClient({
   // Inline edit state
   const [editingRecord, setEditingRecord] = useState<RegisterRecord | null>(null);
   const [editTitle, setEditTitle] = useState<string>('');
+  const [editApproverId, setEditApproverId] = useState<string>('');
   const [editDueDate, setEditDueDate] = useState<string>('');
   const [editReviewDate, setEditReviewDate] = useState<string>('');
   const [editFieldValues, setEditFieldValues] = useState<Record<string, unknown>>({});
@@ -230,10 +231,7 @@ export function RegistersWorkspaceClient({
         registerTypeKey: selectedCreateType.key,
         title: createTitle,
         matterId: createMatterId || null,
-        assignedApproverId:
-          selectedCreateType.approvalRules !== null && createApproverId
-            ? createApproverId
-            : null,
+        assignedApproverId: createApproverId || null,
         dueAt: createDueDate ? `${createDueDate}T17:00:00.000Z` : null,
         reviewAt: createReviewDate ? `${createReviewDate}T09:00:00.000Z` : null,
         fieldValues: createFieldValues,
@@ -291,6 +289,7 @@ export function RegistersWorkspaceClient({
         recordId: editingRecord.id,
         expectedRowVersion: editingRecord.rowVersion,
         title: editTitle,
+        assignedApproverId: editApproverId || null,
         dueAt: editDueDate ? `${editDueDate}T17:00:00.000Z` : null,
         reviewAt: editReviewDate ? `${editReviewDate}T09:00:00.000Z` : null,
         fieldValues: editFieldValues,
@@ -571,25 +570,31 @@ export function RegistersWorkspaceClient({
                 </label>
               ) : null}
 
-              {selectedCreateType.approvalRules !== null ? (
-                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <span className="kv-label">Designated approver (optional)</span>
-                  <select
-                    className="form-input"
-                    value={createApproverId}
-                    onChange={(e) => setCreateApproverId(e.target.value)}
-                  >
-                    <option value="">Any authorised reviewer</option>
-                    {people
-                      .filter((p) => p.isEmployee && !p.mergedIntoId && p.id !== currentUserId)
-                      .map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {personDisplayName(p)}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              ) : null}
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span className="kv-label">
+                  {selectedCreateType.approvalRules !== null
+                    ? 'Designated approver (optional)'
+                    : 'Assigned reviewer (optional)'}
+                </span>
+                <select
+                  className="form-input"
+                  value={createApproverId}
+                  onChange={(e) => setCreateApproverId(e.target.value)}
+                >
+                  <option value="">
+                    {selectedCreateType.approvalRules !== null
+                      ? 'Any authorised reviewer'
+                      : 'No specific reviewer assigned'}
+                  </option>
+                  {people
+                    .filter((p) => p.isEmployee && !p.mergedIntoId && p.id !== currentUserId)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {personDisplayName(p)}
+                      </option>
+                    ))}
+                </select>
+              </label>
 
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <span className="kv-label">Due / compliance deadline</span>
@@ -778,6 +783,7 @@ export function RegistersWorkspaceClient({
                       onClick={() => {
                         setEditingRecord(selectedRecord);
                         setEditTitle(selectedRecord.title);
+                        setEditApproverId(selectedRecord.assignedApproverId ?? '');
                         setEditDueDate(selectedRecord.dueAt ? selectedRecord.dueAt.slice(0, 10) : '');
                         setEditReviewDate(
                           selectedRecord.reviewAt ? selectedRecord.reviewAt.slice(0, 10) : '',
@@ -803,6 +809,33 @@ export function RegistersWorkspaceClient({
                         value={editTitle}
                         onChange={(e) => setEditTitle(e.target.value)}
                       />
+                    </label>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <span className="kv-label">
+                        {selectedRecordType.approvalRules !== null
+                          ? 'Designated approver (optional)'
+                          : 'Assigned reviewer (optional)'}
+                      </span>
+                      <select
+                        className="form-input"
+                        value={editApproverId}
+                        onChange={(e) => setEditApproverId(e.target.value)}
+                      >
+                        <option value="">
+                          {selectedRecordType.approvalRules !== null
+                            ? 'Any authorised reviewer'
+                            : 'No specific reviewer assigned'}
+                        </option>
+                        {people
+                          .filter(
+                            (p) => p.isEmployee && !p.mergedIntoId && p.id !== selectedRecord.ownerId,
+                          )
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {personDisplayName(p)}
+                            </option>
+                          ))}
+                      </select>
                     </label>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                       <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

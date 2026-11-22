@@ -1737,6 +1737,7 @@ export interface SignOffItem {
   approvedById?: string | null;
   approvedAt?: string | null;
   discussionNote?: string;
+  rowVersion?: number;
 }
 
 // ------------------------------------------------------------------ Matter Costs & Multi-Client Customisable Rates Table

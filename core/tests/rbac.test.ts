@@ -2610,6 +2610,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // 3. No self-approval even when actor holds signoff:approve and assignedPartnerId matches or is null
       let item1 = (await getTaskWorkflowRepository().getSignOffById(ctx, 'SO-000001', { includeRestricted: true }))!;
       item1.requestedById = 'P-000001';
+      await getTaskWorkflowRepository().deleteSignOffById(ctx, 'SO-000001');
       await getTaskWorkflowRepository().putSignOff(ctx, item1);
       const selfApprove = await runAsTestActor('P-000001', () =>
         approveSignOff('SO-000001', 'P-000001'),
@@ -2623,6 +2624,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
       expect(isActionDenied(selfDiscuss)).toBe(true);
       item1.requestedById = 'P-000002';
+      await getTaskWorkflowRepository().deleteSignOffById(ctx, 'SO-000001');
       await getTaskWorkflowRepository().putSignOff(ctx, item1);
 
       // 4. Restricted linked matter that the assigned partner cannot access is denied
@@ -2663,6 +2665,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
       // 6. When assignedPartnerId is null, any holder of signoff:approve (who is not requestedById and can access the matter) may approve
       item1.assignedPartnerId = null;
+      await getTaskWorkflowRepository().deleteSignOffById(ctx, 'SO-000001');
       await getTaskWorkflowRepository().putSignOff(ctx, item1);
       const unassignedApprove = await runAsTestActor('P-000038', () =>
         approveSignOff('SO-000001', 'P-000038'),

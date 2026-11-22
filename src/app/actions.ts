@@ -1003,18 +1003,31 @@ export async function updateTenantRbacConfigAction(
   });
 }
 
-export async function approveSignOffAction(signOffId: string) {
+export async function approveSignOffAction(
+  signOffId: string,
+  expectedRowVersion?: number,
+) {
   return guardedAction('approveSignOffAction', async ({ personId: byId }) => {
-    const res = await approveSignOff(signOffId, byId);
-    revalidateAll();
+    const res = await approveSignOff(signOffId, byId, { expectedRowVersion });
+    if (!isActionDenied(res)) {
+      revalidateAll();
+    }
     return res;
   });
 }
 
-export async function discussSignOffAction(signOffId: string, note: string) {
+export async function discussSignOffAction(
+  signOffId: string,
+  note: string,
+  expectedRowVersion?: number,
+) {
   return guardedAction('discussSignOffAction', async ({ personId: byId }) => {
-    const res = await discussSignOff(signOffId, note, byId);
-    revalidateAll();
+    const res = await discussSignOff(signOffId, note, byId, {
+      expectedRowVersion,
+    });
+    if (!isActionDenied(res)) {
+      revalidateAll();
+    }
     return res;
   });
 }

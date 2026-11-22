@@ -11318,6 +11318,44 @@ export async function enqueueNotificationTeamsActivityIfEnabled(
   return record;
 }
 
+async function drainNotificationOutboxesBestEffort(
+  ctx: TenantContext,
+  tenantConfig: TenantConfiguration | undefined,
+  actorId: string,
+): Promise<void> {
+  if (hasActiveTenantTransaction(ctx)) {
+    return;
+  }
+  const effectiveCfg = tenantConfig ?? getActiveTenantConfiguration();
+  const outboxRepo = getOutboxRepository();
+  const emailCfg = resolveEmailIntegrationConfig(effectiveCfg);
+  if ((emailCfg.provider ?? 'disabled') !== 'disabled') {
+    try {
+      await drainEmailOutboxForTenant(ctx, {
+        tenantConfig: effectiveCfg,
+        outboxRepository: outboxRepo,
+        actorId,
+        batchSize: 10,
+      });
+    } catch {
+      // Best-effort post-commit drain: outbox row remains pending/scheduled for retry by outbox-drain.
+    }
+  }
+  const teamsCfg = resolveTeamsIntegrationConfig(effectiveCfg);
+  if ((teamsCfg.provider ?? 'disabled') !== 'disabled') {
+    try {
+      await drainTeamsOutboxForTenant(ctx, {
+        tenantConfig: effectiveCfg,
+        outboxRepository: outboxRepo,
+        actorId,
+        batchSize: 10,
+      });
+    } catch {
+      // Best-effort post-commit drain: outbox row remains pending for outbox-drain.
+    }
+  }
+}
+
 async function pushNotification(
   ctx: TenantContext,
   input: {
@@ -11331,6 +11369,7 @@ async function pushNotification(
     knownMatterIds?: readonly string[];
     knownTask?: Task | null;
     preloaded?: NotificationAccessContext;
+    tenantConfig?: TenantConfiguration;
     byId: string;
     at?: string;
   },
@@ -11357,6 +11396,7 @@ async function pushNotification(
     byId: input.byId,
   };
   const access = await canRecipientReceiveNotification(ctx, candidateItem, {
+    tenantConfig: input.tenantConfig,
     knownMatterIds: input.knownMatterIds,
     knownTask: input.knownTask,
     preloaded: input.preloaded,
@@ -11374,6 +11414,7 @@ async function pushNotification(
   await taskRepo.putNotification(ctx, item);
   await enqueueNotificationEmailIfImmediate(ctx, item, {
     byId: input.byId,
+    tenantConfig: input.tenantConfig,
     knownMatterIds: input.knownMatterIds,
     knownTask: input.knownTask,
     preloaded: input.preloaded,
@@ -11382,6 +11423,7 @@ async function pushNotification(
   });
   await enqueueNotificationTeamsActivityIfEnabled(ctx, item, {
     byId: input.byId,
+    tenantConfig: input.tenantConfig,
     knownMatterIds: input.knownMatterIds,
     knownTask: input.knownTask,
     preloaded: input.preloaded,
@@ -17283,208 +17325,107 @@ export async function updateTenantRbacConfig(
   );
 }
 
+function mapHomeSignOffDenial(
+  errResult: { code: string; message: string },
+  actionVerb: 'approve' | 'discuss',
+): ActionDenied {
+  if (errResult.code === 'MFA_REQUIRED' || errResult.code === 'UNAUTHENTICATED') {
+    return buildActionDenied(errResult.code, errResult.message);
+  }
+  if (
+    errResult.code === REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND ||
+    errResult.message.includes('Sign-off item not found')
+  ) {
+    return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
+  }
+  if (errResult.message.includes('restricted matter linked to this register record')) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have access to the matter linked to this sign-off request.',
+    );
+  }
+  if (errResult.code === REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      `Self-approval is not permitted: the requester cannot ${actionVerb} their own sign-off.`,
+    );
+  }
+  if (errResult.code === REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH) {
+    if (errResult.message.includes('assigned approver')) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        `Only the assigned partner may ${actionVerb} this sign-off request.`,
+      );
+    }
+    return buildActionDenied('FORBIDDEN', errResult.message);
+  }
+  return buildActionDenied('FORBIDDEN', errResult.message);
+}
+
+async function executeHomeSignOffTransition(
+  signOffId: string,
+  actionVerb: 'approve' | 'discuss',
+  note: string | undefined,
+  byId: string,
+  options?: { expectedRowVersion?: number },
+): Promise<{ ok: true } | ActionDenied> {
+  try {
+    const { permSet } = await resolveRegisterActorAndConfig(byId);
+    if (!permSet.permissions.has('signoff:approve')) {
+      return buildActionDenied(
+        'FORBIDDEN',
+        `You do not have permission (signoff:approve) to ${actionVerb} sign-off requests.`,
+      );
+    }
+  } catch (err) {
+    const mapped = mapRegisterErrorToDenial(err);
+    return buildActionDenied(
+      mapped.code === 'UNAUTHENTICATED' || mapped.code === 'MFA_REQUIRED'
+        ? mapped.code
+        : 'FORBIDDEN',
+      mapped.message,
+    );
+  }
+
+  const trimmedNote =
+    actionVerb === 'discuss'
+      ? note?.trim() || 'Partner requested discussion before sign-off.'
+      : undefined;
+
+  const res = await transitionRegisterRecordService(
+    {
+      recordId: signOffId,
+      transitionKey: actionVerb,
+      ...(trimmedNote !== undefined ? { comment: trimmedNote } : {}),
+      expectedRowVersion: options?.expectedRowVersion,
+    },
+    byId,
+    { viaHomeSignOffAdapter: true },
+  );
+  if (!res.ok) {
+    if (res.code === 'INTERNAL_ERROR') {
+      throw new Error(res.message);
+    }
+    return mapHomeSignOffDenial(res, actionVerb);
+  }
+  return { ok: true };
+}
+
 export async function approveSignOff(
   signOffId: string,
   byId: string,
+  options?: { expectedRowVersion?: number },
 ): Promise<{ ok: true } | ActionDenied> {
-  return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, item, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    taskRepo.getSignOffById<SignOffItem>(ctx, signOffId, { includeRestricted: true }),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-  });
-  if (!permSet.permissions.has('signoff:approve')) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'You do not have permission (signoff:approve) to approve sign-off requests.',
-    );
-  }
-
-  if (!item) {
-    return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
-  }
-
-  if (item.matterId) {
-    const linkedMatter = matters.find((m) => m.id === item.matterId) ?? null;
-    if (
-      !linkedMatter ||
-      !canPersonAccessMatter(linkedMatter, byId, actor, {
-        allPeople: people,
-        teams,
-      })
-    ) {
-      return buildActionDenied(
-        'FORBIDDEN',
-        'You do not have access to the matter linked to this sign-off request.',
-      );
-    }
-  }
-
-  if (item.assignedPartnerId && item.assignedPartnerId !== byId) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Only the assigned partner may approve this sign-off request.',
-    );
-  }
-
-  if (item.requestedById === byId) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Self-approval is not permitted: the requester cannot approve their own sign-off.',
-    );
-  }
-
-  if (item.status !== 'Pending' && item.status !== 'Discussing') {
-    return buildActionDenied(
-      'FORBIDDEN',
-      `Cannot approve a sign-off with status "${item.status}".`,
-    );
-  }
-
-  const previousStatus = item.status;
-  const nowIso = new Date().toISOString();
-  item.status = 'Approved';
-  item.approvedById = byId;
-  item.approvedAt = nowIso;
-
-  await taskRepo.withTenantTransaction(ctx, async () => {
-    await taskRepo.putSignOff(ctx, item);
-
-    writeAudit(null, {
-      recordType: item.matterId ? 'matter' : 'system',
-      recordId: item.matterId ?? item.id,
-      action: 'status-change',
-      field: 'Partner sign-off',
-      oldValue: previousStatus,
-      newValue: `Approved: ${item.title}`,
-      byId,
-      at: nowIso,
-    });
-
-    await flushStagedAuditEntries(ctx);
-  });
-
-  return { ok: true };
-  });
+  return executeHomeSignOffTransition(signOffId, 'approve', undefined, byId, options);
 }
-
 
 export async function discussSignOff(
   signOffId: string,
   note: string,
   byId: string,
+  options?: { expectedRowVersion?: number },
 ): Promise<{ ok: true } | ActionDenied> {
-  return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
-  const taskRepo = getTaskWorkflowRepository();
-  const [people, matters, item, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    taskRepo.getSignOffById<SignOffItem>(ctx, signOffId, { includeRestricted: true }),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const permSet = resolvePersonPermissionSet(actor, {
-    allPeople: people,
-    teams,
-  });
-  if (!permSet.permissions.has('signoff:approve')) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'You do not have permission (signoff:approve) to discuss sign-off requests.',
-    );
-  }
-
-  if (!item) {
-    return buildActionDenied('FORBIDDEN', 'Sign-off item not found or access denied.');
-  }
-
-  if (item.matterId) {
-    const linkedMatter = matters.find((m) => m.id === item.matterId) ?? null;
-    if (
-      !linkedMatter ||
-      !canPersonAccessMatter(linkedMatter, byId, actor, {
-        allPeople: people,
-        teams,
-      })
-    ) {
-      return buildActionDenied(
-        'FORBIDDEN',
-        'You do not have access to the matter linked to this sign-off request.',
-      );
-    }
-  }
-
-  if (item.assignedPartnerId && item.assignedPartnerId !== byId) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Only the assigned partner may discuss this sign-off request.',
-    );
-  }
-
-  if (item.requestedById === byId) {
-    return buildActionDenied(
-      'FORBIDDEN',
-      'Self-approval is not permitted: the requester cannot discuss their own sign-off.',
-    );
-  }
-
-  if (item.status !== 'Pending' && item.status !== 'Discussing') {
-    return buildActionDenied(
-      'FORBIDDEN',
-      `Cannot discuss a sign-off with status "${item.status}".`,
-    );
-  }
-
-  const previousStatus = item.status;
-  const nowIso = new Date().toISOString();
-  item.status = 'Discussing';
-  item.discussionNote = note.trim() || 'Partner requested discussion before sign-off.';
-
-  await taskRepo.withTenantTransaction(ctx, async () => {
-    await taskRepo.putSignOff(ctx, item);
-
-    writeAudit(null, {
-      recordType: item.matterId ? 'matter' : 'system',
-      recordId: item.matterId ?? item.id,
-      action: 'status-change',
-      field: 'Partner sign-off',
-      oldValue: previousStatus,
-      newValue: `Discussing: ${item.title} (${item.discussionNote})`,
-      byId,
-      at: nowIso,
-    });
-
-    // Create a follow-up task for the requester
-    const linkedRecords: TaskLinkedRecord[] = [];
-    if (item.matterId) linkedRecords.push({ recordType: 'matter', recordId: item.matterId });
-    await saveTaskRecord(
-      {
-        title: `Discuss partner sign-off: ${item.title}`,
-        description: item.discussionNote,
-        taskTypeId: vid('task_type', 'Review'),
-        priorityId: vid('task_priority', 'High'),
-        dueAt: toIsoDate(new Date()),
-        assignedPersonId: item.requestedById,
-        linkedRecords,
-      },
-      byId,
-      { internalSystemStep: true },
-    );
-
-    await flushStagedAuditEntries(ctx);
-  });
-
-  return { ok: true };
-  });
+  return executeHomeSignOffTransition(signOffId, 'discuss', note, byId, options);
 }
 
 
@@ -17597,9 +17538,6 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const taskRepo = getTaskWorkflowRepository();
-  const id = await taskRepo.allocateNextSignOffId(ctx);
-  const nowIso = new Date().toISOString();
   const formattedAmt = amountGbp.toLocaleString('en-GB', {
     style: 'currency',
     currency: 'GBP',
@@ -17624,21 +17562,35 @@ export async function flagMatterWriteOff(
     );
   }
 
-  const signOff: SignOffItem = {
-    id,
-    kind: 'write_off',
-    title: `Write-off: ${formattedAmt} over cap/estimate on ${matterCode}`,
-    matterNumber: matterCode,
-    matterId: matter.id,
-    subtitle: `${matterCode} · ${matter.title} · Flagged for partner write-off decision`,
-    requestedById: actor.id,
-    requestedAt: nowIso,
-    assignedPartnerId,
-    status: 'Pending',
-  };
+  const created = await createRegisterRecordService(
+    {
+      registerTypeKey: 'sign_off',
+      title: `Write-off: ${formattedAmt} over cap/estimate on ${matterCode}`,
+      matterId: matter.id,
+      assignedApproverId: assignedPartnerId,
+      fieldValues: {
+        signOffKind: 'write_off',
+        matterNumber: matterCode,
+        subtitle: `${matterCode} · ${matter.title} · Flagged for partner write-off decision`,
+        amountGbp,
+      },
+    },
+    actor.id,
+    {
+      tenantCtx: ctx,
+      authorizedViaFinanceCreditControl: true,
+    },
+  );
+  if (!created.ok) {
+    return buildActionDenied(
+      created.code === 'MFA_REQUIRED' || created.code === 'UNAUTHENTICATED'
+        ? created.code
+        : 'FORBIDDEN',
+      created.message,
+    );
+  }
 
-  await taskRepo.putSignOff(ctx, signOff);
-  return { ok: true, signOffId: id };
+  return { ok: true, signOffId: created.record.id };
 }
 
 export async function remindTeamLeadOverdueCompliance(
@@ -25843,7 +25795,7 @@ function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
   ) {
     return registerServiceFailure(rawCode, msg);
   }
-  return registerServiceFailure(rawCode || 'VALIDATION_ERROR', msg);
+  return registerServiceFailure(rawCode || 'INTERNAL_ERROR', msg);
 }
 
 export async function listRegistersWorkspaceDataRecord(
@@ -26053,6 +26005,7 @@ export async function createRegisterRecordService(
   options?: {
     readonly tenantCtx?: TenantContext | null;
     readonly tenantConfig?: TenantConfiguration;
+    readonly authorizedViaFinanceCreditControl?: boolean;
   },
 ): Promise<
   | {
@@ -26081,7 +26034,14 @@ export async function createRegisterRecordService(
         `Register type "${input.registerTypeKey}" is not configured.`,
       );
     }
-    if (!permSet.permissions.has(registerTypePre.createPermission)) {
+    const hasCreatePermission =
+      permSet.permissions.has(registerTypePre.createPermission) ||
+      Boolean(
+        options?.authorizedViaFinanceCreditControl &&
+          registerTypePre.key === 'sign_off' &&
+          permSet.permissions.has('finance:credit_control'),
+      );
+    if (!hasCreatePermission) {
       return registerServiceFailure(
         'FORBIDDEN',
         `Missing required permission "${registerTypePre.createPermission}" to create ${registerTypePre.label}.`,
@@ -26139,6 +26099,7 @@ export async function createRegisterRecordService(
       );
     }
 
+    let notificationsQueued = false;
     const createdRecord = await registerRepo.withTenantTransaction(ctx, async () => {
       const dbOverrideTx = await catRepo.getModuleConfig<RegistersConfiguration>(ctx, 'registers');
       const registerTypeTx = findEffectiveRegisterType(
@@ -26190,10 +26151,7 @@ export async function createRegisterRecordService(
         personId: input.personId?.trim() || null,
         organisationId: input.organisationId?.trim() || null,
         ownerId: actor.id,
-        assignedApproverId:
-          registerTypeTx.approvalRules === null
-            ? null
-            : input.assignedApproverId?.trim() || null,
+        assignedApproverId: input.assignedApproverId?.trim() || null,
         dueAt: finalValidated.dueAt,
         reviewAt: finalValidated.reviewAt,
         reminderScheduleDays: input.reminderScheduleDays ?? null,
@@ -26212,8 +26170,54 @@ export async function createRegisterRecordService(
           at: nowIso,
         },
       ]);
+
+      const recordHref =
+        created.registerTypeKey === 'sign_off'
+          ? '/?panel=partner_sign_off_queue'
+          : `/registers?record=${created.id}`;
+      if (registerTypeTx.approvalRules !== null && created.assignedApproverId) {
+        const pushed = await pushNotification(ctx, {
+          recipientId: created.assignedApproverId,
+          kind: 'approval_requested',
+          title: `Approval requested: ${created.reference}`,
+          detail: `${registerTypeTx.label} "${created.title}" requires your approval decision.`,
+          href: recordHref,
+          recordId: created.id,
+          matterId: created.matterId ?? null,
+          knownMatterIds: matterIdClean ? [matterIdClean] : undefined,
+          tenantConfig: tenantCfg,
+          byId: actor.id,
+          at: nowIso,
+        });
+        if (pushed) notificationsQueued = true;
+      } else if (
+        (registerTypeTx.approvalRules === null && created.assignedApproverId) ||
+        Boolean(created.reviewAt)
+      ) {
+        const reviewerId = created.assignedApproverId || created.ownerId;
+        if (reviewerId) {
+          const pushed = await pushNotification(ctx, {
+            recipientId: reviewerId,
+            kind: 'register_review_assigned',
+            title: `Register review assigned: ${created.reference}`,
+            detail: `${registerTypeTx.label} "${created.title}" has been assigned for your review.`,
+            href: `/registers?record=${created.id}`,
+            recordId: created.id,
+            matterId: created.matterId ?? null,
+            knownMatterIds: matterIdClean ? [matterIdClean] : undefined,
+            tenantConfig: tenantCfg,
+            byId: actor.id,
+            at: nowIso,
+          });
+          if (pushed) notificationsQueued = true;
+        }
+      }
       return created;
     });
+
+    if (notificationsQueued) {
+      await drainNotificationOutboxesBestEffort(ctx, tenantCfg, actor.id);
+    }
 
     return {
       ok: true,
@@ -26239,6 +26243,7 @@ export async function transitionRegisterRecordService(
   options?: {
     readonly tenantCtx?: TenantContext | null;
     readonly tenantConfig?: TenantConfiguration;
+    readonly viaHomeSignOffAdapter?: boolean;
   },
 ): Promise<
   | {
@@ -26263,6 +26268,12 @@ export async function transitionRegisterRecordService(
       return registerServiceFailure(
         'NOT_FOUND',
         `Register record "${input.recordId}" was not found.`,
+      );
+    }
+    if (options?.viaHomeSignOffAdapter && existingPre.registerTypeKey !== 'sign_off') {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        `Sign-off record "${input.recordId}" was not found.`,
       );
     }
     if (existingPre.matterId) {
@@ -26291,15 +26302,26 @@ export async function transitionRegisterRecordService(
       );
     }
 
+    const effectivePermSet =
+      options?.viaHomeSignOffAdapter &&
+      existingPre.registerTypeKey === 'sign_off' &&
+      permSet.permissions.has('signoff:approve')
+        ? new Set([...permSet.permissions, 'register:approve' as PermissionKey])
+        : permSet.permissions;
+    const effectiveExpectedRowVersion =
+      input.expectedRowVersion !== undefined
+        ? input.expectedRowVersion
+        : existingPre.rowVersion;
+
     const preValidated = validateRegisterTransitionExecution({
       registerType: registerTypePre,
       record: existingPre,
       transitionKey: input.transitionKey,
       actorId: actor.id,
       actorRoles,
-      actorPermissionSet: permSet.permissions,
+      actorPermissionSet: effectivePermSet,
       comment: input.comment ?? null,
-      expectedRowVersion: input.expectedRowVersion,
+      expectedRowVersion: effectiveExpectedRowVersion,
     });
 
     // Execute beforeTransition hook STRICTLY OUTSIDE any PostgreSQL write transaction.
@@ -26326,6 +26348,7 @@ export async function transitionRegisterRecordService(
     }
 
     let finalRegisterType = registerTypePre;
+    let notificationsQueued = false;
     const txOutcome = await registerRepo.withTenantTransaction(ctx, async () => {
       const outcome = await registerRepo.lockAndExecuteTransition(ctx, {
         recordId: existingPre.id,
@@ -26363,16 +26386,24 @@ export async function transitionRegisterRecordService(
             transitionKey: input.transitionKey,
             actorId: actor.id,
             actorRoles,
-            actorPermissionSet: permSet.permissions,
+            actorPermissionSet: effectivePermSet,
             comment: input.comment ?? null,
-            expectedRowVersion: input.expectedRowVersion,
+            expectedRowVersion: effectiveExpectedRowVersion,
           });
+          const nextFieldInput: Record<string, unknown> = {
+            ...lockedRecord.fieldValues,
+            ...beforeHookRes.mergedFieldUpdates,
+          };
+          if (lockedRecord.registerTypeKey === 'sign_off') {
+            delete nextFieldInput.legacySignOffStatus;
+            if (input.transitionKey === 'discuss') {
+              nextFieldInput.discussionNote =
+                input.comment?.trim() || 'Partner requested discussion before sign-off.';
+            }
+          }
           const mergedFields = validateRegisterFieldValues({
             registerType: finalRegisterType,
-            fieldValues: {
-              ...lockedRecord.fieldValues,
-              ...beforeHookRes.mergedFieldUpdates,
-            },
+            fieldValues: nextFieldInput,
             applyDefaults: false,
             enforceRequired: true,
           });
@@ -26383,7 +26414,7 @@ export async function transitionRegisterRecordService(
           };
         },
       });
-      await appendTenantAuditEntries(ctx, [
+      const auditRows: FirmAuditEntryInput[] = [
         {
           recordType: 'register_record',
           recordId: outcome.updatedRecord.id,
@@ -26395,9 +26426,104 @@ export async function transitionRegisterRecordService(
           at: outcome.transition.transitionedAt,
           ...(outcome.transition.comment ? { reason: outcome.transition.comment } : {}),
         },
-      ]);
+      ];
+      if (
+        outcome.updatedRecord.registerTypeKey === 'sign_off' &&
+        (input.transitionKey === 'approve' || input.transitionKey === 'discuss')
+      ) {
+        const discussionNote = String(
+          outcome.updatedRecord.fieldValues.discussionNote ??
+            outcome.transition.comment ??
+            '',
+        );
+        auditRows.push({
+          recordType: outcome.updatedRecord.matterId ? 'matter' : 'system',
+          recordId: outcome.updatedRecord.matterId ?? outcome.updatedRecord.id,
+          action: 'status-change',
+          field: 'Partner sign-off',
+          oldValue:
+            outcome.previousRecord.status === 'discussing' ? 'Discussing' : 'Pending',
+          newValue:
+            input.transitionKey === 'approve'
+              ? `Approved: ${outcome.updatedRecord.title}`
+              : `Discussing: ${outcome.updatedRecord.title} (${discussionNote})`,
+          byId: actor.id,
+          at: outcome.transition.transitionedAt,
+        });
+      }
+      await appendTenantAuditEntries(ctx, auditRows);
+
+      if (
+        outcome.updatedRecord.registerTypeKey === 'sign_off' &&
+        input.transitionKey === 'discuss' &&
+        outcome.updatedRecord.ownerId
+      ) {
+        const discussionNote = String(
+          outcome.updatedRecord.fieldValues.discussionNote ??
+            outcome.transition.comment ??
+            'Partner requested discussion before sign-off.',
+        );
+        await runWithAuditStagingScope(async () => {
+          const linkedRecords: TaskLinkedRecord[] = [];
+          if (outcome.updatedRecord.matterId) {
+            linkedRecords.push({
+              recordType: 'matter',
+              recordId: outcome.updatedRecord.matterId,
+            });
+          }
+          await saveTaskRecord(
+            {
+              title: `Discuss partner sign-off: ${outcome.updatedRecord.title}`,
+              description: discussionNote,
+              taskTypeId: vid('task_type', 'Review'),
+              priorityId: vid('task_priority', 'High'),
+              dueAt: toIsoDate(new Date()),
+              assignedPersonId: outcome.updatedRecord.ownerId,
+              linkedRecords,
+            },
+            actor.id,
+            { internalSystemStep: true },
+          );
+          await flushStagedAuditEntries(ctx);
+        });
+      }
+
+      const transitionDef = finalRegisterType.transitions.find(
+        (t) => t.key === input.transitionKey,
+      );
+      const isApprovalDecision =
+        input.transitionKey === 'approve' ||
+        input.transitionKey === 'discuss' ||
+        input.transitionKey === 'reject' ||
+        (finalRegisterType.approvalRules !== null && Boolean(transitionDef?.setsDecidedAt));
+      if (isApprovalDecision && outcome.updatedRecord.ownerId) {
+        const pushed = await pushNotification(ctx, {
+          recipientId: outcome.updatedRecord.ownerId,
+          kind: 'approval_decided',
+          title: `${finalRegisterType.label} decision: ${outcome.updatedRecord.reference}`,
+          detail: `${outcome.updatedRecord.title} moved to ${outcome.updatedRecord.status}.`,
+          href:
+            outcome.updatedRecord.registerTypeKey === 'sign_off'
+              ? '/?panel=partner_sign_off_queue'
+              : `/registers?record=${outcome.updatedRecord.id}`,
+          recordId: outcome.updatedRecord.id,
+          matterId: outcome.updatedRecord.matterId ?? null,
+          knownMatterIds: outcome.updatedRecord.matterId
+            ? [outcome.updatedRecord.matterId]
+            : undefined,
+          tenantConfig: tenantCfg,
+          byId: actor.id,
+          at: outcome.transition.transitionedAt,
+        });
+        if (pushed) notificationsQueued = true;
+      }
+
       return outcome;
     });
+
+    if (notificationsQueued) {
+      await drainNotificationOutboxesBestEffort(ctx, tenantCfg, actor.id);
+    }
 
     // Execute afterTransition hook STRICTLY POST-COMMIT outside any write transaction.
     const afterHookRes = await getPlatformExtensionHost().executeRegisterAfterTransitionHook(
@@ -26509,6 +26635,7 @@ export async function updateRegisterRecordDetailsService(
       enforceRequired: true,
     });
     const nowIso = new Date().toISOString();
+    let notificationsQueued = false;
     const updatedRecord = await registerRepo.withTenantTransaction(ctx, async () => {
       const { updatedRecord: updated } = await registerRepo.updateRegisterRecordDetails(ctx, {
         recordId: existing.id,
@@ -26534,8 +26661,63 @@ export async function updateRegisterRecordDetailsService(
           at: nowIso,
         },
       ]);
+
+      const approverChanged =
+        updated.assignedApproverId !== null &&
+        updated.assignedApproverId !== existing.assignedApproverId;
+      const reviewChanged =
+        Boolean(updated.reviewAt) &&
+        (updated.reviewAt !== existing.reviewAt ||
+          updated.assignedApproverId !== existing.assignedApproverId);
+      if (
+        registerType.approvalRules !== null &&
+        approverChanged &&
+        updated.assignedApproverId
+      ) {
+        const pushed = await pushNotification(ctx, {
+          recipientId: updated.assignedApproverId,
+          kind: 'approval_requested',
+          title: `Approval requested: ${updated.reference}`,
+          detail: `${registerType.label} "${updated.title}" has been assigned to you for approval.`,
+          href:
+            updated.registerTypeKey === 'sign_off'
+              ? '/?panel=partner_sign_off_queue'
+              : `/registers?record=${updated.id}`,
+          recordId: updated.id,
+          matterId: updated.matterId ?? null,
+          knownMatterIds: updated.matterId ? [updated.matterId] : undefined,
+          tenantConfig: tenantCfg,
+          byId: actor.id,
+          at: nowIso,
+        });
+        if (pushed) notificationsQueued = true;
+      } else if (
+        (registerType.approvalRules === null && approverChanged) ||
+        reviewChanged
+      ) {
+        const reviewerId = updated.assignedApproverId || updated.ownerId;
+        if (reviewerId) {
+          const pushed = await pushNotification(ctx, {
+            recipientId: reviewerId,
+            kind: 'register_review_assigned',
+            title: `Register review assigned: ${updated.reference}`,
+            detail: `${registerType.label} "${updated.title}" has been assigned for your review.`,
+            href: `/registers?record=${updated.id}`,
+            recordId: updated.id,
+            matterId: updated.matterId ?? null,
+            knownMatterIds: updated.matterId ? [updated.matterId] : undefined,
+            tenantConfig: tenantCfg,
+            byId: actor.id,
+            at: nowIso,
+          });
+          if (pushed) notificationsQueued = true;
+        }
+      }
       return updated;
     });
+    if (notificationsQueued) {
+      await drainNotificationOutboxesBestEffort(ctx, tenantCfg, actor.id);
+    }
     return { ok: true, record: updatedRecord };
   } catch (err) {
     return mapRegisterErrorToDenial(err);
@@ -26822,9 +27004,10 @@ export async function executeRegisterRemindersForTenant(
             const kindLabel = stage.triggerKind === 'review' ? 'Review' : 'Compliance deadline';
 
             for (let idx = 0; idx < permittedRecipientIds.length; idx++) {
-              await taskRepo.upsertNotificationInTx(tx, ctx, {
+              const recipientId = permittedRecipientIds[idx]!;
+              const notifItem: NotificationItem = {
                 id: ntfIds[idx]!,
-                recipientId: permittedRecipientIds[idx]!,
+                recipientId,
                 kind: 'register_reminder',
                 title: `${regType.label} reminder: ${record.reference}`,
                 detail: `${record.title} — ${kindLabel} (${timingLabel})`,
@@ -26834,6 +27017,20 @@ export async function executeRegisterRemindersForTenant(
                 byId: options.triggeredById,
                 read: false,
                 createdAt: nowIso,
+              };
+              await taskRepo.upsertNotificationInTx(tx, ctx, notifItem);
+              await enqueueNotificationEmailIfImmediate(ctx, notifItem, {
+                byId: options.triggeredById,
+                tenantConfig,
+                drainImmediately: false,
+                recipientPerson: personById.get(recipientId) ?? null,
+                accessAlreadyVerified: true,
+              });
+              await enqueueNotificationTeamsActivityIfEnabled(ctx, notifItem, {
+                byId: options.triggeredById,
+                tenantConfig,
+                drainImmediately: false,
+                accessAlreadyVerified: true,
               });
             }
 
@@ -26853,6 +27050,14 @@ export async function executeRegisterRemindersForTenant(
             remindersDispatched += 1;
           });
         }
+      }
+
+      if (remindersDispatched > 0) {
+        await drainNotificationOutboxesBestEffort(
+          ctx,
+          tenantConfig,
+          options.triggeredById,
+        );
       }
 
       const summary: RegisterRemindersJobSummary = {

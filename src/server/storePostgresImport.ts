@@ -531,7 +531,9 @@ export async function importFirmStoreModulesToPostgres(
       await taskRepo.putNotifications(ctx, notifications);
       counts.notifications = notifications.length;
 
-      await taskRepo.putSignOffs(ctx, signOffs);
+      await taskRepo.putSignOffs(ctx, signOffs, {
+        allowSeedIdempotentUpsert: true,
+      });
       counts.signOffs = signOffs.length;
 
       for (const [userId, items] of recentlyViewedEntries) {
