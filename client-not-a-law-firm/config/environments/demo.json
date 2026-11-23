@@ -4,6 +4,10 @@
   "featureFlags": {
     "enableDemoMode": true
   },
+  "documentGeneration": {
+    "pdfConverter": "container",
+    "pdfConverterFallback": "builtin"
+  },
   "keyVault": {
     "vaultName": "kvnotalawfi2cdo3cw7vuafm",
     "vaultUri": "https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/"

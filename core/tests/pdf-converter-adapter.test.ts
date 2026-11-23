@@ -16,6 +16,7 @@ import {
   type PdfConverterFallbackWarningEvent,
 } from '@platform/core';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
+import notALawFirmDemoOverlay from '../../client-not-a-law-firm/config/environments/demo.json';
 
 function startFakePdfServer(
   handler: (
@@ -256,6 +257,28 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
     );
     expect(baseCfg.documentGeneration.pdfConverter).toBe('builtin');
     expect(baseCfg.documentGeneration.pdfConverterFallback).toBe('builtin');
+
+    const demoCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      notALawFirmDemoOverlay as unknown as Record<string, unknown>,
+    );
+    expect(demoCfg.documentGeneration.pdfConverter).toBe('container');
+    expect(demoCfg.documentGeneration.pdfConverterFallback).toBe('builtin');
+    expect(demoCfg.documentGeneration.enabled).toBe(true);
+    expect(demoCfg.documentGeneration.maxTemplateSizeMb).toBe(10);
+    expect(demoCfg.documentGeneration.defaultOutputFormat).toBe('docx');
+    expect(demoCfg.documentGeneration.allowUserFormatOverride).toBe(true);
+    expect(demoCfg.documentGeneration.storageProvider).toBe('local-fs');
+    expect(demoCfg.documentGeneration.approval.requireApproval).toBe(
+      baseCfg.documentGeneration.approval.requireApproval,
+    );
+    expect(demoCfg.documentGeneration.usage).toEqual(
+      baseCfg.documentGeneration.usage,
+    );
+    expect(
+      Object.keys(demoCfg.documentGeneration.permissions?.roleDefaults ?? {})
+        .length,
+    ).toBeGreaterThan(0);
 
     const defaultSelected = selectDocumentPdfConverter(baseCfg);
     expect(defaultSelected).toBeInstanceOf(BuiltInOpenXmlPdfConverter);

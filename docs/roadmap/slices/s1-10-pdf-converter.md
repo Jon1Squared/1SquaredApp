@@ -102,7 +102,7 @@ Checked against `develop` (`7c2ba3e`):
 
 ## Manual blockers
 
-- Pushing the converter image to demo ACR (`acronesquareddemo2lwvta`) and enabling `enablePdfConverterContainerApp = true` in Azure demo deployment parameters (`Stage 1 plan` §8).
+- Pushing the converter image to demo ACR (`acronesquareddemo2lwvta`) and enabling `enablePdfConverterContainerApp = true` in Azure demo deployment parameters (`Stage 1 plan` §8). Demo tenant uses the container converter with built-in fallback; enabled at deploy time (`client-not-a-law-firm/config/environments/demo.json`, Decision `A4`).
 
 ## Rollback
 

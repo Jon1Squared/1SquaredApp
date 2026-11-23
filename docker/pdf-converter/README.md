@@ -46,4 +46,4 @@ printf '%s\n' "$PROC_STATS" | sed 's/^.*) //' | awk '{print $1}' | grep -c '^Z$'
 docker rm -f onesquared-pdf-timeout
 ```
 
-> Publishing this image to Azure Container Registry and enabling `enablePdfConverterContainerApp = true` in `core/infra/parameters/demo.bicepparam` remain owner deployment tasks in `docs/roadmap/stage-1-plan.md` §8.
+> Publishing this image to Azure Container Registry and enabling it at deploy time (`az deployment group create ... --parameters enablePdfConverterContainerApp=true pdfConverterContainerImage=<acr-login-server>/onesquared-pdf:<tag>`) remain owner deployment tasks in `docs/roadmap/stage-1-plan.md` §8. `core/infra/parameters/demo.bicepparam` retains `enablePdfConverterContainerApp = false` by default because the Bicep guard requires a real image, while `client-not-a-law-firm/config/environments/demo.json` sets the demo tenant to use the container converter with built-in fallback once deployed.
