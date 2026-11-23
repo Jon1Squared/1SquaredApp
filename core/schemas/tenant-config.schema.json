@@ -657,6 +657,61 @@
               }
             }
           }
+        },
+        "intakeChecks": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Stage 1 manual intake check provider configuration (ADR 0038, S1-03)",
+          "properties": {
+            "idVerification": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["manual"],
+                  "default": "manual",
+                  "description": "Active identity verification check provider adapter"
+                }
+              }
+            },
+            "sanctionsPep": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["manual"],
+                  "default": "manual",
+                  "description": "Active sanctions and PEP screening check provider adapter"
+                }
+              }
+            },
+            "eSignature": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["manual"],
+                  "default": "manual",
+                  "description": "Active engagement letter e-signature provider adapter"
+                }
+              }
+            },
+            "payments": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["manual"],
+                  "default": "manual",
+                  "description": "Active money-on-account payment request provider adapter"
+                }
+              }
+            }
+          }
         }
       }
     },

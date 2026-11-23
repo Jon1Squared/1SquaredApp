@@ -2,6 +2,19 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-22 — Extension API v2.1.0 (`S1-03` Intake Check Interfaces, Evidence Storage & Outbox Attachment References)
+
+### Added (Backward Compatible within `^2.0.0`)
+- **`CORE_API_VERSION` bumped from `'2.0.0'` to `'2.1.0'` (`@platform/core-api`, `core/src/api/index.ts`, [ADR 0038](../../docs/decisions/0038-intake-check-interfaces-and-manual-adapters.md)):**
+  - Existing extensions declaring `^2.0.0` remain compatible without modification.
+  - Added intake check provider interfaces (`IdentityVerificationProvider`, `SanctionsPepScreeningProvider`, `ESignatureProvider`, `ClientPaymentRequestProvider`, `TenantIntakeCheckProviders`) and records (`IdentityVerificationRecord`, `SanctionsPepScreeningRecord`, `ESignatureRecord`, `PaymentRequestRecord` with integer `bigint` minor units `amountMinorUnits` and `currency`).
+  - Added `DocumentStorageObjectCategory` `'evidence'` on `DocumentStorageProvider.putObject`.
+  - Added `'intake_check'` to `FirmAuditRecordType`.
+  - Added `MAX_EMAIL_TOTAL_ATTACHMENT_BYTES` (`3_000_000`), `EmailInlineAttachment`, `EmailOutboxAttachmentMetadata`, and extended `OutgoingEmail.attachments` / `EmailOutboxRecord.attachments`.
+  - Added `integrations.intakeChecks` (`idVerification`, `sanctionsPep`, `eSignature`, `payments`, each defaulting to `'manual'`) to `TenantConfiguration` schema, Zod parser, and deep-merge defaults.
+- **Database Migration `0023` & Manual Providers (`@platform/core`, `core/src/tenancy/`, `core/src/integrations/intake-checks/`):**
+  - Added migration `0023_intake_checks_and_outbox_attachments_expand` (`CORE_REQUIRED_SCHEMA_VERSION = '0023'`), `TenantIntakeCheckRepository`, manual provider implementations, and transactional `public.email_outbox_attachments` storage with retention cleanup.
+
 ## 2026-11-21 — Extension API v2.0.0 (Least-Privilege `config:read`, `manifest.hooks` Gate & Registry Update)
 
 ### Breaking Changes

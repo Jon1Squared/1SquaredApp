@@ -23,6 +23,7 @@ import {
   type EntraIdRawTokenClaims,
   type VerifiedOidcTokenClaims,
 } from '../domain/rbac/entra';
+import { expectedBlobContainerName } from './blobStorage';
 
 export * from './migrations/index';
 export * from './blobStorage';
@@ -46,6 +47,7 @@ export * from './rateOverrideRepository';
 export * from './registerRepository';
 export * from './searchRepository';
 export * from './outboxRepository';
+export * from './intakeCheckRepository';
 
 export {
   isEntraMfaVerified,
@@ -150,7 +152,7 @@ export function resolveTenantFromVerifiedToken(
     ...(input.configuredPostgresHost?.trim()
       ? { configuredPostgresHost: input.configuredPostgresHost.trim() }
       : {}),
-    blobContainerName: `tenant-${tenantId}-${environment}`,
+    blobContainerName: expectedBlobContainerName(tenantId, environment),
     keyVaultSecretPrefix:
       input.configuredKeyVault?.vaultName?.trim() ||
       (input.configuredKeyVault?.vaultUri

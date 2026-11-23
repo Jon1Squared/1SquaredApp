@@ -17,20 +17,24 @@
  *    with canonical ADR 0035 §1 defaults when no custom override row exists.
  */
 
-import { randomUUID } from 'node:crypto';
-import type {
-  EmailAttachmentRef,
-  EmailOutboxRecord,
-  EmailOutboxStatus,
-  EmailRecipientList,
-  FirmAuditEntryInput,
-  NotificationChannelFrequency,
-  NotificationKind,
-  OutgoingTeamsActivityTemplateParameter,
-  TeamsActivityOutboxRecord,
-  TeamsActivityOutboxStatus,
-  TenantContext,
-  UserNotificationPreference,
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
+  type EmailAttachmentRef,
+  type EmailInlineAttachment,
+  type EmailOutboxRecord,
+  type EmailOutboxStatus,
+  type EmailOutboxStoredAttachment,
+  type EmailRecipientList,
+  type FirmAuditEntryInput,
+  type NotificationChannelFrequency,
+  type NotificationKind,
+  type OutgoingEmailAttachment,
+  type OutgoingTeamsActivityTemplateParameter,
+  type TeamsActivityOutboxRecord,
+  type TeamsActivityOutboxStatus,
+  type TenantContext,
+  type UserNotificationPreference,
 } from '../api/index';
 import { TenantAuditRepository } from './auditRepository';
 import { sanitizeJobErrorCode } from './jobRunRepository';
@@ -166,16 +170,34 @@ function normalizeRecipients(raw: unknown): EmailRecipientList {
   };
 }
 
-function normalizeAttachments(raw: unknown): EmailAttachmentRef[] {
+function normalizeAttachments(raw: unknown): EmailOutboxStoredAttachment[] {
   if (!Array.isArray(raw)) {
     return [];
   }
-  const out: EmailAttachmentRef[] = [];
+  const out: EmailOutboxStoredAttachment[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       continue;
     }
     const entry = item as Record<string, unknown>;
+    if (
+      entry.source === 'outbox' &&
+      typeof entry.ordinal === 'number' &&
+      typeof entry.fileName === 'string' &&
+      typeof entry.contentType === 'string' &&
+      typeof entry.byteSize === 'number' &&
+      typeof entry.sha256 === 'string'
+    ) {
+      out.push({
+        source: 'outbox',
+        ordinal: entry.ordinal,
+        fileName: entry.fileName,
+        contentType: entry.contentType,
+        byteSize: entry.byteSize,
+        sha256: entry.sha256,
+      });
+      continue;
+    }
     if (
       typeof entry.blobKey === 'string' &&
       typeof entry.fileName === 'string' &&
@@ -319,6 +341,7 @@ function computeAttemptFailurePlan(params: {
   readonly error: unknown;
   readonly maxAttempts?: number;
   readonly baseBackoffSeconds?: number;
+  readonly forcePermanent?: boolean;
   readonly now: Date;
 }): {
   readonly nextAttemptCount: number;
@@ -340,7 +363,8 @@ function computeAttemptFailurePlan(params: {
       ? params.error.trim()
       : sanitizeJobErrorCode(params.error);
   const nextAttemptCount = params.currentAttemptCount + 1;
-  const permanentFailure = nextAttemptCount >= maxAttempts;
+  const permanentFailure =
+    Boolean(params.forcePermanent) || nextAttemptCount >= maxAttempts;
   const backoffSeconds = Math.min(
     MAX_OUTBOX_BACKOFF_SECONDS,
     baseBackoffSeconds * 2 ** Math.max(0, nextAttemptCount - 1),
@@ -380,7 +404,7 @@ export interface EnqueueEmailOutboxInput {
   readonly subject: string;
   readonly htmlBody: string;
   readonly textBody: string;
-  readonly attachments?: readonly EmailAttachmentRef[];
+  readonly attachments?: readonly OutgoingEmailAttachment[];
   readonly createdByPersonId?: string | null;
   readonly nextAttemptAt?: string;
   readonly correlationId?: string;
@@ -437,6 +461,80 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       );
     }
 
+    const preparedInlineAttachments: Array<{
+      readonly ordinal: number;
+      readonly fileName: string;
+      readonly contentType: string;
+      readonly byteSize: number;
+      readonly sha256: string;
+      readonly contentBytes: Uint8Array;
+    }> = [];
+    const attachmentsJson: EmailOutboxStoredAttachment[] = [];
+    let cumulativeInlineBytes = 0;
+
+    for (const [idx, rawAtt] of (input.attachments ?? []).entries()) {
+      if ((rawAtt as EmailInlineAttachment)?.kind === 'inline') {
+        const inline = rawAtt as EmailInlineAttachment;
+        const fileName = inline.fileName?.trim() ?? '';
+        const contentType = inline.contentType?.trim() ?? '';
+        if (!fileName || !contentType) {
+          throw new Error(
+            'EMAIL_ATTACHMENT_INVALID: Inline attachments require fileName and contentType.',
+          );
+        }
+        if (
+          !(inline.contentBytes instanceof Uint8Array) ||
+          inline.contentBytes.length === 0
+        ) {
+          throw new Error(
+            'EMAIL_ATTACHMENT_INVALID: Inline attachment contentBytes must be a non-empty Uint8Array.',
+          );
+        }
+        cumulativeInlineBytes += inline.contentBytes.length;
+        if (cumulativeInlineBytes > MAX_EMAIL_TOTAL_ATTACHMENT_BYTES) {
+          throw new Error(
+            `EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED: Total email attachment size (${cumulativeInlineBytes} bytes) exceeds ${MAX_EMAIL_TOTAL_ATTACHMENT_BYTES} bytes.`,
+          );
+        }
+        const sha256 = createHash('sha256')
+          .update(inline.contentBytes)
+          .digest('hex');
+        const ordinal = idx;
+        preparedInlineAttachments.push({
+          ordinal,
+          fileName,
+          contentType,
+          byteSize: inline.contentBytes.length,
+          sha256,
+          contentBytes: inline.contentBytes,
+        });
+        attachmentsJson.push({
+          source: 'outbox',
+          ordinal,
+          fileName,
+          contentType,
+          byteSize: inline.contentBytes.length,
+          sha256,
+        });
+      } else {
+        const ref = rawAtt as EmailAttachmentRef;
+        const blobKey = ref?.blobKey?.trim() ?? '';
+        const fileName = ref?.fileName?.trim() ?? '';
+        const contentType = ref?.contentType?.trim() ?? '';
+        if (!blobKey || !fileName || !contentType) {
+          throw new Error(
+            'EMAIL_ATTACHMENT_INVALID: Attachment references require blobKey, fileName, and contentType.',
+          );
+        }
+        attachmentsJson.push({
+          blobKey,
+          ...(ref.externalId ? { externalId: ref.externalId } : {}),
+          fileName,
+          contentType,
+        });
+      }
+    }
+
     return this.withTenantTransaction(ctx, async (tx) => {
       const existingRes = await tx.query<DbEmailOutboxRow>(
         `SELECT *
@@ -488,7 +586,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
           input.subject,
           input.htmlBody,
           input.textBody,
-          JSON.stringify(input.attachments ?? []),
+          JSON.stringify(attachmentsJson),
           nextAttemptAt,
           input.createdByPersonId ?? null,
           nowIso,
@@ -514,6 +612,24 @@ export class TenantOutboxRepository extends TenantScopedRepository {
 
       const inserted = insertRes.rows[0];
       this.assertRowTenant(ctx, inserted.tenant_id, 'EmailOutbox');
+      for (const att of preparedInlineAttachments) {
+        await tx.query(
+          `INSERT INTO public.email_outbox_attachments (
+             tenant_id, outbox_id, ordinal, file_name, content_type,
+             byte_size, sha256, content_bytes
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [
+            ctx.tenantId,
+            inserted.id,
+            att.ordinal,
+            att.fileName,
+            att.contentType,
+            att.byteSize,
+            att.sha256,
+            Buffer.from(att.contentBytes),
+          ],
+        );
+      }
       if (options?.auditEntries && options.auditEntries.length > 0) {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
@@ -588,6 +704,64 @@ export class TenantOutboxRepository extends TenantScopedRepository {
           : a.createdAt.localeCompare(b.createdAt),
       );
       return records;
+    });
+  }
+
+  public async getClaimedOutboxAttachmentBytes(
+    ctx: TenantContext,
+    params: { readonly outboxId: string; readonly claimToken: string },
+  ): Promise<ReadonlyArray<EmailInlineAttachment & { readonly ordinal: number }>> {
+    const outboxId = params.outboxId?.trim() ?? '';
+    const claimToken = params.claimToken?.trim() ?? '';
+    if (!outboxId || !claimToken) {
+      return [];
+    }
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{
+        tenant_id: string;
+        outbox_id: string;
+        ordinal: number;
+        file_name: string;
+        content_type: string;
+        byte_size: number;
+        sha256: string;
+        content_bytes: Buffer;
+      }>(
+        `SELECT a.tenant_id, a.outbox_id, a.ordinal, a.file_name,
+                a.content_type, a.byte_size, a.sha256, a.content_bytes
+           FROM public.email_outbox_attachments a
+           JOIN public.email_outbox o
+             ON o.tenant_id = a.tenant_id
+            AND o.id = a.outbox_id
+          WHERE o.tenant_id = $1
+            AND o.id = $2
+            AND o.status = 'sending'
+            AND o.claim_token = $3
+            AND o.content_scrubbed_at IS NULL
+          ORDER BY a.ordinal ASC`,
+        [ctx.tenantId, outboxId, claimToken],
+      );
+
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'EmailOutboxAttachment');
+        const bytes = new Uint8Array(row.content_bytes);
+        const actualSha = createHash('sha256').update(bytes).digest('hex');
+        if (actualSha !== row.sha256) {
+          throw new Error(
+            'EMAIL_OUTBOX_ATTACHMENT_CORRUPTED: Stored outbox attachment digest mismatch.',
+          );
+        }
+        return {
+          ordinal: Number(row.ordinal),
+          kind: 'inline' as const,
+          fileName: row.file_name,
+          contentType: row.content_type,
+          contentBytes: bytes,
+          sha256: row.sha256,
+          byteSize: Number(row.byte_size),
+        };
+      });
     });
   }
 
@@ -686,6 +860,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       readonly error: unknown;
       readonly maxAttempts?: number;
       readonly baseBackoffSeconds?: number;
+      readonly forcePermanent?: boolean;
       readonly failedAt?: Date;
       readonly auditEntriesOnPermanentFailure?: readonly FirmAuditEntryInput[];
     },
@@ -719,6 +894,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
             error: params.error,
             maxAttempts: params.maxAttempts,
             baseBackoffSeconds: params.baseBackoffSeconds,
+            forcePermanent: params.forcePermanent,
             now,
           }).errorCode,
           record: null,
@@ -731,6 +907,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         error: params.error,
         maxAttempts: params.maxAttempts,
         baseBackoffSeconds: params.baseBackoffSeconds,
+        forcePermanent: params.forcePermanent,
         now,
       });
 
@@ -864,6 +1041,16 @@ export class TenantOutboxRepository extends TenantScopedRepository {
 
       for (const row of scrubRes.rows) {
         this.assertRowTenant(ctx, row.tenant_id, 'EmailOutbox');
+      }
+
+      if (scrubRes.rows.length > 0) {
+        const scrubbedIds = scrubRes.rows.map((r) => r.id);
+        await tx.query(
+          `DELETE FROM public.email_outbox_attachments
+            WHERE tenant_id = $1
+              AND outbox_id = ANY($2::text[])`,
+          [ctx.tenantId, scrubbedIds],
+        );
       }
 
       const scrubbedCount = scrubRes.rows.length;

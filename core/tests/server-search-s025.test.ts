@@ -268,7 +268,7 @@ describe('S0-25: Server-Side Full-Text & Trigram Search, Pre-Rank SQL RBAC, Pagi
   });
 
   it('1. Migration 0018 schema contract, pg_trgm extension, and all 20 IMMUTABLE GIN/link indexes exist', async () => {
-    expect(CORE_REQUIRED_SCHEMA_VERSION).toBe('0022');
+    expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(22);
     expect(TENANT_SEARCH_INDEXES_MIGRATION_0018.version).toBe('0018');
     expect(TENANT_SEARCH_INDEXES_MIGRATION_0018.dependsOn).toEqual(['0017']);
 

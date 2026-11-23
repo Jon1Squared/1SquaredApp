@@ -6,6 +6,7 @@ import {
   BasicMergeEngine,
   canActorAccessGeneratedDocument,
   createDocumentStorageProvider,
+  expectedBlobContainerName,
   loadAndValidateTenantConfig,
   LocalTenantStorageProvider,
   resolveDocumentPermissions,
@@ -378,7 +379,7 @@ describe('Host Document Generation Domain & Server Services', () => {
       environment: cfg.environment,
       correlationId: 'corr-r549-admin',
       postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
-      blobContainerName: 'tenant-not-a-law-firm-docs',
+      blobContainerName: expectedBlobContainerName(cfg.tenantId, cfg.environment),
       keyVaultSecretPrefix: 'kv-not-a-law-firm-test',
     };
     const alphaSetupSession = verifySignedEntraSessionCookie(

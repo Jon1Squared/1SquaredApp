@@ -3020,6 +3020,71 @@ ALTER TABLE public.key_date_calendar_syncs
 `.trim(),
   };
 
+export const INTAKE_CHECKS_AND_OUTBOX_ATTACHMENTS_MIGRATION_0023: TenantMigrationDefinition =
+  {
+    version: '0023',
+    name: '0023_intake_checks_and_outbox_attachments_expand',
+    description:
+      'Expand-phase migration creating public.intake_check_records (manual intake check adapters, ADR 0038 S1-D1) and public.email_outbox_attachments (transient outbox-held PDF bytes, S1-D11).',
+    dependsOn: ['0007', '0019'],
+    tablesChanged: ['intake_check_records', 'email_outbox_attachments'],
+    upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_intake_check_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.intake_check_records (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  check_kind TEXT NOT NULL CHECK (
+    check_kind IN ('identity_verification', 'sanctions_pep', 'e_signature', 'payment_request')
+  ),
+  provider TEXT NOT NULL CHECK (provider IN ('manual')),
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('person', 'organisation', 'matter', 'quote')),
+  subject_id TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  amount_minor_units BIGINT NULL CHECK (amount_minor_units IS NULL OR amount_minor_units >= 0),
+  currency TEXT NULL CHECK (currency IS NULL OR currency IN ('GBP')),
+  reference_code TEXT NULL,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_refs_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  recorded_by_person_id TEXT NOT NULL,
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  correlation_id TEXT NOT NULL,
+  CONSTRAINT chk_intake_check_records_outcome_by_kind CHECK (
+    (check_kind = 'identity_verification' AND outcome IN ('verified', 'failed', 'pending', 'expired'))
+    OR (check_kind = 'sanctions_pep' AND outcome IN ('clear', 'match_flagged', 'pending'))
+    OR (check_kind = 'e_signature' AND outcome IN ('requested_manual', 'signed_uploaded', 'declined'))
+    OR (check_kind = 'payment_request' AND outcome IN ('requested_manual', 'receipt_recorded_manual', 'cancelled'))
+  ),
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_intake_check_records_tenant_subject
+  ON public.intake_check_records (tenant_id, subject_type, subject_id, check_kind, recorded_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.email_outbox_attachments (
+  tenant_id TEXT NOT NULL,
+  outbox_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  file_name TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK (byte_size > 0),
+  sha256 TEXT NOT NULL,
+  content_bytes BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, outbox_id, ordinal),
+  FOREIGN KEY (tenant_id, outbox_id)
+    REFERENCES public.email_outbox (tenant_id, id)
+    ON DELETE CASCADE
+);
+`.trim(),
+    downSql: `
+DROP TABLE IF EXISTS public.email_outbox_attachments;
+DROP INDEX IF EXISTS idx_intake_check_records_tenant_subject;
+DROP TABLE IF EXISTS public.intake_check_records;
+DROP SEQUENCE IF EXISTS public.tenant_intake_check_id_seq;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3043,6 +3108,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020,
   STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021,
   KEY_DATE_CALENDAR_SYNC_LEASE_MIGRATION_0022,
+  INTAKE_CHECKS_AND_OUTBOX_ATTACHMENTS_MIGRATION_0023,
 ];
 
 export function validateMigrationCatalogueOrder(

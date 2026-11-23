@@ -39,10 +39,30 @@ function getNodeFs(): typeof import('node:fs') {
 const EICAR_SIGNATURE =
   'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*';
 
+export function expectedBlobContainerName(
+  tenantId: string,
+  environment: string,
+): string {
+  const cleanTenant = tenantId?.trim();
+  const cleanEnv = environment?.trim();
+  if (!cleanTenant || !cleanEnv) {
+    throw new Error(
+      'STORAGE_TENANCY_ERROR: Storage container naming requires non-empty tenantId and environment.',
+    );
+  }
+  return `tenant-${cleanTenant}-${cleanEnv}`;
+}
+
 function ensureValidTenantContext(ctx: TenantContext): void {
-  if (!ctx?.tenantId || !ctx?.blobContainerName) {
+  if (!ctx?.tenantId || !ctx?.environment || !ctx?.blobContainerName) {
     throw new Error(
       'STORAGE_TENANCY_ERROR: Storage operations require a valid TenantContext.',
+    );
+  }
+  const expected = expectedBlobContainerName(ctx.tenantId, ctx.environment);
+  if (ctx.blobContainerName !== expected) {
+    throw new Error(
+      `TENANCY_ISOLATION_ERROR: Storage container "${ctx.blobContainerName}" does not match expected container "${expected}" for tenant "${ctx.tenantId}" (${ctx.environment}).`,
     );
   }
 }
@@ -169,7 +189,7 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
   public async putObject(
     ctx: TenantContext,
     input: {
-      category: 'templates' | 'documents';
+      category: 'templates' | 'documents' | 'evidence';
       objectId: string;
       fileName: string;
       contentType: string;
@@ -178,6 +198,15 @@ abstract class BaseTenantStorageProvider implements DocumentStorageProvider {
     },
   ): Promise<StoredBlobMetadata> {
     ensureValidTenantContext(ctx);
+    if (
+      input.category !== 'templates' &&
+      input.category !== 'documents' &&
+      input.category !== 'evidence'
+    ) {
+      throw new Error(
+        `STORAGE_INVALID_CATEGORY: Unsupported storage category "${String(input.category)}".`,
+      );
+    }
     const safeName = sanitizeFileName(input.fileName);
     const safeId = input.objectId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const blobKey = `${ctx.blobContainerName}/${input.category}/${safeId}/${safeName}`;

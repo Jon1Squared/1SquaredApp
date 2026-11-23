@@ -131,6 +131,47 @@ export async function drainEmailOutboxForTenant(
         (row.recipients.bcc?.length ?? 0);
 
       try {
+        const outboxEntries = row.attachments.filter(
+          (att): att is import('../../api/index').EmailOutboxAttachmentMetadata =>
+            'source' in att && att.source === 'outbox',
+        );
+        const claimedInline =
+          outboxEntries.length > 0
+            ? await outboxRepo.getClaimedOutboxAttachmentBytes(ctx, {
+                outboxId: row.id,
+                claimToken: row.claimToken,
+              })
+            : [];
+        if (
+          outboxEntries.length > 0 &&
+          claimedInline.length !== outboxEntries.length
+        ) {
+          throw new Error(
+            'EMAIL_OUTBOX_ATTACHMENT_MISSING: Expected outbox-held attachment bytes were missing for claimed message.',
+          );
+        }
+        const claimedByOrdinal = new Map(
+          claimedInline.map((item) => [item.ordinal, item]),
+        );
+        const dispatchAttachments: import('../../api/index').OutgoingEmailAttachment[] =
+          row.attachments.map((att) => {
+            if ('source' in att && att.source === 'outbox') {
+              const matched = claimedByOrdinal.get(att.ordinal);
+              if (!matched) {
+                throw new Error(
+                  'EMAIL_OUTBOX_ATTACHMENT_MISSING: Expected outbox-held attachment bytes were missing for claimed message.',
+                );
+              }
+              if (att.sha256 && matched.sha256 && att.sha256 !== matched.sha256) {
+                throw new Error(
+                  'EMAIL_OUTBOX_ATTACHMENT_CORRUPTED: Outbox attachment metadata digest does not match stored attachment bytes.',
+                );
+              }
+              return matched;
+            }
+            return att as import('../../api/index').EmailAttachmentRef;
+          });
+
         const result = await sender.send(ctx, {
           idempotencyKey: row.idempotencyKey,
           templateKey: row.templateKey,
@@ -138,7 +179,7 @@ export async function drainEmailOutboxForTenant(
           subject: row.subject,
           htmlBody: row.htmlBody,
           textBody: row.textBody,
-          attachments: row.attachments,
+          attachments: dispatchAttachments,
           createdByPersonId: row.createdByPersonId,
         });
 
@@ -220,12 +261,16 @@ export async function drainEmailOutboxForTenant(
         // result.status === 'disabled' — provider disabled mid-flight; treat cleanly as skipped
         skippedDisabled = true;
       } catch (err) {
+        const isAttachmentIntegrityError =
+          err instanceof Error &&
+          /^EMAIL_OUTBOX_ATTACHMENT_(MISSING|CORRUPTED):/.test(err.message);
         const failRes = await outboxRepo.markOutboxAttemptFailed(ctx, {
           id: row.id,
           claimToken: row.claimToken,
           error: err,
           maxAttempts,
           baseBackoffSeconds,
+          forcePermanent: isAttachmentIntegrityError,
           failedAt: now,
           auditEntriesOnPermanentFailure: [
             {
@@ -237,7 +282,9 @@ export async function drainEmailOutboxForTenant(
               newValue: 'failed_permanent',
               byId: actorId,
               at: now.toISOString(),
-              reason: `Permanent delivery failure for outbox item ${row.id} after ${maxAttempts} attempts (template=${row.templateKey}).`,
+              reason: isAttachmentIntegrityError
+                ? `Permanent failure for outbox item ${row.id}: attachment integrity verification failed (template=${row.templateKey}).`
+                : `Permanent delivery failure for outbox item ${row.id} after ${maxAttempts} attempts (template=${row.templateKey}).`,
             },
           ],
         });
