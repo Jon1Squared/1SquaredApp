@@ -23,6 +23,7 @@ const TARGET_WHOLE_TENANT_CALLEES = new Set([
   'listClients',
   'getFirmFinanceRollupsSql',
   'listAllVisibleKeyDates',
+  'loadFullConflictSearchGraph',
 ]);
 
 const TARGET_PAGE_CALLEES = new Set(['getAppSnapshot', 'getAppSnapshotInScope']);
@@ -126,18 +127,6 @@ export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
     reason: 'Legacy batch/seed PMS hydrator wrapper delegating to getTenantPmsSource.',
   },
   {
-    file: 'src/server/services.ts',
-    fn: 'loadFullConflictSearchGraph',
-    callees: [
-      'listAllPeople',
-      'listAllOrganisations',
-      'listAllLinks',
-      'listAllMattersUnfiltered',
-      'listAllEnquiriesUnfiltered',
-    ],
-    reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
-  },
-  {
     file: 'src/server/financeServices.ts',
     fn: 'getFirmFinance',
     callees: ['getFirmFinanceRollupsSql'],
@@ -151,7 +140,77 @@ export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
   },
 ];
 
-export const MAX_PERMANENT_ALLOW_LIST_COUNT = 13;
+export const MAX_PERMANENT_ALLOW_LIST_COUNT = 12;
+
+export interface TemporaryConflictGraphAllowListEntry extends AllowListEntry {
+  readonly backlogItem: 'B22';
+}
+
+/**
+ * Temporary allow-list confining `loadFullConflictSearchGraph` and its 6 named
+ * live conflict callers strictly to backlog item `B22` (removed once scoped candidate
+ * pre-filter parity is proven equivalent in production, `R677`).
+ */
+export const TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST: readonly TemporaryConflictGraphAllowListEntry[] =
+  [
+    {
+      file: 'src/server/services.ts',
+      fn: 'loadFullConflictSearchGraph',
+      callees: [
+        'listAllPeople',
+        'listAllOrganisations',
+        'listAllLinks',
+        'listAllMattersUnfiltered',
+        'listAllEnquiriesUnfiltered',
+      ],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+    {
+      file: 'src/server/services.ts',
+      fn: 'saveMatterRecord',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+    {
+      file: 'src/server/services.ts',
+      fn: 'runMatterConflictSearchRecord',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+    {
+      file: 'src/server/services.ts',
+      fn: 'updateMatterConflictRecord',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+    {
+      file: 'src/server/services.ts',
+      fn: 'saveEnquiryRecord',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+    {
+      file: 'src/server/services.ts',
+      fn: 'prepareEnquiryConversion',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+    {
+      file: 'src/server/services.ts',
+      fn: 'prepareQuoteConversionRecord',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
+  ];
+
+export const MAX_TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST_COUNT = 7;
 
 /**
  * Snapshot & client-form baseline deferred strictly to WP1b (S1-02b)
@@ -347,10 +406,12 @@ export function scanSourceTextForWholeTenantCalls(
   unexpected: AstCallFinding[];
   deferred: AstCallFinding[];
   permanentAllowMatched: AstCallFinding[];
+  temporaryConflictMatched: AstCallFinding[];
 } {
   const unexpected: AstCallFinding[] = [];
   const deferred: AstCallFinding[] = [];
   const permanentAllowMatched: AstCallFinding[] = [];
+  const temporaryConflictMatched: AstCallFinding[] = [];
 
   const sourceFile = ts.createSourceFile(
     relPath,
@@ -398,6 +459,10 @@ export function scanSourceTextForWholeTenantCalls(
           if (matchesAllowList(finding, PERMANENT_ALLOW_LIST)) {
             permanentAllowMatched.push(finding);
           } else if (
+            matchesAllowList(finding, TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST)
+          ) {
+            temporaryConflictMatched.push(finding);
+          } else if (
             matchesAllowList(finding, DEFERRED_S1_02B_ALLOW_LIST) ||
             (isPageFile && callee === 'getAppSnapshot') ||
             (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee))
@@ -413,13 +478,19 @@ export function scanSourceTextForWholeTenantCalls(
   };
 
   visit(sourceFile);
-  return { unexpected, deferred, permanentAllowMatched };
+  return {
+    unexpected,
+    deferred,
+    permanentAllowMatched,
+    temporaryConflictMatched,
+  };
 }
 
 function scanWholeTenantCalls(): {
   unexpected: AstCallFinding[];
   deferred: AstCallFinding[];
   permanentAllowMatched: AstCallFinding[];
+  temporaryConflictMatched: AstCallFinding[];
 } {
   const scanDirs = [
     path.join(REPO_ROOT, 'src', 'server'),
@@ -431,6 +502,7 @@ function scanWholeTenantCalls(): {
   const unexpected: AstCallFinding[] = [];
   const deferred: AstCallFinding[] = [];
   const permanentAllowMatched: AstCallFinding[] = [];
+  const temporaryConflictMatched: AstCallFinding[] = [];
 
   for (const absPath of files) {
     const relPath = path.relative(REPO_ROOT, absPath).replace(/\\/g, '/');
@@ -439,9 +511,15 @@ function scanWholeTenantCalls(): {
     unexpected.push(...fileRes.unexpected);
     deferred.push(...fileRes.deferred);
     permanentAllowMatched.push(...fileRes.permanentAllowMatched);
+    temporaryConflictMatched.push(...fileRes.temporaryConflictMatched);
   }
 
-  return { unexpected, deferred, permanentAllowMatched };
+  return {
+    unexpected,
+    deferred,
+    permanentAllowMatched,
+    temporaryConflictMatched,
+  };
 }
 
 describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', () => {
@@ -502,5 +580,43 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
       `async function handler(partyRepo: any, ctx: any) { const getAllOrgs = partyRepo.listAllOrganisations; return getAllOrgs(ctx); }`,
     );
     expect(aliasRes.unexpected.some((f) => f.callee === 'listAllOrganisations')).toBe(true);
+  });
+
+  it('R677: flags unapproved loadFullConflictSearchGraph callers and confines the 7 conflict-graph entries to TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST (B22)', () => {
+    expect(TARGET_WHOLE_TENANT_CALLEES.has('loadFullConflictSearchGraph')).toBe(
+      true,
+    );
+    expect(
+      PERMANENT_ALLOW_LIST.some((e) => e.fn === 'loadFullConflictSearchGraph'),
+    ).toBe(false);
+    expect(TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST.length).toBeLessThanOrEqual(
+      MAX_TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST_COUNT,
+    );
+    for (const entry of TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST) {
+      expect(entry.backlogItem).toBe('B22');
+      expect(entry.callees.length).toBeGreaterThan(0);
+    }
+
+    const r677Synthetic = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticR677.ts',
+      `export async function sneakyCaller(ctx: unknown) { return loadFullConflictSearchGraph(ctx); }`,
+    );
+    expect(
+      r677Synthetic.unexpected.some(
+        (f) => f.fn === 'sneakyCaller' && f.callee === 'loadFullConflictSearchGraph',
+      ),
+    ).toBe(true);
+
+    const r677AliasSynthetic = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticR677Alias.ts',
+      `export async function sneakyAliasCaller(svc: any, ctx: unknown) { const { loadFullConflictSearchGraph: loadAll } = svc; return loadAll(ctx); }`,
+    );
+    expect(
+      r677AliasSynthetic.unexpected.some(
+        (f) =>
+          f.fn === 'sneakyAliasCaller' &&
+          f.callee === 'loadFullConflictSearchGraph',
+      ),
+    ).toBe(true);
   });
 });
