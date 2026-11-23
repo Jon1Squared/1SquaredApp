@@ -194,9 +194,9 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
         res.end('<html>not a pdf</html>');
         return;
       }
-      res.statusCode = 503;
+      res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ errorCode: 'PDF_CONVERTER_NOT_READY' }));
+      res.end(JSON.stringify({ errorCode: 'PDF_CONVERTER_INTERNAL_ERROR' }));
     });
     closers.push(errorSrv.close);
 
@@ -221,11 +221,11 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
     await expect(
       normalSizeConverter.convertDocxToPdf({
         docxBytes: sampleDocx,
-        title: 'HTTP 503 Failure',
+        title: 'HTTP 500 Failure',
       }),
     ).rejects.toMatchObject({
       code: 'PDF_CONVERTER_HTTP_ERROR',
-      statusCode: 503,
+      statusCode: 500,
     });
 
     const badBodyConverter = new HttpPdfConverter({
@@ -358,6 +358,142 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
         correlationId: 'corr-fail',
       }),
     ).rejects.toMatchObject({ code: 'PDF_CONVERTER_UNCONFIGURED' });
+  });
+
+  it('R679: retries HTTP 503 up to 3 times with Retry-After capped at 5s inside timeout budget, throws PDF_CONVERTER_BUSY, and maps fallback warning', async () => {
+    const sampleDocx = buildValidDocxArchive({
+      paragraphs: [{ text: 'R679 busy retry test' }],
+    });
+    const okPdf = new TextEncoder().encode('%PDF-1.7\n%RETRY-OK\n%%EOF\n');
+
+    // 1. 503 followed by 200 succeeds on retry
+    let attempt1 = 0;
+    const sleepCalls1: number[] = [];
+    const retrySuccessConverter = new HttpPdfConverter({
+      baseUrl: 'http://pdf-converter.invalid',
+      fetchImpl: (async () => {
+        attempt1 += 1;
+        if (attempt1 === 1) {
+          return new Response(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }), {
+            status: 503,
+            headers: { 'Retry-After': '0' },
+          });
+        }
+        return new Response(okPdf, {
+          status: 200,
+          headers: { 'Content-Type': 'application/pdf' },
+        });
+      }) as typeof fetch,
+      sleepFn: async (ms: number) => {
+        sleepCalls1.push(ms);
+      },
+    } as never);
+    const out1 = await retrySuccessConverter.convertDocxToPdf({
+      docxBytes: sampleDocx,
+      title: 'R679 Retry Success',
+    });
+    expect(attempt1).toBe(2);
+    expect(sleepCalls1).toEqual([0]);
+    expect(new TextDecoder('latin1').decode(out1)).toContain('RETRY-OK');
+
+    // 2. Repeated 503s retry 3 times (4 total calls), cap Retry-After: 30 at 5000ms, and throw PDF_CONVERTER_BUSY
+    let attempt2 = 0;
+    const sleepCalls2: number[] = [];
+    const busyFailConverter = new HttpPdfConverter({
+      baseUrl: 'http://pdf-converter.invalid',
+      timeoutMs: 30_000,
+      fetchImpl: (async () => {
+        attempt2 += 1;
+        return new Response(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }), {
+          status: 503,
+          headers: { 'Retry-After': '30' },
+        });
+      }) as typeof fetch,
+      sleepFn: async (ms: number) => {
+        sleepCalls2.push(ms);
+      },
+    } as never);
+    await expect(
+      busyFailConverter.convertDocxToPdf({
+        docxBytes: sampleDocx,
+        title: 'R679 Busy Persistent',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PDF_CONVERTER_BUSY',
+      statusCode: 503,
+      message: 'The PDF converter is busy. Please try again in a moment.',
+    });
+    expect(attempt2).toBe(4);
+    expect(sleepCalls2).toEqual([5000, 5000, 5000]);
+
+    // 3. Budget exhaustion: 503 Retry-After: 2 under timeoutMs: 100 stops before exceeding overall timeout budget
+    let attempt3 = 0;
+    const sleepCalls3: number[] = [];
+    const budgetConverter = new HttpPdfConverter({
+      baseUrl: 'http://pdf-converter.invalid',
+      timeoutMs: 100,
+      fetchImpl: (async () => {
+        attempt3 += 1;
+        return new Response(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }), {
+          status: 503,
+          headers: { 'Retry-After': '2' },
+        });
+      }) as typeof fetch,
+      sleepFn: async (ms: number) => {
+        sleepCalls3.push(ms);
+      },
+    } as never);
+    await expect(
+      budgetConverter.convertDocxToPdf({
+        docxBytes: sampleDocx,
+        title: 'R679 Budget Exhausted',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PDF_CONVERTER_BUSY',
+      statusCode: 503,
+      message: 'The PDF converter is busy. Please try again in a moment.',
+    });
+    expect(attempt3).toBe(1);
+    expect(sleepCalls3).toEqual([]);
+
+    // 4. pdfConverterFallback: 'builtin' maps PDF_CONVERTER_BUSY to structured fallback warning with British English message
+    const baseCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+    );
+    const warnings: PdfConverterFallbackWarningEvent[] = [];
+    const fallbackSelected = selectDocumentPdfConverter(
+      {
+        documentGeneration: {
+          ...baseCfg.documentGeneration,
+          pdfConverter: 'container',
+          pdfConverterFallback: 'builtin',
+        },
+      },
+      {
+        converterUrl: 'http://pdf-converter.invalid',
+        timeoutMs: 100,
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }), {
+            status: 503,
+            headers: { 'Retry-After': '2' },
+          })) as typeof fetch,
+        onFallbackWarning: (evt) => warnings.push(evt),
+      },
+    );
+    const fbBytes = await fallbackSelected.convertDocxToPdf({
+      docxBytes: sampleDocx,
+      title: 'CONFIDENTIAL-CLIENT-MATTER',
+      tenantId: 'tenant-alpha',
+      correlationId: 'corr-r679-fallback',
+    });
+    expect(new TextDecoder('latin1').decode(fbBytes).startsWith('%PDF-1.4')).toBe(
+      true,
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.errorCode).toBe('PDF_CONVERTER_BUSY');
+    expect((warnings[0] as { message?: string })?.message).toContain(
+      'The PDF converter is busy. Please try again in a moment.',
+    );
   });
 
   it('R670/R671: server.mjs enforces MAX_CONCURRENCY (503 + Retry-After), caches /health/ready > probe interval, kills full process tree on timeout, returns clean 413 on oversized chunked uploads, and HttpPdfConverter caps PDF response size', async () => {
