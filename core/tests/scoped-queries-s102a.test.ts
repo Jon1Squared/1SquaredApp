@@ -750,7 +750,9 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     const rawBaseMatter = structuredClone(seed.matters[0]!) as Matter;
     const baseMatter: Matter = {
       ...rawBaseMatter,
-      openingRecord: undefined,
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
       sourceEnquiryId: null,
     };
 
@@ -916,7 +918,7 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       ...baseOrg,
       id: 'O-R659-S4-LINKED',
       legalName: 'Calderwood Current Co Ltd',
-      otherNames: [{ id: 'on-r659-s4', name: 'Meridian Former Legacy Co' }],
+      otherNames: [{ id: 'on-r659-s4', typeId: 'ont-former', name: 'Meridian Former Legacy Co' }],
       companyNumber: '',
       generalEmail: '',
       mainPhone: '',
@@ -1370,8 +1372,8 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       scopedEnqGraph.canViewMatter,
       tenantAlpha,
     );
-    expect(scopedEnqHits.allConflicts.map((h) => h.detail).sort()).toEqual(
-      fullEnqHits.allConflicts.map((h) => h.detail).sort(),
+    expect(scopedEnqHits.allConflicts.map((h) => `${h.recordId}:${h.reason}`).sort()).toEqual(
+      fullEnqHits.allConflicts.map((h) => `${h.recordId}:${h.reason}`).sort(),
     );
     expect(fullEnqHits.allConflicts.length).toBeGreaterThan(0);
 
@@ -1547,5 +1549,238 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       { viewerId: 'P-000001', includeRestricted: true },
     );
     expect(bravoVisible).toEqual([]);
+  });
+
+  it('R663: quote-expiry scheduled job persists Expired status, Quote expired timeline, zero-PII audit & job_runs across two tenants idempotently', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const tenancyMod = await import('../src/tenancy/index');
+    const coreMod = await import('../src/index');
+    const runtimeMod = await import('../../src/platform/tenantRuntime');
+    const authorizeMod = await import('../../src/server/authorize');
+    const permsMod = await import('../../src/server/actionPermissions');
+    const servicesMod = (await import('../../src/server/services')) as Record<string, unknown>;
+
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const jobRunRepo = new tenancyMod.TenantJobRunRepository();
+    const auditRepo = new tenancyMod.TenantAuditRepository();
+
+    await jobRunRepo.clearTenantJobRuns(ctxAlpha);
+    await jobRunRepo.clearTenantJobRuns(ctxBravo);
+
+    const buildQuote = (id: string, overrides: Record<string, unknown>) => ({
+      id,
+      reference: id,
+      clientType: 'person' as const,
+      clientFirstName: 'ConfidentialAlice',
+      clientLastName: 'SecretQuoteClient',
+      clientEmail: 'alice.secret@example.invalid',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: `Quote ${id}`,
+      status: 'Sent',
+      feeBasis: 'fixed' as const,
+      estimatedFeeExVat: 1500,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2026-10-01',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-09-01T09:00:00Z',
+      updatedAt: '2026-09-01T09:00:00Z',
+      sentAt: '2026-09-01T10:00:00Z',
+      timeline: [],
+      ...overrides,
+    });
+
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R663-A-SENT', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R663-A-FOLLOW', { status: 'Follow-up due', validUntil: '2026-10-15' }) as never);
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R663-A-DRAFT', { status: 'Draft', validUntil: '2026-10-01', sentAt: null }) as never);
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R663-A-FUTURE', { status: 'Sent', validUntil: '2099-12-31' }) as never);
+    await intakeRepo.putQuote(ctxBravo, buildQuote('QUO-R663-B-SENT', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+
+    const jobPolicy = (permsMod.JOB_PERMISSIONS as Record<string, { permission?: string; jobOnly?: boolean } | undefined>)['quote-expiry'];
+    expect(jobPolicy?.permission).toBe('quote:run_expiry');
+    expect(jobPolicy?.jobOnly).toBe(true);
+
+    const host = process.env.PLATFORM_POSTGRES_HOST?.trim() || '127.0.0.1';
+    const makeRegistryEntry = (tenantId: string, enabled: boolean) => {
+      const slug = tenantId.replace(/-/g, '_');
+      return {
+        tenantId,
+        slug,
+        environment: 'test' as const,
+        postgresHost: host,
+        postgresDatabaseName: `pg_tenant_${slug}_test`,
+        postgresRoleName: `role_tenant_${slug}_test`,
+        keyVaultUri: `https://kv-${slug.replace(/_/g, '')}-test.vault.azure.net/`,
+        packageDir: 'client-not-a-law-firm',
+        timeZone: 'Europe/London',
+        enabled,
+      };
+    };
+
+    const rawBase = structuredClone(runtimeMod.getActiveTenantRawBaseConfig()) as Record<string, unknown>;
+    const alphaCfg = coreMod.loadAndValidateTenantConfig(
+      rawBase,
+      { tenantId: tenantAlpha, environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    const bravoCfg = coreMod.loadAndValidateTenantConfig(
+      rawBase,
+      { tenantId: tenantBravo, environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+
+    const registryAlphaOnly = {
+      schemaVersion: '1.0.0',
+      environment: 'test' as const,
+      hostingMode: 'multi_tenant' as const,
+      tenants: [
+        makeRegistryEntry(tenantAlpha, true),
+        makeRegistryEntry(tenantBravo, false),
+      ],
+    };
+
+    await expect(
+      authorizeMod.guardedJob('quote-expiry' as never, 'unregistered-evil-tenant', async () => 'no', {
+        registry: registryAlphaOnly,
+      }),
+    ).rejects.toMatchObject({ code: 'TENANCY_UNREGISTERED_JOB_TENANT' });
+
+    const runSweep = servicesMod.runScheduledQuoteExpiryJobSweep as
+      | ((options?: Record<string, unknown>) => Promise<{
+          exitCode: number;
+          succeededTenants: string[];
+          skippedTenants: Array<{ tenantId: string; status: string; reason?: string }>;
+          failedTenants: Array<{ tenantId: string; errorCode?: string }>;
+        }>)
+      | undefined;
+    expect(typeof runSweep).toBe('function');
+
+    const firstSweep = await runSweep!({
+      registry: registryAlphaOnly,
+      defaultRunHourLocal: 0,
+      tenantConfigOverrideByTenantId: {
+        [tenantAlpha]: alphaCfg,
+        [tenantBravo]: bravoCfg,
+      },
+    });
+    expect(firstSweep.exitCode).toBe(0);
+    expect(firstSweep.succeededTenants).toEqual([tenantAlpha]);
+
+    const expiredAlpha = await intakeRepo.listVisibleQuotes<{
+      id: string;
+      status: string;
+      timeline: Array<{ kind: string; title: string }>;
+    }>(ctxAlpha, 'P-000001', { status: 'Expired' });
+    const expiredIds = expiredAlpha.map((q) => q.id).sort();
+    expect(expiredIds).toContain('QUO-R663-A-FOLLOW');
+    expect(expiredIds).toContain('QUO-R663-A-SENT');
+    for (const id of ['QUO-R663-A-SENT', 'QUO-R663-A-FOLLOW']) {
+      const q = expiredAlpha.find((item) => item.id === id);
+      expect(q?.status).toBe('Expired');
+      const expEvents = q?.timeline.filter((t) => t.kind === 'expired' && t.title === 'Quote expired') ?? [];
+      expect(expEvents).toHaveLength(1);
+    }
+
+    const alphaDraft = await intakeRepo.getQuoteById<{ status: string; timeline: Array<{ kind: string }> }>(
+      ctxAlpha,
+      'QUO-R663-A-DRAFT',
+      { includeRestricted: true },
+    );
+    expect(alphaDraft?.status).toBe('Draft');
+    expect(alphaDraft?.timeline.some((t) => t.kind === 'expired')).toBe(false);
+
+    const alphaFuture = await intakeRepo.getQuoteById<{ status: string }>(
+      ctxAlpha,
+      'QUO-R663-A-FUTURE',
+      { includeRestricted: true },
+    );
+    expect(alphaFuture?.status).toBe('Sent');
+
+    // Bravo remained disabled in registryAlphaOnly so its overdue quote must remain untouched
+    const bravoOverdue = await intakeRepo.getQuoteById<{ status: string }>(
+      ctxBravo,
+      'QUO-R663-B-SENT',
+      { includeRestricted: true },
+    );
+    expect(bravoOverdue?.status).toBe('Sent');
+
+    const jobRunsAlpha = await jobRunRepo.listJobRuns(ctxAlpha, { jobKey: 'quote-expiry', status: 'succeeded' });
+    expect(jobRunsAlpha.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(jobRunsAlpha)).not.toContain('ConfidentialAlice');
+    expect(JSON.stringify(jobRunsAlpha)).not.toContain('SecretQuoteClient');
+
+    const auditsAlpha = await auditRepo.listAuditEntriesForRecord(ctxAlpha, 'quote', 'QUO-R663-A-SENT');
+    expect(auditsAlpha.some((a) => a.field === 'Quote lifecycle status' && a.newValue === 'Expired')).toBe(true);
+    expect(JSON.stringify(auditsAlpha)).not.toContain('ConfidentialAlice');
+    expect(JSON.stringify(auditsAlpha)).not.toContain('SecretQuoteClient');
+
+    // Second scheduled sweep on same day skips Alpha (already_succeeded_today) and executes Bravo if enabled
+    const secondSweep = await runSweep!({
+      registry: registryAlphaOnly,
+      defaultRunHourLocal: 0,
+      tenantConfigOverrideByTenantId: {
+        [tenantAlpha]: alphaCfg,
+        [tenantBravo]: bravoCfg,
+      },
+    });
+    expect(secondSweep.exitCode).toBe(0);
+    expect(secondSweep.skippedTenants.some((s) => s.tenantId === tenantAlpha)).toBe(true);
+
+    // Manual execution on Alpha is idempotent: 0 newly expired, timeline length remains 1
+    const execManual = servicesMod.executeQuoteExpiryForTenant as (
+      ctx: TenantContext,
+      opts: Record<string, unknown>,
+    ) => Promise<{
+      outcome: string;
+      result?: { summary: { expiredCount: number } };
+    }>;
+    const manualSecond = await execManual(ctxAlpha, {
+      triggerSource: 'manual',
+      triggeredById: 'system:quote-expiry',
+      defaultRunHourLocal: 0,
+      tenantConfig: alphaCfg,
+    });
+    expect(manualSecond.outcome).toBe('executed');
+    expect(manualSecond.result?.summary.expiredCount).toBe(0);
+    const reloadedSent = await intakeRepo.getQuoteById<{ timeline: Array<{ kind: string }> }>(
+      ctxAlpha,
+      'QUO-R663-A-SENT',
+      { includeRestricted: true },
+    );
+    expect(reloadedSent?.timeline.filter((t) => t.kind === 'expired')).toHaveLength(1);
+
+    // Direct helper check: read-only projection updates status without appending timeline; write mode appends once
+    const quotesDomain = await import('../../src/domain/quotes');
+    const helperQuoteRead = buildQuote('QUO-R663-HELPER-READ', { status: 'Sent', validUntil: '2026-10-01' });
+    const readOutcome = quotesDomain.applyQuoteEffectiveLifecycle(helperQuoteRead as never, new Date('2026-11-23T12:00:00Z'), {
+      appendExpiredTimeline: false,
+    });
+    expect(readOutcome).toEqual({ changed: true, newlyExpired: false });
+    expect(helperQuoteRead.status).toBe('Expired');
+    expect(helperQuoteRead.timeline).toHaveLength(0);
+
+    const writeOutcome = quotesDomain.applyQuoteEffectiveLifecycle(
+      buildQuote('QUO-R663-HELPER-WRITE', { status: 'Sent', validUntil: '2026-10-01' }) as never,
+      new Date('2026-11-23T12:00:00Z'),
+      { appendExpiredTimeline: true },
+    );
+    expect(writeOutcome).toEqual({ changed: true, newlyExpired: true });
   });
 });

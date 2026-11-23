@@ -1782,6 +1782,36 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     })) as unknown as T[];
   }
 
+  /**
+   * Loads open quotes (`Sent` or `Follow-up due`) whose `valid_until` date is strictly
+   * before `localDateYmd` for unattended lifecycle expiry (`quote-expiry` job, R663).
+   */
+  public async listOverdueQuotesForLifecycleSweep<T = TenantQuoteRecord>(
+    ctx: TenantContext,
+    localDateYmd: string,
+  ): Promise<T[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<QuoteRow>(
+        `SELECT * FROM quotes q
+         WHERE q.tenant_id = $1
+           AND q.status IN ('Sent', 'Follow-up due')
+           AND q.valid_until IS NOT NULL
+           AND q.valid_until <> ''
+           AND q.valid_until < $2
+         ORDER BY q.id ASC`,
+        [ctx.tenantId, localDateYmd],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'quotes.listOverdueQuotesForLifecycleSweep',
+        );
+        return mapRowToQuote(row) as unknown as T;
+      });
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // S1-02a Scoped Intake & Quote Lookups
   // ---------------------------------------------------------------------------

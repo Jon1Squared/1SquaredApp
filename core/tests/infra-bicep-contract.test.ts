@@ -214,6 +214,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain("'usage-retention-purge'");
     expect(platformBicep).toContain("'enquiry-retention-anonymise'");
     expect(platformBicep).toContain("'register-reminders'");
+    expect(platformBicep).toContain("'quote-expiry'");
     expect(platformBicep).toContain('param enableSchedulerJobs bool = true');
     expect(platformBicep).toContain('param enableKeyDateRemindersJob bool = true');
     expect(platformBicep).toContain('param enableUsageRetentionPurgeJob bool = true');
@@ -221,6 +222,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain('param enableRegisterRemindersJob bool = true');
     expect(platformBicep).toContain('param enableOutboxDrainJob bool = true');
     expect(platformBicep).toContain('param enableNotificationDigestsJob bool = true');
+    expect(platformBicep).toContain('param enableQuoteExpiryJob bool = true');
     expect(platformBicep).toContain("cronExpression: '0 * * * *'");
 
     // Internal-only PDF converter Container App
@@ -350,7 +352,8 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
       ['enquiryAnonymisationJob', 'registerRemindersJob'],
       ['registerRemindersJob', 'outboxDrainJob'],
       ['outboxDrainJob', 'notificationDigestsJob'],
-      ['notificationDigestsJob', 'seedDemoJob'],
+      ['notificationDigestsJob', 'quoteExpiryJob'],
+      ['quoteExpiryJob', 'seedDemoJob'],
     ] as const) {
       expect(resourceBlock(name, next), name).toContain(
         'runtimeAppInsightsMetricsPublisherRole',
@@ -359,6 +362,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(platformBicep).toContain('outbox.delivery.failed_permanent');
     expect(platformBicep).toContain('caj-outbox-drain-${environment}');
     expect(platformBicep).toContain('caj-ntf-dig-${environment}');
+    expect(platformBicep).toContain('caj-quo-exp-${environment}');
     expect(
       platformNoComments.slice(
         platformNoComments.indexOf('resource seedDemoJob '),

@@ -938,6 +938,15 @@ export const JOB_PERMISSIONS = {
     description:
       'Compile and queue daily and weekly email notification digests per tenant user once per working weekday in tenant timezone (ADR 0035 / ADR 0030).',
   },
+  'quote-expiry': {
+    kind: 'job',
+    permission: 'quote:run_expiry',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 2,
+    description:
+      'Transition Sent and Follow-up due quotes past validUntil to Expired with timeline and zero-PII audit once per local day in tenant timezone (ADR 0030, R663).',
+  },
 } as const satisfies Record<string, JobPolicy>;
 
 export type RegisteredJobName = keyof typeof JOB_PERMISSIONS;

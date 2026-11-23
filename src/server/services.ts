@@ -84,8 +84,8 @@ import {
   type WorkingHoursConfig,
 } from '@/domain/dates';
 import {
+  applyQuoteEffectiveLifecycle,
   calculateQuoteTotals,
-  evaluateQuoteEffectiveStatus,
   mapQuoteFeeBasisToArrangementBasis,
   quoteClientDisplayName,
   roundCurrency,
@@ -2849,10 +2849,7 @@ async function getAppSnapshotInScope(
 
   // Derive expired quote display status in-memory only (read path must remain side-effect free).
   for (const q of visibleQuotes) {
-    const eff = evaluateQuoteEffectiveStatus(q, now);
-    if (eff !== q.status) {
-      q.status = eff;
-    }
+    applyQuoteEffectiveLifecycle(q, now, { appendExpiredTimeline: false });
   }
 
   const canTakeByTaskId: Record<string, boolean> = {};
@@ -20529,7 +20526,9 @@ export async function saveQuoteRecord(
         detail: `Follow-up scheduled for ${existing.nextFollowUpDate}`,
       });
     } else {
-      existing.status = evaluateQuoteEffectiveStatus(existing, now);
+      applyQuoteEffectiveLifecycle(existing, now, {
+        appendExpiredTimeline: true,
+      });
     }
 
     await intakeRepo.putQuote(ctx, existing);
@@ -20741,7 +20740,9 @@ export async function logQuoteFollowUpRecord(
   if (quote.status === 'Follow-up due' && nextDate > todayYmd) {
     quote.status = 'Sent';
   }
-  quote.status = evaluateQuoteEffectiveStatus(quote, now);
+  applyQuoteEffectiveLifecycle(quote, now, {
+    appendExpiredTimeline: true,
+  });
   quote.updatedAt = nowIso;
   quote.updatedById = byId;
 
@@ -28863,6 +28864,188 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
           return executeRegisterRemindersForTenant(tenantContext, {
             triggerSource: 'scheduled',
             triggeredById: 'system:register-reminders',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal,
+            statementTimeoutMs: timeoutMs,
+            tenantConfig,
+            signal,
+          });
+        },
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status: outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
+}
+
+export interface QuoteExpiryJobSummary {
+  readonly tenantId: string;
+  readonly localDate: string;
+  readonly candidatesEvaluated: number;
+  readonly expiredCount: number;
+}
+
+/**
+ * Transitions overdue `Sent` and `Follow-up due` quotes (`validUntil < localDate`)
+ * to `'Expired'`, appends a single `'Quote expired'` timeline entry, and writes a
+ * zero-PII audit entry in PostgreSQL (ADR 0030, `R663`).
+ */
+export async function executeQuoteExpiryForTenant(
+  ctx: TenantContext,
+  options: {
+    triggerSource: 'scheduled' | 'manual';
+    triggeredById: string;
+    timeZone?: string;
+    defaultRunHourLocal?: number;
+    statementTimeoutMs?: number;
+    signal?: AbortSignal;
+    tenantConfig?: TenantConfiguration;
+  },
+): Promise<ControlledJobRunOutcome<{ summary: QuoteExpiryJobSummary }>> {
+  const tenantConfig = resolveVerifiedTenantConfiguration(ctx, options.tenantConfig);
+  const effectiveTimeZone =
+    options.timeZone?.trim() ||
+    tenantConfig.timeZone ||
+    'Europe/London';
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+    jobKey: 'quote-expiry',
+    triggerSource: options.triggerSource,
+    triggeredById: options.triggeredById,
+    timeZone: effectiveTimeZone,
+    targetLocalHour: options.defaultRunHourLocal ?? 2,
+    now,
+    statementTimeoutMs: options.statementTimeoutMs,
+    signal: options.signal,
+    work: async ({ localDate }) => {
+      const intakeRepo = getIntakeQuoteRepository();
+      const candidates = await intakeRepo.listOverdueQuotesForLifecycleSweep<Quote>(
+        ctx,
+        localDate,
+      );
+      const lifecycleNow = new Date(`${localDate}T${nowIso.slice(11)}`);
+      let expiredCount = 0;
+
+      for (const quote of candidates) {
+        const previousStatus = quote.status;
+        const { changed, newlyExpired } = applyQuoteEffectiveLifecycle(
+          quote,
+          lifecycleNow,
+          { appendExpiredTimeline: true },
+        );
+        if (!changed && !newlyExpired) {
+          continue;
+        }
+        quote.updatedAt = nowIso;
+        await intakeRepo.putQuote(ctx, quote);
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'quote',
+            recordId: quote.id,
+            action: 'status-change',
+            field: 'Quote lifecycle status',
+            oldValue: previousStatus,
+            newValue: quote.status,
+            byId: options.triggeredById,
+            at: nowIso,
+            reason: `Valid-until date (${quote.validUntil ?? localDate}) passed without an outcome.`,
+          },
+        ]);
+        expiredCount += 1;
+      }
+
+      const summary: QuoteExpiryJobSummary = {
+        tenantId: ctx.tenantId,
+        localDate,
+        candidatesEvaluated: candidates.length,
+        expiredCount,
+      };
+
+      console.info(
+        JSON.stringify({
+          level: 'info',
+          event: 'quote_expiry.completed',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          localDate,
+          candidatesEvaluated: candidates.length,
+          expiredCount,
+        }),
+      );
+
+      return {
+        result: { summary },
+        summary: {
+          candidatesEvaluated: candidates.length,
+          expiredCount,
+        },
+      };
+    },
+  });
+}
+
+export async function runScheduledQuoteExpiryJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) continue;
+    try {
+      const outcome = await guardedJob(
+        'quote-expiry',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeQuoteExpiryForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:quote-expiry',
             timeZone: tenantEntry.timeZone,
             defaultRunHourLocal: options?.defaultRunHourLocal,
             statementTimeoutMs: timeoutMs,

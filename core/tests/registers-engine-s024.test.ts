@@ -156,10 +156,10 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     );
   });
 
-  it('2. RBAC registry (68 user + 9 job-only = 77), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
-    expect(ALL_PERMISSION_KEYS).toHaveLength(77);
+  it('2. RBAC registry (68 user + 10 job-only = 78), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
+    expect(ALL_PERMISSION_KEYS).toHaveLength(78);
     expect(ALL_USER_PERMISSION_KEYS).toHaveLength(68);
-    expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(9);
+    expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(10);
     expect(PERMISSION_REGISTRY['register:configure'].requiresMfa).toBe(true);
     expect(PERMISSION_REGISTRY['register:run_reminders'].jobOnly).toBe(true);
     expect(JOB_PERMISSIONS['register-reminders'].permission).toBe('register:run_reminders');
