@@ -29633,6 +29633,7 @@ export async function executeNotificationDigestsForTenant(
             subject: rendered.subject,
             htmlBody: rendered.htmlBody,
             textBody: rendered.textBody,
+            nextAttemptAt: nowIso,
             createdByPersonId: triggeredById,
             correlationId: ctx.correlationId,
           });
