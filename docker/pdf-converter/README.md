@@ -5,7 +5,7 @@ Internal-only stateless container image running headless LibreOffice Writer (`li
 ## Design choices (Option A)
 
 - **Base image**: `node:24-bookworm-slim` + `tini` (`ENTRYPOINT ["/usr/bin/tini", "--"]` PID 1 init reaping child processes) + Debian `libreoffice-writer-nogui`, `fonts-liberation2`, and `fonts-noto-core`, updated directly from APT with `rm -rf /var/lib/apt/lists/*` (no Chromium GUI or external binaries; base-image SHA-256 digest and package pinning deferred to `B24`).
-- **Least privilege & concurrency**: runs as non-root `USER node` on internal Container Apps ingress (`external: false`, `allowInsecure: false`, port `8080`), enforcing an explicit Container Apps `http` scale rule (`concurrentRequests: '2'`) alongside in-process `PDF_CONVERTER_MAX_CONCURRENCY` (`2` default, returning HTTP `503` `PDF_CONVERTER_BUSY` + `Retry-After` + `Connection: close` when full) and releasing concurrency slots cleanly when a caller aborts an upload mid-stream (`req.on('close')` -> `499 CLIENT_ABORT`).
+- **Least privilege & concurrency**: runs as non-root `USER node` on internal Container Apps ingress (`external: false`, `allowInsecure: false`, port `8080`), enforcing an explicit Container Apps `http` scale rule (`concurrentRequests: '2'`) alongside in-process `PDF_CONVERTER_MAX_CONCURRENCY` (`2` default, returning HTTP `503` `PDF_CONVERTER_BUSY` + `Retry-After` + `Connection: close` when full) and releasing concurrency slots cleanly when a caller aborts an upload mid-stream (`req.on('close')`, `ECONNRESET`, or `req.aborted` -> `499 CLIENT_ABORT`).
 - **Isolation & clean process-tree timeouts**: each `POST /convert` request writes to an isolated temporary directory (`os.tmpdir()`) with a dedicated `-env:UserInstallation=file://...` UNO profile that is deleted unconditionally in `finally`; subprocess timeouts kill the entire LibreOffice process tree cleanly (`SIGKILL` on `-pid` on POSIX / `taskkill /T /F` on Windows, logging zero-PII `pdf_converter.kill_unconfirmed` if exit confirmation does not arrive). Under `NODE_ENV=production`, test override hooks (`PDF_CONVERTER_SOFFICE_BIN`, `PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON`) are ignored (and malformed JSON logs `pdf_converter.invalid_pre_args_json` rather than crashing).
 - **Zero-PII logs**: structured JSON logs emit only `{ timestamp, level, event, correlationId, tenantId?, outcome, statusCode, durationMs, inputBytes, outputBytes, errorCode? }` — never document titles, filenames, or contents.
 
@@ -38,9 +38,11 @@ node scripts/smoke-pdf-converter.mjs http://127.0.0.1:8199
 docker rm -f onesquared-pdf-smoke
 
 # Forced-timeout + PID 1 tini zombie check:
-docker run -d --name onesquared-pdf-timeout -e PDF_CONVERTER_SOFFICE_TIMEOUT_MS=100 -p 127.0.0.1:8198:8080 onesquared-pdf:test
+docker run -d --name onesquared-pdf-timeout -e PDF_CONVERTER_SOFFICE_TIMEOUT_MS=1500 -p 127.0.0.1:8198:8080 onesquared-pdf:test
 node scripts/smoke-pdf-converter.mjs --expect-timeout http://127.0.0.1:8198
-docker exec onesquared-pdf-timeout ps -eo stat | grep -c '^Z'
+PROC_STATS=$(docker exec onesquared-pdf-timeout sh -c 'for f in /proc/[0-9]*/stat; do [ -r "$f" ] && cat "$f" 2>/dev/null || true; done')
+test -n "$PROC_STATS"
+printf '%s\n' "$PROC_STATS" | sed 's/^.*) //' | awk '{print $1}' | grep -c '^Z$'
 docker rm -f onesquared-pdf-timeout
 ```
 

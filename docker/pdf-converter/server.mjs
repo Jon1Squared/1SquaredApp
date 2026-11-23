@@ -212,6 +212,15 @@ function readRequestBodyWithLimit(req, maxBytes) {
     };
 
     const onError = (err) => {
+      if (
+        (err && typeof err === 'object' && err.code === 'ECONNRESET') ||
+        req.aborted
+      ) {
+        const abortErr = new Error('Client aborted request body upload');
+        abortErr.code = 'CLIENT_ABORT';
+        fail(abortErr);
+        return;
+      }
       fail(err);
     };
 
@@ -493,7 +502,10 @@ const server = http.createServer(async (req, res) => {
       res.end(pdfBuffer);
     } catch (err) {
       const isClientAbort =
-        err && typeof err === 'object' && err.code === 'CLIENT_ABORT';
+        (err &&
+          typeof err === 'object' &&
+          (err.code === 'CLIENT_ABORT' || err.code === 'ECONNRESET')) ||
+        req.aborted;
       if (isClientAbort) {
         logEvent({
           level: 'warn',

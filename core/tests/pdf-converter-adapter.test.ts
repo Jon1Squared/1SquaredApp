@@ -494,6 +494,72 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
     expect((warnings[0] as { message?: string })?.message).toContain(
       'The PDF converter is busy. Please try again in a moment.',
     );
+
+    // 5. HTTP-date Retry-After parses future GMT date cleanly and caps at 5s
+    let attemptDate = 0;
+    const sleepCallsDate: number[] = [];
+    const dateRetryConverter = new HttpPdfConverter({
+      baseUrl: 'http://pdf-converter.invalid',
+      fetchImpl: (async () => {
+        attemptDate += 1;
+        if (attemptDate === 1) {
+          return new Response(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }), {
+            status: 503,
+            headers: {
+              'Retry-After': new Date(Date.now() + 1_200).toUTCString(),
+            },
+          });
+        }
+        return new Response(
+          new TextEncoder().encode('%PDF-1.7\n%RETRY-DATE-OK\n%%EOF\n'),
+          { status: 200, headers: { 'Content-Type': 'application/pdf' } },
+        );
+      }) as typeof fetch,
+      sleepFn: async (ms: number) => {
+        sleepCallsDate.push(ms);
+      },
+    } as never);
+    const outDate = await dateRetryConverter.convertDocxToPdf({
+      docxBytes: sampleDocx,
+      title: 'R688 Retry-After HTTP-date',
+    });
+    expect(attemptDate).toBe(2);
+    expect(sleepCallsDate).toHaveLength(1);
+    expect(sleepCallsDate[0]!).toBeGreaterThanOrEqual(1);
+    expect(sleepCallsDate[0]!).toBeLessThanOrEqual(5_000);
+    expect(new TextDecoder('latin1').decode(outDate)).toContain('RETRY-DATE-OK');
+
+    // 6. Invalid Retry-After falls back safely to default 1000ms (never NaN)
+    let attemptInvalid = 0;
+    const sleepCallsInvalid: number[] = [];
+    const invalidRetryConverter = new HttpPdfConverter({
+      baseUrl: 'http://pdf-converter.invalid',
+      fetchImpl: (async () => {
+        attemptInvalid += 1;
+        if (attemptInvalid === 1) {
+          return new Response(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }), {
+            status: 503,
+            headers: { 'Retry-After': 'not-a-valid-retry-after' },
+          });
+        }
+        return new Response(
+          new TextEncoder().encode('%PDF-1.7\n%RETRY-INVALID-OK\n%%EOF\n'),
+          { status: 200, headers: { 'Content-Type': 'application/pdf' } },
+        );
+      }) as typeof fetch,
+      sleepFn: async (ms: number) => {
+        sleepCallsInvalid.push(ms);
+      },
+    } as never);
+    const outInvalid = await invalidRetryConverter.convertDocxToPdf({
+      docxBytes: sampleDocx,
+      title: 'R688 Retry-After Invalid Header',
+    });
+    expect(attemptInvalid).toBe(2);
+    expect(sleepCallsInvalid).toEqual([1_000]);
+    expect(new TextDecoder('latin1').decode(outInvalid)).toContain(
+      'RETRY-INVALID-OK',
+    );
   });
 
   describe('server.mjs process & concurrency hardening (R670, R671, R681, R682, R686)', () => {
@@ -592,6 +658,9 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
           'const args = process.argv.slice(2);',
           "if (args.includes('--version')) {",
           "  if (process.env.MOCK_VERSION_LOG) fs.appendFileSync(process.env.MOCK_VERSION_LOG, '1\\n', 'utf8');",
+          '  if (process.env.MOCK_VERSION_HANG_MS) {',
+          '    await new Promise((r) => setTimeout(r, Number(process.env.MOCK_VERSION_HANG_MS)));',
+          '  }',
           "  process.stdout.write('LibreOffice 24.8.0.0\\n');",
           '  process.exit(0);',
           '}',
@@ -835,7 +904,7 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
       ).rejects.toMatchObject({ code: 'PDF_CONVERTER_SIZE_LIMIT' });
     });
 
-    it('R681: MAX_CONCURRENCY=1 frees slot cleanly after socket destroy() mid-upload, 504 timeout, and 413 payload refusal', async () => {
+    it('R681: MAX_CONCURRENCY=1 frees slot cleanly after TCP reset / abort mid-upload, 504 timeout, and 413 payload refusal', async () => {
       const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 's110-r681-'));
       tempDirs.push(workRoot);
       const { mockSofficePath, hangOnceFlagPath } = createMockSoffice(workRoot);
@@ -845,14 +914,14 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
         NODE_ENV: 'test',
         PDF_CONVERTER_MAX_CONCURRENCY: '1',
         PDF_CONVERTER_MAX_DOCX_BYTES: String(zipBody.byteLength + 512),
-        PDF_CONVERTER_SOFFICE_TIMEOUT_MS: '600',
+        PDF_CONVERTER_SOFFICE_TIMEOUT_MS: '3000',
         PDF_CONVERTER_SOFFICE_BIN: process.execPath,
         PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON: JSON.stringify([mockSofficePath]),
         MOCK_DELAY_MS: '50',
         MOCK_HANG_ONCE_FILE: hangOnceFlagPath,
       });
 
-      // 1. Socket destroyed mid chunked upload must release concurrency slot
+      // 1. TCP RST / socket destroyed mid chunked upload must release concurrency slot and log 499 CLIENT_ABORT (never 500)
       await new Promise<void>((resolve) => {
         const req = http.request({
           hostname: '127.0.0.1',
@@ -866,15 +935,23 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
           },
         });
         req.on('error', () => {
-          // Expected when socket is forcibly destroyed
+          // Expected when socket is forcibly reset/destroyed
         });
         req.write(Buffer.from(zipBody.subarray(0, 64)));
         setTimeout(() => {
-          req.destroy();
+          if (req.socket && typeof req.socket.resetAndDestroy === 'function') {
+            req.socket.resetAndDestroy();
+          } else {
+            req.destroy();
+          }
           resolve();
         }, 60);
       });
-      await new Promise((r) => setTimeout(r, 120));
+      await new Promise((r) => setTimeout(r, 180));
+      const abortLogs = slotSrv.stderrLines.join('\n');
+      expect(abortLogs).toContain('"errorCode":"PDF_CONVERTER_CLIENT_ABORT"');
+      expect(abortLogs).toContain('"statusCode":499');
+      expect(abortLogs).not.toContain('"statusCode":500');
 
       const afterAbortRes = await fetch(`${slotSrv.baseUrl}/convert`, {
         method: 'POST',
@@ -927,22 +1004,26 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
         body: Buffer.from(zipBody),
       });
       expect(after413Res.status).toBe(200);
-    });
+    }, 20_000);
 
-    it('R686: ignores soffice override env hooks in production, survives malformed PRE_ARGS_JSON, aligns readiness timeout to 4500ms, and logs kill_unconfirmed guard', async () => {
+    it('R686: ignores soffice override env hooks in production, survives malformed PRE_ARGS_JSON, enforces 4.5s default readiness timeout behaviourally, and logs kill_unconfirmed guard', async () => {
       const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 's110-r686-'));
       tempDirs.push(workRoot);
       const { mockSofficePath, versionLogPath } = createMockSoffice(workRoot);
 
-      // 1. NODE_ENV=production ignores PDF_CONVERTER_SOFFICE_BIN & PRE_ARGS_JSON
-      await startConverterProcess({
+      // 1. NODE_ENV=production ignores PDF_CONVERTER_SOFFICE_BIN & PRE_ARGS_JSON across a 1.2s polling window
+      const prodSrv = await startConverterProcess({
         NODE_ENV: 'production',
         PDF_CONVERTER_SOFFICE_BIN: process.execPath,
         PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON: JSON.stringify([mockSofficePath]),
         MOCK_VERSION_LOG: versionLogPath,
       });
-      await new Promise((r) => setTimeout(r, 100));
-      expect(fs.existsSync(versionLogPath)).toBe(false);
+      await fetch(`${prodSrv.baseUrl}/health/ready`).catch(() => undefined);
+      const pollDeadline = Date.now() + 1_200;
+      while (Date.now() < pollDeadline) {
+        expect(fs.existsSync(versionLogPath)).toBe(false);
+        await new Promise((r) => setTimeout(r, 150));
+      }
 
       // 2. Non-production malformed PRE_ARGS_JSON logs structured warning and starts cleanly without crashing
       const badJsonSrv = await startConverterProcess({
@@ -952,18 +1033,31 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
       });
       const liveRes = await fetch(`${badJsonSrv.baseUrl}/health/live`);
       expect(liveRes.status).toBe(200);
-      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 100));
       expect(
         badJsonSrv.stderrLines.join('\n') + badJsonSrv.stdoutLines.join('\n'),
       ).toContain('pdf_converter.invalid_pre_args_json');
 
-      // 3. Static checks for readiness default <5s Bicep timeout and kill_unconfirmed guard
+      // 3. Behavioural readiness timeout check (<5s Bicep window): default 4.5s timeout triggers 503 when soffice --version hangs
+      const readyTimeoutSrv = await startConverterProcess({
+        NODE_ENV: 'test',
+        PDF_CONVERTER_SOFFICE_BIN: process.execPath,
+        PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON: JSON.stringify([mockSofficePath]),
+        MOCK_VERSION_HANG_MS: '8000',
+      });
+      const t0 = Date.now();
+      const readyRes = await fetch(`${readyTimeoutSrv.baseUrl}/health/ready`);
+      const elapsedMs = Date.now() - t0;
+      expect(readyRes.status).toBe(503);
+      expect(elapsedMs).toBeGreaterThanOrEqual(3_800);
+      expect(elapsedMs).toBeLessThan(7_500);
+
+      // Keep explicit kill_unconfirmed guard check
       const serverSrc = fs.readFileSync(
         path.resolve(__dirname, '../../docker/pdf-converter/server.mjs'),
         'utf8',
       );
-      expect(serverSrc).toContain('4_500');
       expect(serverSrc).toContain('pdf_converter.kill_unconfirmed');
-    });
+    }, 20_000);
   });
 });

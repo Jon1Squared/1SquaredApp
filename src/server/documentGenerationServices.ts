@@ -26,6 +26,7 @@ import {
   exportTemplatePackage,
   exportTemplateUsageReportCsv,
   findUnmappedPlaceholders,
+  formatPdfConverterUserMessage,
   generateDocumentFromTemplate,
   getReadableCatalogueFieldsForActor,
   hasDocumentPermission,
@@ -33,6 +34,8 @@ import {
   importTemplatePackage,
   isLiveBlobStorageEnvironment,
   normaliseActorHomeRoles,
+  PDF_CONVERTER_BUSY_USER_MESSAGE,
+  PdfConverterError,
   previewTemplateVersion,
   queryTemplateUsageReport,
   rejectTemplateVersion,
@@ -55,6 +58,7 @@ import {
   type FieldGroup,
   type FieldRequiredPermission,
   type GeneratedDocumentRecord,
+  type PdfConverterErrorCode,
   type PromptedFieldDefinition,
   type ScopedDownloadToken,
   type TemplateAvailabilityRules,
@@ -1574,11 +1578,17 @@ export async function generateDocumentService(
   userId: string,
   session?: VerifiedEntraSessionPayload,
 ): Promise<{
-  status: 'generated' | 'blocked_missing_required';
+  status:
+    | 'generated'
+    | 'blocked_missing_required'
+    | 'converter_busy'
+    | 'converter_failed';
   document?: GeneratedDocumentRecord;
   downloadToken?: ScopedDownloadToken;
   fileBase64?: string;
   missingRequiredFields: string[];
+  errorCode?: PdfConverterErrorCode;
+  message?: string;
 }> {
   const { store, ctx, user, people, organisations, matters, teams, config, repo, storage } =
     await getInitializedDocGenContext(userId, session, {
@@ -1654,79 +1664,100 @@ export async function generateDocumentService(
     },
   });
 
-  const res = await repo.withTenantTransaction(ctx, async () => {
-    const generated = await generateDocumentFromTemplate({
-      ctx,
-      repo,
-      storage,
-      engine,
-      pdfConverter,
-      catalogue,
-      actor,
-      config,
-      templateId: input.templateId,
-      sourceEntityType: input.sourceEntityType,
-      matterAccessSubject: matter ? toMatterAccessSubject(matter) : null,
-      primaryClientId,
-      primaryClientEntityType,
-      recipientPartyId: input.recipientPartyId ?? primaryClientId,
-      recipientPartyEntityType:
-        input.recipientPartyEntityType ?? primaryClientEntityType,
-      practiceAreaId: practiceAreaLabel,
-      matterTypeId: matterTypeLabel,
-      teamId: userTeam?.name ?? null,
-      outputFormat: input.outputFormat,
-      resolutionContext,
-    });
-
-    if (generated.status === 'generated' && generated.document) {
-      await appendDocGenAuditInTransaction(ctx, {
-        recordType: matter
-          ? 'matter'
-          : organisation
-            ? 'organisation'
-            : 'person',
-        recordId: matter?.id ?? primaryClientId ?? generated.document.id,
-        action: 'create',
-        field: `Document Generated (${generated.document.templateName} v${generated.document.templateVersionNumber})`,
-        oldValue: null,
-        newValue: `${generated.document.fileName} (${generated.document.outputFormat.toUpperCase()})`,
-        byId: user.id,
+  let res;
+  try {
+    res = await repo.withTenantTransaction(ctx, async () => {
+      const generated = await generateDocumentFromTemplate({
+        ctx,
+        repo,
+        storage,
+        engine,
+        pdfConverter,
+        catalogue,
+        actor,
+        config,
+        templateId: input.templateId,
+        sourceEntityType: input.sourceEntityType,
+        matterAccessSubject: matter ? toMatterAccessSubject(matter) : null,
+        primaryClientId,
+        primaryClientEntityType,
+        recipientPartyId: input.recipientPartyId ?? primaryClientId,
+        recipientPartyEntityType:
+          input.recipientPartyEntityType ?? primaryClientEntityType,
+        practiceAreaId: practiceAreaLabel,
+        matterTypeId: matterTypeLabel,
+        teamId: userTeam?.name ?? null,
+        outputFormat: input.outputFormat,
+        resolutionContext,
       });
 
-      if (
-        matter &&
-        generated.document.documentType === CLIENT_CARE_DOCUMENT_TYPE &&
-        canPersonAccessMatter(matter, user.id, user, {
-          allPeople: people,
-          teams,
-        }) &&
-        hasPersonPermission(user, 'matter:edit', {
-          allPeople: people,
-          teams,
-        })
-      ) {
-        const draftedRes =
-          await getMatterRepository().markEngagementLetterDraftedIfEligible<Matter>(
-            ctx,
-            { matterId: matter.id, updatedById: user.id },
-          );
-        if (draftedRes.updated) {
-          await appendDocGenAuditInTransaction(ctx, {
-            recordType: 'matter',
-            recordId: matter.id,
-            action: 'update',
-            field: 'Engagement letter status',
-            oldValue: draftedRes.previousStatus || null,
-            newValue: 'Drafted',
-            byId: user.id,
-          });
+      if (generated.status === 'generated' && generated.document) {
+        await appendDocGenAuditInTransaction(ctx, {
+          recordType: matter
+            ? 'matter'
+            : organisation
+              ? 'organisation'
+              : 'person',
+          recordId: matter?.id ?? primaryClientId ?? generated.document.id,
+          action: 'create',
+          field: `Document Generated (${generated.document.templateName} v${generated.document.templateVersionNumber})`,
+          oldValue: null,
+          newValue: `${generated.document.fileName} (${generated.document.outputFormat.toUpperCase()})`,
+          byId: user.id,
+        });
+
+        if (
+          matter &&
+          generated.document.documentType === CLIENT_CARE_DOCUMENT_TYPE &&
+          canPersonAccessMatter(matter, user.id, user, {
+            allPeople: people,
+            teams,
+          }) &&
+          hasPersonPermission(user, 'matter:edit', {
+            allPeople: people,
+            teams,
+          })
+        ) {
+          const draftedRes =
+            await getMatterRepository().markEngagementLetterDraftedIfEligible<Matter>(
+              ctx,
+              { matterId: matter.id, updatedById: user.id },
+            );
+          if (draftedRes.updated) {
+            await appendDocGenAuditInTransaction(ctx, {
+              recordType: 'matter',
+              recordId: matter.id,
+              action: 'update',
+              field: 'Engagement letter status',
+              oldValue: draftedRes.previousStatus || null,
+              newValue: 'Drafted',
+              byId: user.id,
+            });
+          }
         }
       }
-    }
 
-    return generated;
-  });
+      return generated;
+    });
+  } catch (err) {
+    if (err instanceof PdfConverterError) {
+      if (err.code === 'PDF_CONVERTER_BUSY') {
+        return {
+          status: 'converter_busy',
+          errorCode: err.code,
+          message: PDF_CONVERTER_BUSY_USER_MESSAGE,
+          missingRequiredFields: [],
+        };
+      }
+      return {
+        status: 'converter_failed',
+        errorCode: err.code,
+        message: formatPdfConverterUserMessage(err.code),
+        missingRequiredFields: [],
+      };
+    }
+    throw err;
+  }
 
   return {
     status: res.status,

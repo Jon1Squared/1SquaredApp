@@ -51,6 +51,27 @@ export class PdfConverterError extends Error {
   }
 }
 
+export function formatPdfConverterUserMessage(
+  code: PdfConverterErrorCode,
+): string {
+  switch (code) {
+    case 'PDF_CONVERTER_BUSY':
+      return PDF_CONVERTER_BUSY_USER_MESSAGE;
+    case 'PDF_CONVERTER_TIMEOUT':
+      return 'PDF conversion timed out. Please try again in a moment.';
+    case 'PDF_CONVERTER_SIZE_LIMIT':
+      return 'This document is too large to convert to PDF. Reduce its size or generate a Word (.docx) document instead.';
+    case 'PDF_CONVERTER_UNCONFIGURED':
+      return 'The dedicated PDF converter is not configured. Please contact your administrator.';
+    case 'PDF_CONVERTER_UNREACHABLE':
+      return 'The PDF converter service is currently unavailable. Please try again in a moment.';
+    case 'PDF_CONVERTER_INVALID_OUTPUT':
+    case 'PDF_CONVERTER_HTTP_ERROR':
+    default:
+      return 'The PDF converter could not render this document. Please try again or contact your administrator.';
+  }
+}
+
 export interface PdfConverterFallbackWarningEvent {
   readonly event: 'document_generation.pdf_converter_fallback';
   readonly tenantId?: string;

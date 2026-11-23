@@ -27,7 +27,7 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function buildMinimalDocxZip() {
+function buildDocxZipWithBodyXml(documentBodyXml) {
   const encoder = new TextEncoder();
   const files = [
     {
@@ -55,7 +55,7 @@ function buildMinimalDocxZip() {
       data: encoder.encode(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
-          '<w:body><w:p><w:r><w:t>1Squared PDF Converter Smoke Test</w:t></w:r></w:p></w:body>' +
+          `<w:body>${documentBodyXml}</w:body>` +
           '</w:document>',
       ),
     },
@@ -174,7 +174,15 @@ async function main() {
     );
   }
 
-  const docxBytes = buildMinimalDocxZip();
+  const docxBytes = expectTimeout
+    ? buildDocxZipWithBodyXml(
+        Array.from({ length: 1_200 }, (_, idx) =>
+          `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Row ${idx} Cell A layout stress test for LibreOffice PDF timeout smoke check</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Row ${idx} Cell B extended pagination paragraph content</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+        ).join(''),
+      )
+    : buildDocxZipWithBodyXml(
+        '<w:p><w:r><w:t>1Squared PDF Converter Smoke Test</w:t></w:r></w:p>',
+      );
   const convertRes = await fetch(`${baseUrl}/convert`, {
     method: 'POST',
     headers: {

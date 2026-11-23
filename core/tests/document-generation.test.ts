@@ -14,6 +14,7 @@ import {
   CORE_API_VERSION,
   CORE_FIELD_CATALOGUE,
   CORE_TENANT_MIGRATIONS,
+  createDirectMigrationClient,
   createOrUploadDraftTemplateVersion,
   DEFAULT_DOCUMENT_PERMISSION_ROLES,
   deleteGeneratedDocument,
@@ -2535,12 +2536,26 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
     });
 
     const seenConverterTenantIds: Array<string | string[] | undefined> = [];
+    let serverMode: 'ok' | 'busy_503' | 'error_500' = 'ok';
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
       req.on('end', () => {
         if (req.url === '/convert' && req.method === 'POST') {
           seenConverterTenantIds.push(req.headers['x-tenant-id']);
+          if (serverMode === 'busy_503') {
+            res.statusCode = 503;
+            res.setHeader('Content-Type', 'application/json');
+            res.setHeader('Retry-After', '0');
+            res.end(JSON.stringify({ errorCode: 'PDF_CONVERTER_BUSY' }));
+            return;
+          }
+          if (serverMode === 'error_500') {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ errorCode: 'PDF_CONVERTER_HTTP_ERROR' }));
+            return;
+          }
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/pdf');
           res.end(
@@ -2716,6 +2731,89 @@ describe('Document Generation — Unit, Contract, Isolation, Record-Access & Sec
           alphaAdminSession,
         ),
       ).rejects.toMatchObject({ code: 'PDF_CONVERTER_UNREACHABLE' });
+
+      // R688: generateDocumentService catches PdfConverterError in fail mode, returns typed converter_busy / converter_failed, and leaves zero partial rows
+      vi.stubEnv('DOC_CONVERTER_URL', fakeConverterUrl);
+      const countDocGenTables = async () => {
+        const direct = await createDirectMigrationClient({ ctx: ctxAlpha });
+        try {
+          const [docs, links, events, daily] = await Promise.all([
+            direct.query<{ c: string }>(
+              `SELECT count(*)::text AS c FROM public.documents WHERE tenant_id = $1`,
+              [tenantAlpha],
+            ),
+            direct.query<{ c: string }>(
+              `SELECT count(*)::text AS c FROM public.document_links WHERE tenant_id = $1`,
+              [tenantAlpha],
+            ),
+            direct.query<{ c: string }>(
+              `SELECT count(*)::text AS c FROM public.template_usage_events WHERE tenant_id = $1`,
+              [tenantAlpha],
+            ),
+            direct.query<{ c: string }>(
+              `SELECT count(*)::text AS c FROM public.template_usage_daily_summaries WHERE tenant_id = $1`,
+              [tenantAlpha],
+            ),
+          ]);
+          return {
+            documents: Number(docs.rows[0]?.c ?? 0),
+            documentLinks: Number(links.rows[0]?.c ?? 0),
+            usageEvents: Number(events.rows[0]?.c ?? 0),
+            usageDaily: Number(daily.rows[0]?.c ?? 0),
+          };
+        } finally {
+          await direct.end();
+        }
+      };
+
+      const countsBefore = await countDocGenTables();
+      serverMode = 'busy_503';
+      const busyGenRes = (await generateDocumentService(
+        {
+          templateId: created.template.id,
+          sourceEntityType: 'matter',
+          matterId: 'M-000001',
+          outputFormat: 'pdf',
+        },
+        'P-000001',
+        alphaAdminSession,
+      )) as unknown as {
+        status: string;
+        errorCode?: string;
+        message?: string;
+        document?: unknown;
+      };
+      expect(busyGenRes).toMatchObject({
+        status: 'converter_busy',
+        errorCode: 'PDF_CONVERTER_BUSY',
+        message: 'The PDF converter is busy. Please try again in a moment.',
+      });
+      expect(busyGenRes.document).toBeUndefined();
+      expect(await countDocGenTables()).toEqual(countsBefore);
+
+      serverMode = 'error_500';
+      const failedGenRes = (await generateDocumentService(
+        {
+          templateId: created.template.id,
+          sourceEntityType: 'matter',
+          matterId: 'M-000001',
+          outputFormat: 'pdf',
+        },
+        'P-000001',
+        alphaAdminSession,
+      )) as unknown as {
+        status: string;
+        errorCode?: string;
+        message?: string;
+        document?: unknown;
+      };
+      expect(failedGenRes.status).toBe('converter_failed');
+      expect(failedGenRes.errorCode).toBe('PDF_CONVERTER_HTTP_ERROR');
+      expect(typeof failedGenRes.message).toBe('string');
+      expect(failedGenRes.message!.length).toBeGreaterThan(0);
+      expect(failedGenRes.message).not.toContain('127.0.0.1');
+      expect(failedGenRes.document).toBeUndefined();
+      expect(await countDocGenTables()).toEqual(countsBefore);
     } finally {
       vi.restoreAllMocks();
       vi.unstubAllEnvs();
