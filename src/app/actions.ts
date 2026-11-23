@@ -73,7 +73,6 @@ import {
   logEnquiryContactRecord,
   logQuoteFollowUpRecord,
   markAllNotificationsRead,
-  markEngagementLetterDrafted,
   markNotificationRead,
   markQuoteSentRecord,
   prepareEnquiryConversion,
@@ -397,14 +396,6 @@ export async function saveMatterAction(
 export async function signOffMatterCostsAction(matterId: string, note?: string) {
   return guardedAction('signOffMatterCostsAction', async (actor) => {
     const res = await signOffMatterCostsRecord(matterId, actor.personId, note);
-    revalidateAll();
-    return res;
-  });
-}
-
-export async function markEngagementLetterDraftedAction(matterId: string) {
-  return guardedAction('markEngagementLetterDraftedAction', async ({ personId: byId }) => {
-    const res = await markEngagementLetterDrafted(matterId, byId);
     revalidateAll();
     return res;
   });

@@ -31,15 +31,27 @@ import {
 } from '@/server/documentGenerationServices';
 import { readAndValidateDocxZip } from '../src/domain/document-generation/docxEngine';
 import {
+  createDefaultMatterCostsConfig,
+  resolveMatterCostsSnapshot,
+} from '@/domain/matterCosts';
+import {
   closeEnquiryRecord,
   markEngagementLetterDrafted,
   reopenEnquiryRecord,
   resetAllDemoData,
   saveEnquiryRecord,
+  saveMatterRecord,
 } from '@/server/services';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import { testDataResetContext } from '@/test/testTenantContexts';
-import type { Enquiry, Matter, NotificationItem, Person, Task } from '@/domain/types';
+import type {
+  Enquiry,
+  Matter,
+  MatterCostsSnapshot,
+  NotificationItem,
+  Person,
+  Task,
+} from '@/domain/types';
 
 function makeSession(
   personId: string,
@@ -150,12 +162,32 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     expect(financial?.officeAccountBalance).toBeUndefined();
     expect(financial?.retainerAmount).toBeUndefined();
 
-    // R673: zero payment on account (snapshot or retainerMoniesOnAccountGbp) and 'No' must resolve to undefined (never £0.00)
+    // R673 / R687: zero payment on account (fieldValues.matterCosts or retainerMoniesOnAccountGbp) and 'No' must resolve to undefined (never £0.00)
+    const defaultCostsCfg = createDefaultMatterCostsConfig(store.values);
+    const buildValidatedCostsSnapshot = (
+      partial: Partial<MatterCostsSnapshot>,
+      retainerMoniesOnAccountGbp: number | null = null,
+    ): MatterCostsSnapshot =>
+      resolveMatterCostsSnapshot({
+        config: defaultCostsCfg,
+        values: store.values,
+        existing: {
+          ...matterNoSnapshot,
+          retainerMoniesOnAccountGbp,
+          fieldValues: {
+            matterCosts: partial,
+          },
+        },
+      });
+
     const zeroSnapshotMatter: Matter = {
       ...matterNoSnapshot,
       retainerMoniesOnAccountGbp: null,
       fieldValues: {
-        matterCostsSnapshot: { paymentOnAccountAmountGbp: 0 },
+        matterCosts: buildValidatedCostsSnapshot({
+          workBasis: 'hourly_rates',
+          paymentOnAccountAmountGbp: 0,
+        }),
       },
     };
     const zeroSnapshotCtx = buildFieldResolutionContextForRecord({
@@ -187,10 +219,20 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       ...matterNoSnapshot,
       retainerMoniesOnAccountGbp: 500,
       fieldValues: {
-        matterCostsSnapshot: {
-          paymentOnAccountRequired: 'No',
-          paymentOnAccountAmountGbp: 500,
-        },
+        matterCosts: buildValidatedCostsSnapshot(
+          {
+            workBasis: 'hourly_rates',
+            totalEstimateGbp: 4200,
+            agreedCapGbp: 5000,
+            associateRateGbp: 295,
+            disbursements: [
+              { id: 'd1', description: 'Search fee', amountGbp: 120 },
+            ],
+            paymentOnAccountRequired: 'No',
+            paymentOnAccountAmountGbp: 500,
+          },
+          500,
+        ),
       },
     };
     const poaNotRequiredCtx = buildFieldResolutionContextForRecord({
@@ -202,15 +244,20 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       currentUser: feeEarnerNoRate,
     });
     expect(poaNotRequiredCtx.financial?.retainerAmount).toBeUndefined();
+    expect(poaNotRequiredCtx.financial?.feeEstimate).toBe(4200);
+    expect(poaNotRequiredCtx.financial?.agreedFeeCap).toBe(5000);
+    expect(poaNotRequiredCtx.financial?.hourlyRate).toBe(295);
+    expect(poaNotRequiredCtx.financial?.unbilledDisbursements).toBe(120);
 
     const poaPositiveMatter: Matter = {
       ...matterNoSnapshot,
       retainerMoniesOnAccountGbp: null,
       fieldValues: {
-        matterCostsSnapshot: {
+        matterCosts: buildValidatedCostsSnapshot({
+          workBasis: 'hourly_rates',
           paymentOnAccountRequired: 'Yes',
-          paymentOnAccountAmountGbp: 1250,
-        },
+          paymentOnAccountAmountGbp: 2500,
+        }),
       },
     };
     const poaPositiveCtx = buildFieldResolutionContextForRecord({
@@ -221,7 +268,28 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       values: store.values,
       currentUser: feeEarnerNoRate,
     });
-    expect(poaPositiveCtx.financial?.retainerAmount).toBe(1250);
+    expect(poaPositiveCtx.financial?.retainerAmount).toBe(2500);
+
+    // Read-only fallback for legacy data carrying fieldValues.matterCostsSnapshot only
+    const legacySnapshotMatter: Matter = {
+      ...matterNoSnapshot,
+      retainerMoniesOnAccountGbp: null,
+      fieldValues: {
+        matterCostsSnapshot: {
+          paymentOnAccountRequired: 'Yes',
+          paymentOnAccountAmountGbp: 750,
+        },
+      },
+    };
+    const legacySnapshotCtx = buildFieldResolutionContextForRecord({
+      tenantId: 'not-a-law-firm',
+      matter: legacySnapshotMatter,
+      people: [feeEarnerNoRate],
+      organisations: store.organisations,
+      values: store.values,
+      currentUser: feeEarnerNoRate,
+    });
+    expect(legacySnapshotCtx.financial?.retainerAmount).toBe(750);
   });
 
   it('R661: matter with no payment on account cannot produce a Client Care Letter showing £0.00 and blocks when required', async () => {
@@ -320,13 +388,26 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     );
     expect(zeroFieldXml).not.toContain('£0.00');
 
+    const defaultCostsCfg = createDefaultMatterCostsConfig(seedStore.values);
     const matterZeroSnap: Matter = {
       ...matterNoRetainer,
       id: 'M-R673-ZERO-SNAP',
       matterNumber: 'R673-0002',
       retainerMoniesOnAccountGbp: null,
       fieldValues: {
-        matterCostsSnapshot: { paymentOnAccountAmountGbp: 0 },
+        matterCosts: resolveMatterCostsSnapshot({
+          config: defaultCostsCfg,
+          values: seedStore.values,
+          existing: {
+            ...matterNoRetainer,
+            fieldValues: {
+              matterCosts: {
+                workBasis: 'hourly_rates',
+                paymentOnAccountAmountGbp: 0,
+              },
+            },
+          },
+        }),
       },
     };
     await matterRepo.createMatter(nalfCtx, matterZeroSnap);
@@ -350,6 +431,117 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       ).get('word/document.xml')!.data,
     );
     expect(zeroSnapXml).not.toContain('£0.00');
+
+    // R687: save real matters through saveMatterRecord so fieldValues.matterCosts is written by the real validator
+    const savedPoaNo = await wrapActor(partnerSession, () =>
+      saveMatterRecord(
+        {
+          ...baseMatter,
+          id: undefined as unknown as string,
+          matterNumber: 'DRAFT',
+          openedAt: null,
+          title: 'R687 POA No Matter',
+          leadFeeEarnerId: partner.id,
+          responsiblePartnerId: partner.id,
+          supervisingPartnerId: partner.id,
+          teamMemberIds: [partner.id],
+          feeEstimateGbp: 4200,
+          retainerMoniesOnAccountGbp: 500,
+          fieldValues: {
+            matterCosts: {
+              workBasis: 'hourly_rates',
+              totalEstimateGbp: 4200,
+              agreedCapGbp: null,
+              disbursements: [],
+              paymentOnAccountRequired: 'No',
+              paymentOnAccountAmountGbp: null,
+            } satisfies Partial<MatterCostsSnapshot>,
+          },
+        },
+        { byId: partner.id, saveMode: 'draft' },
+      ),
+    );
+    expect(savedPoaNo.matter).not.toBeNull();
+    expect(
+      (savedPoaNo.matter!.fieldValues?.['matterCosts'] as MatterCostsSnapshot | undefined)
+        ?.paymentOnAccountRequired,
+    ).toBe('No');
+    const genPoaNo = await wrapActor(partnerSession, () =>
+      generateDocumentService(
+        {
+          templateId: 'TPL-SEED-CCL',
+          sourceEntityType: 'matter',
+          matterId: savedPoaNo.matter!.id,
+          outputFormat: 'docx',
+        },
+        partner.id,
+        partnerSession,
+      ),
+    );
+    expect(genPoaNo.status).toBe('generated');
+    const poaNoXml = new TextDecoder('utf-8').decode(
+      readAndValidateDocxZip(
+        new Uint8Array(Buffer.from(genPoaNo.fileBase64!, 'base64')),
+        10,
+      ).get('word/document.xml')!.data,
+    );
+    expect(poaNoXml).not.toContain('£500.00');
+    expect(poaNoXml).not.toContain('£0.00');
+    expect(poaNoXml).not.toContain('of .');
+
+    const savedPoaYes = await wrapActor(partnerSession, () =>
+      saveMatterRecord(
+        {
+          ...baseMatter,
+          id: undefined as unknown as string,
+          matterNumber: 'DRAFT',
+          openedAt: null,
+          title: 'R687 POA Yes £2500 Matter',
+          leadFeeEarnerId: partner.id,
+          responsiblePartnerId: partner.id,
+          supervisingPartnerId: partner.id,
+          teamMemberIds: [partner.id],
+          feeEstimateGbp: 6000,
+          retainerMoniesOnAccountGbp: null,
+          fieldValues: {
+            matterCosts: {
+              workBasis: 'hourly_rates',
+              totalEstimateGbp: 6000,
+              agreedCapGbp: null,
+              disbursements: [],
+              paymentOnAccountRequired: 'Yes',
+              paymentOnAccountAmountGbp: 2500,
+            } satisfies Partial<MatterCostsSnapshot>,
+          },
+        },
+        { byId: partner.id, saveMode: 'draft' },
+      ),
+    );
+    expect(savedPoaYes.matter).not.toBeNull();
+    expect(
+      (savedPoaYes.matter!.fieldValues?.['matterCosts'] as MatterCostsSnapshot | undefined)
+        ?.paymentOnAccountAmountGbp,
+    ).toBe(2500);
+    const genPoaYes = await wrapActor(partnerSession, () =>
+      generateDocumentService(
+        {
+          templateId: 'TPL-SEED-CCL',
+          sourceEntityType: 'matter',
+          matterId: savedPoaYes.matter!.id,
+          outputFormat: 'docx',
+        },
+        partner.id,
+        partnerSession,
+      ),
+    );
+    expect(genPoaYes.status).toBe('generated');
+    const poaYesXml = new TextDecoder('utf-8').decode(
+      readAndValidateDocxZip(
+        new Uint8Array(Buffer.from(genPoaYes.fileBase64!, 'base64')),
+        10,
+      ).get('word/document.xml')!.data,
+    );
+    expect(poaYesXml).toContain('£2,500.00');
 
     // When financial.retainerAmount is required, generation fails closed with blocked_missing_required
     const tplVer = (await docRepo.getTemplateVersionById(nalfCtx, 'TPL-SEED-CCL-V1'))!;

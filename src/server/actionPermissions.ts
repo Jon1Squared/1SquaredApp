@@ -120,11 +120,6 @@ export const ACTION_PERMISSIONS = {
     key: 'matter:costs:sign_off',
     enforcedBy: 'service',
   },
-  markEngagementLetterDraftedAction: {
-    kind: 'permission',
-    key: 'matter:edit',
-    enforcedBy: 'service',
-  },
   liftMatterRestrictionAction: {
     kind: 'permission',
     key: 'matter:restriction:lift',
