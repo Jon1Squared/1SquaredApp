@@ -150,22 +150,78 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     expect(financial?.officeAccountBalance).toBeUndefined();
     expect(financial?.retainerAmount).toBeUndefined();
 
-    // Explicit zero still formats as 0 when intentionally set
-    const explicitZeroMatter: Matter = {
+    // R673: zero payment on account (snapshot or retainerMoniesOnAccountGbp) and 'No' must resolve to undefined (never £0.00)
+    const zeroSnapshotMatter: Matter = {
       ...matterNoSnapshot,
+      retainerMoniesOnAccountGbp: null,
       fieldValues: {
         matterCostsSnapshot: { paymentOnAccountAmountGbp: 0 },
       },
     };
-    const zeroCtx = buildFieldResolutionContextForRecord({
+    const zeroSnapshotCtx = buildFieldResolutionContextForRecord({
       tenantId: 'not-a-law-firm',
-      matter: explicitZeroMatter,
+      matter: zeroSnapshotMatter,
       people: [feeEarnerNoRate],
       organisations: store.organisations,
       values: store.values,
       currentUser: feeEarnerNoRate,
     });
-    expect(zeroCtx.financial?.retainerAmount).toBe(0);
+    expect(zeroSnapshotCtx.financial?.retainerAmount).toBeUndefined();
+
+    const zeroMatterFieldOnly: Matter = {
+      ...matterNoSnapshot,
+      retainerMoniesOnAccountGbp: 0,
+      fieldValues: {},
+    };
+    const zeroMatterFieldCtx = buildFieldResolutionContextForRecord({
+      tenantId: 'not-a-law-firm',
+      matter: zeroMatterFieldOnly,
+      people: [feeEarnerNoRate],
+      organisations: store.organisations,
+      values: store.values,
+      currentUser: feeEarnerNoRate,
+    });
+    expect(zeroMatterFieldCtx.financial?.retainerAmount).toBeUndefined();
+
+    const poaNotRequiredMatter: Matter = {
+      ...matterNoSnapshot,
+      retainerMoniesOnAccountGbp: 500,
+      fieldValues: {
+        matterCostsSnapshot: {
+          paymentOnAccountRequired: 'No',
+          paymentOnAccountAmountGbp: 500,
+        },
+      },
+    };
+    const poaNotRequiredCtx = buildFieldResolutionContextForRecord({
+      tenantId: 'not-a-law-firm',
+      matter: poaNotRequiredMatter,
+      people: [feeEarnerNoRate],
+      organisations: store.organisations,
+      values: store.values,
+      currentUser: feeEarnerNoRate,
+    });
+    expect(poaNotRequiredCtx.financial?.retainerAmount).toBeUndefined();
+
+    const poaPositiveMatter: Matter = {
+      ...matterNoSnapshot,
+      retainerMoniesOnAccountGbp: null,
+      fieldValues: {
+        matterCostsSnapshot: {
+          paymentOnAccountRequired: 'Yes',
+          paymentOnAccountAmountGbp: 1250,
+        },
+      },
+    };
+    const poaPositiveCtx = buildFieldResolutionContextForRecord({
+      tenantId: 'not-a-law-firm',
+      matter: poaPositiveMatter,
+      people: [feeEarnerNoRate],
+      organisations: store.organisations,
+      values: store.values,
+      currentUser: feeEarnerNoRate,
+    });
+    expect(poaPositiveCtx.financial?.retainerAmount).toBe(1250);
   });
 
   it('R661: matter with no payment on account cannot produce a Client Care Letter showing £0.00 and blocks when required', async () => {
@@ -233,6 +289,67 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     const docXml = new TextDecoder('utf-8').decode(docxZip.get('word/document.xml')!.data);
     expect(docXml).not.toContain('£0.00');
     expect(docXml.toLowerCase()).not.toContain('zero pounds');
+
+    // R673: retainerMoniesOnAccountGbp: 0 (no snapshot) and snapshot paymentOnAccountAmountGbp: 0 never render "£0.00"
+    const matterZeroField: Matter = {
+      ...matterNoRetainer,
+      id: 'M-R673-ZERO-FIELD',
+      matterNumber: 'R673-0001',
+      retainerMoniesOnAccountGbp: 0,
+      fieldValues: {},
+    };
+    await matterRepo.createMatter(nalfCtx, matterZeroField);
+    const genZeroField = await wrapActor(partnerSession, () =>
+      generateDocumentService(
+        {
+          templateId: 'TPL-SEED-CCL',
+          sourceEntityType: 'matter',
+          matterId: matterZeroField.id,
+          outputFormat: 'docx',
+        },
+        partner.id,
+        partnerSession,
+      ),
+    );
+    expect(genZeroField.status).toBe('generated');
+    const zeroFieldXml = new TextDecoder('utf-8').decode(
+      readAndValidateDocxZip(
+        new Uint8Array(Buffer.from(genZeroField.fileBase64!, 'base64')),
+        10,
+      ).get('word/document.xml')!.data,
+    );
+    expect(zeroFieldXml).not.toContain('£0.00');
+
+    const matterZeroSnap: Matter = {
+      ...matterNoRetainer,
+      id: 'M-R673-ZERO-SNAP',
+      matterNumber: 'R673-0002',
+      retainerMoniesOnAccountGbp: null,
+      fieldValues: {
+        matterCostsSnapshot: { paymentOnAccountAmountGbp: 0 },
+      },
+    };
+    await matterRepo.createMatter(nalfCtx, matterZeroSnap);
+    const genZeroSnap = await wrapActor(partnerSession, () =>
+      generateDocumentService(
+        {
+          templateId: 'TPL-SEED-CCL',
+          sourceEntityType: 'matter',
+          matterId: matterZeroSnap.id,
+          outputFormat: 'docx',
+        },
+        partner.id,
+        partnerSession,
+      ),
+    );
+    expect(genZeroSnap.status).toBe('generated');
+    const zeroSnapXml = new TextDecoder('utf-8').decode(
+      readAndValidateDocxZip(
+        new Uint8Array(Buffer.from(genZeroSnap.fileBase64!, 'base64')),
+        10,
+      ).get('word/document.xml')!.data,
+    );
+    expect(zeroSnapXml).not.toContain('£0.00');
 
     // When financial.retainerAmount is required, generation fails closed with blocked_missing_required
     const tplVer = (await docRepo.getTemplateVersionById(nalfCtx, 'TPL-SEED-CCL-V1'))!;

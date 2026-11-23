@@ -896,9 +896,22 @@ export function buildFieldResolutionContextForRecord(params: {
           associateRateGbp?: number | null;
           partnerRateGbp?: number | null;
           disbursementsTotalGbp?: number | null;
+          paymentOnAccountRequired?: 'Yes' | 'No' | '' | null;
           paymentOnAccountAmountGbp?: number | null;
         }
       | undefined;
+
+    const rawRetainerAmount =
+      costsSnapshot?.paymentOnAccountRequired === 'No'
+        ? undefined
+        : (costsSnapshot?.paymentOnAccountAmountGbp ??
+          matter.retainerMoniesOnAccountGbp);
+    const resolvedRetainerAmount =
+      typeof rawRetainerAmount === 'number' &&
+      Number.isFinite(rawRetainerAmount) &&
+      rawRetainerAmount > 0
+        ? rawRetainerAmount
+        : undefined;
 
     financialData = {
       feeEstimate:
@@ -932,10 +945,7 @@ export function buildFieldResolutionContextForRecord(params: {
         (matter.fieldValues?.['officeAccountBalanceGbp'] as
           | number
           | undefined) ?? undefined,
-      retainerAmount:
-        costsSnapshot?.paymentOnAccountAmountGbp ??
-        matter.retainerMoniesOnAccountGbp ??
-        undefined,
+      retainerAmount: resolvedRetainerAmount,
     };
   }
 

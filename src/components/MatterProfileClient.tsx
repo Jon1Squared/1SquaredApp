@@ -3,7 +3,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { CLIENT_CARE_DOCUMENT_TYPE } from '@platform/core-api';
 import {
   AlertCircle,
   Calendar,
@@ -31,7 +30,6 @@ import {
   addNoteAction,
   liftMatterRestrictionAction,
   updateMatterLifecycleStatusAction,
-  markEngagementLetterDraftedAction,
   saveMatterAction,
   saveTaskAction,
   updateMatterConflictRecordAction,
@@ -4528,23 +4526,7 @@ export function MatterProfileClient({
         organisations={organisations}
         values={values}
         currentUserId={currentUserId}
-        onDocumentGenerated={async (doc) => {
-          if (
-            doc.documentType === CLIENT_CARE_DOCUMENT_TYPE &&
-            matter.engagementLetterStatus !== 'Drafted' &&
-            matter.engagementLetterStatus !== 'Sent' &&
-            matter.engagementLetterStatus !== 'Sent to client' &&
-            matter.engagementLetterStatus !== 'Signed' &&
-            matter.engagementLetterStatus !== 'Signed & returned' &&
-            !matter.engagementLetterSentAt &&
-            !matter.engagementLetterSignedAt
-          ) {
-            try {
-              await markEngagementLetterDraftedAction(matter.id);
-            } catch {
-              // Server generateDocumentService already advances status when permitted; keep toast & refresh resilient.
-            }
-          }
+        onDocumentGenerated={(doc) => {
           showToast(`Generated ${doc.fileName}`);
           router.refresh();
         }}
