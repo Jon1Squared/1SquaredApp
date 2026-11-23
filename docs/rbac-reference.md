@@ -23,7 +23,7 @@ Related Architecture Decision Records:
 ## 1. Central Permission Registry (`PERMISSION_REGISTRY`)
 
 Defined in `core/src/domain/rbac/registry.ts` and exported from `@platform/core`.
-Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 68 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 9 job-only permissions; 77 total).
+Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 68 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 10 job-only permissions; 78 total).
 
 | Permission Key | Domain | Sensitivity | Requires MFA | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -104,6 +104,7 @@ Every permission uses the `resource:action` naming convention, carries a sensiti
 | `notification:manage_own_preferences` | `notification` | `standard` | No | Update own in-app, email digest, and Teams activity notification preferences (ADR 0035, S0-29) |
 | `notification:drain_outbox` | `notification` | `critical` | No (`jobOnly: true`) | Execute the scheduled `outbox-drain` job across provisioned tenants to deliver queued email and Teams notifications and scrub expired content (`system:outbox-drain` via `guardedJob`, ADR 0027 / ADR 0035) |
 | `notification:send_digests` | `notification` | `critical` | No (`jobOnly: true`) | Execute the scheduled daily and weekly `notification-digests` job across provisioned tenants (`system:notification-digests` via `guardedJob`, ADR 0035) |
+| `quote:run_expiry` | `quote` | `critical` | No (`jobOnly: true`) | Execute the scheduled daily `quote-expiry` job to persist overdue quote expiry and audit entries across provisioned tenants (`system:quote-expiry` via `guardedJob`, ADR 0030) |
 
 > **Job-only permission invariant (`ADR-0030 §3`):** No built-in or custom role (`admin` included) holds any `jobOnly: true` permission (`DEFAULT_RBAC_ROLES.admin.permissions` uses `ALL_USER_PERMISSION_KEYS` minus `undertaking:manage`). `resolvePermissions`, `resolvePersonPermissionSet`, `updatePersonPermissionOverrides`, and `updateTenantRbacConfig` strip or reject any attempt to grant a `jobOnly` permission to a person, role, or department (`FORBIDDEN`).
 
@@ -217,7 +218,7 @@ Per [ADR-0025](./decisions/0025-permission-enforcement-pattern.md), every server
 - **Policy Registry (`src/server/actionPermissions.ts`):**
   - `ACTION_PERMISSIONS`: maps each exported server action name to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'authenticated', reason }`, or `{ kind: 'gap', slice }`.
   - `ROUTE_PERMISSIONS`: maps each `<METHOD> /api/...` route handler to `{ kind: 'permission', key, enforcedBy: 'action' | 'service' }`, `{ kind: 'public', reason }`, or `{ kind: 'gap', slice }`.
-  - `JOB_PERMISSIONS`: maps each registered CLI background job (`provision`, `migrate`, `seed-demo`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`, `register-reminders`, `outbox-drain`, `notification-digests`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
+  - `JOB_PERMISSIONS`: maps each registered CLI background job (`provision`, `migrate`, `seed-demo`, `key-date-reminders`, `usage-retention-purge`, `enquiry-retention-anonymise`, `register-reminders`, `outbox-drain`, `notification-digests`, `quote-expiry`) to `{ kind: 'job', permission, jobOnly: true, enforcedBy: 'job', timeoutMs }`.
   - `MAX_KNOWN_GAPS`: locks the maximum count of `gap` entries so new actions cannot ship without a permission policy and the baseline gap count can only decrease as Stage 0 slices S0-03 to S0-07 and S0-10 close them.
 - **Action, Route & Job Wrappers (`src/server/authorize.ts`):**
   - `guardedAction(name, fn)` authenticates the actor from the verified Entra ID session, resolves `TenantContext` via `resolveCurrentTenantContext`, resolves the actor's `ResolvedPermissionSet` with the session's real `mfaVerified` state and token roles, and runs `fn` inside `runWithActiveActorSession`.

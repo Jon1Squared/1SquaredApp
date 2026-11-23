@@ -192,6 +192,43 @@ export function evaluateQuoteEffectiveStatus(
   return quote.status;
 }
 
+/**
+ * Applies the evaluated quote lifecycle transition in a single place so scheduled
+ * persistence, write paths, and read-only snapshot projection cannot drift (`R663`).
+ */
+export function applyQuoteEffectiveLifecycle(
+  quote: Quote,
+  now: Date = new Date(),
+  options?: {
+    appendExpiredTimeline?: boolean;
+    timelineId?: string;
+  },
+): { changed: boolean; newlyExpired: boolean } {
+  const eff = evaluateQuoteEffectiveStatus(quote, now);
+  let changed = false;
+  if (eff !== quote.status) {
+    quote.status = eff;
+    changed = true;
+  }
+  let newlyExpired = false;
+  if (
+    eff === 'Expired' &&
+    options?.appendExpiredTimeline &&
+    !quote.timeline.some((t) => t.kind === 'expired')
+  ) {
+    quote.timeline.push({
+      id: options.timelineId ?? `QT-EXP-${quote.id}`,
+      kind: 'expired',
+      at: now.toISOString(),
+      byId: null,
+      title: 'Quote expired',
+      detail: `Valid-until date (${quote.validUntil}) passed without an outcome.`,
+    });
+    newlyExpired = true;
+  }
+  return { changed, newlyExpired };
+}
+
 export function isQuoteOpen(
   quote: Pick<Quote, 'status' | 'validUntil' | 'nextFollowUpDate'>,
   now: Date = new Date(),

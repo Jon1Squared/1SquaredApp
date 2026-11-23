@@ -119,6 +119,9 @@ param enableOutboxDrainJob bool = true
 @description('Enable the hourly notification-digests scheduled Container Apps job (ADR 0035, S0-29)')
 param enableNotificationDigestsJob bool = true
 
+@description('Enable the hourly quote-expiry scheduled Container Apps job (S1-02a, R663)')
+param enableQuoteExpiryJob bool = true
+
 @description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
 param enableSeedDemoJob bool = environment != 'live'
 
@@ -196,6 +199,7 @@ module platform 'modules/platform.bicep' = {
     enableRegisterRemindersJob: enableRegisterRemindersJob
     enableOutboxDrainJob: enableOutboxDrainJob
     enableNotificationDigestsJob: enableNotificationDigestsJob
+    enableQuoteExpiryJob: enableQuoteExpiryJob
     enableSeedDemoJob: enableSeedDemoJob
     enableIdealPostcodesSecret: enableIdealPostcodesSecret
     enableAnthropicSecret: enableAnthropicSecret

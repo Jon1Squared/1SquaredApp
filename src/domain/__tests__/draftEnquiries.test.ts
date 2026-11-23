@@ -40,7 +40,7 @@ import type { Person } from '../types';
 describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
   beforeEach(() => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
-    setTestActorSession('P-000018');
+    setTestActorSession('P-000042');
   });
 
   afterEach(() => {
@@ -50,7 +50,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
 
   it('1. Save as draft sets status Draft and creates no task, no queue routing and no SLA target', async () => {
     const store = loadCommittedSeedStore();
-    const ctx = testTenantCtx('P-000018');
+    const ctx = testTenantCtx('P-000042');
     const initialTaskCount = (
       await getTaskWorkflowRepository().listAllTasksUnfiltered(ctx)
     ).length;
@@ -70,7 +70,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         summary: 'Draft enquiry in progress',
         notes: '',
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     );
 
     expect(res.errors).toBeUndefined();
@@ -134,7 +134,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
           summary: 'Unfair dismissal advice',
           notes: '',
         },
-        { byId: 'P-000018', asDraft: true },
+        { byId: 'P-000042', asDraft: true },
       );
 
       const draft = draftRes.enquiry!;
@@ -157,7 +157,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
           notes: 'Caller dismissed after 4 years of service, wants representation.',
           privacyNoticeGiven: true,
         },
-        { id: draft.id, byId: 'P-000018', asDraft: false },
+        { id: draft.id, byId: 'P-000042', asDraft: false },
       );
 
       expect(routedRes.errors).toBeUndefined();
@@ -173,7 +173,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
 
       // Callback task created for the routed enquiry
       const tasksAfterRoute = await getTaskWorkflowRepository().listAllTasksUnfiltered(
-        testTenantCtx('P-000018'),
+        testTenantCtx('P-000042'),
       );
       const linkedTasks = tasksAfterRoute.filter((t) =>
         t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === routed.id),
@@ -207,7 +207,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         summary: '',
         notes: '',
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     );
 
     const draft = draftRes.enquiry!;
@@ -225,7 +225,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         summary: '',
         notes: 'Modified notes that should not be saved on failed route',
       },
-      { id: draft.id, byId: 'P-000018', asDraft: false },
+      { id: draft.id, byId: 'P-000042', asDraft: false },
     );
 
     expect(routeAttempt.enquiry).toBeUndefined();
@@ -238,7 +238,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     ]);
 
     // Verify the stored draft was NOT mutated or routed
-    const ctx = testTenantCtx('P-000018');
+    const ctx = testTenantCtx('P-000042');
     const storedDraft = (await getIntakeQuoteRepository().getEnquiryById(
       ctx,
       draft.id,
@@ -329,7 +329,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         urgencyId,
         keyDate: '2026-11-15',
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     );
 
     const savedDraft = draftRes.enquiry!;
@@ -386,7 +386,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         lastName: 'UnmatchedCaller',
         phone: '07700 911222',
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     );
 
     const draft = draftRes.enquiry!;
@@ -470,7 +470,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
       store.values,
       {
         recordedAt: '2026-10-18T16:40:00.000Z',
-        recordedById: 'P-000018',
+        recordedById: 'P-000042',
         tenantId: 'not-a-law-firm',
       },
     );
@@ -489,28 +489,34 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         lastName: 'Kendall',
         phone: '07700 900412',
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     );
     const draft = draftRes.enquiry!;
 
     // UI action availability helper blocks Take, Assign, and Convert to matter on a Draft
-    const draftActions = getAvailableEnquiryActions(draft, 'P-000012');
+    const draftActions = getAvailableEnquiryActions(draft, 'P-000042');
     expect(draftActions).not.toContain('Take');
     expect(draftActions).not.toContain('Assign');
     expect(draftActions).not.toContain('Convert to matter');
     expect(draftActions).toEqual(['Decline', 'Save changes', 'Save and route enquiry']);
 
     // Server actions also reject Assign and Convert to matter on a Draft
-    const assignAttempt = await runAsTestActor('P-000012', () =>
-      assignEnquiryRecord(draft.id, 'P-000012', null, 'P-000012'),
+    const assignAttempt = await runAsTestActor('P-000042', () =>
+      assignEnquiryRecord(draft.id, 'P-000042', null, 'P-000042'),
     );
     expect(assignAttempt.error).toMatch(/Cannot assign a draft/i);
 
-    const convertAttempt = await runAsTestActor('P-000012', () =>
-      prepareEnquiryConversion(draft.id, {}, 'P-000012'),
+    const convertAttempt = await runAsTestActor('P-000042', () =>
+      prepareEnquiryConversion(draft.id, {}, 'P-000042'),
     );
     expect(convertAttempt.ok).toBe(false);
     expect(convertAttempt.conflictReasons?.[0]).toMatch(/Cannot convert a draft enquiry/i);
+
+    // Another employee cannot probe or assign someone else's private Draft
+    const otherUserAttempt = await runAsTestActor('P-000008', () =>
+      assignEnquiryRecord(draft.id, 'P-000008', null, 'P-000008'),
+    );
+    expect(otherUserAttempt.error).toBe('Enquiry not found.');
   });
 
   it('7. Drafts do not appear in team queues but do appear in "My drafts"', async () => {
@@ -523,29 +529,29 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
     const draftRes = await saveEnquiryRecord(
       {
         channelId,
-        takenById: 'P-000018',
+        takenById: 'P-000042',
         firstName: 'Draft',
         lastName: 'Caller',
         phone: '07700 900999',
         practiceAreaId,
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     );
     const draft = draftRes.enquiry!;
 
     const myTeamIds = new Set(['TM-000005', 'TM-000006']);
     const allEnquiries =
       await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
-        testTenantCtx('P-000018'),
+        testTenantCtx('P-000042'),
       );
 
     // Appears in "My drafts" for the user who created/took it
-    const myDrafts = filterEnquiriesForTab(allEnquiries, 'drafts', 'P-000018', myTeamIds);
+    const myDrafts = filterEnquiriesForTab(allEnquiries, 'drafts', 'P-000042', myTeamIds);
     expect(myDrafts.some((e) => e.id === draft.id)).toBe(true);
 
     // Does NOT appear in team queues ('team'), 'mine', or 'open'
     for (const tab of ['team', 'mine', 'open'] as const) {
-      const list = filterEnquiriesForTab(allEnquiries, tab, 'P-000018', myTeamIds);
+      const list = filterEnquiriesForTab(allEnquiries, tab, 'P-000042', myTeamIds);
       expect(list.some((e) => e.id === draft.id)).toBe(false);
     }
   });
@@ -622,7 +628,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         notes: 'Caller owns flat with 78 years remaining on lease.',
         privacyNoticeGiven: true,
       },
-      { byId: 'P-000018', asDraft: false },
+      { byId: 'P-000042', asDraft: false },
     );
     const enq1 = saved.enquiry!;
     expect(enq1.linkedPersonId).toBeNull();
@@ -672,7 +678,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         notes: 'Wants neighbour dispute representation.',
         privacyNoticeGiven: true,
       },
-      { byId: 'P-000018', asDraft: false },
+      { byId: 'P-000042', asDraft: false },
     )).enquiry!;
 
     expect(
@@ -710,7 +716,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         notes: 'Outside firm practice areas.',
         privacyNoticeGiven: true,
       },
-      { byId: 'P-000018', asDraft: false },
+      { byId: 'P-000042', asDraft: false },
     )).enquiry!;
 
     expect(
@@ -748,7 +754,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         notes: 'Left message requesting conveyancing quote.',
         privacyNoticeGiven: true,
       },
-      { byId: 'P-000018', asDraft: false },
+      { byId: 'P-000042', asDraft: false },
     )).enquiry!;
 
     await runAsTestActor('P-000001', async () => {
@@ -793,11 +799,11 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         summary: 'Commercial lease dispute',
         notes: 'Seeking representation against landlord.',
       },
-      { byId: 'P-000018', asDraft: true },
+      { byId: 'P-000042', asDraft: true },
     )).enquiry!;
     const allEnquiries =
       await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(
-        testTenantCtx('P-000018'),
+        testTenantCtx('P-000042'),
       );
 
     // 1. mergePeopleWithEnquiries includes Gethin Maddox as a synthetic Person record
@@ -877,7 +883,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         section: 'enquiry_caller',
         required: true,
       },
-      'P-000018',
+      'P-000042',
     );
     const optionalDetailsField = await saveCustomFieldDefinition(
       {
@@ -887,7 +893,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         section: 'enquiry_details',
         required: false,
       },
-      'P-000018',
+      'P-000042',
     );
 
     // Routing without the mandatory custom field fails and lists the missing field
@@ -903,7 +909,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
         privacyNoticeGiven: true,
         customFields: {},
       },
-      { byId: 'P-000018', asDraft: false },
+      { byId: 'P-000042', asDraft: false },
     );
 
     expect(blocked.enquiry).toBeUndefined();
@@ -928,7 +934,7 @@ describe('Draft enquiries and routing lifecycle (Phases 2–7)', () => {
           [optionalDetailsField.id]: true,
         },
       },
-      { byId: 'P-000018', asDraft: false },
+      { byId: 'P-000042', asDraft: false },
     );
 
     expect(routed.errors).toBeUndefined();

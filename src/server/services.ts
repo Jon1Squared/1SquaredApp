@@ -84,8 +84,8 @@ import {
   type WorkingHoursConfig,
 } from '@/domain/dates';
 import {
+  applyQuoteEffectiveLifecycle,
   calculateQuoteTotals,
-  evaluateQuoteEffectiveStatus,
   mapQuoteFeeBasisToArrangementBasis,
   quoteClientDisplayName,
   roundCurrency,
@@ -201,7 +201,6 @@ import {
 } from './workTypeServiceHelpers';
 import {
   buildDefaultMatterPartyTaxonomy,
-  computeMatterPartyUsageCounts,
   migrateMatterPartiesToTwoFieldModel,
 } from '@/domain/matterParties';
 import {
@@ -509,6 +508,569 @@ import {
 
 export const USER_COOKIE = 'onesquared_user';
 
+async function loadStaffPeople(ctx: TenantContext): Promise<Person[]> {
+  return getPartyRepository().listAllPeople<Person>(ctx, {
+    employeesAndLeaversOnly: true,
+  });
+}
+
+function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    if (!item?.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
+
+export interface ScopedConflictSignals {
+  readonly terms?: readonly string[];
+  readonly emails?: readonly string[];
+  readonly phones?: readonly string[];
+  readonly postcodes?: readonly string[];
+  readonly companyNumbers?: readonly string[];
+  readonly linkedPersonIds?: readonly string[];
+  readonly linkedOrganisationIds?: readonly string[];
+  readonly excludeEnquiryId?: string | null;
+}
+
+export function extractConflictSignalsFromParties(
+  parties: readonly ConflictCheckParty[],
+  opts?: { readonly excludeEnquiryId?: string | null },
+): ScopedConflictSignals {
+  const termSet = new Set<string>();
+  const emailSet = new Set<string>();
+  const companySet = new Set<string>();
+  const linkedPersonSet = new Set<string>();
+  const linkedOrgSet = new Set<string>();
+
+  for (const p of parties) {
+    const trimmedName = typeof p.name === 'string' ? p.name.trim() : '';
+    if (trimmedName) {
+      termSet.add(trimmedName);
+      if (trimmedName.includes('@')) {
+        emailSet.add(trimmedName.toLowerCase());
+      }
+    }
+    const trimmedSub =
+      typeof p.subtitle === 'string' ? p.subtitle.trim() : '';
+    if (trimmedSub && trimmedSub.includes('@')) {
+      emailSet.add(trimmedSub.toLowerCase());
+    }
+    const rawPrev = p.identifiers?.previousNames;
+    if (typeof rawPrev === 'string' && rawPrev.trim()) {
+      for (const token of rawPrev.split(/[,;/\n]+/)) {
+        const clean = token.trim();
+        if (clean) termSet.add(clean);
+      }
+    }
+    const compNo = p.identifiers?.companyNumber?.trim();
+    if (compNo) companySet.add(compNo);
+    if (p.linkedRecordId) {
+      if (p.entityType === 'person') linkedPersonSet.add(p.linkedRecordId);
+      else linkedOrgSet.add(p.linkedRecordId);
+    }
+  }
+
+  return {
+    terms: Array.from(termSet),
+    emails: Array.from(emailSet),
+    companyNumbers: Array.from(companySet),
+    linkedPersonIds: Array.from(linkedPersonSet),
+    linkedOrganisationIds: Array.from(linkedOrgSet),
+    excludeEnquiryId: opts?.excludeEnquiryId ?? null,
+  };
+}
+
+export async function loadFullConflictSearchGraph(
+  ctx: TenantContext,
+  _signals: ScopedConflictSignals,
+  viewerId: string,
+  staffPeople: readonly Person[],
+  teams: readonly Team[],
+  rbacConfig?: RbacConfiguration,
+): Promise<{
+  people: Person[];
+  organisations: Organisation[];
+  links: PersonOrganisationLink[];
+  matters: Matter[];
+  enquiries: Enquiry[];
+  canViewMatter: (m: Matter) => boolean;
+  canViewEnquiry: (e: Enquiry) => boolean;
+}> {
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+
+  const [peopleRaw, organisations, links, matters, enquiries] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    partyRepo.listAllOrganisations<Organisation>(ctx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
+    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+  ]);
+
+  const allPeopleOut = dedupeById([...staffPeople, ...peopleRaw]);
+  const actor = allPeopleOut.find((p) => p.id === viewerId) ?? null;
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    actor && activeSession?.personId === actor.id
+      ? activeSession.tokenRoles
+      : undefined;
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    {
+      allPeople: allPeopleOut,
+      teams: [...teams],
+      tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: viewerId,
+      ...(rbacConfig ? { config: { rbac: rbacConfig } } : {}),
+    },
+  );
+  const hiddenEnquiryIdList = await intakeRepo.listHiddenEnquiryIds(ctx, viewerId, {
+    hasRestrictedMatterAccess: hasRestrictedAccess,
+  });
+  const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
+
+  return {
+    people: allPeopleOut,
+    organisations,
+    links,
+    matters,
+    enquiries,
+    canViewMatter: (m: Matter) =>
+      Boolean(viewerId) &&
+      canPersonAccessMatter(m, viewerId, actor, {
+        allPeople: allPeopleOut,
+        teams: [...teams],
+        tokenRoles: effectiveTokenRoles,
+        tokenRolesActorId: viewerId,
+        ...(rbacConfig ? { config: { rbac: rbacConfig } } : {}),
+      }),
+    canViewEnquiry: (e: Enquiry) =>
+      Boolean(viewerId) && !hiddenEnquiryIds.has(e.id),
+  };
+}
+
+export async function loadScopedConflictSearchGraphForParity(
+  ctx: TenantContext,
+  signals: ScopedConflictSignals,
+  viewerId: string,
+  staffPeople: readonly Person[],
+  teams: readonly Team[],
+  rbacConfig?: RbacConfiguration,
+) {
+  return loadScopedConflictSearchGraph(
+    ctx,
+    signals,
+    viewerId,
+    staffPeople,
+    teams,
+    rbacConfig,
+  );
+}
+
+async function loadScopedConflictSearchGraph(
+  ctx: TenantContext,
+  signals: {
+    readonly terms?: readonly string[];
+    readonly emails?: readonly string[];
+    readonly phones?: readonly string[];
+    readonly postcodes?: readonly string[];
+    readonly companyNumbers?: readonly string[];
+    readonly linkedPersonIds?: readonly string[];
+    readonly linkedOrganisationIds?: readonly string[];
+    readonly excludeEnquiryId?: string | null;
+  },
+  viewerId: string,
+  staffPeople: readonly Person[],
+  teams: readonly Team[],
+  rbacConfig?: RbacConfiguration,
+): Promise<{
+  people: Person[];
+  organisations: Organisation[];
+  links: PersonOrganisationLink[];
+  matters: Matter[];
+  enquiries: Enquiry[];
+  canViewMatter: (m: Matter) => boolean;
+  canViewEnquiry: (e: Enquiry) => boolean;
+}> {
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+
+  const harvestPersonSignals = (
+    p: Person,
+    termSet: Set<string>,
+    emailSet: Set<string>,
+    phoneSet: Set<string>,
+    postcodeSet: Set<string>,
+  ) => {
+    for (const nm of [
+      personDisplayName(p),
+      `${p.firstName} ${p.surname}`,
+      p.preferredName ? `${p.preferredName} ${p.surname}` : '',
+      ...(p.otherNames ?? []).map((n) => n.name),
+    ]) {
+      const t = nm?.trim();
+      if (t) termSet.add(t);
+    }
+    for (const em of p.emails ?? []) {
+      const addr = em?.address?.trim().toLowerCase();
+      if (addr) emailSet.add(addr);
+    }
+    for (const ph of p.phones ?? []) {
+      const num = ph?.number?.trim();
+      if (num) phoneSet.add(num);
+    }
+    for (const a of p.addresses ?? []) {
+      const pc = a?.postcode?.trim();
+      if (pc) postcodeSet.add(pc);
+    }
+  };
+
+  const harvestOrgSignals = (
+    o: Organisation,
+    termSet: Set<string>,
+    emailSet: Set<string>,
+    phoneSet: Set<string>,
+    postcodeSet: Set<string>,
+    companySet: Set<string>,
+  ) => {
+    for (const nm of [o.legalName, ...(o.otherNames ?? []).map((n) => n.name)]) {
+      const t = nm?.trim();
+      if (t) termSet.add(t);
+    }
+    if (o.generalEmail?.trim()) emailSet.add(o.generalEmail.trim().toLowerCase());
+    if (o.mainPhone?.trim()) phoneSet.add(o.mainPhone.trim());
+    for (const a of [
+      o.registeredAddress,
+      o.correspondenceAddress,
+      o.billingAddress,
+    ]) {
+      const pc = a?.postcode?.trim();
+      if (pc) postcodeSet.add(pc);
+    }
+    if (o.companyNumber?.trim()) companySet.add(o.companyNumber.trim());
+  };
+
+  const seedTermSet = new Set((signals.terms ?? []).map((t) => t.trim()).filter(Boolean));
+  const seedEmailSet = new Set(
+    (signals.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean),
+  );
+  const seedPhoneSet = new Set((signals.phones ?? []).map((p) => p.trim()).filter(Boolean));
+  const seedPostcodeSet = new Set(
+    (signals.postcodes ?? []).map((pc) => pc.trim()).filter(Boolean),
+  );
+  const seedCompanySet = new Set(
+    (signals.companyNumbers ?? []).map((c) => c.trim()).filter(Boolean),
+  );
+
+  // Hydrate explicitly linked entities first so their otherNames, emails & company numbers seed candidate lookup
+  const [seedPeopleLoaded, seedOrgsLoaded] = await Promise.all([
+    (signals.linkedPersonIds ?? []).length > 0
+      ? partyRepo.listPeopleByIds<Person>(ctx, signals.linkedPersonIds ?? [])
+      : Promise.resolve<Person[]>([]),
+    (signals.linkedOrganisationIds ?? []).length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(
+          ctx,
+          signals.linkedOrganisationIds ?? [],
+        )
+      : Promise.resolve<Organisation[]>([]),
+  ]);
+  for (const p of seedPeopleLoaded) {
+    harvestPersonSignals(p, seedTermSet, seedEmailSet, seedPhoneSet, seedPostcodeSet);
+  }
+  for (const o of seedOrgsLoaded) {
+    harvestOrgSignals(
+      o,
+      seedTermSet,
+      seedEmailSet,
+      seedPhoneSet,
+      seedPostcodeSet,
+      seedCompanySet,
+    );
+  }
+
+  const cand = await partyRepo.findSqlConflictCandidates<
+    Person,
+    Organisation,
+    PersonOrganisationLink
+  >(ctx, {
+    terms: Array.from(seedTermSet),
+    emails: Array.from(seedEmailSet),
+    phones: Array.from(seedPhoneSet),
+    postcodes: Array.from(seedPostcodeSet),
+    companyNumbers: Array.from(seedCompanySet),
+    linkedPersonIds: signals.linkedPersonIds,
+    linkedOrganisationIds: signals.linkedOrganisationIds,
+  });
+
+  const mergedOrganisationsMap = new Map<string, Organisation>();
+  for (const o of [...seedOrgsLoaded, ...cand.organisations]) {
+    if (o?.id && !mergedOrganisationsMap.has(o.id)) {
+      mergedOrganisationsMap.set(o.id, o);
+    }
+  }
+  const mergedPeopleMap = new Map<string, Person>();
+  for (const p of [...seedPeopleLoaded, ...cand.people]) {
+    if (p?.id && !mergedPeopleMap.has(p.id)) {
+      mergedPeopleMap.set(p.id, p);
+    }
+  }
+
+  const seedOrgIds = Array.from(
+    new Set(
+      [
+        ...(signals.linkedOrganisationIds ?? []),
+        ...mergedOrganisationsMap.keys(),
+        ...cand.links.map((l) => l.organisationId).filter(Boolean),
+      ].filter(Boolean),
+    ),
+  );
+  const corpGroupOrgs =
+    seedOrgIds.length > 0
+      ? await partyRepo.expandCorporateGroupOrganisationIds<Organisation>(
+          ctx,
+          seedOrgIds,
+        )
+      : [];
+  for (const o of corpGroupOrgs) {
+    if (o?.id && !mergedOrganisationsMap.has(o.id)) {
+      mergedOrganisationsMap.set(o.id, o);
+    }
+  }
+
+  const preLinkPersonIds = Array.from(
+    new Set(
+      [
+        ...(signals.linkedPersonIds ?? []),
+        ...mergedPeopleMap.keys(),
+        ...cand.links.map((l) => l.personId).filter(Boolean),
+      ].filter(Boolean),
+    ),
+  );
+  const preLinkOrgIds = Array.from(mergedOrganisationsMap.keys());
+  const graphLinks =
+    preLinkPersonIds.length > 0 || preLinkOrgIds.length > 0
+      ? await partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
+          personIds: preLinkPersonIds,
+          organisationIds: preLinkOrgIds,
+        })
+      : [];
+
+  // Hydrate all link & corporate-group counterparts before querying matters & enquiries
+  const expandedPersonIdSet = new Set<string>(preLinkPersonIds);
+  const expandedOrgIdSet = new Set<string>(preLinkOrgIds);
+  for (const l of [...cand.links, ...graphLinks]) {
+    if (l.personId) expandedPersonIdSet.add(l.personId);
+    if (l.organisationId) expandedOrgIdSet.add(l.organisationId);
+  }
+  const missingCounterpartPersonIds = Array.from(expandedPersonIdSet).filter(
+    (id) => !mergedPeopleMap.has(id),
+  );
+  const missingCounterpartOrgIds = Array.from(expandedOrgIdSet).filter(
+    (id) => !mergedOrganisationsMap.has(id),
+  );
+  if (
+    missingCounterpartPersonIds.length > 0 ||
+    missingCounterpartOrgIds.length > 0
+  ) {
+    const [cpPeople, cpOrgs, cpGroupOrgs] = await Promise.all([
+      missingCounterpartPersonIds.length > 0
+        ? partyRepo.listPeopleByIds<Person>(ctx, missingCounterpartPersonIds)
+        : Promise.resolve<Person[]>([]),
+      missingCounterpartOrgIds.length > 0
+        ? partyRepo.listOrganisationsByIds<Organisation>(
+            ctx,
+            missingCounterpartOrgIds,
+          )
+        : Promise.resolve<Organisation[]>([]),
+      missingCounterpartOrgIds.length > 0
+        ? partyRepo.expandCorporateGroupOrganisationIds<Organisation>(
+            ctx,
+            missingCounterpartOrgIds,
+          )
+        : Promise.resolve<Organisation[]>([]),
+    ]);
+    for (const p of cpPeople) mergedPeopleMap.set(p.id, p);
+    for (const o of [...cpOrgs, ...cpGroupOrgs]) {
+      mergedOrganisationsMap.set(o.id, o);
+      expandedOrgIdSet.add(o.id);
+    }
+  }
+
+  // Second-pass signal harvest across candidate + linked counterpart + corporate-group closure
+  const expandedTermSet = new Set<string>(seedTermSet);
+  const expandedEmailSet = new Set<string>(seedEmailSet);
+  const expandedPhoneSet = new Set<string>(seedPhoneSet);
+  const expandedPostcodeSet = new Set<string>(seedPostcodeSet);
+  const expandedCompanySet = new Set<string>(seedCompanySet);
+  for (const p of mergedPeopleMap.values()) {
+    harvestPersonSignals(
+      p,
+      expandedTermSet,
+      expandedEmailSet,
+      expandedPhoneSet,
+      expandedPostcodeSet,
+    );
+  }
+  for (const o of mergedOrganisationsMap.values()) {
+    harvestOrgSignals(
+      o,
+      expandedTermSet,
+      expandedEmailSet,
+      expandedPhoneSet,
+      expandedPostcodeSet,
+      expandedCompanySet,
+    );
+  }
+
+  const allOrgIds = Array.from(expandedOrgIdSet);
+  const allCandPersonIds = Array.from(expandedPersonIdSet);
+  const expandedTerms = Array.from(expandedTermSet);
+  const expandedEmails = Array.from(expandedEmailSet);
+  const expandedPhones = Array.from(expandedPhoneSet);
+
+  const [matchedMatterIds, matchedEnquiries] = await Promise.all([
+    matterRepo.listMatterIdsMatchingCandidateGraph(ctx, {
+      candidateEntityIds: [...allCandPersonIds, ...allOrgIds],
+      candidateTerms: expandedTerms,
+    }),
+    intakeRepo.findSqlConflictEnquiryCandidates<Enquiry>(ctx, {
+      terms: expandedTerms,
+      emails: expandedEmails,
+      phones: expandedPhones,
+      linkedPersonIds: allCandPersonIds,
+      linkedOrganisationIds: allOrgIds,
+      excludeEnquiryId: signals.excludeEnquiryId,
+      includeAll: true,
+      viewerId,
+    }),
+  ]);
+
+  // Expand links with any person/org IDs connected across matched matters/enquiries
+  const extraLinkPersonIds = new Set<string>(allCandPersonIds);
+  const extraLinkOrgIds = new Set<string>(allOrgIds);
+  for (const l of graphLinks) {
+    if (l.personId) extraLinkPersonIds.add(l.personId);
+    if (l.organisationId) extraLinkOrgIds.add(l.organisationId);
+  }
+  for (const e of matchedEnquiries) {
+    if (e.linkedPersonId) extraLinkPersonIds.add(e.linkedPersonId);
+    if (e.linkedOrganisationId) extraLinkOrgIds.add(e.linkedOrganisationId);
+    if (e.referrerPersonId) extraLinkPersonIds.add(e.referrerPersonId);
+  }
+
+  const matters =
+    matchedMatterIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, matchedMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
+  for (const m of matters) {
+    if (m.clientId) {
+      extraLinkOrgIds.add(m.clientId);
+      extraLinkPersonIds.add(m.clientId);
+    }
+    for (const ac of m.additionalClientIds ?? []) {
+      if (ac) {
+        extraLinkOrgIds.add(ac);
+        extraLinkPersonIds.add(ac);
+      }
+    }
+    if (m.instructingContactId) {
+      extraLinkPersonIds.add(m.instructingContactId);
+      extraLinkOrgIds.add(m.instructingContactId);
+    }
+    if (m.billingContactId) {
+      extraLinkPersonIds.add(m.billingContactId);
+      extraLinkOrgIds.add(m.billingContactId);
+    }
+    if (m.referrerContactId) {
+      extraLinkPersonIds.add(m.referrerContactId);
+      extraLinkOrgIds.add(m.referrerContactId);
+    }
+    if (m.responsiblePartnerId) extraLinkPersonIds.add(m.responsiblePartnerId);
+    for (const pt of m.parties ?? []) {
+      if (pt.linkedRecordId) {
+        if (pt.entityType === 'person') extraLinkPersonIds.add(pt.linkedRecordId);
+        else extraLinkOrgIds.add(pt.linkedRecordId);
+      }
+    }
+  }
+
+  const missingPersonIds = Array.from(extraLinkPersonIds).filter(
+    (id) => !mergedPeopleMap.has(id),
+  );
+  const missingOrgIds = Array.from(extraLinkOrgIds).filter(
+    (id) => !mergedOrganisationsMap.has(id),
+  );
+  const [missingPeople, missingOrgs] = await Promise.all([
+    missingPersonIds.length > 0
+      ? partyRepo.listPeopleByIds<Person>(ctx, missingPersonIds)
+      : Promise.resolve<Person[]>([]),
+    missingOrgIds.length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(ctx, missingOrgIds)
+      : Promise.resolve<Organisation[]>([]),
+  ]);
+  for (const p of missingPeople) mergedPeopleMap.set(p.id, p);
+  for (const o of missingOrgs) mergedOrganisationsMap.set(o.id, o);
+
+  const actor = staffPeople.find((p) => p.id === viewerId) ?? null;
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    actor && activeSession?.personId === actor.id
+      ? activeSession.tokenRoles
+      : undefined;
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    {
+      allPeople: [...staffPeople],
+      teams: [...teams],
+      tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: viewerId,
+      ...(rbacConfig ? { config: { rbac: rbacConfig } } : {}),
+    },
+  );
+  const hiddenEnquiryIdList = await intakeRepo.listHiddenEnquiryIds(ctx, viewerId, {
+    hasRestrictedMatterAccess: hasRestrictedAccess,
+  });
+  const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
+
+  const allPeopleOut = dedupeById([
+    ...staffPeople,
+    ...Array.from(mergedPeopleMap.values()),
+  ]);
+  const allLinksMap = new Map<string, PersonOrganisationLink>();
+  for (const l of [...cand.links, ...graphLinks]) {
+    if (l?.id && !allLinksMap.has(l.id)) allLinksMap.set(l.id, l);
+  }
+
+  return {
+    people: allPeopleOut,
+    organisations: Array.from(mergedOrganisationsMap.values()),
+    links: Array.from(allLinksMap.values()),
+    matters,
+    enquiries: matchedEnquiries,
+    canViewMatter: (m: Matter) =>
+      Boolean(viewerId) &&
+      canPersonAccessMatter(m, viewerId, actor, {
+        allPeople: allPeopleOut,
+        teams: [...teams],
+        tokenRoles: effectiveTokenRoles,
+        tokenRolesActorId: viewerId,
+        ...(rbacConfig ? { config: { rbac: rbacConfig } } : {}),
+      }),
+    canViewEnquiry: (e: Enquiry) =>
+      Boolean(viewerId) && !hiddenEnquiryIds.has(e.id),
+  };
+}
+
 export interface AuthenticatedActorContext {
   personId: string;
   person: Person;
@@ -539,7 +1101,7 @@ export async function requireAuthenticatedActor(): Promise<AuthenticatedActorCon
     activeConfig,
   );
   const [allPeople, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(authCtx),
+    loadStaffPeople(authCtx),
     getHrAndRbacRepository().listAllTeams<Team>(authCtx),
   ]);
   const loaded = allPeople.find((p) => p.id === entraSession.personId) ?? null;
@@ -631,9 +1193,9 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   const ctx = resolveDefaultServiceTenantContext(null, actor.personId, {
     session: actor.session,
   });
-  const [people, matters, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+  const matterRepo = getMatterRepository();
+  const [people, teams, rbacConfig] = await Promise.all([
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -680,7 +1242,18 @@ export async function switchUserInDemoMode(targetUserId: string): Promise<{
   }
 
   // R104: Refuse Demo Mode switch if the target persona can access any restricted/staff matter not accessible to the signed-in actor
-  const restrictedMatterWithTargetAccess = matters.find(
+  const actorHiddenRestrictedIds = await matterRepo.listHiddenRestrictedMatterIds(
+    ctx,
+    actor.personId,
+    { hasRestrictedMatterAccess: actorPerms.permissions.has('matter:restricted:access') },
+  );
+  const candidateRestrictedMatters =
+    actorHiddenRestrictedIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, actorHiddenRestrictedIds, {
+          includeRestricted: true,
+        })
+      : [];
+  const restrictedMatterWithTargetAccess = candidateRestrictedMatters.find(
     (m) =>
       Boolean(
         m.isStaffMatter ||
@@ -980,7 +1553,7 @@ async function loadTenantCatalogueStoreView(
     ? baseMatterCostsConfig
     : syncRateCardsWithPmsFeeEarners(
         baseMatterCostsConfig,
-        (await getTenantPmsSource(ctx)).listFeeEarners(),
+        (await getPmsRepository().listFeeEarnersOnly(ctx)) as unknown as PmsFeeEarner[],
         values,
       );
 
@@ -1135,7 +1708,7 @@ async function syncAffectedMattersRestrictionsInTx(
   if (lockedMatters.length === 0) {
     return;
   }
-  const txPeople = await getPartyRepository().listAllPeople<Person>(ctx);
+  const txPeople = await loadStaffPeople(ctx);
   const txTeams = await getHrAndRbacRepository().listAllTeams<Team>(ctx);
   const txRbacOverride =
     options.rbacConfig !== undefined
@@ -1184,7 +1757,7 @@ async function putMatterWithInTxRestrictions(
   await matterRepo.lockMattersForRestrictionRecompute<Matter>(ctx, {
     matterIds: [matter.id],
   });
-  const txPeople = await getPartyRepository().listAllPeople<Person>(ctx);
+  const txPeople = await loadStaffPeople(ctx);
   const txTeams = await getHrAndRbacRepository().listAllTeams<Team>(ctx);
   const txRbacOverride =
     options.rbacConfig !== undefined
@@ -1383,12 +1956,12 @@ export async function listAuditEntriesForRecord(
   } catch {
     return [];
   }
-  const [people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
-    getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
-    getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, teams, rbacConfig] = await Promise.all([
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -1402,62 +1975,101 @@ export async function listAuditEntriesForRecord(
   const effectiveTokenRoles =
     options?.tokenRoles ??
     (activeSession?.personId === viewer.id ? activeSession.tokenRoles : undefined);
-
-  const prelimVisibility = buildRecordVisibility({ teams }, viewer, {
+  const permSet = resolvePersonPermissionSet(viewer, {
+    allPeople: people,
     teams,
-    people,
-    matters,
-    enquiries,
-    quotes,
     tokenRoles: effectiveTokenRoles,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-    rbacConfig,
+    tokenRolesActorId: viewer.id,
+    config: { ...getActiveTenantConfiguration(), rbac: rbacConfig },
+    context: ctx,
+    mfaVerified: ctx.mfaVerified,
   });
-  const hiddenMatterKeyDateIds =
-    await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
-      ctx,
-      prelimVisibility.hiddenMatterIds,
-    );
-  const visibility = buildRecordVisibility({ teams }, viewer, {
-    teams,
-    people,
-    matters,
-    enquiries,
-    quotes,
-    tokenRoles: effectiveTokenRoles,
-    hiddenMatterKeyDateIds,
-    rbacConfig,
-  });
+  const hasRestrictedAccess = permSet.permissions.has('matter:restricted:access');
+  const canViewMatterDirect = (m: Matter): boolean =>
+    canPersonAccessMatter(m, viewer.id, viewer, {
+      allPeople: people,
+      teams,
+      tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: viewer.id,
+      config: { rbac: rbacConfig },
+    });
 
   if (recordType === 'matter') {
-    const m = matters.find((x) => x.id === recordId);
-    if (m && !visibility.canViewMatter(m)) {
-      return [];
-    }
-    if (prelimVisibility.hiddenMatterIds.has(recordId)) {
+    const [m] = await matterRepo.listMattersByIds<Matter>(ctx, [recordId], {
+      includeRestricted: true,
+    });
+    if (!m || !canViewMatterDirect(m)) {
       return [];
     }
   } else if (recordType === 'enquiry') {
-    const e = enquiries.find((x) => x.id === recordId);
-    if (!e || !visibility.canViewEnquiry(e)) {
+    const e = await intakeRepo.getEnquiryById<Enquiry>(ctx, recordId, {
+      includeRestricted: true,
+    });
+    const isHidden = e
+      ? await intakeRepo.isEnquiryHiddenFromViewer(ctx, e.id, viewer.id, {
+          hasRestrictedMatterAccess: hasRestrictedAccess,
+        })
+      : false;
+    if (!e || isHidden) {
       return [];
     }
   } else if (recordType === 'quote') {
-    const q = quotes.find((x) => x.id === recordId);
-    if (!q || !visibility.canViewQuote(q)) {
+    const q = await intakeRepo.getQuoteByIdOrReference<Quote>(ctx, recordId, {
+      includeRestricted: true,
+    });
+    const isHidden = q
+      ? await intakeRepo.isQuoteHiddenFromViewer(ctx, q.id, viewer.id, {
+          hasRestrictedMatterAccess: hasRestrictedAccess,
+        })
+      : false;
+    if (!q || isHidden) {
       return [];
     }
   } else if (recordType === 'task') {
-    const t = tasks.find((x) => x.id === recordId);
-    if (!t || !visibility.canViewTask(t)) {
+    const [t, hiddenTaskIds] = await Promise.all([
+      taskRepo.getTaskById<Task>(ctx, recordId, { includeRestricted: true }),
+      taskRepo.listHiddenTaskIds(ctx, viewer.id, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      }),
+    ]);
+    if (!t || hiddenTaskIds.includes(t.id)) {
+      return [];
+    }
+    const hiddenMatterIds = new Set(
+      await matterRepo.listHiddenRestrictedMatterIds(ctx, viewer.id, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      }),
+    );
+    const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+      ctx,
+      hiddenMatterIds,
+    );
+    if (
+      (t.linkedKeyDateId && hiddenKdIds.has(t.linkedKeyDateId)) ||
+      t.linkedRecords.some(
+        (lr) =>
+          (lr as { recordType: string }).recordType === 'key_date' &&
+          hiddenKdIds.has(lr.recordId),
+      )
+    ) {
       return [];
     }
   } else if (recordType === 'key_date') {
+    const hiddenMatterIds = new Set(
+      await matterRepo.listHiddenRestrictedMatterIds(ctx, viewer.id, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      }),
+    );
+    const hiddenMatterKeyDateIds =
+      await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+        ctx,
+        hiddenMatterIds,
+      );
     if (hiddenMatterKeyDateIds.has(recordId)) {
       return [];
     }
     const prefix = recordId.split(':')[0];
-    if (prefix && visibility.hiddenMatterIds.has(prefix)) {
+    if (prefix && hiddenMatterIds.has(prefix)) {
       return [];
     }
   } else if (recordType === 'employee_payroll') {
@@ -1476,11 +2088,27 @@ export async function listAuditEntriesForRecord(
     recordId,
     { limit: options?.limit ?? 200 },
   );
+  const openMatterIds = Array.from(
+    new Set(
+      rows.flatMap((row) => {
+        const snap = row.snapshot as { kind?: unknown; openMatterIds?: unknown } | undefined;
+        return snap?.kind === 'conflict_check_on_hire' && Array.isArray(snap.openMatterIds)
+          ? snap.openMatterIds.filter((id): id is string => typeof id === 'string')
+          : [];
+      }),
+    ),
+  );
+  const referencedMatters =
+    openMatterIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, openMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
   return rows.map((row) =>
     redactRestrictedAuditEntryForViewer(
       mapFirmAuditRecordToAuditEntry(row),
-      matters,
-      visibility.canViewMatter,
+      referencedMatters,
+      canViewMatterDirect,
     ),
   );
 }
@@ -1513,12 +2141,11 @@ export async function listFirmAuditEntriesPage(
       nextBeforeSeq: null,
     };
   }
-  const [people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    getIntakeQuoteRepository().listAllEnquiriesUnfiltered<Enquiry>(ctx),
-    getIntakeQuoteRepository().listAllQuotesUnfiltered<Quote>(ctx),
-    getTaskWorkflowRepository().listAllTasksUnfiltered<Task>(ctx),
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const [people, teams, rbacConfig] = await Promise.all([
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -1561,34 +2188,43 @@ export async function listFirmAuditEntriesPage(
     };
   }
 
-  const prelimVisibility = buildRecordVisibility({ teams }, viewer, {
-    teams,
-    people,
-    matters,
-    enquiries,
-    quotes,
-    tokenRoles: effectiveTokenRoles,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-    rbacConfig,
-  });
+  const hasRestrictedAccess = permSet.permissions.has('matter:restricted:access');
+  const [
+    hiddenMatterIdList,
+    hiddenEnquiryIdList,
+    hiddenQuoteIdList,
+    hiddenTaskIdList,
+  ] = await Promise.all([
+    matterRepo.listHiddenRestrictedMatterIds(ctx, viewer.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    intakeRepo.listHiddenEnquiryIds(ctx, viewer.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    intakeRepo.listHiddenQuoteIds(ctx, viewer.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    taskRepo.listHiddenTaskIds(ctx, viewer.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+  ]);
+  const hiddenMatterIds = new Set(hiddenMatterIdList);
+  const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
+  const hiddenQuoteIds = new Set(hiddenQuoteIdList);
+  const hiddenTaskIds = new Set(hiddenTaskIdList);
   const hiddenMatterKeyDateIds =
     await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
       ctx,
-      prelimVisibility.hiddenMatterIds,
+      hiddenMatterIds,
     );
-  const visibility = buildRecordVisibility({ teams }, viewer, {
-    teams,
-    people,
-    matters,
-    enquiries,
-    quotes,
-    tokenRoles: effectiveTokenRoles,
-    hiddenMatterKeyDateIds,
-    rbacConfig,
-  });
-  const hiddenTaskIds = new Set(
-    tasks.filter((t) => !visibility.canViewTask(t)).map((t) => t.id),
-  );
+  const canViewMatterDirect = (m: Matter): boolean =>
+    canPersonAccessMatter(m, viewer.id, viewer, {
+      allPeople: people,
+      teams,
+      tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: viewer.id,
+      config: { rbac: rbacConfig },
+    });
   const canPayroll = hasEmployeePermission(
     viewer,
     'employee:payroll',
@@ -1605,22 +2241,22 @@ export async function listFirmAuditEntriesPage(
   );
 
   const isVisibleAuditRow = (a: FirmAuditEntryRecord): boolean => {
-    if (a.recordType === 'matter' && visibility.hiddenMatterIds.has(a.recordId)) {
+    if (a.recordType === 'matter' && hiddenMatterIds.has(a.recordId)) {
       return false;
     }
     if (a.recordType === 'task' && hiddenTaskIds.has(a.recordId)) {
       return false;
     }
-    if (a.recordType === 'enquiry' && visibility.hiddenEnquiryIds.has(a.recordId)) {
+    if (a.recordType === 'enquiry' && hiddenEnquiryIds.has(a.recordId)) {
       return false;
     }
-    if (a.recordType === 'quote' && visibility.hiddenQuoteIds.has(a.recordId)) {
+    if (a.recordType === 'quote' && hiddenQuoteIds.has(a.recordId)) {
       return false;
     }
     if (a.recordType === 'key_date') {
       if (hiddenMatterKeyDateIds.has(a.recordId)) return false;
       const prefix = a.recordId.split(':')[0];
-      if (prefix && visibility.hiddenMatterIds.has(prefix)) return false;
+      if (prefix && hiddenMatterIds.has(prefix)) return false;
     }
     if (a.recordType === 'employee_payroll' && !canPayroll) {
       return false;
@@ -1680,12 +2316,29 @@ export async function listFirmAuditEntriesPage(
       ? lastVisible.seq
       : null;
 
+  const openMatterIds = Array.from(
+    new Set(
+      collected.flatMap((row) => {
+        const snap = row.snapshot as { kind?: unknown; openMatterIds?: unknown } | undefined;
+        return snap?.kind === 'conflict_check_on_hire' && Array.isArray(snap.openMatterIds)
+          ? snap.openMatterIds.filter((id): id is string => typeof id === 'string')
+          : [];
+      }),
+    ),
+  );
+  const referencedMatters =
+    openMatterIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, openMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
+
   return {
     entries: collected.map((row) =>
       redactRestrictedAuditEntryForViewer(
         mapFirmAuditRecordToAuditEntry(row),
-        matters,
-        visibility.canViewMatter,
+        referencedMatters,
+        canViewMatterDirect,
       ),
     ),
     nextBeforeSeq,
@@ -1744,24 +2397,15 @@ async function getAppSnapshotInScope(
     links,
     notes,
     mergeHistory,
-    matters,
-    enquiries,
-    quotes,
-    tasks,
-    signOffs,
+    teams,
+    dbEmployeeMigrationReport,
+    dbRbacOverride,
   ] = await Promise.all([
     partyRepo.listAllPeople<Person>(snapshotTenantCtx),
     partyRepo.listAllOrganisations<Organisation>(snapshotTenantCtx),
     partyRepo.listAllLinks<PersonOrganisationLink>(snapshotTenantCtx),
     partyRepo.listAllNotes<Note>(snapshotTenantCtx),
     partyRepo.listAllMergeHistory<MergeHistory>(snapshotTenantCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(snapshotTenantCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(snapshotTenantCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(snapshotTenantCtx),
-    taskRepo.listAllTasksUnfiltered<Task>(snapshotTenantCtx),
-    taskRepo.listAllSignOffsUnfiltered<SignOffItem>(snapshotTenantCtx),
-  ]);
-  const [teams, dbEmployeeMigrationReport, dbRbacOverride] = await Promise.all([
     hrRepo.listAllTeams<Team>(snapshotTenantCtx),
     hrRepo.getEmployeeMigrationReport<
       import('@/domain/types').EmployeeMigrationReport
@@ -1814,22 +2458,90 @@ async function getAppSnapshotInScope(
   const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
   const keyDateRepo = getKeyDateRepository();
-
-  // Data-layer record visibility filtering for the signed-in user (R152, R170, Rule 4):
-  const prelimVisibility = buildRecordVisibility({ teams }, user, {
-    teams,
-    people,
-    matters,
-    enquiries,
-    quotes,
-    tokenRoles: effectiveTokenRoles,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-    rbacConfig,
-  });
-  const employeeMatterVisibility = buildMatterVisibilityForEmployeeRecord(
-    matters,
-    prelimVisibility.canViewMatter,
+  const hasRestrictedAccess = currentUserPermissions.includes(
+    'matter:restricted:access',
   );
+  const canViewQuotes = currentUserPermissions.includes('quote:view');
+
+  // Data-layer SQL visibility filtering for the signed-in user (S1-02a, R152, R170, Rule 4):
+  const [
+    visibleMatters,
+    hiddenMatterIdList,
+    rawVisibleEnquiries,
+    hiddenEnquiryIdList,
+    visibleQuotes,
+    hiddenQuoteIdList,
+    rawVisibleTasks,
+    hiddenTaskIdList,
+    visibleSignOffs,
+  ] = await Promise.all([
+    matterRepo.listVisibleMatters<Matter>(snapshotTenantCtx, {
+      viewerId: user.id,
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    matterRepo.listHiddenRestrictedMatterIds(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    intakeRepo.listVisibleEnquiries<Enquiry>(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    intakeRepo.listHiddenEnquiryIds(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    canViewQuotes
+      ? intakeRepo.listVisibleQuotes<Quote>(snapshotTenantCtx, user.id, {
+          hasRestrictedMatterAccess: hasRestrictedAccess,
+        })
+      : Promise.resolve<Quote[]>([]),
+    intakeRepo.listHiddenQuoteIds(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    taskRepo.listVisibleTasks<Task>(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    taskRepo.listHiddenTaskIds(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+    taskRepo.listVisibleSignOffs<SignOffItem>(snapshotTenantCtx, user.id, {
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    }),
+  ]);
+
+  const hiddenMatterIds = new Set(hiddenMatterIdList);
+  const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
+    snapshotTenantCtx,
+    hiddenMatterIds,
+  );
+  const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
+  const hiddenQuoteIds = new Set(hiddenQuoteIdList);
+  const hiddenTaskIds = new Set(hiddenTaskIdList);
+
+  const visibleTasks: Task[] = [];
+  for (const t of rawVisibleTasks) {
+    const linksToHiddenKd =
+      Boolean(t.linkedKeyDateId && hiddenMatterKeyDateIds.has(t.linkedKeyDateId)) ||
+      t.linkedRecords.some(
+        (lr) =>
+          (lr as { recordType: string }).recordType === 'key_date' &&
+          hiddenMatterKeyDateIds.has(lr.recordId),
+      );
+    if (linksToHiddenKd) {
+      hiddenTaskIds.add(t.id);
+    } else {
+      visibleTasks.push(t);
+    }
+  }
+
+  // Only conflictCheckOnHire.openMatterIds visible to the signed-in user are exposed via filterEmploymentForUser.
+  // Any hidden restricted matter IDs in employment.conflictCheckOnHire.openMatterIds return false from canViewMatterId.
+  const visibleMatterById = new Map(visibleMatters.map((m) => [m.id, m]));
+  const employeeMatterVisibility = {
+    canViewMatterId: (matterId: string) => visibleMatterById.has(matterId),
+    visibleMatterNumberById: new Map(
+      visibleMatters.map((m) => [m.id, m.matterNumber] as const),
+    ),
+  };
+
   // Filter employment records on people at the API level based on requesting user's permissions and matter visibility
   const filteredPeople: Person[] = people.map((p) => {
     if (!p.employment) return p;
@@ -1871,73 +2583,36 @@ async function getAppSnapshotInScope(
         }
       : user);
   const employees = activeEmployees(filteredPeople, store.values);
-  const hiddenMatterKeyDateIds = await keyDateRepo.listHiddenKeyDateIdsForMatters(
-    snapshotTenantCtx,
-    prelimVisibility.hiddenMatterIds,
-  );
-  const visibility = buildRecordVisibility({ teams }, user, {
-    teams,
-    people,
-    matters,
-    enquiries,
-    quotes,
-    tokenRoles: effectiveTokenRoles,
-    hiddenMatterKeyDateIds,
-    rbacConfig,
+
+  const hiddenMatterSourceQuoteIds = new Set<string>();
+  for (const q of visibleQuotes) {
+    if (q.convertedMatterId && hiddenMatterIds.has(q.convertedMatterId)) {
+      hiddenMatterSourceQuoteIds.add(q.id);
+    }
+  }
+
+  // Strip hidden matter conflict hits from conflictSnapshot.
+  const visibleEnquiries: Enquiry[] = rawVisibleEnquiries.map((e) => {
+    if (
+      !e.conflictSnapshot?.conflicts?.length ||
+      hiddenMatterIds.size === 0
+    ) {
+      return e;
+    }
+    const filteredConflicts = e.conflictSnapshot.conflicts.filter(
+      (c) => !(c.recordType === 'matter' && hiddenMatterIds.has(c.recordId)),
+    );
+    if (filteredConflicts.length === e.conflictSnapshot.conflicts.length) {
+      return e;
+    }
+    return {
+      ...e,
+      conflictSnapshot: {
+        ...e.conflictSnapshot,
+        conflicts: filteredConflicts,
+      },
+    };
   });
-  const visibleMatters: Matter[] = matters.filter(visibility.canViewMatter);
-  const hiddenMatterIds = visibility.hiddenMatterIds;
-  const hiddenMatterSourceQuoteIds = visibility.hiddenMatterSourceQuoteIds;
-
-  // Filter enquiries: hide personal Drafts belonging to another user and enquiries converted into a hidden matter,
-  // and strip hidden matter conflict hits from conflictSnapshot.
-  const visibleEnquiries: Enquiry[] = enquiries
-    .filter(visibility.canViewEnquiry)
-    .map((e) => {
-      if (
-        !e.conflictSnapshot?.conflicts?.length ||
-        hiddenMatterIds.size === 0
-      ) {
-        return e;
-      }
-      const filteredConflicts = e.conflictSnapshot.conflicts.filter(
-        (c) => !(c.recordType === 'matter' && hiddenMatterIds.has(c.recordId)),
-      );
-      if (filteredConflicts.length === e.conflictSnapshot.conflicts.length) {
-        return e;
-      }
-      return {
-        ...e,
-        conflictSnapshot: {
-          ...e.conflictSnapshot,
-          conflicts: filteredConflicts,
-        },
-      };
-    });
-  const visibleEnquiryIdSet = new Set(visibleEnquiries.map((e) => e.id));
-  const hiddenEnquiryIds = new Set(
-    enquiries
-      .filter((e) => !visibleEnquiryIdSet.has(e.id))
-      .map((e) => e.id),
-  );
-
-  // Filter quotes: require quote:view and hide quotes linked to or converted into a hidden matter or hidden enquiry.
-  const visibleQuotes: Quote[] = currentUserPermissions.includes('quote:view')
-    ? quotes.filter(visibility.canViewQuote)
-    : [];
-  const visibleQuoteIdSet = new Set(visibleQuotes.map((q) => q.id));
-  const hiddenQuoteIds = new Set(
-    quotes
-      .filter((q) => !visibleQuoteIdSet.has(q.id))
-      .map((q) => q.id),
-  );
-
-  // Filter tasks: hide any task linked to a hidden matter, hidden enquiry, hidden quote, or hidden key date.
-  const visibleTasks: Task[] = tasks.filter(visibility.canViewTask);
-  const visibleTaskIdSet = new Set(visibleTasks.map((t) => t.id));
-  const hiddenTaskIds = new Set(
-    tasks.filter((t) => !visibleTaskIdSet.has(t.id)).map((t) => t.id),
-  );
 
   // Person-to-organisation links only connect People and Organisations.
   const visibleLinks = links;
@@ -1992,7 +2667,7 @@ async function getAppSnapshotInScope(
       teams,
     }),
   );
-  const matterByIdForKd = new Map(matters.map((m) => [m.id, m]));
+  const matterByIdForKd = visibleMatterById;
   const canViewKeyDates = currentUserKeyDatePermissions.includes('keydate:view');
   const repoVisibleKeyDates = canViewKeyDates
     ? await keyDateRepo.listAllVisibleKeyDates(snapshotTenantCtx, user.id)
@@ -2052,19 +2727,22 @@ async function getAppSnapshotInScope(
   if (finance.canViewMatter) {
     const isCleanEmpty = Boolean(store.isCleanDeployment) && store.pmsLinks.length === 0;
     if (!isCleanEmpty) {
-      const pms = await getTenantPmsSource(snapshotTenantCtx);
-      const hiddenPmsMatterCodes = new Set(
-        store.pmsLinks
-          .filter((l) => l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId))
-          .map((l) => l.pmsCode),
-      );
       const visiblePmsLinks = store.pmsLinks.filter(
         (l) => !(l.entityType === 'matter' && hiddenMatterIds.has(l.onesquaredId)),
       );
-      const allMatterFins = pms
-        .getAllMatterFinancials()
-        .filter((f) => !hiddenPmsMatterCodes.has(f.matter_code));
-      const finByMatterCode = new Map(allMatterFins.map((f) => [f.matter_code, f]));
+      const visibleMatterPmsCodes = visiblePmsLinks
+        .filter((l) => l.entityType === 'matter')
+        .map((l) => l.pmsCode);
+      const allMatterFins = await getPmsRepository().getMatterFinanceSummaryRows(
+        snapshotTenantCtx,
+        visibleMatterPmsCodes,
+      );
+      const finByMatterCode = new Map(
+        allMatterFins.map((f) => [
+          f.matter_code,
+          f as unknown as PmsMatterFinancials,
+        ]),
+      );
       for (const link of visiblePmsLinks) {
         if (link.entityType === 'matter') {
           const fin = finByMatterCode.get(link.pmsCode);
@@ -2101,7 +2779,8 @@ async function getAppSnapshotInScope(
       !hiddenMatterIds.has(id) &&
       !hiddenTaskIds.has(id) &&
       !hiddenEnquiryIds.has(id) &&
-      !hiddenQuoteIds.has(id),
+      !hiddenQuoteIds.has(id) &&
+      (canViewQuotes || !id.startsWith('QUO-')),
   );
   const [primaryNotifications, effectivePersonNotifications, userNotifPrefs] =
     await Promise.all([
@@ -2140,21 +2819,22 @@ async function getAppSnapshotInScope(
           hiddenMatterIds.has(n.recordId) ||
           hiddenTaskIds.has(n.recordId) ||
           hiddenEnquiryIds.has(n.recordId) ||
-          hiddenQuoteIds.has(n.recordId)
+          hiddenQuoteIds.has(n.recordId) ||
+          (!canViewQuotes && n.recordId.startsWith('QUO-'))
         ),
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const taskBadgeCount = countMyUrgentBadgeTasks(visibleTasks, effectiveWorkPerson.id, now);
 
-  const visibleSignOffs = signOffs.filter(
-    (s) => !(s.matterId && hiddenMatterIds.has(s.matterId)),
-  );
   const visibleNotes = notes.filter(
     (n) =>
       !hiddenMatterIds.has(n.recordId) &&
       !hiddenTaskIds.has(n.recordId) &&
       !hiddenEnquiryIds.has(n.recordId) &&
-      !hiddenQuoteIds.has(n.recordId),
+      !hiddenQuoteIds.has(n.recordId) &&
+      (canViewQuotes ||
+        (!n.recordId.startsWith('QUO-') &&
+          (n.recordType as string) !== 'quote')),
   );
   // R413: Do not load the firm-wide audit_entries table on every page snapshot;
   // profile pages use listAuditEntriesForRecord and Admin uses listFirmAuditEntriesPage.
@@ -2167,23 +2847,9 @@ async function getAppSnapshotInScope(
       ).entries
     : [];
 
-  // Keep quote statuses up to date when follow-up or valid-until dates pass
+  // Derive expired quote display status in-memory only (read path must remain side-effect free).
   for (const q of visibleQuotes) {
-    const eff = evaluateQuoteEffectiveStatus(q, now);
-    if (eff !== q.status) {
-      q.status = eff;
-      if (eff === 'Expired' && !q.timeline.some((t) => t.kind === 'expired')) {
-        q.timeline.push({
-          id: `QT-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          kind: 'expired',
-          at: now.toISOString(),
-          byId: null,
-          title: 'Quote expired',
-          detail: `Valid-until date (${q.validUntil}) passed without an outcome.`,
-        });
-      }
-      await intakeRepo.putQuote(snapshotTenantCtx, q);
-    }
+    applyQuoteEffectiveLifecycle(q, now, { appendExpiredTimeline: false });
   }
 
   const canTakeByTaskId: Record<string, boolean> = {};
@@ -2247,7 +2913,12 @@ async function getAppSnapshotInScope(
   const actorCanSignOffCosts = currentUserPermissions.includes('matter:costs:sign_off');
   for (const m of visibleMatters) {
     canSignOffCostsByMatterId[m.id] =
-      actorCanSignOffCosts && visibility.canViewMatter(m);
+      actorCanSignOffCosts &&
+      canPersonAccessMatter(m, user.id, user, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      });
     signOffEstimateGbpByMatterId[m.id] = resolveMatterSignOffEstimateGbp(
       store,
       activeTenantCfg,
@@ -2405,15 +3076,21 @@ export async function getEmployeeDetailsForUser(
 }> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const hrRepo = getHrAndRbacRepository();
-  const [store, people, matters, teams, rbacConfig] = await Promise.all([
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const [store, staffPeople, targetPersonDirect, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(ctx),
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+    loadStaffPeople(ctx),
+    partyRepo.getPersonById<Person>(ctx, personId),
     hrRepo.listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
+  const people = dedupeById([
+    ...staffPeople,
+    ...(targetPersonDirect ? [targetPersonDirect] : []),
+  ]);
   const user = people.find((p) => p.id === byId) ?? null;
-  const person = people.find((p) => p.id === personId) ?? null;
+  const person = targetPersonDirect ?? people.find((p) => p.id === personId) ?? null;
   const activeSession = getActiveActorSession();
   const effectiveTokenRoles =
     user && activeSession?.personId === user.id ? activeSession.tokenRoles : undefined;
@@ -2512,6 +3189,13 @@ export async function getEmployeeDetailsForUser(
     }
   });
 
+  const hireMatterIds = rawEmployment?.conflictCheckOnHire?.openMatterIds ?? [];
+  const matters =
+    hireMatterIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, hireMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
   const matterVisibility = buildMatterVisibilityForEmployeeRecord(matters, (m) =>
     canPersonAccessMatter(m, byId, user, {
       allPeople: people,
@@ -2561,7 +3245,7 @@ export async function logEmployeeRestrictedAccess(
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const hrRepo = getHrAndRbacRepository();
   const [people, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     hrRepo.listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -2615,15 +3299,33 @@ export async function reassignLeaverOwnedRecords(
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
   const hrRepo = getHrAndRbacRepository();
-  const [people, organisations, matters, tasks, enquiries, teams, rbacConfig] = await Promise.all([
-    partyRepo.listAllPeople<Person>(reassignCtx),
-    partyRepo.listAllOrganisations<Organisation>(reassignCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(reassignCtx),
-    taskRepo.listAllTasksUnfiltered<Task>(reassignCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(reassignCtx),
+  const [
+    staffPeople,
+    ownedExternalPeople,
+    organisations,
+    matters,
+    tasks,
+    enquiries,
+    teams,
+    rbacConfig,
+  ] = await Promise.all([
+    loadStaffPeople(reassignCtx),
+    partyRepo.listPeopleOwnedByPerson<Person>(reassignCtx, fromLeaverId),
+    partyRepo.listOrganisationsOwnedByPerson<Organisation>(
+      reassignCtx,
+      fromLeaverId,
+    ),
+    matterRepo.listMattersUnfilteredByIdsOrSources<Matter>(reassignCtx, {
+      ownerPersonId: fromLeaverId,
+    }),
+    taskRepo.listTasksOwnedByPerson<Task>(reassignCtx, fromLeaverId),
+    intakeRepo.listEnquiriesForOwnerOrMatters<Enquiry>(reassignCtx, {
+      ownerPersonId: fromLeaverId,
+    }),
     hrRepo.listAllTeams<Team>(reassignCtx),
     loadEffectiveTenantRbacConfig(reassignCtx),
   ]);
+  const people = dedupeById([...staffPeople, ...ownedExternalPeople]);
   const now = new Date().toISOString();
   const actor = people.find((p) => p.id === byId) ?? null;
   const actorPerms = resolvePersonPermissionSet(actor, {
@@ -2972,18 +3674,54 @@ export async function savePersonRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const hrRepo = getHrAndRbacRepository();
-  const [people, organisations, matters, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(personCtx),
-    partyRepo.listAllOrganisations<Organisation>(personCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(personCtx),
-    hrRepo.listAllTeams<Team>(personCtx),
+  const [staffPeople, existingDirect, dupPeopleDirect, initialOrg, teams] =
+    await Promise.all([
+      loadStaffPeople(personCtx),
+      opts.id && !opts.id.startsWith('ENQ-')
+        ? partyRepo.getPersonById<Person>(personCtx, opts.id)
+        : Promise.resolve<Person | null>(null),
+      opts.matchedDuplicateIds?.length
+        ? partyRepo.listPeopleByIds<Person>(personCtx, opts.matchedDuplicateIds)
+        : Promise.resolve<Person[]>([]),
+      opts.initialLink?.organisationId
+        ? partyRepo.getOrganisationById<Organisation>(
+            personCtx,
+            opts.initialLink.organisationId,
+          )
+        : Promise.resolve<Organisation | null>(null),
+      hrRepo.listAllTeams<Team>(personCtx),
+    ]);
+  const people = dedupeById([
+    ...staffPeople,
+    ...(existingDirect ? [existingDirect] : []),
+    ...dupPeopleDirect,
   ]);
+  const existingOrgIdsToLoad = Array.from(
+    new Set(
+      [
+        ...(existingDirect?.employment?.conflictCheckOnHire?.openMatterIds ?? []),
+      ].filter(Boolean),
+    ),
+  );
+  const matters =
+    opts.id && !opts.id.startsWith('ENQ-')
+      ? await matterRepo.listMattersUnfilteredByIdsOrSources<Matter>(
+          personCtx,
+          {
+            ids: existingOrgIdsToLoad,
+            clientIds: [opts.id],
+            partyEntityIds: [opts.id],
+            contactIds: [opts.id],
+          },
+        )
+      : [];
+  const organisations: Organisation[] = initialOrg ? [initialOrg] : [];
   const now = new Date().toISOString();
   const today = resolveTenantLocalDateAndHour(
     new Date(),
     getActiveTenantConfiguration().timeZone || 'Europe/London',
   ).localDate;
-  const existing = opts.id ? people.find((p) => p.id === opts.id) ?? null : null;
+  const existing = existingDirect;
   const deny = (
     code: 'FORBIDDEN' | 'MFA_REQUIRED',
     message: string,
@@ -4141,19 +4879,39 @@ export async function saveOrganisationRecord(
   const orgCtx = resolveDefaultServiceTenantContext(null, opts?.byId);
   const store = await loadTenantCatalogueStoreView(orgCtx);
   const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
-  const [people, organisations, matters, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(orgCtx),
-    partyRepo.listAllOrganisations<Organisation>(orgCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(orgCtx),
+  const [people, existingDirect, dupOrgsDirect, teams] = await Promise.all([
+    loadStaffPeople(orgCtx),
+    opts.id
+      ? partyRepo.getOrganisationById<Organisation>(orgCtx, opts.id)
+      : Promise.resolve<Organisation | null>(null),
+    opts.matchedDuplicateIds?.length
+      ? partyRepo.listOrganisationsByIds<Organisation>(
+          orgCtx,
+          opts.matchedDuplicateIds,
+        )
+      : Promise.resolve<Organisation[]>([]),
     getHrAndRbacRepository().listAllTeams<Team>(orgCtx),
   ]);
+  const parentIdToLoad =
+    input.parentOrganisationId ?? existingDirect?.parentOrganisationId ?? null;
+  const parentOrg =
+    parentIdToLoad &&
+    parentIdToLoad !== existingDirect?.id &&
+    !dupOrgsDirect.some((o) => o.id === parentIdToLoad)
+      ? await partyRepo.getOrganisationById<Organisation>(orgCtx, parentIdToLoad)
+      : null;
+  const organisations = dedupeById([
+    ...(existingDirect ? [existingDirect] : []),
+    ...dupOrgsDirect,
+    ...(parentOrg ? [parentOrg] : []),
+  ]);
+  const matters: Matter[] = [];
   const now = new Date().toISOString();
   const today = resolveTenantLocalDateAndHour(
     new Date(),
     getActiveTenantConfiguration().timeZone || 'Europe/London',
   ).localDate;
-  const existing = opts.id ? organisations.find((o) => o.id === opts.id) ?? null : null;
+  const existing = existingDirect;
   if (opts.id && !existing) {
     const msg = 'Organisation not found.';
     return {
@@ -4437,12 +5195,17 @@ export async function createOrUpdateLink(
   const linkCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const now = new Date().toISOString();
-  const [people, org, existing] = await Promise.all([
-    partyRepo.listAllPeople<Person>(linkCtx),
+  const [staffPeople, targetPersonDirect, org, existing] = await Promise.all([
+    loadStaffPeople(linkCtx),
+    partyRepo.getPersonById<Person>(linkCtx, input.personId),
     partyRepo.getOrganisationById<Organisation>(linkCtx, input.organisationId),
     input.id
       ? partyRepo.getLinkById<PersonOrganisationLink>(linkCtx, input.id)
       : Promise.resolve(null),
+  ]);
+  const people = dedupeById([
+    ...staffPeople,
+    ...(targetPersonDirect ? [targetPersonDirect] : []),
   ]);
   if (input.id && !existing) {
     return buildActionDenied(
@@ -4544,7 +5307,7 @@ export async function deleteLink(linkId: string, byId: string): Promise<{ ok: tr
   const linkCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const [people, existing, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(linkCtx),
+    loadStaffPeople(linkCtx),
     partyRepo.getLinkById<PersonOrganisationLink>(linkCtx, linkId),
     getHrAndRbacRepository().listAllTeams<Team>(linkCtx),
   ]);
@@ -4563,7 +5326,9 @@ export async function deleteLink(linkId: string, byId: string): Promise<{ ok: tr
   if (!existing) {
     return buildActionDenied('FORBIDDEN', `Organisation link "${linkId}" not found.`);
   }
-  const person = people.find((p) => p.id === existing.personId);
+  const person =
+    people.find((p) => p.id === existing.personId) ??
+    (await partyRepo.getPersonById<Person>(linkCtx, existing.personId));
   const org = await partyRepo.getOrganisationById<Organisation>(
     linkCtx,
     existing.organisationId,
@@ -4601,27 +5366,39 @@ export async function addNoteToRecord(
   const noteCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const [people, matters, targetOrg, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(noteCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(noteCtx),
+  const [staffPeople, targetPersonDirect, targetMatter, targetOrg, teams] = await Promise.all([
+    loadStaffPeople(noteCtx),
+    recordType === 'person'
+      ? partyRepo.getPersonById<Person>(noteCtx, recordId)
+      : Promise.resolve(null),
+    recordType === 'matter'
+      ? matterRepo.getMatterById<Matter>(noteCtx, recordId, {
+          includeRestricted: true,
+        })
+      : Promise.resolve(null),
     recordType === 'organisation'
       ? partyRepo.getOrganisationById<Organisation>(noteCtx, recordId)
       : Promise.resolve(null),
     getHrAndRbacRepository().listAllTeams<Team>(noteCtx),
   ]);
+  const people = dedupeById([
+    ...staffPeople,
+    ...(targetPersonDirect ? [targetPersonDirect] : []),
+  ]);
+  const matters = targetMatter ? [targetMatter] : [];
   const actor = people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility({ teams }, actor, {
-    people,
-    matters,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
+  const canViewTargetMatter = targetMatter
+    ? canPersonAccessMatter(targetMatter, byId, actor, {
+        allPeople: people,
+        teams,
+      })
+    : false;
 
   const target: (AnyRecord | Matter) | undefined =
     recordType === 'person'
       ? people.find((p) => p.id === recordId)
       : recordType === 'matter'
-        ? matters.find((m) => m.id === recordId)
+        ? (targetMatter ?? undefined)
         : (targetOrg ?? undefined);
 
   if (!target) {
@@ -4637,7 +5414,7 @@ export async function addNoteToRecord(
         allPeople: people,
         teams,
       }) ||
-      !visibility.canViewMatter(target as Matter)
+      !canViewTargetMatter
     ) {
       return buildActionDenied(
         'FORBIDDEN',
@@ -5844,21 +6621,19 @@ export async function saveMatterRecord(
       }
     }
   }
-  const [store, people, organisations, links, matters, enquiries, quotes, tasks, teams, lookupRbacConfig] = lookupCtx
+  const [store, people, existingRef, teams, lookupRbacConfig] = lookupCtx
     ? await Promise.all([
         loadTenantCatalogueStoreView(lookupCtx),
-        partyRepo.listAllPeople<Person>(lookupCtx),
-        partyRepo.listAllOrganisations<Organisation>(lookupCtx),
-        partyRepo.listAllLinks<PersonOrganisationLink>(lookupCtx),
-        matterRepo.listAllMattersUnfiltered<Matter>(lookupCtx),
-        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(lookupCtx),
-        intakeRepo.listAllQuotesUnfiltered<Quote>(lookupCtx),
-        taskRepo.listAllTasksUnfiltered<Task>(lookupCtx),
+        loadStaffPeople(lookupCtx),
+        opts.id
+          ? matterRepo.getMatterById<Matter>(lookupCtx, opts.id, {
+              includeRestricted: true,
+            })
+          : Promise.resolve<Matter | null>(null),
         getHrAndRbacRepository().listAllTeams<Team>(lookupCtx),
         loadEffectiveTenantRbacConfig(lookupCtx),
       ])
-    : [null as unknown as FirmStore, [], [], [], [], [], [], [], [], undefined];
-  const existingRef = opts.id ? matters.find((m) => m.id === opts.id) ?? null : null;
+    : [null as unknown as FirmStore, [] as Person[], null, [] as Team[], undefined];
   const existing = existingRef ? structuredClone(existingRef) : null;
   const existingRowVersion = existing?.rowVersion ?? 1;
   const now = nextMonotonicIsoTimestamp(existing?.updatedAt);
@@ -6103,6 +6878,112 @@ export async function saveMatterRecord(
     return { matter: null, errors };
   }
 
+  const resolvedMatterPartiesForLoad = input.parties ?? existing?.parties ?? [];
+  const referencedEntityIdsForMatterSave = Array.from(
+    new Set(
+      [
+        input.clientId,
+        existing?.clientId,
+        ...(input.additionalClientIds ?? existing?.additionalClientIds ?? []),
+        input.instructingContactId,
+        existing?.instructingContactId,
+        input.billingContactId,
+        existing?.billingContactId,
+        input.referrerContactId,
+        existing?.referrerContactId,
+        ...resolvedMatterPartiesForLoad.map((p) => p.linkedRecordId),
+        ...((input.conflictCheckRecord ?? existing?.conflictCheckRecord)?.parties ?? []).map(
+          (cp) => cp.linkedRecordId,
+        ),
+      ].filter((id): id is string => typeof id === 'string' && id.trim().length > 0 && !id.startsWith('ENQ-')),
+    ),
+  );
+  const referencedEnquiryIdsForMatterSave = Array.from(
+    new Set(
+      [
+        input.sourceEnquiryId,
+        existing?.sourceEnquiryId,
+        input.clientId?.startsWith('ENQ-') ? input.clientId : null,
+        existing?.clientId?.startsWith('ENQ-') ? existing.clientId : null,
+        ...resolvedMatterPartiesForLoad
+          .map((p) => p.linkedRecordId)
+          .filter((id): id is string => Boolean(id && id.startsWith('ENQ-'))),
+      ].filter((id): id is string => typeof id === 'string' && id.trim().length > 0),
+    ),
+  );
+  const referencedQuoteIdsForMatterSave = Array.from(
+    new Set(
+      [input.sourceQuoteId, existing?.sourceQuoteId].filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    ),
+  );
+  const unnamedPartySearchTerms = Array.from(
+    new Set(
+      resolvedMatterPartiesForLoad
+        .filter((pt) => !pt.linkedRecordId && pt.name?.trim() && !pt.name.trim().startsWith('['))
+        .map((pt) => pt.name.trim()),
+    ),
+  );
+
+  const [
+    directMatterPeople,
+    directMatterOrgs,
+    directMatterEnquiries,
+    directMatterQuotes,
+    unnamedPartyCandidates,
+    tasks,
+  ] = await Promise.all([
+    referencedEntityIdsForMatterSave.length > 0
+      ? partyRepo.listPeopleByIds<Person>(extensionCtx, referencedEntityIdsForMatterSave)
+      : Promise.resolve<Person[]>([]),
+    referencedEntityIdsForMatterSave.length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(extensionCtx, referencedEntityIdsForMatterSave)
+      : Promise.resolve<Organisation[]>([]),
+    referencedEnquiryIdsForMatterSave.length > 0
+      ? intakeRepo.listEnquiriesByIds<Enquiry>(extensionCtx, referencedEnquiryIdsForMatterSave, {
+          includeRestricted: true,
+        })
+      : Promise.resolve<Enquiry[]>([]),
+    referencedQuoteIdsForMatterSave.length > 0
+      ? intakeRepo.listQuotesByIds<Quote>(extensionCtx, referencedQuoteIdsForMatterSave)
+      : Promise.resolve<Quote[]>([]),
+    unnamedPartySearchTerms.length > 0
+      ? partyRepo.findSqlConflictCandidates<Person, Organisation, PersonOrganisationLink>(
+          extensionCtx,
+          { terms: unnamedPartySearchTerms },
+        )
+      : Promise.resolve({
+          people: [] as Person[],
+          organisations: [] as Organisation[],
+          links: [] as PersonOrganisationLink[],
+          directPersonIds: [] as string[],
+          directOrganisationIds: [] as string[],
+        }),
+    existing?.id
+      ? taskRepo.listTasksLinkedToRecord<Task>(extensionCtx, 'matter', existing.id)
+      : Promise.resolve<Task[]>([]),
+  ]);
+  const linkedPersonIdsFromEnquiries = directMatterEnquiries
+    .map((e) => e.linkedPersonId)
+    .filter((id): id is string => Boolean(id && !referencedEntityIdsForMatterSave.includes(id)));
+  const extraEnquiryPeople =
+    linkedPersonIdsFromEnquiries.length > 0
+      ? await partyRepo.listPeopleByIds<Person>(extensionCtx, linkedPersonIdsFromEnquiries)
+      : [];
+  const scopedPeopleForMatter = dedupeById([
+    ...people,
+    ...directMatterPeople,
+    ...extraEnquiryPeople,
+    ...unnamedPartyCandidates.people,
+  ]);
+  const organisations = dedupeById([
+    ...directMatterOrgs,
+    ...unnamedPartyCandidates.organisations,
+  ]);
+  const enquiriesBase: Enquiry[] = directMatterEnquiries;
+  const quotes: Quote[] = directMatterQuotes;
+
   const pendingPeople: Person[] = [];
   const pendingOrganisations: Organisation[] = [];
   const pendingEnquiryLinks: Array<{ enquiry: Enquiry; prevEnquiry: Enquiry; linkedPersonId: string }> = [];
@@ -6137,11 +7018,11 @@ export async function saveMatterRecord(
   const promoteEnquiryPersonId = async (rawId: string | null | undefined): Promise<string | null> => {
     if (!rawId) return null;
     if (!rawId.startsWith('ENQ-')) return rawId;
-    const enq = enquiries.find((e) => e.id === rawId);
+    const enq = enquiriesBase.find((e) => e.id === rawId);
     if (!enq) return rawId;
     if (
       enq.linkedPersonId &&
-      (people.some((p) => p.id === enq.linkedPersonId) ||
+      (scopedPeopleForMatter.some((p) => p.id === enq.linkedPersonId) ||
         pendingPeople.some((p) => p.id === enq.linkedPersonId))
     ) {
       return enq.linkedPersonId;
@@ -6151,7 +7032,7 @@ export async function saveMatterRecord(
       return existingPendingLink.linkedPersonId;
     }
     const existingFromEnq =
-      people.find((p) => p.createdFromEnquiryId === enq.id) ??
+      scopedPeopleForMatter.find((p) => p.createdFromEnquiryId === enq.id) ??
       pendingPeople.find((p) => p.createdFromEnquiryId === enq.id);
     if (existingFromEnq) {
       pendingEnquiryLinks.push({
@@ -6264,7 +7145,7 @@ export async function saveMatterRecord(
     !existing &&
     rawMatterNumberInput &&
     rawMatterNumberInput !== 'DRAFT' &&
-    matters.some((m) => m.matterNumber === rawMatterNumberInput)
+    (await matterRepo.existsMatterNumber(extensionCtx, rawMatterNumberInput))
       ? ''
       : rawMatterNumberInput;
   const matterNumber = isDraftSave
@@ -6297,7 +7178,7 @@ export async function saveMatterRecord(
     const isPerson = pt.entityType === 'person';
     if (isPerson) {
       const existingPerson =
-        people.find(
+        scopedPeopleForMatter.find(
           (p) => !p.mergedIntoId && personDisplayName(p).toLowerCase() === cleanName.toLowerCase(),
         ) ??
         pendingPeople.find(
@@ -6507,7 +7388,9 @@ export async function saveMatterRecord(
   }
 
   const allPeopleWithPending =
-    pendingPeople.length > 0 ? [...people, ...pendingPeople] : people;
+    pendingPeople.length > 0
+      ? [...scopedPeopleForMatter, ...pendingPeople]
+      : scopedPeopleForMatter;
   const allOrganisationsWithPending =
     pendingOrganisations.length > 0
       ? [...organisations, ...pendingOrganisations]
@@ -6601,18 +7484,32 @@ export async function saveMatterRecord(
     people: allPeopleWithPending,
     organisations: allOrganisationsWithPending,
   });
-  const visibility = buildRecordVisibility(
-    store,
-    actingUser,
+  const saveMatterConflictSignals = extractConflictSignalsFromParties(
+    effectiveConflictParties,
     {
-      people: allPeopleWithPending,
-      matters,
-      enquiries,
-      quotes,
-      teams,
-      hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+      excludeEnquiryId:
+        input.sourceEnquiryId !== undefined
+          ? input.sourceEnquiryId
+          : existing?.sourceEnquiryId ?? null,
     },
   );
+  const conflictGraph = await loadFullConflictSearchGraph(
+    extensionCtx,
+    saveMatterConflictSignals,
+    opts.byId,
+    people,
+    teams,
+    matterRbacConfig,
+  );
+  const conflictPeopleMerged = dedupeById([
+    ...allPeopleWithPending,
+    ...conflictGraph.people,
+  ]);
+  const conflictOrgsMerged = dedupeById([
+    ...allOrganisationsWithPending,
+    ...conflictGraph.organisations,
+  ]);
+  const enquiries = dedupeById([...enquiriesBase, ...conflictGraph.enquiries]);
   const rawServerMatches = searchMatterConflicts(
     {
       currentMatterId: existing?.id ?? null,
@@ -6631,14 +7528,17 @@ export async function saveMatterRecord(
       reviewedAtIso: now,
     },
     {
-      matters,
+      matters: dedupeById([
+        ...(existing ? [existing] : []),
+        ...conflictGraph.matters,
+      ]),
       enquiries,
-      people: allPeopleWithPending,
-      organisations: allOrganisationsWithPending,
-      links,
+      people: conflictPeopleMerged,
+      organisations: conflictOrgsMerged,
+      links: conflictGraph.links,
       tenantId: getActiveTenantConfiguration().tenantId,
-      canView: visibility.canViewMatter,
-      canViewEnquiry: visibility.canViewEnquiry,
+      canView: conflictGraph.canViewMatter,
+      canViewEnquiry: conflictGraph.canViewEnquiry,
     },
   );
   const reconciledConflictMatches = reconcileServerConflictMatches({
@@ -8044,7 +8944,7 @@ export async function saveMatterRecord(
 
       const workTypeTaskRepo = getTaskWorkflowRepository();
       if (willOpen && !isDraftSave && !isPmsImport) {
-        const currentTasks = await workTypeTaskRepo.listAllTasksUnfiltered<Task>(extensionCtx);
+        const currentTasks = tasks;
         await instantiateWorkTypeAutoTasksInTx({
           ctx: extensionCtx,
           matter,
@@ -8187,7 +9087,7 @@ export async function markEngagementLetterDrafted(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const [people, existing, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     matterRepo.getMatterById<Matter>(ctx, matterId),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
@@ -8279,7 +9179,7 @@ export async function liftMatterRestriction(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const [people, existing, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(prelimCtx),
+    loadStaffPeople(prelimCtx),
     matterRepo.getMatterById<Matter>(prelimCtx, matterId),
     getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
@@ -8444,28 +9344,26 @@ export async function runMatterConflictSearchRecord(
       },
     };
   }
-  const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const intakeRepo = getIntakeQuoteRepository();
-  const [people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
-    partyRepo.listAllPeople<Person>(ctx),
-    partyRepo.listAllOrganisations<Organisation>(ctx),
-    partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
-    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+  const [staffPeople, teams, currentMatterDirect] = await Promise.all([
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    input.currentMatterId
+      ? matterRepo.getMatterById<Matter>(ctx, input.currentMatterId, {
+          includeRestricted: true,
+        })
+      : Promise.resolve<Matter | null>(null),
   ]);
-  const actingUser = people.find((p) => p.id === byId) ?? null;
+  const actingUser = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !actingUser ||
     !actingUser.isEmployee ||
     (!hasPersonPermission(actingUser, 'matter:create', {
-      allPeople: people,
+      allPeople: staffPeople,
       teams,
     }) &&
       !hasPersonPermission(actingUser, 'matter:edit', {
-        allPeople: people,
+        allPeople: staffPeople,
         teams,
       }))
   ) {
@@ -8478,17 +9376,25 @@ export async function runMatterConflictSearchRecord(
     };
   }
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
-    allPeople: people,
+    allPeople: staffPeople,
     teams,
   });
-  const visibility = buildRecordVisibility({ teams }, actingUser, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  const searchSignals = extractConflictSignalsFromParties(input.parties ?? [], {
+    excludeEnquiryId: input.sourceEnquiryId,
   });
+  const graph = await loadFullConflictSearchGraph(
+    ctx,
+    searchSignals,
+    byId,
+    staffPeople,
+    teams,
+  );
+  const matters = dedupeById([
+    ...graph.matters,
+    ...(currentMatterDirect ? [currentMatterDirect] : []),
+  ]);
+  const { people, organisations, links, enquiries, canViewMatter, canViewEnquiry } =
+    graph;
   const nowIso = new Date().toISOString();
   const actorDisplayName = personDisplayName(actingUser);
   const matches = searchMatterConflicts(
@@ -8505,9 +9411,9 @@ export async function runMatterConflictSearchRecord(
       people,
       organisations,
       links,
-      tenantId: getActiveTenantConfiguration().tenantId,
-      canView: visibility.canViewMatter,
-      canViewEnquiry: visibility.canViewEnquiry,
+      tenantId: ctx.tenantId,
+      canView: canViewMatter,
+      canViewEnquiry,
     },
   );
   const displayNow = formatDateTime(nowIso) || nowIso;
@@ -8524,15 +9430,13 @@ export async function runMatterConflictSearchRecord(
     ).length,
     searchedSources: [...CONFLICT_SEARCHED_SOURCES],
   };
-  let savedMatter = input.currentMatterId
-    ? matters.find((m) => m.id === input.currentMatterId) ?? null
-    : null;
+  let savedMatter = currentMatterDirect;
   const hasSavedMatter = Boolean(savedMatter);
   let matterUpdated = false;
   let auditWritten = false;
   if (
     savedMatter &&
-    visibility.canViewMatter(savedMatter) &&
+    canViewMatter(savedMatter) &&
     hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: people,
       teams,
@@ -8612,44 +9516,36 @@ export async function updateMatterConflictRecord(
     const partyRepo = getPartyRepository();
     const matterRepo = getMatterRepository();
     const intakeRepo = getIntakeQuoteRepository();
-    const [store, people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+    const [store, staffPeople, matter, teams] = await Promise.all([
       loadTenantCatalogueStoreView(conflictCtx),
-      partyRepo.listAllPeople<Person>(conflictCtx),
-      partyRepo.listAllOrganisations<Organisation>(conflictCtx),
-      partyRepo.listAllLinks<PersonOrganisationLink>(conflictCtx),
-      matterRepo.listAllMattersUnfiltered<Matter>(conflictCtx),
-      intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(conflictCtx),
-      intakeRepo.listAllQuotesUnfiltered<Quote>(conflictCtx),
+      loadStaffPeople(conflictCtx),
+      matterRepo.getMatterById<Matter>(conflictCtx, matterId, {
+        includeRestricted: true,
+      }),
       getHrAndRbacRepository().listAllTeams<Team>(conflictCtx),
     ]);
   const today = resolveTenantLocalDateAndHour(
     new Date(),
     getActiveTenantConfiguration().timeZone || 'Europe/London',
   ).localDate;
-  const matter = matters.find((m) => m.id === matterId);
-  const actingUser = people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actingUser, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
+  const actingUser = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !matter ||
     !actingUser ||
     !actingUser.isEmployee ||
-    !visibility.canViewMatter(matter) ||
+    !canPersonAccessMatter(matter, byId, actingUser, {
+      allPeople: staffPeople,
+      teams,
+    }) ||
     !hasPersonPermission(actingUser, 'matter:edit', {
-      allPeople: people,
+      allPeople: staffPeople,
       teams,
     })
   ) {
     return { matter: null };
   }
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
-    allPeople: people,
+    allPeople: staffPeople,
     teams,
   });
   if (
@@ -8664,6 +9560,80 @@ export async function updateMatterConflictRecord(
       },
     };
   }
+  const conflictPartyIds = new Set<string>(
+    [
+      matter.clientId,
+      ...(matter.additionalClientIds ?? []),
+      matter.instructingContactId,
+      matter.billingContactId,
+      matter.referrerContactId,
+      ...(matter.parties ?? []).map((p) => p.linkedRecordId),
+      ...(record.parties ?? []).map((p) => p.linkedRecordId),
+    ].filter((x): x is string => Boolean(x)),
+  );
+  const conflictUpdateSignals = extractConflictSignalsFromParties(
+    record.parties ?? [],
+    { excludeEnquiryId: matter.sourceEnquiryId },
+  );
+  const [graph, directPeople, directOrgs, sourceEnquiryDirect, sourceQuoteDirect] =
+    await Promise.all([
+      loadFullConflictSearchGraph(
+        conflictCtx,
+        {
+          ...conflictUpdateSignals,
+          linkedPersonIds: Array.from(
+            new Set([
+              ...(conflictUpdateSignals.linkedPersonIds ?? []),
+              ...conflictPartyIds,
+            ]),
+          ),
+          linkedOrganisationIds: Array.from(
+            new Set([
+              ...(conflictUpdateSignals.linkedOrganisationIds ?? []),
+              ...conflictPartyIds,
+            ]),
+          ),
+        },
+        byId,
+        staffPeople,
+        teams,
+      ),
+      conflictPartyIds.size > 0
+        ? partyRepo.listPeopleByIds<Person>(
+            conflictCtx,
+            Array.from(conflictPartyIds),
+          )
+        : Promise.resolve<Person[]>([]),
+      conflictPartyIds.size > 0
+        ? partyRepo.listOrganisationsByIds<Organisation>(
+            conflictCtx,
+            Array.from(conflictPartyIds),
+          )
+        : Promise.resolve<Organisation[]>([]),
+      matter.sourceEnquiryId
+        ? intakeRepo.getEnquiryById<Enquiry>(
+            conflictCtx,
+            matter.sourceEnquiryId,
+            { includeRestricted: true },
+          )
+        : Promise.resolve<Enquiry | null>(null),
+      matter.sourceQuoteId
+        ? intakeRepo.getQuoteByIdOrReference<Quote>(
+            conflictCtx,
+            matter.sourceQuoteId,
+            { includeRestricted: true },
+          )
+        : Promise.resolve<Quote | null>(null),
+    ]);
+  const people = dedupeById([...graph.people, ...directPeople]);
+  const organisations = dedupeById([...graph.organisations, ...directOrgs]);
+  const links = graph.links;
+  const matters = dedupeById([matter, ...graph.matters]);
+  const enquiries = dedupeById([
+    ...(sourceEnquiryDirect ? [sourceEnquiryDirect] : []),
+    ...graph.enquiries,
+  ]);
+  const quotes: Quote[] = sourceQuoteDirect ? [sourceQuoteDirect] : [];
   const storedConflictRecord =
     matter.conflictCheckRecord ??
     resolveMatterConflictCheckRecord(matter, people, organisations);
@@ -8728,8 +9698,8 @@ export async function updateMatterConflictRecord(
       organisations,
       links,
       tenantId: getActiveTenantConfiguration().tenantId,
-      canView: visibility.canViewMatter,
-      canViewEnquiry: visibility.canViewEnquiry,
+      canView: graph.canViewMatter,
+      canViewEnquiry: graph.canViewEnquiry,
     },
   );
   const reconciledMatches = reconcileServerConflictMatches({
@@ -8911,7 +9881,11 @@ export async function updateMatterConflictRecord(
         sanitisedRecord.status === 'Approved' ||
         sanitisedRecord.status === 'Cleared' ||
         sanitisedRecord.status === 'Declined'
-          ? await taskRepo.listAllTasksUnfiltered<Task>(conflictCtx)
+          ? await taskRepo.listTasksLinkedToRecord<Task>(
+              conflictCtx,
+              'matter',
+              matter.id,
+            )
           : [];
       if (
         sanitisedRecord.status === 'Approved' ||
@@ -9008,16 +9982,15 @@ export async function signOffMatterCostsRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, staffPeople, matterDirect, teams] = await Promise.all([
     loadTenantCatalogueStoreView(prelimCtx),
-    partyRepo.listAllPeople<Person>(prelimCtx),
-    partyRepo.listAllOrganisations<Organisation>(prelimCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(prelimCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(prelimCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(prelimCtx),
+    loadStaffPeople(prelimCtx),
+    matterRepo.getMatterById<Matter>(prelimCtx, matterId, {
+      includeRestricted: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
-  const matter = matters.find((m) => m.id === matterId) ?? null;
+  const matter = matterDirect;
   const prospectiveStatusId = resolveProspectiveStatusId(store);
   const wasProspectiveBeforeSignOff = Boolean(
     matter &&
@@ -9027,26 +10000,56 @@ export async function signOffMatterCostsRecord(
         store.values,
       ),
   );
-  const actingUser = people.find((p) => p.id === byId) ?? null;
-  const visibility = buildRecordVisibility(store, actingUser, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
+  const actingUser = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !matter ||
     !actingUser ||
     !actingUser.isEmployee ||
-    !visibility.canViewMatter(matter)
+    !canPersonAccessMatter(matter, byId, actingUser, {
+      allPeople: staffPeople,
+      teams,
+    })
   ) {
     return {
       matter: null,
       errors: { permission: 'Matter not found or restricted.' },
     };
   }
+  const refEntityIds = Array.from(
+    new Set(
+      [
+        matter.clientId,
+        ...(matter.additionalClientIds ?? []),
+        matter.instructingContactId,
+        matter.billingContactId,
+        matter.referrerContactId,
+        ...(matter.parties ?? []).map((p) => p.linkedRecordId),
+      ].filter((x): x is string => Boolean(x)),
+    ),
+  );
+  const [extraPeople, organisations, sourceEnq, sourceQuote] = await Promise.all([
+    refEntityIds.length > 0
+      ? partyRepo.listPeopleByIds<Person>(prelimCtx, refEntityIds)
+      : Promise.resolve<Person[]>([]),
+    refEntityIds.length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(prelimCtx, refEntityIds)
+      : Promise.resolve<Organisation[]>([]),
+    matter.sourceEnquiryId
+      ? intakeRepo.getEnquiryById<Enquiry>(prelimCtx, matter.sourceEnquiryId, {
+          includeRestricted: true,
+        })
+      : Promise.resolve<Enquiry | null>(null),
+    matter.sourceQuoteId
+      ? intakeRepo.getQuoteByIdOrReference<Quote>(
+          prelimCtx,
+          matter.sourceQuoteId,
+          { includeRestricted: true },
+        )
+      : Promise.resolve<Quote | null>(null),
+  ]);
+  const people = dedupeById([...staffPeople, ...extraPeople]);
+  const enquiries: Enquiry[] = sourceEnq ? [sourceEnq] : [];
+  const quotes: Quote[] = sourceQuote ? [sourceQuote] : [];
   if (
     !hasPersonPermission(actingUser, 'matter:costs:sign_off', {
       allPeople: people,
@@ -9402,7 +10405,11 @@ export async function signOffMatterCostsRecord(
       }
       if (openedBySignOff) {
         const existingTasksForSignOff =
-          await taskRepoForSignOff.listAllTasksUnfiltered<Task>(extensionCtx);
+          await taskRepoForSignOff.listTasksLinkedToRecord<Task>(
+            extensionCtx,
+            'matter',
+            saved.id,
+          );
         await instantiateWorkTypeAutoTasksInTx({
           ctx: extensionCtx,
           matter: saved,
@@ -9438,12 +10445,15 @@ export async function dismissDuplicateMatch(
 ): Promise<{ ok: true } | ActionDenied> {
   const dupCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
-  const [store, people, organisations, teams] = await Promise.all([
+  const [store, people, targetPersonDirect, targetOrgDirect, teams] = await Promise.all([
     loadTenantCatalogueStoreView(dupCtx),
-    partyRepo.listAllPeople<Person>(dupCtx),
+    loadStaffPeople(dupCtx),
+    recordType === 'person'
+      ? partyRepo.getPersonById<Person>(dupCtx, recordId)
+      : Promise.resolve<Person | null>(null),
     recordType === 'organisation'
-      ? partyRepo.listAllOrganisations<Organisation>(dupCtx)
-      : Promise.resolve([] as Organisation[]),
+      ? partyRepo.getOrganisationById<Organisation>(dupCtx, recordId)
+      : Promise.resolve<Organisation | null>(null),
     getHrAndRbacRepository().listAllTeams<Team>(dupCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -9463,11 +10473,30 @@ export async function dismissDuplicateMatch(
     'duplicate_status',
     'none',
   );
-  const list: AnyRecord[] = recordType === 'person' ? people : organisations;
-  const rec = list.find((r) => r.id === recordId);
+  const rec: AnyRecord | undefined =
+    recordType === 'person'
+      ? targetPersonDirect ?? undefined
+      : targetOrgDirect ?? undefined;
   if (!rec) {
     return buildActionDenied('FORBIDDEN', `Target ${recordType} "${recordId}" not found.`);
   }
+  const siblingIdsToLoad = Array.from(
+    new Set(
+      (otherId ? [otherId] : rec.possibleMatchIds).filter(
+        (id) => Boolean(id) && id !== recordId,
+      ),
+    ),
+  );
+  const siblingRecords: AnyRecord[] =
+    siblingIdsToLoad.length > 0
+      ? recordType === 'person'
+        ? await partyRepo.listPeopleByIds<Person>(dupCtx, siblingIdsToLoad)
+        : await partyRepo.listOrganisationsByIds<Organisation>(
+            dupCtx,
+            siblingIdsToLoad,
+          )
+      : [];
+  const list: AnyRecord[] = dedupeById([rec, ...siblingRecords]);
   if (otherId && !list.some((r) => r.id === otherId)) {
     return buildActionDenied('FORBIDDEN', `Compared ${recordType} "${otherId}" not found.`);
   }
@@ -9566,7 +10595,7 @@ export async function executeMerge(
     const matterRepo = getMatterRepository();
     const [authStore, authPeople, teams] = await Promise.all([
       loadTenantCatalogueStoreView(prelimCtx),
-      partyRepo.listAllPeople<Person>(prelimCtx),
+      loadStaffPeople(prelimCtx),
       getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
     ]);
     const actor = authPeople.find((p) => p.id === byId) ?? null;
@@ -9598,15 +10627,52 @@ export async function executeMerge(
     let mergeSqlApplied = false;
     try {
       await partyRepo.withTenantTransaction(activeMergeCtx, async () => {
-        // Load all merge inputs inside the transaction so pre-tx stale reads cannot slip through (ADR 0033 §3)
-        const [store, people, organisations, links, notes, matters] = await Promise.all([
+        // Load only merge-affected records inside the transaction (ADR 0033 §3, S1-02a)
+        const [
+          store,
+          people,
+          targetOrgs,
+          corpTreeOrgs,
+          links,
+          notes,
+          matters,
+        ] = await Promise.all([
           loadTenantCatalogueStoreView(activeMergeCtx, { includePmsLinks: true }),
-          partyRepo.listAllPeople<Person>(activeMergeCtx),
-          partyRepo.listAllOrganisations<Organisation>(activeMergeCtx),
-          partyRepo.listAllLinks<PersonOrganisationLink>(activeMergeCtx),
-          partyRepo.listAllNotes<Note>(activeMergeCtx),
-          matterRepo.listAllMattersUnfiltered<Matter>(activeMergeCtx),
+          recordType === 'person'
+            ? partyRepo.listPeopleByIds<Person>(activeMergeCtx, [
+                survivorId,
+                mergedId,
+              ])
+            : Promise.resolve<Person[]>([]),
+          recordType === 'organisation'
+            ? partyRepo.listOrganisationsByIds<Organisation>(activeMergeCtx, [
+                survivorId,
+                mergedId,
+              ])
+            : Promise.resolve<Organisation[]>([]),
+          recordType === 'organisation'
+            ? partyRepo.expandCorporateGroupOrganisationIds<Organisation>(
+                activeMergeCtx,
+                [mergedId],
+              )
+            : Promise.resolve<Organisation[]>([]),
+          partyRepo.listLinksForEntities<PersonOrganisationLink>(
+            activeMergeCtx,
+            recordType === 'person'
+              ? { personIds: [survivorId, mergedId] }
+              : { organisationIds: [survivorId, mergedId] },
+          ),
+          partyRepo.listNotesForRecords<Note>(activeMergeCtx, [
+            { recordType, recordId: mergedId },
+          ]),
+          matterRepo.listMattersUnfilteredByIdsOrSources<Matter>(activeMergeCtx, {
+            clientIds: [mergedId, survivorId],
+            partyEntityIds: [mergedId],
+            contactIds: [mergedId],
+            conflictReferenceEntityId: mergedId,
+          }),
         ]);
+        const organisations = dedupeById([...targetOrgs, ...corpTreeOrgs]);
         const list: AnyRecord[] = recordType === 'person' ? people : organisations;
         const survivor = list.find((r) => r.id === survivorId);
         const merged = list.find((r) => r.id === mergedId);
@@ -10059,11 +11125,23 @@ export async function findCandidateDuplicatesForRecord(
   const notAddressOnly = (reasons: string[]) =>
     reasons.some((r) => r !== 'address' && r !== 'postcode');
   if (record.recordType === 'person') {
-    const people =
-      options?.people ??
-      (await getPartyRepository().listAllPeople<Person>(
-        options?.ctx ?? resolveDefaultServiceTenantContext(null),
-      ));
+    const candidatePeople = options?.people
+      ? [...options.people]
+      : await getPartyRepository().findSqlDuplicateCandidates<Person>(
+          options?.ctx ?? resolveDefaultServiceTenantContext(null),
+          {
+            kind: 'person',
+            id: record.id,
+            firstName: record.firstName,
+            preferredName: record.preferredName,
+            surname: record.surname,
+            otherNames: record.otherNames.map((n) => n.name),
+            emails: record.emails.map((e) => e.address),
+            phones: record.phones.map((p) => p.number),
+            postcodes: record.addresses.map((a) => a.postcode).filter(Boolean),
+            fuzzy: true,
+          },
+        );
     const matches = findPersonDuplicates(
       {
         id: record.id,
@@ -10074,17 +11152,35 @@ export async function findCandidateDuplicatesForRecord(
         phones: record.phones.map((p) => p.number),
         addresses: record.addresses,
       },
-      people as Person[],
+      candidatePeople,
       record.notDuplicateOf,
       { fuzzy: true },
     );
     return matches.filter((m) => notAddressOnly(m.reasons)).map((m) => m.record);
   }
-  const organisations =
-    options?.organisations ??
-    (await getPartyRepository().listAllOrganisations<Organisation>(
-      options?.ctx ?? resolveDefaultServiceTenantContext(null),
-    ));
+  const candidateOrganisations = options?.organisations
+    ? [...options.organisations]
+    : await getPartyRepository().findSqlDuplicateCandidates<Organisation>(
+        options?.ctx ?? resolveDefaultServiceTenantContext(null),
+        {
+          kind: 'organisation',
+          id: record.id,
+          legalName: record.legalName,
+          otherNames: record.otherNames.map((n) => n.name),
+          companyNumber: record.companyNumber,
+          emails: record.generalEmail ? [record.generalEmail] : [],
+          phones: record.mainPhone ? [record.mainPhone] : [],
+          postcodes: [
+            record.registeredAddress,
+            record.correspondenceAddress,
+            record.billingAddress,
+          ]
+            .filter((a): a is Address => Boolean(a))
+            .map((a) => a.postcode)
+            .filter(Boolean),
+          fuzzy: true,
+        },
+      );
   const matches = findOrganisationDuplicates(
     {
       id: record.id,
@@ -10093,11 +11189,13 @@ export async function findCandidateDuplicatesForRecord(
       companyNumber: record.companyNumber,
       emails: record.generalEmail ? [record.generalEmail] : [],
       phones: record.mainPhone ? [record.mainPhone] : [],
-      addresses: [record.registeredAddress, record.correspondenceAddress].filter(
-        (a): a is Address => Boolean(a),
-      ),
+      addresses: [
+        record.registeredAddress,
+        record.correspondenceAddress,
+        record.billingAddress,
+      ].filter((a): a is Address => Boolean(a)),
     },
-    organisations as Organisation[],
+    candidateOrganisations,
     record.notDuplicateOf,
     { fuzzy: true },
   );
@@ -11072,7 +12170,7 @@ async function canRecipientReceiveNotification(
       const [loadedTeams, loadedAllPeople] = await Promise.all([
         hrRepo.listAllTeams<Team>(ctx),
         lineManagerGrantsRestricted
-          ? partyRepo.listAllPeople<Person>(ctx)
+          ? loadStaffPeople(ctx)
           : Promise.resolve([recipient]),
       ]);
       teams = loadedTeams;
@@ -11499,7 +12597,7 @@ export async function getMyNotificationPreferences(
   }
 
   const [people, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -11598,7 +12696,7 @@ export async function updateMyNotificationPreferences(
   }
 
   const [people, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -11890,7 +12988,7 @@ export async function updateEmployeeRoleSetting(
   const hrRepo = getHrAndRbacRepository();
   return partyRepo.withTenantTransaction(ctx, async () => {
     const [people, teams, rbacOverride] = await Promise.all([
-      partyRepo.listAllPeople<Person>(ctx),
+      loadStaffPeople(ctx),
       hrRepo.listAllTeams<Team>(ctx),
       hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
     ]);
@@ -12065,6 +13163,178 @@ function workingHoursConfigFromStore(store: FirmStore): WorkingHoursConfig {
   };
 }
 
+async function loadScopedTaskVisibilityContext(
+  ctx: TenantContext,
+  store: FirmStore,
+  actor: Person | null,
+  staffPeople: readonly Person[],
+  teams: readonly Team[],
+  rbacConfig: RbacConfiguration,
+  options: {
+    readonly existingTask?: Task | null;
+    readonly candidateLinks?: readonly TaskLinkedRecord[];
+    readonly explicitKeyDateId?: string | null;
+  },
+): Promise<{
+  visibility: ReturnType<typeof buildRecordVisibility>;
+  people: Person[];
+  organisations: Organisation[];
+  matters: Matter[];
+  enquiries: Enquiry[];
+  quotes: Quote[];
+  loadedKeyDateById: Map<string, KeyDate>;
+}> {
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const actorId = actor?.id ?? ctx.actorId;
+
+  const allLinks: TaskLinkedRecord[] = [
+    ...(options.existingTask?.linkedRecords ?? []),
+    ...(options.candidateLinks ?? []),
+  ];
+  const candidateMatterIds = new Set<string>();
+  const candidateEnquiryIds = new Set<string>();
+  const candidateQuoteIds = new Set<string>();
+  const candidateKeyDateIds = new Set<string>();
+  const candidatePersonIds = new Set<string>();
+  const candidateOrganisationIds = new Set<string>();
+
+  if (options.existingTask?.linkedKeyDateId) {
+    candidateKeyDateIds.add(options.existingTask.linkedKeyDateId);
+  }
+  if (options.explicitKeyDateId) {
+    candidateKeyDateIds.add(options.explicitKeyDateId);
+  }
+  for (const lr of allLinks) {
+    if (!lr?.recordId) continue;
+    if (lr.recordType === 'matter') candidateMatterIds.add(lr.recordId);
+    else if (lr.recordType === 'enquiry') candidateEnquiryIds.add(lr.recordId);
+    else if (lr.recordType === 'quote') candidateQuoteIds.add(lr.recordId);
+    else if (lr.recordType === 'person') candidatePersonIds.add(lr.recordId);
+    else if (lr.recordType === 'organisation') candidateOrganisationIds.add(lr.recordId);
+    else if ((lr as { recordType: string }).recordType === 'key_date') {
+      candidateKeyDateIds.add(lr.recordId);
+    }
+  }
+
+  const [
+    loadedKeyDatesList,
+    directQuotes,
+    directEnquiries,
+    directPeople,
+    organisations,
+  ] = await Promise.all([
+    candidateKeyDateIds.size > 0
+      ? Promise.all(
+          Array.from(candidateKeyDateIds).map((kdId) =>
+            getKeyDateRepository().getKeyDateById(ctx, kdId, actorId, {
+              includeRestricted: true,
+            }),
+          ),
+        )
+      : Promise.resolve<Array<KeyDate | null>>([]),
+    candidateQuoteIds.size > 0
+      ? intakeRepo.listQuotesByIds<Quote>(ctx, Array.from(candidateQuoteIds))
+      : Promise.resolve<Quote[]>([]),
+    candidateEnquiryIds.size > 0
+      ? intakeRepo.listEnquiriesByIds<Enquiry>(
+          ctx,
+          Array.from(candidateEnquiryIds),
+          { includeRestricted: true },
+        )
+      : Promise.resolve<Enquiry[]>([]),
+    candidatePersonIds.size > 0
+      ? partyRepo.listPeopleByIds<Person>(ctx, Array.from(candidatePersonIds))
+      : Promise.resolve<Person[]>([]),
+    candidateOrganisationIds.size > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(
+          ctx,
+          Array.from(candidateOrganisationIds),
+        )
+      : Promise.resolve<Organisation[]>([]),
+  ]);
+
+  const loadedKeyDateById = new Map<string, KeyDate>();
+  for (const kd of loadedKeyDatesList) {
+    if (!kd) continue;
+    loadedKeyDateById.set(kd.id, kd);
+    if (kd.matterId) candidateMatterIds.add(kd.matterId);
+    if (kd.enquiryId) candidateEnquiryIds.add(kd.enquiryId);
+  }
+  for (const q of directQuotes) {
+    if (q.convertedMatterId) candidateMatterIds.add(q.convertedMatterId);
+    if (q.linkedEnquiryId) candidateEnquiryIds.add(q.linkedEnquiryId);
+  }
+  const enquiryMap = new Map<string, Enquiry>();
+  for (const e of directEnquiries) {
+    enquiryMap.set(e.id, e);
+    if (e.convertedMatterId) candidateMatterIds.add(e.convertedMatterId);
+  }
+  const missingEnqIds = Array.from(candidateEnquiryIds).filter(
+    (id) => !enquiryMap.has(id),
+  );
+  if (missingEnqIds.length > 0) {
+    const extraEnqs = await intakeRepo.listEnquiriesByIds<Enquiry>(
+      ctx,
+      missingEnqIds,
+      { includeRestricted: true },
+    );
+    for (const e of extraEnqs) {
+      enquiryMap.set(e.id, e);
+      if (e.convertedMatterId) candidateMatterIds.add(e.convertedMatterId);
+    }
+  }
+  const enquiries = Array.from(enquiryMap.values());
+  const matters =
+    candidateMatterIds.size > 0 ||
+    enquiries.length > 0 ||
+    directQuotes.length > 0
+      ? await matterRepo.listMattersUnfilteredByIdsOrSources<Matter>(ctx, {
+          ids: Array.from(candidateMatterIds),
+          sourceEnquiryIds: enquiries.map((e) => e.id),
+          sourceQuoteIds: directQuotes.map((q) => q.id),
+        })
+      : [];
+  const people = dedupeById([...staffPeople, ...directPeople]);
+
+  const prelimVis = buildRecordVisibility(store, actor, {
+    people,
+    matters,
+    enquiries,
+    quotes: directQuotes,
+    teams,
+    rbacConfig,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+  });
+  const hiddenKdIds =
+    prelimVis.hiddenMatterIds.size > 0
+      ? await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+          ctx,
+          prelimVis.hiddenMatterIds,
+        )
+      : EMPTY_HIDDEN_KEY_DATE_IDS;
+  const visibility = buildRecordVisibility(store, actor, {
+    people,
+    matters,
+    enquiries,
+    quotes: directQuotes,
+    teams,
+    rbacConfig,
+    hiddenMatterKeyDateIds: hiddenKdIds,
+  });
+
+  return {
+    visibility,
+    people,
+    organisations,
+    matters,
+    enquiries,
+    quotes: directQuotes,
+    loadedKeyDateById,
+  };
+}
+
 export async function saveTaskRecord(
   input: {
     id?: string;
@@ -12088,52 +13358,23 @@ export async function saveTaskRecord(
   return runWithAuditStagingScope(async () => {
   const now = new Date().toISOString();
   const taskCtx = resolveDefaultServiceTenantContext(null, byId);
-  const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
-  const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
   return taskRepo.withTenantTransaction(taskCtx, async () => {
-  const [store, people, organisations, matters, enquiries, quotes, existing, teams, rbacConfig] = await Promise.all([
+  const [store, staffPeople, existing, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(taskCtx),
-    partyRepo.listAllPeople<Person>(taskCtx),
-    partyRepo.listAllOrganisations<Organisation>(taskCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
+    loadStaffPeople(taskCtx),
     input.id
       ? taskRepo.getTaskById<Task>(taskCtx, input.id, { includeRestricted: true })
       : Promise.resolve(null),
     getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
     loadEffectiveTenantRbacConfig(taskCtx),
   ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  const prelimVis = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    rbacConfig,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
-    taskCtx,
-    prelimVis.hiddenMatterIds,
-  );
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    rbacConfig,
-    hiddenMatterKeyDateIds: hiddenKdIds,
-  });
+  const actor = staffPeople.find((p) => p.id === byId) ?? null;
 
   if (!opts?.viaTakeTask && !opts?.internalSystemStep) {
     if (
       !hasPersonPermission(actor, 'task:edit', {
-        allPeople: people,
+        allPeople: staffPeople,
         teams,
         config: { rbac: rbacConfig },
         tenantId: taskCtx.tenantId,
@@ -12148,14 +13389,37 @@ export async function saveTaskRecord(
     const msg = 'Task not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  if (existing && !visibility.canViewTask(existing)) {
-    const msg = 'You do not have access to this task.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
 
   const candidateLinks = input.linkedRecords ?? existing?.linkedRecords ?? [];
   const explicitInputKeyDateId =
     input.linkedKeyDateId !== undefined ? input.linkedKeyDateId?.trim() || null : undefined;
+  const {
+    visibility,
+    people,
+    organisations,
+    matters,
+    enquiries,
+    quotes,
+    loadedKeyDateById,
+  } = await loadScopedTaskVisibilityContext(
+    taskCtx,
+    store,
+    actor,
+    staffPeople,
+    teams,
+    rbacConfig,
+    {
+      existingTask: existing,
+      candidateLinks,
+      explicitKeyDateId: explicitInputKeyDateId,
+    },
+  );
+  if (existing && !visibility.canViewTask(existing)) {
+    const msg = 'You do not have access to this task.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const intakeRepo = getIntakeQuoteRepository();
+
   if (
     existing &&
     !opts?.internalSystemStep &&
@@ -12174,27 +13438,6 @@ export async function saveTaskRecord(
       : explicitInputKeyDateId !== undefined
         ? explicitInputKeyDateId
         : linkedRecordKeyDateIds[0] ?? existing?.linkedKeyDateId ?? null;
-  const allCandidateKeyDateIds = Array.from(
-    new Set(
-      [effectiveLinkedKeyDateId, existing?.linkedKeyDateId, ...linkedRecordKeyDateIds].filter(
-        (id): id is string => Boolean(id),
-      ),
-    ),
-  );
-  const loadedKeyDatesList =
-    allCandidateKeyDateIds.length > 0
-      ? await Promise.all(
-          allCandidateKeyDateIds.map((kdId) =>
-            getKeyDateRepository().getKeyDateById(taskCtx, kdId, byId, {
-              includeRestricted: true,
-            }),
-          ),
-        )
-      : [];
-  const loadedKeyDateById = new Map<string, KeyDate>();
-  for (const kd of loadedKeyDatesList) {
-    if (kd) loadedKeyDateById.set(kd.id, kd);
-  }
 
   for (const lr of candidateLinks) {
     if (lr.recordType === 'matter') {
@@ -12829,44 +14072,29 @@ export async function takeTaskRecord(
   byId: string,
 ): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
     const taskCtx = resolveDefaultServiceTenantContext(null, byId);
-    const partyRepo = getPartyRepository();
-    const matterRepo = getMatterRepository();
-    const intakeRepo = getIntakeQuoteRepository();
     const taskRepo = getTaskWorkflowRepository();
-    const [store, people, matters, enquiries, quotes, existing, teams, rbacConfig] = await Promise.all([
+    const [store, people, existing, teams, rbacConfig] = await Promise.all([
       loadTenantCatalogueStoreView(taskCtx),
-      partyRepo.listAllPeople<Person>(taskCtx),
-      matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
-      intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
-      intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
+      loadStaffPeople(taskCtx),
       taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
       getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
       loadEffectiveTenantRbacConfig(taskCtx),
     ]);
     const actor = people.find((p) => p.id === byId) ?? null;
-    const prelimVis = buildRecordVisibility(store, actor, {
-      people,
-      matters,
-      enquiries,
-      quotes,
-      teams,
-      rbacConfig,
-      hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-    });
-    const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
+    if (!existing) {
+      const msg = 'Task not found.';
+      return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+    }
+    const { visibility } = await loadScopedTaskVisibilityContext(
       taskCtx,
-      prelimVis.hiddenMatterIds,
-    );
-    const visibility = buildRecordVisibility(store, actor, {
+      store,
+      actor,
       people,
-      matters,
-      enquiries,
-      quotes,
       teams,
       rbacConfig,
-      hiddenMatterKeyDateIds: hiddenKdIds,
-    });
-    if (!existing || !visibility.canViewTask(existing)) {
+      { existingTask: existing },
+    );
+    if (!visibility.canViewTask(existing)) {
       const msg = 'Task not found.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
     }
@@ -12899,16 +14127,10 @@ export async function addTaskCommentRecord(
 ): Promise<{ task?: Task; error?: string } & Partial<ActionDenied>> {
   return runWithAuditStagingScope(async () => {
   const taskCtx = resolveDefaultServiceTenantContext(null, byId);
-  const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
-  const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [store, people, matters, enquiries, quotes, task, teams, rbacConfig] = await Promise.all([
+  const [store, people, task, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(taskCtx),
-    partyRepo.listAllPeople<Person>(taskCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(taskCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(taskCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(taskCtx),
+    loadStaffPeople(taskCtx),
     taskRepo.getTaskById<Task>(taskCtx, taskId, { includeRestricted: true }),
     getHrAndRbacRepository().listAllTeams<Team>(taskCtx),
     loadEffectiveTenantRbacConfig(taskCtx),
@@ -12925,29 +14147,21 @@ export async function addTaskCommentRecord(
     const msg = 'You do not have permission (task:comment) to comment on tasks.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const prelimVis = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    rbacConfig,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const hiddenKdIds = await getKeyDateRepository().listHiddenKeyDateIdsForMatters(
-    taskCtx,
-    prelimVis.hiddenMatterIds,
-  );
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    rbacConfig,
-    hiddenMatterKeyDateIds: hiddenKdIds,
-  });
-  if (!task || !visibility.canViewTask(task)) {
+  if (!task) {
+    const msg = 'Task not found or access denied.';
+    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
+  }
+  const { visibility, matters, enquiries, quotes } =
+    await loadScopedTaskVisibilityContext(
+      taskCtx,
+      store,
+      actor,
+      people,
+      teams,
+      rbacConfig,
+      { existingTask: task },
+    );
+  if (!visibility.canViewTask(task)) {
     const msg = 'Task not found or access denied.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -13150,7 +14364,7 @@ async function raiseAutomaticTask(
       const [loadedTeam, autoPeople, autoTeams, autoRbac, autoQuotes, directEnqs] =
         await Promise.all([
           getHrAndRbacRepository().getTeamById<Team>(ctx, task.assignedTeamId),
-          getPartyRepository().listAllPeople<Person>(ctx),
+          loadStaffPeople(ctx),
           getHrAndRbacRepository().listAllTeams<Team>(ctx),
           loadEffectiveTenantRbacConfig(ctx),
           Promise.all(
@@ -13265,7 +14479,11 @@ async function completeOpenContactTasksForEnquiry(
   now: string,
 ): Promise<void> {
   const taskRepo = getTaskWorkflowRepository();
-  const tasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+  const tasks = await taskRepo.listTasksLinkedToRecord<Task>(
+    ctx,
+    'enquiry',
+    enquiryId,
+  );
   const callBackTypeId = valueBySystemKey(store.values, 'task_type', 'call_back')?.id;
   for (const t of tasks) {
     const isLinked = t.linkedRecords.some((lr) => lr.recordType === 'enquiry' && lr.recordId === enquiryId);
@@ -13329,28 +14547,50 @@ export async function saveEnquiryRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, organisations, links, matters, enquiries, quotes, teams, rbacConfig] = await Promise.all([
+  const [
+    store,
+    people,
+    teams,
+    rbacConfig,
+    existing,
+    linkedOrgDirect,
+    linkedPersonDirect,
+    referrerPersonDirect,
+  ] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    partyRepo.listAllPeople<Person>(enqCtx),
-    partyRepo.listAllOrganisations<Organisation>(enqCtx),
-    partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    loadStaffPeople(enqCtx),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
     loadEffectiveTenantRbacConfig(enqCtx),
+    opts.id
+      ? intakeRepo.getEnquiryById<Enquiry>(enqCtx, opts.id, {
+          includeRestricted: true,
+        })
+      : Promise.resolve<Enquiry | null>(null),
+    input.linkedOrganisationId
+      ? partyRepo.getOrganisationById<Organisation>(enqCtx, input.linkedOrganisationId)
+      : Promise.resolve<Organisation | null>(null),
+    input.linkedPersonId
+      ? partyRepo.getPersonById<Person>(enqCtx, input.linkedPersonId)
+      : Promise.resolve<Person | null>(null),
+    input.referrerPersonId
+      ? partyRepo.getPersonById<Person>(enqCtx, input.referrerPersonId)
+      : Promise.resolve<Person | null>(null),
   ]);
+  const existingConvertedMatter = existing?.convertedMatterId
+    ? await matterRepo.getMatterById<Matter>(enqCtx, existing.convertedMatterId, {
+        includeRestricted: true,
+      })
+    : null;
   const actor = people.find((p) => p.id === opts.byId) ?? null;
   const visibility = buildRecordVisibility(store, actor, {
     people,
-    matters,
-    enquiries,
-    quotes,
+    matters: existingConvertedMatter ? [existingConvertedMatter] : [],
+    enquiries: existing ? [existing] : [],
+    quotes: [],
     teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
     rbacConfig,
   });
-  const existing = opts.id ? enquiries.find((e) => e.id === opts.id) ?? null : null;
   if (opts.id && !existing) {
     const msg = 'Enquiry not found.';
     return {
@@ -13408,20 +14648,14 @@ export async function saveEnquiryRecord(
       }
     }
   }
-  if (
-    input.linkedOrganisationId &&
-    !organisations.some((o) => o.id === input.linkedOrganisationId)
-  ) {
+  if (input.linkedOrganisationId && !linkedOrgDirect) {
     const msg = 'Linked organisation not found.';
     return {
       ...buildActionDenied('FORBIDDEN', msg),
       errors: { linkedOrganisationId: msg },
     };
   }
-  if (
-    input.linkedPersonId &&
-    !people.some((p) => p.id === input.linkedPersonId)
-  ) {
+  if (input.linkedPersonId && !linkedPersonDirect) {
     const msg = 'Linked person not found.';
     return {
       ...buildActionDenied('FORBIDDEN', msg),
@@ -13506,7 +14740,43 @@ export async function saveEnquiryRecord(
     }
   }
 
-  // Server-side Quick Conflict Check snapshot (passes all matters and redacts restricted hits via canViewMatter, R257)
+  // Server-side Quick Conflict Check snapshot (Option 1 full evaluation + restricted redaction via canViewMatter)
+  const conflictGraph = await loadFullConflictSearchGraph(
+    enqCtx,
+    {
+      terms: [
+        mergedInput.firstName,
+        mergedInput.lastName,
+        `${mergedInput.firstName} ${mergedInput.lastName}`.trim(),
+        mergedInput.callingOnBehalfOf,
+        ...mergedInput.otherPartiesNamed.split(/[,;/\n]+/).map((s) => s.trim()),
+      ].filter(Boolean),
+      emails: [mergedInput.email].filter(Boolean),
+      phones: [mergedInput.phone].filter(Boolean),
+      postcodes: [mergedInput.address?.postcode ?? ''].filter(Boolean),
+      linkedPersonIds: [mergedInput.linkedPersonId, mergedInput.referrerPersonId].filter(
+        (x): x is string => Boolean(x),
+      ),
+      linkedOrganisationIds: [mergedInput.linkedOrganisationId].filter(
+        (x): x is string => Boolean(x),
+      ),
+      excludeEnquiryId: existing?.id ?? null,
+    },
+    opts.byId,
+    people,
+    teams,
+    rbacConfig,
+  );
+  const conflictPeople = dedupeById([
+    ...people,
+    ...conflictGraph.people,
+    ...(linkedPersonDirect ? [linkedPersonDirect] : []),
+    ...(referrerPersonDirect ? [referrerPersonDirect] : []),
+  ]);
+  const conflictOrganisations = dedupeById([
+    ...conflictGraph.organisations,
+    ...(linkedOrgDirect ? [linkedOrgDirect] : []),
+  ]);
   const conflictSnapshot = computeEnquiryConflictSnapshot(
     {
       firstName: mergedInput.firstName,
@@ -13521,17 +14791,17 @@ export async function saveEnquiryRecord(
       linkedPersonId: mergedInput.linkedPersonId,
       linkedOrganisationId: mergedInput.linkedOrganisationId,
     },
-    people,
-    organisations,
-    matters,
+    conflictPeople,
+    conflictOrganisations,
+    conflictGraph.matters,
     store.values,
     {
       recordedAt: now,
       recordedById: opts.byId,
-      enquiries: enquiries.filter((e) => visibility.canViewEnquiry(e)),
+      enquiries: conflictGraph.enquiries.filter((e) => conflictGraph.canViewEnquiry(e)),
       excludeEnquiryId: existing?.id ?? null,
-      links,
-      canViewMatter: visibility.canViewMatter,
+      links: conflictGraph.links,
+      canViewMatter: conflictGraph.canViewMatter,
       tenantId: getActiveTenantConfiguration().tenantId,
     },
   );
@@ -13856,9 +15126,9 @@ export async function saveEnquiryRecord(
       people,
       teams,
       effectiveRbac: rbacConfig,
-      matters,
-      enquiries: enquiries.map((e) => (e.id === enquiry.id ? enquiry : e)).concat(existing ? [] : [enquiry]),
-      quotes,
+      matters: conflictGraph.matters,
+      enquiries: [enquiry],
+      quotes: [],
     });
     await raiseAutomaticTask(
       enqCtx,
@@ -13974,13 +15244,14 @@ export async function assignEnquiryRecord(
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const [store, people, matters, enquiries, quotes, tasks, teams, rbacConfig] = await Promise.all([
+  const matterRepo = getMatterRepository();
+  const [store, people, directEnq, tasks, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
-    taskRepo.listAllTasksUnfiltered<Task>(enqCtx),
+    loadStaffPeople(enqCtx),
+    intakeRepo.getEnquiryById<Enquiry>(enqCtx, enquiryId, {
+      includeRestricted: true,
+    }),
+    taskRepo.listTasksLinkedToRecord<Task>(enqCtx, 'enquiry', enquiryId),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
     loadEffectiveTenantRbacConfig(enqCtx),
   ]);
@@ -13995,29 +15266,34 @@ export async function assignEnquiryRecord(
     const msg = 'You do not have permission (enquiry:assign) to assign enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const enq = enquiries.find((e) => e.id === enquiryId);
-  if (
-    !enq ||
-    (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) ||
-    visibility.hiddenMatterSourceEnquiryIds.has(enq.id)
-  ) {
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    {
+      allPeople: people,
+      teams,
+      config: { rbac: rbacConfig },
+    },
+  );
+  const enquiries = directEnq ? [directEnq] : [];
+  const matters = directEnq
+    ? await matterRepo.listMattersUnfilteredByIdsOrSources<Matter>(enqCtx, {
+        ids: directEnq.convertedMatterId ? [directEnq.convertedMatterId] : [],
+        sourceEnquiryIds: [directEnq.id],
+      })
+    : [];
+  const isHiddenEnq = directEnq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, directEnq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  const enq = directEnq;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   if (!isEnquiryRouted(enq)) {
     return { error: 'Cannot assign a draft or closed enquiry before it has been routed.' };
-  }
-  if (!visibility.canViewEnquiry(enq)) {
-    const msg = 'Enquiry not found.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
 
   const now = new Date().toISOString();
@@ -14088,7 +15364,7 @@ export async function assignEnquiryRecord(
         effectiveRbac: rbacConfig,
         matters,
         enquiries,
-        quotes,
+        quotes: [],
       });
       await pushNotification(enqCtx, {
         recipientId: assignedToId,
@@ -14123,12 +15399,12 @@ export async function logEnquiryContactRecord(
   return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, enq, teams] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    loadStaffPeople(enqCtx),
+    intakeRepo.getEnquiryById<Enquiry>(enqCtx, enquiryId, {
+      includeRestricted: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -14141,16 +15417,17 @@ export async function logEnquiryContactRecord(
     const msg = 'You do not have permission (enquiry:edit) to log contact on enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const enq = enquiries.find((e) => e.id === enquiryId);
-  if (!enq || !visibility.canViewEnquiry(enq)) {
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    { allPeople: people, teams },
+  );
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -14231,12 +15508,12 @@ export async function sendEnquiryEmailRecord(
   return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, enq, teams] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    loadStaffPeople(enqCtx),
+    intakeRepo.getEnquiryById<Enquiry>(enqCtx, enquiryId, {
+      includeRestricted: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -14249,16 +15526,17 @@ export async function sendEnquiryEmailRecord(
     const msg = 'You do not have permission (enquiry:edit) to send enquiry emails.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const enq = enquiries.find((e) => e.id === enquiryId);
-  if (!enq || !visibility.canViewEnquiry(enq)) {
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    { allPeople: people, teams },
+  );
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -14384,37 +15662,57 @@ export async function closeEnquiryRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, staffPeople, enq, teams] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    partyRepo.listAllPeople<Person>(enqCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    loadStaffPeople(enqCtx),
+    intakeRepo.getEnquiryById<Enquiry>(enqCtx, enquiryId, {
+      includeRestricted: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
+  const actor = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'enquiry:close', {
-      allPeople: people,
+      allPeople: staffPeople,
       teams,
     })
   ) {
     const msg = 'You do not have permission (enquiry:close) to close enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const enq = enquiries.find((e) => e.id === enquiryId);
-  if (!enq || !visibility.canViewEnquiry(enq)) {
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    { allPeople: staffPeople, teams },
+  );
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
+  const linkedPersonDirect = enq.linkedPersonId
+    ? await partyRepo.getPersonById<Person>(enqCtx, enq.linkedPersonId)
+    : null;
+  const people = dedupeById([
+    ...staffPeople,
+    ...(linkedPersonDirect ? [linkedPersonDirect] : []),
+  ]);
+  const matters = enq.linkedPersonId
+    ? await matterRepo.listMattersUnfilteredByIdsOrSources<Matter>(enqCtx, {
+        clientIds: [enq.linkedPersonId],
+        partyEntityIds: [enq.linkedPersonId],
+        contactIds: [enq.linkedPersonId],
+      })
+    : [];
+  const enquiries = enq.linkedPersonId
+    ? await intakeRepo.listEnquiriesForOwnerOrMatters<Enquiry>(enqCtx, {
+        clientPersonIds: [enq.linkedPersonId],
+      })
+    : [enq];
 
   if (input.targetStatus === 'Declined' && !input.closeReasonId) {
     return { error: 'A close reason is required when declining an enquiry.' };
@@ -14531,14 +15829,10 @@ export async function closeEnquiryRecord(
       closeReasonSystemKey !== 'no_response';
     if (shouldConsiderNonEngagementTask) {
       const taskRepo = getTaskWorkflowRepository();
-      const existingTasks = await taskRepo.listVisibleTasks<Task>(
+      const existingTasks = await taskRepo.listTasksLinkedToRecord<Task>(
         enqCtx,
-        enqCtx.actorId,
-        {
-          linkedRecordType: 'enquiry',
-          linkedRecordId: enq.id,
-          includeRestricted: true,
-        },
+        'enquiry',
+        enq.id,
       );
       const alreadyHasOpenTask = existingTasks.some(
         (t) =>
@@ -14633,12 +15927,12 @@ export async function reopenEnquiryRecord(
   return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, people, enq, teams] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    getPartyRepository().listAllPeople<Person>(enqCtx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    loadStaffPeople(enqCtx),
+    intakeRepo.getEnquiryById<Enquiry>(enqCtx, enquiryId, {
+      includeRestricted: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -14651,16 +15945,17 @@ export async function reopenEnquiryRecord(
     const msg = 'You do not have permission (enquiry:reopen) to reopen enquiries.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const enq = enquiries.find((e) => e.id === enquiryId);
-  if (!enq || !visibility.canViewEnquiry(enq)) {
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    { allPeople: people, teams },
+  );
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -14771,22 +16066,19 @@ export async function prepareEnquiryConversion(
   return runWithAuditStagingScope(async () => {
   const enqCtx = resolveDefaultServiceTenantContext(null, byId);
   const partyRepo = getPartyRepository();
-  const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, staffPeople, enq, teams] = await Promise.all([
     loadTenantCatalogueStoreView(enqCtx),
-    partyRepo.listAllPeople<Person>(enqCtx),
-    partyRepo.listAllOrganisations<Organisation>(enqCtx),
-    partyRepo.listAllLinks<PersonOrganisationLink>(enqCtx),
-    matterRepo.listAllMattersUnfiltered<Matter>(enqCtx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(enqCtx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(enqCtx),
+    loadStaffPeople(enqCtx),
+    intakeRepo.getEnquiryById<Enquiry>(enqCtx, enquiryId, {
+      includeRestricted: true,
+    }),
     getHrAndRbacRepository().listAllTeams<Team>(enqCtx),
   ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
+  const actor = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'matter:create', {
-      allPeople: people,
+      allPeople: staffPeople,
       teams,
     })
   ) {
@@ -14798,17 +16090,17 @@ export async function prepareEnquiryConversion(
       conflictReasons: [msg],
     };
   }
-  const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const enq = enquiries.find((e) => e.id === enquiryId);
-  if (!enq) return { ok: false, conflictReasons: ['Enquiry not found.'] };
-  if (enq.convertedMatterId && visibility.hiddenMatterIds.has(enq.convertedMatterId)) {
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    { allPeople: staffPeople, teams },
+  );
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     return { ok: false, conflictReasons: ['Enquiry not found.'] };
   }
   if (!isEnquiryRouted(enq)) {
@@ -14817,14 +16109,53 @@ export async function prepareEnquiryConversion(
       conflictReasons: ['Cannot convert a draft enquiry before it has been routed.'],
     };
   }
-  if (!visibility.canViewEnquiry(enq)) {
-    return { ok: false, conflictReasons: ['Enquiry not found.'] };
-  }
 
   const now = new Date();
   const nowIso = now.toISOString();
   const today = toIsoDate(now);
   const actorName = actor ? personDisplayName(actor) : byId;
+
+  const targetPersonId = opts.usePersonId ?? enq.linkedPersonId;
+  const targetOrgId = opts.useOrganisationId ?? enq.linkedOrganisationId;
+  const searchTerms = [
+    `${enq.firstName} ${enq.lastName}`.trim(),
+    enq.callingOnBehalfOf,
+    ...enq.otherPartiesNamed.split(/[,;/\n]+/).map((s) => s.trim()),
+  ].filter(Boolean);
+  const graph = await loadFullConflictSearchGraph(
+    enqCtx,
+    {
+      terms: searchTerms,
+      emails: enq.email ? [enq.email] : [],
+      phones: enq.phone ? [enq.phone] : [],
+      postcodes: enq.address?.postcode ? [enq.address.postcode] : [],
+      linkedPersonIds: [targetPersonId, enq.referrerPersonId].filter(
+        (x): x is string => Boolean(x),
+      ),
+      linkedOrganisationIds: targetOrgId ? [targetOrgId] : [],
+      excludeEnquiryId: enq.id,
+    },
+    byId,
+    staffPeople,
+    teams,
+  );
+  const [explicitPersonDirect, explicitOrgDirect] = await Promise.all([
+    targetPersonId && !graph.people.some((p) => p.id === targetPersonId)
+      ? partyRepo.getPersonById<Person>(enqCtx, targetPersonId)
+      : Promise.resolve<Person | null>(null),
+    targetOrgId && !graph.organisations.some((o) => o.id === targetOrgId)
+      ? partyRepo.getOrganisationById<Organisation>(enqCtx, targetOrgId)
+      : Promise.resolve<Organisation | null>(null),
+  ]);
+  const people = dedupeById([
+    ...graph.people,
+    ...(explicitPersonDirect ? [explicitPersonDirect] : []),
+  ]);
+  const organisations = dedupeById([
+    ...graph.organisations,
+    ...(explicitOrgDirect ? [explicitOrgDirect] : []),
+  ]);
+  const { links, matters, enquiries, canViewMatter, canViewEnquiry } = graph;
 
   const conflicts = runEnquiryConflictSearch(
     {
@@ -14835,22 +16166,22 @@ export async function prepareEnquiryConversion(
       email: enq.email,
       phone: enq.phone,
       address: enq.address,
-      linkedPersonId: opts.usePersonId ?? enq.linkedPersonId,
-      linkedOrganisationId: opts.useOrganisationId ?? enq.linkedOrganisationId,
+      linkedPersonId: targetPersonId,
+      linkedOrganisationId: targetOrgId,
     },
     people,
     organisations,
     matters,
     store.values,
-    enquiries.filter((e) => visibility.canViewEnquiry(e)),
+    enquiries.filter((e) => canViewEnquiry(e)),
     enq.id,
     links,
-    visibility.canViewMatter,
+    canViewMatter,
     getActiveTenantConfiguration().tenantId,
   );
 
   const redactRestrictedMatterReasons = (rawReasons: string[]): string[] => {
-    const hiddenMatters = matters.filter((m) => !visibility.canViewMatter(m));
+    const hiddenMatters = matters.filter((m) => !canViewMatter(m));
     return rawReasons.map((reason) => {
       let safe = reason;
       for (const hm of hiddenMatters) {
@@ -15191,7 +16522,11 @@ async function finalizeEnquiryConversionToMatter(
 
   // Carry enquiry key dates across to the converted matter in PostgreSQL (`source: 'carried_from_enquiry'`) (§1, S0-15)
   const kdConfig = await getKeyDatesConfig({ ctx });
-  const existingTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+  const [enqTasksPre, matterTasksPre] = await Promise.all([
+    taskRepo.listTasksLinkedToRecord<Task>(ctx, 'enquiry', enq.id),
+    taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', matter.id),
+  ]);
+  const existingTasks = dedupeById([...enqTasksPre, ...matterTasksPre]);
   if (kdConfig.enabled) {
     const keyDateRepo = getKeyDateRepository();
     await keyDateRepo.withTenantTransaction(ctx, async () => {
@@ -15299,11 +16634,13 @@ async function finalizeEnquiryConversionToMatter(
       store.values,
     )
   ) {
-    const [latestTasks, convPeople, convTeams] = await Promise.all([
-      taskRepo.listAllTasksUnfiltered<Task>(ctx),
-      getPartyRepository().listAllPeople<Person>(ctx),
+    const [latestEnqTasks, latestMatterTasks, convPeople, convTeams] = await Promise.all([
+      taskRepo.listTasksLinkedToRecord<Task>(ctx, 'enquiry', enq.id),
+      taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', matter.id),
+      loadStaffPeople(ctx),
       getHrAndRbacRepository().listAllTeams<Team>(ctx),
     ]);
+    const latestTasks = dedupeById([...latestEnqTasks, ...latestMatterTasks]);
     const workTypesCfgForConv =
       store.workTypesConfig ??
       resolveEffectiveWorkTypesConfig(
@@ -15426,10 +16763,9 @@ export async function runEnquiryRetentionAnonymisationForTenant(
           });
         }
       } else {
-        const partyRepo = getPartyRepository();
         const hrRepo = getHrAndRbacRepository();
         const [people, teams, rbacOverride] = await Promise.all([
-          partyRepo.listAllPeople<Person>(ctx),
+          loadStaffPeople(ctx),
           hrRepo.listAllTeams<Team>(ctx),
           hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
         ]);
@@ -15452,17 +16788,26 @@ export async function runEnquiryRetentionAnonymisationForTenant(
 
       const catalogueRepo = getCatalogueRepository();
       const intakeRepo = getIntakeQuoteRepository();
-      const [enquirySettings, allEnquiries] = await Promise.all([
+      const trimmedSpecificId = opts.specificEnquiryId?.trim() || undefined;
+      const [enquirySettings, specificEnquiry, allEnquiries] = await Promise.all([
         catalogueRepo.getEnquirySettingsConfig<EnquirySettings>(ctx),
-        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+        trimmedSpecificId
+          ? intakeRepo.getEnquiryById<Enquiry>(ctx, trimmedSpecificId, {
+              includeRestricted: true,
+            })
+          : Promise.resolve<Enquiry | null>(null),
+        trimmedSpecificId
+          ? Promise.resolve<Enquiry[]>([])
+          : intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
       ]);
       const retentionMonths = Math.max(
         1,
         Math.floor(Number(enquirySettings?.retentionMonths) || 12),
       );
-      const trimmedSpecificId = opts.specificEnquiryId?.trim() || undefined;
       const candidates = trimmedSpecificId
-        ? allEnquiries.filter((e) => e.id === trimmedSpecificId)
+        ? specificEnquiry
+          ? [specificEnquiry]
+          : []
         : allEnquiries;
       const evaluatedCount = candidates.length;
       const retentionNote =
@@ -15619,8 +16964,14 @@ export async function getMatterPmsViewBundle(
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { ctx, actor, permSet, tokenRoles, visiblePmsLinks, tenantPmsLinks, people, matters, teams } = auth;
-  const matter = matters.find((m) => m.id === matterId && !m.mergedIntoId);
+  const { ctx, actor, permSet, tokenRoles, visiblePmsLinks, people, matters, teams } = auth;
+  const fetchedMatter =
+    matters.find((m) => m.id === matterId && !m.mergedIntoId) ??
+    (await getMatterRepository().getMatterById<Matter>(ctx, matterId, {
+      includeRestricted: true,
+    }));
+  const matter =
+    fetchedMatter && !fetchedMatter.mergedIntoId ? fetchedMatter : undefined;
   if (
     !matter ||
     !canPersonAccessMatter(matter, actor.id, actor, {
@@ -15636,8 +16987,8 @@ export async function getMatterPmsViewBundle(
     );
   }
 
-  const pms = await getTenantPmsSource(ctx);
-  const extractInfo = pms.getExtractInfo();
+  const pmsRepo = getPmsRepository();
+  const extractInfo = (await pmsRepo.getExtractInfo(ctx)) as unknown as PmsExtractInfo;
   const link =
     visiblePmsLinks.find((l) => l.entityType === 'matter' && l.onesquaredId === matterId) ?? null;
 
@@ -15646,11 +16997,9 @@ export async function getMatterPmsViewBundle(
   let unlinkedPmsMattersForClient: PmsMatter[] = [];
 
   if (canManageLinks) {
-    const linkedPmsCodes = new Set(
-      tenantPmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
-    );
-    const allPmsMatters = pms.listMatters();
-    allUnlinkedPmsMatters = allPmsMatters.filter((pm) => !linkedPmsCodes.has(pm.matter_code));
+    allUnlinkedPmsMatters = (await pmsRepo.listUnlinkedMatters(
+      ctx,
+    )) as unknown as PmsMatter[];
 
     const clientEntityType: PmsEntityType = matter.clientId.startsWith('P-')
       ? 'person'
@@ -15677,7 +17026,9 @@ export async function getMatterPmsViewBundle(
     };
   }
 
-  const matterBundle = link ? pms.getMatterFullBundle(link.pmsCode) : null;
+  const matterBundle = link
+    ? ((await pmsRepo.getMatterFullBundle(ctx, link.pmsCode)) as unknown as PmsMatterFullBundle | null)
+    : null;
 
   return {
     extractInfo,
@@ -15696,15 +17047,20 @@ export async function getClientPmsViewBundle(
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { hiddenMatterIds, accessibleLinkedPmsMatterCodes, visiblePmsLinks, people, ctx } = auth;
-  const organisations =
+  const { hiddenMatterIds, accessibleLinkedPmsMatterCodes, visiblePmsLinks, ctx } = auth;
+  const partyRepo = getPartyRepository();
+  const targetOrg =
     recordType === 'organisation'
-      ? await getPartyRepository().listAllOrganisations<Organisation>(ctx)
-      : [];
+      ? await partyRepo.getOrganisationById<Organisation>(ctx, recordId)
+      : null;
+  const targetPerson =
+    recordType === 'person'
+      ? await partyRepo.getPersonById<Person>(ctx, recordId)
+      : null;
   const targetExists =
     recordType === 'organisation'
-      ? organisations.some((o) => o.id === recordId && !o.mergedIntoId)
-      : people.some((p) => p.id === recordId && !p.mergedIntoId);
+      ? Boolean(targetOrg && !targetOrg.mergedIntoId)
+      : Boolean(targetPerson && !targetPerson.mergedIntoId);
   if (!targetExists) {
     return buildActionDenied(
       'FORBIDDEN',
@@ -15712,8 +17068,18 @@ export async function getClientPmsViewBundle(
     );
   }
 
-  const pms = await getTenantPmsSource(ctx);
-  const extractInfo = pms.getExtractInfo();
+  const corpGroupOrgs =
+    recordType === 'organisation' && targetOrg
+      ? await partyRepo.expandCorporateGroupOrganisationIds<Organisation>(ctx, [recordId])
+      : [];
+  const subsidiaries = targetOrg
+    ? corpGroupOrgs.filter(
+        (o) => !o.mergedIntoId && o.parentOrganisationId === targetOrg.id,
+      )
+    : [];
+
+  const pmsRepo = getPmsRepository();
+  const extractInfo = await pmsRepo.getExtractInfo(ctx);
   const link =
     visiblePmsLinks.find((l) => l.entityType === recordType && l.onesquaredId === recordId) ?? null;
 
@@ -15739,15 +17105,29 @@ export async function getClientPmsViewBundle(
     };
   }
 
-  const allPmsClients = pms.listClients();
-  const visibleMatterFins = pms
-    .getAllMatterFinancials()
-    .filter((m) => accessibleLinkedPmsMatterCodes.has(m.matter_code));
-  const visibleInvoices = pms
-    .listAllInvoiceBalances()
-    .filter((i) => accessibleLinkedPmsMatterCodes.has(i.matter_code));
-  const visibleAgedDebt = pms
-    .getAgedDebt()
+  const scopedClientCodes = Array.from(
+    new Set(
+      [
+        link?.pmsCode,
+        ...subsidiaries.map((sub) =>
+          findPmsCodeForRecord(visiblePmsLinks, 'organisation', sub.id),
+        ),
+      ].filter((code): code is string => Boolean(code)),
+    ),
+  );
+  const [clientData, agedDebtLists] = await Promise.all([
+    pmsRepo.getClientPmsDataByCodes(ctx, scopedClientCodes),
+    Promise.all(scopedClientCodes.map((code) => pmsRepo.getAgedDebt(ctx, code))),
+  ]);
+  const allPmsClients = clientData.clients;
+  const visibleMatterFins = clientData.matterFinancials.filter((m) =>
+    accessibleLinkedPmsMatterCodes.has(m.matter_code),
+  );
+  const visibleInvoices = clientData.invoiceBalances.filter((i) =>
+    accessibleLinkedPmsMatterCodes.has(i.matter_code),
+  );
+  const visibleAgedDebt = agedDebtLists
+    .flat()
     .filter((i) => accessibleLinkedPmsMatterCodes.has(i.matter_code));
 
   const pmsClient = link
@@ -15770,15 +17150,11 @@ export async function getClientPmsViewBundle(
       : null;
 
   let groupView: PmsGroupFinancials | null = null;
-  if (recordType === 'organisation') {
-    const org = organisations.find((o) => o.id === recordId);
-    if (org) {
-      const subsidiaries = organisations.filter(
-        (o) => !o.mergedIntoId && o.parentOrganisationId === org.id,
-      );
-      if (subsidiaries.length > 0) {
-        const groupOrgs = [org, ...subsidiaries];
-        const companies: PmsGroupCompanyRow[] = groupOrgs.map((go) => {
+  if (recordType === 'organisation' && targetOrg) {
+    if (subsidiaries.length > 0) {
+      const org = targetOrg;
+      const groupOrgs = [org, ...subsidiaries];
+      const companies: PmsGroupCompanyRow[] = groupOrgs.map((go) => {
           const code = findPmsCodeForRecord(visiblePmsLinks, 'organisation', go.id);
           const companyClient = code
             ? allPmsClients.find((c) => c.client_code === code) ?? null
@@ -15827,7 +17203,6 @@ export async function getClientPmsViewBundle(
             credit_limit_used_pct: credit_limit > 0 ? outstanding_debt / credit_limit : null,
           },
         };
-      }
     }
   }
 
@@ -15882,7 +17257,7 @@ export async function getPmsAdminSnapshot(
       suggestedMatterMatches: [],
     };
   }
-  const pms = await getTenantPmsSource(ctx);
+  const pmsRepo = getPmsRepository();
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, actor.id, actor, {
       allPeople: people,
@@ -15900,10 +17275,13 @@ export async function getPmsAdminSnapshot(
   const visiblePmsLinks = tenantPmsLinks.filter(
     (l) => !(l.entityType === 'matter' && !visibleMatterIdSet.has(l.onesquaredId)),
   );
-  const extractInfo = pms.getExtractInfo();
-  const pmsFeeEarners = pms.listFeeEarners();
-  const pmsClients = pms.listClients();
-  const pmsMatters = pms.listMatters().filter((pm) => !hiddenPmsCodes.has(pm.matter_code));
+  const pmsSnap = await pmsRepo.getPmsAdminSummarySnapshot(ctx);
+  const extractInfo = pmsSnap.extractInfo as unknown as PmsExtractInfo;
+  const pmsFeeEarners = pmsSnap.feeEarners as unknown as PmsFeeEarner[];
+  const pmsClients = pmsSnap.clients as unknown as PmsClient[];
+  const pmsMatters = (pmsSnap.matters as unknown as PmsMatter[]).filter(
+    (pm) => !hiddenPmsCodes.has(pm.matter_code),
+  );
   const suggestedMatterMatches = suggestMatterMatches(
     visiblePmsLinks,
     visibleMatters,
@@ -16142,11 +17520,11 @@ export async function createRecordFromPms(
   const ctx = resolveDefaultServiceTenantContext(null, byId, {
     tenantCtx: opts?.tenantCtx,
   });
-  const [store, people, teams, pms] = await Promise.all([
+  const pmsRepo = getPmsRepository();
+  const [store, people, teams] = await Promise.all([
     loadTenantCatalogueStoreView(ctx, { includePmsLinks: true }),
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
-    getTenantPmsSource(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
   const activeSession = getActiveActorSession();
@@ -16239,7 +17617,8 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'employee') {
-    const fe = pms.listFeeEarners().find((f) => f.fee_earner_id === pmsCode);
+    const feeEarners = await pmsRepo.listFeeEarnersOnly(ctx);
+    const fe = feeEarners.find((f) => f.fee_earner_id === pmsCode);
     if (!fe) return { ok: false, error: `PMS fee earner ${pmsCode} not found.` };
 
     const paId = mapPmsPracticeAreaId(store, fe.department);
@@ -16322,10 +17701,10 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'organisation') {
-    const client = pms
-      .listClients()
-      .find((c) => c.client_code === pmsCode && c.client_type === 'Organisation');
-    if (!client) return { ok: false, error: `PMS organisation client ${pmsCode} not found.` };
+    const client = await pmsRepo.getClientByCode(ctx, pmsCode);
+    if (!client || client.client_type !== 'Organisation') {
+      return { ok: false, error: `PMS organisation client ${pmsCode} not found.` };
+    }
 
     const partner1SqId =
       (client.client_partner_id
@@ -16368,10 +17747,10 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'person') {
-    const client = pms
-      .listClients()
-      .find((c) => c.client_code === pmsCode && c.client_type === 'Individual');
-    if (!client) return { ok: false, error: `PMS individual client ${pmsCode} not found.` };
+    const client = await pmsRepo.getClientByCode(ctx, pmsCode);
+    if (!client || client.client_type !== 'Individual') {
+      return { ok: false, error: `PMS individual client ${pmsCode} not found.` };
+    }
 
     const parts = client.client_name.trim().split(/\s+/);
     const firstName = parts[0] ?? client.client_name;
@@ -16433,11 +17812,11 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'matter') {
-    const pm = pms.listMatters().find((m) => m.matter_code === pmsCode);
+    const pm = await pmsRepo.getMatterByCode(ctx, pmsCode);
     if (!pm) return { ok: false, error: `PMS matter ${pmsCode} not found.` };
 
     // Ensure the client exists & is linked in 1Squared first
-    const pmsClient = pms.listClients().find((c) => c.client_code === pm.client_code);
+    const pmsClient = await pmsRepo.getClientByCode(ctx, pm.client_code);
     const clientEntityType: PmsEntityType =
       pmsClient?.client_type === 'Individual' ? 'person' : 'organisation';
     let clientId = findOneSquaredIdForPmsCode(store.pmsLinks, clientEntityType, pm.client_code);
@@ -16581,7 +17960,7 @@ export async function saveHomePagesConfig(
     catalogueRepo.withTenantTransaction(ctx, async () => {
       const [store, people, teams] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
-        getPartyRepository().listAllPeople<Person>(ctx),
+        loadStaffPeople(ctx),
         getHrAndRbacRepository().listAllTeams<Team>(ctx),
       ]);
       const current =
@@ -16674,7 +18053,7 @@ export async function resetHomePagesConfig(
     catalogueRepo.withTenantTransaction(ctx, async () => {
       const [store, people, teams] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
-        getPartyRepository().listAllPeople<Person>(ctx),
+        loadStaffPeople(ctx),
         getHrAndRbacRepository().listAllTeams<Team>(ctx),
       ]);
       const current =
@@ -16753,7 +18132,7 @@ export async function addHomeRole(
     catalogueRepo.withTenantTransaction(ctx, async () => {
       const [store, people, teams] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
-        getPartyRepository().listAllPeople<Person>(ctx),
+        loadStaffPeople(ctx),
         getHrAndRbacRepository().listAllTeams<Team>(ctx),
       ]);
       const actor = people.find((p) => p.id === byId) ?? null;
@@ -16862,7 +18241,7 @@ export async function updateEmployeeRolesAndSupports(
   const hrRepo = getHrAndRbacRepository();
   return partyRepo.withTenantTransaction(ctx, async () => {
     const [people, teams, dbRbacOverride] = await Promise.all([
-      partyRepo.listAllPeople<Person>(ctx),
+      loadStaffPeople(ctx),
       hrRepo.listAllTeams<Team>(ctx),
       hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
     ]);
@@ -16962,7 +18341,7 @@ export async function previewRbacOverrides(
 ): Promise<{ ok: boolean; code?: string; error?: string; permissions: PermissionKey[] }> {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const [people, teams, dbRbacOverride] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
   ]);
@@ -17098,7 +18477,7 @@ export async function updatePersonPermissionOverrides(
   const hrRepo = getHrAndRbacRepository();
   return partyRepo.withTenantTransaction(ctx, async () => {
     const [people, teams, dbRbacOverride] = await Promise.all([
-      partyRepo.listAllPeople<Person>(ctx),
+      loadStaffPeople(ctx),
       hrRepo.listAllTeams<Team>(ctx),
       hrRepo.getRbacConfigOverride<RbacConfiguration>(ctx),
     ]);
@@ -17227,7 +18606,7 @@ export async function updateTenantRbacConfig(
     hrRepo.withTenantTransaction(ctx, async () => {
       const [people, teams, { override: dbRbacOverride, rowVersion }] =
         await Promise.all([
-          partyRepo.listAllPeople<Person>(ctx),
+          loadStaffPeople(ctx),
           hrRepo.listAllTeams<Team>(ctx),
           hrRepo.getRbacConfigOverrideWithVersion<RbacConfiguration>(ctx),
         ]);
@@ -17564,8 +18943,9 @@ export async function requestMatterBill(
   const targetMatter = linkedId
     ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
     : undefined;
-  const pms = await getTenantPmsSource(ctx);
-  const pmsMatter = linkedId ? pms.getMatterFinancials(matterCode) : null;
+  const pmsMatter = linkedId
+    ? await getPmsRepository().getMatterFinancials(ctx, matterCode)
+    : null;
   if (
     !targetMatter ||
     !pmsMatter ||
@@ -17643,8 +19023,9 @@ export async function flagMatterWriteOff(
   const matter = linkedId
     ? matters.find((m) => m.id === linkedId && !m.mergedIntoId)
     : undefined;
-  const pms = await getTenantPmsSource(ctx);
-  const pmsMatter = linkedId ? pms.getMatterFinancials(matterCode) : null;
+  const pmsMatter = linkedId
+    ? await getPmsRepository().getMatterFinancials(ctx, matterCode)
+    : null;
   if (
     !matter ||
     !pmsMatter ||
@@ -17723,7 +19104,7 @@ export async function remindTeamLeadOverdueCompliance(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const [people, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const actor = people.find((p) => p.id === byId) ?? null;
@@ -17811,7 +19192,7 @@ export async function recordInvoiceCreditControlAction(
   if (!auth.ok) return auth;
 
   const { actor, tokenRoles, tenantPmsLinks, people, matters, teams, ctx } = auth;
-  const pms = await getTenantPmsSource(ctx);
+  const pmsRepo = getPmsRepository();
   const linkedMatterId = findOneSquaredIdForPmsCode(
     tenantPmsLinks,
     'matter',
@@ -17822,7 +19203,7 @@ export async function recordInvoiceCreditControlAction(
     ? matters.find((m) => m.id === linkedMatterId && !m.mergedIntoId)
     : null;
   const pmsMatter = linkedMatterId
-    ? pms.getMatterFinancials(input.matterCode)
+    ? await pmsRepo.getMatterFinancials(ctx, input.matterCode)
     : null;
   if (
     !matter ||
@@ -17840,7 +19221,7 @@ export async function recordInvoiceCreditControlAction(
     );
   }
 
-  const pmsInvoice = pms.getInvoiceBalance(input.invoiceNumber);
+  const pmsInvoice = await pmsRepo.getInvoiceBalance(ctx, input.invoiceNumber);
   if (!pmsInvoice || pmsInvoice.matter_code !== input.matterCode) {
     return buildActionDenied(
       'FORBIDDEN',
@@ -17920,7 +19301,6 @@ export async function recordInvoiceCreditControlAction(
 
   // Record a note on the client or matter, persist to pms_credit_control_log, and log an audit entry in one transaction
   const targetRecordId = linkedOrgId ?? linkedPersonId ?? linkedMatterId;
-  const pmsRepo = getPmsRepository();
   await runWithAuditStagingScope(() =>
     pmsRepo.withTenantTransaction(ctx, async () => {
       if (targetRecordId) {
@@ -17983,7 +19363,7 @@ export async function saveOrgStructure(
 > {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const [people, teams, rbacOverride] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
   ]);
@@ -18225,14 +19605,12 @@ export async function deleteMatterPartyRelationship(
   let result!: { taxonomy: MatterPartyTaxonomy; error?: string };
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const [store, matters] = await Promise.all([
+      const [store, count] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
-        getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+        getMatterRepository().countMatterPartyUsages(ctx, { relationshipTypeId: code }),
       ]);
       const taxonomy =
         store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-      const usage = computeMatterPartyUsageCounts(matters);
-      const count = usage.byRelationshipCode[code] ?? 0;
       if (count > 0) {
         result = {
           taxonomy,
@@ -18388,14 +19766,12 @@ export async function deleteMatterPartyCapacity(
   let result!: { taxonomy: MatterPartyTaxonomy; error?: string };
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const [store, matters] = await Promise.all([
+      const [store, count] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
-        getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
+        getMatterRepository().countMatterPartyUsages(ctx, { capacityId: code }),
       ]);
       const taxonomy =
         store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values);
-      const usage = computeMatterPartyUsageCounts(matters);
-      const count = usage.byCapacityCode[code] ?? 0;
       if (count > 0) {
         result = {
           taxonomy,
@@ -18555,38 +19931,90 @@ export async function saveQuoteRecord(
 > {
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [catalogueStore, people, organisations, matters, enquiries, quotes, teams] = await Promise.all([
+  const [
+    catalogueStore,
+    staffPeople,
+    teams,
+    rbacConfig,
+    existing,
+    linkedOrgDirect,
+    linkedPersonDirect,
+    linkedEnqDirect,
+  ] = await Promise.all([
     loadTenantCatalogueStoreView(ctx),
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getPartyRepository().listAllOrganisations<Organisation>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+    opts.id
+      ? intakeRepo.getQuoteById<Quote>(ctx, opts.id, { includeRestricted: true })
+      : Promise.resolve<Quote | null>(null),
+    input.linkedOrganisationId
+      ? partyRepo.getOrganisationById<Organisation>(ctx, input.linkedOrganisationId)
+      : Promise.resolve<Organisation | null>(null),
+    input.linkedPersonId
+      ? partyRepo.getPersonById<Person>(ctx, input.linkedPersonId)
+      : Promise.resolve<Person | null>(null),
+    input.linkedEnquiryId
+      ? intakeRepo.getEnquiryById<Enquiry>(ctx, input.linkedEnquiryId, {
+          includeRestricted: true,
+        })
+      : Promise.resolve<Enquiry | null>(null),
   ]);
-  const actor = people.find((p) => p.id === opts.byId) ?? null;
+  const existingLinkedEnq =
+    existing?.linkedEnquiryId && existing.linkedEnquiryId !== input.linkedEnquiryId
+      ? await intakeRepo.getEnquiryById<Enquiry>(ctx, existing.linkedEnquiryId, {
+          includeRestricted: true,
+        })
+      : null;
+  const refMatterIds = Array.from(
+    new Set(
+      [
+        existing?.convertedMatterId,
+        linkedEnqDirect?.convertedMatterId,
+        existingLinkedEnq?.convertedMatterId,
+      ].filter((x): x is string => Boolean(x)),
+    ),
+  );
+  const refMatters =
+    refMatterIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, refMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
+  const refEnquiries = dedupeById(
+    [linkedEnqDirect, existingLinkedEnq].filter((e): e is Enquiry => Boolean(e)),
+  );
+  const people = dedupeById([
+    ...staffPeople,
+    ...(linkedPersonDirect ? [linkedPersonDirect] : []),
+  ]);
+  const organisations = linkedOrgDirect ? [linkedOrgDirect] : [];
+  const actor = staffPeople.find((p) => p.id === opts.byId) ?? null;
   if (
     !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: people,
+      allPeople: staffPeople,
       teams,
+      config: { rbac: rbacConfig },
     })
   ) {
     const msg = 'You do not have permission (quote:edit) to create or edit quotes.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   const visibility = buildRecordVisibility({ teams }, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
+    people: staffPeople,
+    matters: refMatters,
+    enquiries: refEnquiries,
+    quotes: existing ? [existing] : [],
     teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
   const now = new Date();
   const nowIso = now.toISOString();
 
-  const existing = opts.id ? quotes.find((q) => q.id === opts.id) : undefined;
   if (opts.id && (!existing || !visibility.canViewQuote(existing))) {
     const msg = 'Quote not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
@@ -18595,17 +20023,16 @@ export async function saveQuoteRecord(
   const clientType = input.clientType || 'prospect';
   const linkedOrganisationId = input.linkedOrganisationId || null;
   const linkedPersonId = input.linkedPersonId || null;
-  if (linkedOrganisationId && !organisations.some((o) => o.id === linkedOrganisationId)) {
+  if (linkedOrganisationId && !linkedOrgDirect) {
     const msg = 'Linked organisation not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
-  if (linkedPersonId && !people.some((p) => p.id === linkedPersonId)) {
+  if (linkedPersonId && !linkedPersonDirect) {
     const msg = 'Linked person not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
   if (input.linkedEnquiryId) {
-    const linkedEnq = enquiries.find((e) => e.id === input.linkedEnquiryId);
-    if (!linkedEnq || !visibility.canViewEnquiry(linkedEnq)) {
+    if (!linkedEnqDirect || !visibility.canViewEnquiry(linkedEnqDirect)) {
       const msg = 'Linked enquiry not found or access denied.';
       return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
     }
@@ -19091,7 +20518,9 @@ export async function saveQuoteRecord(
         detail: `Follow-up scheduled for ${existing.nextFollowUpDate}`,
       });
     } else {
-      existing.status = evaluateQuoteEffectiveStatus(existing, now);
+      applyQuoteEffectiveLifecycle(existing, now, {
+        appendExpiredTimeline: true,
+      });
     }
 
     await intakeRepo.putQuote(ctx, existing);
@@ -19133,6 +20562,79 @@ export async function saveQuoteRecord(
   });
 }
 
+async function loadScopedQuoteForEdit(
+  ctx: TenantContext,
+  byId: string,
+  quoteId: string,
+  noPermMsg: string,
+): Promise<
+  | { ok: true; quote: Quote }
+  | { ok: false; denied: ActionDenied & { error: string } }
+> {
+  const intakeRepo = getIntakeQuoteRepository();
+  const [people, quote, teams, rbacConfig] = await Promise.all([
+    loadStaffPeople(ctx),
+    intakeRepo.getQuoteById<Quote>(ctx, quoteId, { includeRestricted: true }),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actor = people.find((p) => p.id === byId) ?? null;
+  if (
+    !hasPersonPermission(actor, 'quote:edit', {
+      allPeople: people,
+      teams,
+      config: { rbac: rbacConfig },
+    })
+  ) {
+    return {
+      ok: false,
+      denied: { ...buildActionDenied('FORBIDDEN', noPermMsg), error: noPermMsg },
+    };
+  }
+  if (!quote) {
+    const msg = 'Quote not found.';
+    return {
+      ok: false,
+      denied: { ...buildActionDenied('FORBIDDEN', msg), error: msg },
+    };
+  }
+  const linkedEnq = quote.linkedEnquiryId
+    ? await intakeRepo.getEnquiryById<Enquiry>(ctx, quote.linkedEnquiryId, {
+        includeRestricted: true,
+      })
+    : null;
+  const refMatterIds = Array.from(
+    new Set(
+      [quote.convertedMatterId, linkedEnq?.convertedMatterId].filter(
+        (x): x is string => Boolean(x),
+      ),
+    ),
+  );
+  const refMatters =
+    refMatterIds.length > 0
+      ? await getMatterRepository().listMattersByIds<Matter>(ctx, refMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
+  const visibility = buildRecordVisibility({ teams }, actor, {
+    people,
+    matters: refMatters,
+    enquiries: linkedEnq ? [linkedEnq] : [],
+    quotes: [quote],
+    teams,
+    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
+  });
+  if (!visibility.canViewQuote(quote)) {
+    const msg = 'Quote not found.';
+    return {
+      ok: false,
+      denied: { ...buildActionDenied('FORBIDDEN', msg), error: msg },
+    };
+  }
+  return { ok: true, quote };
+}
+
 export async function markQuoteSentRecord(
   quoteId: string,
   byId: string,
@@ -19140,34 +20642,14 @@ export async function markQuoteSentRecord(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (
-    !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: people,
-      teams,
-    })
-  ) {
-    const msg = 'You do not have permission (quote:edit) to mark a quote as sent.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
-  const visibility = buildRecordVisibility({ teams }, actor, {
-    people,
-    matters,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const quote = quotes.find((q) => q.id === quoteId);
-  if (!quote || !visibility.canViewQuote(quote)) {
-    const msg = 'Quote not found.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
+  const scoped = await loadScopedQuoteForEdit(
+    ctx,
+    byId,
+    quoteId,
+    'You do not have permission (quote:edit) to mark a quote as sent.',
+  );
+  if (!scoped.ok) return scoped.denied;
+  const { quote } = scoped;
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -19220,34 +20702,14 @@ export async function logQuoteFollowUpRecord(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (
-    !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: people,
-      teams,
-    })
-  ) {
-    const msg = 'You do not have permission (quote:edit) to log quote follow-ups.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
-  const visibility = buildRecordVisibility({ teams }, actor, {
-    people,
-    matters,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const quote = quotes.find((q) => q.id === quoteId);
-  if (!quote || !visibility.canViewQuote(quote)) {
-    const msg = 'Quote not found.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
+  const scoped = await loadScopedQuoteForEdit(
+    ctx,
+    byId,
+    quoteId,
+    'You do not have permission (quote:edit) to log quote follow-ups.',
+  );
+  if (!scoped.ok) return scoped.denied;
+  const { quote } = scoped;
   if (!input.note?.trim()) {
     return { error: 'Please enter a follow-up note.' };
   }
@@ -19270,7 +20732,9 @@ export async function logQuoteFollowUpRecord(
   if (quote.status === 'Follow-up due' && nextDate > todayYmd) {
     quote.status = 'Sent';
   }
-  quote.status = evaluateQuoteEffectiveStatus(quote, now);
+  applyQuoteEffectiveLifecycle(quote, now, {
+    appendExpiredTimeline: true,
+  });
   quote.updatedAt = nowIso;
   quote.updatedById = byId;
 
@@ -19333,34 +20797,14 @@ export async function reviseQuoteRecord(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (
-    !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: people,
-      teams,
-    })
-  ) {
-    const msg = 'You do not have permission (quote:edit) to revise quotes.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
-  const visibility = buildRecordVisibility({ teams }, actor, {
-    people,
-    matters,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const quote = quotes.find((q) => q.id === quoteId);
-  if (!quote || !visibility.canViewQuote(quote)) {
-    const msg = 'Quote not found.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
+  const scoped = await loadScopedQuoteForEdit(
+    ctx,
+    byId,
+    quoteId,
+    'You do not have permission (quote:edit) to revise quotes.',
+  );
+  if (!scoped.ok) return scoped.denied;
+  const { quote } = scoped;
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -19710,34 +21154,14 @@ export async function recordQuoteOutcomeRecord(
   return runWithAuditStagingScope(async () => {
   const ctx = resolveDefaultServiceTenantContext(null, byId);
   const intakeRepo = getIntakeQuoteRepository();
-  const [people, matters, quotes, teams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
-    getHrAndRbacRepository().listAllTeams<Team>(ctx),
-  ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
-  if (
-    !hasPersonPermission(actor, 'quote:edit', {
-      allPeople: people,
-      teams,
-    })
-  ) {
-    const msg = 'You do not have permission (quote:edit) to record a quote outcome.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
-  const visibility = buildRecordVisibility({ teams }, actor, {
-    people,
-    matters,
-    quotes,
-    teams,
-    hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-  });
-  const quote = quotes.find((q) => q.id === quoteId);
-  if (!quote || !visibility.canViewQuote(quote)) {
-    const msg = 'Quote not found.';
-    return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
-  }
+  const scoped = await loadScopedQuoteForEdit(
+    ctx,
+    byId,
+    quoteId,
+    'You do not have permission (quote:edit) to record a quote outcome.',
+  );
+  if (!scoped.ok) return scoped.denied;
+  const { quote } = scoped;
 
   if (input.outcome === 'Declined') {
     if (!input.declineReason) {
@@ -19827,21 +21251,19 @@ export async function prepareQuoteConversionRecord(
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
-  const [store, people, organisations, links, matters, enquiries, quotes, teams] = await Promise.all([
+  const [store, staffPeople, quoteDirect, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(ctx),
-    partyRepo.listAllPeople<Person>(ctx),
-    partyRepo.listAllOrganisations<Organisation>(ctx),
-    partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
-    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
-    intakeRepo.listAllQuotesUnfiltered<Quote>(ctx),
+    loadStaffPeople(ctx),
+    intakeRepo.getQuoteById<Quote>(ctx, quoteId, { includeRestricted: true }),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
   ]);
-  const actor = people.find((p) => p.id === byId) ?? null;
+  const actor = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !hasPersonPermission(actor, 'matter:create', {
-      allPeople: people,
+      allPeople: staffPeople,
       teams,
+      config: { rbac: rbacConfig },
     })
   ) {
     const msg = 'You do not have permission (matter:create) to convert a quote to a matter.';
@@ -19852,16 +21274,38 @@ export async function prepareQuoteConversionRecord(
       conflictReasons: [msg],
     };
   }
+  if (!quoteDirect) {
+    return { ok: false, error: 'Quote not found.' };
+  }
+  const quote = quoteDirect;
+  const linkedEnq = quote.linkedEnquiryId
+    ? await intakeRepo.getEnquiryById<Enquiry>(ctx, quote.linkedEnquiryId, {
+        includeRestricted: true,
+      })
+    : null;
+  const refMatterIds = Array.from(
+    new Set(
+      [quote.convertedMatterId, linkedEnq?.convertedMatterId].filter(
+        (x): x is string => Boolean(x),
+      ),
+    ),
+  );
+  const refMatters =
+    refMatterIds.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(ctx, refMatterIds, {
+          includeRestricted: true,
+        })
+      : [];
   const visibility = buildRecordVisibility(store, actor, {
-    people,
-    matters,
-    enquiries,
-    quotes,
+    people: staffPeople,
+    matters: refMatters,
+    enquiries: linkedEnq ? [linkedEnq] : [],
+    quotes: [quote],
     teams,
     hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
+    rbacConfig,
   });
-  const quote = quotes.find((q) => q.id === quoteId);
-  if (!quote || !visibility.canViewQuote(quote)) {
+  if (!visibility.canViewQuote(quote)) {
     return { ok: false, error: 'Quote not found.' };
   }
 
@@ -19870,26 +21314,37 @@ export async function prepareQuoteConversionRecord(
   const today = toIsoDate(now);
   const actorName = actor ? personDisplayName(actor) : byId;
   const actorHasRiskView = hasPersonPermission(actor, 'risk:view', {
-    allPeople: people,
+    allPeople: staffPeople,
     teams,
+    config: { rbac: rbacConfig },
   });
 
   let personId = quote.linkedPersonId;
   let orgId = quote.linkedOrganisationId;
 
   // If linked to an enquiry that already has linkedPersonId / linkedOrganisationId, inherit if missing
-  const linkedEnq = quote.linkedEnquiryId
-    ? enquiries.find((e) => e.id === quote.linkedEnquiryId)
-    : undefined;
   if (linkedEnq) {
     if (!personId && linkedEnq.linkedPersonId) personId = linkedEnq.linkedPersonId;
     if (!orgId && linkedEnq.linkedOrganisationId) orgId = linkedEnq.linkedOrganisationId;
   }
 
+  const [existingOrgDirect, existingPersonDirect, referrerPersonDirect] =
+    await Promise.all([
+      orgId
+        ? partyRepo.getOrganisationById<Organisation>(ctx, orgId)
+        : Promise.resolve<Organisation | null>(null),
+      personId
+        ? partyRepo.getPersonById<Person>(ctx, personId)
+        : Promise.resolve<Person | null>(null),
+      linkedEnq?.referrerPersonId
+        ? partyRepo.getPersonById<Person>(ctx, linkedEnq.referrerPersonId)
+        : Promise.resolve<Person | null>(null),
+    ]);
+
   const hasOrgName = Boolean(quote.prospectOrganisationName.trim());
   const hasPersonName = Boolean(quote.prospectName.trim());
-  const existingOrg = orgId ? organisations.find((o) => o.id === orgId) : undefined;
-  const existingPerson = personId ? people.find((p) => p.id === personId) : undefined;
+  const existingOrg = existingOrgDirect ?? undefined;
+  const existingPerson = existingPersonDirect ?? undefined;
   const clientOrgName = existingOrg?.legalName || quote.prospectOrganisationName.trim();
   const clientPersonName = existingPerson
     ? personDisplayName(existingPerson)
@@ -19940,6 +21395,63 @@ export async function prepareQuoteConversionRecord(
     });
   });
 
+  const nameParts = clientPersonName.split(/\s+/).filter(Boolean);
+  const firstNameForSearch = existingPerson?.firstName ?? (nameParts[0] || '');
+  const lastNameForSearch = existingPerson?.surname ?? nameParts.slice(1).join(' ');
+  const searchEmail =
+    quote.prospectEmail ||
+    existingPerson?.emails[0]?.address ||
+    existingOrg?.generalEmail ||
+    '';
+  const searchPhone =
+    quote.prospectPhone ||
+    existingPerson?.phones[0]?.number ||
+    existingOrg?.mainPhone ||
+    '';
+  const graph = await loadFullConflictSearchGraph(
+    ctx,
+    {
+      terms: [
+        clientOrgName,
+        clientPersonName,
+        firstNameForSearch,
+        lastNameForSearch,
+        ...enqOtherPartyNames,
+      ].filter(Boolean),
+      emails: [searchEmail].filter(Boolean),
+      phones: [searchPhone].filter(Boolean),
+      postcodes: [
+        existingOrg?.registeredAddress?.postcode ?? '',
+        existingOrg?.billingAddress?.postcode ?? '',
+        existingPerson?.addresses[0]?.postcode ?? '',
+        linkedEnq?.address?.postcode ?? '',
+      ].filter(Boolean),
+      companyNumbers: [existingOrg?.companyNumber ?? ''].filter(Boolean),
+      linkedPersonIds: [personId, linkedEnq?.referrerPersonId ?? null].filter(
+        (x): x is string => Boolean(x),
+      ),
+      linkedOrganisationIds: [orgId].filter((x): x is string => Boolean(x)),
+      excludeEnquiryId: quote.linkedEnquiryId ?? null,
+    },
+    byId,
+    staffPeople,
+    teams,
+    rbacConfig,
+  );
+  const people = dedupeById([
+    ...staffPeople,
+    ...graph.people,
+    ...(existingPerson ? [existingPerson] : []),
+    ...(referrerPersonDirect ? [referrerPersonDirect] : []),
+  ]);
+  const organisations = dedupeById([
+    ...graph.organisations,
+    ...(existingOrg ? [existingOrg] : []),
+  ]);
+  const matters = graph.matters;
+  const enquiries = graph.enquiries;
+  const links = graph.links;
+
   const effectiveParties = buildEffectiveConflictParties({
     submittedParties,
     clientId: orgId || personId || null,
@@ -19966,8 +21478,8 @@ export async function prepareQuoteConversionRecord(
       organisations,
       links,
       tenantId: getActiveTenantConfiguration().tenantId,
-      canView: visibility.canViewMatter,
-      canViewEnquiry: visibility.canViewEnquiry,
+      canView: graph.canViewMatter,
+      canViewEnquiry: graph.canViewEnquiry,
     },
   );
   const reconciledMatches = reconcileServerConflictMatches({
@@ -19978,25 +21490,14 @@ export async function prepareQuoteConversionRecord(
     reviewedAtIso: nowIso,
   });
 
-  const nameParts = clientPersonName.split(/\s+/).filter(Boolean);
-  const firstNameForSearch = existingPerson?.firstName ?? (nameParts[0] || '');
-  const lastNameForSearch = existingPerson?.surname ?? nameParts.slice(1).join(' ');
   const prelimConflicts = runEnquiryConflictSearch(
     {
       firstName: firstNameForSearch,
       lastName: lastNameForSearch,
       callingOnBehalfOf: clientOrgName,
       otherPartiesNamed: linkedEnq?.otherPartiesNamed ?? '',
-      email:
-        quote.prospectEmail ||
-        existingPerson?.emails[0]?.address ||
-        existingOrg?.generalEmail ||
-        '',
-      phone:
-        quote.prospectPhone ||
-        existingPerson?.phones[0]?.number ||
-        existingOrg?.mainPhone ||
-        '',
+      email: searchEmail,
+      phone: searchPhone,
       linkedPersonId: personId ?? null,
       linkedOrganisationId: orgId ?? null,
     },
@@ -20004,10 +21505,10 @@ export async function prepareQuoteConversionRecord(
     organisations,
     matters,
     store.values,
-    enquiries.filter((e) => visibility.canViewEnquiry(e)),
+    enquiries.filter((e) => graph.canViewEnquiry(e)),
     quote.linkedEnquiryId ?? null,
     links,
-    visibility.canViewMatter,
+    graph.canViewMatter,
     getActiveTenantConfiguration().tenantId,
   );
 
@@ -20483,7 +21984,7 @@ export async function syncMatterCostsRatesFromPms(
   const ctx = resolveDefaultServiceTenantContext(null, byId, options);
   const activeSession = getActiveActorSession();
   const [syncPeople, syncTeams] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
   ]);
   const syncActor = syncPeople.find((p) => p.id === byId && !p.mergedIntoId) ?? null;
@@ -20533,12 +22034,11 @@ export async function syncMatterCostsRatesFromPms(
   let next!: MatterCostsConfig;
   await runWithAuditStagingScope(() =>
     catalogueRepo.withTenantTransaction(ctx, async () => {
-      const [store, pms, dbOverride] = await Promise.all([
+      const [store, feeEarners, dbOverride] = await Promise.all([
         loadTenantCatalogueStoreView(ctx),
-        getTenantPmsSource(ctx),
+        getPmsRepository().listFeeEarnersOnly(ctx),
         catalogueRepo.getMatterCostsConfig<MatterCostsConfig>(ctx),
       ]);
-      const feeEarners = pms.listFeeEarners();
       const base = resolveEffectiveMatterCostsConfig(
         tenantCfg,
         dbOverride ?? store.matterCostsConfig,
@@ -20626,7 +22126,7 @@ export async function resolveOrProvisionEntraEmployee(
   );
   const hrRepo = getHrAndRbacRepository();
   const [prelimPeople, prelimTeams, dbRbacOverride] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(signInCtx),
+    loadStaffPeople(signInCtx),
     hrRepo.listAllTeams<Team>(signInCtx),
     hrRepo.getRbacConfigOverride<RbacConfiguration>(signInCtx),
   ]);
@@ -20701,7 +22201,7 @@ export async function resolveOrProvisionEntraEmployee(
   return runWithAuditStagingScope(async () => {
     const partyRepo = getPartyRepository();
     const [people, teams] = await Promise.all([
-      partyRepo.listAllPeople<Person>(signInCtx),
+      loadStaffPeople(signInCtx),
       hrRepo.listAllTeams<Team>(signInCtx),
     ]);
     const {
@@ -20905,7 +22405,11 @@ function resolveActorFromPeopleForKeyDates(
 async function resolveKeyDatesActorAndData(
   store: FirmStore | null,
   byId: string,
-  options?: { tenantCtx?: TenantContext | null },
+  options?: {
+    tenantCtx?: TenantContext | null;
+    matterId?: string | null;
+    includeVisibleMatters?: boolean;
+  },
 ): Promise<{
   ctx: TenantContext;
   actor: Person | null;
@@ -20924,9 +22428,8 @@ async function resolveKeyDatesActorAndData(
   } catch {
     return null;
   }
-  const [people, matters, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(prelimCtx),
-    getMatterRepository().listAllMattersUnfiltered<Matter>(prelimCtx),
+  const [people, teams, rbacConfig] = await Promise.all([
+    loadStaffPeople(prelimCtx),
     getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
     loadEffectiveTenantRbacConfig(prelimCtx),
   ]);
@@ -20956,7 +22459,7 @@ async function resolveKeyDatesActorAndData(
       ctx: prelimCtx,
       actor: null,
       people,
-      matters,
+      matters: [],
       teams,
       rbacOptions: baseRbacOptions,
       personRbacOptions,
@@ -20965,18 +22468,38 @@ async function resolveKeyDatesActorAndData(
   const ctx = resolveDefaultServiceTenantContext(store, actor.id, {
     tenantCtx: options?.tenantCtx,
   });
+  const finalRbacOptions: ResolvePersonPermissionsOptions = {
+    ...baseRbacOptions,
+    context: ctx,
+    tokenRolesActorId: actor.id,
+    tenantId: ctx.tenantId,
+  };
+  let matters: Matter[] = [];
+  if (options?.matterId?.trim()) {
+    const m = await getMatterRepository().getMatterById<Matter>(
+      ctx,
+      options.matterId.trim(),
+      { includeRestricted: true },
+    );
+    if (m) matters = [m];
+  } else if (options?.includeVisibleMatters) {
+    const hasRestrictedAccess = hasPersonPermission(
+      actor,
+      'matter:restricted:access',
+      finalRbacOptions,
+    );
+    matters = await getMatterRepository().listVisibleMatters<Matter>(ctx, {
+      viewerId: actor.id,
+      hasRestrictedMatterAccess: hasRestrictedAccess,
+    });
+  }
   return {
     ctx,
     actor,
     people,
     matters,
     teams,
-    rbacOptions: {
-      ...baseRbacOptions,
-      context: ctx,
-      tokenRolesActorId: actor.id,
-      tenantId: ctx.tenantId,
-    },
+    rbacOptions: finalRbacOptions,
     personRbacOptions: {
       ...personRbacOptions,
       tenantId: ctx.tenantId,
@@ -21419,6 +22942,34 @@ async function runPostCommitKeyDateCalendarSync(params: {
   return {};
 }
 
+async function loadKeyDateReminderTasks(
+  ctx: TenantContext,
+  keyDateIds: readonly string[],
+  reminderStates: readonly KeyDateReminderState[] = [],
+): Promise<Task[]> {
+  const cleanKdIds = Array.from(
+    new Set(keyDateIds.map((id) => id?.trim()).filter((id): id is string => Boolean(id))),
+  );
+  const taskIds = Array.from(
+    new Set(
+      reminderStates
+        .map((rs) => rs.taskId?.trim())
+        .filter((id): id is string => Boolean(id)),
+    ),
+  );
+  const idempotencyKeys = cleanKdIds.map((kdId) =>
+    buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId),
+  );
+  if (taskIds.length === 0 && cleanKdIds.length === 0 && idempotencyKeys.length === 0) {
+    return [];
+  }
+  return getTaskWorkflowRepository().listTasksByIdsOrIdempotencyKeys<Task>(ctx, {
+    ids: taskIds,
+    keyDateIds: cleanKdIds,
+    idempotencyKeys,
+  });
+}
+
 async function commitKeyDateDomainWritesInPostgres(params: {
   ctx: TenantContext;
   keyDatesToUpsert?: readonly KeyDate[];
@@ -21517,7 +23068,7 @@ export async function getMatterKeyDatesSnapshot(
 }> {
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(null, userId);
+    resolved = await resolveKeyDatesActorAndData(null, userId, { matterId });
   } catch {
     resolved = null;
   }
@@ -21692,7 +23243,9 @@ export async function createOrProposeKeyDateRecord(
     const txResult = await keyDateRepo.withTenantTransaction(
       prelimCtx,
       async () => {
-        const resolved = await resolveKeyDatesActorAndData(null, byId);
+        const resolved = await resolveKeyDatesActorAndData(null, byId, {
+          matterId: input.matterId,
+        });
         if (!resolved || !resolved.actor) {
           return {
             ok: false as const,
@@ -21789,7 +23342,11 @@ export async function createOrProposeKeyDateRecord(
             (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
           );
           if (!isMarkedNotApplicable) {
-            const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+            const storeTasks = await loadKeyDateReminderTasks(
+              ctx,
+              [kd.id],
+              reminderStatesWorking,
+            );
             const beforeTaskJsonById = new Map(
               storeTasks.map((t) => [t.id, JSON.stringify(t)]),
             );
@@ -21955,7 +23512,11 @@ export async function proposeProvisionalKeyDateRecord(
             (na) => na.keyDateTypeId === kd.keyDateTypeId && Boolean(na.reason?.trim()),
           );
           if (!isMarkedNotApplicable) {
-            const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+            const storeTasks = await loadKeyDateReminderTasks(
+              ctx,
+              [kd.id],
+              reminderStatesWorking,
+            );
             const beforeTaskJsonById = new Map(
               storeTasks.map((t) => [t.id, JSON.stringify(t)]),
             );
@@ -22060,7 +23621,10 @@ async function loadKeyDateForActorOrClassifyError(
     return { kd: null, error: 'Key date not found.', matter: null, enquiry: null };
   }
   const matter = kd.matterId
-    ? matters.find((m) => m.id === kd.matterId) ?? null
+    ? matters.find((m) => m.id === kd.matterId) ??
+      (await getMatterRepository().getMatterById<Matter>(ctx, kd.matterId, {
+        includeRestricted: true,
+      }))
     : null;
   const enquiry = kd.enquiryId
     ? await getIntakeQuoteRepository().getEnquiryById<Enquiry>(ctx, kd.enquiryId, {
@@ -22167,7 +23731,11 @@ export async function verifyProposedKeyDateRecord(
         );
         const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, verifier.id);
 
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const storeTasks = await loadKeyDateReminderTasks(
+          ctx,
+          [kd.id, kd.supersedesKeyDateId].filter((id): id is string => Boolean(id)),
+          reminderStatesWorking,
+        );
         const beforeTaskJsonById = new Map(
           storeTasks.map((t) => [t.id, JSON.stringify(t)]),
         );
@@ -22456,7 +24024,11 @@ export async function supersedeConfirmedKeyDateRecord(
           (na) => na.keyDateTypeId === existing.keyDateTypeId && Boolean(na.reason?.trim()),
         );
 
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const storeTasks = await loadKeyDateReminderTasks(
+          ctx,
+          [supersededKeyDate.id, replacementKeyDate.id],
+          reminderStatesWorking,
+        );
         const beforeTaskJsonById = new Map(
           storeTasks.map((t) => [t.id, JSON.stringify(t)]),
         );
@@ -22682,7 +24254,11 @@ export async function resolveKeyDateOutcomeRecord(
         const reminderStatesWorking = existingReminder ? [existingReminder] : [];
         const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, actor.id);
 
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const storeTasks = await loadKeyDateReminderTasks(
+          ctx,
+          [kd.id],
+          reminderStatesWorking,
+        );
         const beforeTaskJsonById = new Map(
           storeTasks.map((t) => [t.id, JSON.stringify(t)]),
         );
@@ -22800,7 +24376,12 @@ export async function reassignKeyDateTeamRecord(
         const stagedAudit: AuditEntry[] = [];
         let pendingIdx = 0;
 
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const existingReminder = await keyDateRepo.getReminderState(ctx, kd.id, actor.id);
+        const storeTasks = await loadKeyDateReminderTasks(
+          ctx,
+          [kd.id],
+          existingReminder ? [existingReminder] : [],
+        );
         const beforeTaskJsonById = new Map(
           storeTasks.map((t) => [t.id, JSON.stringify(t)]),
         );
@@ -22886,7 +24467,9 @@ export async function recordKeyDateNotApplicableRecord(
     const keyDateRepo = getKeyDateRepository();
 
     return await keyDateRepo.withTenantTransaction(prelimCtx, async () => {
-      const resolved = await resolveKeyDatesActorAndData(null, byId);
+      const resolved = await resolveKeyDatesActorAndData(null, byId, {
+        matterId: input.matterId,
+      });
       if (!resolved || !resolved.actor) {
         return { ok: false, error: `Unknown or unauthenticated user "${byId}".` };
       }
@@ -22941,8 +24524,7 @@ export async function recordKeyDateNotApplicableRecord(
         .map((kd) => kd.id);
       const deletedTaskIds: string[] = [];
       if (matchingKeyDateIds.length > 0) {
-        const taskRepo = getTaskWorkflowRepository();
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const storeTasks = await loadKeyDateReminderTasks(ctx, matchingKeyDateIds);
         const idempotencyKeys = new Set(
           matchingKeyDateIds.map((kdId) =>
             buildKeyDateReminderIdempotencyKey(kdId, ctx.tenantId),
@@ -23089,7 +24671,7 @@ export async function acknowledgeKeyDateReminderRecord(
       let changedTasks: Task[] = [];
       let deletedTaskIds: string[] = [];
       if (reminderStatesWorking.length === 0) {
-        const storeTasks = await taskRepo.listAllTasksUnfiltered<Task>(ctx);
+        const storeTasks = await loadKeyDateReminderTasks(ctx, [keyDateId]);
         const beforeTaskJsonById = new Map(
           storeTasks.map((t) => [t.id, JSON.stringify(t)]),
         );
@@ -24110,7 +25692,7 @@ export async function runKeyDateReminderSchedulerRecord(
       effectiveTenantCtx ??
       resolveDefaultServiceTenantContext(null, null);
     [prelimPeople, prelimTeams] = await Promise.all([
-      getPartyRepository().listAllPeople<Person>(readPeopleCtx),
+      loadStaffPeople(readPeopleCtx),
       getHrAndRbacRepository().listAllTeams<Team>(readPeopleCtx),
     ]);
   } catch {
@@ -24214,7 +25796,9 @@ export async function queryKeyDatesTeamDiaryRecord(
 ): Promise<TeamDiaryEntry[]> {
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(null, byId);
+    resolved = await resolveKeyDatesActorAndData(null, byId, {
+      includeVisibleMatters: true,
+    });
   } catch {
     resolved = null;
   }
@@ -24223,10 +25807,17 @@ export async function queryKeyDatesTeamDiaryRecord(
   const config = await getKeyDatesConfig({ ctx, userId: viewer.id });
   const keyDateRepo = getKeyDateRepository();
   const intakeRepo = getIntakeQuoteRepository();
+  const hasRestrictedMatterAccess = hasPersonPermission(
+    viewer,
+    'matter:restricted:access',
+    rbacOptions,
+  );
   const [keyDates, reminderStates, enquiries] = await Promise.all([
     keyDateRepo.listAllVisibleKeyDates(ctx, viewer.id),
     keyDateRepo.listAllReminderStates(ctx, viewer.id),
-    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+    intakeRepo.listVisibleEnquiries<Enquiry>(ctx, viewer.id, {
+      hasRestrictedMatterAccess,
+    }),
   ]);
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, rbacOptions),
@@ -24253,7 +25844,9 @@ export async function getKeyDateExceptionsReportRecord(
 ): Promise<KeyDateException[]> {
   let resolved: Awaited<ReturnType<typeof resolveKeyDatesActorAndData>> = null;
   try {
-    resolved = await resolveKeyDatesActorAndData(null, byId);
+    resolved = await resolveKeyDatesActorAndData(null, byId, {
+      includeVisibleMatters: true,
+    });
   } catch {
     resolved = null;
   }
@@ -24542,7 +26135,7 @@ export async function saveWorkTypesConfigRecord(
 
   const [store, people, teams, rbacConfig] = await Promise.all([
     loadTenantCatalogueStoreView(ctx),
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);
@@ -24687,7 +26280,7 @@ export async function updateMatterLifecycleStatusRecord(
         const existing = await matterRepo.getMatterById<Matter>(ctx, matterId, {
           includeRestricted: true,
         });
-        const people = await partyRepo.listAllPeople<Person>(ctx);
+        const people = await loadStaffPeople(ctx);
         const teams = await hrRepo.listAllTeams<Team>(ctx);
         const rbacConfig = await loadEffectiveTenantRbacConfig(ctx);
         const dbMatterStatusValues =
@@ -25018,7 +26611,7 @@ async function resolveRateOverrideActor(
   permSet: ResolvedPermissionSet;
 }> {
   const [people, teams, rbacOverride] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(ctx),
   ]);
@@ -25819,7 +27412,7 @@ async function resolveRegisterActorAndConfig(
     explicitOptions?.tenantConfig,
   );
   const [people, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx, undefined, tenantCfg),
   ]);
@@ -25988,8 +27581,16 @@ export async function listRegistersWorkspaceDataRecord(
       );
     }
 
-    const allMatters = await getMatterRepository().listAllMattersUnfiltered<Matter>(ctx);
-    const visibleMatters = allMatters.filter((m) =>
+    const candidateMatters = await getMatterRepository().listVisibleMatters<Matter>(
+      ctx,
+      {
+        viewerId: actor.id,
+        hasRestrictedMatterAccess: permSet.permissions.has(
+          'matter:restricted:access',
+        ),
+      },
+    );
+    const visibleMatters = candidateMatters.filter((m) =>
       canPersonAccessMatter(m, actor.id, actor, {
         allPeople: people,
         teams,
@@ -25997,7 +27598,7 @@ export async function listRegistersWorkspaceDataRecord(
       }),
     );
     const employeeMatterVisibility = buildMatterVisibilityForEmployeeRecord(
-      allMatters,
+      visibleMatters,
       (m) =>
         canPersonAccessMatter(m, actor.id, actor, {
           allPeople: people,
@@ -27293,6 +28894,210 @@ export async function runScheduledRegisterRemindersJobSweep(options?: {
   };
 }
 
+export interface QuoteExpiryJobSummary {
+  readonly tenantId: string;
+  readonly localDate: string;
+  readonly candidatesEvaluated: number;
+  readonly expiredCount: number;
+}
+
+/**
+ * Transitions overdue `Sent` and `Follow-up due` quotes (`validUntil < localDate`)
+ * to `'Expired'`, appends a single `'Quote expired'` timeline entry, and writes a
+ * zero-PII audit entry in PostgreSQL (ADR 0030, `R663`).
+ */
+export async function executeQuoteExpiryForTenant(
+  ctx: TenantContext,
+  options: {
+    triggerSource: 'scheduled' | 'manual';
+    triggeredById: string;
+    timeZone?: string;
+    defaultRunHourLocal?: number;
+    statementTimeoutMs?: number;
+    signal?: AbortSignal;
+    tenantConfig?: TenantConfiguration;
+    /** Test-only hook invoked right before expiring each candidate quote (`R675`). */
+    onBeforeExpireQuote?: (quoteId: string) => Promise<void>;
+  },
+): Promise<ControlledJobRunOutcome<{ summary: QuoteExpiryJobSummary }>> {
+  const tenantConfig = resolveVerifiedTenantConfiguration(ctx, options.tenantConfig);
+  const effectiveTimeZone =
+    options.timeZone?.trim() ||
+    tenantConfig.timeZone ||
+    'Europe/London';
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  return getJobRunRepository().executeControlledTenantJobRun(ctx, {
+    jobKey: 'quote-expiry',
+    triggerSource: options.triggerSource,
+    triggeredById: options.triggeredById,
+    timeZone: effectiveTimeZone,
+    targetLocalHour: options.defaultRunHourLocal ?? 2,
+    now,
+    statementTimeoutMs: options.statementTimeoutMs,
+    signal: options.signal,
+    work: async ({ localDate }) => {
+      const intakeRepo = getIntakeQuoteRepository();
+      const candidates = await intakeRepo.listOverdueQuotesForLifecycleSweep<Quote>(
+        ctx,
+        localDate,
+      );
+      const lifecycleNow = new Date(`${localDate}T${nowIso.slice(11)}`);
+      let expiredCount = 0;
+
+      for (const quote of candidates) {
+        if (
+          options.onBeforeExpireQuote &&
+          (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST))
+        ) {
+          await options.onBeforeExpireQuote(quote.id);
+        }
+        const expireResult = await intakeRepo.expireQuoteIfOverdue<Quote>(
+          ctx,
+          quote.id,
+          {
+            localDate,
+            applyTransition: (freshQuote) => {
+              const previousStatus = freshQuote.status;
+              const { changed, newlyExpired } = applyQuoteEffectiveLifecycle(
+                freshQuote,
+                lifecycleNow,
+                { appendExpiredTimeline: true },
+              );
+              if (!changed && !newlyExpired) {
+                return { shouldPersist: false, previousStatus };
+              }
+              freshQuote.updatedAt = nowIso;
+              return { shouldPersist: true, previousStatus };
+            },
+            onPersistedInTx: async (expiredQuote, previousStatus) => {
+              await appendTenantAuditEntries(ctx, [
+                {
+                  recordType: 'quote',
+                  recordId: expiredQuote.id,
+                  action: 'status-change',
+                  field: 'Quote lifecycle status',
+                  oldValue: previousStatus,
+                  newValue: expiredQuote.status,
+                  byId: options.triggeredById,
+                  at: nowIso,
+                  reason: `Valid-until date (${expiredQuote.validUntil ?? localDate}) passed without an outcome.`,
+                },
+              ]);
+            },
+          },
+        );
+        if (!expireResult.expired || !expireResult.quote) {
+          continue;
+        }
+        expiredCount += 1;
+      }
+
+      const summary: QuoteExpiryJobSummary = {
+        tenantId: ctx.tenantId,
+        localDate,
+        candidatesEvaluated: candidates.length,
+        expiredCount,
+      };
+
+      console.info(
+        JSON.stringify({
+          level: 'info',
+          event: 'quote_expiry.completed',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          localDate,
+          candidatesEvaluated: candidates.length,
+          expiredCount,
+        }),
+      );
+
+      return {
+        result: { summary },
+        summary: {
+          candidatesEvaluated: candidates.length,
+          expiredCount,
+        },
+      };
+    },
+  });
+}
+
+export async function runScheduledQuoteExpiryJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) continue;
+    try {
+      const outcome = await guardedJob(
+        'quote-expiry',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeQuoteExpiryForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:quote-expiry',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal,
+            statementTimeoutMs: timeoutMs,
+            tenantConfig,
+            signal,
+          });
+        },
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status: outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
+}
+
 export interface OutboxDrainSweepSummary extends ScheduledTenantJobSweepSummary {
   readonly resultsByTenant: Record<string, CombinedOutboxDrainResult>;
 }
@@ -27850,6 +29655,7 @@ export async function executeNotificationDigestsForTenant(
             subject: rendered.subject,
             htmlBody: rendered.htmlBody,
             textBody: rendered.textBody,
+            nextAttemptAt: nowIso,
             createdByPersonId: triggeredById,
             correlationId: ctx.correlationId,
           });
@@ -28042,7 +29848,7 @@ export async function searchGlobalRecords(
   const ctx =
     options?.tenantCtx ?? resolveDefaultServiceTenantContext(null, byId);
   const [people, teams, rbacConfig] = await Promise.all([
-    getPartyRepository().listAllPeople<Person>(ctx),
+    loadStaffPeople(ctx),
     getHrAndRbacRepository().listAllTeams<Team>(ctx),
     loadEffectiveTenantRbacConfig(ctx),
   ]);

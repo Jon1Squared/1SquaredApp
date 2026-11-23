@@ -1847,18 +1847,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
     };
   }
 
-  private async refreshSnapshotInTx(
-    tx: TenantSqlClient,
+  private mapFeeEarnerRows(
     ctx: TenantContext,
-  ): Promise<HydratedTenantPmsSnapshot> {
-    const extractInfo = await this.getExtractInfoInTx(tx, ctx);
-    const pmsLinks = await this.listPmsLinksInTx(tx, ctx);
-
-    const feRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
-      [ctx.tenantId],
-    );
-    const feeEarners: TenantPmsFeeEarner[] = feRes.rows.map((row) => {
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsFeeEarner[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_earners');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEarner>;
       return {
@@ -1877,13 +1870,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
         active: String(p.active ?? row.status ?? 'Yes'),
       };
     });
-    const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+  }
 
-    const clientRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
-      [ctx.tenantId],
-    );
-    const clients: TenantPmsClient[] = clientRes.rows.map((row) => {
+  private mapClientRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsClient[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_clients');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsClient>;
       return {
@@ -1908,12 +1901,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
         status: String(p.status ?? 'Active'),
       };
     });
+  }
 
-    const matterRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
-      [ctx.tenantId],
-    );
-    const matters: TenantPmsMatter[] = matterRes.rows.map((row) => {
+  private mapMatterRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsMatter[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_matters');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsMatter>;
       return {
@@ -1949,12 +1943,14 @@ export class TenantPmsRepository extends TenantScopedRepository {
         third_party_payer: String(p.third_party_payer ?? ''),
       };
     });
+  }
 
-    const estRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 ORDER BY estimate_date ASC, estimate_id ASC',
-      [ctx.tenantId],
-    );
-    const feeEstimates: TenantPmsFeeEstimate[] = estRes.rows.map((row) => {
+  private mapFeeEstimateRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+    feById: ReadonlyMap<string, TenantPmsFeeEarner>,
+  ): TenantPmsFeeEstimate[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_estimates');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEstimate>;
       const givenBy = String(p.given_by ?? '');
@@ -1978,12 +1974,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
         notes: String(p.notes ?? ''),
       };
     });
+  }
 
-    const invRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC',
-      [ctx.tenantId],
-    );
-    const invoices: TenantPmsInvoiceRow[] = invRes.rows.map((row) => {
+  private mapInvoiceRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsInvoiceRow[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_invoices');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsInvoiceRow>;
       return {
@@ -2003,12 +2000,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
         credit_note_for: p.credit_note_for ? String(p.credit_note_for) : null,
       };
     });
+  }
 
-    const payRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
-      [ctx.tenantId],
-    );
-    const payments: TenantPmsPayment[] = payRes.rows.map((row) => {
+  private mapPaymentRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsPayment[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_payments');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsPayment>;
       return {
@@ -2022,12 +2020,14 @@ export class TenantPmsRepository extends TenantScopedRepository {
         reference: String(p.reference ?? ''),
       };
     });
+  }
 
-    const teRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC',
-      [ctx.tenantId],
-    );
-    const timeEntries: TenantPmsTimeEntry[] = teRes.rows.map((row) => {
+  private mapTimeEntryRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+    feById: ReadonlyMap<string, TenantPmsFeeEarner>,
+  ): TenantPmsTimeEntry[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_time_entries');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsTimeEntry>;
       const feId = String(row.fee_earner_id);
@@ -2060,12 +2060,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
         write_off_value: round2(Number(p.write_off_value ?? 0)),
       };
     });
+  }
 
-    const disbRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 ORDER BY entry_date DESC, disbursement_id DESC',
-      [ctx.tenantId],
-    );
-    const disbursements: TenantPmsDisbursement[] = disbRes.rows.map((row) => {
+  private mapDisbursementRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsDisbursement[] {
+    return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_disbursements');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsDisbursement>;
       return {
@@ -2089,41 +2090,108 @@ export class TenantPmsRepository extends TenantScopedRepository {
             : null,
       };
     });
+  }
 
-    const caRes = await tx.query<DbGenericPayloadRow>(
-      'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 ORDER BY matter_code ASC, entry_date ASC, transaction_id ASC',
-      [ctx.tenantId],
-    );
+  private mapClientAccountRows(
+    ctx: TenantContext,
+    rows: readonly DbGenericPayloadRow[],
+  ): TenantPmsClientAccountEntry[] {
     const runningByMatter = new Map<string, number>();
-    const clientAccount: TenantPmsClientAccountEntry[] = caRes.rows.map(
-      (row) => {
-        this.assertRowTenant(ctx, row.tenant_id, 'pms_client_account_entries');
-        const p = (row.payload_json ??
-          {}) as Partial<TenantPmsClientAccountEntry>;
-        const mCode = String(row.matter_code);
-        const amt = round2(Number(row.amount ?? p.amount ?? 0));
-        const nextPence =
-          (runningByMatter.get(mCode) ?? 0) + Math.round(amt * 100);
-        runningByMatter.set(mCode, nextPence);
-        return {
-          transaction_id: String(row.transaction_id),
-          matter_code: mCode,
-          client_code: String(row.client_code),
-          date: String(row.entry_date ?? p.date ?? ''),
-          type: (row.direction ??
-            p.type ??
-            'Receipt') as TenantPmsClientAccountEntry['type'],
-          description: String(p.description ?? ''),
-          amount: amt,
-          running_balance: round2(nextPence / 100),
-        };
-      },
-    );
+    return rows.map((row) => {
+      this.assertRowTenant(ctx, row.tenant_id, 'pms_client_account_entries');
+      const p = (row.payload_json ??
+        {}) as Partial<TenantPmsClientAccountEntry>;
+      const mCode = String(row.matter_code);
+      const amt = round2(Number(row.amount ?? p.amount ?? 0));
+      const nextPence =
+        (runningByMatter.get(mCode) ?? 0) + Math.round(amt * 100);
+      runningByMatter.set(mCode, nextPence);
+      return {
+        transaction_id: String(row.transaction_id),
+        matter_code: mCode,
+        client_code: String(row.client_code),
+        date: String(row.entry_date ?? p.date ?? ''),
+        type: (row.direction ??
+          p.type ??
+          'Receipt') as TenantPmsClientAccountEntry['type'],
+        description: String(p.description ?? ''),
+        amount: amt,
+        running_balance: round2(nextPence / 100),
+      };
+    });
+  }
 
-    const ccRes = await tx.query<DbCreditControlLogRow>(
-      'SELECT * FROM public.pms_credit_control_log WHERE tenant_id = $1 ORDER BY id DESC',
+  private async refreshSnapshotInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+  ): Promise<HydratedTenantPmsSnapshot> {
+    const extractInfo = await this.getExtractInfoInTx(tx, ctx);
+    const pmsLinks = await this.listPmsLinksInTx(tx, ctx);
+
+    const feRes = await tx.query<DbGenericPayloadRow>(
+      'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
       [ctx.tenantId],
     );
+    const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+    const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+
+    const [
+      clientRes,
+      matterRes,
+      estRes,
+      invRes,
+      payRes,
+      teRes,
+      disbRes,
+      caRes,
+      ccRes,
+    ] = await Promise.all([
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 ORDER BY estimate_date ASC, estimate_id ASC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 ORDER BY entry_date DESC, disbursement_id DESC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 ORDER BY matter_code ASC, entry_date ASC, transaction_id ASC',
+        [ctx.tenantId],
+      ),
+      tx.query<DbCreditControlLogRow>(
+        'SELECT * FROM public.pms_credit_control_log WHERE tenant_id = $1 ORDER BY id DESC',
+        [ctx.tenantId],
+      ),
+    ]);
+
+    const clients = this.mapClientRows(ctx, clientRes.rows);
+    const matters = this.mapMatterRows(ctx, matterRes.rows);
+    const feeEstimates = this.mapFeeEstimateRows(ctx, estRes.rows, feById);
+    const invoices = this.mapInvoiceRows(ctx, invRes.rows);
+    const payments = this.mapPaymentRows(ctx, payRes.rows);
+    const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+    const disbursements = this.mapDisbursementRows(ctx, disbRes.rows);
+    const clientAccount = this.mapClientAccountRows(ctx, caRes.rows);
     const creditControlLog: TenantPmsCreditControlLogEntry[] = ccRes.rows.map(
       (row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'pms_credit_control_log');
@@ -2160,7 +2228,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       clientAccount,
     });
 
-    const snapshot: HydratedTenantPmsSnapshot = {
+    return {
       tenantId: ctx.tenantId,
       databaseName: ctx.postgresDatabaseName,
       extractInfo,
@@ -2178,8 +2246,6 @@ export class TenantPmsRepository extends TenantScopedRepository {
       clientAccount,
       creditControlLog,
     };
-
-    return snapshot;
   }
 
   public async loadTenantPmsSnapshot(
@@ -2193,46 +2259,215 @@ export class TenantPmsRepository extends TenantScopedRepository {
   public async listFeeEarners(
     ctx: TenantContext,
   ): Promise<TenantPmsFeeEarner[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.feeEarners);
+    return this.listFeeEarnersOnly(ctx);
+  }
+
+  public async listFeeEarnersOnly(
+    ctx: TenantContext,
+  ): Promise<TenantPmsFeeEarner[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const feRes = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+        [ctx.tenantId],
+      );
+      return this.mapFeeEarnerRows(ctx, feRes.rows);
+    });
   }
 
   public async listClients(ctx: TenantContext): Promise<TenantPmsClient[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.clients);
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+        [ctx.tenantId],
+      );
+      return this.mapClientRows(ctx, res.rows);
+    });
   }
 
   public async listMatters(ctx: TenantContext): Promise<TenantPmsMatter[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.matters);
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
+        [ctx.tenantId],
+      );
+      return this.mapMatterRows(ctx, res.rows);
+    });
+  }
+
+  public async getClientByCode(
+    ctx: TenantContext,
+    clientCode: string,
+  ): Promise<TenantPmsClient | null> {
+    const cleanCode = clientCode?.trim();
+    if (!cleanCode) return null;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2 LIMIT 1',
+        [ctx.tenantId, cleanCode],
+      );
+      return this.mapClientRows(ctx, res.rows)[0] ?? null;
+    });
+  }
+
+  public async getMatterByCode(
+    ctx: TenantContext,
+    matterCode: string,
+  ): Promise<TenantPmsMatter | null> {
+    const cleanCode = matterCode?.trim();
+    if (!cleanCode) return null;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2 LIMIT 1',
+        [ctx.tenantId, cleanCode],
+      );
+      return this.mapMatterRows(ctx, res.rows)[0] ?? null;
+    });
+  }
+
+  public async listUnlinkedMatters(
+    ctx: TenantContext,
+  ): Promise<TenantPmsMatter[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        `SELECT m.*
+         FROM public.pms_matters m
+         WHERE m.tenant_id = $1
+           AND NOT EXISTS (
+             SELECT 1
+             FROM public.pms_links l
+             WHERE l.tenant_id = m.tenant_id
+               AND l.entity_type = 'matter'
+               AND l.pms_code = m.matter_code
+           )
+         ORDER BY m.matter_code ASC`,
+        [ctx.tenantId],
+      );
+      return this.mapMatterRows(ctx, res.rows);
+    });
+  }
+
+  public async getMatterFinanceSummaryRows(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsMatterFinancials[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [extractInfo, feRes, mRes, estRes, invRes, payRes, teRes, disbRes, caRes] =
+        await Promise.all([
+          this.getExtractInfoInTx(tx, ctx),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+            [ctx.tenantId],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY matter_code ASC',
+            [ctx.tenantId, cleanCodes],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY estimate_date ASC, estimate_id ASC',
+            [ctx.tenantId, cleanCodes],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY invoice_date DESC, invoice_number DESC',
+            [ctx.tenantId, cleanCodes],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY payment_date ASC, receipt_id ASC',
+            [ctx.tenantId, cleanCodes],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, time_id DESC',
+            [ctx.tenantId, cleanCodes],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+            [ctx.tenantId, cleanCodes],
+          ),
+          tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY matter_code ASC, entry_date ASC, transaction_id ASC',
+            [ctx.tenantId, cleanCodes],
+          ),
+        ]);
+
+      const matters = this.mapMatterRows(ctx, mRes.rows);
+      if (matters.length === 0) return [];
+      const clientCodes = Array.from(
+        new Set(matters.map((m) => m.client_code).filter(Boolean)),
+      );
+      const clientRes =
+        clientCodes.length > 0
+          ? await tx.query<DbGenericPayloadRow>(
+              'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY client_code ASC',
+              [ctx.tenantId, clientCodes],
+            )
+          : { rows: [] as DbGenericPayloadRow[] };
+
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      const clients = this.mapClientRows(ctx, clientRes.rows);
+      const feeEstimates = this.mapFeeEstimateRows(ctx, estRes.rows, feById);
+      const invoices = this.mapInvoiceRows(ctx, invRes.rows);
+      const payments = this.mapPaymentRows(ctx, payRes.rows);
+      const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+      const disbursements = this.mapDisbursementRows(ctx, disbRes.rows);
+      const clientAccount = this.mapClientAccountRows(ctx, caRes.rows);
+
+      const invoiceBalances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices,
+        payments,
+      });
+      return computeDerivedMatterFinancials({
+        asAtDate: extractInfo.asAtDate,
+        feeEarners,
+        clients,
+        matters,
+        feeEstimates,
+        invoiceBalances,
+        timeEntries,
+        disbursements,
+        clientAccount,
+      });
+    });
   }
 
   public async getAllMatterFinancials(
     ctx: TenantContext,
   ): Promise<TenantPmsMatterFinancials[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.matterFinancials);
+    const rollups = await this.getFirmFinanceRollupsSql(ctx);
+    return rollups.matterFinancials;
   }
 
   public async getMatterFinancials(
     ctx: TenantContext,
     matterCode: string,
   ): Promise<TenantPmsMatterFinancials | null> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    const found = snap.matterFinancials.find(
-      (m) => m.matter_code === matterCode,
-    );
-    return found ? structuredClone(found) : null;
+    const rows = await this.getMatterFinanceSummaryRows(ctx, [matterCode]);
+    return rows[0] ?? null;
   }
 
   public async getFeeEstimates(
     ctx: TenantContext,
     matterCode: string,
   ): Promise<TenantPmsFeeEstimate[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(
-      snap.feeEstimates.filter((e) => e.matter_code === matterCode),
-    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [feRes, estRes] = await Promise.all([
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = $2 ORDER BY estimate_date ASC, estimate_id ASC',
+          [ctx.tenantId, matterCode],
+        ),
+      ]);
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      return this.mapFeeEstimateRows(ctx, estRes.rows, feById);
+    });
   }
 
   public async getTimeEntries(
@@ -2240,187 +2475,725 @@ export class TenantPmsRepository extends TenantScopedRepository {
     matterCode: string,
     filters?: TenantPmsTimeEntryFilters,
   ): Promise<TenantPmsTimeEntry[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(
-      snap.timeEntries.filter((te) => {
-        if (te.matter_code !== matterCode) return false;
-        if (
-          filters?.feeEarnerId &&
-          filters.feeEarnerId !== 'all' &&
-          te.fee_earner_id !== filters.feeEarnerId
-        ) {
-          return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const clauses = ['tenant_id = $1', 'matter_code = $2'];
+      const params: unknown[] = [ctx.tenantId, matterCode];
+      if (filters?.feeEarnerId && filters.feeEarnerId !== 'all') {
+        params.push(filters.feeEarnerId);
+        clauses.push(`fee_earner_id = $${params.length}`);
+      }
+      if (filters?.billedStatus && filters.billedStatus !== 'all') {
+        params.push(filters.billedStatus);
+        clauses.push(`billing_status = $${params.length}`);
+      }
+      if (filters?.dateFrom) {
+        params.push(filters.dateFrom);
+        clauses.push(`entry_date >= $${params.length}`);
+      }
+      if (filters?.dateTo) {
+        params.push(filters.dateTo);
+        clauses.push(`entry_date <= $${params.length}`);
+      }
+      const [feRes, teRes] = await Promise.all([
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_time_entries WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, time_id DESC`,
+          params,
+        ),
+      ]);
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      return this.mapTimeEntryRows(ctx, teRes.rows, feById);
+    });
+  }
+
+  public async getFeeEarnerTimeSummary(
+    ctx: TenantContext,
+    feeEarnerId: string,
+    options?: { readonly accessibleMatterCodes?: readonly string[] },
+  ): Promise<{
+    readonly extractInfo: TenantPmsExtractInfo;
+    readonly feeEarner: TenantPmsFeeEarner | null;
+    readonly timeEntries: TenantPmsTimeEntry[];
+  }> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const extractInfo = await this.getExtractInfoInTx(tx, ctx);
+      const feRes = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 AND fee_earner_id = $2',
+        [ctx.tenantId, feeEarnerId],
+      );
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feeEarner = feeEarners[0] ?? null;
+      if (!feeEarner) {
+        return { extractInfo, feeEarner: null, timeEntries: [] };
+      }
+      const clauses = ['tenant_id = $1', 'fee_earner_id = $2'];
+      const params: unknown[] = [ctx.tenantId, feeEarnerId];
+      if (options?.accessibleMatterCodes) {
+        const codes = Array.from(
+          new Set(options.accessibleMatterCodes.filter(Boolean)),
+        );
+        if (codes.length === 0) {
+          return { extractInfo, feeEarner, timeEntries: [] };
         }
-        if (
-          filters?.billedStatus &&
-          filters.billedStatus !== 'all' &&
-          te.billed_status !== filters.billedStatus
-        ) {
-          return false;
-        }
-        if (filters?.dateFrom && te.date < filters.dateFrom) return false;
-        if (filters?.dateTo && te.date > filters.dateTo) return false;
-        return true;
-      }),
-    );
+        params.push(codes);
+        clauses.push(`matter_code = ANY($${params.length}::text[])`);
+      }
+      const teRes = await tx.query<DbGenericPayloadRow>(
+        `SELECT * FROM public.pms_time_entries WHERE ${clauses.join(' AND ')} ORDER BY entry_date DESC, time_id DESC`,
+        params,
+      );
+      const feById = new Map([[feeEarner.fee_earner_id, feeEarner]]);
+      return {
+        extractInfo,
+        feeEarner,
+        timeEntries: this.mapTimeEntryRows(ctx, teRes.rows, feById),
+      };
+    });
   }
 
   public async listAllTimeEntries(
     ctx: TenantContext,
   ): Promise<TenantPmsTimeEntry[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.timeEntries);
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [feRes, teRes] = await Promise.all([
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 ORDER BY entry_date DESC, time_id DESC',
+          [ctx.tenantId],
+        ),
+      ]);
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      return this.mapTimeEntryRows(ctx, teRes.rows, feById);
+    });
   }
 
   public async getMatterWipBreakdown(
     ctx: TenantContext,
     matterCode: string,
   ): Promise<TenantPmsMatterWipBreakdown> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return computeDerivedMatterWipBreakdown({
-      matterCode,
-      asAtDate: snap.extractInfo.asAtDate,
-      feeEarners: snap.feeEarners,
-      timeEntries: snap.timeEntries,
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [extractInfo, feRes, teRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, time_id DESC',
+          [ctx.tenantId, matterCode],
+        ),
+      ]);
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+      return computeDerivedMatterWipBreakdown({
+        matterCode,
+        asAtDate: extractInfo.asAtDate,
+        feeEarners,
+        timeEntries,
+      });
     });
   }
 
   public async listAllInvoiceBalances(
     ctx: TenantContext,
   ): Promise<TenantPmsInvoiceBalance[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.invoiceBalances);
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [extractInfo, invRes, payRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 ORDER BY invoice_date DESC, invoice_number DESC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
+          [ctx.tenantId],
+        ),
+      ]);
+      return computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices: this.mapInvoiceRows(ctx, invRes.rows),
+        payments: this.mapPaymentRows(ctx, payRes.rows),
+      });
+    });
   }
 
   public async getInvoiceBalance(
     ctx: TenantContext,
     invoiceNumber: string,
   ): Promise<TenantPmsInvoiceBalance | null> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    const found = snap.invoiceBalances.find(
-      (i) => i.invoice_number === invoiceNumber,
-    );
-    return found ? structuredClone(found) : null;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [extractInfo, invRes, payRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_invoices
+           WHERE tenant_id = $1
+             AND (invoice_number = $2 OR payload_json->>'credit_note_for' = $2)`,
+          [ctx.tenantId, invoiceNumber],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND invoice_number = $2 ORDER BY payment_date ASC, receipt_id ASC',
+          [ctx.tenantId, invoiceNumber],
+        ),
+      ]);
+      const balances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices: this.mapInvoiceRows(ctx, invRes.rows),
+        payments: this.mapPaymentRows(ctx, payRes.rows),
+      });
+      return balances.find((i) => i.invoice_number === invoiceNumber) ?? null;
+    });
   }
 
   public async getAgedDebt(
     ctx: TenantContext,
     clientCode?: string,
   ): Promise<TenantPmsInvoiceBalance[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(
-      snap.invoiceBalances
-        .filter(
-          (i) =>
-            i.invoice_type !== 'Credit note' &&
-            (!clientCode || i.client_code === clientCode),
-        )
-        .sort((a, b) => a.invoice_number.localeCompare(b.invoice_number)),
-    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const extractInfo = await this.getExtractInfoInTx(tx, ctx);
+      const invRes = clientCode
+        ? await tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND client_code = $2',
+            [ctx.tenantId, clientCode],
+          )
+        : await tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1',
+            [ctx.tenantId],
+          );
+      const payRes = clientCode
+        ? await tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND client_code = $2 ORDER BY payment_date ASC, receipt_id ASC',
+            [ctx.tenantId, clientCode],
+          )
+        : await tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
+            [ctx.tenantId],
+          );
+      const balances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices: this.mapInvoiceRows(ctx, invRes.rows),
+        payments: this.mapPaymentRows(ctx, payRes.rows),
+      });
+      return balances
+        .filter((i) => i.invoice_type !== 'Credit note')
+        .sort((a, b) => a.invoice_number.localeCompare(b.invoice_number));
+    });
   }
 
   public async getInvoices(
     ctx: TenantContext,
     filter?: { matterCode?: string; clientCode?: string },
   ): Promise<TenantPmsInvoiceDetail[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    const filteredBalances = snap.invoiceBalances.filter((inv) => {
-      if (filter?.matterCode && inv.matter_code !== filter.matterCode) {
-        return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const invClauses = ['tenant_id = $1'];
+      const invParams: unknown[] = [ctx.tenantId];
+      if (filter?.matterCode) {
+        invParams.push(filter.matterCode);
+        invClauses.push(`matter_code = $${invParams.length}`);
       }
-      if (filter?.clientCode && inv.client_code !== filter.clientCode) {
-        return false;
+      if (filter?.clientCode) {
+        invParams.push(filter.clientCode);
+        invClauses.push(`client_code = $${invParams.length}`);
       }
-      return true;
-    });
 
-    return structuredClone(
-      filteredBalances.map((inv) => ({
-        ...inv,
-        payments: snap.payments.filter(
-          (p) => p.invoice_number === inv.invoice_number,
+      const [extractInfo, invRes, feRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_invoices WHERE ${invClauses.join(' AND ')} ORDER BY invoice_date DESC, invoice_number DESC`,
+          invParams,
         ),
-        timeEntries: [...snap.timeEntries]
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+      ]);
+      const invoices = this.mapInvoiceRows(ctx, invRes.rows);
+      if (invoices.length === 0) return [];
+      const invNumbers = invoices.map((i) => i.invoice_number);
+      const matterCodes = Array.from(new Set(invoices.map((i) => i.matter_code)));
+
+      const [payRes, teRes, disbRes] = await Promise.all([
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND invoice_number = ANY($2::text[]) ORDER BY payment_date ASC, receipt_id ASC',
+          [ctx.tenantId, invNumbers],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) AND invoice_number = ANY($3::text[])',
+          [ctx.tenantId, matterCodes, invNumbers],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) AND invoice_number = ANY($3::text[])',
+          [ctx.tenantId, matterCodes, invNumbers],
+        ),
+      ]);
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      const payments = this.mapPaymentRows(ctx, payRes.rows);
+      const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+      const disbursements = this.mapDisbursementRows(ctx, disbRes.rows);
+      const balances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices,
+        payments,
+      });
+
+      return balances.map((inv) => ({
+        ...inv,
+        payments: payments.filter((p) => p.invoice_number === inv.invoice_number),
+        timeEntries: timeEntries
           .filter((t) => t.invoice_number === inv.invoice_number)
           .sort((a, b) => {
             const cmp = a.date.localeCompare(b.date);
-            if (cmp !== 0) return cmp;
-            return a.time_id.localeCompare(b.time_id);
+            return cmp !== 0 ? cmp : a.time_id.localeCompare(b.time_id);
           }),
-        disbursements: [...snap.disbursements]
+        disbursements: disbursements
           .filter((d) => d.invoice_number === inv.invoice_number)
           .sort((a, b) => {
             const cmp = a.date.localeCompare(b.date);
-            if (cmp !== 0) return cmp;
-            return a.disbursement_id.localeCompare(b.disbursement_id);
+            return cmp !== 0
+              ? cmp
+              : a.disbursement_id.localeCompare(b.disbursement_id);
           }),
-        appliedCreditNotes: filteredBalances.filter(
+        appliedCreditNotes: balances.filter(
           (other) => other.credit_note_for === inv.invoice_number,
         ),
-      })),
-    );
+      }));
+    });
   }
 
   public async getDisbursements(
     ctx: TenantContext,
     matterCode: string,
   ): Promise<TenantPmsDisbursement[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(
-      snap.disbursements.filter((d) => d.matter_code === matterCode),
-    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, disbursement_id DESC',
+        [ctx.tenantId, matterCode],
+      );
+      return this.mapDisbursementRows(ctx, res.rows);
+    });
   }
 
   public async getClientAccountLedger(
     ctx: TenantContext,
     matterCode: string,
   ): Promise<TenantPmsClientAccountEntry[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(
-      snap.clientAccount.filter((ca) => ca.matter_code === matterCode),
-    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date ASC, transaction_id ASC',
+        [ctx.tenantId, matterCode],
+      );
+      return this.mapClientAccountRows(ctx, res.rows);
+    });
   }
 
   public async listAllPayments(
     ctx: TenantContext,
   ): Promise<TenantPmsPayment[]> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    return structuredClone(snap.payments);
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
+        [ctx.tenantId],
+      );
+      return this.mapPaymentRows(ctx, res.rows);
+    });
   }
 
   public async getMatterFullBundle(
     ctx: TenantContext,
     matterCode: string,
   ): Promise<TenantPmsMatterFullBundle | null> {
-    const snap = await this.loadTenantPmsSnapshot(ctx);
-    const summary = snap.matterFinancials.find(
-      (m) => m.matter_code === matterCode,
+    return this.getMatterPmsDataByCode(ctx, matterCode);
+  }
+
+  public async getMatterPmsDataByCode(
+    ctx: TenantContext,
+    matterCode: string,
+  ): Promise<TenantPmsMatterFullBundle | null> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [
+        extractInfo,
+        feRes,
+        mRes,
+        estRes,
+        invRes,
+        payRes,
+        teRes,
+        disbRes,
+        caRes,
+      ] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2',
+          [ctx.tenantId, matterCode],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = $2 ORDER BY estimate_date ASC, estimate_id ASC',
+          [ctx.tenantId, matterCode],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = $2 ORDER BY invoice_date DESC, invoice_number DESC',
+          [ctx.tenantId, matterCode],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND matter_code = $2 ORDER BY payment_date ASC, receipt_id ASC',
+          [ctx.tenantId, matterCode],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, time_id DESC',
+          [ctx.tenantId, matterCode],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date DESC, disbursement_id DESC',
+          [ctx.tenantId, matterCode],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date ASC, transaction_id ASC',
+          [ctx.tenantId, matterCode],
+        ),
+      ]);
+
+      const matters = this.mapMatterRows(ctx, mRes.rows);
+      if (matters.length === 0) return null;
+      const clientRes = matters[0]!.client_code
+        ? await tx.query<DbGenericPayloadRow>(
+            'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2',
+            [ctx.tenantId, matters[0]!.client_code],
+          )
+        : { rows: [] as DbGenericPayloadRow[] };
+
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      const clients = this.mapClientRows(ctx, clientRes.rows);
+      const estimates = this.mapFeeEstimateRows(ctx, estRes.rows, feById);
+      const rawInvoices = this.mapInvoiceRows(ctx, invRes.rows);
+      const payments = this.mapPaymentRows(ctx, payRes.rows);
+      const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+      const disbursements = this.mapDisbursementRows(ctx, disbRes.rows);
+      const clientAccount = this.mapClientAccountRows(ctx, caRes.rows);
+
+      const invoiceBalances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices: rawInvoices,
+        payments,
+      });
+      const matterFinancials = computeDerivedMatterFinancials({
+        asAtDate: extractInfo.asAtDate,
+        feeEarners,
+        clients,
+        matters,
+        feeEstimates: estimates,
+        invoiceBalances,
+        timeEntries,
+        disbursements,
+        clientAccount,
+      });
+      const summary = matterFinancials[0];
+      if (!summary) return null;
+
+      const detailedInvoices: TenantPmsInvoiceDetail[] = invoiceBalances.map(
+        (inv) => ({
+          ...inv,
+          payments: payments.filter(
+            (p) => p.invoice_number === inv.invoice_number,
+          ),
+          timeEntries: timeEntries
+            .filter((t) => t.invoice_number === inv.invoice_number)
+            .sort((a, b) => {
+              const cmp = a.date.localeCompare(b.date);
+              return cmp !== 0 ? cmp : a.time_id.localeCompare(b.time_id);
+            }),
+          disbursements: disbursements
+            .filter((d) => d.invoice_number === inv.invoice_number)
+            .sort((a, b) => {
+              const cmp = a.date.localeCompare(b.date);
+              return cmp !== 0
+                ? cmp
+                : a.disbursement_id.localeCompare(b.disbursement_id);
+            }),
+          appliedCreditNotes: invoiceBalances.filter(
+            (other) => other.credit_note_for === inv.invoice_number,
+          ),
+        }),
+      );
+
+      return {
+        extractInfo,
+        summary,
+        estimates,
+        timeEntries,
+        wipBreakdown: computeDerivedMatterWipBreakdown({
+          matterCode,
+          asAtDate: extractInfo.asAtDate,
+          feeEarners,
+          timeEntries,
+        }),
+        invoices: detailedInvoices,
+        disbursements,
+        clientAccount,
+      };
+    });
+  }
+
+  public async getClientPmsDataByCodes(
+    ctx: TenantContext,
+    clientCodes: readonly string[],
+  ): Promise<{
+    readonly extractInfo: TenantPmsExtractInfo;
+    readonly clients: TenantPmsClient[];
+    readonly matterFinancials: TenantPmsMatterFinancials[];
+    readonly invoiceBalances: TenantPmsInvoiceBalance[];
+  }> {
+    const cleanCodes = Array.from(
+      new Set(clientCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
     );
-    if (!summary) return null;
-    const invoices = await this.getInvoices(ctx, { matterCode });
-    return {
-      extractInfo: structuredClone(snap.extractInfo),
-      summary: structuredClone(summary),
-      estimates: structuredClone(
-        snap.feeEstimates.filter((e) => e.matter_code === matterCode),
-      ),
-      timeEntries: structuredClone(
-        snap.timeEntries.filter((t) => t.matter_code === matterCode),
-      ),
-      wipBreakdown: computeDerivedMatterWipBreakdown({
-        matterCode,
-        asAtDate: snap.extractInfo.asAtDate,
-        feeEarners: snap.feeEarners,
-        timeEntries: snap.timeEntries,
-      }),
-      invoices,
-      disbursements: structuredClone(
-        snap.disbursements.filter((d) => d.matter_code === matterCode),
-      ),
-      clientAccount: structuredClone(
-        snap.clientAccount.filter((ca) => ca.matter_code === matterCode),
-      ),
-    };
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const extractInfo = await this.getExtractInfoInTx(tx, ctx);
+      if (cleanCodes.length === 0) {
+        return {
+          extractInfo,
+          clients: [],
+          matterFinancials: [],
+          invoiceBalances: [],
+        };
+      }
+      const [feRes, cRes, mRes] = await Promise.all([
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY client_code ASC',
+          [ctx.tenantId, cleanCodes],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND client_code = ANY($2::text[]) ORDER BY matter_code ASC',
+          [ctx.tenantId, cleanCodes],
+        ),
+      ]);
+      const clients = this.mapClientRows(ctx, cRes.rows);
+      const matters = this.mapMatterRows(ctx, mRes.rows);
+      const matterCodes = matters.map((m) => m.matter_code);
+      if (matterCodes.length === 0) {
+        return {
+          extractInfo,
+          clients,
+          matterFinancials: [],
+          invoiceBalances: [],
+        };
+      }
+      const [estRes, invRes, payRes, teRes, disbRes, caRes] = await Promise.all([
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY estimate_date ASC, estimate_id ASC',
+          [ctx.tenantId, matterCodes],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY invoice_date DESC, invoice_number DESC',
+          [ctx.tenantId, matterCodes],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY payment_date ASC, receipt_id ASC',
+          [ctx.tenantId, matterCodes],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_time_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, time_id DESC',
+          [ctx.tenantId, matterCodes],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+          [ctx.tenantId, matterCodes],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY matter_code ASC, entry_date ASC, transaction_id ASC',
+          [ctx.tenantId, matterCodes],
+        ),
+      ]);
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      const feeEstimates = this.mapFeeEstimateRows(ctx, estRes.rows, feById);
+      const invoices = this.mapInvoiceRows(ctx, invRes.rows);
+      const payments = this.mapPaymentRows(ctx, payRes.rows);
+      const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+      const disbursements = this.mapDisbursementRows(ctx, disbRes.rows);
+      const clientAccount = this.mapClientAccountRows(ctx, caRes.rows);
+      const invoiceBalances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices,
+        payments,
+      });
+      const matterFinancials = computeDerivedMatterFinancials({
+        asAtDate: extractInfo.asAtDate,
+        feeEarners,
+        clients,
+        matters,
+        feeEstimates,
+        invoiceBalances,
+        timeEntries,
+        disbursements,
+        clientAccount,
+      });
+      return {
+        extractInfo,
+        clients,
+        matterFinancials,
+        invoiceBalances,
+      };
+    });
+  }
+
+  public async getFirmFinanceRollupsSql(
+    ctx: TenantContext,
+    options?: { readonly hiddenMatterCodes?: readonly string[] },
+  ): Promise<{
+    readonly extractInfo: TenantPmsExtractInfo;
+    readonly feeEarners: TenantPmsFeeEarner[];
+    readonly clients: TenantPmsClient[];
+    readonly matterFinancials: TenantPmsMatterFinancials[];
+    readonly invoiceBalances: TenantPmsInvoiceBalance[];
+    readonly timeEntries: TenantPmsTimeEntry[];
+    readonly payments: TenantPmsPayment[];
+  }> {
+    const hidden = Array.from(
+      new Set((options?.hiddenMatterCodes ?? []).filter(Boolean)),
+    );
+    const excludeClause =
+      hidden.length > 0 ? ' AND NOT (matter_code = ANY($2::text[]))' : '';
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const args = hidden.length > 0 ? [ctx.tenantId, hidden] : [ctx.tenantId];
+      const [
+        extractInfo,
+        feRes,
+        cRes,
+        mRes,
+        estRes,
+        invRes,
+        payRes,
+        teRes,
+        disbRes,
+        caRes,
+      ] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_matters WHERE tenant_id = $1${excludeClause} ORDER BY matter_code ASC`,
+          args,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_fee_estimates WHERE tenant_id = $1${excludeClause} ORDER BY estimate_date ASC, estimate_id ASC`,
+          args,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_invoices WHERE tenant_id = $1${excludeClause} ORDER BY invoice_date DESC, invoice_number DESC`,
+          args,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_payments WHERE tenant_id = $1${excludeClause} ORDER BY payment_date ASC, receipt_id ASC`,
+          args,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_time_entries WHERE tenant_id = $1${excludeClause} ORDER BY entry_date DESC, time_id DESC`,
+          args,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_disbursements WHERE tenant_id = $1${excludeClause} ORDER BY entry_date DESC, disbursement_id DESC`,
+          args,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1${excludeClause} ORDER BY matter_code ASC, entry_date ASC, transaction_id ASC`,
+          args,
+        ),
+      ]);
+
+      const feeEarners = this.mapFeeEarnerRows(ctx, feRes.rows);
+      const feById = new Map(feeEarners.map((f) => [f.fee_earner_id, f]));
+      const clients = this.mapClientRows(ctx, cRes.rows);
+      const matters = this.mapMatterRows(ctx, mRes.rows);
+      const feeEstimates = this.mapFeeEstimateRows(ctx, estRes.rows, feById);
+      const rawInvoices = this.mapInvoiceRows(ctx, invRes.rows);
+      const payments = this.mapPaymentRows(ctx, payRes.rows);
+      const timeEntries = this.mapTimeEntryRows(ctx, teRes.rows, feById);
+      const disbursements = this.mapDisbursementRows(ctx, disbRes.rows);
+      const clientAccount = this.mapClientAccountRows(ctx, caRes.rows);
+
+      const invoiceBalances = computeDerivedInvoiceBalances({
+        asAtDate: extractInfo.asAtDate,
+        invoices: rawInvoices,
+        payments,
+      });
+      const matterFinancials = computeDerivedMatterFinancials({
+        asAtDate: extractInfo.asAtDate,
+        feeEarners,
+        clients,
+        matters,
+        feeEstimates,
+        invoiceBalances,
+        timeEntries,
+        disbursements,
+        clientAccount,
+      });
+      return {
+        extractInfo,
+        feeEarners,
+        clients,
+        matterFinancials,
+        invoiceBalances,
+        timeEntries,
+        payments,
+      };
+    });
+  }
+
+  public async getPmsAdminSummarySnapshot(ctx: TenantContext): Promise<{
+    readonly extractInfo: TenantPmsExtractInfo;
+    readonly pmsLinks: TenantPmsLinkRecord[];
+    readonly feeEarners: TenantPmsFeeEarner[];
+    readonly clients: TenantPmsClient[];
+    readonly matters: TenantPmsMatter[];
+  }> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [extractInfo, pmsLinks, feRes, cRes, mRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        this.listPmsLinksInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_fee_earners WHERE tenant_id = $1 ORDER BY fee_earner_id ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_clients WHERE tenant_id = $1 ORDER BY client_code ASC',
+          [ctx.tenantId],
+        ),
+        tx.query<DbGenericPayloadRow>(
+          'SELECT * FROM public.pms_matters WHERE tenant_id = $1 ORDER BY matter_code ASC',
+          [ctx.tenantId],
+        ),
+      ]);
+      return {
+        extractInfo,
+        pmsLinks,
+        feeEarners: this.mapFeeEarnerRows(ctx, feRes.rows),
+        clients: this.mapClientRows(ctx, cRes.rows),
+        matters: this.mapMatterRows(ctx, mRes.rows),
+      };
+    });
   }
 
   // ============================================================================

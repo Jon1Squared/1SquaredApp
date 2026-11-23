@@ -83,7 +83,8 @@ export type JobOnlyPermissionKey =
   | 'enquiry:run_retention_anonymise'
   | 'register:run_reminders'
   | 'notification:drain_outbox'
-  | 'notification:send_digests';
+  | 'notification:send_digests'
+  | 'quote:run_expiry';
 
 export type PermissionKey =
   | EmployeePermission

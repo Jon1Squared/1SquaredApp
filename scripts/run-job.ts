@@ -39,6 +39,7 @@ import {
   runScheduledKeyDateRemindersJobSweep,
   runScheduledNotificationDigestsJobSweep,
   runScheduledOutboxDrainJobSweep,
+  runScheduledQuoteExpiryJobSweep,
   runScheduledRegisterRemindersJobSweep,
   runScheduledUsageRetentionPurgeJobSweep,
 } from '../src/server/services';
@@ -110,6 +111,13 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
       name: 'notification-digests',
       description:
         'Compile and queue Mon-Fri daily and weekly email notification digests per tenant user once per working day',
+      mode: 'scheduled',
+      schedule: '0 * * * *',
+    },
+    {
+      name: 'quote-expiry',
+      description:
+        'Transition overdue Sent and Follow-up due quotes past validUntil to Expired once per local day at 02:00 local time',
       mode: 'scheduled',
       schedule: '0 * * * *',
     },
@@ -625,6 +633,19 @@ export async function executeCliJobRunner(
       writeOut(
         `${JSON.stringify({
           event: 'job.notification-digests.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
+
+    if (jobName === 'quote-expiry') {
+      const summary = await runScheduledQuoteExpiryJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.quote-expiry.completed',
           succeededCount: summary.succeededTenants.length,
           skippedCount: summary.skippedTenants.length,
           failedCount: summary.failedTenants.length,

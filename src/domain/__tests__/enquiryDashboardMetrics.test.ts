@@ -321,12 +321,12 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
       valueBySystemKey(store.values, 'enquiry_urgency', 'standard')?.id ??
       'enquiry_urgency.standard';
 
-    const ctx = testTenantCtx('P-000018');
+    const ctx = testTenantCtx('P-000042');
     const beforeEnquiriesSnapshot = structuredClone(
       await getIntakeQuoteRepository().listAllEnquiriesUnfiltered(ctx),
     );
 
-    await runAsTestActor('P-000018', async () => {
+    await runAsTestActor('P-000042', async () => {
       // 1. Non-draft save with privacyNoticeGiven omitted is rejected on the server and leaves enquiries unchanged
       const omittedNonDraft = await saveEnquiryRecord(
         {
@@ -339,7 +339,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
           notes: 'Caller enquiring about conveyancing fees.',
           urgencyId,
         },
-        { byId: 'P-000018', asDraft: false },
+        { byId: 'P-000042', asDraft: false },
       );
       expect(omittedNonDraft.enquiry).toBeUndefined();
       expect(omittedNonDraft.errors?.privacyNoticeGiven).toBe(
@@ -362,7 +362,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
           urgencyId,
           privacyNoticeGiven: false,
         },
-        { byId: 'P-000018', asDraft: false },
+        { byId: 'P-000042', asDraft: false },
       );
       expect(falseNonDraft.enquiry).toBeUndefined();
       expect(falseNonDraft.errors?.privacyNoticeGiven).toBe(
@@ -384,7 +384,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
           notes: 'Draft notes.',
           urgencyId,
         },
-        { byId: 'P-000018', asDraft: true },
+        { byId: 'P-000042', asDraft: true },
       );
       expect(draftSaved.errors).toBeUndefined();
       expect(draftSaved.enquiry).toBeDefined();
@@ -400,7 +400,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
           notes: 'Attempting to route draft without privacy notice.',
           privacyNoticeGiven: false,
         },
-        { id: draftSaved.enquiry!.id, byId: 'P-000018', asDraft: false },
+        { id: draftSaved.enquiry!.id, byId: 'P-000042', asDraft: false },
       );
       expect(routeDraftWithoutPrivacy.enquiry).toBeUndefined();
       expect(routeDraftWithoutPrivacy.errors?.privacyNoticeGiven).toBe(
@@ -425,7 +425,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
           notes: 'Updated notes on legacy enquiry before confirming privacy notice.',
           privacyNoticeGiven: false,
         },
-        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
+        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000042' },
       );
       expect(editedLegacy.errors).toBeUndefined();
       expect(editedLegacy.enquiry?.notes).toBe(
@@ -438,7 +438,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
           notes: 'Updated notes and confirmed privacy notice given.',
           privacyNoticeGiven: true,
         },
-        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
+        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000042' },
       );
       expect(fixedLegacy.errors).toBeUndefined();
       expect(fixedLegacy.enquiry?.privacyNoticeGiven).toBe(true);
@@ -451,7 +451,7 @@ describe('computeEnquiryDashboardMetrics and enquiry form defaults (R324, R342, 
         {
           privacyNoticeGiven: false,
         },
-        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000018' },
+        { id: 'ENQ-LEGACY-PRIVACY', byId: 'P-000042' },
       );
       expect(revertPrivacy.enquiry).toBeUndefined();
       expect(revertPrivacy.errors?.privacyNoticeGiven).toBe(

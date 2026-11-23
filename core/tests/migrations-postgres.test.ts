@@ -11,6 +11,7 @@ import {
   TenantCatalogueRepository,
   TenantHrAndRbacRepository,
   TenantMigrationRunner,
+  TenantPartyRepository,
   TenantPostgresPoolManager,
   TenantScopedRepository,
   TenantTaskWorkflowRepository,
@@ -20,6 +21,10 @@ import {
   type TenantMigrationDefinition,
   type TenantRegistry,
 } from '@platform/core';
+import {
+  computeOrganisationLookupKeys,
+  computePersonLookupKeys,
+} from '../src/tenancy/candidateKeys';
 import type { Team } from '@/domain/types';
 import { resolveRoutedTeam } from '@/domain/tasks';
 import * as corePkg from '@platform/core';
@@ -246,6 +251,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       ]),
     );
     expect(activeAt0017).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
     const activeAfter0023Rollback = await runner.getActiveTables(ctx);
     expect(activeAfter0023Rollback).not.toContain('intake_check_records');
@@ -1090,6 +1096,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await expect(runner.rollbackVersion(ctx, '0015')).rejects.toThrow(
         /MIGRATION_ROLLBACK_ORDER_ERROR/,
       );
+      expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
@@ -1142,7 +1149,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privCheck.rows[0]).toEqual({ has_select: true, has_insert: true });
 
-      // Re-apply 0015..0021 and 0023 -> upSql drops both bridges again and recreates 0016-0023 state
+      // Re-apply 0015..0021, 0023 and 0024 -> upSql drops both bridges again and recreates 0016-0024 state
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
       expect(reapplied.map((m) => m.version)).toEqual([
         '0015',
@@ -1153,6 +1160,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0020',
         '0021',
         '0023',
+        '0024',
       ]);
 
       const tableAfterReapply = await client.query(
@@ -1197,6 +1205,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privsUp.rows[0]).toEqual({ cro_ins: true, mro_del: true });
 
+      expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
@@ -1220,6 +1229,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0020',
         '0021',
         '0023',
+        '0024',
       ]);
 
       const tablesReapplied = await client.query<{ table_name: string }>(
@@ -1245,6 +1255,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const runner = new TenantMigrationRunner();
     const pre0017 = CORE_TENANT_MIGRATIONS.filter((m) => m.version < '0017');
     await runner.applyUp(ctx, pre0017);
+    await runner.rollbackVersion(ctx, '0024');
     await runner.rollbackVersion(ctx, '0023');
     await runner.rollbackVersion(ctx, '0021');
     await runner.rollbackVersion(ctx, '0020');
@@ -1346,6 +1357,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
          WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
       );
 
+      expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
@@ -1382,6 +1394,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0020',
         '0021',
         '0023',
+        '0024',
       ]);
       const rebackfilled = await client.query<{ status: string }>(
         `SELECT status FROM public.register_records WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
@@ -1443,6 +1456,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         [...expectedIndexes].sort(),
       );
 
+      expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
@@ -1465,6 +1479,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0020',
         '0021',
         '0023',
+        '0024',
       ]);
 
       const idxReapplied = await client.query<{ indexname: string }>(
@@ -2032,4 +2047,379 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await client.end();
     }
   });
+
+  it('S1-02a: 0024_scoped_lookup_and_candidate_indexes_expand adds lookup columns & indexes and reverses cleanly (up -> down -> up)', async () => {
+    const tenantId = 'mig-s102a-0024';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      const colsUp = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'people'
+           AND column_name IN ('phone_last9_keys', 'postcode_keys', 'phonetic_keys')
+         ORDER BY column_name ASC`,
+      );
+      expect(colsUp.rows.map((r) => r.column_name)).toEqual([
+        'phone_last9_keys',
+        'phonetic_keys',
+        'postcode_keys',
+      ]);
+
+      expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
+      const colsDown = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'people'
+           AND column_name IN ('phone_last9_keys', 'postcode_keys', 'phonetic_keys')`,
+      );
+      expect(colsDown.rowCount).toBe(0);
+
+      const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0024']);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('R660: 0024 backfills exact compute*LookupKeys for accented names (ŵ, ñ, ø, æ, ß) and multiple otherNames, and SQL search matches profile_json->otherNames', async () => {
+    const tenantId = 'mig-s102a-r660';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const runner = new TenantMigrationRunner();
+    const preMigrations = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0024');
+    await runner.applyUp(ctx, preMigrations);
+    await runner.rollbackVersion(ctx, '0024');
+
+    const personFixture = {
+      firstName: 'Gŵyl',
+      preferredName: 'Peña',
+      surname: 'Sørensen-Strauß',
+      otherNames: [{ name: 'Æthelred' }, { name: 'Ŵyndham' }],
+      phones: [{ number: '+44 7700 900777' }],
+      addresses: [{ postcode: 'CF10 1AA' }],
+    };
+    const orgFixture = {
+      legalName: 'Peña & Gŵyl Holdings Ltd',
+      otherNames: [
+        { name: 'Sørensen & Strauß Ltd' },
+        { name: 'Æthelred Cyf' },
+        { name: 'Former Ŵestminster Co' },
+      ],
+      companyNumber: 'GB01234567',
+      generalEmail: 'hello@pena-gwyl.example',
+      mainPhone: '029 2018 0999',
+      website: 'https://www.pena-gwyl.example',
+      registeredAddress: { postcode: 'CF10 1AB' },
+      correspondenceAddress: { postcode: 'NP20 1AA' },
+      billingAddress: { postcode: 'SA1 1AA' },
+    };
+
+    const client = await createDirectMigrationClient({ ctx });
+    try {
+      await client.query(
+        `DELETE FROM public.people WHERE tenant_id = $1 AND id = 'P-R660-1'`,
+        [tenantId],
+      );
+      await client.query(
+        `DELETE FROM public.organisations WHERE tenant_id = $1 AND id = 'O-R660-1'`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO public.people (
+           tenant_id, id, first_name, preferred_name, other_names, surname,
+           phones_json, addresses_json, profile_json
+         ) VALUES ($1, 'P-R660-1', $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb)`,
+        [
+          tenantId,
+          personFixture.firstName,
+          personFixture.preferredName,
+          personFixture.otherNames.map((n) => n.name).join('; '),
+          personFixture.surname,
+          JSON.stringify(personFixture.phones),
+          JSON.stringify(personFixture.addresses),
+          JSON.stringify({ otherNames: personFixture.otherNames }),
+        ],
+      );
+      await client.query(
+        `INSERT INTO public.organisations (
+           tenant_id, id, legal_name, trading_name, company_number, general_email,
+           main_phone, website, registered_address_json, trading_address_json, profile_json
+         ) VALUES ($1, 'O-R660-1', $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb)`,
+        [
+          tenantId,
+          orgFixture.legalName,
+          orgFixture.otherNames[0]!.name,
+          orgFixture.companyNumber,
+          orgFixture.generalEmail,
+          orgFixture.mainPhone,
+          orgFixture.website,
+          JSON.stringify(orgFixture.registeredAddress),
+          JSON.stringify(orgFixture.correspondenceAddress),
+          JSON.stringify({
+            otherNames: orgFixture.otherNames,
+            billingAddress: orgFixture.billingAddress,
+          }),
+        ],
+      );
+
+      await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+
+      const personRowRes = await client.query<{
+        phone_last9_keys: string[];
+        postcode_keys: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT phone_last9_keys, postcode_keys, phonetic_keys
+           FROM public.people WHERE tenant_id = $1 AND id = 'P-R660-1'`,
+        [tenantId],
+      );
+      const expectedPersonKeys = computePersonLookupKeys(personFixture);
+      expect(personRowRes.rows[0]?.phone_last9_keys).toEqual(
+        expectedPersonKeys.phoneLast9Keys,
+      );
+      expect(personRowRes.rows[0]?.postcode_keys).toEqual(
+        expectedPersonKeys.postcodeKeys,
+      );
+      expect(personRowRes.rows[0]?.phonetic_keys).toEqual(
+        expectedPersonKeys.phoneticKeys,
+      );
+
+      const orgRowRes = await client.query<{
+        norm_company_number: string;
+        email_domains: string[];
+        phone_last9_keys: string[];
+        postcode_keys: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT norm_company_number, email_domains, phone_last9_keys, postcode_keys, phonetic_keys
+           FROM public.organisations WHERE tenant_id = $1 AND id = 'O-R660-1'`,
+        [tenantId],
+      );
+      const expectedOrgKeys = computeOrganisationLookupKeys(orgFixture);
+      expect(orgRowRes.rows[0]?.norm_company_number).toBe(
+        expectedOrgKeys.normCompanyNumber,
+      );
+      expect(orgRowRes.rows[0]?.email_domains).toEqual(
+        expectedOrgKeys.emailDomains,
+      );
+      expect(orgRowRes.rows[0]?.phone_last9_keys).toEqual(
+        expectedOrgKeys.phoneLast9Keys,
+      );
+      expect(orgRowRes.rows[0]?.postcode_keys).toEqual(
+        expectedOrgKeys.postcodeKeys,
+      );
+      expect(orgRowRes.rows[0]?.phonetic_keys).toEqual(
+        expectedOrgKeys.phoneticKeys,
+      );
+
+      // SQL duplicate search must match an organisation by a 2nd/3rd otherNames entry stored in profile_json
+      const partyRepo = new TenantPartyRepository();
+      const orgMatchesByFormerName = await partyRepo.findSqlDuplicateCandidates(
+        ctx,
+        {
+          kind: 'organisation',
+          legalName: 'Former Ŵestminster Co',
+          fuzzy: true,
+        },
+      );
+      expect(orgMatchesByFormerName.some((o) => o.id === 'O-R660-1')).toBe(true);
+
+      // Second tenant isolation: Bravo sees zero records and zero backfilled rows from Alpha
+      const tenantBravoId = 'mig-s102a-r660-bravo';
+      await provisionPostgresClusterRolesAndDatabases({
+        tenants: [{ tenantId: tenantBravoId, environment: 'test' }],
+      });
+      const ctxBravo = makeTestTenantContext(tenantBravoId);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+      const bravoMatches = await partyRepo.findSqlDuplicateCandidates(
+        ctxBravo,
+        {
+          kind: 'organisation',
+          legalName: 'Former Ŵestminster Co',
+          fuzzy: true,
+        },
+      );
+      expect(bravoMatches).toEqual([]);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it('R685: 0024 keyset-paginates backfill (>500 rows), is idempotent on re-run, and reverses cleanly (up -> down -> up)', async () => {
+    const tenantAlpha = 'mig-s102a-r685-a';
+    const tenantBravo = 'mig-s102a-r685-b';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeTestTenantContext(tenantAlpha);
+    const ctxBravo = makeTestTenantContext(tenantBravo);
+    const runner = new TenantMigrationRunner();
+    const preMigrations = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0024');
+    await runner.applyUp(ctxAlpha, preMigrations);
+    await runner.rollbackVersion(ctxAlpha, '0024');
+    await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+
+    const mig0024 = CORE_TENANT_MIGRATIONS.find((m) => m.version === '0024')!;
+    expect(mig0024).toBeDefined();
+
+    const client = await createDirectMigrationClient({ ctx: ctxAlpha });
+    try {
+      await client.query(`DELETE FROM public.people WHERE tenant_id = $1 AND id LIKE 'P-R685-%'`, [tenantAlpha]);
+      await client.query(`DELETE FROM public.organisations WHERE tenant_id = $1 AND id LIKE 'O-R685-%'`, [tenantAlpha]);
+
+      const bulkPeople = Array.from({ length: 515 }, (_, i) => ({
+        id: `P-R685-${String(i).padStart(4, '0')}`,
+        firstName: `Kestrel${i}`,
+        surname: i === 514 ? 'LastPagePerson' : 'PagedPerson',
+        phone: `0770090${String(i).padStart(4, '0')}`,
+        postcode: 'CF10 3ZZ',
+      }));
+      await client.query(
+        `INSERT INTO public.people (
+           tenant_id, id, first_name, surname, phones_json, addresses_json, profile_json
+         )
+         SELECT
+           $1,
+           v.id,
+           v."firstName",
+           v.surname,
+           jsonb_build_array(jsonb_build_object('number', v.phone)),
+           jsonb_build_array(jsonb_build_object('postcode', v.postcode)),
+           '{}'::jsonb
+         FROM jsonb_to_recordset($2::jsonb) AS v(
+           id text,
+           "firstName" text,
+           surname text,
+           phone text,
+           postcode text
+         )`,
+        [tenantAlpha, JSON.stringify(bulkPeople)],
+      );
+
+      const bulkOrgs = Array.from({ length: 510 }, (_, i) => ({
+        id: `O-R685-${String(i).padStart(4, '0')}`,
+        legalName: i === 509 ? 'Zeta Final Page Org Ltd' : `Paged Org ${i} Ltd`,
+        companyNumber: `10${String(i).padStart(6, '0')}`,
+        email: `org${i}@paged-r685.example`,
+        phone: `0292018${String(i).padStart(4, '0')}`,
+      }));
+      await client.query(
+        `INSERT INTO public.organisations (
+           tenant_id, id, legal_name, company_number, general_email, main_phone, profile_json
+         )
+         SELECT
+           $1,
+           v.id,
+           v."legalName",
+           v."companyNumber",
+           v.email,
+           v.phone,
+           '{}'::jsonb
+         FROM jsonb_to_recordset($2::jsonb) AS v(
+           id text,
+           "legalName" text,
+           "companyNumber" text,
+           email text,
+           phone text
+         )`,
+        [tenantAlpha, JSON.stringify(bulkOrgs)],
+      );
+
+      // Apply 0024 -> spans 2 pages on both tables
+      const applied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      expect(applied.map((m) => m.version)).toContain('0024');
+
+      const { computePersonLookupKeys, computeOrganisationLookupKeys } = await import('../src/tenancy/candidateKeys');
+      const expectedLastPerson = computePersonLookupKeys({
+        firstName: 'Kestrel514',
+        surname: 'LastPagePerson',
+        phones: [{ number: '07700900514' }],
+        addresses: [{ postcode: 'CF10 3ZZ' }],
+      });
+      const expectedLastOrg = computeOrganisationLookupKeys({
+        legalName: 'Zeta Final Page Org Ltd',
+        companyNumber: '10000509',
+        generalEmail: 'org509@paged-r685.example',
+        mainPhone: '02920180509',
+      });
+
+      const lastPersonRow = await client.query<{
+        phone_last9_keys: string[];
+        postcode_keys: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT phone_last9_keys, postcode_keys, phonetic_keys FROM public.people WHERE tenant_id = $1 AND id = 'P-R685-0514'`,
+        [tenantAlpha],
+      );
+      expect(lastPersonRow.rows[0]?.phone_last9_keys).toEqual(expectedLastPerson.phoneLast9Keys);
+      expect(lastPersonRow.rows[0]?.postcode_keys).toEqual(expectedLastPerson.postcodeKeys);
+      expect(lastPersonRow.rows[0]?.phonetic_keys).toEqual(expectedLastPerson.phoneticKeys);
+
+      const lastOrgRow = await client.query<{
+        norm_company_number: string | null;
+        email_domains: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT norm_company_number, email_domains, phonetic_keys FROM public.organisations WHERE tenant_id = $1 AND id = 'O-R685-0509'`,
+        [tenantAlpha],
+      );
+      expect(lastOrgRow.rows[0]?.norm_company_number).toBe(expectedLastOrg.normCompanyNumber);
+      expect(lastOrgRow.rows[0]?.email_domains).toEqual(expectedLastOrg.emailDomains);
+      expect(lastOrgRow.rows[0]?.phonetic_keys).toEqual(expectedLastOrg.phoneticKeys);
+
+      // Re-run afterUpSql directly (idempotent: clears & repopulates cleanly without duplicating/erasing)
+      await client.query(
+        `UPDATE public.people SET phone_last9_keys = '{}'::text[] WHERE tenant_id = $1 AND id IN ('P-R685-0000', 'P-R685-0514')`,
+        [tenantAlpha],
+      );
+      await mig0024.afterUpSql!(client, ctxAlpha);
+      await mig0024.afterUpSql!(client, ctxAlpha);
+      const repopulated = await client.query<{ id: string; phone_last9_keys: string[] }>(
+        `SELECT id, phone_last9_keys FROM public.people WHERE tenant_id = $1 AND id = 'P-R685-0514'`,
+        [tenantAlpha],
+      );
+      expect(repopulated.rows[0]?.phone_last9_keys).toEqual(expectedLastPerson.phoneLast9Keys);
+
+      // Full down -> up round-trip preserves rows and repopulates keys across pages
+      expect(await runner.rollbackVersion(ctxAlpha, '0024')).toBe(true);
+      const reapplied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0024']);
+
+      const afterRoundTrip = await client.query<{
+        phonetic_keys: string[];
+        postcode_keys: string[];
+      }>(
+        `SELECT phonetic_keys, postcode_keys FROM public.people WHERE tenant_id = $1 AND id = 'P-R685-0514'`,
+        [tenantAlpha],
+      );
+      expect(afterRoundTrip.rows[0]?.phonetic_keys).toEqual(expectedLastPerson.phoneticKeys);
+      expect(afterRoundTrip.rows[0]?.postcode_keys).toEqual(expectedLastPerson.postcodeKeys);
+
+      // Two-tenant isolation: Bravo has zero Alpha rows (verified via dedicated Bravo client)
+      const bravoClient = await createDirectMigrationClient({
+        ctx: ctxBravo,
+      });
+      try {
+        const bravoCount = await bravoClient.query<{ cnt: string }>(
+          `SELECT count(*)::text AS cnt FROM public.people WHERE tenant_id = $1`,
+          [tenantBravo],
+        );
+        expect(Number(bravoCount.rows[0]?.cnt ?? 0)).toBe(0);
+      } finally {
+        await bravoClient.end();
+      }
+    } finally {
+      await client.end();
+    }
+  }, 30_000);
 });

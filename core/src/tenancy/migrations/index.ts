@@ -8,7 +8,12 @@
  */
 
 import crypto from 'node:crypto';
+import type * as PgTypes from 'pg';
 import type { TenantContext } from '../../api/index';
+import {
+  computeOrganisationLookupKeys,
+  computePersonLookupKeys,
+} from '../candidateKeys';
 import {
   assertValidPostgresTenantContext,
   createDirectMigrationClient,
@@ -29,6 +34,16 @@ export interface TenantMigrationDefinition {
   readonly downSql: string;
   readonly tablesChanged: readonly string[];
   readonly dependsOn?: readonly string[];
+  /**
+   * Optional TypeScript backfill hook run inside the migration transaction immediately after
+   * `upSql` (for canonical candidate-key computation shared with repository writes).
+   */
+  readonly afterUpSql?: (client: PgTypes.Client, ctx: TenantContext) => Promise<void>;
+  /**
+   * Deterministic signature hashed into `computeMigrationChecksum` when `afterUpSql` is used,
+   * leaving checksums for pure-SQL migrations untouched when `undefined`.
+   */
+  readonly backfillSignature?: string;
   /**
    * Checksums recorded by earlier releases of this same migration whose `upSql` is
    * unchanged and only `downSql` was corrected. Never list a checksum whose `upSql` differs.
@@ -3085,6 +3100,254 @@ DROP SEQUENCE IF EXISTS public.tenant_intake_check_id_seq;
 `.trim(),
   };
 
+export const SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024: TenantMigrationDefinition =
+  {
+    version: '0024',
+    name: '0024_scoped_lookup_and_candidate_indexes_expand',
+    description:
+      'Expand-phase migration adding indexed lookup/candidate columns on public.people and public.organisations plus restricted-matter partial index for server-side B15 SQL scoping.',
+    dependsOn: ['0009', '0018'],
+    tablesChanged: ['people', 'organisations', 'matters'],
+    backfillSignature: 'ts-candidate-keys-v2',
+    upSql: `
+ALTER TABLE public.people
+  ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS postcode_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS phonetic_keys TEXT[] NOT NULL DEFAULT '{}'::text[];
+
+ALTER TABLE public.organisations
+  ADD COLUMN IF NOT EXISTS norm_company_number TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS email_domains TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS postcode_keys TEXT[] NOT NULL DEFAULT '{}'::text[],
+  ADD COLUMN IF NOT EXISTS phonetic_keys TEXT[] NOT NULL DEFAULT '{}'::text[];
+
+CREATE INDEX IF NOT EXISTS idx_people_phone_last9_gin
+  ON public.people USING GIN (phone_last9_keys);
+CREATE INDEX IF NOT EXISTS idx_people_postcode_keys_gin
+  ON public.people USING GIN (postcode_keys);
+CREATE INDEX IF NOT EXISTS idx_people_phonetic_keys_gin
+  ON public.people USING GIN (phonetic_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_email_domains_gin
+  ON public.organisations USING GIN (email_domains);
+CREATE INDEX IF NOT EXISTS idx_organisations_phone_last9_gin
+  ON public.organisations USING GIN (phone_last9_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_postcode_keys_gin
+  ON public.organisations USING GIN (postcode_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_phonetic_keys_gin
+  ON public.organisations USING GIN (phonetic_keys);
+CREATE INDEX IF NOT EXISTS idx_organisations_tenant_norm_company_no
+  ON public.organisations (tenant_id, norm_company_number)
+  WHERE norm_company_number <> '';
+CREATE INDEX IF NOT EXISTS idx_matters_tenant_restricted_acl
+  ON public.matters (tenant_id, id)
+  WHERE (
+    is_staff_matter = TRUE
+    OR has_ethical_wall = TRUE
+    OR jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) > 0
+  );
+`.trim(),
+    downSql: `
+DROP INDEX IF EXISTS public.idx_matters_tenant_restricted_acl;
+DROP INDEX IF EXISTS public.idx_organisations_tenant_norm_company_no;
+DROP INDEX IF EXISTS public.idx_organisations_phonetic_keys_gin;
+DROP INDEX IF EXISTS public.idx_organisations_postcode_keys_gin;
+DROP INDEX IF EXISTS public.idx_organisations_phone_last9_gin;
+DROP INDEX IF EXISTS public.idx_organisations_email_domains_gin;
+DROP INDEX IF EXISTS public.idx_people_phonetic_keys_gin;
+DROP INDEX IF EXISTS public.idx_people_postcode_keys_gin;
+DROP INDEX IF EXISTS public.idx_people_phone_last9_gin;
+ALTER TABLE public.organisations
+  DROP COLUMN IF EXISTS phonetic_keys,
+  DROP COLUMN IF EXISTS postcode_keys,
+  DROP COLUMN IF EXISTS phone_last9_keys,
+  DROP COLUMN IF EXISTS email_domains,
+  DROP COLUMN IF EXISTS norm_company_number;
+ALTER TABLE public.people
+  DROP COLUMN IF EXISTS phonetic_keys,
+  DROP COLUMN IF EXISTS postcode_keys,
+  DROP COLUMN IF EXISTS phone_last9_keys;
+`.trim(),
+    afterUpSql: async (client: PgTypes.Client, ctx: TenantContext) => {
+      const BATCH_SIZE = 500;
+      const parseOtherNames = (
+        prof: unknown,
+        fallbackText?: string,
+      ): Array<{ name?: string }> => {
+        const profObj =
+          prof && typeof prof === 'object' && !Array.isArray(prof)
+            ? (prof as Record<string, unknown>)
+            : {};
+        if (Array.isArray(profObj.otherNames) && profObj.otherNames.length > 0) {
+          return profObj.otherNames
+            .map((entry) =>
+              typeof entry === 'string'
+                ? { name: entry }
+                : { name: String((entry as { name?: unknown })?.name ?? '') },
+            )
+            .filter((entry) => entry.name.trim().length > 0);
+        }
+        if (fallbackText && fallbackText.trim()) {
+          return fallbackText
+            .split(/[;,]+/)
+            .map((s) => ({ name: s.trim() }))
+            .filter((entry) => entry.name.length > 0);
+        }
+        return [];
+      };
+
+      let lastPersonId: string | null = null;
+      while (true) {
+        interface PeopleBackfillRow {
+          id: string;
+          first_name: string | null;
+          preferred_name: string | null;
+          other_names: string | null;
+          surname: string | null;
+          phones_json: unknown;
+          addresses_json: unknown;
+          profile_json: unknown;
+        }
+        const peopleRes: PgTypes.QueryResult<PeopleBackfillRow> =
+          await client.query<PeopleBackfillRow>(
+            `SELECT id, first_name, preferred_name, other_names, surname,
+                    phones_json, addresses_json, profile_json
+               FROM public.people
+              WHERE tenant_id = $1
+                AND ($2::text IS NULL OR id > $2::text)
+              ORDER BY id ASC
+              LIMIT $3`,
+            [ctx.tenantId, lastPersonId, BATCH_SIZE],
+          );
+        if (peopleRes.rows.length === 0) break;
+        const chunk = peopleRes.rows.map((row) => {
+          const phones = Array.isArray(row.phones_json)
+            ? row.phones_json.map((p) =>
+                typeof p === 'string'
+                  ? { number: p }
+                  : { number: String((p as { number?: unknown })?.number ?? '') },
+              )
+            : [];
+          const addresses = Array.isArray(row.addresses_json)
+            ? row.addresses_json.map((a) => ({
+                postcode: String((a as { postcode?: unknown })?.postcode ?? ''),
+              }))
+            : [];
+          const keys = computePersonLookupKeys({
+            firstName: row.first_name ?? '',
+            preferredName: row.preferred_name ?? '',
+            surname: row.surname ?? '',
+            otherNames: parseOtherNames(row.profile_json, row.other_names ?? ''),
+            phones,
+            addresses,
+          });
+          return {
+            id: row.id,
+            phoneLast9Keys: keys.phoneLast9Keys,
+            postcodeKeys: keys.postcodeKeys,
+            phoneticKeys: keys.phoneticKeys,
+          };
+        });
+        await client.query(
+          `UPDATE public.people AS p
+              SET phone_last9_keys = v."phoneLast9Keys",
+                  postcode_keys = v."postcodeKeys",
+                  phonetic_keys = v."phoneticKeys"
+             FROM jsonb_to_recordset($2::jsonb) AS v(
+               id text,
+               "phoneLast9Keys" text[],
+               "postcodeKeys" text[],
+               "phoneticKeys" text[]
+             )
+            WHERE p.tenant_id = $1 AND p.id = v.id`,
+          [ctx.tenantId, JSON.stringify(chunk)],
+        );
+        lastPersonId = peopleRes.rows[peopleRes.rows.length - 1]!.id;
+        if (peopleRes.rows.length < BATCH_SIZE) break;
+      }
+
+      let lastOrgId: string | null = null;
+      while (true) {
+        interface OrgBackfillRow {
+          id: string;
+          legal_name: string | null;
+          trading_name: string | null;
+          company_number: string | null;
+          general_email: string | null;
+          main_phone: string | null;
+          website: string | null;
+          registered_address_json: { postcode?: string } | null;
+          trading_address_json: { postcode?: string } | null;
+          profile_json: unknown;
+        }
+        const orgRes: PgTypes.QueryResult<OrgBackfillRow> =
+          await client.query<OrgBackfillRow>(
+            `SELECT id, legal_name, trading_name, company_number, general_email,
+                    main_phone, website, registered_address_json, trading_address_json,
+                    profile_json
+               FROM public.organisations
+              WHERE tenant_id = $1
+                AND ($2::text IS NULL OR id > $2::text)
+              ORDER BY id ASC
+              LIMIT $3`,
+            [ctx.tenantId, lastOrgId, BATCH_SIZE],
+          );
+        if (orgRes.rows.length === 0) break;
+        const chunk = orgRes.rows.map((row) => {
+          const prof =
+            row.profile_json &&
+            typeof row.profile_json === 'object' &&
+            !Array.isArray(row.profile_json)
+              ? (row.profile_json as Record<string, unknown>)
+              : {};
+          const billingAddr =
+            prof.billingAddress && typeof prof.billingAddress === 'object'
+              ? (prof.billingAddress as { postcode?: string })
+              : null;
+          const keys = computeOrganisationLookupKeys({
+            legalName: row.legal_name ?? '',
+            companyNumber: row.company_number ?? '',
+            generalEmail: row.general_email ?? '',
+            mainPhone: row.main_phone ?? '',
+            website: row.website ?? '',
+            registeredAddress: row.registered_address_json,
+            correspondenceAddress: row.trading_address_json,
+            billingAddress: billingAddr,
+            otherNames: parseOtherNames(row.profile_json, row.trading_name ?? ''),
+          });
+          return {
+            id: row.id,
+            normCompanyNumber: keys.normCompanyNumber,
+            emailDomains: keys.emailDomains,
+            phoneLast9Keys: keys.phoneLast9Keys,
+            postcodeKeys: keys.postcodeKeys,
+            phoneticKeys: keys.phoneticKeys,
+          };
+        });
+        await client.query(
+          `UPDATE public.organisations AS o
+              SET norm_company_number = v."normCompanyNumber",
+                  email_domains = v."emailDomains",
+                  phone_last9_keys = v."phoneLast9Keys",
+                  postcode_keys = v."postcodeKeys",
+                  phonetic_keys = v."phoneticKeys"
+             FROM jsonb_to_recordset($2::jsonb) AS v(
+               id text,
+               "normCompanyNumber" text,
+               "emailDomains" text[],
+               "phoneLast9Keys" text[],
+               "postcodeKeys" text[],
+               "phoneticKeys" text[]
+             )
+            WHERE o.tenant_id = $1 AND o.id = v.id`,
+          [ctx.tenantId, JSON.stringify(chunk)],
+        );
+        lastOrgId = orgRes.rows[orgRes.rows.length - 1]!.id;
+        if (orgRes.rows.length < BATCH_SIZE) break;
+      }
+    },
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3109,6 +3372,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   STABLE_KEYS_AND_TEAM_METADATA_BACKFILL_MIGRATION_0021,
   KEY_DATE_CALENDAR_SYNC_LEASE_MIGRATION_0022,
   INTAKE_CHECKS_AND_OUTBOX_ATTACHMENTS_MIGRATION_0023,
+  SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024,
 ];
 
 export function validateMigrationCatalogueOrder(
@@ -3132,10 +3396,13 @@ validateMigrationCatalogueOrder(CORE_TENANT_MIGRATIONS);
 export function computeMigrationChecksum(
   migration: TenantMigrationDefinition,
 ): string {
+  const sigPart = migration.backfillSignature
+    ? `:${migration.backfillSignature}`
+    : '';
   return crypto
     .createHash('sha256')
     .update(
-      `${migration.version}:${migration.name}:${migration.upSql}:${migration.downSql}`,
+      `${migration.version}:${migration.name}:${migration.upSql}:${migration.downSql}${sigPart}`,
     )
     .digest('hex');
 }
@@ -3262,6 +3529,9 @@ export class TenantMigrationRunner {
           }
 
           await client.query(migration.upSql);
+          if (migration.afterUpSql) {
+            await migration.afterUpSql(client, ctx);
+          }
 
           await client.query(
             `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, ${runtimeIdent}`,

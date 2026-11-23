@@ -36,7 +36,6 @@ import {
   isNonLiveDemoEnvironment,
   resolveCurrentTenantContext,
 } from '@/platform/tenantRuntime';
-import { getTenantPmsSource } from '@/pms/pmsSource';
 import type {
   PmsCashReceivedSummary,
   PmsClientAccountEntry,
@@ -210,15 +209,31 @@ export async function verifyFinanceActorAndPermission(
       tenantCfg,
     );
 
-  const [people, matters, teams, firmProfile, homePagesConfig, tenantPmsLinks] =
+  const [people, teams, firmProfile, homePagesConfig, tenantPmsLinks] =
     await Promise.all([
-      getPartyRepository().listAllPeople<Person>(prelimTenantContext),
-      getMatterRepository().listAllMattersUnfiltered<Matter>(prelimTenantContext),
+      getPartyRepository().listAllPeople<Person>(prelimTenantContext, {
+        employeesAndLeaversOnly: true,
+      }),
       getHrAndRbacRepository().listAllTeams<Team>(prelimTenantContext),
       getCatalogueRepository().getFirmProfile(prelimTenantContext),
       getCatalogueRepository().getHomePagesConfig<HomePagesConfig>(prelimTenantContext),
       getPmsRepository().listPmsLinks<PmsLink>(prelimTenantContext),
     ]);
+  const linkedMatterIds = Array.from(
+    new Set(
+      tenantPmsLinks
+        .filter((l) => l.entityType === 'matter')
+        .map((l) => l.onesquaredId)
+        .filter(Boolean),
+    ),
+  );
+  const matters =
+    linkedMatterIds.length > 0
+      ? await getMatterRepository().listMattersUnfilteredByIdsOrSources<Matter>(
+          prelimTenantContext,
+          { ids: linkedMatterIds },
+        )
+      : [];
   const actor = people.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
   if (!actor) {
     return buildActionDenied(
@@ -441,8 +456,8 @@ export async function getMatterFinanceRows(
     };
   }
 
-  const pms = await getTenantPmsSource(ctx);
-  const pmsExtractInfo = pms.getExtractInfo();
+  const pmsRepo = getPmsRepository();
+  const pmsExtractInfo = await pmsRepo.getExtractInfo(ctx);
   if (!isValidPmsAsAtDate(pmsExtractInfo.asAtDate)) {
     return {
       pmsExtractInfo: {
@@ -465,9 +480,14 @@ export async function getMatterFinanceRows(
     if (allowedPmsCodesFilter && !allowedPmsCodesFilter.has(matterCode)) return false;
     return true;
   };
+  const targetMatterCodes = Array.from(scopedAccessibleLinkedPmsMatterCodes).filter(
+    (code) => isCodeAllowed(code),
+  );
 
-  const rawMatterFins = pms.getAllMatterFinancials();
-  const allMatterFins = rawMatterFins.filter((f) => isCodeAllowed(f.matter_code));
+  const allMatterFins = await pmsRepo.getMatterFinanceSummaryRows(
+    ctx,
+    targetMatterCodes,
+  );
   const finByMatterCode = new Map(allMatterFins.map((f) => [f.matter_code, f]));
 
   const pmsSummaryByMatterId: Record<string, PmsMatterFinancials> = {};
@@ -482,20 +502,29 @@ export async function getMatterFinanceRows(
     }
   }
 
-  const pmsAgedDebt: PmsInvoiceBalance[] = pms
-    .getAgedDebt()
-    .filter((inv) => isCodeAllowed(inv.matter_code));
-  const pmsInvoices: PmsInvoiceDetail[] = pms
-    .getInvoices()
-    .filter((inv) => isCodeAllowed(inv.matter_code));
+  const pmsAgedDebt: PmsInvoiceBalance[] =
+    targetMatterCodes.length > 0
+      ? (await pmsRepo.getAgedDebt(ctx)).filter((inv) =>
+          isCodeAllowed(inv.matter_code),
+        )
+      : [];
+  const invoiceBatches = await Promise.all(
+    targetMatterCodes.map((code) => pmsRepo.getInvoices(ctx, { matterCode: code })),
+  );
+  const pmsInvoices: PmsInvoiceDetail[] = invoiceBatches.flat();
 
   const pmsAllDisbursements: PmsDisbursement[] = [];
   const pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]> = {};
   for (const mf of allMatterFins) {
     if (mf.unbilled_disbursements > 0) {
-      pmsAllDisbursements.push(...pms.getDisbursements(mf.matter_code));
+      pmsAllDisbursements.push(
+        ...(await pmsRepo.getDisbursements(ctx, mf.matter_code)),
+      );
     }
-    const ledgerEntries = pms.getClientAccountLedger(mf.matter_code);
+    const ledgerEntries = await pmsRepo.getClientAccountLedger(
+      ctx,
+      mf.matter_code,
+    );
     if (mf.client_account_balance > 0 || ledgerEntries.length > 0) {
       pmsClientAccountByMatterCode[mf.matter_code] = ledgerEntries;
     }
@@ -547,20 +576,21 @@ export async function getMyFinanceFigures(
     return { myFeeEarnerFigures: null, myWeeklyTime: null };
   }
 
-  const pms = await getTenantPmsSource(ctx);
-  const extractInfo = pms.getExtractInfo();
+  const feSummary = await getPmsRepository().getFeeEarnerTimeSummary(
+    ctx,
+    myFeCode,
+    { accessibleMatterCodes: Array.from(accessibleLinkedPmsMatterCodes) },
+  );
+  const extractInfo = feSummary.extractInfo;
   if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
     return { myFeeEarnerFigures: null, myWeeklyTime: null };
   }
-  const feeEarners = pms.listFeeEarners();
-  const myFe = feeEarners.find((fe) => fe.fee_earner_id === myFeCode) ?? null;
+  const myFe = feSummary.feeEarner;
   if (!myFe) {
     return { myFeeEarnerFigures: null, myWeeklyTime: null };
   }
 
-  const timeEntries = pms
-    .listAllTimeEntries()
-    .filter((t) => accessibleLinkedPmsMatterCodes.has(t.matter_code));
+  const timeEntries = feSummary.timeEntries;
   const rollups = buildFirmFinanceRollups(
     {
       asAtDate: extractInfo.asAtDate,
@@ -649,8 +679,10 @@ export async function getFirmFinance(
     };
   }
 
-  const pms = await getTenantPmsSource(ctx);
-  const extractInfo = pms.getExtractInfo();
+  const sqlRollups = await getPmsRepository().getFirmFinanceRollupsSql(ctx, {
+    hiddenMatterCodes: Array.from(hiddenPmsMatterCodes),
+  });
+  const extractInfo = sqlRollups.extractInfo;
   if (!isValidPmsAsAtDate(extractInfo.asAtDate)) {
     return {
       pmsExtractInfo: {
@@ -685,12 +717,12 @@ export async function getFirmFinance(
   const rollups = buildFirmFinanceRollups(
     {
       asAtDate: extractInfo.asAtDate,
-      feeEarners: pms.listFeeEarners(),
-      clients: pms.listClients(),
-      matterFinancials: pms.getAllMatterFinancials(),
-      invoices: pms.listAllInvoiceBalances(),
-      timeEntries: pms.listAllTimeEntries(),
-      payments: pms.listAllPayments(),
+      feeEarners: sqlRollups.feeEarners,
+      clients: sqlRollups.clients,
+      matterFinancials: sqlRollups.matterFinancials,
+      invoices: sqlRollups.invoiceBalances,
+      timeEntries: sqlRollups.timeEntries,
+      payments: sqlRollups.payments,
     },
     hiddenPmsMatterCodes,
   );

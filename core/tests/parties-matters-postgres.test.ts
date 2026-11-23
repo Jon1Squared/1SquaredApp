@@ -2034,13 +2034,13 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     // 2. Right after Replica A loads matters, Replica B removes U and commits.
     // 3. Replica A finishes getAppSnapshot, listAuditEntriesForRecord, listFirmAuditEntriesPage, and getKeyDateExceptionsReportRecord.
     const matterRepoA = replicaA.getMatterRepository();
-    const origListAllMattersA =
-      matterRepoA.listAllMattersUnfiltered.bind(matterRepoA);
+    const origListVisibleMattersA =
+      matterRepoA.listVisibleMatters.bind(matterRepoA);
     let bRemovedDuringARead = false;
     const spyReadInterleave = vi
-      .spyOn(matterRepoA, 'listAllMattersUnfiltered')
-      .mockImplementationOnce(async (ctx) => {
-        const loadedMatters = await origListAllMattersA(ctx);
+      .spyOn(matterRepoA, 'listVisibleMatters')
+      .mockImplementationOnce(async (ctx, opts) => {
+        const loadedMatters = await origListVisibleMattersA(ctx, opts);
         // Confirm Replica A loaded inputs while U was still in restricted_access_user_ids_json in SQL
         expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
 
@@ -2125,11 +2125,13 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     expect(regrantRes.ok).toBe(true);
     expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
 
+    const origListByIdsA =
+      matterRepoA.listMattersUnfilteredByIdsOrSources.bind(matterRepoA);
     let bRemovedDuringAWrite = false;
     const spyWriteInterleave = vi
-      .spyOn(matterRepoA, 'listAllMattersUnfiltered')
-      .mockImplementationOnce(async (ctx) => {
-        const loadedMatters = await origListAllMattersA(ctx);
+      .spyOn(matterRepoA, 'listMattersUnfilteredByIdsOrSources')
+      .mockImplementationOnce(async (ctx, filters) => {
+        const loadedMatters = await origListByIdsA(ctx, filters);
         const removeRes = await runInReplicaB(adminSessionB, () =>
           replicaB.updateEmployeeRolesAndSupports(
             userU,
@@ -2227,11 +2229,12 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     )!;
     expect(latestStaffMatterBeforeTeamRace).not.toBeNull();
 
+    const origGetMatterByIdA = matterRepoA.getMatterById.bind(matterRepoA);
     let bRemovedTeamLeadDuringAMatterSave = false;
     const spyTeamInterleave = vi
-      .spyOn(matterRepoA, 'listAllMattersUnfiltered')
-      .mockImplementationOnce(async (ctx) => {
-        const loadedMatters = await origListAllMattersA(ctx);
+      .spyOn(matterRepoA, 'getMatterById')
+      .mockImplementationOnce(async (ctx, id, opts) => {
+        const loadedMatter = await origGetMatterByIdA(ctx, id, opts);
         expect(await readRestrictedIdsOnFreshConnection()).toContain(userU);
 
         const removeTeamLeadRes = await runInReplicaB(adminSessionB, () =>
@@ -2250,7 +2253,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         );
         expect(removeTeamLeadRes.team).toBeDefined();
         bRemovedTeamLeadDuringAMatterSave = true;
-        return loadedMatters;
+        return loadedMatter;
       });
 
     try {

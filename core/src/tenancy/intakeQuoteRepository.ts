@@ -771,51 +771,142 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
 }
 
 /**
- * SQL predicate returning TRUE when an enquiry row `e` (`e.tenant_id = $1`) is visible to `viewerId` (`$2`).
- * - Personal `Draft` enquiries are visible only to `created_by_id = $2` or `taken_by_id = $2`.
- * - Any enquiry converted into or referenced by (`matters.source_enquiry_id`) a restricted staff or
- *   ethical-wall matter is hidden unless `$2` is listed in `matters.restricted_access_user_ids_json`.
+ * Extracts the explicit `restrictedAccessUserIds` JSONB array configured on a matter row,
+ * respecting `opening_record_json.hasRestrictedAccessUserIds` so SQL predicates never mistake
+ * pre-expanded participant cache columns for an explicit allow-list (`R676`; `S1-09` adds full `S1-D12`).
  */
-export const ENQUIRY_VISIBLE_SQL_PREDICATE = `(
-  (e.status <> 'Draft' OR COALESCE(e.created_by_id, '') = $2 OR COALESCE(e.taken_by_id, '') = $2)
-  AND NOT EXISTS (
-    SELECT 1 FROM matters m
-    WHERE m.tenant_id = e.tenant_id
-      AND (m.id = e.converted_matter_id OR m.source_enquiry_id = e.id)
-      AND (
-        m.is_staff_matter = TRUE
-        OR m.has_ethical_wall = TRUE
-        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-      )
-      AND NOT (m.restricted_access_user_ids_json ? $2)
-  )
-)`;
+export function buildMatterExplicitAllowJsonSql(alias = 'm'): string {
+  return `(
+    CASE
+      WHEN (${alias}.opening_record_json->>'hasRestrictedAccessUserIds') = 'true'
+        THEN CASE
+          WHEN jsonb_typeof(${alias}.opening_record_json->'restrictedAccessUserIdsFallback') = 'array'
+            THEN ${alias}.opening_record_json->'restrictedAccessUserIdsFallback'
+          WHEN jsonb_typeof(${alias}.restricted_access_user_ids_json) = 'array'
+            THEN ${alias}.restricted_access_user_ids_json
+          ELSE '[]'::jsonb
+        END
+      WHEN (${alias}.opening_record_json->>'hasRestrictedAccessUserIds') = 'false'
+        THEN '[]'::jsonb
+      WHEN jsonb_typeof(${alias}.restricted_access_user_ids_json) = 'array'
+        THEN ${alias}.restricted_access_user_ids_json
+      ELSE '[]'::jsonb
+    END
+  )`;
+}
 
 /**
- * SQL predicate returning TRUE when a quote row `q` (`q.tenant_id = $1`) is visible to `viewerId` (`$2`).
- * - Any quote converted into or referenced by (`matters.source_quote_id`) a restricted matter is hidden
- *   unless `$2` is in `matters.restricted_access_user_ids_json`.
- * - Any quote linked (`q.source_enquiry_id`) to an enquiry that is hidden from `$2` is also hidden.
+ * SQL predicate returning TRUE when a restricted matter row (`alias`) is hidden from the viewer
+ * at `$viewerParamIndex`, matching TypeScript `canAccessMatter` (`core/src/domain/rbac/resolver.ts`, `R676`):
+ * - Unrestricted matters (`!is_staff_matter && !has_ethical_wall && len(allowJson) === 0`) are never hidden.
+ * - Non-empty explicit allow-list (`len(allowJson) > 0`) is decisive for participants (excludes unlisted participants; `matter:restricted:access` holders still pass ethical walls until S1-09 (S1-D12)).
+ * - Empty allow-list (`len(allowJson) === 0`) falls back to named participants (`responsible_partner_id`,
+ *   `supervisor_id`, `responsible_fee_earner_id`, or `opening_record_json->'teamMemberIds'`).
  */
-export const QUOTE_VISIBLE_SQL_PREDICATE = `(
-  NOT EXISTS (
-    SELECT 1 FROM matters m
-    WHERE m.tenant_id = q.tenant_id
-      AND (m.id = q.converted_matter_id OR m.source_quote_id = q.id)
+export function buildMatterHiddenFromViewerSql(
+  alias = 'm',
+  viewerParamIndex = 2,
+): string {
+  const p = `$${viewerParamIndex}::text`;
+  const allowJson = buildMatterExplicitAllowJsonSql(alias);
+  return `(
+    (
+      ${alias}.is_staff_matter = TRUE
+      OR ${alias}.has_ethical_wall = TRUE
+      OR jsonb_array_length(${allowJson}) > 0
+    )
+    AND (
+      CASE
+        WHEN jsonb_array_length(${allowJson}) > 0
+          THEN NOT (${p} <> '' AND COALESCE(${allowJson} ? ${p}, FALSE))
+        ELSE NOT (
+          ${p} <> ''
+          AND (
+            COALESCE(${alias}.responsible_partner_id = ${p}, FALSE)
+            OR COALESCE(${alias}.supervisor_id = ${p}, FALSE)
+            OR COALESCE(${alias}.responsible_fee_earner_id = ${p}, FALSE)
+            OR (
+              jsonb_typeof(${alias}.opening_record_json->'teamMemberIds') = 'array'
+              AND COALESCE((${alias}.opening_record_json->'teamMemberIds') ? ${p}, FALSE)
+            )
+          )
+        )
+      END
+    )
+  )`;
+}
+
+export function buildEnquiryDraftOnlySqlPredicate(viewerParamIndex = 2): string {
+  const p = `$${viewerParamIndex}::text`;
+  return `(
+    e.status <> 'Draft'
+    OR (
+      ${p} <> ''
       AND (
-        m.is_staff_matter = TRUE
-        OR m.has_ethical_wall = TRUE
-        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+        COALESCE(e.created_by_id = ${p}, FALSE)
+        OR COALESCE(e.taken_by_id = ${p}, FALSE)
       )
-      AND NOT (m.restricted_access_user_ids_json ? $2)
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM enquiries e
-    WHERE e.tenant_id = q.tenant_id
-      AND e.id = q.source_enquiry_id
-      AND NOT ${ENQUIRY_VISIBLE_SQL_PREDICATE}
-  )
-)`;
+    )
+  )`;
+}
+
+export function buildQuoteDraftOnlySqlPredicate(viewerParamIndex = 2): string {
+  return `(
+    NOT EXISTS (
+      SELECT 1 FROM enquiries e
+      WHERE e.tenant_id = q.tenant_id
+        AND e.id = q.source_enquiry_id
+        AND NOT ${buildEnquiryDraftOnlySqlPredicate(viewerParamIndex)}
+    )
+  )`;
+}
+
+/**
+ * Parameterized SQL predicate returning TRUE when an enquiry row `e` (`e.tenant_id = $1`)
+ * is visible to `viewerId` (`$viewerParamIndex`), matching `canViewMatter` + `canViewEnquiry` (`R676`, `R685`).
+ */
+export function buildEnquiryVisibleSqlPredicate(viewerParamIndex = 2): string {
+  return `(
+    ${buildEnquiryDraftOnlySqlPredicate(viewerParamIndex)}
+    AND NOT EXISTS (
+      SELECT 1 FROM matters m
+      WHERE m.tenant_id = e.tenant_id
+        AND (m.id = e.converted_matter_id OR m.source_enquiry_id = e.id)
+        AND ${buildMatterHiddenFromViewerSql('m', viewerParamIndex)}
+    )
+  )`;
+}
+
+/**
+ * Parameterized SQL predicate returning TRUE when a quote row `q` (`q.tenant_id = $1`)
+ * is visible to `viewerId` (`$viewerParamIndex`), matching `canViewMatter` + `canViewQuote` (`R676`, `R685`).
+ */
+export function buildQuoteVisibleSqlPredicate(viewerParamIndex = 2): string {
+  return `(
+    NOT EXISTS (
+      SELECT 1 FROM matters m
+      WHERE m.tenant_id = q.tenant_id
+        AND (m.id = q.converted_matter_id OR m.source_quote_id = q.id)
+        AND ${buildMatterHiddenFromViewerSql('m', viewerParamIndex)}
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM enquiries e
+      WHERE e.tenant_id = q.tenant_id
+        AND e.id = q.source_enquiry_id
+        AND NOT ${buildEnquiryVisibleSqlPredicate(viewerParamIndex)}
+    )
+  )`;
+}
+
+export const ENQUIRY_DRAFT_ONLY_SQL_PREDICATE =
+  buildEnquiryDraftOnlySqlPredicate(2);
+
+export const QUOTE_DRAFT_ONLY_SQL_PREDICATE =
+  buildQuoteDraftOnlySqlPredicate(2);
+
+export const ENQUIRY_VISIBLE_SQL_PREDICATE = buildEnquiryVisibleSqlPredicate(2);
+
+export const QUOTE_VISIBLE_SQL_PREDICATE = buildQuoteVisibleSqlPredicate(2);
 
 export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   private readonly auditRepo: TenantAuditRepository;
@@ -835,15 +926,10 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     viewerId: string,
   ): Promise<Set<string>> {
     const res = await tx.query<{ tenant_id: string; id: string }>(
-      `SELECT tenant_id, id
-       FROM matters
-       WHERE tenant_id = $1
-         AND (
-           is_staff_matter = TRUE
-           OR has_ethical_wall = TRUE
-           OR jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) > 0
-         )
-         AND NOT (restricted_access_user_ids_json ? $2)`,
+      `SELECT m.tenant_id, m.id
+       FROM matters m
+       WHERE m.tenant_id = $1
+         AND ${buildMatterHiddenFromViewerSql('m', 2)}`,
       [ctx.tenantId, viewerId],
     );
     const ids = new Set<string>();
@@ -1249,11 +1335,21 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   public async getEnquiryById<T = TenantEnquiryRecord>(
     ctx: TenantContext,
     enquiryId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
   ): Promise<T | null> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
       const viewerId = options?.viewerId ?? ctx.actorId;
+      const predicate = hasRestrictedMatterAccess
+        ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
+        : ENQUIRY_VISIBLE_SQL_PREDICATE;
       const res = includeRestricted
         ? await tx.query<EnquiryRow>(
             `SELECT * FROM enquiries e WHERE e.tenant_id = $1 AND e.id = $2`,
@@ -1263,7 +1359,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
             `SELECT * FROM enquiries e
              WHERE e.tenant_id = $1
                AND e.id = $3
-               AND ${ENQUIRY_VISIBLE_SQL_PREDICATE}`,
+               AND ${predicate}`,
             [ctx.tenantId, viewerId, enquiryId],
           );
       const row = res.rows[0];
@@ -1272,7 +1368,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       }
       this.assertRowTenant(ctx, row.tenant_id, 'enquiries.getEnquiryById');
       const mapped = mapRowToEnquiry(row);
-      if (includeRestricted) {
+      if (includeRestricted || hasRestrictedMatterAccess) {
         return mapped as unknown as T;
       }
       const hiddenMatterIds = await this.listHiddenRestrictedMatterIdsInTx(
@@ -1295,16 +1391,24 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       assignedTeamId?: string;
       assignedToId?: string;
       includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
       const params: unknown[] = includeRestricted
         ? [ctx.tenantId]
         : [ctx.tenantId, viewerId];
       const clauses: string[] = ['e.tenant_id = $1'];
       if (!includeRestricted) {
-        clauses.push(ENQUIRY_VISIBLE_SQL_PREDICATE);
+        clauses.push(
+          hasRestrictedMatterAccess
+            ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
+            : ENQUIRY_VISIBLE_SQL_PREDICATE,
+        );
       }
       if (options?.status) {
         params.push(options.status);
@@ -1325,15 +1429,16 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
          ORDER BY e.received_at DESC, e.id ASC`,
         params,
       );
-      const hiddenMatterIds = includeRestricted
-        ? new Set<string>()
-        : await this.listHiddenRestrictedMatterIdsInTx(tx, ctx, viewerId);
+      const hiddenMatterIds =
+        includeRestricted || hasRestrictedMatterAccess
+          ? new Set<string>()
+          : await this.listHiddenRestrictedMatterIdsInTx(tx, ctx, viewerId);
 
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'enquiries.listVisibleEnquiries');
         const mapped = mapRowToEnquiry(row);
         return (
-          includeRestricted
+          includeRestricted || hasRestrictedMatterAccess
             ? mapped
             : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
         ) as unknown as T;
@@ -1658,11 +1763,21 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   public async getQuoteById<T = TenantQuoteRecord>(
     ctx: TenantContext,
     quoteId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
   ): Promise<T | null> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
       const viewerId = options?.viewerId ?? ctx.actorId;
+      const predicate = hasRestrictedMatterAccess
+        ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+        : QUOTE_VISIBLE_SQL_PREDICATE;
       const res = includeRestricted
         ? await tx.query<QuoteRow>(
             `SELECT * FROM quotes q WHERE q.tenant_id = $1 AND q.id = $2`,
@@ -1672,7 +1787,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
             `SELECT * FROM quotes q
              WHERE q.tenant_id = $1
                AND q.id = $3
-               AND ${QUOTE_VISIBLE_SQL_PREDICATE}`,
+               AND ${predicate}`,
             [ctx.tenantId, viewerId, quoteId],
           );
       const row = res.rows[0];
@@ -1691,16 +1806,24 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       status?: string;
       sourceEnquiryId?: string;
       includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
       const params: unknown[] = includeRestricted
         ? [ctx.tenantId]
         : [ctx.tenantId, viewerId];
       const clauses: string[] = ['q.tenant_id = $1'];
       if (!includeRestricted) {
-        clauses.push(QUOTE_VISIBLE_SQL_PREDICATE);
+        clauses.push(
+          hasRestrictedMatterAccess
+            ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+            : QUOTE_VISIBLE_SQL_PREDICATE,
+        );
       }
       if (options?.status) {
         params.push(options.status);
@@ -1730,6 +1853,492 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     return (await this.listVisibleQuotes(ctx, ctx.actorId, {
       includeRestricted: true,
     })) as unknown as T[];
+  }
+
+  /**
+   * Loads open quotes (`Sent` or `Follow-up due`) whose `valid_until` date is strictly
+   * before `localDateYmd` for unattended lifecycle expiry (`quote-expiry` job, R663).
+   */
+  public async listOverdueQuotesForLifecycleSweep<T = TenantQuoteRecord>(
+    ctx: TenantContext,
+    localDateYmd: string,
+  ): Promise<T[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<QuoteRow>(
+        `SELECT * FROM quotes q
+         WHERE q.tenant_id = $1
+           AND q.status IN ('Sent', 'Follow-up due')
+           AND q.valid_until IS NOT NULL
+           AND q.valid_until <> ''
+           AND q.valid_until < $2
+         ORDER BY q.id ASC`,
+        [ctx.tenantId, localDateYmd],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'quotes.listOverdueQuotesForLifecycleSweep',
+        );
+        return mapRowToQuote(row) as unknown as T;
+      });
+    });
+  }
+
+  /**
+   * Atomically locks and expires a single quote only if it is still open (`Sent` or
+   * `Follow-up due`) with `valid_until < localDate` (`R675`). Uses `FOR UPDATE SKIP LOCKED`
+   * so concurrent status changes or another worker never get overwritten or stall the sweep.
+   */
+  public async expireQuoteIfOverdue<
+    T extends { status: string; timeline?: unknown[]; updatedAt?: string } = TenantQuoteRecord,
+  >(
+    ctx: TenantContext,
+    quoteId: string,
+    options: {
+      readonly localDate: string;
+      readonly applyTransition: (quote: T) => {
+        readonly shouldPersist: boolean;
+        readonly previousStatus: string;
+      };
+      readonly onPersistedInTx?: (
+        expiredQuote: T,
+        previousStatus: string,
+      ) => Promise<void>;
+    },
+  ): Promise<{ expired: boolean; previousStatus: string | null; quote: T | null }> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<QuoteRow>(
+        `SELECT * FROM quotes q
+         WHERE q.tenant_id = $1
+           AND q.id = $2
+           AND q.status IN ('Sent', 'Follow-up due')
+           AND NULLIF(q.valid_until, '') IS NOT NULL
+           AND q.valid_until < $3
+         FOR UPDATE SKIP LOCKED`,
+        [ctx.tenantId, quoteId, options.localDate],
+      );
+      if (res.rows.length === 0) {
+        return { expired: false, previousStatus: null, quote: null };
+      }
+      const row = res.rows[0]!;
+      this.assertRowTenant(
+        ctx,
+        row.tenant_id,
+        'quotes.expireQuoteIfOverdue',
+      );
+      const freshQuote = mapRowToQuote(row) as unknown as T;
+      const { shouldPersist, previousStatus } = options.applyTransition(freshQuote);
+      if (!shouldPersist) {
+        return { expired: false, previousStatus, quote: null };
+      }
+      await this.upsertQuoteInTx(
+        tx,
+        ctx,
+        freshQuote as unknown as TenantQuoteRecord,
+      );
+      await options.onPersistedInTx?.(freshQuote, previousStatus);
+      return { expired: true, previousStatus, quote: freshQuote };
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // S1-02a Scoped Intake & Quote Lookups
+  // ---------------------------------------------------------------------------
+
+  public async getQuoteByIdOrReference<T = TenantQuoteRecord>(
+    ctx: TenantContext,
+    idOrReference: string,
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<T | null> {
+    if (!idOrReference?.trim()) return null;
+    const key = idOrReference.trim();
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(
+        options?.hasRestrictedMatterAccess,
+      );
+      const viewerId = options?.viewerId ?? ctx.actorId;
+      const predicate = hasRestrictedMatterAccess
+        ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+        : QUOTE_VISIBLE_SQL_PREDICATE;
+      const res = includeRestricted
+        ? await tx.query<QuoteRow>(
+            `SELECT * FROM quotes q WHERE q.tenant_id = $1 AND (q.id = $2 OR q.quote_reference = $2) LIMIT 1`,
+            [ctx.tenantId, key],
+          )
+        : await tx.query<QuoteRow>(
+            `SELECT * FROM quotes q
+             WHERE q.tenant_id = $1
+               AND (q.id = $3 OR q.quote_reference = $3)
+               AND ${predicate}
+             LIMIT 1`,
+            [ctx.tenantId, viewerId, key],
+          );
+      const row = res.rows[0];
+      if (!row) return null;
+      this.assertRowTenant(ctx, row.tenant_id, 'quotes.getQuoteByIdOrReference');
+      return mapRowToQuote(row) as unknown as T;
+    });
+  }
+
+  public async listEnquiriesByIds<T = TenantEnquiryRecord>(
+    ctx: TenantContext,
+    enquiryIds: readonly string[],
+    options?: {
+      includeRestricted?: boolean;
+      viewerId?: string;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<T[]> {
+    const cleanIds = Array.from(
+      new Set(enquiryIds.map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const includeRestricted = Boolean(options?.includeRestricted);
+      const viewerId = (options?.viewerId ?? ctx.actorId ?? '').trim() || '__none__';
+      const sqlParams: unknown[] = [ctx.tenantId, cleanIds];
+      const whereClauses = ['e.tenant_id = $1', 'e.id = ANY($2::text[])'];
+      if (!includeRestricted) {
+        sqlParams.push(viewerId);
+        const vIdx = sqlParams.length;
+        const pred = options?.hasRestrictedMatterAccess
+          ? buildEnquiryDraftOnlySqlPredicate(vIdx)
+          : buildEnquiryVisibleSqlPredicate(vIdx);
+        whereClauses.push(pred);
+      }
+      const res = await tx.query<EnquiryRow>(
+        `SELECT * FROM enquiries e
+         WHERE ${whereClauses.join(' AND ')}
+         ORDER BY e.id ASC`,
+        sqlParams,
+      );
+      const hiddenMatterIds =
+        includeRestricted || options?.hasRestrictedMatterAccess
+          ? new Set<string>()
+          : await this.listHiddenRestrictedMatterIdsInTx(tx, ctx, viewerId);
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'enquiries.listEnquiriesByIds');
+        const mapped = mapRowToEnquiry(row);
+        return (
+          includeRestricted || options?.hasRestrictedMatterAccess
+            ? mapped
+            : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
+        ) as unknown as T;
+      });
+    });
+  }
+
+  public async listQuotesByIds<T = TenantQuoteRecord>(
+    ctx: TenantContext,
+    quoteIds: readonly string[],
+  ): Promise<T[]> {
+    const cleanIds = Array.from(
+      new Set(quoteIds.map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<QuoteRow>(
+        `SELECT * FROM quotes q
+         WHERE q.tenant_id = $1 AND q.id = ANY($2::text[])
+         ORDER BY q.id ASC`,
+        [ctx.tenantId, cleanIds],
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'quotes.listQuotesByIds');
+        return mapRowToQuote(row) as unknown as T;
+      });
+    });
+  }
+
+  public async listEnquiriesForOwnerOrMatters<T = TenantEnquiryRecord>(
+    ctx: TenantContext,
+    filter: {
+      readonly ownerPersonId?: string;
+      readonly matterIds?: readonly string[];
+      readonly clientPersonIds?: readonly string[];
+      readonly clientOrgIds?: readonly string[];
+    },
+  ): Promise<T[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const orClauses: string[] = [];
+      const params: unknown[] = [ctx.tenantId];
+      if (filter.ownerPersonId?.trim()) {
+        params.push(filter.ownerPersonId.trim());
+        const idx = params.length;
+        orClauses.push(
+          `(e.assigned_to_id = $${idx} OR e.taken_by_id = $${idx} OR e.created_by_id = $${idx} OR e.linked_person_id = $${idx})`,
+        );
+      }
+      const mIds = Array.from(
+        new Set((filter.matterIds ?? []).filter(Boolean)),
+      );
+      if (mIds.length > 0) {
+        params.push(mIds);
+        orClauses.push(`e.converted_matter_id = ANY($${params.length}::text[])`);
+      }
+      const pIds = Array.from(
+        new Set((filter.clientPersonIds ?? []).filter(Boolean)),
+      );
+      if (pIds.length > 0) {
+        params.push(pIds);
+        const idx = params.length;
+        orClauses.push(
+          `(e.linked_person_id = ANY($${idx}::text[]) OR e.summary_and_notes_json->>'referrerPersonId' = ANY($${idx}::text[]))`,
+        );
+      }
+      const oIds = Array.from(
+        new Set((filter.clientOrgIds ?? []).filter(Boolean)),
+      );
+      if (oIds.length > 0) {
+        params.push(oIds);
+        orClauses.push(`e.linked_organisation_id = ANY($${params.length}::text[])`);
+      }
+      if (orClauses.length === 0) return [];
+      const res = await tx.query<EnquiryRow>(
+        `SELECT * FROM enquiries e
+         WHERE e.tenant_id = $1 AND (${orClauses.join(' OR ')})
+         ORDER BY e.id ASC`,
+        params,
+      );
+      return res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'enquiries.listEnquiriesForOwnerOrMatters',
+        );
+        return mapRowToEnquiry(row) as unknown as T;
+      });
+    });
+  }
+
+  public async findSqlConflictEnquiryCandidates<T = TenantEnquiryRecord>(
+    ctx: TenantContext,
+    params: {
+      readonly terms?: readonly string[];
+      readonly emails?: readonly string[];
+      readonly phones?: readonly string[];
+      readonly linkedPersonIds?: readonly string[];
+      readonly linkedOrganisationIds?: readonly string[];
+      readonly excludeEnquiryId?: string | null;
+      readonly includeAll?: boolean;
+      readonly viewerId?: string;
+      readonly hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<T[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const orClauses: string[] = [];
+      const sqlParams: unknown[] = [ctx.tenantId];
+
+      const pIds = Array.from(
+        new Set((params.linkedPersonIds ?? []).map((x) => x.trim()).filter(Boolean)),
+      );
+      if (pIds.length > 0) {
+        sqlParams.push(pIds);
+        const idx = sqlParams.length;
+        orClauses.push(
+          `(e.linked_person_id = ANY($${idx}::text[]) OR e.referrer_person_id = ANY($${idx}::text[]) OR e.summary_and_notes_json->>'referrerPersonId' = ANY($${idx}::text[]))`,
+        );
+      }
+      const oIds = Array.from(
+        new Set((params.linkedOrganisationIds ?? []).map((x) => x.trim()).filter(Boolean)),
+      );
+      if (oIds.length > 0) {
+        sqlParams.push(oIds);
+        orClauses.push(`e.linked_organisation_id = ANY($${sqlParams.length}::text[])`);
+      }
+      const emails = Array.from(
+        new Set((params.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean)),
+      );
+      if (emails.length > 0) {
+        sqlParams.push(emails);
+        orClauses.push(`lower(COALESCE(e.email, '')) = ANY($${sqlParams.length}::text[])`);
+      }
+      const terms = Array.from(
+        new Set((params.terms ?? []).map((t) => t.trim()).filter((t) => t.length >= 2)),
+      );
+      for (const term of terms) {
+        const escaped = term.replace(/[\\%_]/g, '\\$&');
+        sqlParams.push(`%${escaped}%`, term);
+        const likeIdx = sqlParams.length - 1;
+        const trgmIdx = sqlParams.length;
+        const enqOtherExpr = `COALESCE(e.summary_and_notes_json->>'otherPartiesNamed', e.profile_json->>'otherPartiesNamed', '')`;
+        const enqConcatLower = `lower(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') || ' ' || COALESCE(e.calling_on_behalf_of, '') || ' ' || COALESCE(e.organisation_name, '') || ' ' || ${enqOtherExpr})`;
+        orClauses.push(
+          `(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') ILIKE $${likeIdx} OR COALESCE(e.calling_on_behalf_of, '') ILIKE $${likeIdx} OR COALESCE(e.organisation_name, '') ILIKE $${likeIdx} OR ${enqOtherExpr} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${enqConcatLower}) >= 0.28 OR word_similarity(${enqConcatLower}, $${trgmIdx}) >= 0.28 OR (length(trim(COALESCE(e.calling_on_behalf_of, ''))) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(COALESCE(e.calling_on_behalf_of, '')))) > 0) OR (length(trim(COALESCE(e.organisation_name, ''))) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(COALESCE(e.organisation_name, '')))) > 0))`,
+        );
+      }
+      for (const ph of params.phones ?? []) {
+        const digits = ph.replace(/\D/g, '');
+        if (digits.length >= 7) {
+          const suffix = digits.slice(-7);
+          sqlParams.push(`%${suffix}%`);
+          orClauses.push(
+            `regexp_replace(COALESCE(e.phone, ''), '[^0-9]', '', 'g') LIKE $${sqlParams.length}`,
+          );
+        }
+      }
+      if (orClauses.length === 0) return [];
+
+      const whereClauses: string[] = ['e.tenant_id = $1', `(${orClauses.join(' OR ')})`];
+      if (params.excludeEnquiryId?.trim()) {
+        sqlParams.push(params.excludeEnquiryId.trim());
+        whereClauses.push(`e.id <> $${sqlParams.length}`);
+      }
+      if (!params.includeAll) {
+        sqlParams.push(params.viewerId ?? ctx.actorId);
+        const vIdx = sqlParams.length;
+        const pred = params.hasRestrictedMatterAccess
+          ? buildEnquiryDraftOnlySqlPredicate(vIdx)
+          : buildEnquiryVisibleSqlPredicate(vIdx);
+        whereClauses.push(pred);
+      }
+
+      const res = await tx.query<EnquiryRow>(
+        `SELECT * FROM enquiries e
+         WHERE ${whereClauses.join(' AND ')}
+         ORDER BY e.received_at DESC, e.id ASC`,
+        sqlParams,
+      );
+      const hiddenMatterIds =
+        params.includeAll || params.hasRestrictedMatterAccess
+          ? new Set<string>()
+          : await this.listHiddenRestrictedMatterIdsInTx(
+              tx,
+              ctx,
+              params.viewerId ?? ctx.actorId,
+            );
+      return res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'enquiries.findSqlConflictEnquiryCandidates',
+        );
+        const mapped = mapRowToEnquiry(row);
+        return (
+          params.includeAll || params.hasRestrictedMatterAccess
+            ? mapped
+            : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
+        ) as unknown as T;
+      });
+    });
+  }
+
+  public async listHiddenEnquiryIds(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean; ids?: readonly string[] },
+  ): Promise<string[]> {
+    const filterIds = options?.ids
+      ? Array.from(new Set(options.ids.map((id) => id?.trim()).filter(Boolean) as string[]))
+      : null;
+    if (filterIds && filterIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
+        : ENQUIRY_VISIBLE_SQL_PREDICATE;
+      const res = filterIds
+        ? await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT e.tenant_id, e.id FROM enquiries e
+             WHERE e.tenant_id = $1 AND e.id = ANY($3::text[]) AND NOT ${pred}
+             ORDER BY e.id ASC`,
+            [ctx.tenantId, viewerId, filterIds],
+          )
+        : await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT e.tenant_id, e.id FROM enquiries e
+             WHERE e.tenant_id = $1 AND NOT ${pred}
+             ORDER BY e.id ASC`,
+            [ctx.tenantId, viewerId],
+          );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'enquiries.listHiddenEnquiryIds');
+        return r.id;
+      });
+    });
+  }
+
+  public async isEnquiryHiddenFromViewer(
+    ctx: TenantContext,
+    enquiryId: string,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean },
+  ): Promise<boolean> {
+    const cleanId = enquiryId?.trim();
+    if (!cleanId) return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
+        : ENQUIRY_VISIBLE_SQL_PREDICATE;
+      const res = await tx.query<{ is_hidden: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM enquiries e
+           WHERE e.tenant_id = $1 AND e.id = $3 AND NOT ${pred}
+         ) AS is_hidden`,
+        [ctx.tenantId, viewerId, cleanId],
+      );
+      return Boolean(res.rows[0]?.is_hidden);
+    });
+  }
+
+  public async listHiddenQuoteIds(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean; ids?: readonly string[] },
+  ): Promise<string[]> {
+    const filterIds = options?.ids
+      ? Array.from(new Set(options.ids.map((id) => id?.trim()).filter(Boolean) as string[]))
+      : null;
+    if (filterIds && filterIds.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+        : QUOTE_VISIBLE_SQL_PREDICATE;
+      const res = filterIds
+        ? await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT q.tenant_id, q.id FROM quotes q
+             WHERE q.tenant_id = $1 AND q.id = ANY($3::text[]) AND NOT ${pred}
+             ORDER BY q.id ASC`,
+            [ctx.tenantId, viewerId, filterIds],
+          )
+        : await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT q.tenant_id, q.id FROM quotes q
+             WHERE q.tenant_id = $1 AND NOT ${pred}
+             ORDER BY q.id ASC`,
+            [ctx.tenantId, viewerId],
+          );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'quotes.listHiddenQuoteIds');
+        return r.id;
+      });
+    });
+  }
+
+  public async isQuoteHiddenFromViewer(
+    ctx: TenantContext,
+    quoteId: string,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean },
+  ): Promise<boolean> {
+    const cleanId = quoteId?.trim();
+    if (!cleanId) return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+        : QUOTE_VISIBLE_SQL_PREDICATE;
+      const res = await tx.query<{ is_hidden: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM quotes q
+           WHERE q.tenant_id = $1 AND q.id = $3 AND NOT ${pred}
+         ) AS is_hidden`,
+        [ctx.tenantId, viewerId, cleanId],
+      );
+      return Boolean(res.rows[0]?.is_hidden);
+    });
   }
 
   public async deleteQuoteById(

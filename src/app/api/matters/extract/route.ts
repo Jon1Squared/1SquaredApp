@@ -18,8 +18,6 @@ import { AuthorisationError } from '@/domain/rbac';
 import {
   vid,
   type ChoiceValue,
-  type Enquiry,
-  type Matter,
   type Organisation,
   type Person,
   type PersonOrganisationLink,
@@ -30,7 +28,6 @@ import {
   getCatalogueRepository,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
-  getMatterRepository,
   getPartyRepository,
 } from '@/platform/tenantRuntime';
 import { guardedRoute } from '@/server/authorize';
@@ -42,7 +39,6 @@ import {
   savePersonRecord,
 } from '@/server/services';
 import { readServerSecret } from '@/server/serverSecrets';
-import { buildRecordVisibility, EMPTY_HIDDEN_KEY_DATE_IDS } from '@/server/visibility';
 
 export const dynamic = 'force-dynamic';
 
@@ -2125,10 +2121,14 @@ async function ensureContactInCrm(
     }
   } else if (orgId) {
     if (!canCreateContacts) return;
-    const allLinks = await getPartyRepository().listAllLinks<PersonOrganisationLink>(
+    const links = await getPartyRepository().listLinksForEntities<PersonOrganisationLink>(
       tenantContext,
+      {
+        personIds: [contact.matchedPersonId],
+        organisationIds: [orgId],
+      },
     );
-    const hasLink = allLinks.some(
+    const hasLink = links.some(
       (l) =>
         l.personId === contact.matchedPersonId &&
         l.organisationId === orgId &&
@@ -2223,33 +2223,18 @@ export const POST = guardedRoute(
 
       const tenantContext = guardedActor!.tenantContext;
       const partyRepo = getPartyRepository();
-      const matterRepo = getMatterRepository();
       const intakeRepo = getIntakeQuoteRepository();
       const hrRepo = getHrAndRbacRepository();
       const catalogueRepo = getCatalogueRepository();
-      const [allPeople, allOrganisations, allMatters, allEnquiries, allTeams, allValues] = await Promise.all([
-        partyRepo.listAllPeople<Person>(tenantContext),
-        partyRepo.listAllOrganisations<Organisation>(tenantContext),
-        matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
-        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
+      const [staffPeople, allTeams, allValues] = await Promise.all([
+        partyRepo.listAllPeople<Person>(tenantContext, {
+          employeesAndLeaversOnly: true,
+        }),
         hrRepo.listAllTeams<Team>(tenantContext),
         catalogueRepo.listAllChoiceValues<ChoiceValue>(tenantContext),
       ]);
-      const actorPerson = allPeople.find((p) => p.id === byId) ?? null;
-      const visibility = buildRecordVisibility({ teams: allTeams }, actorPerson, {
-        teams: allTeams,
-        people: allPeople,
-        matters: allMatters,
-        enquiries: allEnquiries,
-        hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-      });
-      const visiblePeople = allPeople.filter(
-        (p) =>
-          !p.mergedIntoId &&
-          !(p.createdFromEnquiryId && visibility.hiddenEnquiryIds.has(p.createdFromEnquiryId)),
-      );
-      const visibleOrganisations = allOrganisations.filter((o) => !o.mergedIntoId);
-      const employees = allPeople.filter((p) => p.isEmployee && !p.mergedIntoId);
+      const actorPerson = staffPeople.find((p) => p.id === byId) ?? null;
+      const employees = staffPeople.filter((p) => p.isEmployee && !p.mergedIntoId);
 
       const practiceAreas = allValues.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
@@ -2272,6 +2257,72 @@ export const POST = guardedRoute(
         byId,
       );
 
+      const searchTerms: string[] = [];
+      const searchEmails: string[] = [];
+      const searchCompanyNumbers: string[] = [];
+      if (rawExtraction.client?.name) searchTerms.push(rawExtraction.client.name);
+      if (rawExtraction.client?.email) searchEmails.push(rawExtraction.client.email);
+      if (rawExtraction.client?.companyNumber) {
+        searchCompanyNumbers.push(rawExtraction.client.companyNumber);
+      }
+      for (const contact of [rawExtraction.instructingContact, rawExtraction.billingContact]) {
+        if (contact?.name) searchTerms.push(contact.name);
+        if (contact?.email) searchEmails.push(contact.email);
+      }
+      for (const pt of [
+        ...(rawExtraction.otherParties ?? []),
+        ...(rawExtraction.matters ?? []).flatMap((m) => m.otherParties ?? []),
+      ]) {
+        if (pt?.name) searchTerms.push(pt.name);
+        if (pt?.contactDetails && pt.contactDetails.includes('@')) {
+          searchEmails.push(pt.contactDetails.trim());
+        }
+        if (pt?.companyNumber) searchCompanyNumbers.push(pt.companyNumber);
+      }
+
+      const candidateMatches = await partyRepo.findSqlConflictCandidates<
+        Person,
+        Organisation,
+        PersonOrganisationLink
+      >(tenantContext, {
+        terms: searchTerms,
+        emails: searchEmails,
+        companyNumbers: searchCompanyNumbers,
+      });
+      const hasRestrictedAccess = hasPersonPermission(
+        actorPerson,
+        'matter:restricted:access',
+        { allPeople: staffPeople, teams: allTeams },
+      );
+      const candidateEnquiryIds = Array.from(
+        new Set(
+          candidateMatches.people
+            .map((p) => p.createdFromEnquiryId)
+            .filter((x): x is string => Boolean(x)),
+        ),
+      );
+      const hiddenEnquiryIdList =
+        candidateEnquiryIds.length > 0
+          ? await intakeRepo.listHiddenEnquiryIds(tenantContext, byId, {
+              hasRestrictedMatterAccess: hasRestrictedAccess,
+              ids: candidateEnquiryIds,
+            })
+          : [];
+      const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
+
+      const candidatePeopleMap = new Map<string, Person>();
+      for (const p of [...staffPeople, ...candidateMatches.people]) {
+        if (!candidatePeopleMap.has(p.id)) candidatePeopleMap.set(p.id, p);
+      }
+      const visiblePeople = Array.from(candidatePeopleMap.values()).filter(
+        (p) =>
+          !p.mergedIntoId &&
+          !(p.createdFromEnquiryId && hiddenEnquiryIds.has(p.createdFromEnquiryId)),
+      );
+      const visibleOrganisations = candidateMatches.organisations.filter(
+        (o) => !o.mergedIntoId,
+      );
+
       const enriched = enrichExtractionWithCrmMatches(rawExtraction, {
         organisations: visibleOrganisations,
         people: visiblePeople,
@@ -2282,7 +2333,7 @@ export const POST = guardedRoute(
       const canCreateContacts =
         Boolean(guardedActor?.permissions.has('contact:create')) &&
         hasPersonPermission(actorPerson, 'contact:create', {
-          allPeople,
+          allPeople: staffPeople,
           teams: allTeams,
         });
 
@@ -2417,22 +2468,21 @@ export const POST = guardedRoute(
         }
       }
 
-      const [latestPeople, latestOrganisations, latestLinks, latestMatters, latestEnquiries, latestTeams] =
+      const [latestPeople, latestOrganisations, latestLinks] =
         await Promise.all([
-          partyRepo.listAllPeople<Person>(tenantContext),
-          partyRepo.listAllOrganisations<Organisation>(tenantContext),
-          partyRepo.listAllLinks<PersonOrganisationLink>(tenantContext),
-          matterRepo.listAllMattersUnfiltered<Matter>(tenantContext),
-          intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(tenantContext),
-          hrRepo.listAllTeams<Team>(tenantContext),
+          partyRepo.listPeopleByIds<Person>(
+            tenantContext,
+            Array.from(matchedPersonIds),
+          ),
+          partyRepo.listOrganisationsByIds<Organisation>(
+            tenantContext,
+            Array.from(matchedOrgIds),
+          ),
+          partyRepo.listLinksForEntities<PersonOrganisationLink>(tenantContext, {
+            personIds: Array.from(matchedPersonIds),
+            organisationIds: Array.from(matchedOrgIds),
+          }),
         ]);
-      const latestVisibility = buildRecordVisibility({ teams: latestTeams }, actorPerson, {
-        teams: latestTeams,
-        people: latestPeople,
-        matters: latestMatters,
-        enquiries: latestEnquiries,
-        hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
-      });
       const returnedOrganisations = latestOrganisations.filter(
         (o) => matchedOrgIds.has(o.id) && !o.mergedIntoId,
       );
@@ -2444,7 +2494,7 @@ export const POST = guardedRoute(
             !p.isEmployee &&
             !(
               p.createdFromEnquiryId &&
-              latestVisibility.hiddenEnquiryIds.has(p.createdFromEnquiryId)
+              hiddenEnquiryIds.has(p.createdFromEnquiryId)
             ),
         )
         .map((p) => ({ ...p, employment: undefined }));

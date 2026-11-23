@@ -5,6 +5,7 @@ import {
   POST as matterExtractPost,
 } from '@/app/api/matters/extract/route';
 import {
+  getCatalogueRepository,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
@@ -632,7 +633,7 @@ describe('S0-06: POST /api/matters/extract permissions, tenant settings, B10, an
     errorSpy.mockClear();
     clearMatterExtractionCacheForTesting();
     const internalSpy = vi
-      .spyOn(getMatterRepository(), 'listAllMattersUnfiltered')
+      .spyOn(getCatalogueRepository(), 'listAllChoiceValues')
       .mockRejectedValueOnce(new TypeError('Unexpected internal programming failure'));
     try {
       const internalErrRes = await matterExtractPost(

@@ -787,6 +787,16 @@ export const PERMISSION_REGISTRY: Readonly<
     jobOnly: true,
     sinceVersion: '1.1.0',
   },
+  'quote:run_expiry': {
+    key: 'quote:run_expiry',
+    domain: 'quote',
+    description:
+      'Execute the scheduled daily quote-expiry lifecycle sweep across provisioned tenants (ADR 0030; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.1.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(
