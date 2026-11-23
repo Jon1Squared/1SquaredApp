@@ -314,6 +314,11 @@ export function DocumentGenerationModal({
         return;
       }
 
+      if (res.status === 'converter_busy' || res.status === 'converter_failed') {
+        setErrorMsg(res.message ?? 'Document generation failed.');
+        return;
+      }
+
       if (res.document) {
         if (res.fileBase64) {
           triggerBase64Download(

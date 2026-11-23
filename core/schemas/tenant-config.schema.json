@@ -839,6 +839,24 @@
           "default": "local-fs",
           "description": "Configured document storage provider"
         },
+        "pdfConverter": {
+          "type": "string",
+          "enum": [
+            "builtin",
+            "container"
+          ],
+          "default": "builtin",
+          "description": "DOCX-to-PDF rendering engine: in-process BuiltInOpenXmlPdfConverter (builtin) or the internal headless LibreOffice Container App over DOC_CONVERTER_URL (container, Stage 1 item 46)"
+        },
+        "pdfConverterFallback": {
+          "type": "string",
+          "enum": [
+            "builtin",
+            "fail"
+          ],
+          "default": "builtin",
+          "description": "Behaviour when pdfConverter is container and the converter service is unconfigured or unreachable: fall back to BuiltInOpenXmlPdfConverter with a structured warning (builtin) or fail generation loudly (fail)"
+        },
         "approval": {
           "type": "object",
           "additionalProperties": false,

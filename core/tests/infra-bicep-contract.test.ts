@@ -602,4 +602,58 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(dockerfile).toContain('manifest.json');
     expect(runnerStage).toContain('--chown=node:node');
   });
+
+  it('S1-10: configures internal-only ca-pdf probes, pdfConverterMinReplicas parameter, disabled default, and DOC_CONVERTER_URL on web app and all 7 scheduled jobs', () => {
+    const demoParams = fs.readFileSync(
+      path.join(INFRA_DIR, 'parameters', 'demo.bicepparam'),
+      'utf8',
+    );
+    expect(mainBicep).toMatch(/@minValue\(0\)[\s\S]*?@maxValue\(4\)[\s\S]*?param pdfConverterMinReplicas int = 0/);
+    expect(platformBicep).toMatch(/@minValue\(0\)[\s\S]*?@maxValue\(4\)[\s\S]*?param pdfConverterMinReplicas int = 0/);
+    expect(mainBicep).toContain('pdfConverterMinReplicas: pdfConverterMinReplicas');
+    expect(mainBicep).toContain('param enablePdfConverterContainerApp bool = false');
+    expect(platformBicep).toContain('param enablePdfConverterContainerApp bool = false');
+    expect(demoParams).toContain('param enablePdfConverterContainerApp = false');
+
+    const pdfBlock = platformNoComments.slice(
+      platformNoComments.indexOf('resource pdfConverterContainerApp'),
+      platformNoComments.indexOf('resource webContainerApp'),
+    );
+    expect(pdfBlock).toContain('external: false');
+    expect(pdfBlock).toContain('allowInsecure: false');
+    expect(pdfBlock).toContain('targetPort: 8080');
+    expect(pdfBlock).toContain('minReplicas: pdfConverterMinReplicas');
+
+    const pdfDockerfile = fs.readFileSync(
+      path.join(REPO_ROOT, 'docker', 'pdf-converter', 'Dockerfile'),
+      'utf8',
+    );
+    expect(pdfDockerfile).toContain('tini');
+    expect(pdfDockerfile).toContain('ENTRYPOINT ["/usr/bin/tini", "--"]');
+    expect(pdfBlock).toMatch(/concurrentRequests:\s*'2'/);
+    expect(pdfBlock).toMatch(/type:\s*'Startup'[\s\S]*?path:\s*'\/health\/live'[\s\S]*?port:\s*8080/);
+    expect(pdfBlock).toMatch(/type:\s*'Liveness'[\s\S]*?path:\s*'\/health\/live'[\s\S]*?port:\s*8080[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
+    expect(pdfBlock).toMatch(/type:\s*'Readiness'[\s\S]*?path:\s*'\/health\/ready'[\s\S]*?port:\s*8080[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
+
+    const resourceBlock = (name: string, next: string) =>
+      platformNoComments.slice(
+        platformNoComments.indexOf(`resource ${name} `),
+        platformNoComments.indexOf(`resource ${next} `),
+      );
+    const webAppBlock = resourceBlock('webContainerApp', 'provisionJob');
+    expect(webAppBlock).toContain('pdfConverterEnv');
+    for (const [name, next] of [
+      ['keyDateRemindersJob', 'usageRetentionPurgeJob'],
+      ['usageRetentionPurgeJob', 'enquiryAnonymisationJob'],
+      ['enquiryAnonymisationJob', 'registerRemindersJob'],
+      ['registerRemindersJob', 'outboxDrainJob'],
+      ['outboxDrainJob', 'notificationDigestsJob'],
+      ['notificationDigestsJob', 'quoteExpiryJob'],
+      ['quoteExpiryJob', 'seedDemoJob'],
+    ] as const) {
+      expect(resourceBlock(name, next), name).toContain(
+        'env: concat(runtimeCommonEnv, pdfConverterEnv)',
+      );
+    }
+  });
 });

@@ -571,12 +571,18 @@ export interface DocumentGenerationEngine {
   }>;
 }
 
+export type DocumentPdfConverterMode = 'builtin' | 'container';
+
+export type DocumentPdfConverterFallbackMode = 'builtin' | 'fail';
+
 export interface DocumentPdfConverter {
   readonly converterId: string;
   convertDocxToPdf(input: {
     docxBytes: Uint8Array;
     title: string;
     authorName?: string;
+    readonly tenantId?: string;
+    readonly correlationId?: string;
   }): Promise<Uint8Array>;
 }
 
@@ -820,6 +826,8 @@ export interface DocumentGenerationConfig {
   defaultOutputFormat: DocumentOutputFormat;
   allowUserFormatOverride: boolean;
   storageProvider: StorageProviderId;
+  pdfConverter?: DocumentPdfConverterMode;
+  pdfConverterFallback?: DocumentPdfConverterFallbackMode;
   approval: {
     requireApproval: boolean;
     allowSelfApproval: boolean;

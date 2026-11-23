@@ -10,8 +10,149 @@
  * 2. Active from day one so users can generate and download `.pdf` or `.docx` out of the box.
  */
 
-import type { DocumentPdfConverter } from '../../api/index';
+import type {
+  DocumentPdfConverter,
+  DocumentPdfConverterFallbackMode,
+  TenantConfiguration,
+} from '../../api/index';
 import { readAndValidateDocxZip, unescapeXmlText } from './docxEngine';
+
+export const DEFAULT_HTTP_PDF_CONVERTER_TIMEOUT_MS = 60_000;
+export const DEFAULT_HTTP_PDF_CONVERTER_MAX_DOCX_BYTES = 25 * 1024 * 1024;
+export const DEFAULT_HTTP_PDF_CONVERTER_MAX_PDF_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_HTTP_PDF_CONVERTER_MAX_BUSY_RETRIES = 3;
+export const DEFAULT_HTTP_PDF_CONVERTER_MAX_RETRY_AFTER_MS = 5_000;
+export const DEFAULT_HTTP_PDF_CONVERTER_DEFAULT_RETRY_AFTER_MS = 1_000;
+export const PDF_CONVERTER_BUSY_USER_MESSAGE =
+  'The PDF converter is busy. Please try again in a moment.';
+
+export type PdfConverterErrorCode =
+  | 'PDF_CONVERTER_UNCONFIGURED'
+  | 'PDF_CONVERTER_SIZE_LIMIT'
+  | 'PDF_CONVERTER_TIMEOUT'
+  | 'PDF_CONVERTER_UNREACHABLE'
+  | 'PDF_CONVERTER_BUSY'
+  | 'PDF_CONVERTER_HTTP_ERROR'
+  | 'PDF_CONVERTER_INVALID_OUTPUT';
+
+export class PdfConverterError extends Error {
+  public readonly code: PdfConverterErrorCode;
+  public readonly statusCode?: number;
+
+  public constructor(
+    code: PdfConverterErrorCode,
+    message: string,
+    statusCode?: number,
+  ) {
+    super(message);
+    this.name = 'PdfConverterError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
+export function formatPdfConverterUserMessage(
+  code: PdfConverterErrorCode,
+): string {
+  switch (code) {
+    case 'PDF_CONVERTER_BUSY':
+      return PDF_CONVERTER_BUSY_USER_MESSAGE;
+    case 'PDF_CONVERTER_TIMEOUT':
+      return 'PDF conversion timed out. Please try again in a moment.';
+    case 'PDF_CONVERTER_SIZE_LIMIT':
+      return 'This document is too large to convert to PDF. Reduce its size or generate a Word (.docx) document instead.';
+    case 'PDF_CONVERTER_UNCONFIGURED':
+      return 'The dedicated PDF converter is not configured. Please contact your administrator.';
+    case 'PDF_CONVERTER_UNREACHABLE':
+      return 'The PDF converter service is currently unavailable. Please try again in a moment.';
+    case 'PDF_CONVERTER_INVALID_OUTPUT':
+    case 'PDF_CONVERTER_HTTP_ERROR':
+    default:
+      return 'The PDF converter could not render this document. Please try again or contact your administrator.';
+  }
+}
+
+export interface PdfConverterFallbackWarningEvent {
+  readonly event: 'document_generation.pdf_converter_fallback';
+  readonly tenantId?: string;
+  readonly correlationId?: string;
+  readonly errorCode: string;
+  readonly fallbackConverterId: string;
+  readonly message?: string;
+}
+
+function defaultEmitFallbackWarning(event: PdfConverterFallbackWarningEvent): void {
+  // Structured log intentionally excludes document title, filename, and content (S1-10, Rule 10 / Standard §14).
+  console.warn(
+    JSON.stringify({
+      level: 'warn',
+      event: event.event,
+      ...(event.tenantId ? { tenantId: event.tenantId } : {}),
+      ...(event.correlationId ? { correlationId: event.correlationId } : {}),
+      errorCode: event.errorCode,
+      fallbackConverterId: event.fallbackConverterId,
+      ...(event.message ? { message: event.message } : {}),
+    }),
+  );
+}
+
+function parseRetryAfterMs(headers: Headers | undefined | null): number {
+  const raw = headers?.get('retry-after')?.trim();
+  if (!raw) {
+    return DEFAULT_HTTP_PDF_CONVERTER_DEFAULT_RETRY_AFTER_MS;
+  }
+  const numericSeconds = Number(raw);
+  if (Number.isFinite(numericSeconds) && numericSeconds >= 0) {
+    return Math.min(
+      Math.round(numericSeconds * 1000),
+      DEFAULT_HTTP_PDF_CONVERTER_MAX_RETRY_AFTER_MS,
+    );
+  }
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) {
+    return Math.min(
+      Math.max(0, dateMs - Date.now()),
+      DEFAULT_HTTP_PDF_CONVERTER_MAX_RETRY_AFTER_MS,
+    );
+  }
+  return DEFAULT_HTTP_PDF_CONVERTER_DEFAULT_RETRY_AFTER_MS;
+}
+
+function defaultSleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(handle);
+      reject(signal.reason);
+    };
+    const handle = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function hasPdfMagicSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.byteLength >= 5 &&
+    bytes[0] === 0x25 && // %
+    bytes[1] === 0x50 && // P
+    bytes[2] === 0x44 && // D
+    bytes[3] === 0x46 && // F
+    bytes[4] === 0x2d // -
+  );
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: unknown }).name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
 
 interface PdfRenderLine {
   text: string;
@@ -356,4 +497,303 @@ export class BuiltInOpenXmlPdfConverter implements DocumentPdfConverter {
 
     return new TextEncoder().encode(pdfContent);
   }
+}
+
+export class HttpPdfConverter implements DocumentPdfConverter {
+  public readonly converterId = 'libreoffice-http-pdf';
+  public readonly baseUrl: string;
+  public readonly timeoutMs: number;
+  public readonly maxDocxBytes: number;
+  public readonly maxPdfBytes: number;
+  private readonly fetchImpl: typeof fetch;
+  private readonly sleepFn: (ms: number, signal: AbortSignal) => Promise<void>;
+
+  public constructor(options: {
+    baseUrl: string;
+    timeoutMs?: number;
+    maxDocxBytes?: number;
+    maxPdfBytes?: number;
+    fetchImpl?: typeof fetch;
+    sleepFn?: (ms: number, signal: AbortSignal) => Promise<void>;
+  }) {
+    this.baseUrl = options.baseUrl.trim().replace(/\/+$/, '');
+    this.timeoutMs =
+      options.timeoutMs ?? DEFAULT_HTTP_PDF_CONVERTER_TIMEOUT_MS;
+    this.maxDocxBytes =
+      options.maxDocxBytes ?? DEFAULT_HTTP_PDF_CONVERTER_MAX_DOCX_BYTES;
+    this.maxPdfBytes =
+      options.maxPdfBytes ?? DEFAULT_HTTP_PDF_CONVERTER_MAX_PDF_BYTES;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.sleepFn = options.sleepFn ?? defaultSleepWithSignal;
+  }
+
+  public async convertDocxToPdf(input: {
+    docxBytes: Uint8Array;
+    title: string;
+    authorName?: string;
+    readonly tenantId?: string;
+    readonly correlationId?: string;
+  }): Promise<Uint8Array> {
+    if (!this.baseUrl) {
+      throw new PdfConverterError(
+        'PDF_CONVERTER_UNCONFIGURED',
+        'DOC_CONVERTER_URL is not configured for container PDF conversion.',
+      );
+    }
+
+    if (input.docxBytes.byteLength > this.maxDocxBytes) {
+      throw new PdfConverterError(
+        'PDF_CONVERTER_SIZE_LIMIT',
+        `DOCX payload (${input.docxBytes.byteLength} bytes) exceeds maximum PDF converter limit (${this.maxDocxBytes} bytes).`,
+      );
+    }
+
+    const controller = new AbortController();
+    const deadlineMs = Date.now() + this.timeoutMs;
+    const timer = setTimeout(() => {
+      controller.abort(
+        new PdfConverterError(
+          'PDF_CONVERTER_TIMEOUT',
+          `PDF converter container request timed out after ${this.timeoutMs} ms.`,
+        ),
+      );
+    }, this.timeoutMs);
+
+    try {
+      const headers: Record<string, string> = {
+        'content-type':
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      };
+      if (input.tenantId?.trim()) {
+        headers['x-tenant-id'] = input.tenantId.trim();
+      }
+      if (input.correlationId?.trim()) {
+        headers['x-correlation-id'] = input.correlationId.trim();
+      }
+
+      let response!: Response;
+      for (
+        let attempt = 0;
+        attempt <= DEFAULT_HTTP_PDF_CONVERTER_MAX_BUSY_RETRIES;
+        attempt += 1
+      ) {
+        response = await this.fetchImpl(`${this.baseUrl}/convert`, {
+          method: 'POST',
+          headers,
+          body: Buffer.from(input.docxBytes),
+          signal: controller.signal,
+        });
+
+        if (response.status !== 503) {
+          break;
+        }
+
+        response.body?.cancel().catch(() => {});
+
+        if (attempt >= DEFAULT_HTTP_PDF_CONVERTER_MAX_BUSY_RETRIES) {
+          throw new PdfConverterError(
+            'PDF_CONVERTER_BUSY',
+            PDF_CONVERTER_BUSY_USER_MESSAGE,
+            503,
+          );
+        }
+
+        const waitMs = parseRetryAfterMs(response.headers);
+        const remainingBudgetMs = deadlineMs - Date.now();
+        if (remainingBudgetMs <= 0 || waitMs >= remainingBudgetMs) {
+          throw new PdfConverterError(
+            'PDF_CONVERTER_BUSY',
+            PDF_CONVERTER_BUSY_USER_MESSAGE,
+            503,
+          );
+        }
+
+        await this.sleepFn(waitMs, controller.signal);
+      }
+
+      if (!response.ok) {
+        response.body?.cancel().catch(() => {});
+        throw new PdfConverterError(
+          'PDF_CONVERTER_HTTP_ERROR',
+          `PDF converter container responded with HTTP ${response.status}.`,
+          response.status,
+        );
+      }
+
+      const contentLengthHeader = response.headers?.get('content-length');
+      if (contentLengthHeader !== null && contentLengthHeader !== undefined) {
+        const declaredPdfLength = Number(contentLengthHeader);
+        if (
+          Number.isFinite(declaredPdfLength) &&
+          declaredPdfLength > this.maxPdfBytes
+        ) {
+          response.body?.cancel().catch(() => {});
+          throw new PdfConverterError(
+            'PDF_CONVERTER_SIZE_LIMIT',
+            `PDF response (${declaredPdfLength} bytes) exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+          );
+        }
+      }
+
+      let pdfBytes: Uint8Array;
+      if (response.body && typeof response.body.getReader === 'function') {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
+          totalBytes += value.byteLength;
+          if (totalBytes > this.maxPdfBytes) {
+            reader.cancel().catch(() => {});
+            controller.abort(
+              new PdfConverterError(
+                'PDF_CONVERTER_SIZE_LIMIT',
+                `PDF response exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+              ),
+            );
+            throw new PdfConverterError(
+              'PDF_CONVERTER_SIZE_LIMIT',
+              `PDF response (${totalBytes} bytes) exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+            );
+          }
+          chunks.push(value);
+        }
+        pdfBytes = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          pdfBytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+      } else {
+        pdfBytes = new Uint8Array(await response.arrayBuffer());
+        if (pdfBytes.byteLength > this.maxPdfBytes) {
+          throw new PdfConverterError(
+            'PDF_CONVERTER_SIZE_LIMIT',
+            `PDF response (${pdfBytes.byteLength} bytes) exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+          );
+        }
+      }
+
+      if (!hasPdfMagicSignature(pdfBytes)) {
+        throw new PdfConverterError(
+          'PDF_CONVERTER_INVALID_OUTPUT',
+          'PDF converter container response did not start with a valid %PDF- header.',
+        );
+      }
+
+      return pdfBytes;
+    } catch (err) {
+      if (err instanceof PdfConverterError) {
+        throw err;
+      }
+      if (controller.signal.aborted || isAbortLikeError(err)) {
+        throw new PdfConverterError(
+          'PDF_CONVERTER_TIMEOUT',
+          `PDF converter container request timed out after ${this.timeoutMs} ms.`,
+        );
+      }
+      throw new PdfConverterError(
+        'PDF_CONVERTER_UNREACHABLE',
+        'PDF converter container could not be reached over DOC_CONVERTER_URL.',
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+export class FallbackAwarePdfConverter implements DocumentPdfConverter {
+  public readonly converterId: string;
+  private readonly primary: DocumentPdfConverter;
+  private readonly fallback: DocumentPdfConverter;
+  private readonly fallbackMode: DocumentPdfConverterFallbackMode;
+  private readonly onFallbackWarning: (
+    event: PdfConverterFallbackWarningEvent,
+  ) => void;
+
+  public constructor(options: {
+    primary: DocumentPdfConverter;
+    fallback: DocumentPdfConverter;
+    fallbackMode: DocumentPdfConverterFallbackMode;
+    onFallbackWarning?: (event: PdfConverterFallbackWarningEvent) => void;
+  }) {
+    this.primary = options.primary;
+    this.fallback = options.fallback;
+    this.fallbackMode = options.fallbackMode;
+    this.onFallbackWarning =
+      options.onFallbackWarning ?? defaultEmitFallbackWarning;
+    this.converterId = `${options.primary.converterId}+fallback:${options.fallbackMode}`;
+  }
+
+  public async convertDocxToPdf(input: {
+    docxBytes: Uint8Array;
+    title: string;
+    authorName?: string;
+    readonly tenantId?: string;
+    readonly correlationId?: string;
+  }): Promise<Uint8Array> {
+    try {
+      return await this.primary.convertDocxToPdf(input);
+    } catch (err) {
+      if (this.fallbackMode === 'fail') {
+        throw err;
+      }
+      const errorCode =
+        err instanceof PdfConverterError ? err.code : 'PDF_CONVERTER_FAILED';
+      const fallbackMessage =
+        errorCode === 'PDF_CONVERTER_BUSY'
+          ? `${PDF_CONVERTER_BUSY_USER_MESSAGE} Falling back to the built-in PDF converter.`
+          : undefined;
+      this.onFallbackWarning({
+        event: 'document_generation.pdf_converter_fallback',
+        ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+        ...(input.correlationId ? { correlationId: input.correlationId } : {}),
+        errorCode,
+        fallbackConverterId: this.fallback.converterId,
+        ...(fallbackMessage ? { message: fallbackMessage } : {}),
+      });
+      return this.fallback.convertDocxToPdf(input);
+    }
+  }
+}
+
+export function selectDocumentPdfConverter(
+  tenantConfig: Pick<TenantConfiguration, 'documentGeneration'>,
+  options?: {
+    converterUrl?: string;
+    timeoutMs?: number;
+    maxDocxBytes?: number;
+    maxPdfBytes?: number;
+    fetchImpl?: typeof fetch;
+    sleepFn?: (ms: number, signal: AbortSignal) => Promise<void>;
+    onFallbackWarning?: (event: PdfConverterFallbackWarningEvent) => void;
+  },
+): DocumentPdfConverter {
+  const converterMode = tenantConfig.documentGeneration.pdfConverter ?? 'builtin';
+  const fallbackMode =
+    tenantConfig.documentGeneration.pdfConverterFallback ?? 'builtin';
+
+  const builtin = new BuiltInOpenXmlPdfConverter();
+  if (converterMode !== 'container') {
+    return builtin;
+  }
+
+  const baseUrl = (options?.converterUrl ?? process.env.DOC_CONVERTER_URL ?? '').trim();
+  const primary = new HttpPdfConverter({
+    baseUrl,
+    timeoutMs: options?.timeoutMs,
+    maxDocxBytes: options?.maxDocxBytes,
+    maxPdfBytes: options?.maxPdfBytes,
+    fetchImpl: options?.fetchImpl,
+    sleepFn: options?.sleepFn,
+  });
+
+  return new FallbackAwarePdfConverter({
+    primary,
+    fallback: builtin,
+    fallbackMode,
+    onFallbackWarning: options?.onFallbackWarning,
+  });
 }

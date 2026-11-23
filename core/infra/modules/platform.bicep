@@ -51,11 +51,16 @@ param containerRegistryName string = 'acronesquared${environment}${take(uniqueSt
 @description('Immutable container image reference (registry/repository@sha256:... or tag) for the web app and jobs (required when deployApps is true)')
 param appContainerImage string = ''
 
-@description('Optional in Stage 0 (unused by app runtime; BuiltInOpenXmlPdfConverter handles Stage 0 PDF conversion per ADR 0024): whether to deploy a headless LibreOffice PDF converter internal Container App (carried to Stage 1)')
+@description('Whether to deploy the internal headless LibreOffice PDF converter Container App (ca-pdf, Stage 1 item 46; disabled by default until image is pushed to ACR)')
 param enablePdfConverterContainerApp bool = false
 
-@description('Optional in Stage 0 (unused by app runtime; carried to Stage 1): container image reference for the internal PDF converter Container App (required non-empty when enablePdfConverterContainerApp is true)')
+@description('Container image reference for the internal headless LibreOffice PDF converter Container App (required non-empty when enablePdfConverterContainerApp is true)')
 param pdfConverterContainerImage string = ''
+
+@description('Minimum running replicas for the internal PDF converter Container App (0..4)')
+@minValue(0)
+@maxValue(4)
+param pdfConverterMinReplicas int = 0
 
 @description('Master toggle for scheduled Container Apps jobs (enabled in S0-19)')
 param enableSchedulerJobs bool = true
@@ -986,11 +991,56 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
             cpu: json('1.0')
             memory: '2Gi'
           }
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: {
+                path: '/health/live'
+                port: 8080
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 10
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/health/live'
+                port: 8080
+              }
+              initialDelaySeconds: 15
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/health/ready'
+                port: 8080
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+          ]
         }
       ]
       scale: {
-        minReplicas: 0
+        minReplicas: pdfConverterMinReplicas
         maxReplicas: 4
+        rules: [
+          {
+            name: 'http-concurrency'
+            http: {
+              metadata: {
+                concurrentRequests: '2'
+              }
+            }
+          }
+        ]
       }
     }
   }
@@ -1370,7 +1420,7 @@ resource keyDateRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps &&
             'dist/jobs/run-job.mjs'
             'key-date-reminders'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -1428,7 +1478,7 @@ resource usageRetentionPurgeJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps
             'dist/jobs/run-job.mjs'
             'usage-retention-purge'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -1486,7 +1536,7 @@ resource enquiryAnonymisationJob 'Microsoft.App/jobs@2025-07-01' = if (deployApp
             'dist/jobs/run-job.mjs'
             'enquiry-retention-anonymise'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -1544,7 +1594,7 @@ resource registerRemindersJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps &
             'dist/jobs/run-job.mjs'
             'register-reminders'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -1602,7 +1652,7 @@ resource outboxDrainJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enab
             'dist/jobs/run-job.mjs'
             'outbox-drain'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -1660,7 +1710,7 @@ resource notificationDigestsJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps
             'dist/jobs/run-job.mjs'
             'notification-digests'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
@@ -1718,7 +1768,7 @@ resource quoteExpiryJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enab
             'dist/jobs/run-job.mjs'
             'quote-expiry'
           ]
-          env: runtimeCommonEnv
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {
             cpu: json('0.5')
             memory: '1Gi'

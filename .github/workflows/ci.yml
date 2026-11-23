@@ -176,6 +176,35 @@ jobs:
             exit 1
           fi
 
+      - name: Build dedicated PDF converter image and run readiness & .docx conversion smoke test (S1-10)
+        run: |
+          docker build -f docker/pdf-converter/Dockerfile -t onesquared-pdf:test docker/pdf-converter
+          trap 'docker rm -f onesquared-pdf-smoke onesquared-pdf-timeout >/dev/null 2>&1 || true' EXIT
+          docker rm -f onesquared-pdf-smoke onesquared-pdf-timeout >/dev/null 2>&1 || true
+          docker run -d --name onesquared-pdf-smoke -p 127.0.0.1:8199:8080 onesquared-pdf:test
+          if ! node scripts/smoke-pdf-converter.mjs http://127.0.0.1:8199; then
+            echo "PDF converter container smoke check failed; last 200 log lines from onesquared-pdf-smoke:" >&2
+            docker logs --tail 200 onesquared-pdf-smoke || true
+            exit 1
+          fi
+          docker run -d --name onesquared-pdf-timeout -e PDF_CONVERTER_SOFFICE_TIMEOUT_MS=1500 -p 127.0.0.1:8198:8080 onesquared-pdf:test
+          if ! node scripts/smoke-pdf-converter.mjs http://127.0.0.1:8198 --expect-timeout; then
+            echo "PDF converter timeout smoke check failed; last 200 log lines from onesquared-pdf-timeout:" >&2
+            docker logs --tail 200 onesquared-pdf-timeout || true
+            exit 1
+          fi
+          sleep 2
+          PROC_STATS=$(docker exec onesquared-pdf-timeout sh -c 'for f in /proc/[0-9]*/stat; do [ -r "$f" ] && cat "$f" 2>/dev/null || true; done')
+          echo "PDF converter container /proc/[0-9]*/stat snapshot after forced timeout:"
+          echo "$PROC_STATS"
+          if [ -z "$PROC_STATS" ]; then
+            echo "ERROR: /proc/[0-9]*/stat returned no process lines from onesquared-pdf-timeout" >&2
+            exit 1
+          fi
+          ZOMBIES=$(printf '%s\n' "$PROC_STATS" | sed 's/^.*) //' | awk '{print $1}' | grep -c '^Z$' || true)
+          echo "PDF converter container zombie count after forced timeout: $ZOMBIES"
+          [ "$ZOMBIES" -eq 0 ]
+
   e2e:
     name: Role Journey Smoke Tests (Playwright)
     runs-on: ubuntu-latest

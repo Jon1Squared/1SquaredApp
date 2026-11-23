@@ -373,6 +373,48 @@ if (dockerInfoRes.status === 0) {
     ['run', '--rm', 'onesquared-ci:test', 'grep', '-rq', 'nalf-matter-costs-governance', '.next/server'],
     liveBuildEnv,
   );
+  runStep(
+    '10e/12 Build dedicated PDF converter container image (S1-10)',
+    isWin ? 'docker.exe' : 'docker',
+    [
+      'build',
+      '-f',
+      'docker/pdf-converter/Dockerfile',
+      '-t',
+      'onesquared-pdf:test',
+      'docker/pdf-converter',
+    ],
+    liveBuildEnv,
+  );
+  console.log('\n=== [CI Verify] 10f/12 Verify PDF converter container /health/ready and .docx -> %PDF- conversion (S1-10) ===');
+  const dockerBin = isWin ? 'docker.exe' : 'docker';
+  spawnSync(dockerBin, ['rm', '-f', 'onesquared-pdf-smoke'], { stdio: 'ignore', shell: false });
+  const startPdfRes = spawnSync(
+    dockerBin,
+    ['run', '-d', '--name', 'onesquared-pdf-smoke', '-p', '127.0.0.1:8199:8080', 'onesquared-pdf:test'],
+    { encoding: 'utf8', shell: false },
+  );
+  if (startPdfRes.status !== 0) {
+    console.error('[CI Verify] FAILED: could not start onesquared-pdf-smoke container:', startPdfRes.stderr);
+    process.exit(startPdfRes.status ?? 1);
+  }
+  try {
+    const smokeRes = spawnSync(
+      process.execPath,
+      ['scripts/smoke-pdf-converter.mjs', 'http://127.0.0.1:8199'],
+      { stdio: 'inherit', env: liveBuildEnv, shell: false },
+    );
+    if (smokeRes.status !== 0) {
+      console.error('[CI Verify] PDF converter smoke check failed; last 200 log lines from onesquared-pdf-smoke:');
+      spawnSync(dockerBin, ['logs', '--tail', '200', 'onesquared-pdf-smoke'], {
+        stdio: 'inherit',
+        shell: false,
+      });
+      process.exit(smokeRes.status ?? 1);
+    }
+  } finally {
+    spawnSync(dockerBin, ['rm', '-f', 'onesquared-pdf-smoke'], { stdio: 'ignore', shell: false });
+  }
 } else {
   console.log('[CI Verify] Local Docker daemon not active; dist/jobs/run-job.mjs bundle verified directly on Node 24 (full docker build/run runs on ubuntu-latest in .github/workflows/ci.yml).');
 }
