@@ -26,7 +26,7 @@ Checked against `develop` (`7c2ba3e`):
    - `verifyFinanceActorAndPermission` (`src/server/financeServices.ts:216`) calls `listAllMattersUnfiltered` and `TenantPmsRepository.loadTenantPmsSnapshot` (`pmsRepository.ts:2185` executes 12 full `SELECT *` queries). On `/` alone this runs up to 7× full PMS hydrations per request.
    - `getAppSnapshotInScope` (`src/server/services.ts:2171-2187`) performs a hidden `intakeRepo.putQuote` write-on-read during snapshot reads.
 3. **Migration number coordination in WP1 (`S1-01` -> `S1-03` -> `S1-02a` -> `S1-10`):**
-   - `S1-03` claims migration `0023` (`0023_intake_checks_and_outbox_attachments_expand`, raising `CORE_REQUIRED_SCHEMA_VERSION = '0023'`). Therefore, if `S1-02a` adds lookup/phonetic candidate indexes on `people` / `organisations` (note Stage 1 plan v3.1 §5 row prose still refers to `0023` from v3), **`S1-02a` uses migration `0024`** (`0024_scoped_lookup_and_candidate_indexes_expand`, `dependsOn: ['0023']`, `CORE_REQUIRED_SCHEMA_VERSION = '0024'`).
+   - `S1-03` claims migration `0023` (`0023_intake_checks_and_outbox_attachments_expand`, raising `CORE_REQUIRED_SCHEMA_VERSION = '0023'`). Because `0024` adds indexes and columns only to `people`, `organisations`, and `matters` (requiring `0009` and `0018`, with zero dependency on `0023`), **`S1-02a` uses migration `0024`** (`0024_scoped_lookup_and_candidate_indexes_expand`, `dependsOn: ['0009', '0018']`, `CORE_REQUIRED_SCHEMA_VERSION = '0024'`) so `0023` and `0024` can be rolled back independently.
 4. **Complete inventory and split disposition between `S1-02a` (WP1) and `S1-02b` (WP1b):**
 
 | # | `file:line` | Function / surface | Disposition (`S1-02a` vs `S1-02b` baseline vs `Permanent Allow-list`) |
@@ -68,7 +68,7 @@ Checked against `develop` (`7c2ba3e`):
 ## Files and changes
 
 1. **Core SQL-scoped repository methods & optional migration `0024` (`core/src/tenancy/`):**
-   - `core/src/tenancy/migrations/index.ts`: reversible expand migration **`0024_scoped_lookup_and_candidate_indexes_expand`** (`dependsOn: ['0023']`, `CORE_REQUIRED_SCHEMA_VERSION = '0024'`, `downSql` drops added columns/indexes cleanly per Rule 8) adding indexed lookup columns/arrays (`people.phone_last9_keys`, `people.phonetic_keys`, `organisations.email_domains`, `organisations.norm_company_number`, `organisations.phonetic_keys`) populated via deterministic backfills and GIN / B-tree indexes so SQL candidate selection guarantees zero missed hits against `normalise.ts` / `duplicates.ts` / `matterConflicts.ts`.
+   - `core/src/tenancy/migrations/index.ts`: reversible expand migration **`0024_scoped_lookup_and_candidate_indexes_expand`** (`dependsOn: ['0009', '0018']`, `CORE_REQUIRED_SCHEMA_VERSION = '0024'`, `downSql` drops added columns/indexes cleanly per Rule 8) adding indexed lookup columns/arrays (`people.phone_last9_keys`, `people.postcode_keys`, `people.phonetic_keys`, `organisations.email_domains`, `organisations.phone_last9_keys`, `organisations.postcode_keys`, `organisations.norm_company_number`, `organisations.phonetic_keys`) populated via deterministic TypeScript `compute*LookupKeys` `afterUpSql` batches so SQL candidate selection guarantees zero missed hits against `normalise.ts` / `duplicates.ts` / `matterConflicts.ts`.
    - `core/src/tenancy/matterRepository.ts`: push `searchVisibleMatters` text search (`:1892-1918`) into SQL `ILIKE`; add `listMatterIdsMatchingCandidateGraph(...)` and `listMattersUnfilteredByIdsOrSources`.
    - `core/src/tenancy/partyRepository.ts`:
      - Add `employeesAndLeaversOnly` filter option on `listAllPeople` (`WHERE tenant_id = $1 AND (is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records e WHERE e.tenant_id = people.tenant_id AND e.person_id = people.id))`) so ~35 RBAC/auth checks never load external contacts;
@@ -126,4 +126,4 @@ Checked against `develop` (`7c2ba3e`):
 
 - **Change class:** Core tenancy SQL query expansion (`core/src/tenancy/`, reversible migration `0024`) and Host server/service/finance SQL-scoping refactor (`B15` part 1, server side).
 - **Both hosting models:** Identical per-tenant PostgreSQL execution over `SET LOCAL ROLE` across Model A (`single_tenant`) and Model B (`multi_tenant`); zero tenancy-mode branches.
-- **Migration and rollback:** Additive expand migration `0024` (`CORE_REQUIRED_SCHEMA_VERSION = '0024'`, `dependsOn: ['0023']`) with tested `downSql`; reversible via `downSql` + `git revert`.
+- **Migration and rollback:** Additive expand migration `0024` (`CORE_REQUIRED_SCHEMA_VERSION = '0024'`, `dependsOn: ['0009', '0018']`) with tested `downSql`; reversible via `downSql` + `git revert`.

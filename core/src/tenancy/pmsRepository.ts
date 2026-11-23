@@ -2294,6 +2294,58 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async getClientByCode(
+    ctx: TenantContext,
+    clientCode: string,
+  ): Promise<TenantPmsClient | null> {
+    const cleanCode = clientCode?.trim();
+    if (!cleanCode) return null;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_clients WHERE tenant_id = $1 AND client_code = $2 LIMIT 1',
+        [ctx.tenantId, cleanCode],
+      );
+      return this.mapClientRows(ctx, res.rows)[0] ?? null;
+    });
+  }
+
+  public async getMatterByCode(
+    ctx: TenantContext,
+    matterCode: string,
+  ): Promise<TenantPmsMatter | null> {
+    const cleanCode = matterCode?.trim();
+    if (!cleanCode) return null;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_matters WHERE tenant_id = $1 AND matter_code = $2 LIMIT 1',
+        [ctx.tenantId, cleanCode],
+      );
+      return this.mapMatterRows(ctx, res.rows)[0] ?? null;
+    });
+  }
+
+  public async listUnlinkedMatters(
+    ctx: TenantContext,
+  ): Promise<TenantPmsMatter[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        `SELECT m.*
+         FROM public.pms_matters m
+         WHERE m.tenant_id = $1
+           AND NOT EXISTS (
+             SELECT 1
+             FROM public.pms_links l
+             WHERE l.tenant_id = m.tenant_id
+               AND l.entity_type = 'matter'
+               AND l.pms_code = m.matter_code
+           )
+         ORDER BY m.matter_code ASC`,
+        [ctx.tenantId],
+      );
+      return this.mapMatterRows(ctx, res.rows);
+    });
+  }
+
   public async getMatterFinanceSummaryRows(
     ctx: TenantContext,
     matterCodes: readonly string[],

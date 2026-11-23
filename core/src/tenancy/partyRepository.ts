@@ -4139,10 +4139,23 @@ export class TenantPartyRepository extends TenantScopedRepository {
            ORDER BY p.id ASC`,
           params,
         );
-        return res.rows.map((row) => {
+        const mapped = res.rows.map((row) => {
           this.assertRowTenant(ctx, row.tenant_id, 'Person');
           return mapPersonRow<TenantPersonRecord>(row) as TRecord;
         });
+        if (mapped.length > 500) {
+          console.warn(
+            JSON.stringify({
+              level: 'warn',
+              event: 'tenancy.candidate_query.high_cardinality',
+              tenantId: ctx.tenantId,
+              correlationId: ctx.correlationId,
+              operation: 'findSqlDuplicateCandidates:person',
+              candidateCount: mapped.length,
+            }),
+          );
+        }
+        return mapped;
       }
 
       // Organisation candidate lookup
@@ -4237,10 +4250,23 @@ export class TenantPartyRepository extends TenantScopedRepository {
          ORDER BY id ASC`,
         params,
       );
-      return res.rows.map((row) => {
+      const mappedOrgs = res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
         return mapOrganisationRow<TenantOrganisationRecord>(row) as TRecord;
       });
+      if (mappedOrgs.length > 500) {
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            event: 'tenancy.candidate_query.high_cardinality',
+            tenantId: ctx.tenantId,
+            correlationId: ctx.correlationId,
+            operation: 'findSqlDuplicateCandidates:organisation',
+            candidateCount: mappedOrgs.length,
+          }),
+        );
+      }
+      return mappedOrgs;
     });
   }
 
@@ -4345,17 +4371,53 @@ export class TenantPartyRepository extends TenantScopedRepository {
       for (const o of directOrgs) orgMap.set(o.id, o);
     }
 
-    // Step 2: Query people & organisations matching terms/emails/phones/postcodes/companyNos
-    for (const term of cleanTerms) {
+    const STOP_WORDS = new Set([
+      'the',
+      'and',
+      'of',
+      'for',
+      'in',
+      'at',
+      'by',
+      'to',
+      'limited',
+      'ltd',
+      'llp',
+      'plc',
+      'inc',
+      'corp',
+      'co',
+      'uk',
+      'group',
+      'holdings',
+    ]);
+    const effectiveTerms = cleanTerms.filter((term) => {
       const tokens = normaliseComparableNameKey(term).split(' ').filter(Boolean);
-      const firstNameGuess = tokens.length >= 2 ? tokens[0] : term;
-      const surnameGuess = tokens.length >= 2 ? tokens[tokens.length - 1] : undefined;
+      const informativeTokens = tokens.filter(
+        (t) => !STOP_WORDS.has(t) && t.length >= 2,
+      );
+      return informativeTokens.length > 0;
+    });
+
+    // Step 2: Query people & organisations matching terms/emails/phones/postcodes/companyNos
+    for (const term of effectiveTerms) {
+      const tokens = normaliseComparableNameKey(term).split(' ').filter(Boolean);
+      const nonStopTokens = tokens.filter((t) => !STOP_WORDS.has(t));
+      const hintTokens = nonStopTokens.length > 0 ? nonStopTokens : tokens;
+      const firstNameGuess = hintTokens.length >= 2 ? hintTokens[0] : term;
+      const surnameGuess =
+        hintTokens.length >= 2 ? hintTokens[hintTokens.length - 1] : undefined;
+      const strippedPhrase =
+        nonStopTokens.length > 0 && nonStopTokens.length < tokens.length
+          ? nonStopTokens.join(' ')
+          : null;
+      const orgOtherNames = strippedPhrase ? [term, strippedPhrase] : [term];
       const [pHits, oHits] = await Promise.all([
         this.findSqlDuplicateCandidates<TPerson>(ctx, {
           kind: 'person',
           firstName: firstNameGuess,
           surname: surnameGuess,
-          otherNames: [term],
+          otherNames: orgOtherNames,
           emails: cleanEmails,
           phones: cleanPhones,
           postcodes: cleanPostcodes,
@@ -4365,7 +4427,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
         this.findSqlDuplicateCandidates<TOrg>(ctx, {
           kind: 'organisation',
           legalName: term,
-          otherNames: [term],
+          otherNames: orgOtherNames,
           companyNumbers: cleanCompanyNos,
           emails: cleanEmails,
           phones: cleanPhones,
@@ -4379,7 +4441,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
     }
 
     if (
-      cleanTerms.length === 0 &&
+      effectiveTerms.length === 0 &&
       (cleanEmails.length > 0 ||
         cleanPhones.length > 0 ||
         cleanPostcodes.length > 0 ||
@@ -4475,9 +4537,24 @@ export class TenantPartyRepository extends TenantScopedRepository {
       organisationIds: Array.from(orgMap.keys()),
     });
 
+    const peopleOut = Array.from(personMap.values());
+    const orgsOut = Array.from(orgMap.values());
+    if (peopleOut.length + orgsOut.length > 500) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'tenancy.candidate_query.high_cardinality',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          operation: 'findSqlConflictCandidates',
+          candidateCount: peopleOut.length + orgsOut.length,
+        }),
+      );
+    }
+
     return {
-      people: Array.from(personMap.values()),
-      organisations: Array.from(orgMap.values()),
+      people: peopleOut,
+      organisations: orgsOut,
       links: allLinks,
       directPersonIds,
       directOrganisationIds,

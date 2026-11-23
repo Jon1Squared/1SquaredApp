@@ -1783,4 +1783,316 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     );
     expect(writeOutcome).toEqual({ changed: true, newlyExpired: true });
   });
+
+  it('R671: enforces per-ID EXISTS hidden enquiry/quote checks, single-record PMS code lookups, stop-word filtering, and high-cardinality warning (>500, no truncation) across two tenants', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const tenancyMod = await import('../src/tenancy/index');
+    const matterRepo = new TenantMatterRepository();
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const partyRepo = new tenancyMod.TenantPartyRepository();
+    const pmsRepo = new tenancyMod.TenantPmsRepository();
+    const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
+
+    // 1. Per-ID EXISTS hidden checks (Draft vs restricted matter vs public, Alpha vs Bravo)
+    await matterRepo.putMatter(ctxAlpha, {
+      ...(structuredClone(seed.matters[0]!) as Matter),
+      id: 'M-R671-REST',
+      matterNumber: 'MAT-R671-R1',
+      title: 'R671 Restricted Matter',
+      responsiblePartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000001',
+      teamMemberIds: ['P-000001'],
+      isStaffMatter: true,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: ['P-000001'],
+      parties: [],
+    });
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R671-DRAFT',
+      reference: 'ENQ-R671-D1',
+      status: 'Draft',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Private',
+      lastName: 'Draft',
+      summary: 'Draft summary',
+      receivedAt: '2026-11-01T10:00:00Z',
+    } as never);
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R671-REST',
+      reference: 'ENQ-R671-R1',
+      status: 'Assigned',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Rest',
+      lastName: 'Enquiry',
+      convertedMatterId: 'M-R671-REST',
+      summary: 'Restricted summary',
+      receivedAt: '2026-11-01T10:05:00Z',
+    } as never);
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R671-PUB',
+      reference: 'ENQ-R671-P1',
+      status: 'Assigned',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Public',
+      lastName: 'Enquiry',
+      summary: 'Public summary',
+      receivedAt: '2026-11-01T10:10:00Z',
+    } as never);
+    await intakeRepo.putQuote(ctxAlpha, {
+      id: 'QUO-R671-REST',
+      reference: 'QUO-R671-R1',
+      clientType: 'person',
+      clientFirstName: 'Rest',
+      clientLastName: 'Quote',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: 'Restricted Quote',
+      status: 'Sent',
+      feeBasis: 'fixed',
+      estimatedFeeExVat: 1000,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2099-12-31',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-11-01T10:00:00Z',
+      updatedAt: '2026-11-01T10:00:00Z',
+      linkedEnquiryId: 'ENQ-R671-REST',
+      timeline: [],
+    } as never);
+    await intakeRepo.putQuote(ctxAlpha, {
+      id: 'QUO-R671-PUB',
+      reference: 'QUO-R671-P1',
+      clientType: 'person',
+      clientFirstName: 'Pub',
+      clientLastName: 'Quote',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: 'Public Quote',
+      status: 'Sent',
+      feeBasis: 'fixed',
+      estimatedFeeExVat: 1000,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2099-12-31',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-11-01T10:00:00Z',
+      updatedAt: '2026-11-01T10:00:00Z',
+      timeline: [],
+    } as never);
+
+    const typedIntake = intakeRepo as unknown as {
+      isEnquiryHiddenFromViewer?: (
+        ctx: TenantContext,
+        id: string,
+        viewerId: string,
+        opts?: { hasRestrictedMatterAccess?: boolean },
+      ) => Promise<boolean>;
+      isQuoteHiddenFromViewer?: (
+        ctx: TenantContext,
+        id: string,
+        viewerId: string,
+        opts?: { hasRestrictedMatterAccess?: boolean },
+      ) => Promise<boolean>;
+    };
+    expect(typeof typedIntake.isEnquiryHiddenFromViewer).toBe('function');
+    expect(typeof typedIntake.isQuoteHiddenFromViewer).toBe('function');
+    expect(
+      await typedIntake.isEnquiryHiddenFromViewer!(ctxAlpha, 'ENQ-R671-DRAFT', 'P-000002', {
+        hasRestrictedMatterAccess: false,
+      }),
+    ).toBe(true);
+    expect(
+      await typedIntake.isEnquiryHiddenFromViewer!(ctxAlpha, 'ENQ-R671-DRAFT', 'P-000002', {
+        hasRestrictedMatterAccess: true,
+      }),
+    ).toBe(true);
+    expect(
+      await typedIntake.isEnquiryHiddenFromViewer!(ctxAlpha, 'ENQ-R671-REST', 'P-000002', {
+        hasRestrictedMatterAccess: false,
+      }),
+    ).toBe(true);
+    expect(
+      await typedIntake.isEnquiryHiddenFromViewer!(ctxAlpha, 'ENQ-R671-REST', 'P-000002', {
+        hasRestrictedMatterAccess: true,
+      }),
+    ).toBe(false);
+    expect(
+      await typedIntake.isEnquiryHiddenFromViewer!(ctxAlpha, 'ENQ-R671-PUB', 'P-000002'),
+    ).toBe(false);
+    expect(
+      await typedIntake.isQuoteHiddenFromViewer!(ctxAlpha, 'QUO-R671-REST', 'P-000002', {
+        hasRestrictedMatterAccess: false,
+      }),
+    ).toBe(true);
+    expect(
+      await typedIntake.isQuoteHiddenFromViewer!(ctxAlpha, 'QUO-R671-REST', 'P-000002', {
+        hasRestrictedMatterAccess: true,
+      }),
+    ).toBe(false);
+    expect(
+      await typedIntake.isQuoteHiddenFromViewer!(ctxAlpha, 'QUO-R671-PUB', 'P-000002'),
+    ).toBe(false);
+    expect(
+      await intakeRepo.getEnquiryById(ctxBravo, 'ENQ-R671-PUB', { includeRestricted: true }),
+    ).toBeNull();
+
+    // 2. Single-record PMS code lookups & unlinked matters across two tenants
+    await pmsRepo.importExtractDataset(ctxAlpha, {
+      extractInfo: {
+        asAtDate: '2026-11-01',
+        importedAt: '2026-11-01T09:00:00Z',
+        sourceFile: 'r671-pms.xlsx',
+      },
+      feeEarners: [],
+      clients: [
+        {
+          client_code: 'PMS-C-R671',
+          client_name: 'R671 Single Lookup Ltd',
+          client_type: 'Organisation',
+          client_partner_id: '',
+          email: '',
+          phone: '',
+          billing_address: '',
+          postcode: '',
+          company_number: '',
+          credit_terms_days: 30,
+          credit_limit: 0,
+          rate_discount_pct: 0,
+          date_opened: '2026-10-01',
+          sector: 'Legal',
+          crm_match_on: 'email',
+          status: 'Active',
+        },
+      ],
+      matters: [
+        {
+          matter_code: 'PMS-M-R671',
+          client_code: 'PMS-C-R671',
+          matter_description: 'R671 Unlinked Matter',
+          practice_area: 'Corporate and commercial',
+          work_type: 'Share purchase',
+          fee_earner_id: '',
+          responsible_partner_id: '',
+          billing_basis: 'Hourly Rate',
+          fixed_fee_amount: 0,
+          fee_estimate: 5000,
+          estimate_alert_pct: 80,
+          date_opened: '2026-10-01',
+          date_closed: null,
+          status: 'Open',
+          billing_frequency: 'Monthly',
+          client_reference: '',
+          third_party_payer: '',
+        },
+      ],
+      feeEstimates: [],
+      timeEntries: [],
+      disbursements: [],
+      invoices: [],
+      payments: [],
+      clientAccount: [],
+    });
+
+    const typedPms = pmsRepo as unknown as {
+      getClientByCode?: (ctx: TenantContext, code: string) => Promise<{ client_code: string } | null>;
+      getMatterByCode?: (ctx: TenantContext, code: string) => Promise<{ matter_code: string } | null>;
+      listUnlinkedMatters?: (ctx: TenantContext) => Promise<Array<{ matter_code: string }>>;
+    };
+    expect(typeof typedPms.getClientByCode).toBe('function');
+    expect(typeof typedPms.getMatterByCode).toBe('function');
+    expect(typeof typedPms.listUnlinkedMatters).toBe('function');
+    expect((await typedPms.getClientByCode!(ctxAlpha, 'PMS-C-R671'))?.client_code).toBe('PMS-C-R671');
+    expect((await typedPms.getMatterByCode!(ctxAlpha, 'PMS-M-R671'))?.matter_code).toBe('PMS-M-R671');
+    expect((await typedPms.listUnlinkedMatters!(ctxAlpha)).some((m) => m.matter_code === 'PMS-M-R671')).toBe(true);
+    expect(await typedPms.getClientByCode!(ctxBravo, 'PMS-C-R671')).toBeNull();
+    expect(await typedPms.getMatterByCode!(ctxBravo, 'PMS-M-R671')).toBeNull();
+
+    // 3. Stop-word-only terms skip unnecessary name queries while non-stop words match
+    const { vi } = await import('vitest');
+    const baseOrg = structuredClone(seed.organisations[0]!) as Organisation;
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R671-SHOP',
+      legalName: 'Acme Law Shop Ltd',
+      otherNames: [],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: null,
+      notDuplicateOf: [],
+    });
+    const dupSpy = vi.spyOn(partyRepo, 'findSqlDuplicateCandidates');
+    try {
+      await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        terms: ['the', 'and', 'limited', 'llp', 'ltd', 'plc'],
+      });
+      expect(dupSpy).not.toHaveBeenCalled();
+
+      dupSpy.mockClear();
+      const nonStopRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        terms: ['The Law Shop'],
+      });
+      expect(dupSpy).toHaveBeenCalled();
+      expect(nonStopRes.organisations.some((o) => o.id === 'O-R671-SHOP')).toBe(true);
+    } finally {
+      dupSpy.mockRestore();
+    }
+
+    // 4. High-cardinality > 500 candidate warning without truncation and with zero PII
+    const basePerson = structuredClone(seed.people.find((p) => !p.isEmployee) ?? seed.people[0]!) as Person;
+    const bulkPeople: Person[] = Array.from({ length: 505 }, (_, i) => ({
+      ...basePerson,
+      id: `P-R671-HC-${String(i).padStart(4, '0')}`,
+      firstName: `Person${i}`,
+      surname: 'HighCardR671',
+      isEmployee: false,
+      emails: [],
+      phones: [],
+      addresses: [],
+      notDuplicateOf: [],
+    }));
+    await partyRepo.putPeople(ctxAlpha, bulkPeople);
+
+    const warnMessages: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnMessages.push(args.map((a) => String(a)).join(' '));
+    });
+    try {
+      const candidates = await partyRepo.findSqlDuplicateCandidates<Person>(ctxAlpha, {
+        kind: 'person',
+        surname: 'HighCardR671',
+        fuzzy: false,
+      });
+      expect(candidates.length).toBeGreaterThanOrEqual(505);
+      const hcWarn = warnMessages.find((msg) => msg.includes('tenancy.candidate_query.high_cardinality'));
+      expect(hcWarn).toBeDefined();
+      expect(hcWarn).toContain(tenantAlpha);
+      expect(hcWarn).not.toContain('HighCardR671');
+      expect(hcWarn).not.toContain('Person0');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });

@@ -2002,27 +2002,27 @@ export async function listAuditEntriesForRecord(
       return [];
     }
   } else if (recordType === 'enquiry') {
-    const [e, hiddenEnqIds] = await Promise.all([
-      intakeRepo.getEnquiryById<Enquiry>(ctx, recordId, {
-        includeRestricted: true,
-      }),
-      intakeRepo.listHiddenEnquiryIds(ctx, viewer.id, {
-        hasRestrictedMatterAccess: hasRestrictedAccess,
-      }),
-    ]);
-    if (!e || hiddenEnqIds.includes(e.id)) {
+    const e = await intakeRepo.getEnquiryById<Enquiry>(ctx, recordId, {
+      includeRestricted: true,
+    });
+    const isHidden = e
+      ? await intakeRepo.isEnquiryHiddenFromViewer(ctx, e.id, viewer.id, {
+          hasRestrictedMatterAccess: hasRestrictedAccess,
+        })
+      : false;
+    if (!e || isHidden) {
       return [];
     }
   } else if (recordType === 'quote') {
-    const [q, hiddenQuoteIds] = await Promise.all([
-      intakeRepo.getQuoteByIdOrReference<Quote>(ctx, recordId, {
-        includeRestricted: true,
-      }),
-      intakeRepo.listHiddenQuoteIds(ctx, viewer.id, {
-        hasRestrictedMatterAccess: hasRestrictedAccess,
-      }),
-    ]);
-    if (!q || hiddenQuoteIds.includes(q.id)) {
+    const q = await intakeRepo.getQuoteByIdOrReference<Quote>(ctx, recordId, {
+      includeRestricted: true,
+    });
+    const isHidden = q
+      ? await intakeRepo.isQuoteHiddenFromViewer(ctx, q.id, viewer.id, {
+          hasRestrictedMatterAccess: hasRestrictedAccess,
+        })
+      : false;
+    if (!q || isHidden) {
       return [];
     }
   } else if (recordType === 'task') {
@@ -15282,13 +15282,13 @@ export async function assignEnquiryRecord(
         sourceEnquiryIds: [directEnq.id],
       })
     : [];
-  const hiddenEnqIds = new Set(
-    await intakeRepo.listHiddenEnquiryIds(enqCtx, byId, {
-      hasRestrictedMatterAccess: hasRestrictedAccess,
-    }),
-  );
+  const isHiddenEnq = directEnq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, directEnq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
   const enq = directEnq;
-  if (!enq || hiddenEnqIds.has(enq.id)) {
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -15422,12 +15422,12 @@ export async function logEnquiryContactRecord(
     'matter:restricted:access',
     { allPeople: people, teams },
   );
-  const hiddenEnqIds = new Set(
-    await intakeRepo.listHiddenEnquiryIds(enqCtx, byId, {
-      hasRestrictedMatterAccess: hasRestrictedAccess,
-    }),
-  );
-  if (!enq || hiddenEnqIds.has(enq.id)) {
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -15531,12 +15531,12 @@ export async function sendEnquiryEmailRecord(
     'matter:restricted:access',
     { allPeople: people, teams },
   );
-  const hiddenEnqIds = new Set(
-    await intakeRepo.listHiddenEnquiryIds(enqCtx, byId, {
-      hasRestrictedMatterAccess: hasRestrictedAccess,
-    }),
-  );
-  if (!enq || hiddenEnqIds.has(enq.id)) {
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -15685,12 +15685,12 @@ export async function closeEnquiryRecord(
     'matter:restricted:access',
     { allPeople: staffPeople, teams },
   );
-  const hiddenEnqIds = new Set(
-    await intakeRepo.listHiddenEnquiryIds(enqCtx, byId, {
-      hasRestrictedMatterAccess: hasRestrictedAccess,
-    }),
-  );
-  if (!enq || hiddenEnqIds.has(enq.id)) {
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -15950,12 +15950,12 @@ export async function reopenEnquiryRecord(
     'matter:restricted:access',
     { allPeople: people, teams },
   );
-  const hiddenEnqIds = new Set(
-    await intakeRepo.listHiddenEnquiryIds(enqCtx, byId, {
-      hasRestrictedMatterAccess: hasRestrictedAccess,
-    }),
-  );
-  if (!enq || hiddenEnqIds.has(enq.id)) {
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     const msg = 'Enquiry not found.';
     return { ...buildActionDenied('FORBIDDEN', msg), error: msg };
   }
@@ -16095,12 +16095,12 @@ export async function prepareEnquiryConversion(
     'matter:restricted:access',
     { allPeople: staffPeople, teams },
   );
-  const hiddenEnqIds = new Set(
-    await intakeRepo.listHiddenEnquiryIds(enqCtx, byId, {
-      hasRestrictedMatterAccess: hasRestrictedAccess,
-    }),
-  );
-  if (!enq || hiddenEnqIds.has(enq.id)) {
+  const isHiddenEnq = enq
+    ? await intakeRepo.isEnquiryHiddenFromViewer(enqCtx, enq.id, byId, {
+        hasRestrictedMatterAccess: hasRestrictedAccess,
+      })
+    : false;
+  if (!enq || isHiddenEnq) {
     return { ok: false, conflictReasons: ['Enquiry not found.'] };
   }
   if (!isEnquiryRouted(enq)) {
@@ -16964,7 +16964,7 @@ export async function getMatterPmsViewBundle(
   const auth = await verifyFinanceActorAndPermission(byId, 'finance:view_matter');
   if (!auth.ok) return auth;
 
-  const { ctx, actor, permSet, tokenRoles, visiblePmsLinks, tenantPmsLinks, people, matters, teams } = auth;
+  const { ctx, actor, permSet, tokenRoles, visiblePmsLinks, people, matters, teams } = auth;
   const fetchedMatter =
     matters.find((m) => m.id === matterId && !m.mergedIntoId) ??
     (await getMatterRepository().getMatterById<Matter>(ctx, matterId, {
@@ -16997,11 +16997,9 @@ export async function getMatterPmsViewBundle(
   let unlinkedPmsMattersForClient: PmsMatter[] = [];
 
   if (canManageLinks) {
-    const linkedPmsCodes = new Set(
-      tenantPmsLinks.filter((l) => l.entityType === 'matter').map((l) => l.pmsCode),
-    );
-    const allPmsMatters = (await pmsRepo.listMatters(ctx)) as unknown as PmsMatter[];
-    allUnlinkedPmsMatters = allPmsMatters.filter((pm) => !linkedPmsCodes.has(pm.matter_code));
+    allUnlinkedPmsMatters = (await pmsRepo.listUnlinkedMatters(
+      ctx,
+    )) as unknown as PmsMatter[];
 
     const clientEntityType: PmsEntityType = matter.clientId.startsWith('P-')
       ? 'person'
@@ -17703,11 +17701,10 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'organisation') {
-    const pmsClients = await pmsRepo.listClients(ctx);
-    const client = pmsClients.find(
-      (c) => c.client_code === pmsCode && c.client_type === 'Organisation',
-    );
-    if (!client) return { ok: false, error: `PMS organisation client ${pmsCode} not found.` };
+    const client = await pmsRepo.getClientByCode(ctx, pmsCode);
+    if (!client || client.client_type !== 'Organisation') {
+      return { ok: false, error: `PMS organisation client ${pmsCode} not found.` };
+    }
 
     const partner1SqId =
       (client.client_partner_id
@@ -17750,11 +17747,10 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'person') {
-    const pmsClients = await pmsRepo.listClients(ctx);
-    const client = pmsClients.find(
-      (c) => c.client_code === pmsCode && c.client_type === 'Individual',
-    );
-    if (!client) return { ok: false, error: `PMS individual client ${pmsCode} not found.` };
+    const client = await pmsRepo.getClientByCode(ctx, pmsCode);
+    if (!client || client.client_type !== 'Individual') {
+      return { ok: false, error: `PMS individual client ${pmsCode} not found.` };
+    }
 
     const parts = client.client_name.trim().split(/\s+/);
     const firstName = parts[0] ?? client.client_name;
@@ -17816,15 +17812,11 @@ export async function createRecordFromPms(
   }
 
   if (entityType === 'matter') {
-    const [pmsMatters, pmsClients] = await Promise.all([
-      pmsRepo.listMatters(ctx),
-      pmsRepo.listClients(ctx),
-    ]);
-    const pm = pmsMatters.find((m) => m.matter_code === pmsCode);
+    const pm = await pmsRepo.getMatterByCode(ctx, pmsCode);
     if (!pm) return { ok: false, error: `PMS matter ${pmsCode} not found.` };
 
     // Ensure the client exists & is linked in 1Squared first
-    const pmsClient = pmsClients.find((c) => c.client_code === pm.client_code);
+    const pmsClient = await pmsRepo.getClientByCode(ctx, pm.client_code);
     const clientEntityType: PmsEntityType =
       pmsClient?.client_type === 'Individual' ? 'person' : 'organisation';
     let clientId = findOneSquaredIdForPmsCode(store.pmsLinks, clientEntityType, pm.client_code);

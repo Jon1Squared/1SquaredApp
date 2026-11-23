@@ -2294,11 +2294,20 @@ export const POST = guardedRoute(
         'matter:restricted:access',
         { allPeople: staffPeople, teams: allTeams },
       );
-      const hiddenEnquiryIdList = await intakeRepo.listHiddenEnquiryIds(
-        tenantContext,
-        byId,
-        { hasRestrictedMatterAccess: hasRestrictedAccess },
+      const candidateEnquiryIds = Array.from(
+        new Set(
+          candidateMatches.people
+            .map((p) => p.createdFromEnquiryId)
+            .filter((x): x is string => Boolean(x)),
+        ),
       );
+      const hiddenEnquiryIdList =
+        candidateEnquiryIds.length > 0
+          ? await intakeRepo.listHiddenEnquiryIds(tenantContext, byId, {
+              hasRestrictedMatterAccess: hasRestrictedAccess,
+              ids: candidateEnquiryIds,
+            })
+          : [];
       const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
 
       const candidatePeopleMap = new Map<string, Person>();

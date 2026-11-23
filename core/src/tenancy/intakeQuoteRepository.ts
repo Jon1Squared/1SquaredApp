@@ -2102,18 +2102,29 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   public async listHiddenEnquiryIds(
     ctx: TenantContext,
     viewerId: string,
-    options?: { hasRestrictedMatterAccess?: boolean },
+    options?: { hasRestrictedMatterAccess?: boolean; ids?: readonly string[] },
   ): Promise<string[]> {
+    const filterIds = options?.ids
+      ? Array.from(new Set(options.ids.map((id) => id?.trim()).filter(Boolean) as string[]))
+      : null;
+    if (filterIds && filterIds.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const pred = options?.hasRestrictedMatterAccess
         ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
         : ENQUIRY_VISIBLE_SQL_PREDICATE;
-      const res = await tx.query<{ tenant_id: string; id: string }>(
-        `SELECT e.tenant_id, e.id FROM enquiries e
-         WHERE e.tenant_id = $1 AND NOT ${pred}
-         ORDER BY e.id ASC`,
-        [ctx.tenantId, viewerId],
-      );
+      const res = filterIds
+        ? await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT e.tenant_id, e.id FROM enquiries e
+             WHERE e.tenant_id = $1 AND e.id = ANY($3::text[]) AND NOT ${pred}
+             ORDER BY e.id ASC`,
+            [ctx.tenantId, viewerId, filterIds],
+          )
+        : await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT e.tenant_id, e.id FROM enquiries e
+             WHERE e.tenant_id = $1 AND NOT ${pred}
+             ORDER BY e.id ASC`,
+            [ctx.tenantId, viewerId],
+          );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'enquiries.listHiddenEnquiryIds');
         return r.id;
@@ -2121,25 +2132,82 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     });
   }
 
+  public async isEnquiryHiddenFromViewer(
+    ctx: TenantContext,
+    enquiryId: string,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean },
+  ): Promise<boolean> {
+    const cleanId = enquiryId?.trim();
+    if (!cleanId) return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
+        : ENQUIRY_VISIBLE_SQL_PREDICATE;
+      const res = await tx.query<{ is_hidden: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM enquiries e
+           WHERE e.tenant_id = $1 AND e.id = $3 AND NOT ${pred}
+         ) AS is_hidden`,
+        [ctx.tenantId, viewerId, cleanId],
+      );
+      return Boolean(res.rows[0]?.is_hidden);
+    });
+  }
+
   public async listHiddenQuoteIds(
     ctx: TenantContext,
     viewerId: string,
-    options?: { hasRestrictedMatterAccess?: boolean },
+    options?: { hasRestrictedMatterAccess?: boolean; ids?: readonly string[] },
   ): Promise<string[]> {
+    const filterIds = options?.ids
+      ? Array.from(new Set(options.ids.map((id) => id?.trim()).filter(Boolean) as string[]))
+      : null;
+    if (filterIds && filterIds.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const pred = options?.hasRestrictedMatterAccess
         ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
         : QUOTE_VISIBLE_SQL_PREDICATE;
-      const res = await tx.query<{ tenant_id: string; id: string }>(
-        `SELECT q.tenant_id, q.id FROM quotes q
-         WHERE q.tenant_id = $1 AND NOT ${pred}
-         ORDER BY q.id ASC`,
-        [ctx.tenantId, viewerId],
-      );
+      const res = filterIds
+        ? await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT q.tenant_id, q.id FROM quotes q
+             WHERE q.tenant_id = $1 AND q.id = ANY($3::text[]) AND NOT ${pred}
+             ORDER BY q.id ASC`,
+            [ctx.tenantId, viewerId, filterIds],
+          )
+        : await tx.query<{ tenant_id: string; id: string }>(
+            `SELECT q.tenant_id, q.id FROM quotes q
+             WHERE q.tenant_id = $1 AND NOT ${pred}
+             ORDER BY q.id ASC`,
+            [ctx.tenantId, viewerId],
+          );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'quotes.listHiddenQuoteIds');
         return r.id;
       });
+    });
+  }
+
+  public async isQuoteHiddenFromViewer(
+    ctx: TenantContext,
+    quoteId: string,
+    viewerId: string,
+    options?: { hasRestrictedMatterAccess?: boolean },
+  ): Promise<boolean> {
+    const cleanId = quoteId?.trim();
+    if (!cleanId) return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pred = options?.hasRestrictedMatterAccess
+        ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+        : QUOTE_VISIBLE_SQL_PREDICATE;
+      const res = await tx.query<{ is_hidden: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM quotes q
+           WHERE q.tenant_id = $1 AND q.id = $3 AND NOT ${pred}
+         ) AS is_hidden`,
+        [ctx.tenantId, viewerId, cleanId],
+      );
+      return Boolean(res.rows[0]?.is_hidden);
     });
   }
 

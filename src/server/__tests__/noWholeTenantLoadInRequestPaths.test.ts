@@ -19,6 +19,10 @@ const TARGET_WHOLE_TENANT_CALLEES = new Set([
   'loadTenantPmsSnapshot',
   'getTenantPmsSource',
   'hydrateTenantPmsSource',
+  'listMatters',
+  'listClients',
+  'getFirmFinanceRollupsSql',
+  'listAllVisibleKeyDates',
 ]);
 
 const TARGET_PAGE_CALLEES = new Set(['getAppSnapshot', 'getAppSnapshotInScope']);
@@ -34,38 +38,60 @@ const TARGET_CLIENT_SCAN_CALLEES = new Set([
 interface AllowListEntry {
   readonly file: string;
   readonly fn: string;
-  readonly callees?: readonly string[];
+  readonly callees: readonly [string, ...string[]];
   readonly reason: string;
 }
 
 /**
  * Intentionally whole-tenant batch jobs, admin bulk actions, seed/demo utilities,
- * and low-level legacy PMS compatibility wrappers (S1-02a B15 guard).
+ * firm-wide SQL aggregate reports, and legacy PMS wrappers (S1-02a B15 guard).
  */
 export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
   {
     file: 'src/server/services.ts',
     fn: 'rerunAutomaticPmsMatching',
+    callees: [
+      'listAllPeople',
+      'listAllOrganisations',
+      'listAllMattersUnfiltered',
+      'getTenantPmsSource',
+      'listClients',
+      'listMatters',
+    ],
     reason: 'Explicit admin bulk PMS auto-matching batch operation across firm matters/entities.',
   },
   {
     file: 'src/server/services.ts',
     fn: 'executeKeyDateRemindersForTenant',
+    callees: [
+      'listAllPeople',
+      'listAllMattersUnfiltered',
+      'listAllTasksUnfiltered',
+    ],
     reason: 'Scheduled background job (guardedJob key-date-reminders) iterating due tenant reminders.',
   },
   {
     file: 'src/server/services.ts',
     fn: 'executeRegisterRemindersForTenant',
+    callees: ['listAllPeople', 'listAllMattersUnfiltered'],
     reason: 'Scheduled background job (guardedJob register-reminders) scanning open tenant registers.',
   },
   {
     file: 'src/server/services.ts',
     fn: 'executeNotificationDigestsForTenant',
+    callees: [
+      'listAllPeople',
+      'listAllMattersUnfiltered',
+      'listAllEnquiriesUnfiltered',
+      'listAllQuotesUnfiltered',
+      'listAllTasksUnfiltered',
+    ],
     reason: 'Scheduled background job (guardedJob notification-digests) building undigested notification emails.',
   },
   {
     file: 'src/server/services.ts',
     fn: 'resetAllDemoData',
+    callees: ['listAllPeople'],
     reason: 'Non-live test/demo seed reset helper.',
   },
   {
@@ -78,21 +104,25 @@ export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
   {
     file: 'src/server/documentStoreServices.ts',
     fn: 'applyAdminTemplateAdditionsToOpenMatters',
+    callees: ['listAllMattersUnfiltered'],
     reason: 'Explicit admin bulk SharePoint folder-provisioning batch across open matters.',
   },
   {
     file: 'src/server/storePostgresImport.ts',
     fn: 'importFirmStoreModulesToPostgres',
+    callees: ['listAllMattersUnfiltered', 'listAllEnquiriesUnfiltered'],
     reason: 'Seed/migration store import verification utility across all tenant records.',
   },
   {
     file: 'src/pms/pmsSource.ts',
     fn: 'getTenantPmsSource',
+    callees: ['loadTenantPmsSnapshot'],
     reason: 'Legacy batch/seed PMS hydrator wrapper (disallowed in request-path server services).',
   },
   {
     file: 'src/pms/pmsSource.ts',
     fn: 'hydrateTenantPmsSource',
+    callees: ['getTenantPmsSource'],
     reason: 'Legacy batch/seed PMS hydrator wrapper delegating to getTenantPmsSource.',
   },
   {
@@ -107,7 +137,21 @@ export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
     ],
     reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
   },
+  {
+    file: 'src/server/financeServices.ts',
+    fn: 'getFirmFinance',
+    callees: ['getFirmFinanceRollupsSql'],
+    reason: 'Firm-wide SQL finance roll-up summary across visible firm matters.',
+  },
+  {
+    file: 'src/server/services.ts',
+    fn: 'queryKeyDatesTeamDiaryRecord',
+    callees: ['listAllVisibleKeyDates'],
+    reason: 'Firm/team diary query using PostgreSQL visibility-filtered key dates repository reader.',
+  },
 ];
+
+export const MAX_PERMANENT_ALLOW_LIST_COUNT = 13;
 
 /**
  * Snapshot & client-form baseline deferred strictly to WP1b (S1-02b)
@@ -129,14 +173,15 @@ export const DEFERRED_S1_02B_ALLOW_LIST: readonly AllowListEntry[] = [
       'listAllLinks',
       'listAllNotes',
       'listAllMergeHistory',
+      'listAllVisibleKeyDates',
     ],
     reason:
-      'Temporary people/org/links/notes/mergeHistory hydration inside getAppSnapshotInScope deferred to WP1b (matters/enquiries/quotes/tasks/signOffs/PMS converted in S1-02a).',
+      'Temporary people/org/links/notes/mergeHistory/visibleKeyDates hydration inside getAppSnapshotInScope deferred to WP1b (matters/enquiries/quotes/tasks/signOffs/PMS converted in S1-02a).',
   },
 ];
 
-// Exact S1-02b baseline: 25 app layout/page getAppSnapshot calls + 6 component client-scan calls + 6 getAppSnapshot/InScope calls = 37
-export const MAX_DEFERRED_S1_02B_BASELINE_COUNT = 37;
+// Exact S1-02b baseline: 25 app layout/page getAppSnapshot calls + 6 component client-scan calls + 7 getAppSnapshot/InScope calls = 38
+export const MAX_DEFERRED_S1_02B_BASELINE_COUNT = 38;
 
 interface AstCallFinding {
   readonly file: string;
@@ -168,10 +213,71 @@ function walkSourceFiles(dir: string): string[] {
   return results;
 }
 
-function getCalleeName(expr: ts.LeftHandSideExpression): string | null {
-  if (ts.isIdentifier(expr)) return expr.text;
+function getMemberAccessName(expr: ts.Expression): string | null {
   if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  if (
+    ts.isElementAccessExpression(expr) &&
+    ts.isStringLiteralLike(expr.argumentExpression)
+  ) {
+    return expr.argumentExpression.text;
+  }
   return null;
+}
+
+function getCalleeName(
+  expr: ts.LeftHandSideExpression,
+  aliasMap?: ReadonlyMap<string, string>,
+): string | null {
+  if (ts.isIdentifier(expr)) {
+    return aliasMap?.get(expr.text) ?? expr.text;
+  }
+  if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  if (
+    ts.isElementAccessExpression(expr) &&
+    ts.isStringLiteralLike(expr.argumentExpression)
+  ) {
+    return expr.argumentExpression.text;
+  }
+  return null;
+}
+
+function collectWholeTenantAliases(
+  sourceFile: ts.SourceFile,
+): Map<string, string> {
+  const aliasMap = new Map<string, string>();
+  const allMonitored = new Set([
+    ...TARGET_WHOLE_TENANT_CALLEES,
+    ...TARGET_PAGE_CALLEES,
+    ...TARGET_CLIENT_SCAN_CALLEES,
+  ]);
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && node.initializer) {
+      if (ts.isIdentifier(node.name)) {
+        const rhsName = ts.isIdentifier(node.initializer)
+          ? aliasMap.get(node.initializer.text) ?? node.initializer.text
+          : getMemberAccessName(node.initializer);
+        if (rhsName && allMonitored.has(rhsName)) {
+          aliasMap.set(node.name.text, rhsName);
+        }
+      } else if (ts.isObjectBindingPattern(node.name)) {
+        for (const el of node.name.elements) {
+          if (!ts.isBindingElement(el) || !ts.isIdentifier(el.name)) continue;
+          const propName = el.propertyName
+            ? ts.isIdentifier(el.propertyName) ||
+              ts.isStringLiteralLike(el.propertyName)
+              ? el.propertyName.text
+              : null
+            : el.name.text;
+          if (propName && allMonitored.has(propName)) {
+            aliasMap.set(el.name.text, propName);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return aliasMap;
 }
 
 function hasEmployeesAndLeaversOnlyOption(node: ts.CallExpression): boolean {
@@ -234,6 +340,82 @@ function matchesAllowList(
   );
 }
 
+export function scanSourceTextForWholeTenantCalls(
+  relPath: string,
+  sourceText: string,
+): {
+  unexpected: AstCallFinding[];
+  deferred: AstCallFinding[];
+  permanentAllowMatched: AstCallFinding[];
+} {
+  const unexpected: AstCallFinding[] = [];
+  const deferred: AstCallFinding[] = [];
+  const permanentAllowMatched: AstCallFinding[] = [];
+
+  const sourceFile = ts.createSourceFile(
+    relPath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    relPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const aliasMap = collectWholeTenantAliases(sourceFile);
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const callee = getCalleeName(node.expression, aliasMap);
+      if (callee) {
+        const isPageFile = relPath.startsWith('src/app/');
+        const isComponentFile = relPath.startsWith('src/components/');
+        let flagged = false;
+
+        if (TARGET_WHOLE_TENANT_CALLEES.has(callee)) {
+          if (
+            callee === 'listAllPeople' &&
+            hasEmployeesAndLeaversOnlyOption(node)
+          ) {
+            flagged = false;
+          } else {
+            flagged = true;
+          }
+        } else if (TARGET_PAGE_CALLEES.has(callee)) {
+          flagged = true;
+        } else if (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee)) {
+          flagged = true;
+        }
+
+        if (flagged) {
+          const line =
+            sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+              .line + 1;
+          const finding: AstCallFinding = {
+            file: relPath,
+            line,
+            fn: getEnclosingFunctionName(node),
+            callee,
+          };
+
+          if (matchesAllowList(finding, PERMANENT_ALLOW_LIST)) {
+            permanentAllowMatched.push(finding);
+          } else if (
+            matchesAllowList(finding, DEFERRED_S1_02B_ALLOW_LIST) ||
+            (isPageFile && callee === 'getAppSnapshot') ||
+            (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee))
+          ) {
+            deferred.push(finding);
+          } else {
+            unexpected.push(finding);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return { unexpected, deferred, permanentAllowMatched };
+}
+
 function scanWholeTenantCalls(): {
   unexpected: AstCallFinding[];
   deferred: AstCallFinding[];
@@ -253,66 +435,10 @@ function scanWholeTenantCalls(): {
   for (const absPath of files) {
     const relPath = path.relative(REPO_ROOT, absPath).replace(/\\/g, '/');
     const sourceText = fs.readFileSync(absPath, 'utf8');
-    const sourceFile = ts.createSourceFile(
-      absPath,
-      sourceText,
-      ts.ScriptTarget.Latest,
-      true,
-      absPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    );
-
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node)) {
-        const callee = getCalleeName(node.expression);
-        if (callee) {
-          const isPageFile = relPath.startsWith('src/app/');
-          const isComponentFile = relPath.startsWith('src/components/');
-          let flagged = false;
-
-          if (TARGET_WHOLE_TENANT_CALLEES.has(callee)) {
-            if (
-              callee === 'listAllPeople' &&
-              hasEmployeesAndLeaversOnlyOption(node)
-            ) {
-              flagged = false;
-            } else {
-              flagged = true;
-            }
-          } else if (TARGET_PAGE_CALLEES.has(callee)) {
-            flagged = true;
-          } else if (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee)) {
-            flagged = true;
-          }
-
-          if (flagged) {
-            const line =
-              sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
-                .line + 1;
-            const finding: AstCallFinding = {
-              file: relPath,
-              line,
-              fn: getEnclosingFunctionName(node),
-              callee,
-            };
-
-            if (matchesAllowList(finding, PERMANENT_ALLOW_LIST)) {
-              permanentAllowMatched.push(finding);
-            } else if (
-              matchesAllowList(finding, DEFERRED_S1_02B_ALLOW_LIST) ||
-              (isPageFile && callee === 'getAppSnapshot') ||
-              (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee))
-            ) {
-              deferred.push(finding);
-            } else {
-              unexpected.push(finding);
-            }
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-
-    visit(sourceFile);
+    const fileRes = scanSourceTextForWholeTenantCalls(relPath, sourceText);
+    unexpected.push(...fileRes.unexpected);
+    deferred.push(...fileRes.deferred);
+    permanentAllowMatched.push(...fileRes.permanentAllowMatched);
   }
 
   return { unexpected, deferred, permanentAllowMatched };
@@ -335,5 +461,46 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
     expect(deferred.length).toBeLessThanOrEqual(
       MAX_DEFERRED_S1_02B_BASELINE_COUNT,
     );
+  });
+
+  it('R671: requires callees + ratchet on PERMANENT_ALLOW_LIST, monitors PMS/rollup/keydate loaders, and catches element-access and alias calls', () => {
+    for (const expectedCallee of [
+      'listMatters',
+      'listClients',
+      'getFirmFinanceRollupsSql',
+      'listAllVisibleKeyDates',
+    ]) {
+      expect(TARGET_WHOLE_TENANT_CALLEES.has(expectedCallee)).toBe(true);
+    }
+
+    for (const entry of PERMANENT_ALLOW_LIST) {
+      expect(
+        Array.isArray(entry.callees) && entry.callees.length > 0,
+        `PERMANENT_ALLOW_LIST entry ${entry.file}:${entry.fn} must declare explicit non-empty callees`,
+      ).toBe(true);
+    }
+
+    expect(typeof MAX_PERMANENT_ALLOW_LIST_COUNT).toBe('number');
+    expect(PERMANENT_ALLOW_LIST.length).toBeLessThanOrEqual(
+      MAX_PERMANENT_ALLOW_LIST_COUNT,
+    );
+
+    const elementRes = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticGuardCheck.ts',
+      `async function handler(matterRepo: any, ctx: any) { return matterRepo['listAllMattersUnfiltered'](ctx); }`,
+    );
+    expect(elementRes.unexpected.some((f) => f.callee === 'listAllMattersUnfiltered')).toBe(true);
+
+    const destructuredRes = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticGuardCheck.ts',
+      `async function handler(matterRepo: any, ctx: any) { const { listAllMattersUnfiltered: fetchAllM } = matterRepo; return fetchAllM(ctx); }`,
+    );
+    expect(destructuredRes.unexpected.some((f) => f.callee === 'listAllMattersUnfiltered')).toBe(true);
+
+    const aliasRes = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticGuardCheck.ts',
+      `async function handler(partyRepo: any, ctx: any) { const getAllOrgs = partyRepo.listAllOrganisations; return getAllOrgs(ctx); }`,
+    );
+    expect(aliasRes.unexpected.some((f) => f.callee === 'listAllOrganisations')).toBe(true);
   });
 });
