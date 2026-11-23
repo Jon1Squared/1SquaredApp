@@ -103,7 +103,6 @@ import {
   executeKeyDateRemindersForTenant,
   executeMerge,
   flagMatterWriteOff,
-  getAppSnapshot,
   getClientPmsViewBundle,
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
@@ -142,6 +141,7 @@ import {
   updateMatterLifecycleStatusRecord,
   updatePersonPermissionOverrides,
 } from '../../src/server/services';
+import { getAppSnapshot } from '../../src/server/__tests__/testAppSnapshot';
 import { guardedJob } from '../../src/server/authorize';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import {

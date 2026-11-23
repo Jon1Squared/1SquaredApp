@@ -36,7 +36,6 @@ import {
 } from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import {
-  getAppSnapshot,
   resetAllDemoData,
   reviseQuoteRecord,
   saveMatterCostsConfig,
@@ -44,6 +43,7 @@ import {
   saveQuoteRecord,
   signOffMatterCostsRecord,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
   auditEntriesSince,

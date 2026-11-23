@@ -31,7 +31,6 @@ import {
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import {
   createRegisterRecordService,
-  getAppSnapshot,
   getKeyDatesConfig,
   resetAllDemoData,
   saveEnquiryRecord,
@@ -44,6 +43,7 @@ import {
   searchGlobalRecords,
   updatePersonPermissionOverrides,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
   runAsTestActor,

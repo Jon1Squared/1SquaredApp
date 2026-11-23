@@ -84,7 +84,6 @@ import {
   discussSignOff,
   dismissDuplicateMatch,
   executeMerge,
-  getAppSnapshot,
   getClientPmsViewBundle,
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
@@ -128,6 +127,7 @@ import {
   withPageActor,
   listAuditEntriesForRecord,
 } from '../../src/server/services';
+import { getAppSnapshot } from '../../src/server/__tests__/testAppSnapshot';
 import {
   flushDocumentLifecycleSyncForTesting,
   getRepositorySingleton,

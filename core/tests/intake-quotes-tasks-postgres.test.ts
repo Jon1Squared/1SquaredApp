@@ -48,7 +48,6 @@ import {
   enqueueNotificationEmailIfImmediate,
   enqueueNotificationTeamsActivityIfEnabled,
   executeNotificationDigestsForTenant,
-  getAppSnapshot,
   getKeyDateRepository,
   listFirmAuditEntriesPage,
   prepareEnquiryConversion,
@@ -59,6 +58,7 @@ import {
   saveTaskRecord,
   saveTeamRecord,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { isActionDenied } from '@/domain/actionResult';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { setAuditAdapterFailureHookForTesting } from '@/server/testSupport/auditTestSupport';
@@ -1662,6 +1662,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       const freshEntraAuth = await import('@/server/entraAuth');
       const freshRbacRuntime = await import('@/server/rbacRuntime');
       const freshServices = await import('@/server/services');
+      const freshSnapshot = await import('@/server/__tests__/testAppSnapshot');
 
       const freshCookie = freshEntraAuth.createSignedEntraSessionCookie(
         carysSession.verifiedSession,
@@ -1676,7 +1677,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       // 3. Read all three back through the services on the cold-started module graph
       const snapshotAfterColdStart = await freshRbacRuntime.runWithActiveActorSession(
         freshCarysSession,
-        () => freshServices.getAppSnapshot('P-000001'),
+        () => freshSnapshot.getAppSnapshot('P-000001'),
       );
 
       // 4. Assert enquiry, quote, and task are unchanged and no clearTenantData ran
@@ -1722,6 +1723,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
     const replicaAEntra = await import('@/server/entraAuth');
     const replicaARbac = await import('@/server/rbacRuntime');
     const replicaAServices = await import('@/server/services');
+    const replicaASnapshot = await import('@/server/__tests__/testAppSnapshot');
     const replicaACore = await import('@platform/core');
     const replicaASession = {
       ...carysSession,
@@ -1739,6 +1741,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
     const replicaBEntra = await import('@/server/entraAuth');
     const replicaBRbac = await import('@/server/rbacRuntime');
     const replicaBServices = await import('@/server/services');
+    const replicaBSnapshot = await import('@/server/__tests__/testAppSnapshot');
     const replicaBCore = await import('@platform/core');
     const replicaBSession = {
       ...carysSession,
@@ -1751,7 +1754,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       // 1. Replica B reads initial snapshot before Replica A writes
       const snapBInitial = await replicaBRbac.runWithActiveActorSession(
         replicaBSession,
-        () => replicaBServices.getAppSnapshot('P-000001'),
+        () => replicaBSnapshot.getAppSnapshot('P-000001'),
       );
       const initialEnqCount = snapBInitial.enquiries.length;
       const initialQuoteCount = snapBInitial.quotes.length;
@@ -1840,7 +1843,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
       // 3. Instance B sees Instance A's new enquiry, quote, and task straight away
       const snapBAfterA = await replicaBRbac.runWithActiveActorSession(
         replicaBSession,
-        () => replicaBServices.getAppSnapshot('P-000001'),
+        () => replicaBSnapshot.getAppSnapshot('P-000001'),
       );
       expect(snapBAfterA.enquiries.some((e) => e.id === newEnqId)).toBe(true);
       expect(snapBAfterA.quotes.some((q) => q.id === newQuoteId)).toBe(true);
@@ -1868,7 +1871,7 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
 
       const snapAVerify = await replicaARbac.runWithActiveActorSession(
         replicaASession,
-        () => replicaAServices.getAppSnapshot('P-000001'),
+        () => replicaASnapshot.getAppSnapshot('P-000001'),
       );
       expect(snapAVerify.enquiries.some((e) => e.id === newEnqId)).toBe(true);
       expect(snapAVerify.quotes.some((q) => q.id === newQuoteId)).toBe(true);

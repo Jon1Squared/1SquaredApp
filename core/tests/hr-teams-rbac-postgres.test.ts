@@ -28,7 +28,6 @@ import {
 } from '@/server/entraAuth';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import {
-  getAppSnapshot,
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
   getPartyRepository,
@@ -42,6 +41,7 @@ import {
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import {
   auditEntriesForRecord,
   makeVerifiedTestEntraSession,
@@ -1036,6 +1036,7 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
         delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
 
         const replicaBServices = await import('@/server/services');
+        const replicaBSnapshot = await import('@/server/__tests__/testAppSnapshot');
         const replicaBRbac = await import('@/server/rbacRuntime');
         const replicaBEntra = await import('@/server/entraAuth');
 
@@ -1074,7 +1075,7 @@ describe('S0-17b: PostgreSQL HR, Teams & RBAC Repository, R408/R410/R413/R417/R4
             verifiedSession: verifiedB,
           },
           async () => {
-            const snapB = await replicaBServices.getAppSnapshot('P-000001');
+            const snapB = await replicaBSnapshot.getAppSnapshot('P-000001');
             expect(
               snapB.teams.some((t) => t.name === 'R465 Cold-Start Restructuring Team'),
             ).toBe(true);

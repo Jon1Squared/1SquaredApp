@@ -51,12 +51,12 @@ import {
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import {
   executeMerge,
-  getAppSnapshot,
   resetAllDemoData,
   saveMatterRecord,
   saveOrganisationRecord,
   signOffMatterCostsRecord,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
   auditEntriesSince,

@@ -35,7 +35,6 @@ import {
 } from './orgStructure';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
-  getAppSnapshot,
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
@@ -49,6 +48,7 @@ import {
   saveMatterRecord,
   savePersonRecord,
 } from '../server/services';
+import { getAppSnapshot } from '../server/__tests__/testAppSnapshot';
 import {
   createSignedEntraSessionCookie,
   verifySignedEntraSessionCookie,

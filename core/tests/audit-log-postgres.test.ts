@@ -24,7 +24,6 @@ import {
 } from '../src/index';
 import {
   executeMerge,
-  getAppSnapshot,
   getHrAndRbacRepository,
   getIntakeQuoteRepository,
   getKeyDatesConfig,
@@ -43,6 +42,7 @@ import {
   updatePersonPermissionOverrides,
   updateTenantRbacConfig,
 } from '../../src/server/services';
+import { getAppSnapshot } from '../../src/server/__tests__/testAppSnapshot';
 import {
   flushStagedAuditEntries,
   getAuditRepository,

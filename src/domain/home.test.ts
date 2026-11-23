@@ -30,7 +30,6 @@ import {
   approveSignOff,
   discussSignOff,
   flagMatterWriteOff,
-  getAppSnapshot,
   requestMatterBill,
   resetAllDemoData,
   resetHomePagesConfig,
@@ -38,6 +37,7 @@ import {
   switchViewingRole,
   updateEmployeeRolesAndSupports,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { testDataResetContext } from '@/test/testTenantContexts';
 import {
   runAsTestActor,

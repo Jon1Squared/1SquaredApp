@@ -53,7 +53,7 @@ function personMatchesConfiguredRole(
 }
 
 /**
- * Resolves the suggested conflict reviewer for UI governance suggestions (`getAppSnapshot`).
+ * Resolves the suggested conflict reviewer for matter-opening governance suggestions (`loadMatterNewPageData` / `loadMatterEditPageData`).
  * Uses the same stable `conflictReview` team and role resolution as task routing, with
  * no display-name matching and no hard-coded role fallbacks.
  */
