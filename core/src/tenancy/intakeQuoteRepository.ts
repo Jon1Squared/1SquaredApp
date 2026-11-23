@@ -770,65 +770,143 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
   };
 }
 
-export const ENQUIRY_DRAFT_ONLY_SQL_PREDICATE = `(
-  e.status <> 'Draft' OR COALESCE(e.created_by_id, '') = $2 OR COALESCE(e.taken_by_id, '') = $2
-)`;
-
-export const QUOTE_DRAFT_ONLY_SQL_PREDICATE = `(
-  NOT EXISTS (
-    SELECT 1 FROM enquiries e
-    WHERE e.tenant_id = q.tenant_id
-      AND e.id = q.source_enquiry_id
-      AND NOT ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
-  )
-)`;
+/**
+ * Extracts the explicit `restrictedAccessUserIds` JSONB array configured on a matter row,
+ * respecting `opening_record_json.hasRestrictedAccessUserIds` so SQL predicates never mistake
+ * pre-expanded participant cache columns for an explicit S1-D12 allow-list (`R676`).
+ */
+export function buildMatterExplicitAllowJsonSql(alias = 'm'): string {
+  return `(
+    CASE
+      WHEN (${alias}.opening_record_json->>'hasRestrictedAccessUserIds') = 'true'
+        THEN CASE
+          WHEN jsonb_typeof(${alias}.opening_record_json->'restrictedAccessUserIdsFallback') = 'array'
+            THEN ${alias}.opening_record_json->'restrictedAccessUserIdsFallback'
+          WHEN jsonb_typeof(${alias}.restricted_access_user_ids_json) = 'array'
+            THEN ${alias}.restricted_access_user_ids_json
+          ELSE '[]'::jsonb
+        END
+      WHEN (${alias}.opening_record_json->>'hasRestrictedAccessUserIds') = 'false'
+        THEN '[]'::jsonb
+      WHEN jsonb_typeof(${alias}.restricted_access_user_ids_json) = 'array'
+        THEN ${alias}.restricted_access_user_ids_json
+      ELSE '[]'::jsonb
+    END
+  )`;
+}
 
 /**
- * SQL predicate returning TRUE when an enquiry row `e` (`e.tenant_id = $1`) is visible to `viewerId` (`$2`).
- * - Personal `Draft` enquiries are visible only to `created_by_id = $2` or `taken_by_id = $2`.
- * - Any enquiry converted into or referenced by (`matters.source_enquiry_id`) a restricted staff or
- *   ethical-wall matter is hidden unless `$2` is listed in `matters.restricted_access_user_ids_json`.
+ * SQL predicate returning TRUE when a restricted matter row (`alias`) is hidden from the viewer
+ * at `$viewerParamIndex`, matching TypeScript `canAccessMatter` (`core/src/domain/rbac/resolver.ts`, `R676`):
+ * - Unrestricted matters (`!is_staff_matter && !has_ethical_wall && len(allowJson) === 0`) are never hidden.
+ * - Non-empty explicit allow-list (`len(allowJson) > 0`) is decisive (S1-D12: excludes unlisted participants).
+ * - Empty allow-list (`len(allowJson) === 0`) falls back to named participants (`responsible_partner_id`,
+ *   `supervisor_id`, `responsible_fee_earner_id`, or `opening_record_json->'teamMemberIds'`).
  */
-export const ENQUIRY_VISIBLE_SQL_PREDICATE = `(
-  ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
-  AND NOT EXISTS (
-    SELECT 1 FROM matters m
-    WHERE m.tenant_id = e.tenant_id
-      AND (m.id = e.converted_matter_id OR m.source_enquiry_id = e.id)
+export function buildMatterHiddenFromViewerSql(
+  alias = 'm',
+  viewerParamIndex = 2,
+): string {
+  const p = `$${viewerParamIndex}::text`;
+  const allowJson = buildMatterExplicitAllowJsonSql(alias);
+  return `(
+    (
+      ${alias}.is_staff_matter = TRUE
+      OR ${alias}.has_ethical_wall = TRUE
+      OR jsonb_array_length(${allowJson}) > 0
+    )
+    AND (
+      CASE
+        WHEN jsonb_array_length(${allowJson}) > 0
+          THEN NOT (${p} <> '' AND COALESCE(${allowJson} ? ${p}, FALSE))
+        ELSE NOT (
+          ${p} <> ''
+          AND (
+            COALESCE(${alias}.responsible_partner_id = ${p}, FALSE)
+            OR COALESCE(${alias}.supervisor_id = ${p}, FALSE)
+            OR COALESCE(${alias}.responsible_fee_earner_id = ${p}, FALSE)
+            OR (
+              jsonb_typeof(${alias}.opening_record_json->'teamMemberIds') = 'array'
+              AND COALESCE((${alias}.opening_record_json->'teamMemberIds') ? ${p}, FALSE)
+            )
+          )
+        )
+      END
+    )
+  )`;
+}
+
+export function buildEnquiryDraftOnlySqlPredicate(viewerParamIndex = 2): string {
+  const p = `$${viewerParamIndex}::text`;
+  return `(
+    e.status <> 'Draft'
+    OR (
+      ${p} <> ''
       AND (
-        m.is_staff_matter = TRUE
-        OR m.has_ethical_wall = TRUE
-        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+        COALESCE(e.created_by_id = ${p}, FALSE)
+        OR COALESCE(e.taken_by_id = ${p}, FALSE)
       )
-      AND NOT (m.restricted_access_user_ids_json ? $2)
-  )
-)`;
+    )
+  )`;
+}
+
+export function buildQuoteDraftOnlySqlPredicate(viewerParamIndex = 2): string {
+  return `(
+    NOT EXISTS (
+      SELECT 1 FROM enquiries e
+      WHERE e.tenant_id = q.tenant_id
+        AND e.id = q.source_enquiry_id
+        AND NOT ${buildEnquiryDraftOnlySqlPredicate(viewerParamIndex)}
+    )
+  )`;
+}
 
 /**
- * SQL predicate returning TRUE when a quote row `q` (`q.tenant_id = $1`) is visible to `viewerId` (`$2`).
- * - Any quote converted into or referenced by (`matters.source_quote_id`) a restricted matter is hidden
- *   unless `$2` is in `matters.restricted_access_user_ids_json`.
- * - Any quote linked (`q.source_enquiry_id`) to an enquiry that is hidden from `$2` is also hidden.
+ * Parameterized SQL predicate returning TRUE when an enquiry row `e` (`e.tenant_id = $1`)
+ * is visible to `viewerId` (`$viewerParamIndex`), matching `canViewMatter` + `canViewEnquiry` (`R676`, `R685`).
  */
-export const QUOTE_VISIBLE_SQL_PREDICATE = `(
-  NOT EXISTS (
-    SELECT 1 FROM matters m
-    WHERE m.tenant_id = q.tenant_id
-      AND (m.id = q.converted_matter_id OR m.source_quote_id = q.id)
-      AND (
-        m.is_staff_matter = TRUE
-        OR m.has_ethical_wall = TRUE
-        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-      )
-      AND NOT (m.restricted_access_user_ids_json ? $2)
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM enquiries e
-    WHERE e.tenant_id = q.tenant_id
-      AND e.id = q.source_enquiry_id
-      AND NOT ${ENQUIRY_VISIBLE_SQL_PREDICATE}
-  )
-)`;
+export function buildEnquiryVisibleSqlPredicate(viewerParamIndex = 2): string {
+  return `(
+    ${buildEnquiryDraftOnlySqlPredicate(viewerParamIndex)}
+    AND NOT EXISTS (
+      SELECT 1 FROM matters m
+      WHERE m.tenant_id = e.tenant_id
+        AND (m.id = e.converted_matter_id OR m.source_enquiry_id = e.id)
+        AND ${buildMatterHiddenFromViewerSql('m', viewerParamIndex)}
+    )
+  )`;
+}
+
+/**
+ * Parameterized SQL predicate returning TRUE when a quote row `q` (`q.tenant_id = $1`)
+ * is visible to `viewerId` (`$viewerParamIndex`), matching `canViewMatter` + `canViewQuote` (`R676`, `R685`).
+ */
+export function buildQuoteVisibleSqlPredicate(viewerParamIndex = 2): string {
+  return `(
+    NOT EXISTS (
+      SELECT 1 FROM matters m
+      WHERE m.tenant_id = q.tenant_id
+        AND (m.id = q.converted_matter_id OR m.source_quote_id = q.id)
+        AND ${buildMatterHiddenFromViewerSql('m', viewerParamIndex)}
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM enquiries e
+      WHERE e.tenant_id = q.tenant_id
+        AND e.id = q.source_enquiry_id
+        AND NOT ${buildEnquiryVisibleSqlPredicate(viewerParamIndex)}
+    )
+  )`;
+}
+
+export const ENQUIRY_DRAFT_ONLY_SQL_PREDICATE =
+  buildEnquiryDraftOnlySqlPredicate(2);
+
+export const QUOTE_DRAFT_ONLY_SQL_PREDICATE =
+  buildQuoteDraftOnlySqlPredicate(2);
+
+export const ENQUIRY_VISIBLE_SQL_PREDICATE = buildEnquiryVisibleSqlPredicate(2);
+
+export const QUOTE_VISIBLE_SQL_PREDICATE = buildQuoteVisibleSqlPredicate(2);
 
 export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   private readonly auditRepo: TenantAuditRepository;
@@ -848,15 +926,10 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     viewerId: string,
   ): Promise<Set<string>> {
     const res = await tx.query<{ tenant_id: string; id: string }>(
-      `SELECT tenant_id, id
-       FROM matters
-       WHERE tenant_id = $1
-         AND (
-           is_staff_matter = TRUE
-           OR has_ethical_wall = TRUE
-           OR jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) > 0
-         )
-         AND NOT (restricted_access_user_ids_json ? $2)`,
+      `SELECT m.tenant_id, m.id
+       FROM matters m
+       WHERE m.tenant_id = $1
+         AND ${buildMatterHiddenFromViewerSql('m', 2)}`,
       [ctx.tenantId, viewerId],
     );
     const ids = new Set<string>();
@@ -1930,8 +2003,8 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         sqlParams.push(viewerId);
         const vIdx = sqlParams.length;
         const pred = options?.hasRestrictedMatterAccess
-          ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE.replace(/\$2/g, `$${vIdx}`)
-          : ENQUIRY_VISIBLE_SQL_PREDICATE.replace(/\$2/g, `$${vIdx}`);
+          ? buildEnquiryDraftOnlySqlPredicate(vIdx)
+          : buildEnquiryVisibleSqlPredicate(vIdx);
         whereClauses.push(pred);
       }
       const res = await tx.query<EnquiryRow>(
@@ -2116,8 +2189,8 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         sqlParams.push(params.viewerId ?? ctx.actorId);
         const vIdx = sqlParams.length;
         const pred = params.hasRestrictedMatterAccess
-          ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE.replace(/\$2/g, `$${vIdx}`)
-          : ENQUIRY_VISIBLE_SQL_PREDICATE.replace(/\$2/g, `$${vIdx}`);
+          ? buildEnquiryDraftOnlySqlPredicate(vIdx)
+          : buildEnquiryVisibleSqlPredicate(vIdx);
         whereClauses.push(pred);
       }
 

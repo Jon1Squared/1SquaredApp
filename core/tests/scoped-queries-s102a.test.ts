@@ -18,6 +18,10 @@ import {
 } from '@/platform/tenantRuntime';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
 import {
+  buildRecordVisibility,
+  EMPTY_HIDDEN_KEY_DATE_IDS,
+} from '@/server/visibility';
+import {
   extractConflictSignalsFromParties,
   getAppSnapshot,
   getClientPmsViewBundle,
@@ -956,6 +960,40 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       ],
     });
 
+    // Scenario 4b (R685): Former name held as a separate linked organisation record under O-R659-S4-LINKED
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R685-FORMER-LINKED',
+      legalName: 'Meridian Legacy Subsidiary Ltd',
+      otherNames: [
+        { id: 'on-r685-s4b', typeId: 'ont-former', name: 'Meridian Former Standalone Corp' },
+      ],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: 'O-R659-S4-LINKED',
+      notDuplicateOf: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R685-S4B-ORG',
+      matterNumber: 'MAT-R685-4B',
+      title: 'Scenario 4b Linked Former Org Matter',
+      clientId: 'O-R685-FORMER-LINKED',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [],
+    });
+
     // Scenario 5: previousNames with separators ("Meyrick, Bowen; Parry / Pritchard")
     await matterRepo.putMatter(ctxAlpha, {
       ...baseMatter,
@@ -1114,6 +1152,100 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       receivedAt: '2026-11-02T11:00:00Z',
     } as never);
 
+    // R676 Fixture A: Staff matter with EMPTY allow-list where P-000002 is responsiblePartnerId
+    await matterRepo.putMatter(
+      ctxAlpha,
+      {
+        ...baseMatter,
+        id: 'M-R676-STAFF-EMPTY',
+        matterNumber: 'MAT-R676-SE',
+        title: 'Staff Empty Allowlist Matter',
+        clientId: 'O-R659-NEUTRAL-CLIENT',
+        additionalClientIds: [],
+        responsiblePartnerId: 'P-000002',
+        supervisingPartnerId: null,
+        leadFeeEarnerId: 'P-000002',
+        teamMemberIds: ['P-000002'],
+        instructingContactId: null,
+        billingContactId: null,
+        referrerContactId: null,
+        sourceEnquiryId: 'ENQ-R676-STAFF-EMPTY',
+        isStaffMatter: true,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: [],
+        parties: [
+          {
+            id: 'mp-r676-se',
+            relationshipCode: 'OP',
+            capacityCodes: [],
+            entityType: 'person',
+            linkedRecordId: null,
+            name: 'Bramwell EmptyAllowStaff',
+            role: 'Opponent',
+            notes: '',
+          },
+        ],
+      },
+      { sqlRestrictedAccessUserIds: [] },
+    );
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R676-STAFF-EMPTY',
+      reference: 'ENQ-R676-SE',
+      status: 'Converted',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      convertedMatterId: 'M-R676-STAFF-EMPTY',
+      firstName: 'Bramwell',
+      lastName: 'EmptyAllowStaff',
+      summary: 'Staff Empty Allowlist Converted Source Enquiry',
+      receivedAt: '2026-11-02T11:05:00Z',
+    } as never);
+
+    // R676 Fixture B: Ethical wall with explicit non-empty allow-list ['P-000001'] where P-000002 is responsiblePartnerId (S1-D12: explicit allow-list wins)
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R676-WALL-EXPLICIT',
+      matterNumber: 'MAT-R676-WE',
+      title: 'Wall Explicit Allowlist Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      responsiblePartnerId: 'P-000002',
+      supervisingPartnerId: null,
+      leadFeeEarnerId: 'P-000002',
+      teamMemberIds: ['P-000002'],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      sourceEnquiryId: 'ENQ-R676-WALL-EXPLICIT',
+      isStaffMatter: false,
+      hasEthicalWall: true,
+      restrictedAccessUserIds: ['P-000001'],
+      parties: [
+        {
+          id: 'mp-r676-we',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'person',
+          linkedRecordId: null,
+          name: 'Cromwell WallExplicitTarget',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R676-WALL-EXPLICIT',
+      reference: 'ENQ-R676-WE',
+      status: 'Converted',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      convertedMatterId: 'M-R676-WALL-EXPLICIT',
+      firstName: 'Cromwell',
+      lastName: 'WallExplicitTarget',
+      summary: 'Explicit Wall Converted Source Enquiry',
+      receivedAt: '2026-11-02T11:10:00Z',
+    } as never);
+
     const parties: ConflictCheckParty[] = [
       // #1 Link counterpart (S1)
       {
@@ -1200,6 +1332,27 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
         role: 'Witness',
         linkedRecordId: null,
       },
+      {
+        id: 'cp-r676-12',
+        name: 'Bramwell EmptyAllowStaff',
+        entityType: 'person',
+        role: 'Other party',
+        linkedRecordId: null,
+      },
+      {
+        id: 'cp-r676-13',
+        name: 'Cromwell WallExplicitTarget',
+        entityType: 'person',
+        role: 'Other party',
+        linkedRecordId: null,
+      },
+      {
+        id: 'cp-r685-14',
+        name: 'Meridian Former Standalone Corp',
+        entityType: 'organisation',
+        role: 'Other party',
+        linkedRecordId: null,
+      },
     ];
 
     const staffPeople = await partyRepo.listAllPeople<Person>(ctxAlpha, {
@@ -1208,48 +1361,71 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     const teams = await hrRepo.listAllTeams<Team>(ctxAlpha);
     const signals = extractConflictSignalsFromParties(parties);
 
-    const compareForViewer = async (viewerId: string, expectRedactedWall: boolean) => {
-      const fullGraph = await loadFullConflictSearchGraph(
-        ctxAlpha,
-        signals,
-        viewerId,
-        staffPeople,
+    const loadPreS102aConflictGraph = async (viewerId: string) => {
+      const [peopleRaw, organisations, links, matters, enquiries] = await Promise.all([
+        partyRepo.listAllPeople<Person>(ctxAlpha),
+        partyRepo.listAllOrganisations<Organisation>(ctxAlpha),
+        partyRepo.listAllLinks<PersonOrganisationLink>(ctxAlpha),
+        matterRepo.listAllMattersUnfiltered<Matter>(ctxAlpha),
+        intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctxAlpha),
+      ]);
+      const byId = new Map<string, Person>();
+      for (const p of [...staffPeople, ...peopleRaw]) {
+        if (p?.id && !byId.has(p.id)) byId.set(p.id, p);
+      }
+      const allPeopleOut = Array.from(byId.values());
+      const viewerPerson = allPeopleOut.find((p) => p.id === viewerId) ?? null;
+      const legacyVis = buildRecordVisibility({ teams }, viewerPerson, {
+        hiddenMatterKeyDateIds: EMPTY_HIDDEN_KEY_DATE_IDS,
         teams,
-      );
-      const scopedGraph = await loadScopedConflictSearchGraphForParity(
-        ctxAlpha,
-        signals,
-        viewerId,
-        staffPeople,
-        teams,
-      );
+        people: allPeopleOut,
+        matters,
+        enquiries,
+      });
+      return {
+        people: allPeopleOut,
+        organisations,
+        links,
+        matters,
+        enquiries,
+        canViewMatter: legacyVis.canViewMatter,
+        canViewEnquiry: legacyVis.canViewEnquiry,
+      };
+    };
 
-      const fullMatches = searchMatterConflicts(
-        { parties },
-        {
-          matters: fullGraph.matters,
-          enquiries: fullGraph.enquiries,
-          people: fullGraph.people,
-          organisations: fullGraph.organisations,
-          links: fullGraph.links,
-          tenantId: tenantAlpha,
-          canView: fullGraph.canViewMatter,
-          canViewEnquiry: fullGraph.canViewEnquiry,
-        },
-      );
-      const scopedMatches = searchMatterConflicts(
-        { parties },
-        {
-          matters: scopedGraph.matters,
-          enquiries: scopedGraph.enquiries,
-          people: scopedGraph.people,
-          organisations: scopedGraph.organisations,
-          links: scopedGraph.links,
-          tenantId: tenantAlpha,
-          canView: scopedGraph.canViewMatter,
-          canViewEnquiry: scopedGraph.canViewEnquiry,
-        },
-      );
+    const compareForViewer = async (
+      viewerId: string,
+      opts: {
+        canSeeWall: boolean;
+        canSeePrivateDraft: boolean;
+        canSeeStaffEmpty: boolean;
+        canSeeExplicitWall: boolean;
+      },
+    ) => {
+      const [preS102aGraph, fullGraph, scopedGraph] = await Promise.all([
+        loadPreS102aConflictGraph(viewerId),
+        loadFullConflictSearchGraph(ctxAlpha, signals, viewerId, staffPeople, teams),
+        loadScopedConflictSearchGraphForParity(ctxAlpha, signals, viewerId, staffPeople, teams),
+      ]);
+
+      const runMatters = (graph: typeof fullGraph) =>
+        searchMatterConflicts(
+          { parties },
+          {
+            matters: graph.matters,
+            enquiries: graph.enquiries,
+            people: graph.people,
+            organisations: graph.organisations,
+            links: graph.links,
+            tenantId: tenantAlpha,
+            canView: graph.canViewMatter,
+            canViewEnquiry: graph.canViewEnquiry,
+          },
+        );
+
+      const preS102aMatches = runMatters(preS102aGraph);
+      const fullMatches = runMatters(fullGraph);
+      const scopedMatches = runMatters(scopedGraph);
 
       const normalizeMatches = (list: typeof fullMatches) =>
         [...list]
@@ -1267,31 +1443,76 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
             ),
           );
 
-      // Verify all 8 scenarios produced hits in full first
-      const serialized = JSON.stringify(fullMatches);
-      expect(serialized).toContain('M-R659-S1-FREE');
-      expect(serialized).toContain('M-R659-S2-REF');
-      expect(serialized).toContain('M-R659-S3-TENPLUS');
-      expect(serialized).toContain('M-R659-S4-FORMER');
-      expect(serialized).toContain('M-R659-S5-PREVSEP');
-      expect(serialized).toContain('M-R659-S6-EMAIL');
-      expect(serialized).toContain('M-R659-S7-COMPNO');
-      if (expectRedactedWall) {
-        expect(serialized).not.toContain('Confidential Staff Ethical Wall Matter');
-        expect(serialized).not.toContain('Private Draft Wall Enquiry');
-        expect(fullMatches.some((m) => m.restricted && m.whereFound.includes('Restricted matter'))).toBe(true);
-        expect(fullMatches.some((m) => m.restricted && m.whereFound.includes('Restricted enquiry'))).toBe(true);
+      // Verify all scenarios produced expected hits and redaction in legacy preS102a first
+      const preSerialized = JSON.stringify(preS102aMatches);
+      expect(preSerialized).toContain('M-R659-S1-FREE');
+      expect(preSerialized).toContain('M-R659-S2-REF');
+      expect(preSerialized).toContain('M-R659-S3-TENPLUS');
+      expect(preSerialized).toContain('M-R659-S4-FORMER');
+      expect(preSerialized).toContain('M-R685-S4B-ORG');
+      expect(preSerialized).toContain('M-R659-S5-PREVSEP');
+      expect(preSerialized).toContain('M-R659-S6-EMAIL');
+      expect(preSerialized).toContain('M-R659-S7-COMPNO');
+      if (opts.canSeeWall) {
+        expect(preSerialized).toContain('M-R659-S8-WALL');
       } else {
-        expect(serialized).toContain('M-R659-S8-WALL');
+        expect(preSerialized).not.toContain('Confidential Staff Ethical Wall Matter');
+        expect(preS102aMatches.some((m) => m.restricted && m.whereFound.includes('Restricted matter'))).toBe(true);
+      }
+      if (opts.canSeePrivateDraft) {
+        expect(preSerialized).toContain('Private Draft Wall Enquiry');
+      } else {
+        expect(preSerialized).not.toContain('Private Draft Wall Enquiry');
+        expect(preS102aMatches.some((m) => m.restricted && m.whereFound.includes('Restricted enquiry'))).toBe(true);
+      }
+      if (opts.canSeeStaffEmpty) {
+        expect(preSerialized).toContain('M-R676-STAFF-EMPTY');
+        expect(preSerialized).toContain('ENQ-R676-STAFF-EMPTY');
+      } else {
+        expect(preSerialized).not.toContain('Staff Empty Allowlist Matter');
+        expect(preSerialized).not.toContain('Staff Empty Allowlist Converted Source Enquiry');
+      }
+      if (opts.canSeeExplicitWall) {
+        expect(preSerialized).toContain('M-R676-WALL-EXPLICIT');
+        expect(preSerialized).toContain('ENQ-R676-WALL-EXPLICIT');
+      } else {
+        expect(preSerialized).not.toContain('Wall Explicit Allowlist Matter');
+        expect(preSerialized).not.toContain('Explicit Wall Converted Source Enquiry');
       }
 
+      // Assert exact 3-arm parity: preS102a === full === scoped (hits AND redaction)
+      expect(normalizeMatches(fullMatches)).toEqual(normalizeMatches(preS102aMatches));
       expect(normalizeMatches(scopedMatches)).toEqual(normalizeMatches(fullMatches));
     };
 
-    // Unauthorised fee earner (P-000002): redacted restricted matter & draft enquiry
-    await compareForViewer('P-000002', true);
-    // Restricted-access partner (P-000001): full unredacted matter & own draft enquiry
-    await compareForViewer('P-000001', false);
+    // Unauthorised participant fee earner (P-000002): sees M-R676-STAFF-EMPTY (empty allow-list fallback), redacted walls & non-allow-listed explicit wall
+    await compareForViewer('P-000002', {
+      canSeeWall: false,
+      canSeePrivateDraft: false,
+      canSeeStaffEmpty: true,
+      canSeeExplicitWall: false,
+    });
+    // Unrelated fee earner without matter:restricted:access (P-000006): redacted on staff-empty and all walls
+    await compareForViewer('P-000006', {
+      canSeeWall: false,
+      canSeePrivateDraft: false,
+      canSeeStaffEmpty: false,
+      canSeeExplicitWall: false,
+    });
+    // Partner on explicit wall allow-list without matter:restricted:access (P-000001): sees S8 wall, own Draft, & explicit wall, but NOT unrelated staff-empty matter
+    await compareForViewer('P-000001', {
+      canSeeWall: true,
+      canSeePrivateDraft: true,
+      canSeeStaffEmpty: false,
+      canSeeExplicitWall: true,
+    });
+    // Risk & Compliance oversight holder with matter:restricted:access (P-000003): sees all restricted matters & converted enquiries, while P-000001's personal Draft remains hidden
+    await compareForViewer('P-000003', {
+      canSeeWall: true,
+      canSeePrivateDraft: false,
+      canSeeStaffEmpty: true,
+      canSeeExplicitWall: true,
+    });
 
     // Live Option 1 check: runMatterConflictCheckRecord uses loadFullConflictSearchGraph with P-000002 redaction
     setTestEntraSessionOverride({
@@ -1316,12 +1537,13 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       'Confidential Staff Ethical Wall Matter',
     );
 
-    // Enquiry conflict search parity (Full vs Scoped)
+    // Enquiry conflict search parity (preS102a vs Full vs Scoped, filtering enquiries by canViewEnquiry matching live services.ts)
     const enqInput = {
       firstName: 'Huw',
       lastName: 'ReferrerTarget',
       callingOnBehalfOf: 'Snowdonia Counterpart Logistics Ltd',
-      otherPartiesNamed: 'Meyrick, Bowen; Decimus Tenth Party Target Ltd',
+      otherPartiesNamed:
+        'Meyrick, Bowen; Decimus Tenth Party Target Ltd; Bramwell EmptyAllowStaff; Cromwell WallExplicitTarget; Private DraftWall; Meridian Former Standalone Corp',
       email: 'conflict-email-hit@invented.example',
     };
     const enqSignals: ReturnType<typeof extractConflictSignalsFromParties> = {
@@ -1334,48 +1556,40 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       ].filter(Boolean),
       emails: [enqInput.email],
     };
-    const fullEnqGraph = await loadFullConflictSearchGraph(
-      ctxAlpha,
-      enqSignals,
-      'P-000002',
-      staffPeople,
-      teams,
-    );
-    const scopedEnqGraph = await loadScopedConflictSearchGraphForParity(
-      ctxAlpha,
-      enqSignals,
-      'P-000002',
-      staffPeople,
-      teams,
-    );
-    const fullEnqHits = runEnquiryConflictSearch(
-      enqInput,
-      fullEnqGraph.people,
-      fullEnqGraph.organisations,
-      fullEnqGraph.matters,
-      seed.values,
-      fullEnqGraph.enquiries,
-      null,
-      fullEnqGraph.links,
-      fullEnqGraph.canViewMatter,
-      tenantAlpha,
-    );
-    const scopedEnqHits = runEnquiryConflictSearch(
-      enqInput,
-      scopedEnqGraph.people,
-      scopedEnqGraph.organisations,
-      scopedEnqGraph.matters,
-      seed.values,
-      scopedEnqGraph.enquiries,
-      null,
-      scopedEnqGraph.links,
-      scopedEnqGraph.canViewMatter,
-      tenantAlpha,
-    );
-    expect(scopedEnqHits.allConflicts.map((h) => `${h.recordId}:${h.reason}`).sort()).toEqual(
-      fullEnqHits.allConflicts.map((h) => `${h.recordId}:${h.reason}`).sort(),
-    );
+    const [preEnqGraph, fullEnqGraph, scopedEnqGraph] = await Promise.all([
+      loadPreS102aConflictGraph('P-000002'),
+      loadFullConflictSearchGraph(ctxAlpha, enqSignals, 'P-000002', staffPeople, teams),
+      loadScopedConflictSearchGraphForParity(ctxAlpha, enqSignals, 'P-000002', staffPeople, teams),
+    ]);
+    const runEnqArm = (graph: typeof fullEnqGraph) =>
+      runEnquiryConflictSearch(
+        enqInput,
+        graph.people,
+        graph.organisations,
+        graph.matters,
+        seed.values,
+        graph.enquiries.filter((e) => graph.canViewEnquiry(e)),
+        null,
+        graph.links,
+        graph.canViewMatter,
+        tenantAlpha,
+      );
+    const preEnqHits = runEnqArm(preEnqGraph);
+    const fullEnqHits = runEnqArm(fullEnqGraph);
+    const scopedEnqHits = runEnqArm(scopedEnqGraph);
+
+    const normalizeEnqHits = (res: typeof fullEnqHits) =>
+      res.allConflicts.map((h) => `${h.recordType}:${h.recordId}:${h.reason}`).sort();
+
+    expect(normalizeEnqHits(fullEnqHits)).toEqual(normalizeEnqHits(preEnqHits));
+    expect(normalizeEnqHits(scopedEnqHits)).toEqual(normalizeEnqHits(fullEnqHits));
     expect(fullEnqHits.allConflicts.length).toBeGreaterThan(0);
+    // P-000002 CAN see ENQ-R676-STAFF-EMPTY (participant on empty-allow-list staff matter) & Scenario 4b linked org
+    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R676-STAFF-EMPTY')).toBe(true);
+    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'O-R685-FORMER-LINKED')).toBe(true);
+    // P-000002 MUST NOT see ENQ-R676-WALL-EXPLICIT (excluded from explicit allow-list) or ENQ-R659-S8-PRIV (another user's Draft)
+    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R676-WALL-EXPLICIT')).toBe(false);
+    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R659-S8-PRIV')).toBe(false);
 
     // Second-tenant isolation: Bravo sees ZERO Alpha Scenario 1-8 hits
     const bravoStaff = await partyRepo.listAllPeople<Person>(ctxBravo, {
@@ -2324,14 +2538,15 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
 
       await independentIntakeRepo.withTenantTransaction(ctxBravo, async (tx) => {
         await tx.query('SELECT id FROM quotes WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [ctxBravo.tenantId, 'QUO-R675-B-LOCKED']);
-        const lockedRun = await execManual(ctxBravo, {
+        await execManual(ctxBravo, {
           triggerSource: 'manual',
           triggeredById: 'system:quote-expiry-locked',
           defaultRunHourLocal: 0,
           statementTimeoutMs: 2000,
           tenantConfig: bravoCfg,
         });
-        expect(lockedRun.result?.summary.expiredCount).toBe(0);
+        const lockedQuoteState = await intakeRepo.getQuoteById<{ status: string }>(ctxBravo, 'QUO-R675-B-LOCKED', { includeRestricted: true });
+        expect(lockedQuoteState?.status).toBe('Sent');
         throw new Error('__RELEASE_LOCK_ROLLBACK__');
       }).catch((err: Error) => {
         if (err.message !== '__RELEASE_LOCK_ROLLBACK__') throw err;
