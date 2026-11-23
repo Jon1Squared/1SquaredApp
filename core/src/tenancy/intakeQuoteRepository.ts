@@ -1829,31 +1829,44 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   public async listEnquiriesByIds<T = TenantEnquiryRecord>(
     ctx: TenantContext,
     enquiryIds: readonly string[],
-    options?: { includeRestricted?: boolean; viewerId?: string },
+    options?: {
+      includeRestricted?: boolean;
+      viewerId?: string;
+      hasRestrictedMatterAccess?: boolean;
+    },
   ): Promise<T[]> {
     const cleanIds = Array.from(
       new Set(enquiryIds.map((x) => x?.trim()).filter(Boolean) as string[]),
     );
     if (cleanIds.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
+      const includeRestricted = Boolean(options?.includeRestricted);
+      const viewerId = (options?.viewerId ?? ctx.actorId ?? '').trim() || '__none__';
+      const sqlParams: unknown[] = [ctx.tenantId, cleanIds];
+      const whereClauses = ['e.tenant_id = $1', 'e.id = ANY($2::text[])'];
+      if (!includeRestricted) {
+        sqlParams.push(viewerId);
+        const vIdx = sqlParams.length;
+        const pred = options?.hasRestrictedMatterAccess
+          ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE.replace(/\$2/g, `$${vIdx}`)
+          : ENQUIRY_VISIBLE_SQL_PREDICATE.replace(/\$2/g, `$${vIdx}`);
+        whereClauses.push(pred);
+      }
       const res = await tx.query<EnquiryRow>(
         `SELECT * FROM enquiries e
-         WHERE e.tenant_id = $1 AND e.id = ANY($2::text[])
+         WHERE ${whereClauses.join(' AND ')}
          ORDER BY e.id ASC`,
-        [ctx.tenantId, cleanIds],
+        sqlParams,
       );
-      const hiddenMatterIds = options?.includeRestricted
-        ? new Set<string>()
-        : await this.listHiddenRestrictedMatterIdsInTx(
-            tx,
-            ctx,
-            options?.viewerId ?? ctx.actorId,
-          );
+      const hiddenMatterIds =
+        includeRestricted || options?.hasRestrictedMatterAccess
+          ? new Set<string>()
+          : await this.listHiddenRestrictedMatterIdsInTx(tx, ctx, viewerId);
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'enquiries.listEnquiriesByIds');
         const mapped = mapRowToEnquiry(row);
         return (
-          options?.includeRestricted
+          includeRestricted || options?.hasRestrictedMatterAccess
             ? mapped
             : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
         ) as unknown as T;

@@ -1432,4 +1432,120 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     expect(bravoFullJson).not.toContain('Private Draft Wall Enquiry');
     expect(bravoScopedJson).not.toContain('Private Draft Wall Enquiry');
   });
+
+  it('R664: listEnquiriesByIds enforces ENQUIRY_VISIBLE_SQL_PREDICATE and ENQUIRY_DRAFT_ONLY_SQL_PREDICATE when includeRestricted is false across two tenants', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const matterRepo = new TenantMatterRepository();
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
+
+    await matterRepo.putMatter(ctxAlpha, {
+      ...(structuredClone(seed.matters[0]!) as Matter),
+      id: 'M-R664-RESTRICTED',
+      matterNumber: 'MAT-R664-R1',
+      title: 'R664 Restricted Matter',
+      responsiblePartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000001',
+      teamMemberIds: ['P-000001'],
+      isStaffMatter: true,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: ['P-000001'],
+      parties: [],
+    });
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R664-DRAFT',
+      reference: 'ENQ-R664-D1',
+      status: 'Draft',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Private',
+      lastName: 'DraftOwner',
+      summary: 'User A Private Draft',
+      receivedAt: '2026-11-01T10:00:00Z',
+    } as never);
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R664-RESTRICTED',
+      reference: 'ENQ-R664-R1',
+      status: 'Assigned',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Restricted',
+      lastName: 'LinkedMatter',
+      convertedMatterId: 'M-R664-RESTRICTED',
+      summary: 'Restricted Matter Linked Enquiry',
+      receivedAt: '2026-11-01T10:05:00Z',
+    } as never);
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R664-PUBLIC',
+      reference: 'ENQ-R664-P1',
+      status: 'Assigned',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Open',
+      lastName: 'PublicEnq',
+      summary: 'Open Assigned Enquiry',
+      receivedAt: '2026-11-01T10:10:00Z',
+    } as never);
+
+    const targetIds = ['ENQ-R664-DRAFT', 'ENQ-R664-RESTRICTED', 'ENQ-R664-PUBLIC'];
+
+    const userBVisible = await intakeRepo.listEnquiriesByIds<Enquiry>(
+      ctxAlpha,
+      targetIds,
+      { viewerId: 'P-000002' },
+    );
+    expect(userBVisible.map((e) => e.id)).toEqual(['ENQ-R664-PUBLIC']);
+
+    const restrictedHolderVisible = await (
+      intakeRepo as unknown as {
+        listEnquiriesByIds: (
+          ctx: TenantContext,
+          ids: readonly string[],
+          opts?: {
+            includeRestricted?: boolean;
+            viewerId?: string;
+            hasRestrictedMatterAccess?: boolean;
+          },
+        ) => Promise<Enquiry[]>;
+      }
+    ).listEnquiriesByIds(ctxAlpha, targetIds, {
+      viewerId: 'P-000002',
+      hasRestrictedMatterAccess: true,
+    });
+    expect(restrictedHolderVisible.map((e) => e.id)).toEqual([
+      'ENQ-R664-PUBLIC',
+      'ENQ-R664-RESTRICTED',
+    ]);
+
+    const ownerVisible = await intakeRepo.listEnquiriesByIds<Enquiry>(
+      ctxAlpha,
+      targetIds,
+      { viewerId: 'P-000001' },
+    );
+    expect(ownerVisible.map((e) => e.id)).toEqual([
+      'ENQ-R664-DRAFT',
+      'ENQ-R664-PUBLIC',
+      'ENQ-R664-RESTRICTED',
+    ]);
+
+    const bravoVisible = await intakeRepo.listEnquiriesByIds<Enquiry>(
+      ctxBravo,
+      targetIds,
+      { viewerId: 'P-000001', includeRestricted: true },
+    );
+    expect(bravoVisible).toEqual([]);
+  });
 });
