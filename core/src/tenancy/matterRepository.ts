@@ -1976,6 +1976,84 @@ export class TenantMatterRepository extends TenantScopedRepository {
   }
 
   /**
+   * Advances `engagement_letter_status` to `'Drafted'` inside an existing tenant transaction when
+   * generating a Client Care Letter (`B2`), refusing to regress `'Drafted'`, `'Sent'`,
+   * `'Sent to client'`, `'Signed'`, `'Signed & returned'`, or already-sent/signed matters.
+   */
+  public async markEngagementLetterDraftedIfEligible<
+    TMatter extends TenantMatterRecord = TenantMatterRecord,
+  >(
+    ctx: TenantContext,
+    params: { matterId: string; updatedById: string },
+  ): Promise<{
+    matter: TMatter | null;
+    updated: boolean;
+    previousStatus: string;
+  }> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const selectRes = await tx.query<DbMatterRow>(
+        `SELECT *
+           FROM public.matters
+          WHERE tenant_id = $1
+            AND id = $2
+            AND client_id <> 'O-KEYDATE-STUB'
+            FOR UPDATE`,
+        [ctx.tenantId, params.matterId],
+      );
+      const row = selectRes.rows[0];
+      if (!row) {
+        return { matter: null, updated: false, previousStatus: '' };
+      }
+      this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+      const partiesMap = await this.loadPartiesByMatterIdsInTx(tx, ctx, [
+        row.id,
+      ]);
+      const parties = partiesMap.get(row.id) ?? [];
+      const existing = mapMatterRow<TMatter>(row, parties);
+      const previousStatus = existing.engagementLetterStatus ?? '';
+      const protectedStatuses = new Set([
+        'Drafted',
+        'Sent',
+        'Sent to client',
+        'Signed',
+        'Signed & returned',
+      ]);
+      if (
+        protectedStatuses.has(previousStatus) ||
+        Boolean(existing.engagementLetterSentAt) ||
+        Boolean(existing.engagementLetterSignedAt)
+      ) {
+        return { matter: existing, updated: false, previousStatus };
+      }
+
+      const nowIso = new Date().toISOString();
+      const updatedOpening = {
+        ...((row.opening_record_json ?? {}) as Record<string, unknown>),
+        updatedById: params.updatedById,
+        updatedAt: nowIso,
+      };
+      const updateRes = await tx.query<DbMatterRow>(
+        `UPDATE public.matters
+            SET row_version = row_version + 1,
+                engagement_letter_status = 'Drafted',
+                updated_at = $3::timestamptz,
+                opening_record_json = $4::jsonb
+          WHERE tenant_id = $1
+            AND id = $2
+          RETURNING *`,
+        [ctx.tenantId, params.matterId, nowIso, JSON.stringify(updatedOpening)],
+      );
+      const updatedRow = updateRes.rows[0]!;
+      this.assertRowTenant(ctx, updatedRow.tenant_id, 'Matter');
+      return {
+        matter: mapMatterRow<TMatter>(updatedRow, parties),
+        updated: true,
+        previousStatus,
+      };
+    });
+  }
+
+  /**
    * Clears `matter_parties` and `matters` for `ctx.tenantId`.
    * Preserves `matter_number_sequences` by default (`B6`) so matter numbers never go backwards
    * across matter deletions or `resetAllDemoData` demo resets.

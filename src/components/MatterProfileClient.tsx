@@ -30,7 +30,6 @@ import {
   addNoteAction,
   liftMatterRestrictionAction,
   updateMatterLifecycleStatusAction,
-  markEngagementLetterDraftedAction,
   saveMatterAction,
   saveTaskAction,
   updateMatterConflictRecordAction,
@@ -245,7 +244,9 @@ export function resolveMatterIntakeComplianceRows(
     : matter.amlStatus || 'Not recorded';
 
   const engagementSigned =
-    Boolean(matter.engagementLetterSignedAt) || matter.engagementLetterStatus === 'Signed';
+    Boolean(matter.engagementLetterSignedAt) ||
+    matter.engagementLetterStatus === 'Signed' ||
+    matter.engagementLetterStatus === 'Signed & returned';
   const engagementLabel = engagementSigned ? 'Engagement letter signed' : 'Engagement letter';
   const engagementDetail = matter.engagementLetterSignedAt
     ? formatShortDayMonth(matter.engagementLetterSignedAt)
@@ -4526,12 +4527,6 @@ export function MatterProfileClient({
         values={values}
         currentUserId={currentUserId}
         onDocumentGenerated={(doc) => {
-          if (
-            doc.documentType === 'Client Care Letter' &&
-            matter.engagementLetterStatus !== 'Signed'
-          ) {
-            void markEngagementLetterDraftedAction(matter.id);
-          }
           showToast(`Generated ${doc.fileName}`);
           router.refresh();
         }}

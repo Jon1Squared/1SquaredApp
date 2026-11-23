@@ -70,6 +70,7 @@ import type {
   ChoiceValue,
   CustomFieldDefinition,
   Matter,
+  MatterCostsSnapshot,
   Organisation,
   Person,
 } from './types';
@@ -889,47 +890,56 @@ export function buildFieldResolutionContextForRecord(params: {
       fieldValues: matter.fieldValues ?? {},
     };
 
-    const costsSnapshot = matter.fieldValues?.['matterCostsSnapshot'] as
-      | {
-          totalEstimateGbp?: number | null;
-          agreedCapGbp?: number | null;
-          associateRateGbp?: number | null;
-          partnerRateGbp?: number | null;
-          disbursementsTotalGbp?: number | null;
-          paymentOnAccountAmountGbp?: number | null;
-        }
+    const costsSnapshot = (matter.fieldValues?.['matterCosts'] ??
+      matter.fieldValues?.['matterCostsSnapshot']) as
+      | Partial<MatterCostsSnapshot>
       | undefined;
+
+    const rawRetainerAmount =
+      costsSnapshot?.paymentOnAccountRequired === 'No'
+        ? undefined
+        : (costsSnapshot?.paymentOnAccountAmountGbp ??
+          matter.retainerMoniesOnAccountGbp);
+    const resolvedRetainerAmount =
+      typeof rawRetainerAmount === 'number' &&
+      Number.isFinite(rawRetainerAmount) &&
+      rawRetainerAmount > 0
+        ? rawRetainerAmount
+        : undefined;
 
     financialData = {
       feeEstimate:
-        costsSnapshot?.totalEstimateGbp ?? matter.feeEstimateGbp ?? 0,
+        costsSnapshot?.totalEstimateGbp ?? matter.feeEstimateGbp ?? undefined,
       agreedFeeCap:
         costsSnapshot?.agreedCapGbp ??
         matter.agreedFeeCapGbp ??
         matter.feeEstimateGbp ??
-        0,
+        undefined,
       hourlyRate:
         costsSnapshot?.associateRateGbp ??
         feeEarnerPerson?.employment?.feeEarner?.chargeOutRateGbp ??
-        285,
+        undefined,
       wipBalance:
-        (matter.fieldValues?.['wipBalanceGbp'] as number | undefined) ?? 0,
-      unbilledDisbursements: costsSnapshot?.disbursementsTotalGbp ?? 0,
+        (matter.fieldValues?.['wipBalanceGbp'] as number | undefined) ??
+        undefined,
+      unbilledDisbursements:
+        costsSnapshot?.disbursementsTotalGbp ?? undefined,
       billedTotal:
-        (matter.fieldValues?.['billedTotalGbp'] as number | undefined) ?? 0,
+        (matter.fieldValues?.['billedTotalGbp'] as number | undefined) ??
+        undefined,
       unpaidInvoiceBalance:
         (matter.fieldValues?.['unpaidInvoiceBalanceGbp'] as
           | number
-          | undefined) ?? 0,
+          | undefined) ?? undefined,
       clientAccountBalance:
         (matter.fieldValues?.['clientAccountBalanceGbp'] as
           | number
-          | undefined) ?? 0,
+          | undefined) ?? undefined,
       officeAccountBalance:
         (matter.fieldValues?.['officeAccountBalanceGbp'] as
           | number
-          | undefined) ?? 0,
-      retainerAmount: costsSnapshot?.paymentOnAccountAmountGbp ?? 1500,
+          | undefined) ?? undefined,
+      retainerAmount: resolvedRetainerAmount,
     };
   }
 
@@ -1101,7 +1111,10 @@ export function buildSeedClientCareTemplateDocxBytes(): Uint8Array {
         bold: true,
       },
       {
-        text: 'Your matter will be billed on a {{ matter.fundingType }} basis. Our current estimate of professional charges is {{ financial.feeEstimate | currency }} ({{ financial.feeEstimate | words }}) plus VAT and disbursements. The applicable lead hourly charge-out rate is {{ financial.hourlyRate | currency }} per hour plus VAT. To enable us to commence work promptly, please arrange payment on account of {{ financial.retainerAmount | currency }}.',
+        text: 'Your matter will be billed on a {{ matter.fundingType }} basis. Our current estimate of professional charges is {{ financial.feeEstimate | currency }} ({{ financial.feeEstimate | words }}) plus VAT and disbursements. The applicable lead hourly charge-out rate is {{ financial.hourlyRate | currency }} per hour plus VAT. Any payment on account required is set out in the costs information enclosed.',
+      },
+      {
+        text: 'Payment on account requested: {{ financial.retainerAmount | currency }}',
       },
       {
         text: '4. Client Identification, Regulatory & Complaints Procedure',

@@ -939,8 +939,10 @@ export function EnquiryFormClient({
     showToast(`Linked enquiry to ${o.legalName} (${o.id})`);
   };
 
-  const handleFindAddress = async () => {
-    const q = (addressLookupQuery || postcode).trim();
+  const handleFindAddress = async (overrideQuery?: unknown) => {
+    const explicitQuery =
+      typeof overrideQuery === 'string' ? overrideQuery : undefined;
+    const q = (explicitQuery ?? (addressLookupQuery || postcode)).trim();
     if (q.length < 3) {
       showToast('Type a postcode or part of an address (at least 3 characters).');
       return;
@@ -1258,12 +1260,15 @@ export function EnquiryFormClient({
         return;
       }
       const modeClosed = closeModalMode;
+      const raisedNonEngagementTask = Boolean(res.nonEngagementTask);
       setCloseModalMode(null);
       setCloseReasonId('');
       showToast(
         isDraftMode
           ? `Enquiry ${enquiry.reference} declined.`
-          : `Enquiry closed as ${modeClosed}`,
+          : raisedNonEngagementTask
+            ? `Enquiry closed as ${modeClosed} — raised 'Send non-engagement letter' task`
+            : `Enquiry closed as ${modeClosed}`,
       );
       router.refresh();
     });
@@ -1313,7 +1318,7 @@ export function EnquiryFormClient({
   };
 
   const handleDeclineConflict = () => {
-    const conflictReason = closeReasons.find((r) => r.label.toLowerCase() === 'conflict');
+    const conflictReason = closeReasons.find((r) => r.systemKey === 'conflict');
     if (conflictReason) setCloseReasonId(conflictReason.id);
     setCloseNotes(
       conflictCheck.otherPartyClientMatches
@@ -4518,12 +4523,79 @@ export function EnquiryFormClient({
                         showToast('Enter a postcode first (e.g. CF10 1AA).');
                         return;
                       }
-                      handleFindAddress();
+                      void handleFindAddress(postcode);
                     }}
                   >
                     Find address
                   </button>
                 </div>
+                {addressDropdownOpen &&
+                (addressSearching ||
+                  addressLookupError ||
+                  addressSuggestions.length > 0) ? (
+                  <div
+                    role="listbox"
+                    aria-label="Matching UK addresses in modal"
+                    style={{
+                      marginTop: 6,
+                      maxHeight: 200,
+                      overflowY: 'auto',
+                      border: '1px solid var(--border-subtle, #d1d5db)',
+                      borderRadius: 8,
+                      background: 'var(--surface-card, #ffffff)',
+                    }}
+                  >
+                    {addressLookupError ? (
+                      <div
+                        className="field-error"
+                        style={{ padding: '8px 12px', fontSize: 12.5 }}
+                      >
+                        {addressLookupError}
+                      </div>
+                    ) : addressSuggestions.length === 0 ? (
+                      <div
+                        className="muted"
+                        style={{ padding: '8px 12px', fontSize: 12.5 }}
+                      >
+                        Searching Ideal Postcodes…
+                      </div>
+                    ) : (
+                      addressSuggestions.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          role="option"
+                          aria-selected={false}
+                          disabled={Boolean(addressResolvingId)}
+                          onClick={() => handleSelectAddressSuggestion(item)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            width: '100%',
+                            textAlign: 'left',
+                            padding: '8px 10px',
+                            border: 'none',
+                            borderBottom:
+                              '1px solid var(--border-subtle, #e5e7eb)',
+                            background: 'transparent',
+                            cursor: addressResolvingId
+                              ? 'progress'
+                              : 'pointer',
+                            fontSize: 13,
+                          }}
+                        >
+                          <span>{item.suggestion}</span>
+                          {addressResolvingId === item.id ? (
+                            <span className="muted" style={{ fontSize: 11.5 }}>
+                              Selecting…
+                            </span>
+                          ) : null}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                ) : null}
               </div>
 
               <div className="field-group">

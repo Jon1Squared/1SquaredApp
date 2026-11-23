@@ -120,11 +120,6 @@ export const ACTION_PERMISSIONS = {
     key: 'matter:costs:sign_off',
     enforcedBy: 'service',
   },
-  markEngagementLetterDraftedAction: {
-    kind: 'permission',
-    key: 'matter:edit',
-    enforcedBy: 'service',
-  },
   liftMatterRestrictionAction: {
     kind: 'permission',
     key: 'matter:restriction:lift',
@@ -762,7 +757,11 @@ export type RegisteredActionName = keyof typeof ACTION_PERMISSIONS;
 export const ROUTE_PERMISSIONS = {
   'GET /api/address-lookup': {
     kind: 'authenticated',
-    reason: 'Public UK postcode data; reads no tenant data (S0-01).',
+    reason: 'R371 405 Method Not Allowed stub; use POST /api/address-lookup with a JSON body.',
+  },
+  'POST /api/address-lookup': {
+    kind: 'authenticated',
+    reason: 'Public UK postcode data; reads no tenant data (S0-01, R371 POST).',
   },
   'GET /api/auth/login': {
     kind: 'public',

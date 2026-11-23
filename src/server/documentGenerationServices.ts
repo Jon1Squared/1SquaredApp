@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import {
   approveTemplateVersion,
   BasicMergeEngine,
+  CLIENT_CARE_DOCUMENT_TYPE,
   buildAutoMappingsForPlaceholders,
   BuiltInOpenXmlPdfConverter,
   buildValidDocxArchive,
@@ -597,7 +598,7 @@ async function ensureSeedDocumentTemplatesInner(
       'Standard SRA-compliant Client Care & Engagement Letter including scope of work, fee earner details, fee estimate, and complaints procedure.',
     category: 'Client Care',
     tags: ['client-care', 'engagement', 'onboarding'],
-    outputDocumentType: 'client_care',
+    outputDocumentType: CLIENT_CARE_DOCUMENT_TYPE,
     filenamePattern:
       '{{matter.reference}} - Client Care Letter - {{client.name}}',
     availabilityRules: {
@@ -1573,6 +1574,36 @@ export async function generateDocumentService(
         newValue: `${generated.document.fileName} (${generated.document.outputFormat.toUpperCase()})`,
         byId: user.id,
       });
+
+      if (
+        matter &&
+        generated.document.documentType === CLIENT_CARE_DOCUMENT_TYPE &&
+        canPersonAccessMatter(matter, user.id, user, {
+          allPeople: people,
+          teams,
+        }) &&
+        hasPersonPermission(user, 'matter:edit', {
+          allPeople: people,
+          teams,
+        })
+      ) {
+        const draftedRes =
+          await getMatterRepository().markEngagementLetterDraftedIfEligible<Matter>(
+            ctx,
+            { matterId: matter.id, updatedById: user.id },
+          );
+        if (draftedRes.updated) {
+          await appendDocGenAuditInTransaction(ctx, {
+            recordType: 'matter',
+            recordId: matter.id,
+            action: 'update',
+            field: 'Engagement letter status',
+            oldValue: draftedRes.previousStatus || null,
+            newValue: 'Drafted',
+            byId: user.id,
+          });
+        }
+      }
     }
 
     return generated;

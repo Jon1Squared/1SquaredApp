@@ -108,7 +108,7 @@ Compiled on 6 November 2026 from branch `fix/testing-fixes` (commit `a0a5534`) b
   - Compliance: conflict record with re-run, risk assessment, opening record, PDF exports.
   - Activity; Record (taxonomy axes, metadata, audit).
 - **[Real] Opening record snapshot** and client-side PDFs of the matter opening, conflict check and risk assessment (`matterOpeningRecord.ts`). [Untested]
-- **[Real] Engagement letter status fields.** Generating a Client Care Letter marks the engagement letter as drafted.
+- **[Real] Engagement letter status fields.** Generating a Client Care Letter (`CLIENT_CARE_DOCUMENT_TYPE`) sets the matter's engagement letter status to `'Drafted'` on the server (with an audit entry, without regressing `'Drafted'`, `'Sent'`, `'Sent to client'`, `'Signed'`, or `'Signed & returned'`), covered by permission and two-tenant tests (`S1-01`).
 - **[Real] Restricted matters:**
   - Staff matters and ethical walls are derived automatically and give an allow-list (`restrictedAccessUserIds`).
   - They can be lifted with a reason and the `matter:restriction:lift` permission.
@@ -135,7 +135,7 @@ Compiled on 6 November 2026 from branch `fix/testing-fixes` (commit `a0a5534`) b
 - **[Real] Duplicate detection** (email, domain, phone, name, fuzzy, sound-alike, company number, address) with dismiss. **Merge** with history and audit. Tests: `domain.test.ts` (merge execution is untested).
 - **[Real] Person–organisation links.**
 - **[Real] Client groups (basic):** parent organisation, and a group finance roll-up covering parent plus direct subsidiaries.
-- **[Real] UK address lookup** (Ideal Postcodes, runs in the browser).
+- **[Real] UK address lookup** (Ideal Postcodes via authenticated server-side `POST /api/address-lookup` JSON requests returning `405` on `GET`, with multi-premise modal pickers in `PersonFormClient` and `EnquiryFormClient`).
 - **[Stub] Companies House search** returns invented demo companies (`searchCompaniesHouseDemo`).
 - **[Demo]** "Sanctions & PEP: Clear" and ID "Re-check due" pills are hard-coded. Some profiles show fixed demo contacts and matters.
 - **[Stub]** "Record time" and "Send reminder" buttons on profiles only show a toast.
@@ -152,7 +152,7 @@ Compiled on 6 November 2026 from branch `fix/testing-fixes` (commit `a0a5534`) b
   - approve draft bill
   - partner escalation for an overdue invoice
   - key-date reminders (one task per date)
-- **[Stub]** The `non_engagement_letter` automatic task is configured but never raised.
+- **[Real] Automatic `non_engagement_letter` task.** Closing an active enquiry as `Declined` or `Referred out` (excluding `Draft`, `No response`, and `went_elsewhere`) raises the `non_engagement_letter` automatic task after orphan person clean-up without duplicating open tasks (`S1-01`).
 
 ## 10. Key dates and limitation (most complete module)
 - **[Real] Key dates per matter and enquiry:**

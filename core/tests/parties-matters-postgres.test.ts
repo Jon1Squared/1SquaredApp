@@ -538,18 +538,46 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       });
       expect(dbAfterW1?.rowVersion).toBe(rv0 + 1);
 
-      // Writer (2): markEngagementLetterDrafted (on M-000006 where engagementLetterStatus !== 'Signed')
+      // Writer (2): markEngagementLetterDrafted (non-regression on Sent M-000006, and row_version increment on a Draftable matter)
       const m6Before = (
         await freshMatterRepo.getMatterById(ctx, 'M-000006', {
           viewerUserId: 'P-000001',
           hasRestrictedMatterAccess: true,
         })
       )!;
-      const w2 = await runWithActiveActorSession(carysSession, () =>
+      const w2Protected = await runWithActiveActorSession(carysSession, () =>
         markEngagementLetterDrafted('M-000006', 'P-000001'),
       );
-      expect(w2.errors).toBeUndefined();
-      expect(w2.matter?.rowVersion).toBe((m6Before.rowVersion ?? 1) + 1);
+      expect(w2Protected.errors).toBeUndefined();
+      expect(w2Protected.matter?.engagementLetterStatus).toBe(
+        m6Before.engagementLetterStatus,
+      );
+      expect(w2Protected.matter?.rowVersion).toBe(m6Before.rowVersion ?? 1);
+
+      const draftableW2Id = 'M-S016-W2-DRAFTING';
+      await freshMatterRepo.createMatter(ctx, {
+        ...m6Before,
+        id: draftableW2Id,
+        matterNumber: 'S016-W2-001',
+        engagementLetterStatus: 'Drafting',
+        engagementLetterSentAt: null,
+        engagementLetterSignedAt: null,
+      });
+      try {
+        const w2Before = (
+          await freshMatterRepo.getMatterById(ctx, draftableW2Id, {
+            viewerUserId: 'P-000001',
+            hasRestrictedMatterAccess: true,
+          })
+        )!;
+        const w2 = await runWithActiveActorSession(carysSession, () =>
+          markEngagementLetterDrafted(draftableW2Id, 'P-000001'),
+        );
+        expect(w2.errors).toBeUndefined();
+        expect(w2.matter?.rowVersion).toBe((w2Before.rowVersion ?? 1) + 1);
+      } finally {
+        await freshMatterRepo.deleteMatterById(ctx, draftableW2Id);
+      }
 
       // Writer (3): runMatterConflictSearchRecord (with currentMatterId)
       const m6BeforeW3 = (

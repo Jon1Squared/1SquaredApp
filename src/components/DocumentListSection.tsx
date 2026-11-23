@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Download,
   FilePlus2,
@@ -70,6 +71,7 @@ export function DocumentListSection({
   values,
   currentUserId,
 }: DocumentListSectionProps) {
+  const router = useRouter();
   const [snapshot, setSnapshot] =
     useState<DocumentGenerationClientSnapshot | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -297,6 +299,7 @@ export function DocumentListSection({
         initialSnapshot={snapshot}
         onDocumentGenerated={() => {
           void loadSnapshot();
+          router.refresh();
         }}
       />
     </section>

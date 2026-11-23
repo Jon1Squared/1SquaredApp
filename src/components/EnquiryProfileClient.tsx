@@ -348,11 +348,12 @@ export function EnquiryProfileClient({
         return;
       }
       const mode = closeModalMode;
+      const raisedNonEngagementTask = Boolean(res.nonEngagementTask);
       setCloseModalMode(null);
       showToast(
-        mode === 'Declined' || mode === 'Referred out'
+        raisedNonEngagementTask
           ? `Enquiry closed as ${mode} — raised 'Send non-engagement letter' task`
-          : 'Enquiry closed as No response',
+          : `Enquiry closed as ${mode}`,
       );
     });
   };
@@ -398,7 +399,7 @@ export function EnquiryProfileClient({
   };
 
   const handleDeclineConflict = () => {
-    const conflictReason = closeReasons.find((r) => r.label.toLowerCase() === 'conflict');
+    const conflictReason = closeReasons.find((r) => r.systemKey === 'conflict');
     if (conflictReason) setCloseReasonId(conflictReason.id);
     setCloseNotes(
       conflictCheck.otherPartyClientMatches
@@ -1442,10 +1443,15 @@ export function EnquiryProfileClient({
                     value={closeNotes}
                     onChange={(e) => setCloseNotes(e.target.value)}
                   />
-                  {closeModalMode === 'Declined' || closeModalMode === 'Referred out' ? (
+                  {(closeModalMode === 'Declined' || closeModalMode === 'Referred out') &&
+                  enquiry.status !== 'Draft' &&
+                  closeReasons.find((r) => r.id === closeReasonId)?.systemKey !==
+                    'went_elsewhere' &&
+                  closeReasons.find((r) => r.id === closeReasonId)?.systemKey !==
+                    'no_response' ? (
                     <span className="field-help">
-                      Compliance rule: Closing as {closeModalMode} automatically raises a{' '}
-                      <strong>Send non-engagement letter</strong> task due in 2 working days.
+                      Compliance rule: Closing an active enquiry as {closeModalMode} automatically raises a{' '}
+                      <strong>Send non-engagement letter</strong> task due in 2 working days (unless client went elsewhere).
                     </span>
                   ) : null}
                 </div>

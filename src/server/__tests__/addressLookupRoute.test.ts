@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GET as addressLookupGet } from '@/app/api/address-lookup/route';
+import * as addressLookupRoute from '@/app/api/address-lookup/route';
 import {
   clearAddressLookupCaches,
   resolveAddressSuggestion,
@@ -28,7 +28,31 @@ const TEST_SESSION = {
   expiresAt: new Date(Date.now() + 3600_000).toISOString(),
 };
 
-describe('S0-01: /api/address-lookup route and addressLookup client helper', () => {
+function getPostHandler(): (req: Request) => Promise<Response> {
+  const post = (
+    addressLookupRoute as unknown as {
+      POST?: (req: Request) => Promise<Response>;
+    }
+  ).POST;
+  expect(typeof post).toBe('function');
+  return post!;
+}
+
+function makePostRequest(
+  body: unknown,
+  options?: { url?: string; headers?: Record<string, string> },
+): Request {
+  return new Request(options?.url ?? 'http://localhost:3000/api/address-lookup', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options?.headers ?? {}),
+    },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+}
+
+describe('S0-01 & S1-01 (R371): /api/address-lookup POST route, GET 405 stub, and addressLookup client helper', () => {
   beforeEach(() => {
     clearAddressLookupCaches();
     resetAddressLookupNotConfiguredWarningForTests();
@@ -49,20 +73,56 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     vi.restoreAllMocks();
   });
 
-  it('returns 401 without a session (setTestEntraSessionOverride(undefined))', async () => {
+  it('returns 401 without a session on POST (setTestEntraSessionOverride(undefined))', async () => {
+    const post = getPostHandler();
     setTestEntraSessionOverride(undefined);
-    const req = new Request('http://localhost:3000/api/address-lookup?q=CF10');
-    const res = await addressLookupGet(req);
+    const res = await post(makePostRequest({ q: 'CF10' }));
     expect(res.status).toBe(401);
   });
 
-  it('returns 503 with "Address lookup isn\'t configured" when the key is unset or an unresolved Key Vault reference, logs tenantId and correlationId without query text (R230), and searchAddressSuggestions surfaces that message', async () => {
+  it('rejects GET with HTTP 405 and Allow: POST without reading query params or calling Ideal Postcodes', async () => {
+    process.env.IDEAL_POSTCODES_API_KEY = 'test-ideal-postcodes-key-placeholder';
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const res = await addressLookupRoute.GET(
+      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA'),
+    );
+    expect(res.status).toBe(405);
+    expect(res.headers.get('Allow')).toBe('POST');
+    const json = (await res.json()) as { code?: string };
+    expect(json.code).toBe('METHOD_NOT_ALLOWED');
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const idRes = await addressLookupRoute.GET(
+      new Request('http://localhost:3000/api/address-lookup?id=paf_1001'),
+    );
+    expect(idRes.status).toBe(405);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores URL query params on POST and validates JSON bodies cleanly', async () => {
+    const post = getPostHandler();
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const queryOnlyRes = await post(
+      makePostRequest({}, { url: 'http://localhost:3000/api/address-lookup?q=CF11%209LJ' }),
+    );
+    expect(queryOnlyRes.status).toBe(400);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const badJsonRes = await post(makePostRequest('{invalid json'));
+    expect(badJsonRes.status).toBe(400);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 with "Address lookup isn\'t configured" when the key is unset or an unresolved Key Vault reference, logs tenantId and correlationId without query text (R230), and searchAddressSuggestions sends POST JSON', async () => {
+    const post = getPostHandler();
     delete process.env.IDEAL_POSTCODES_API_KEY;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const unsetRes = await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA'),
-    );
+    const unsetRes = await post(makePostRequest({ q: 'CF10 1AA' }));
     expect(unsetRes.status).toBe(503);
     const unsetJson = (await unsetRes.json()) as {
       code?: string;
@@ -87,9 +147,7 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     process.env.IDEAL_POSTCODES_API_KEY =
       '@Microsoft.KeyVault(SecretUri=https://kv-test.vault.azure.net/secrets/ideal-postcodes-api-key/)';
 
-    const kvRes = await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA'),
-    );
+    const kvRes = await post(makePostRequest({ q: 'CF10 1AA' }));
     expect(kvRes.status).toBe(503);
     const kvJson = (await kvRes.json()) as {
       code?: string;
@@ -98,45 +156,66 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     expect(kvJson.code).toBe('NOT_CONFIGURED');
     expect(kvJson.message).toBe("Address lookup isn't configured");
 
-    // Wire fetch to the route handler so searchAddressSuggestions exercises the real route response
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    // Wire fetch to the POST route handler and assert client helper uses POST with JSON body and no query string
+    const clientRequests: Array<{ url: string; method?: string; body?: unknown }> = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const pathStr = typeof input === 'string' ? input : input.toString();
-      return addressLookupGet(new Request(`http://localhost:3000${pathStr}`));
+      clientRequests.push({
+        url: pathStr,
+        method: init?.method,
+        body: init?.body,
+      });
+      return post(
+        new Request(`http://localhost:3000${pathStr}`, {
+          method: init?.method,
+          headers: init?.headers,
+          body: init?.body,
+        }),
+      );
     }) as unknown as typeof fetch;
 
     const clientResult = await searchAddressSuggestions('CF10 1AA');
     expect(clientResult.suggestions).toEqual([]);
     expect(clientResult.error).toBe("Address lookup isn't configured");
+    expect(clientRequests).toHaveLength(1);
+    expect(clientRequests[0]!.url).toBe('/api/address-lookup');
+    expect(clientRequests[0]!.method).toBe('POST');
+    expect(JSON.parse(String(clientRequests[0]!.body))).toEqual({ q: 'CF10 1AA' });
   });
 
   it('validates client-supplied x-correlation-id and replaces unsafe or over-long values with corr-addr-… (R237)', async () => {
+    const post = getPostHandler();
     delete process.env.IDEAL_POSTCODES_API_KEY;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     // 1. Valid bounded header is preserved
     resetAddressLookupNotConfiguredWarningForTests();
-    await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA', {
-        headers: { 'x-correlation-id': 'client-req:12345_ok.1' },
-      }),
+    await post(
+      makePostRequest(
+        { q: 'CF10 1AA' },
+        { headers: { 'x-correlation-id': 'client-req:12345_ok.1' } },
+      ),
     );
     const validWarn = JSON.parse(String(warnSpy.mock.calls[0]?.[0] ?? '')) as {
       correlationId?: string;
     };
     expect(validWarn.correlationId).toBe('client-req:12345_ok.1');
 
-    // 2. Header containing a newline or unsafe characters is replaced
+    // 2. Header containing unsafe characters or a newline is replaced
     warnSpy.mockClear();
     resetAddressLookupNotConfiguredWarningForTests();
-    await addressLookupGet({
-      url: 'http://localhost:3000/api/address-lookup?q=CF10%201AA',
-      headers: {
-        get: (name: string) =>
-          name.toLowerCase() === 'x-correlation-id'
-            ? 'corr-injected\n{"event":"forged"}'
-            : null,
-      },
-    } as unknown as Request);
+    await post(
+      {
+        url: 'http://localhost:3000/api/address-lookup',
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === 'x-correlation-id'
+              ? 'corr-injected\n{"event":"forged"}'
+              : null,
+        },
+        json: async () => ({ q: 'CF10 1AA' }),
+      } as unknown as Request,
+    );
     const newlineWarn = JSON.parse(
       String(warnSpy.mock.calls[0]?.[0] ?? ''),
     ) as {
@@ -147,10 +226,11 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     // 3. Header longer than 128 characters is replaced
     warnSpy.mockClear();
     resetAddressLookupNotConfiguredWarningForTests();
-    await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?q=CF10%201AA', {
-        headers: { 'x-correlation-id': 'a'.repeat(129) },
-      }),
+    await post(
+      makePostRequest(
+        { q: 'CF10 1AA' },
+        { headers: { 'x-correlation-id': 'a'.repeat(129) } },
+      ),
     );
     const overlongWarn = JSON.parse(
       String(warnSpy.mock.calls[0]?.[0] ?? ''),
@@ -161,6 +241,7 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
   });
 
   it('with the key set and fetch mocked, the outbound URL carries the server key and the response body contains no key', async () => {
+    const post = getPostHandler();
     const serverKey = 'test-ideal-postcodes-key-placeholder';
     process.env.IDEAL_POSTCODES_API_KEY = serverKey;
 
@@ -177,6 +258,11 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
                 suggestion: '10 Cathedral Road, Cardiff, CF11 9LJ',
                 udprn: 1001,
               },
+              {
+                id: 'paf_1002',
+                suggestion: '12 Cathedral Road, Cardiff, CF11 9LJ',
+                udprn: 1002,
+              },
             ],
           },
         }),
@@ -187,9 +273,7 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
       );
     }) as unknown as typeof fetch;
 
-    const res = await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?q=CF11%209LJ'),
-    );
+    const res = await post(makePostRequest({ q: 'CF11 9LJ' }));
     expect(res.status).toBe(200);
     expect(outboundUrls).toHaveLength(1);
     expect(outboundUrls[0]).toContain(
@@ -207,17 +291,21 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
         suggestion: '10 Cathedral Road, Cardiff, CF11 9LJ',
         udprn: 1001,
       },
+      {
+        id: 'paf_1002',
+        suggestion: '12 Cathedral Road, Cardiff, CF11 9LJ',
+        udprn: 1002,
+      },
     ]);
   });
 
   it('a query that is too short returns an empty list without calling fetch', async () => {
+    const post = getPostHandler();
     process.env.IDEAL_POSTCODES_API_KEY = 'test-ideal-postcodes-key-placeholder';
     const fetchSpy = vi.fn();
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
-    const res = await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?q=ab'),
-    );
+    const res = await post(makePostRequest({ q: 'ab' }));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { suggestions: unknown[] };
     expect(body.suggestions).toEqual([]);
@@ -228,7 +316,8 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('resolves an address ID through the server route and rejects invalid IDs without calling fetch', async () => {
+  it('resolves an address ID via POST JSON and rejects invalid IDs without calling fetch', async () => {
+    const post = getPostHandler();
     const serverKey = 'test-ideal-postcodes-key-placeholder';
     process.env.IDEAL_POSTCODES_API_KEY = serverKey;
 
@@ -250,22 +339,24 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
     });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
-    const badRes = await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?id=../bad/id'),
-    );
+    const badRes = await post(makePostRequest({ id: '../bad/id' }));
     expect(badRes.status).toBe(400);
     expect(fetchSpy).not.toHaveBeenCalled();
 
-    const okRes = await addressLookupGet(
-      new Request('http://localhost:3000/api/address-lookup?id=paf_1001'),
-    );
+    const okRes = await post(makePostRequest({ id: 'paf_1001' }));
     expect(okRes.status).toBe(200);
     const rawText = await okRes.text();
     expect(rawText).not.toContain(serverKey);
 
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const resolveCalls: Array<{ url: string; method?: string; body?: unknown }> = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const pathStr = typeof input === 'string' ? input : input.toString();
-      if (pathStr.startsWith('/api/address-lookup')) {
+      resolveCalls.push({
+        url: pathStr,
+        method: init?.method,
+        body: init?.body,
+      });
+      if (pathStr === '/api/address-lookup' && init?.method === 'POST') {
         return new Response(rawText, {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -284,5 +375,9 @@ describe('S0-01: /api/address-lookup route and addressLookup client helper', () 
       postcode: 'CF11 9LJ',
       country: 'Wales',
     });
+    expect(resolveCalls).toHaveLength(1);
+    expect(resolveCalls[0]!.url).toBe('/api/address-lookup');
+    expect(resolveCalls[0]!.method).toBe('POST');
+    expect(JSON.parse(String(resolveCalls[0]!.body))).toEqual({ id: 'paf_1001' });
   });
 });

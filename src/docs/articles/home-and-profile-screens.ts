@@ -39,7 +39,7 @@ On a matter profile (**Overview** tab), the **Intake & compliance** card is deri
 | --- | --- | --- | --- |
 | **Conflict check** | \`conflictDecision.outcome\`, \`conflictDecision.decidedAt\`, \`conflictCheckDate\` | \`Conflict check cleared\` (or the recorded outcome) with the decision date | \`Conflict check not recorded\` (\`—\`) |
 | **Client due diligence** | \`amlCompletedAt\`, \`amlStatus\` | \`Verified <date>\` when \`amlCompletedAt\` is set | The stored \`amlStatus\` label, or \`Not recorded\` |
-| **Engagement letter** | \`engagementLetterSignedAt\`, \`engagementLetterStatus\` | \`Engagement letter signed\` with the signed date | \`Engagement letter\` with the stored status (such as \`Drafted\` or \`Sent\`), or \`Not recorded\` |
+| **Engagement letter** | \`engagementLetterSignedAt\`, \`engagementLetterStatus\` | \`Engagement letter signed\` with the signed date (or status \`Signed & returned\`) | \`Engagement letter\` with the stored status (such as \`Drafted\`, \`Sent\`, or \`Signed & returned\`), or \`Not recorded\` |
 | **Matter risk assessment** | Server-scored risk assessment (\`overallRisk\`, \`completedQuestions\`, \`totalQuestions\`) | \`Matter risk assessment (<Low/Medium/High> risk)\` with \`<completed>/<total> answered\` | \`Matter risk assessment (Not started)\` with \`0/<total> answered\` |
 
 ## 3. Person and organisation compliance displays ("Sanctions & PEP: Not checked" and conflict checks)
@@ -62,7 +62,7 @@ A single canonical **Person** record represents an individual across every conte
 
 ## 5. External lookups (Companies House and UK postcodes)
 
-- **UK address lookup**: queries the server-side \`/api/address-lookup\` route using the tenant’s configured Ideal Postcodes key. When address lookup is not configured or returns no match, the form displays a clear message prompting the user to enter the address manually, and never fills a fabricated street address.
+- **UK address lookup**: sends \`POST /api/address-lookup\` JSON requests (never passing postcodes or lookup IDs in URL query strings; \`GET\` returns \`405 Method Not Allowed\`) using the tenant’s server-side Ideal Postcodes key, and presents all matching premises in an explicit picker inside the form or address modal rather than auto-selecting the first premise or copying addresses from other CRM records. When address lookup is not configured or returns no match, the form displays a clear message prompting the user to enter the address manually, and never fills a fabricated street address.
 - **Companies House lookup**: until the live Companies House API integration is enabled, searching from the organisation form reports *"Companies House lookup isn't set up"* rather than returning demo company records.
 
 ## 6. Self-service notification preferences (Notifications tab)

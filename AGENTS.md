@@ -13,10 +13,10 @@ Reference documents (read before any architecture decision or review; not loaded
 
 Read these first in every session, before planning or writing code:
 - `docs/roadmap/feature-list.md`: the master backlog. IDs (1–46, F1–F23, P1–P13, B1–B21, E1–E9, Q1–Q2) are stable; never renumber them, and new items take the next free number in their series.
-- The current stage plan: `docs/roadmap/stage-0-plan.md` (detailed slice plans are in `docs/roadmap/slices/`). Work only on slices in that plan, and respect each slice's dependencies.
+- The current stage plan: `docs/roadmap/stage-1-plan.md` (detailed slice plans are in `docs/roadmap/slices/`). Work only on slices in that plan, and respect each slice's dependencies.
 
 Rules:
-- One slice per branch and pull request. Name the branch `s0-NN-short-name` (for example `s0-03-lock-down-approvals`) and target `develop`.
+- One slice per branch and pull request. Name the branch `s1-NN-short-name` (for example `s1-01-quick-fixes`) and target `develop`.
 - Update the affected `feature-list.md` rows (status, "What exists" and "What’s missing") in the same pull request, with the PR number where useful.
 - Use the strict bar. **Completed** means the item works end to end, with server-side permission checks, tests (including two-tenant tests where it touches data) and a help article. Anything less is **Partly built**.
 - Never attempt the manual setup tasks in section 8 of the stage plan (accounts, tenants, mailboxes, DNS, Azure subscriptions, key rotation). If a slice needs one, list it as a blocker in the slice plan and the PR description, and stop that part of the work.

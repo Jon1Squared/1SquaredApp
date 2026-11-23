@@ -910,11 +910,16 @@ describe('Two-tenant scheduled jobs, per-tenant config, timeout abort & live gua
       }),
     ).toThrow(/TENANCY_FORGERY_DETECTED/);
 
-    // Monday 2026-11-23T09:00:00Z -> positive control executes on Alpha and compiles 0 items on Bravo
+    // Upcoming Monday at 09:00:00Z relative to current clock (R685: never goes stale) -> positive control executes on Alpha and compiles 0 items on Bravo
+    const nowRef = new Date();
+    const daysUntilMonday = nowRef.getUTCDay() === 1 ? 7 : (8 - nowRef.getUTCDay()) % 7;
+    const nextMonday0900Utc = new Date(nowRef.getTime());
+    nextMonday0900Utc.setUTCDate(nextMonday0900Utc.getUTCDate() + daysUntilMonday);
+    nextMonday0900Utc.setUTCHours(9, 0, 0, 0);
     const sweep = await runScheduledNotificationDigestsJobSweep({
       registry,
       digestHourLocal: 0,
-      now: new Date('2026-11-23T09:00:00.000Z'),
+      now: nextMonday0900Utc,
       tenantConfigOverrideByTenantId: {
         'tenant-alpha': alphaCfg,
         'tenant-bravo': bravoCfg,

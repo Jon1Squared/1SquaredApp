@@ -473,7 +473,7 @@ export class CoreEmailDispatcher implements EmailSender {
     }
 
     const senderAddress =
-      message.from?.trim() || email.senderAddress?.trim() || '';
+      email.senderAddress?.trim() || message.from?.trim() || '';
     const replyTo = message.replyTo?.trim() || email.replyTo?.trim() || undefined;
     const loadedAttachments = await resolveLoadedAttachments(
       ctx,
