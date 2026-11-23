@@ -28971,25 +28971,26 @@ export async function executeQuoteExpiryForTenant(
               freshQuote.updatedAt = nowIso;
               return { shouldPersist: true, previousStatus };
             },
+            onPersistedInTx: async (expiredQuote, previousStatus) => {
+              await appendTenantAuditEntries(ctx, [
+                {
+                  recordType: 'quote',
+                  recordId: expiredQuote.id,
+                  action: 'status-change',
+                  field: 'Quote lifecycle status',
+                  oldValue: previousStatus,
+                  newValue: expiredQuote.status,
+                  byId: options.triggeredById,
+                  at: nowIso,
+                  reason: `Valid-until date (${expiredQuote.validUntil ?? localDate}) passed without an outcome.`,
+                },
+              ]);
+            },
           },
         );
         if (!expireResult.expired || !expireResult.quote) {
           continue;
         }
-        const expiredQuote = expireResult.quote;
-        await appendTenantAuditEntries(ctx, [
-          {
-            recordType: 'quote',
-            recordId: expiredQuote.id,
-            action: 'status-change',
-            field: 'Quote lifecycle status',
-            oldValue: expireResult.previousStatus,
-            newValue: expiredQuote.status,
-            byId: options.triggeredById,
-            at: nowIso,
-            reason: `Valid-until date (${expiredQuote.validUntil ?? localDate}) passed without an outcome.`,
-          },
-        ]);
         expiredCount += 1;
       }
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CORE_REQUIRED_SCHEMA_VERSION,
+  createDirectMigrationClient,
   getGlobalTenantPostgresPoolManager,
   resolveTenantFromVerifiedToken,
   TenantHrAndRbacRepository,
@@ -9,6 +10,7 @@ import {
   TenantMigrationRunner,
   TenantPartyRepository,
   TenantPmsRepository,
+  TenantTaskWorkflowRepository,
   type TenantContext,
 } from '@platform/core';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
@@ -1209,7 +1211,7 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       receivedAt: '2026-11-02T11:05:00Z',
     } as never);
 
-    // R676 Fixture B: Ethical wall with explicit non-empty allow-list ['P-000001'] where P-000002 is responsiblePartnerId (S1-D12: explicit allow-list wins)
+    // R676 Fixture B: Ethical wall with explicit non-empty allow-list ['P-000001'] where P-000002 is responsiblePartnerId (explicit allow-list excludes unlisted participants; matter:restricted:access still passes until S1-09 (S1-D12))
     await matterRepo.putMatter(ctxAlpha, {
       ...baseMatter,
       id: 'M-R676-WALL-EXPLICIT',
@@ -1519,7 +1521,7 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       canSeeWall: true,
       canSeePrivateDraft: false,
       canSeeStaffEmpty: true,
-      canSeeExplicitWall: true,
+      canSeeExplicitWall: true, // flips to false in S1-09 (S1-D12)
     });
 
     // Live Option 1 check: runMatterConflictCheckRecord uses loadFullConflictSearchGraph with P-000002 redaction
@@ -1545,7 +1547,7 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       'Confidential Staff Ethical Wall Matter',
     );
 
-    // Enquiry conflict search parity (preS102a vs Full vs Scoped, filtering enquiries by canViewEnquiry matching live services.ts)
+    // Enquiry conflict search parity (preS102a vs Full vs Scoped, filtering enquiries by canViewEnquiry matching live services.ts, R694: P-000002, P-000006, P-000003 + redaction fields + legacy row + direct quote predicate)
     const enqInput = {
       firstName: 'Huw',
       lastName: 'ReferrerTarget',
@@ -1564,40 +1566,203 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       ].filter(Boolean),
       emails: [enqInput.email],
     };
-    const [preEnqGraph, fullEnqGraph, scopedEnqGraph] = await Promise.all([
-      loadPreS102aConflictGraph('P-000002'),
-      loadFullConflictSearchGraph(ctxAlpha, enqSignals, 'P-000002', staffPeople, teams),
-      loadScopedConflictSearchGraphForParity(ctxAlpha, enqSignals, 'P-000002', staffPeople, teams),
-    ]);
-    const runEnqArm = (graph: typeof fullEnqGraph) =>
-      runEnquiryConflictSearch(
-        enqInput,
-        graph.people,
-        graph.organisations,
-        graph.matters,
-        seed.values,
-        graph.enquiries.filter((e) => graph.canViewEnquiry(e)),
-        null,
-        graph.links,
-        graph.canViewMatter,
-        tenantAlpha,
+    const normalizeEnqHits = (res: ReturnType<typeof runEnquiryConflictSearch>) =>
+      res.allConflicts
+        .map((h) =>
+          JSON.stringify({
+            recordType: h.recordType,
+            recordId: h.recordId,
+            name: h.name,
+            recordLabel: h.recordLabel,
+            reason: h.reason,
+            reasons: h.reasons,
+            matchedFields: h.matchedFields,
+            severity: h.severity,
+            strength: h.strength,
+            blocking: h.blocking,
+          }),
+        )
+        .sort();
+
+    for (const [viewerId, expectedEnq] of [
+      [
+        'P-000002',
+        { seeStaffEmpty: true, seeExplicitWall: false, seePrivDraft: false },
+      ],
+      [
+        'P-000006',
+        { seeStaffEmpty: false, seeExplicitWall: false, seePrivDraft: false },
+      ],
+      [
+        'P-000003',
+        {
+          seeStaffEmpty: true,
+          seeExplicitWall: true, // flips to false in S1-09 (S1-D12)
+          seePrivDraft: false,
+        },
+      ],
+    ] as const) {
+      const [preEnqGraph, fullEnqGraph, scopedEnqGraph] = await Promise.all([
+        loadPreS102aConflictGraph(viewerId),
+        loadFullConflictSearchGraph(ctxAlpha, enqSignals, viewerId, staffPeople, teams),
+        loadScopedConflictSearchGraphForParity(
+          ctxAlpha,
+          enqSignals,
+          viewerId,
+          staffPeople,
+          teams,
+        ),
+      ]);
+      const runEnqArm = (graph: typeof fullEnqGraph) =>
+        runEnquiryConflictSearch(
+          enqInput,
+          graph.people,
+          graph.organisations,
+          graph.matters,
+          seed.values,
+          graph.enquiries.filter((e) => graph.canViewEnquiry(e)),
+          null,
+          graph.links,
+          graph.canViewMatter,
+          tenantAlpha,
+        );
+      const preEnqHits = runEnqArm(preEnqGraph);
+      const fullEnqHits = runEnqArm(fullEnqGraph);
+      const scopedEnqHits = runEnqArm(scopedEnqGraph);
+
+      expect(normalizeEnqHits(fullEnqHits)).toEqual(normalizeEnqHits(preEnqHits));
+      expect(normalizeEnqHits(scopedEnqHits)).toEqual(normalizeEnqHits(fullEnqHits));
+      expect(fullEnqHits.allConflicts.length).toBeGreaterThan(0);
+      expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'O-R685-FORMER-LINKED')).toBe(
+        true,
       );
-    const preEnqHits = runEnqArm(preEnqGraph);
-    const fullEnqHits = runEnqArm(fullEnqGraph);
-    const scopedEnqHits = runEnqArm(scopedEnqGraph);
+      expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R676-STAFF-EMPTY')).toBe(
+        expectedEnq.seeStaffEmpty,
+      );
+      expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R676-WALL-EXPLICIT')).toBe(
+        expectedEnq.seeExplicitWall,
+      );
+      expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R659-S8-PRIV')).toBe(
+        expectedEnq.seePrivDraft,
+      );
+    }
 
-    const normalizeEnqHits = (res: typeof fullEnqHits) =>
-      res.allConflicts.map((h) => `${h.recordType}:${h.recordId}:${h.reason}`).sort();
+    // R694: legacy matter row missing opening_record_json.hasRestrictedAccessUserIds falls back cleanly to restricted_access_user_ids_json
+    await matterRepo.putMatter(
+      ctxAlpha,
+      {
+        ...(structuredClone(seed.matters[0]!) as Matter),
+        id: 'M-R694-LEGACY-NO-FLAG',
+        matterNumber: 'MAT-R694-LEG1',
+        title: 'Legacy No Flag Ethical Wall Matter',
+        responsiblePartnerId: 'P-000002',
+        leadFeeEarnerId: 'P-000002',
+        teamMemberIds: ['P-000002'],
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001'],
+        parties: [],
+      },
+      { sqlRestrictedAccessUserIds: ['P-000001'] },
+    );
+    const r694LegacyDirect = await createDirectMigrationClient({ ctx: ctxAlpha });
+    try {
+      await r694LegacyDirect.query(
+        `UPDATE public.matters
+         SET opening_record_json = opening_record_json - 'hasRestrictedAccessUserIds' - 'restrictedAccessUserIdsFallback'
+         WHERE tenant_id = $1 AND id = $2`,
+        [tenantAlpha, 'M-R694-LEGACY-NO-FLAG'],
+      );
+    } finally {
+      await r694LegacyDirect.end();
+    }
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R694-LEGACY',
+      reference: 'ENQ-R694-LEG1',
+      status: 'Converted',
+      createdById: 'P-000002',
+      takenById: 'P-000002',
+      firstName: 'Legacy',
+      lastName: 'NoFlagClient',
+      convertedMatterId: 'M-R694-LEGACY-NO-FLAG',
+      summary: 'Legacy converted enquiry',
+      receivedAt: '2026-11-01T10:02:00Z',
+    } as never);
+    expect(
+      await intakeRepo.isEnquiryHiddenFromViewer(ctxAlpha, 'ENQ-R694-LEGACY', 'P-000002'),
+    ).toBe(true);
+    expect(
+      await intakeRepo.isEnquiryHiddenFromViewer(ctxAlpha, 'ENQ-R694-LEGACY', 'P-000001'),
+    ).toBe(false);
 
-    expect(normalizeEnqHits(fullEnqHits)).toEqual(normalizeEnqHits(preEnqHits));
-    expect(normalizeEnqHits(scopedEnqHits)).toEqual(normalizeEnqHits(fullEnqHits));
-    expect(fullEnqHits.allConflicts.length).toBeGreaterThan(0);
-    // P-000002 CAN see ENQ-R676-STAFF-EMPTY (participant on empty-allow-list staff matter) & Scenario 4b linked org
-    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R676-STAFF-EMPTY')).toBe(true);
-    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'O-R685-FORMER-LINKED')).toBe(true);
-    // P-000002 MUST NOT see ENQ-R676-WALL-EXPLICIT (excluded from explicit allow-list) or ENQ-R659-S8-PRIV (another user's Draft)
-    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R676-WALL-EXPLICIT')).toBe(false);
-    expect(fullEnqHits.allConflicts.some((h) => h.recordId === 'ENQ-R659-S8-PRIV')).toBe(false);
+    // R694: direct quote-predicate visibility across ENQ-R676-STAFF-EMPTY and ENQ-R676-WALL-EXPLICIT
+    await intakeRepo.putQuote(ctxAlpha, {
+      id: 'QUO-R694-STAFF-EMPTY',
+      reference: 'QUO-R694-SE1',
+      clientType: 'person',
+      clientFirstName: 'Bramwell',
+      clientLastName: 'EmptyAllowStaff',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: 'Quote linked to empty allow-list staff matter',
+      status: 'Sent',
+      feeBasis: 'fixed',
+      estimatedFeeExVat: 1000,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2099-12-31',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-11-01T10:00:00Z',
+      updatedAt: '2026-11-01T10:00:00Z',
+      linkedEnquiryId: 'ENQ-R676-STAFF-EMPTY',
+      timeline: [],
+    } as never);
+    await intakeRepo.putQuote(ctxAlpha, {
+      id: 'QUO-R694-WALL-EXPLICIT',
+      reference: 'QUO-R694-WE1',
+      clientType: 'person',
+      clientFirstName: 'Cromwell',
+      clientLastName: 'WallExplicitTarget',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: 'Quote linked to explicit wall allow-list matter',
+      status: 'Sent',
+      feeBasis: 'fixed',
+      estimatedFeeExVat: 1000,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2099-12-31',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-11-01T10:00:00Z',
+      updatedAt: '2026-11-01T10:00:00Z',
+      linkedEnquiryId: 'ENQ-R676-WALL-EXPLICIT',
+      timeline: [],
+    } as never);
+
+    expect(
+      await intakeRepo.isQuoteHiddenFromViewer(ctxAlpha, 'QUO-R694-STAFF-EMPTY', 'P-000002'),
+    ).toBe(false);
+    expect(
+      await intakeRepo.isQuoteHiddenFromViewer(ctxAlpha, 'QUO-R694-WALL-EXPLICIT', 'P-000002'),
+    ).toBe(true);
+    expect(
+      await intakeRepo.isQuoteHiddenFromViewer(ctxAlpha, 'QUO-R694-WALL-EXPLICIT', 'P-000006'),
+    ).toBe(true);
+    expect(
+      await intakeRepo.isQuoteHiddenFromViewer(ctxAlpha, 'QUO-R694-WALL-EXPLICIT', 'P-000001'),
+    ).toBe(false);
+    expect(
+      await intakeRepo.isQuoteHiddenFromViewer(ctxAlpha, 'QUO-R694-WALL-EXPLICIT', 'P-000003', {
+        hasRestrictedMatterAccess: true,
+      }),
+    ).toBe(false); // flips to true in S1-09 (S1-D12)
+    const p2VisibleQuotes = await intakeRepo.listVisibleQuotes<{ id: string }>(
+      ctxAlpha,
+      'P-000002',
+    );
+    expect(p2VisibleQuotes.some((q) => q.id === 'QUO-R694-STAFF-EMPTY')).toBe(true);
+    expect(p2VisibleQuotes.some((q) => q.id === 'QUO-R694-WALL-EXPLICIT')).toBe(false);
 
     // Second-tenant isolation: Bravo sees ZERO Alpha Scenario 1-8 hits
     const bravoStaff = await partyRepo.listAllPeople<Person>(ctxBravo, {
@@ -2303,6 +2468,16 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       });
       expect(dupSpy).toHaveBeenCalled();
       expect(rawFallbackRes.organisations.some((o) => o.id === 'O-R685-STOPWORD-ORG')).toBe(true);
+
+      // R694: multi-token all-stop-word phrase falls back per-term alongside an informative term
+      dupSpy.mockClear();
+      const mixedWithStopWordOrgRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        terms: ['Unrelated Distinct Party', 'The Limited Company'],
+      });
+      expect(dupSpy).toHaveBeenCalled();
+      expect(
+        mixedWithStopWordOrgRes.organisations.some((o) => o.id === 'O-R685-STOPWORD-ORG'),
+      ).toBe(true);
     } finally {
       dupSpy.mockRestore();
     }
@@ -2720,5 +2895,258 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('R692 / R694: putMatter default allow-list preserves non-empty restrictedAccessUserIds, TenantTaskWorkflowRepository enforces two-tenant linked enquiry visibility, and quote-expiry audit failures roll back quote transitions', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const matterRepo = new TenantMatterRepository();
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const twRepo = new TenantTaskWorkflowRepository();
+    const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
+
+    // R692 item 2: putMatter WITHOUT sqlRestrictedAccessUserIds must NOT merge participants when restrictedAccessUserIds is non-empty
+    await matterRepo.putMatter(ctxAlpha, {
+      ...(structuredClone(seed.matters[0]!) as Matter),
+      id: 'M-R692-WALL-DEFAULT',
+      matterNumber: 'MAT-R692-WD1',
+      title: 'R692 Explicit Allow-List Ethical Wall Matter',
+      responsiblePartnerId: 'P-000002',
+      supervisingPartnerId: 'P-000006',
+      leadFeeEarnerId: 'P-000002',
+      teamMemberIds: ['P-000002', 'P-000006'],
+      isStaffMatter: false,
+      hasEthicalWall: true,
+      restrictedAccessUserIds: ['P-000001'],
+      parties: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...(structuredClone(seed.matters[0]!) as Matter),
+      id: 'M-R692-STAFF-EMPTY',
+      matterNumber: 'MAT-R692-SE1',
+      title: 'R692 Empty Allow-List Staff Matter',
+      responsiblePartnerId: 'P-000002',
+      supervisingPartnerId: null,
+      leadFeeEarnerId: 'P-000002',
+      teamMemberIds: ['P-000002'],
+      isStaffMatter: true,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [],
+    });
+
+    const alphaDirect = await createDirectMigrationClient({ ctx: ctxAlpha });
+    try {
+      const colRes = await alphaDirect.query<{ restricted_access_user_ids_json: string[] }>(
+        `SELECT restricted_access_user_ids_json FROM public.matters WHERE tenant_id = $1 AND id = $2`,
+        [tenantAlpha, 'M-R692-WALL-DEFAULT'],
+      );
+      expect(colRes.rows[0]?.restricted_access_user_ids_json).toEqual(['P-000001']);
+    } finally {
+      await alphaDirect.end();
+    }
+
+    const p2VisibleMatters = await matterRepo.listVisibleMatters(ctxAlpha, 'P-000002');
+    expect(p2VisibleMatters.some((m) => m.id === 'M-R692-WALL-DEFAULT')).toBe(false);
+    expect(p2VisibleMatters.some((m) => m.id === 'M-R692-STAFF-EMPTY')).toBe(true);
+    expect(
+      await matterRepo.getMatterById(ctxAlpha, 'M-R692-WALL-DEFAULT', { viewerId: 'P-000002' }),
+    ).toBeNull();
+    expect(
+      await matterRepo.getMatterById(ctxAlpha, 'M-R692-WALL-DEFAULT', { viewerId: 'P-000001' }),
+    ).not.toBeNull();
+
+    // R692 item 1: Two-tenant task visibility linked to enquiries whose converted matters use empty-allow-list vs explicit-allow-list restriction
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R692-WALL-EXPLICIT',
+      reference: 'ENQ-R692-WE1',
+      status: 'Converted',
+      createdById: 'P-000002',
+      takenById: 'P-000002',
+      firstName: 'Explicit',
+      lastName: 'WallClient',
+      convertedMatterId: 'M-R692-WALL-DEFAULT',
+      summary: 'Linked to explicit wall matter',
+      receivedAt: '2026-11-01T10:00:00Z',
+    } as never);
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R692-STAFF-EMPTY',
+      reference: 'ENQ-R692-SE1',
+      status: 'Converted',
+      createdById: 'P-000002',
+      takenById: 'P-000002',
+      firstName: 'Staff',
+      lastName: 'EmptyClient',
+      convertedMatterId: 'M-R692-STAFF-EMPTY',
+      summary: 'Linked to empty allow-list staff matter',
+      receivedAt: '2026-11-01T10:01:00Z',
+    } as never);
+
+    const makeTask = (id: string, linkedEnquiryId: string) => ({
+      id,
+      reference: id,
+      title: `Task ${id}`,
+      description: 'Linked visibility check',
+      taskTypeId: 'task_type.follow_up',
+      priorityId: 'task_priority.normal',
+      status: 'To do' as const,
+      dueAt: '2026-11-15',
+      assignedPersonId: 'P-000002',
+      assignedPersonIds: ['P-000002'],
+      assignedTeamId: 'TM-000001',
+      linkedRecords: [{ recordType: 'enquiry' as const, recordId: linkedEnquiryId, label: linkedEnquiryId }],
+      checklist: [],
+      comments: [],
+      createdById: 'P-000002',
+      createdAt: '2026-11-01T10:00:00Z',
+      updatedById: 'P-000002',
+      updatedAt: '2026-11-01T10:00:00Z',
+      completedAt: null,
+      completedById: null,
+    });
+
+    await twRepo.putTask(ctxAlpha, makeTask('TSK-R692-WALL-EXPLICIT', 'ENQ-R692-WALL-EXPLICIT'));
+    await twRepo.putTask(ctxAlpha, makeTask('TSK-R692-STAFF-EMPTY', 'ENQ-R692-STAFF-EMPTY'));
+
+    await matterRepo.putMatter(ctxBravo, {
+      ...(structuredClone(seed.matters[0]!) as Matter),
+      id: 'M-R692-BRAVO-WALL',
+      matterNumber: 'MAT-R692-BW1',
+      title: 'Bravo Only Restricted Matter',
+      responsiblePartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000001',
+      teamMemberIds: ['P-000001'],
+      hasEthicalWall: true,
+      restrictedAccessUserIds: ['P-000001'],
+      parties: [],
+    });
+    await intakeRepo.putEnquiry(ctxBravo, {
+      id: 'ENQ-R692-BRAVO-WALL',
+      reference: 'ENQ-R692-BW1',
+      status: 'Converted',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Bravo',
+      lastName: 'Secret',
+      convertedMatterId: 'M-R692-BRAVO-WALL',
+      summary: 'Bravo secret enquiry',
+      receivedAt: '2026-11-01T10:00:00Z',
+    } as never);
+    await twRepo.putTask(ctxBravo, makeTask('TSK-R692-BRAVO', 'ENQ-R692-BRAVO-WALL'));
+
+    const p2Tasks = await twRepo.listVisibleTasks<{ id: string }>(ctxAlpha, 'P-000002');
+    expect(p2Tasks.some((t) => t.id === 'TSK-R692-STAFF-EMPTY')).toBe(true);
+    expect(p2Tasks.some((t) => t.id === 'TSK-R692-WALL-EXPLICIT')).toBe(false);
+    expect(p2Tasks.some((t) => t.id === 'TSK-R692-BRAVO')).toBe(false);
+
+    const p1Tasks = await twRepo.listVisibleTasks<{ id: string }>(ctxAlpha, 'P-000001');
+    expect(p1Tasks.some((t) => t.id === 'TSK-R692-WALL-EXPLICIT')).toBe(true);
+    expect(p1Tasks.some((t) => t.id === 'TSK-R692-STAFF-EMPTY')).toBe(false);
+
+    const tamperedBravoTasks = await twRepo.listTasksByIdsOrIdempotencyKeys(ctxAlpha, {
+      ids: ['TSK-R692-BRAVO'],
+    });
+    expect(tamperedBravoTasks).toEqual([]);
+
+    // R694 / R675: audit failure rolls back expireQuoteIfOverdue quote transition atomically
+    await intakeRepo.putQuote(ctxAlpha, {
+      id: 'QUO-R694-AUDIT-ROLLBACK',
+      reference: 'QUO-R694-AR1',
+      clientType: 'person' as const,
+      clientFirstName: 'Rollback',
+      clientLastName: 'Tester',
+      clientEmail: 'rollback@example.invalid',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: 'Quote Rollback Check',
+      status: 'Sent',
+      feeBasis: 'fixed' as const,
+      estimatedFeeExVat: 1200,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2026-10-01',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-09-01T09:00:00Z',
+      updatedAt: '2026-09-01T09:00:00Z',
+      sentAt: '2026-09-01T10:00:00Z',
+      timeline: [],
+    } as never);
+
+    const tenancyMod = await import('../src/tenancy/index');
+    const coreMod = await import('../src/index');
+    const runtimeMod = await import('../../src/platform/tenantRuntime');
+    const servicesMod = (await import('../../src/server/services')) as Record<string, unknown>;
+    const auditSupport = await import('../../src/server/testSupport/auditTestSupport');
+    const jobRunRepo = new tenancyMod.TenantJobRunRepository();
+    await jobRunRepo.clearTenantJobRuns(ctxAlpha);
+
+    const rawBase = structuredClone(runtimeMod.getActiveTenantRawBaseConfig()) as Record<string, unknown>;
+    const alphaCfg = coreMod.loadAndValidateTenantConfig(
+      rawBase,
+      { tenantId: tenantAlpha, environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    const execManual = servicesMod.executeQuoteExpiryForTenant as (
+      ctx: TenantContext,
+      opts: Record<string, unknown>,
+    ) => Promise<unknown>;
+
+    auditSupport.setAuditAdapterFailureHookForTesting(() => {
+      throw new Error('INJECTED_R694_AUDIT_FAILURE');
+    });
+    try {
+      await expect(
+        execManual(ctxAlpha, {
+          triggerSource: 'manual',
+          triggeredById: 'system:quote-expiry',
+          defaultRunHourLocal: 0,
+          tenantConfig: alphaCfg,
+        }),
+      ).rejects.toThrow(/INJECTED_R694_AUDIT_FAILURE/);
+    } finally {
+      auditSupport.setAuditAdapterFailureHookForTesting(null);
+    }
+
+    const rolledBackQuote = await intakeRepo.getQuoteById<{ status: string }>(
+      ctxAlpha,
+      'QUO-R694-AUDIT-ROLLBACK',
+      { includeRestricted: true },
+    );
+    expect(rolledBackQuote?.status).toBe('Sent');
+
+    // Direct repository-level onPersistedInTx rollback check (independent of executeControlledTenantJobRun outer tx)
+    await expect(
+      intakeRepo.expireQuoteIfOverdue(ctxAlpha, 'QUO-R694-AUDIT-ROLLBACK', {
+        localDate: '2026-11-23',
+        applyTransition: (q) => {
+          const prev = q.status;
+          q.status = 'Expired';
+          return { shouldPersist: true, previousStatus: prev };
+        },
+        onPersistedInTx: async () => {
+          throw new Error('INJECTED_DIRECT_IN_TX_AUDIT_FAILURE');
+        },
+      }),
+    ).rejects.toThrow(/INJECTED_DIRECT_IN_TX_AUDIT_FAILURE/);
+    const directRolledBack = await intakeRepo.getQuoteById<{ status: string }>(
+      ctxAlpha,
+      'QUO-R694-AUDIT-ROLLBACK',
+      { includeRestricted: true },
+    );
+    expect(directRolledBack?.status).toBe('Sent');
   });
 });

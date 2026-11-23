@@ -105,7 +105,7 @@ Checked against `develop` (`7c2ba3e`):
 
 ## Help and documentation (rule 11)
 
-- `src/docs/articles/development-process.ts` & `deployment-and-security.ts`: document server-side SQL-scoped repository queries, the request-path AST guard (`B15` server phase), and `employeesAndLeaversOnly` / Draft privacy hardening.
+- `src/docs/articles/development-process.ts` & `deployment-and-security.ts`: document server-side SQL-scoped repository queries, the request-path AST guard (`B15` server phase), `employeesAndLeaversOnly` / Draft privacy hardening, and accurate `S1-D12` boundary (`S1-09` pending, `R691`, `R692`, `R694`).
 - `docs/roadmap/feature-list.md`: update `B15` (`Partly built` — server-side converted, page loaders & UI form scans remaining for `S1-02b`), plus items `1`–`4`, `28`, `33`, `P2`, `P8`, `P10`.
 - `docs/release-notes.md`: add `S1-02a` entry under `Unreleased`.
 

@@ -611,21 +611,26 @@ function buildMatterDbParameters(
     additionalClientIdsJson: JSON.stringify(matter.additionalClientIds ?? []),
     restrictedAccessUserIdsJson: JSON.stringify(
       sqlRestrictedAccessUserIds ??
-        (matter.isStaffMatter ||
-        matter.hasEthicalWall ||
-        (matter.restrictedAccessUserIds?.length ?? 0) > 0
+        ((matter.restrictedAccessUserIds?.length ?? 0) > 0
           ? Array.from(
               new Set(
-                [
-                  ...(matter.restrictedAccessUserIds ?? []),
-                  matter.responsiblePartnerId,
-                  matter.supervisingPartnerId,
-                  matter.leadFeeEarnerId,
-                  ...(matter.teamMemberIds ?? []),
-                ].filter((id): id is string => Boolean(id)),
+                (matter.restrictedAccessUserIds ?? []).filter(
+                  (id): id is string => Boolean(id),
+                ),
               ),
             )
-          : []),
+          : matter.isStaffMatter || matter.hasEthicalWall
+            ? Array.from(
+                new Set(
+                  [
+                    matter.responsiblePartnerId,
+                    matter.supervisingPartnerId,
+                    matter.leadFeeEarnerId,
+                    ...(matter.teamMemberIds ?? []),
+                  ].filter((id): id is string => Boolean(id)),
+                ),
+              )
+            : []),
     ),
     fieldsJson: JSON.stringify(matter.fieldValues ?? {}),
     customFieldsJson: JSON.stringify(matter.customFields ?? {}),

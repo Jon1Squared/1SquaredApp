@@ -773,7 +773,7 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
 /**
  * Extracts the explicit `restrictedAccessUserIds` JSONB array configured on a matter row,
  * respecting `opening_record_json.hasRestrictedAccessUserIds` so SQL predicates never mistake
- * pre-expanded participant cache columns for an explicit S1-D12 allow-list (`R676`).
+ * pre-expanded participant cache columns for an explicit allow-list (`R676`; `S1-09` adds full `S1-D12`).
  */
 export function buildMatterExplicitAllowJsonSql(alias = 'm'): string {
   return `(
@@ -799,7 +799,7 @@ export function buildMatterExplicitAllowJsonSql(alias = 'm'): string {
  * SQL predicate returning TRUE when a restricted matter row (`alias`) is hidden from the viewer
  * at `$viewerParamIndex`, matching TypeScript `canAccessMatter` (`core/src/domain/rbac/resolver.ts`, `R676`):
  * - Unrestricted matters (`!is_staff_matter && !has_ethical_wall && len(allowJson) === 0`) are never hidden.
- * - Non-empty explicit allow-list (`len(allowJson) > 0`) is decisive (S1-D12: excludes unlisted participants).
+ * - Non-empty explicit allow-list (`len(allowJson) > 0`) is decisive for participants (excludes unlisted participants; `matter:restricted:access` holders still pass ethical walls until S1-09 (S1-D12)).
  * - Empty allow-list (`len(allowJson) === 0`) falls back to named participants (`responsible_partner_id`,
  *   `supervisor_id`, `responsible_fee_earner_id`, or `opening_record_json->'teamMemberIds'`).
  */
@@ -1901,6 +1901,10 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         readonly shouldPersist: boolean;
         readonly previousStatus: string;
       };
+      readonly onPersistedInTx?: (
+        expiredQuote: T,
+        previousStatus: string,
+      ) => Promise<void>;
     },
   ): Promise<{ expired: boolean; previousStatus: string | null; quote: T | null }> {
     return this.withTenantTransaction(ctx, async (tx) => {
@@ -1933,6 +1937,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         ctx,
         freshQuote as unknown as TenantQuoteRecord,
       );
+      await options.onPersistedInTx?.(freshQuote, previousStatus);
       return { expired: true, previousStatus, quote: freshQuote };
     });
   }

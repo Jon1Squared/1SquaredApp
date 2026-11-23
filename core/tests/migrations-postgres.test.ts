@@ -2405,12 +2405,19 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(afterRoundTrip.rows[0]?.phonetic_keys).toEqual(expectedLastPerson.phoneticKeys);
       expect(afterRoundTrip.rows[0]?.postcode_keys).toEqual(expectedLastPerson.postcodeKeys);
 
-      // Two-tenant isolation: Bravo has zero Alpha rows
-      const bravoCount = await client.query<{ cnt: string }>(
-        `SELECT count(*)::text AS cnt FROM public.people WHERE tenant_id = $1`,
-        [tenantBravo],
-      );
-      expect(Number(bravoCount.rows[0]?.cnt ?? 0)).toBe(0);
+      // Two-tenant isolation: Bravo has zero Alpha rows (verified via dedicated Bravo client)
+      const bravoClient = await createDirectMigrationClient({
+        ctx: ctxBravo,
+      });
+      try {
+        const bravoCount = await bravoClient.query<{ cnt: string }>(
+          `SELECT count(*)::text AS cnt FROM public.people WHERE tenant_id = $1`,
+          [tenantBravo],
+        );
+        expect(Number(bravoCount.rows[0]?.cnt ?? 0)).toBe(0);
+      } finally {
+        await bravoClient.end();
+      }
     } finally {
       await client.end();
     }

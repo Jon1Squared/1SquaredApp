@@ -4455,10 +4455,11 @@ export class TenantPartyRepository extends TenantScopedRepository {
     ]);
     const filteredTerms = cleanTerms.filter((term) => {
       const tokens = normaliseComparableNameKey(term).split(' ').filter(Boolean);
+      const rawTokens = term.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const informativeTokens = tokens.filter(
         (t) => !STOP_WORDS.has(t) && t.length >= 2,
       );
-      return informativeTokens.length > 0;
+      return informativeTokens.length > 0 || rawTokens.length >= 2;
     });
     const effectiveTerms =
       filteredTerms.length > 0 ? filteredTerms : cleanTerms;
