@@ -25,6 +25,7 @@ import {
   type SuggestedTaskAssignee,
 } from './CreateTaskModal';
 import { useToast } from './Toast';
+import { useEntityPicker } from './useEntityPicker';
 
 interface Props {
   teams: Team[];
@@ -78,6 +79,9 @@ export function TaskFormClient({
   );
   const [recordSearchQuery, setRecordSearchQuery] = useState('');
   const [recordSearchFocused, setRecordSearchFocused] = useState(false);
+  const [pickedSearchRecords, setPickedSearchRecords] = useState<
+    Record<string, SearchableRecordItem>
+  >({});
 
   // Build suggested people based on linked matter/enquiry or current user's team
   const suggestedPeople = useMemo<SuggestedTaskAssignee[]>(() => {
@@ -225,32 +229,58 @@ export function TaskFormClient({
     return items;
   }, [matters, enquiries, quotes, organisations, people, values]);
 
-  const matchingSearchRecords = useMemo(() => {
-    const tokens = recordSearchQuery
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean);
-    if (tokens.length === 0) return [];
+  const typeLabels: Record<TaskLinkedRecordType, SearchableRecordItem['typeLabel']> = {
+    matter: 'Matter',
+    enquiry: 'Enquiry',
+    quote: 'Quote',
+    organisation: 'Organisation',
+    person: 'Person',
+  };
 
-    return searchableRecords
-      .filter((item) => {
-        if (
-          linkedRecords.some(
-            (lr) => lr.recordType === item.recordType && lr.recordId === item.recordId,
-          )
-        ) {
-          return false;
-        }
-        return tokens.every((tok) => item.searchText.includes(tok));
-      })
-      .slice(0, 12);
-  }, [recordSearchQuery, searchableRecords, linkedRecords]);
+  const { items: pickerSearchResults } = useEntityPicker(
+    {
+      entityTypes: ['matter', 'enquiry', 'quote', 'organisation', 'person'],
+      query: recordSearchQuery,
+      limit: 15,
+    },
+    { enabled: Boolean(recordSearchQuery.trim()) },
+  );
+
+  const matchingSearchRecords = useMemo<SearchableRecordItem[]>(() => {
+    if (!recordSearchQuery.trim()) return [];
+    const seen = new Set<string>();
+    const results: SearchableRecordItem[] = [];
+    for (const item of pickerSearchResults) {
+      if (
+        linkedRecords.some(
+          (lr) => lr.recordType === item.recordType && lr.recordId === item.id,
+        )
+      ) {
+        continue;
+      }
+      const key = `${item.recordType}:${item.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push({
+        recordType: item.recordType,
+        recordId: item.id,
+        typeLabel: typeLabels[item.recordType],
+        reference: item.reference ?? item.id,
+        title: item.label,
+        subtitle: item.subtitle,
+        href: item.href,
+        searchText: '',
+      });
+    }
+    return results.slice(0, 12);
+  }, [recordSearchQuery, pickerSearchResults, linkedRecords]);
 
   const resolveLinkedItem = (lr: TaskLinkedRecord) => {
-    const found = searchableRecords.find(
-      (item) => item.recordType === lr.recordType && item.recordId === lr.recordId,
-    );
+    const found =
+      pickedSearchRecords[`${lr.recordType}:${lr.recordId}`] ??
+      searchableRecords.find(
+        (item) => item.recordType === lr.recordType && item.recordId === lr.recordId,
+      );
     if (found) {
       return {
         typeLabel: found.typeLabel,
@@ -267,7 +297,11 @@ export function TaskFormClient({
     };
   };
 
-  const handleSelectRecord = (item: Pick<SearchableRecordItem, 'recordType' | 'recordId'>) => {
+  const handleSelectRecord = (item: SearchableRecordItem) => {
+    setPickedSearchRecords((prev) => ({
+      ...prev,
+      [`${item.recordType}:${item.recordId}`]: item,
+    }));
     setLinkedRecords((prev) => {
       if (
         prev.some(

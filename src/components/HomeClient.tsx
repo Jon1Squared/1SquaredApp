@@ -21,7 +21,6 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
-import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import {
   computeEnquiryDashboardMetrics,
   enquiryDisplayName,
@@ -85,6 +84,7 @@ import type {
 } from '@/pms/types';
 import { HeroHomeSearch, StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { useIntakePreview } from './useIntakePreview';
 
 export type HomeSnapshotBaseProps = Pick<
   AppSnapshot,
@@ -467,22 +467,25 @@ export function HomeClient({
     [allMatterFins],
   );
 
-  // Live duplicate check for Quick Enquiry Capture (Panel 13)
-  const quickDuplicateHits = useMemo(() => {
-    const personHits = findPersonDuplicates(
-      {
-        firstName: qFirstName,
-        surname: qLastName,
-        emails: qEmail ? [qEmail] : [],
-        phones: qPhone ? [qPhone] : [],
-      },
-      people,
-    );
-    const orgHits = qOnBehalf
-      ? findOrganisationDuplicates({ legalName: qOnBehalf }, organisations)
-      : [];
-    return { personHits, orgHits };
-  }, [qFirstName, qLastName, qEmail, qPhone, qOnBehalf, people, organisations]);
+  // Live duplicate check for Quick Enquiry Capture (Panel 13) via debounced C2 server action
+  const { preview: quickIntakePreview } = useIntakePreview(
+    {
+      kind: 'quick_enquiry',
+      firstName: qFirstName,
+      surname: qLastName,
+      callingOnBehalfOf: qOnBehalf,
+      emails: qEmail ? [qEmail] : [],
+      phones: qPhone ? [qPhone] : [],
+    },
+    { enableConflicts: false },
+  );
+  const quickDuplicateHits = useMemo(
+    () => ({
+      personHits: quickIntakePreview.duplicatePeople,
+      orgHits: quickIntakePreview.duplicateOrganisations,
+    }),
+    [quickIntakePreview.duplicatePeople, quickIntakePreview.duplicateOrganisations],
+  );
 
   // ------------------------------------------------------------------ Actions
   async function handleCompleteTask(task: Task) {

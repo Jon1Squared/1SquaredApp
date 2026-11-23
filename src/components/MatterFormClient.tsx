@@ -41,6 +41,7 @@ import {
   saveMatterAction,
   saveMatterRateOverrideAction,
   saveTaskAction,
+  searchEntityPickerAction,
   signOffMatterCostsAction,
   switchViewingRoleAction,
   updateMatterConflictRecordAction,
@@ -122,14 +123,6 @@ import {
   type CustomKeyDateEntry,
 } from '@/domain/matterOpeningRecord';
 import { formatGbp, quoteWorkTypeSummary } from '@/domain/quotes';
-import {
-  allowedNameEdits,
-  editDistance,
-  normaliseComparableName,
-  organisationNameLooseMatch,
-  personNameLooseMatch,
-  tokensSoundAlike,
-} from '@/domain/normalise';
 import type {
   ChoiceList,
   ChoiceValue,
@@ -175,6 +168,7 @@ import { OrganisationFormClient } from './OrganisationFormClient';
 import { PersonFormClient } from './PersonFormClient';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { useEntityPicker } from './useEntityPicker';
 
 interface MatterFormClientProps {
   existing?: Matter | null;
@@ -360,19 +354,38 @@ export function MatterFormClient({
 
   useEffect(() => {
     queueMicrotask(() => {
-      setPeople(mergePeopleWithEnquiries(initialPeople, enquiries, values));
+      const mergedInitial = mergePeopleWithEnquiries(initialPeople, enquiries, values);
+      setPeople((prev) => {
+        const byId = new Map(mergedInitial.map((p) => [p.id, p]));
+        for (const p of prev) {
+          if (!byId.has(p.id)) byId.set(p.id, p);
+        }
+        return Array.from(byId.values());
+      });
     });
   }, [initialPeople, enquiries, values]);
 
   useEffect(() => {
     queueMicrotask(() => {
-      setOrganisations(initialOrganisations);
+      setOrganisations((prev) => {
+        const byId = new Map(initialOrganisations.map((o) => [o.id, o]));
+        for (const o of prev) {
+          if (!byId.has(o.id)) byId.set(o.id, o);
+        }
+        return Array.from(byId.values());
+      });
     });
   }, [initialOrganisations]);
 
   useEffect(() => {
     queueMicrotask(() => {
-      setLinks(initialLinks);
+      setLinks((prev) => {
+        const byId = new Map(initialLinks.map((l) => [l.id, l]));
+        for (const l of prev) {
+          if (!byId.has(l.id)) byId.set(l.id, l);
+        }
+        return Array.from(byId.values());
+      });
     });
   }, [initialLinks]);
 
@@ -3023,8 +3036,146 @@ export function MatterFormClient({
     setClientModalOpen(true);
   }
 
+  const hasClientSearchQuery = Boolean(
+    clientSearchFirstName.trim() || clientSearchSurname.trim() || clientSearchOrg.trim(),
+  );
+
+  // Live SQL search results in the Client Lookup pop-up via debounced C2 picker action
+  const { items: clientPickerItems } = useEntityPicker(
+    {
+      entityTypes: ['person', 'organisation'],
+      query: '',
+      personQuery: {
+        firstName: clientSearchFirstName,
+        surname: clientSearchSurname,
+        organisationName: clientSearchOrg,
+      },
+      excludeDemo: true,
+      includeLinkedOrgs: true,
+      limit: 25,
+    },
+    { enabled: clientModalOpen && hasClientSearchQuery },
+  );
+
+  function hydratePickedClients(idsToAdd: string[]) {
+    const newPeople: Person[] = [];
+    const newOrgs: Organisation[] = [];
+    const newLinks: PersonOrganisationLink[] = [];
+    const todayIso = toIsoDate(new Date());
+
+    for (const id of idsToAdd) {
+      const picked = clientPickerItems.find((item) => item.id === id);
+      if (!picked) continue;
+      if (picked.person) {
+        newPeople.push(picked.person);
+      }
+      if (picked.organisation) {
+        newOrgs.push(picked.organisation);
+      }
+      if (picked.linkedOrgs && picked.linkedOrgs.length > 0 && picked.person) {
+        for (const org of picked.linkedOrgs) {
+          newOrgs.push(org);
+          newLinks.push({
+            id: `picker-${picked.person.id}-${org.id}`,
+            personId: picked.person.id,
+            organisationId: org.id,
+            jobTitle: picked.person.jobTitle || '',
+            department: '',
+            roleWithinOrganisation: '',
+            contactRoleIds: [],
+            isPrimaryContact: true,
+            isCurrent: true,
+            startDate: todayIso,
+            endDate: null,
+            contactStatusId: null,
+            createdById: currentUser.id,
+            createdAt: todayIso,
+            updatedById: currentUser.id,
+            updatedAt: todayIso,
+          });
+        }
+      }
+    }
+
+    if (newPeople.length > 0) {
+      setPeople((prev) => {
+        const byId = new Map(prev.map((p) => [p.id, p]));
+        for (const p of newPeople) byId.set(p.id, p);
+        return Array.from(byId.values());
+      });
+    }
+    if (newOrgs.length > 0) {
+      setOrganisations((prev) => {
+        const byId = new Map(prev.map((o) => [o.id, o]));
+        for (const o of newOrgs) byId.set(o.id, o);
+        return Array.from(byId.values());
+      });
+    }
+    if (newLinks.length > 0) {
+      setLinks((prev) => {
+        const byPair = new Set(prev.map((l) => `${l.personId}:${l.organisationId}`));
+        const extra = newLinks.filter(
+          (l) => !byPair.has(`${l.personId}:${l.organisationId}`),
+        );
+        return extra.length > 0 ? [...prev, ...extra] : prev;
+      });
+    }
+
+    const orgIdsAdded = idsToAdd.filter((id) => id.startsWith('O-'));
+    for (const orgId of orgIdsAdded) {
+      void searchEntityPickerAction({
+        entityTypes: ['person'],
+        query: '',
+        corporateGroupOfOrgId: orgId,
+        limit: 50,
+      }).then((res) => {
+        if (isActionDenied(res) || res.items.length === 0) return;
+        const contactPeople = res.items
+          .map((item) => item.person)
+          .filter((p): p is Person => Boolean(p));
+        if (contactPeople.length === 0) return;
+        setPeople((prev) => {
+          const byId = new Map(prev.map((p) => [p.id, p]));
+          for (const cp of contactPeople) byId.set(cp.id, cp);
+          return Array.from(byId.values());
+        });
+        setLinks((prev) => {
+          const byPair = new Set(prev.map((l) => `${l.personId}:${l.organisationId}`));
+          const added: PersonOrganisationLink[] = [];
+          for (const cp of contactPeople) {
+            if (!byPair.has(`${cp.id}:${orgId}`)) {
+              added.push({
+                id: `picker-${cp.id}-${orgId}`,
+                personId: cp.id,
+                organisationId: orgId,
+                jobTitle: cp.jobTitle || '',
+                department: '',
+                roleWithinOrganisation: '',
+                contactRoleIds: [],
+                isPrimaryContact: false,
+                isCurrent: true,
+                startDate: todayIso,
+                endDate: null,
+                contactStatusId: null,
+                createdById: currentUser.id,
+                createdAt: todayIso,
+                updatedById: currentUser.id,
+                updatedAt: todayIso,
+              });
+            }
+          }
+          return added.length > 0 ? [...prev, ...added] : prev;
+        });
+        if (!instructingContactId && contactPeople[0]) {
+          setInstructingContactId((curr) => curr ?? contactPeople[0].id);
+        }
+      });
+    }
+  }
+
   function handleAddClientsToMatter(idsToAdd: string[], toastMsg?: string) {
     if (idsToAdd.length === 0) return;
+    hydratePickedClients(idsToAdd);
     setClientIds((prev) => {
       const merged = Array.from(new Set([...prev, ...idsToAdd]));
       return merged;
@@ -3068,220 +3219,47 @@ export function MatterFormClient({
     );
   }
 
-  const hasClientSearchQuery = Boolean(
-    clientSearchFirstName.trim() || clientSearchSurname.trim() || clientSearchOrg.trim(),
-  );
-
-  // Live search results in the Client Lookup pop-up (blank until details entered, includes fuzzy & phonetic matches)
   const clientLookupResults = useMemo(() => {
-    const fnRaw = clientSearchFirstName.trim();
-    const snRaw = clientSearchSurname.trim();
-    const orgRaw = clientSearchOrg.trim();
-    if (!fnRaw && !snRaw && !orgRaw) {
-      return [];
-    }
-
-    const fn = normaliseComparableName(fnRaw);
-    const sn = normaliseComparableName(snRaw);
-    const orgQ = normaliseComparableName(orgRaw);
-
-    const checkTokenMatch = (
-      queryVal: string,
-      candidates: string[],
-    ): 'exact' | 'similar spelling' | 'sounds like' | null => {
-      const qTokens = normaliseComparableName(queryVal).split(' ').filter(Boolean);
-      if (qTokens.length === 0) return null;
-
-      let best: 'exact' | 'similar spelling' | 'sounds like' | null = null;
-      for (const cand of candidates) {
-        const cNorm = normaliseComparableName(cand);
-        if (!cNorm) continue;
-        if (cNorm.includes(normaliseComparableName(queryVal))) {
-          return 'exact';
-        }
-        const cTokens = cNorm.split(' ').filter(Boolean);
-        // Check if every query token matches a candidate token (exact, fuzzy edit distance, or phonetic)
-        let allMatched = true;
-        let usedFuzzy: 'similar spelling' | 'sounds like' | null = null;
-        for (const qt of qTokens) {
-          let tokenMatched = false;
-          for (const ct of cTokens) {
-            if (ct.includes(qt)) {
-              tokenMatched = true;
-              break;
-            }
-            const minLen = Math.min(qt.length, ct.length);
-            const maxEdits = minLen >= 4 ? allowedNameEdits(minLen) : minLen === 3 ? 1 : 0;
-            if (maxEdits > 0 && editDistance(qt, ct) <= maxEdits) {
-              tokenMatched = true;
-              if (!usedFuzzy) usedFuzzy = 'similar spelling';
-              break;
-            }
-            if (qt.length >= 3 && ct.length >= 3 && tokensSoundAlike(qt, ct)) {
-              tokenMatched = true;
-              if (!usedFuzzy) usedFuzzy = 'sounds like';
-              break;
-            }
-          }
-          if (!tokenMatched) {
-            allMatched = false;
-            break;
-          }
-        }
-        if (allMatched) {
-          if (!usedFuzzy) return 'exact';
-          if (best !== 'similar spelling') best = usedFuzzy;
-        }
-      }
-      return best;
-    };
-
-    const results: {
-      id: string;
-      entityType: 'person' | 'organisation';
-      name: string;
-      firstName: string;
-      surname: string;
-      organisationName: string;
-      details: string;
-      alreadyAdded: boolean;
-      missingClientFields: string[];
-      matchNote: 'similar spelling' | 'sounds like' | null;
-      rank: number;
-    }[] = [];
-
-    // 1. Search People (including employees who may also be clients/contacts — single record rule)
-    for (const p of people) {
-      if (p.mergedIntoId || p.demo) continue;
-      const personLinks = links.filter((l) => l.personId === p.id && l.isCurrent);
-      const linkedOrgs = personLinks
-        .map((l) => organisations.find((o) => o.id === l.organisationId))
-        .filter((o): o is Organisation => Boolean(o));
-      const orgNames = linkedOrgs.map((o) => o.legalName).join(', ');
-
-      let matchNote: 'similar spelling' | 'sounds like' | null = null;
-
-      if (fn) {
-        const fnRes = checkTokenMatch(fn, [
-          p.firstName,
-          p.preferredName ?? '',
-          ...p.otherNames.map((n) => n.name),
-        ]);
-        if (!fnRes) continue;
-        if (fnRes !== 'exact') matchNote = fnRes;
-      }
-
-      if (sn) {
-        const snRes = checkTokenMatch(sn, [
-          p.surname,
-          ...p.otherNames.map((n) => n.name),
-        ]);
-        if (!snRes) continue;
-        if (snRes !== 'exact' && !matchNote) matchNote = snRes;
-      }
-
-      if (!matchNote && fn && sn) {
-        const loose = personNameLooseMatch(
-          `${fnRaw} ${snRaw}`,
-          `${p.firstName} ${p.surname}`,
-        );
-        if (loose) matchNote = loose;
-      }
-
-      if (orgQ) {
-        const orgCandidates = linkedOrgs.flatMap((o) => [
-          o.legalName,
-          ...o.otherNames.map((n) => n.name),
-        ]);
-        const orgRes = checkTokenMatch(orgQ, orgCandidates);
-        const looseOrg = linkedOrgs
-          .map((o) => organisationNameLooseMatch(orgRaw, o.legalName))
-          .find(Boolean);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact' && !matchNote) matchNote = orgRes;
-        else if (!orgRes && looseOrg && !matchNote) matchNote = looseOrg;
-      }
-
-      const email =
-        p.emails.find((e) => e.isPrimary)?.address ?? p.emails[0]?.address ?? null;
-      results.push({
-        id: p.id,
-        entityType: 'person',
-        name: personDisplayName(p),
-        firstName: p.firstName,
-        surname: p.surname,
-        organisationName: orgNames || '—',
-        details: [p.jobTitle || null, email, p.addresses[0]?.town ?? null]
-          .filter(Boolean)
-          .join(' · '),
-        alreadyAdded: clientIds.includes(p.id),
-        missingClientFields: getMissingClientFieldsForPerson(p),
-        matchNote,
-        rank: matchNote ? 2 : 1,
-      });
-    }
-
-    // 2. Search Organisations
-    for (const o of organisations) {
-      if (o.mergedIntoId) continue;
-      const orgCandidates = [o.legalName, ...o.otherNames.map((n) => n.name)];
-      let matchNote: 'similar spelling' | 'sounds like' | null = null;
-
-      if (orgQ) {
-        const orgRes = checkTokenMatch(orgQ, orgCandidates);
-        const looseOrg = organisationNameLooseMatch(orgRaw, o.legalName);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact') matchNote = orgRes;
-        else if (!orgRes && looseOrg) matchNote = looseOrg;
-      } else if (fn || sn) {
-        const combinedQuery = [fnRaw, snRaw].filter(Boolean).join(' ');
-        const orgRes = checkTokenMatch(combinedQuery, orgCandidates);
-        const looseOrg = organisationNameLooseMatch(combinedQuery, o.legalName);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact') matchNote = orgRes;
-        else if (!orgRes && looseOrg) matchNote = looseOrg;
-      }
-
-      results.push({
-        id: o.id,
-        entityType: 'organisation',
-        name: o.legalName,
-        firstName: '—',
-        surname: '—',
-        organisationName: o.legalName,
-        details: [
-          o.companyNumber ? `Co. no. ${o.companyNumber}` : null,
-          o.registeredAddress?.town ?? null,
-          o.generalEmail || null,
-        ]
-          .filter(Boolean)
-          .join(' · '),
-        alreadyAdded: clientIds.includes(o.id),
-        missingClientFields: getMissingClientFieldsForOrg(o),
-        matchNote,
-        rank: matchNote ? 2 : 1,
-      });
-    }
-
-    return results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-  }, [
-    clientSearchFirstName,
-    clientSearchSurname,
-    clientSearchOrg,
-    people,
-    organisations,
-    links,
-    clientIds,
-  ]);
+    if (!hasClientSearchQuery) return [];
+    return clientPickerItems.map((item) => {
+      const isOrg = item.recordType === 'organisation';
+      return {
+        id: item.id,
+        entityType: isOrg ? ('organisation' as const) : ('person' as const),
+        name: item.label,
+        firstName: item.person?.firstName ?? '—',
+        surname: item.person?.surname ?? '—',
+        organisationName: isOrg
+          ? item.label
+          : (item.linkedOrgs ?? []).map((o) => o.legalName).join(', ') || '—',
+        details: item.subtitle,
+        alreadyAdded: clientIds.includes(item.id),
+        missingClientFields:
+          isOrg && item.organisation
+            ? getMissingClientFieldsForOrg(item.organisation)
+            : !isOrg && item.person
+              ? getMissingClientFieldsForPerson(item.person)
+              : [],
+        matchNote: item.matchNote ?? null,
+        rank: item.rank ?? 1,
+      };
+    });
+  }, [hasClientSearchQuery, clientPickerItems, clientIds]);
 
   const matchedOrgForNewPerson = useMemo(() => {
     const q = clientSearchOrg.trim().toLowerCase();
     if (!q) return '';
+    const fromPicker = clientPickerItems.find(
+      (item) =>
+        item.recordType === 'organisation' &&
+        item.label.toLowerCase().includes(q),
+    );
+    if (fromPicker) return fromPicker.id;
     const found = organisations.find(
       (o) => !o.mergedIntoId && o.legalName.toLowerCase().includes(q),
     );
     return found?.id ?? '';
-  }, [clientSearchOrg, organisations]);
+  }, [clientSearchOrg, clientPickerItems, organisations]);
 
   const subcategoriesForPractice = useMemo(
     () =>
@@ -3942,8 +3920,8 @@ export function MatterFormClient({
     }
   }
 
-  // "Include related entities" per organisation
-  function handleIncludeRelatedEntities(orgParty: ConflictCheckParty) {
+  // "Include related entities" per organisation via SQL corporate-group + linked-contacts lookup
+  async function handleIncludeRelatedEntities(orgParty: ConflictCheckParty) {
     if (orgParty.relatedEntitiesIncluded) return;
     const relatedToAdd: ConflictCheckParty[] = [];
     const connectedRelCode =
@@ -3958,69 +3936,54 @@ export function MatterFormClient({
           : 'TP';
     const connectedAlignment = getRelationshipAlignment(connectedRelCode);
 
-    // Check links in store for people linked to this organisation
-    const linkedPeople = links
-      .filter((l) => l.organisationId === orgParty.linkedRecordId && l.isCurrent)
-      .map((l) => people.find((p) => p.id === l.personId))
-      .filter((p): p is Person => Boolean(p && !p.demo && !p.mergedIntoId));
-
-    for (const lp of linkedPeople) {
-      const isDir = (lp.jobTitle || '').toLowerCase().includes('director');
-      relatedToAdd.push({
-        id: nextClientItemId(`rel-${lp.id}`),
-        name: personDisplayName(lp),
-        entityType: 'person',
-        role: 'Related party',
-        relationshipCode: connectedRelCode,
-        capacityCodes: [isDir ? 'CAP_DIRECTOR' : 'CAP_REPRESENTATIVE'],
-        connectedToPartyId: orgParty.id,
-        alignment: connectedAlignment,
-        linkedRecordId: lp.id,
-        subtitle: `${lp.jobTitle || 'Contact'} · Connected to ${orgParty.name}`,
-        parentPartyId: orgParty.id,
-      });
-    }
-
-    // Check parent/subsidiary organisations in store
     if (orgParty.linkedRecordId) {
-      const orgRecord = organisations.find((o) => o.id === orgParty.linkedRecordId);
-      if (orgRecord?.parentOrganisationId) {
-        const parentOrg = organisations.find(
-          (o) => o.id === orgRecord.parentOrganisationId && !o.mergedIntoId,
-        );
-        if (parentOrg) {
-          relatedToAdd.push({
-            id: nextClientItemId(`rel-org-${parentOrg.id}`),
-            name: parentOrg.legalName,
-            entityType: 'organisation',
-            role: 'Related party',
-            relationshipCode: connectedRelCode,
-            capacityCodes: ['CAP_PARENT_COMPANY'],
-            connectedToPartyId: orgParty.id,
-            alignment: connectedAlignment,
-            linkedRecordId: parentOrg.id,
-            subtitle: `Parent company · Connected to ${orgParty.name}`,
-            parentPartyId: orgParty.id,
-          });
+      const res = await searchEntityPickerAction({
+        entityTypes: ['person', 'organisation'],
+        query: '',
+        corporateGroupOfOrgId: orgParty.linkedRecordId,
+        limit: 50,
+      });
+      if (!isActionDenied(res)) {
+        for (const item of res.items) {
+          if (item.recordType === 'person' && item.person) {
+            const lp = item.person;
+            const isDir = (lp.jobTitle || '').toLowerCase().includes('director');
+            relatedToAdd.push({
+              id: nextClientItemId(`rel-${lp.id}`),
+              name: personDisplayName(lp),
+              entityType: 'person',
+              role: 'Related party',
+              relationshipCode: connectedRelCode,
+              capacityCodes: [isDir ? 'CAP_DIRECTOR' : 'CAP_REPRESENTATIVE'],
+              connectedToPartyId: orgParty.id,
+              alignment: connectedAlignment,
+              linkedRecordId: lp.id,
+              subtitle: `${lp.jobTitle || 'Contact'} · Connected to ${orgParty.name}`,
+              parentPartyId: orgParty.id,
+            });
+          } else if (item.recordType === 'organisation' && item.organisation) {
+            const groupOrg = item.organisation;
+            const isParent = item.subtitle.toLowerCase().includes('parent');
+            const isSub =
+              item.subtitle.toLowerCase().includes('subsidiary') ||
+              groupOrg.parentOrganisationId === orgParty.linkedRecordId;
+            relatedToAdd.push({
+              id: nextClientItemId(`rel-org-${groupOrg.id}`),
+              name: groupOrg.legalName,
+              entityType: 'organisation',
+              role: 'Related party',
+              relationshipCode: connectedRelCode,
+              capacityCodes: [
+                isParent ? 'CAP_PARENT_COMPANY' : isSub ? 'CAP_SUBSIDIARY' : 'CAP_PARENT_COMPANY',
+              ],
+              connectedToPartyId: orgParty.id,
+              alignment: connectedAlignment,
+              linkedRecordId: groupOrg.id,
+              subtitle: `${item.subtitle} · Connected to ${orgParty.name}`,
+              parentPartyId: orgParty.id,
+            });
+          }
         }
-      }
-      const childOrgs = organisations.filter(
-        (o) => o.parentOrganisationId === orgParty.linkedRecordId && !o.mergedIntoId,
-      );
-      for (const child of childOrgs) {
-        relatedToAdd.push({
-          id: nextClientItemId(`rel-org-${child.id}`),
-          name: child.legalName,
-          entityType: 'organisation',
-          role: 'Related party',
-          relationshipCode: connectedRelCode,
-          capacityCodes: ['CAP_SUBSIDIARY'],
-          connectedToPartyId: orgParty.id,
-          alignment: connectedAlignment,
-          linkedRecordId: child.id,
-          subtitle: `Subsidiary / group company · Connected to ${orgParty.name}`,
-          parentPartyId: orgParty.id,
-        });
       }
     }
 

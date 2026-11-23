@@ -30441,34 +30441,69 @@ export async function searchEntityPickerRecord(
 
   if (input.corporateGroupOfOrgId?.trim()) {
     const groupOrgId = input.corporateGroupOfOrgId.trim();
-    const [targetOrg, groupOrgs] = await Promise.all([
-      partyRepo.getOrganisationById<Organisation>(ctx, groupOrgId),
-      partyRepo.expandCorporateGroupOrganisationIds<Organisation>(ctx, [groupOrgId]),
+    const wantPeople = types.has('person');
+    const wantOrgs = types.has('organisation') || !wantPeople;
+    const [targetOrg, groupOrgs, orgLinks] = await Promise.all([
+      wantOrgs
+        ? partyRepo.getOrganisationById<Organisation>(ctx, groupOrgId)
+        : Promise.resolve<Organisation | null>(null),
+      wantOrgs
+        ? partyRepo.expandCorporateGroupOrganisationIds<Organisation>(ctx, [groupOrgId])
+        : Promise.resolve<Organisation[]>([]),
+      wantPeople
+        ? partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
+            organisationIds: [groupOrgId],
+          })
+        : Promise.resolve<PersonOrganisationLink[]>([]),
     ]);
-    const combinedOrgs = dedupeById([
-      ...(targetOrg?.parentOrganisationId
-        ? await partyRepo.listOrganisationsByIds<Organisation>(ctx, [
-            targetOrg.parentOrganisationId,
-          ])
-        : []),
-      ...groupOrgs,
-    ]).filter((o) => !o.mergedIntoId && o.id !== groupOrgId && !excludeSet.has(o.id));
-    return {
-      items: combinedOrgs.slice(0, limit).map((o) => ({
-        id: o.id,
-        recordType: 'organisation' as const,
-        label: o.legalName,
-        subtitle:
-          targetOrg?.parentOrganisationId === o.id
-            ? 'Parent company'
-            : o.parentOrganisationId === groupOrgId
-              ? 'Subsidiary company'
-              : 'Group company',
-        reference: o.id,
-        href: `/organisations/${o.id}`,
-        organisation: o,
-      })),
-    };
+    const currentPersonIds = Array.from(
+      new Set(orgLinks.filter((l) => l.isCurrent).map((l) => l.personId)),
+    );
+    const linkedPeopleRaw =
+      wantPeople && currentPersonIds.length > 0
+        ? await partyRepo.listPeopleByIds<Person>(ctx, currentPersonIds)
+        : [];
+    const personItems: EntityPickerOption[] = linkedPeopleRaw
+      .filter((p) => !p.mergedIntoId && !p.demo && !excludeSet.has(p.id))
+      .map((p) => {
+        const safePerson = sanitizePersonForClientPreview(p, {
+          preserveNonEmployeeDob: true,
+        });
+        return {
+          id: p.id,
+          recordType: 'person' as const,
+          label: personDisplayName(p),
+          subtitle: p.jobTitle || 'Contact',
+          reference: p.id,
+          href: `/people/${p.id}`,
+          person: safePerson,
+        };
+      });
+    const combinedOrgs = wantOrgs
+      ? dedupeById([
+          ...(targetOrg?.parentOrganisationId
+            ? await partyRepo.listOrganisationsByIds<Organisation>(ctx, [
+                targetOrg.parentOrganisationId,
+              ])
+            : []),
+          ...groupOrgs,
+        ]).filter((o) => !o.mergedIntoId && o.id !== groupOrgId && !excludeSet.has(o.id))
+      : [];
+    const orgItems: EntityPickerOption[] = combinedOrgs.map((o) => ({
+      id: o.id,
+      recordType: 'organisation' as const,
+      label: o.legalName,
+      subtitle:
+        targetOrg?.parentOrganisationId === o.id
+          ? 'Parent company'
+          : o.parentOrganisationId === groupOrgId
+            ? 'Subsidiary company'
+            : 'Group company',
+      reference: o.id,
+      href: `/organisations/${o.id}`,
+      organisation: o,
+    }));
+    return { items: [...personItems, ...orgItems].slice(0, Math.max(limit, 50)) };
   }
 
   if (input.personQuery) {

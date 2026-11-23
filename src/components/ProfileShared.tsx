@@ -27,6 +27,7 @@ import type {
   RecordType,
 } from '@/domain/types';
 import { useToast } from './Toast';
+import { EntitySearchSelect, useEntityPicker } from './useEntityPicker';
 
 export function KeyValue({
   label,
@@ -62,14 +63,48 @@ export function PossibleDuplicateBanner({
     () => candidates.filter((c) => !isEmployeeOrLeaverRecord(c)),
     [candidates],
   );
-  const selectableTargets = useMemo(
-    () =>
-      allSameType.filter(
-        (r) =>
-          r.id !== record.id && !r.mergedIntoId && !isEmployeeOrLeaverRecord(r),
-      ),
-    [allSameType, record.id],
+  const [mergeSearchQuery, setMergeSearchQuery] = useState('');
+  const { items: remoteMergePickerItems } = useEntityPicker(
+    {
+      entityTypes: [record.recordType === 'organisation' ? 'organisation' : 'person'],
+      query: mergeSearchQuery,
+      excludeIds: [record.id],
+      excludeDemo: true,
+      limit: 25,
+    },
+    { enabled: mergeOpen && !recordIsEmployeeOrLeaver },
   );
+
+  const remoteMergeRecords = useMemo<AnyRecord[]>(
+    () =>
+      remoteMergePickerItems
+        .map((item) => item.person ?? item.organisation ?? null)
+        .filter(
+          (r): r is Person | Organisation =>
+            Boolean(
+              r &&
+                r.id !== record.id &&
+                !r.mergedIntoId &&
+                !isEmployeeOrLeaverRecord(r),
+            ),
+        ),
+    [remoteMergePickerItems, record.id],
+  );
+
+  const selectableTargets = useMemo(() => {
+    const byId = new Map<string, AnyRecord>();
+    for (const r of allSameType) {
+      if (r.id !== record.id && !r.mergedIntoId && !isEmployeeOrLeaverRecord(r)) {
+        byId.set(r.id, r);
+      }
+    }
+    for (const r of remoteMergeRecords) {
+      if (!byId.has(r.id)) {
+        byId.set(r.id, r);
+      }
+    }
+    return Array.from(byId.values());
+  }, [allSameType, remoteMergeRecords, record.id]);
   const [survivorId, setSurvivorId] = useState<string>(
     mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
   );
@@ -189,6 +224,15 @@ export function PossibleDuplicateBanner({
               <label className="field-label" htmlFor="merge-survivor-select">
                 Surviving record
               </label>
+              <input
+                type="search"
+                className="input"
+                style={{ marginBottom: 8 }}
+                placeholder="Search surviving records…"
+                aria-label="Search surviving record"
+                value={mergeSearchQuery}
+                onChange={(e) => setMergeSearchQuery(e.target.value)}
+              />
               <select
                 id="merge-survivor-select"
                 className="select"
@@ -417,44 +461,58 @@ export function LinkModal({
               <label className="field-label" htmlFor="link-org-select">
                 Organisation
               </label>
-              <select
+              <EntitySearchSelect
                 id="link-org-select"
                 className="select"
+                entityTypes={['organisation']}
                 value={organisationId}
-                onChange={(e) => setOrganisationId(e.target.value)}
                 required
-              >
-                {organisations
+                emptyLabel="Select an organisation…"
+                searchPlaceholder="Search organisations…"
+                searchAriaLabel="Search organisation to link"
+                initialOptions={organisations
                   .filter((o) => !o.mergedIntoId)
                   .sort((a, b) => a.legalName.localeCompare(b.legalName))
-                  .map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.legalName}
-                    </option>
-                  ))}
-              </select>
+                  .map((o) => ({
+                    id: o.id,
+                    recordType: 'organisation' as const,
+                    label: o.legalName,
+                    subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+                    reference: o.id,
+                    href: `/organisations/${o.id}`,
+                    organisation: o,
+                  }))}
+                onChange={(nextId) => setOrganisationId(nextId)}
+              />
             </div>
           ) : (
             <div className="field field--full">
               <label className="field-label" htmlFor="link-person-select">
                 Person
               </label>
-              <select
+              <EntitySearchSelect
                 id="link-person-select"
                 className="select"
+                entityTypes={['person']}
                 value={personId}
-                onChange={(e) => setPersonId(e.target.value)}
                 required
-              >
-                {people
+                emptyLabel="Select a person…"
+                searchPlaceholder="Search people…"
+                searchAriaLabel="Search person to link"
+                initialOptions={people
                   .filter((p) => !p.mergedIntoId)
                   .sort((a, b) => a.surname.localeCompare(b.surname))
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {personDisplayName(p)} {p.jobTitle ? `(${p.jobTitle})` : ''}
-                    </option>
-                  ))}
-              </select>
+                  .map((p) => ({
+                    id: p.id,
+                    recordType: 'person' as const,
+                    label: `${personDisplayName(p)} ${p.jobTitle ? `(${p.jobTitle})` : ''}`,
+                    subtitle: p.jobTitle ?? '',
+                    reference: p.id,
+                    href: `/people/${p.id}`,
+                    person: p,
+                  }))}
+                onChange={(nextId) => setPersonId(nextId)}
+              />
             </div>
           )}
 

@@ -2349,6 +2349,8 @@ export async function loadEnquiryDetailPageData(
     quotes,
     tasks,
     keyDates,
+    extraPersonIds: enquiry.conflictSnapshot?.knownPeople.map((k) => k.id),
+    extraOrgIds: enquiry.conflictSnapshot?.knownOrganisations.map((k) => k.id),
   });
 
   const canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }> =
