@@ -153,17 +153,18 @@ export async function drainEmailOutboxForTenant(
         const claimedByOrdinal = new Map(
           claimedInline.map((item) => [item.ordinal, item]),
         );
-        let fallbackCursor = 0;
         const dispatchAttachments: import('../../api/index').OutgoingEmailAttachment[] =
           row.attachments.map((att) => {
             if ('source' in att && att.source === 'outbox') {
-              const matched =
-                claimedByOrdinal.get(att.ordinal) ??
-                claimedInline[fallbackCursor];
-              fallbackCursor += 1;
+              const matched = claimedByOrdinal.get(att.ordinal);
               if (!matched) {
                 throw new Error(
                   'EMAIL_OUTBOX_ATTACHMENT_MISSING: Expected outbox-held attachment bytes were missing for claimed message.',
+                );
+              }
+              if (att.sha256 && matched.sha256 && att.sha256 !== matched.sha256) {
+                throw new Error(
+                  'EMAIL_OUTBOX_ATTACHMENT_CORRUPTED: Outbox attachment metadata digest does not match stored attachment bytes.',
                 );
               }
               return matched;

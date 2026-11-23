@@ -39,16 +39,30 @@ function getNodeFs(): typeof import('node:fs') {
 const EICAR_SIGNATURE =
   'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*';
 
+export function expectedBlobContainerName(
+  tenantId: string,
+  environment: string,
+): string {
+  const cleanTenant = tenantId?.trim();
+  const cleanEnv = environment?.trim();
+  if (!cleanTenant || !cleanEnv) {
+    throw new Error(
+      'STORAGE_TENANCY_ERROR: Storage container naming requires non-empty tenantId and environment.',
+    );
+  }
+  return `tenant-${cleanTenant}-${cleanEnv}`;
+}
+
 function ensureValidTenantContext(ctx: TenantContext): void {
-  if (!ctx?.tenantId || !ctx?.blobContainerName) {
+  if (!ctx?.tenantId || !ctx?.environment || !ctx?.blobContainerName) {
     throw new Error(
       'STORAGE_TENANCY_ERROR: Storage operations require a valid TenantContext.',
     );
   }
-  const expectedPrefix = `tenant-${ctx.tenantId}-`;
-  if (!ctx.blobContainerName.startsWith(expectedPrefix)) {
+  const expected = expectedBlobContainerName(ctx.tenantId, ctx.environment);
+  if (ctx.blobContainerName !== expected) {
     throw new Error(
-      `TENANCY_ISOLATION_ERROR: Storage container "${ctx.blobContainerName}" does not belong to tenant "${ctx.tenantId}".`,
+      `TENANCY_ISOLATION_ERROR: Storage container "${ctx.blobContainerName}" does not match expected container "${expected}" for tenant "${ctx.tenantId}" (${ctx.environment}).`,
     );
   }
 }

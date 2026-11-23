@@ -2162,11 +2162,15 @@ export interface IntakeEvidenceArtifactRef {
   readonly scanStatus: MalwareScanStatus | 'quarantined';
 }
 
+export const IDENTITY_VERIFICATION_OUTCOMES = [
+  'verified',
+  'failed',
+  'pending',
+  'expired',
+] as const;
+
 export type IdentityVerificationOutcome =
-  | 'verified'
-  | 'failed'
-  | 'pending'
-  | 'expired';
+  (typeof IDENTITY_VERIFICATION_OUTCOMES)[number];
 
 export interface IdentityVerificationRecord {
   readonly id: string;
@@ -2212,7 +2216,13 @@ export interface IdentityVerificationProvider {
   ): Promise<IdentityVerificationRecord | null>;
 }
 
-export type SanctionsPepOutcome = 'clear' | 'match_flagged' | 'pending';
+export const SANCTIONS_PEP_OUTCOMES = [
+  'clear',
+  'match_flagged',
+  'pending',
+] as const;
+
+export type SanctionsPepOutcome = (typeof SANCTIONS_PEP_OUTCOMES)[number];
 
 export interface SanctionsPepScreeningRecord {
   readonly id: string;
@@ -2256,10 +2266,13 @@ export interface SanctionsPepScreeningProvider {
   ): Promise<SanctionsPepScreeningRecord | null>;
 }
 
-export type ESignatureOutcome =
-  | 'requested_manual'
-  | 'signed_uploaded'
-  | 'declined';
+export const E_SIGNATURE_OUTCOMES = [
+  'requested_manual',
+  'signed_uploaded',
+  'declined',
+] as const;
+
+export type ESignatureOutcome = (typeof E_SIGNATURE_OUTCOMES)[number];
 
 export interface ESignatureEnvelopeRecord {
   readonly id: string;
@@ -2307,10 +2320,21 @@ export interface ESignatureProvider {
   ): Promise<ESignatureEnvelopeRecord | null>;
 }
 
+export const PAYMENT_REQUEST_OUTCOMES = [
+  'requested_manual',
+  'receipt_recorded_manual',
+  'cancelled',
+] as const;
+
 export type PaymentRequestOutcome =
-  | 'requested_manual'
-  | 'receipt_recorded_manual'
-  | 'cancelled';
+  (typeof PAYMENT_REQUEST_OUTCOMES)[number];
+
+export const INTAKE_CHECK_OUTCOMES_BY_KIND = Object.freeze({
+  identity_verification: IDENTITY_VERIFICATION_OUTCOMES,
+  sanctions_pep: SANCTIONS_PEP_OUTCOMES,
+  e_signature: E_SIGNATURE_OUTCOMES,
+  payment_request: PAYMENT_REQUEST_OUTCOMES,
+}) satisfies Readonly<Record<IntakeCheckKind, readonly string[]>>;
 
 export interface PaymentRequestRecord {
   readonly id: string;

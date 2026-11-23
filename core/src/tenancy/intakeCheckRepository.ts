@@ -6,13 +6,14 @@
  * with `SET LOCAL ROLE`, `assertRowTenant`, and same-transaction zero-PII `audit_entries` (`ADR 0038`, `ADR 0020`).
  */
 
-import type {
-  FirmAuditEntryInput,
-  IntakeCheckKind,
-  IntakeCheckProviderMode,
-  IntakeCheckSubjectType,
-  IntakeEvidenceArtifactRef,
-  TenantContext,
+import {
+  INTAKE_CHECK_OUTCOMES_BY_KIND,
+  type FirmAuditEntryInput,
+  type IntakeCheckKind,
+  type IntakeCheckProviderMode,
+  type IntakeCheckSubjectType,
+  type IntakeEvidenceArtifactRef,
+  type TenantContext,
 } from '../api/index';
 import { TenantAuditRepository } from './auditRepository';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
@@ -20,16 +21,7 @@ import { TenantScopedRepository, toIsoString } from './tenantScopedRepository';
 
 export const ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND: Readonly<
   Record<IntakeCheckKind, readonly string[]>
-> = Object.freeze({
-  identity_verification: Object.freeze(['verified', 'failed', 'pending', 'expired']),
-  sanctions_pep: Object.freeze(['clear', 'match_flagged', 'pending']),
-  e_signature: Object.freeze(['requested_manual', 'signed_uploaded', 'declined']),
-  payment_request: Object.freeze([
-    'requested_manual',
-    'receipt_recorded_manual',
-    'cancelled',
-  ]),
-});
+> = INTAKE_CHECK_OUTCOMES_BY_KIND;
 
 export function assertValidIntakeCheckOutcome(
   checkKind: IntakeCheckKind,

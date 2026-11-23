@@ -488,7 +488,7 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         metadata: {},
         evidenceRefs: [],
       }),
-    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
 
     const forgedBlobContainerCtx: TenantContext = Object.freeze({
       ...ctxAlpha,
@@ -502,7 +502,7 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         verificationMethod: 'Forged blob container check',
         evidenceRefs: [evidRefBravo],
       }),
-    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
     expect(
       await providers.idVerification.getLatestCheckForSubject(ctxAlpha, {
         subjectType: 'person',
@@ -513,6 +513,75 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       await providers.idVerification.getLatestCheckForSubject(ctxBravo, {
         subjectType: 'person',
         subjectId: 'P-C-FORGED-BLOB',
+      }),
+    ).toBeNull();
+
+    // R672: tenant-id prefix collision (tenant-alpha -> tenant-tenant-alpha- vs tenant-alpha-two -> tenant-tenant-alpha-two-test) & environment mismatch (test vs live)
+    const prefixCollisionCtx: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      blobContainerName: 'tenant-tenant-alpha-two-test',
+    });
+    await expect(
+      storage.putObject(prefixCollisionCtx, {
+        category: 'evidence',
+        objectId: 'EVID-R672-PREFIX',
+        fileName: 'prefix.pdf',
+        contentType: 'application/pdf',
+        bytes: evidBytes,
+      }),
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
+    await expect(
+      providers.idVerification.recordManualCheck(prefixCollisionCtx, {
+        subjectType: 'person',
+        subjectId: 'P-C-R672-PREFIX',
+        outcome: 'verified',
+        verificationMethod: 'Prefix collision bypass check',
+        evidenceRefs: [
+          {
+            ...evidRefAlpha,
+            blobKey: 'tenant-tenant-alpha-two-test/evidence/fake.pdf',
+          },
+        ],
+      }),
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
+    expect(
+      await providers.idVerification.getLatestCheckForSubject(ctxAlpha, {
+        subjectType: 'person',
+        subjectId: 'P-C-R672-PREFIX',
+      }),
+    ).toBeNull();
+
+    const envMismatchCtx: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      blobContainerName: 'tenant-tenant-alpha-live',
+    });
+    await expect(
+      storage.putObject(envMismatchCtx, {
+        category: 'evidence',
+        objectId: 'EVID-R672-ENV',
+        fileName: 'env-mismatch.pdf',
+        contentType: 'application/pdf',
+        bytes: evidBytes,
+      }),
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
+    await expect(
+      providers.idVerification.recordManualCheck(envMismatchCtx, {
+        subjectType: 'person',
+        subjectId: 'P-C-R672-ENV',
+        outcome: 'verified',
+        verificationMethod: 'Env mismatch bypass check',
+        evidenceRefs: [
+          {
+            ...evidRefAlpha,
+            blobKey: 'tenant-tenant-alpha-live/evidence/fake.pdf',
+          },
+        ],
+      }),
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
+    expect(
+      await providers.idVerification.getLatestCheckForSubject(ctxAlpha, {
+        subjectType: 'person',
+        subjectId: 'P-C-R672-ENV',
       }),
     ).toBeNull();
 
@@ -546,12 +615,12 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       }),
     ).toBeNull();
 
-    const forgedRoleCtx: TenantContext = Object.freeze({
+    const forgedPgRoleTenantMismatchCtx: TenantContext = Object.freeze({
       ...ctxAlpha,
       tenantId: ctxBravo.tenantId,
     });
     await expect(
-      repo.recordCheck(forgedRoleCtx, {
+      repo.recordCheck(forgedPgRoleTenantMismatchCtx, {
         checkKind: 'identity_verification',
         provider: 'manual',
         subjectType: 'person',
@@ -575,6 +644,51 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         subjectId: 'P-C-FORGED-ROLE',
       }),
     ).toBeNull();
+
+    // R684: Forged actorRoles claim (and unverified OIDC token with elevated roles) cannot bypass tenant isolation
+    const forgedActorRolesCtx: TenantContext = Object.freeze({
+      ...ctxAlpha,
+      actorRoles: Object.freeze(['admin', 'managing_partner']),
+      blobContainerName: ctxBravo.blobContainerName,
+    });
+    await expect(
+      providers.idVerification.recordManualCheck(forgedActorRolesCtx, {
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ACTOR-ROLES',
+        outcome: 'verified',
+        verificationMethod: 'Forged actorRoles check',
+        evidenceRefs: [evidRefBravo],
+      }),
+    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
+    expect(
+      await repo.getLatestCheckForSubject(ctxAlpha, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ACTOR-ROLES',
+      }),
+    ).toBeNull();
+    expect(
+      await repo.getLatestCheckForSubject(ctxBravo, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ACTOR-ROLES',
+      }),
+    ).toBeNull();
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          sub: 'P-ALPHA-1',
+          tenantId: ctxAlpha.tenantId,
+          name: 'Alpha User',
+          email: 'alpha@tenant-alpha.example',
+          roles: ['admin', 'managing_partner'],
+          mfaVerified: true,
+        } as unknown as Parameters<typeof resolveTenantFromVerifiedToken>[0]['verifiedToken'],
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-forged-actor-roles',
+      }),
+    ).toThrow(/TENANCY_AUTH_ERROR/);
 
     expect(() =>
       resolveTenantFromVerifiedToken({
@@ -1077,5 +1191,65 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       'Quote-Middle-One.pdf',
       'Schedule-Part-Two.pdf',
     ]);
+
+    // 9. R674: Outbox attachment ordinal mismatch or metadata sha256 mismatch fails closed (never falls back cursor or sends wrong file)
+    mixedGraphPayloads.length = 0;
+    const enqOrdinalMismatch = await outboxRepo.enqueueEmail(ctxAlpha, {
+      idempotencyKey: 's103-r674-ordinal-mismatch',
+      templateKey: 'quote_send',
+      recipients: { to: ['client-mixed@invented.example'] },
+      subject: 'Ordinal Mismatch Should Fail Closed',
+      htmlBody: '<p>Ordinal mismatch.</p>',
+      textBody: 'Ordinal mismatch.',
+      attachments: [inlinePdf1],
+    });
+    await outboxRepo.withTenantTransaction(ctxAlpha, async (tx) => {
+      await tx.query(
+        `UPDATE public.email_outbox
+            SET attachments_json = jsonb_set(attachments_json, '{0,ordinal}', '99'::jsonb)
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctxAlpha.tenantId, enqOrdinalMismatch.record.id],
+      );
+    });
+    const drainOrdinalMismatch = await drainOutboxForTenant(ctxAlpha, {
+      tenantConfig: cfgGraph,
+      emailSender: mixedGraphDispatcher,
+      outboxRepository: outboxRepo,
+      actorId: 'system:outbox-drain',
+      baseBackoffSeconds: 60,
+      now: new Date(Date.now() + 10_000),
+    });
+    expect(drainOrdinalMismatch.sentCount).toBe(0);
+    expect(drainOrdinalMismatch.retriedCount).toBe(1);
+    expect(mixedGraphPayloads).toHaveLength(0);
+
+    const enqShaMismatch = await outboxRepo.enqueueEmail(ctxAlpha, {
+      idempotencyKey: 's103-r674-sha-mismatch',
+      templateKey: 'quote_send',
+      recipients: { to: ['client-mixed@invented.example'] },
+      subject: 'SHA256 Mismatch Should Fail Closed',
+      htmlBody: '<p>SHA mismatch.</p>',
+      textBody: 'SHA mismatch.',
+      attachments: [inlinePdf1],
+    });
+    await outboxRepo.withTenantTransaction(ctxAlpha, async (tx) => {
+      await tx.query(
+        `UPDATE public.email_outbox
+            SET attachments_json = jsonb_set(attachments_json, '{0,sha256}', to_jsonb($3::text))
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctxAlpha.tenantId, enqShaMismatch.record.id, '0'.repeat(64)],
+      );
+    });
+    const drainShaMismatch = await drainOutboxForTenant(ctxAlpha, {
+      tenantConfig: cfgGraph,
+      emailSender: mixedGraphDispatcher,
+      outboxRepository: outboxRepo,
+      actorId: 'system:outbox-drain',
+      baseBackoffSeconds: 60,
+      now: new Date(Date.now() + 20_000),
+    });
+    expect(drainShaMismatch.sentCount).toBe(0);
+    expect(drainShaMismatch.retriedCount).toBe(1);
+    expect(mixedGraphPayloads).toHaveLength(0);
   });
 });
