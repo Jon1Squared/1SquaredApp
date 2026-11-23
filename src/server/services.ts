@@ -28916,6 +28916,8 @@ export async function executeQuoteExpiryForTenant(
     statementTimeoutMs?: number;
     signal?: AbortSignal;
     tenantConfig?: TenantConfiguration;
+    /** Test-only hook invoked right before expiring each candidate quote (`R675`). */
+    onBeforeExpireQuote?: (quoteId: string) => Promise<void>;
   },
 ): Promise<ControlledJobRunOutcome<{ summary: QuoteExpiryJobSummary }>> {
   const tenantConfig = resolveVerifiedTenantConfiguration(ctx, options.tenantConfig);
@@ -28945,28 +28947,47 @@ export async function executeQuoteExpiryForTenant(
       let expiredCount = 0;
 
       for (const quote of candidates) {
-        const previousStatus = quote.status;
-        const { changed, newlyExpired } = applyQuoteEffectiveLifecycle(
-          quote,
-          lifecycleNow,
-          { appendExpiredTimeline: true },
+        if (
+          options.onBeforeExpireQuote &&
+          (process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST))
+        ) {
+          await options.onBeforeExpireQuote(quote.id);
+        }
+        const expireResult = await intakeRepo.expireQuoteIfOverdue<Quote>(
+          ctx,
+          quote.id,
+          {
+            localDate,
+            applyTransition: (freshQuote) => {
+              const previousStatus = freshQuote.status;
+              const { changed, newlyExpired } = applyQuoteEffectiveLifecycle(
+                freshQuote,
+                lifecycleNow,
+                { appendExpiredTimeline: true },
+              );
+              if (!changed && !newlyExpired) {
+                return { shouldPersist: false, previousStatus };
+              }
+              freshQuote.updatedAt = nowIso;
+              return { shouldPersist: true, previousStatus };
+            },
+          },
         );
-        if (!changed && !newlyExpired) {
+        if (!expireResult.expired || !expireResult.quote) {
           continue;
         }
-        quote.updatedAt = nowIso;
-        await intakeRepo.putQuote(ctx, quote);
+        const expiredQuote = expireResult.quote;
         await appendTenantAuditEntries(ctx, [
           {
             recordType: 'quote',
-            recordId: quote.id,
+            recordId: expiredQuote.id,
             action: 'status-change',
             field: 'Quote lifecycle status',
-            oldValue: previousStatus,
-            newValue: quote.status,
+            oldValue: expireResult.previousStatus,
+            newValue: expiredQuote.status,
             byId: options.triggeredById,
             at: nowIso,
-            reason: `Valid-until date (${quote.validUntil ?? localDate}) passed without an outcome.`,
+            reason: `Valid-until date (${expiredQuote.validUntil ?? localDate}) passed without an outcome.`,
           },
         ]);
         expiredCount += 1;

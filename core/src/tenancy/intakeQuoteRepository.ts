@@ -1812,6 +1812,58 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     });
   }
 
+  /**
+   * Atomically locks and expires a single quote only if it is still open (`Sent` or
+   * `Follow-up due`) with `valid_until < localDate` (`R675`). Uses `FOR UPDATE SKIP LOCKED`
+   * so concurrent status changes or another worker never get overwritten or stall the sweep.
+   */
+  public async expireQuoteIfOverdue<
+    T extends { status: string; timeline?: unknown[]; updatedAt?: string } = TenantQuoteRecord,
+  >(
+    ctx: TenantContext,
+    quoteId: string,
+    options: {
+      readonly localDate: string;
+      readonly applyTransition: (quote: T) => {
+        readonly shouldPersist: boolean;
+        readonly previousStatus: string;
+      };
+    },
+  ): Promise<{ expired: boolean; previousStatus: string | null; quote: T | null }> {
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query<QuoteRow>(
+        `SELECT * FROM quotes q
+         WHERE q.tenant_id = $1
+           AND q.id = $2
+           AND q.status IN ('Sent', 'Follow-up due')
+           AND NULLIF(q.valid_until, '') IS NOT NULL
+           AND q.valid_until < $3
+         FOR UPDATE SKIP LOCKED`,
+        [ctx.tenantId, quoteId, options.localDate],
+      );
+      if (res.rows.length === 0) {
+        return { expired: false, previousStatus: null, quote: null };
+      }
+      const row = res.rows[0]!;
+      this.assertRowTenant(
+        ctx,
+        row.tenant_id,
+        'quotes.expireQuoteIfOverdue',
+      );
+      const freshQuote = mapRowToQuote(row) as unknown as T;
+      const { shouldPersist, previousStatus } = options.applyTransition(freshQuote);
+      if (!shouldPersist) {
+        return { expired: false, previousStatus, quote: null };
+      }
+      await this.upsertQuoteInTx(
+        tx,
+        ctx,
+        freshQuote as unknown as TenantQuoteRecord,
+      );
+      return { expired: true, previousStatus, quote: freshQuote };
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // S1-02a Scoped Intake & Quote Lookups
   // ---------------------------------------------------------------------------

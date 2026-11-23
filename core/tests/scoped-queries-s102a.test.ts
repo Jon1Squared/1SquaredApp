@@ -2095,4 +2095,259 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       warnSpy.mockRestore();
     }
   });
+
+  it('R675: quote-expiry runs atomic conditional FOR UPDATE SKIP LOCKED updates across concurrent workers and outcomes across two tenants', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const tenancyMod = await import('../src/tenancy/index');
+    const coreMod = await import('../src/index');
+    const runtimeMod = await import('../../src/platform/tenantRuntime');
+    const servicesMod = (await import('../../src/server/services')) as Record<string, unknown>;
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const auditRepo = new tenancyMod.TenantAuditRepository();
+    const jobRunRepo = new tenancyMod.TenantJobRunRepository();
+
+    await jobRunRepo.clearTenantJobRuns(ctxAlpha);
+    await jobRunRepo.clearTenantJobRuns(ctxBravo);
+
+    const buildQuote = (id: string, overrides: Record<string, unknown>) => ({
+      id,
+      reference: id,
+      clientType: 'person' as const,
+      clientFirstName: 'RaceCheck',
+      clientLastName: 'ConfidentialQuote',
+      clientEmail: 'race.check@example.invalid',
+      departmentId: 'DEPT-DISP',
+      matterTypeId: 'MT-DISP-01',
+      title: `Quote ${id}`,
+      status: 'Sent',
+      feeBasis: 'fixed' as const,
+      estimatedFeeExVat: 1500,
+      estimatedDisbursementsExVat: 0,
+      vatRatePercent: 20,
+      validUntil: '2026-10-01',
+      ownerId: 'P-000001',
+      createdById: 'P-000001',
+      createdAt: '2026-09-01T09:00:00Z',
+      updatedAt: '2026-09-01T09:00:00Z',
+      sentAt: '2026-09-01T10:00:00Z',
+      timeline: [],
+      ...overrides,
+    });
+
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R675-A-ACCEPT', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R675-A-EXTEND', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R675-A-DUP', { status: 'Follow-up due', validUntil: '2026-10-05' }) as never);
+    await intakeRepo.putQuote(ctxAlpha, buildQuote('QUO-R675-A-OK', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+    await intakeRepo.putQuote(ctxBravo, buildQuote('QUO-R675-B-LOCKED', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+    await intakeRepo.putQuote(ctxBravo, buildQuote('QUO-R675-B-RACE', { status: 'Sent', validUntil: '2026-10-01' }) as never);
+
+    const countExpiryAudits = async (ctx: TenantContext, quoteId: string): Promise<number> => {
+      const entries = await auditRepo.listAuditEntriesForRecord(ctx, 'quote', quoteId);
+      return entries.filter((a) => a.field === 'Quote lifecycle status' && a.newValue === 'Expired').length;
+    };
+    const acceptAuditsBefore = await countExpiryAudits(ctxAlpha, 'QUO-R675-A-ACCEPT');
+    const extendAuditsBefore = await countExpiryAudits(ctxAlpha, 'QUO-R675-A-EXTEND');
+    const dupAuditsBefore = await countExpiryAudits(ctxAlpha, 'QUO-R675-A-DUP');
+    const okAuditsBefore = await countExpiryAudits(ctxAlpha, 'QUO-R675-A-OK');
+
+    const rawBase = structuredClone(runtimeMod.getActiveTenantRawBaseConfig()) as Record<string, unknown>;
+    const alphaCfg = coreMod.loadAndValidateTenantConfig(
+      rawBase,
+      { tenantId: tenantAlpha, environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    const bravoCfg = coreMod.loadAndValidateTenantConfig(
+      rawBase,
+      { tenantId: tenantBravo, environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+
+    const secondPoolManager = new tenancyMod.TenantPostgresPoolManager();
+    const independentIntakeRepo = new TenantIntakeQuoteRepository({ poolManager: secondPoolManager });
+    const execManual = servicesMod.executeQuoteExpiryForTenant as (
+      ctx: TenantContext,
+      opts: Record<string, unknown>,
+    ) => Promise<{
+      outcome: string;
+      result?: { summary: { expiredCount: number } };
+    }>;
+
+    try {
+      const seenHooks: string[] = [];
+      const firstRun = await execManual(ctxAlpha, {
+        triggerSource: 'manual',
+        triggeredById: 'system:quote-expiry-worker-1',
+        defaultRunHourLocal: 0,
+        tenantConfig: alphaCfg,
+        statementTimeoutMs: 3000,
+        onBeforeExpireQuote: async (quoteId: string) => {
+          seenHooks.push(quoteId);
+          if (quoteId === 'QUO-R675-A-ACCEPT') {
+            const existing = await independentIntakeRepo.getQuoteById<Record<string, unknown>>(
+              ctxAlpha,
+              quoteId,
+              { includeRestricted: true },
+            );
+            await independentIntakeRepo.putQuote(ctxAlpha, {
+              ...(existing as Record<string, unknown>),
+              status: 'Accepted',
+              outcomeAt: '2026-11-23T10:00:00Z',
+              updatedAt: '2026-11-23T10:00:00Z',
+            } as never);
+          } else if (quoteId === 'QUO-R675-A-EXTEND') {
+            const existing = await independentIntakeRepo.getQuoteById<Record<string, unknown>>(
+              ctxAlpha,
+              quoteId,
+              { includeRestricted: true },
+            );
+            await independentIntakeRepo.putQuote(ctxAlpha, {
+              ...(existing as Record<string, unknown>),
+              validUntil: '2099-12-31',
+              updatedAt: '2026-11-23T10:00:00Z',
+            } as never);
+          } else if (quoteId === 'QUO-R675-A-DUP') {
+            // Simulate another independent worker expiring the quote before worker 1 persists
+            const existing = await independentIntakeRepo.getQuoteById<Record<string, unknown>>(
+              ctxAlpha,
+              quoteId,
+              { includeRestricted: true },
+            );
+            await independentIntakeRepo.putQuote(ctxAlpha, {
+              ...(existing as Record<string, unknown>),
+              status: 'Expired',
+              timeline: [
+                {
+                  id: `QT-EXP-${quoteId}`,
+                  kind: 'expired',
+                  at: '2026-11-23T10:00:00Z',
+                  byId: null,
+                  title: 'Quote expired',
+                  detail: 'Expired by worker 2.',
+                },
+              ],
+              updatedAt: '2026-11-23T10:00:00Z',
+            } as never);
+          }
+        },
+      });
+
+      expect(seenHooks).toContain('QUO-R675-A-ACCEPT');
+      expect(seenHooks).toContain('QUO-R675-A-EXTEND');
+      expect(seenHooks).toContain('QUO-R675-A-DUP');
+      expect(seenHooks).toContain('QUO-R675-A-OK');
+      expect(firstRun.outcome).toBe('executed');
+      // Worker 1 expires only QUO-R675-A-OK (worker 2 expired QUO-R675-A-DUP; ACCEPT & EXTEND were updated concurrently).
+      expect(firstRun.result?.summary.expiredCount).toBe(1);
+
+      const acceptedQuote = await intakeRepo.getQuoteById<{ status: string; timeline: Array<{ kind: string }> }>(
+        ctxAlpha,
+        'QUO-R675-A-ACCEPT',
+        { includeRestricted: true },
+      );
+      expect(acceptedQuote?.status).toBe('Accepted');
+      expect(acceptedQuote?.timeline.some((t) => t.kind === 'expired')).toBe(false);
+      expect((await countExpiryAudits(ctxAlpha, 'QUO-R675-A-ACCEPT')) - acceptAuditsBefore).toBe(0);
+
+      const extendedQuote = await intakeRepo.getQuoteById<{ status: string; validUntil: string; timeline: Array<{ kind: string }> }>(
+        ctxAlpha,
+        'QUO-R675-A-EXTEND',
+        { includeRestricted: true },
+      );
+      expect(extendedQuote?.status).toBe('Sent');
+      expect(extendedQuote?.validUntil).toBe('2099-12-31');
+      expect(extendedQuote?.timeline.some((t) => t.kind === 'expired')).toBe(false);
+      expect((await countExpiryAudits(ctxAlpha, 'QUO-R675-A-EXTEND')) - extendAuditsBefore).toBe(0);
+
+      const dupQuote = await intakeRepo.getQuoteById<{ status: string; timeline: Array<{ kind: string }> }>(
+        ctxAlpha,
+        'QUO-R675-A-DUP',
+        { includeRestricted: true },
+      );
+      expect(dupQuote?.status).toBe('Expired');
+      expect(dupQuote?.timeline.filter((t) => t.kind === 'expired')).toHaveLength(1);
+      expect((await countExpiryAudits(ctxAlpha, 'QUO-R675-A-DUP')) - dupAuditsBefore).toBe(0);
+
+      const okQuote = await intakeRepo.getQuoteById<{ status: string; timeline: Array<{ kind: string }> }>(
+        ctxAlpha,
+        'QUO-R675-A-OK',
+        { includeRestricted: true },
+      );
+      expect(okQuote?.status).toBe('Expired');
+      expect(okQuote?.timeline.filter((t) => t.kind === 'expired')).toHaveLength(1);
+      expect((await countExpiryAudits(ctxAlpha, 'QUO-R675-A-OK')) - okAuditsBefore).toBe(1);
+
+      // Bravo's overdue quotes remained completely untouched by Alpha's sweep, and SKIP LOCKED skips an uncommitted FOR UPDATE lock cleanly.
+      const bravoBefore = await intakeRepo.getQuoteById<{ status: string }>(ctxBravo, 'QUO-R675-B-LOCKED', { includeRestricted: true });
+      expect(bravoBefore?.status).toBe('Sent');
+
+      const { applyQuoteEffectiveLifecycle } = await import('../../src/domain/quotes');
+      const [race1, race2] = await Promise.all([
+        intakeRepo.expireQuoteIfOverdue(ctxBravo, 'QUO-R675-B-RACE', {
+          localDate: '2026-11-23',
+          applyTransition: (q) => {
+            const prev = q.status;
+            const { changed, newlyExpired } = applyQuoteEffectiveLifecycle(q as never, new Date('2026-11-23T09:00:00Z'), {
+              appendExpiredTimeline: true,
+            });
+            q.updatedAt = '2026-11-23T09:00:00Z';
+            return { shouldPersist: changed || newlyExpired, previousStatus: prev };
+          },
+        }),
+        independentIntakeRepo.expireQuoteIfOverdue(ctxBravo, 'QUO-R675-B-RACE', {
+          localDate: '2026-11-23',
+          applyTransition: (q) => {
+            const prev = q.status;
+            const { changed, newlyExpired } = applyQuoteEffectiveLifecycle(q as never, new Date('2026-11-23T09:00:00Z'), {
+              appendExpiredTimeline: true,
+            });
+            q.updatedAt = '2026-11-23T09:00:00Z';
+            return { shouldPersist: changed || newlyExpired, previousStatus: prev };
+          },
+        }),
+      ]);
+      expect([race1.expired, race2.expired].filter(Boolean)).toHaveLength(1);
+
+      await independentIntakeRepo.withTenantTransaction(ctxBravo, async (tx) => {
+        await tx.query('SELECT id FROM quotes WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [ctxBravo.tenantId, 'QUO-R675-B-LOCKED']);
+        const lockedRun = await execManual(ctxBravo, {
+          triggerSource: 'manual',
+          triggeredById: 'system:quote-expiry-locked',
+          defaultRunHourLocal: 0,
+          statementTimeoutMs: 2000,
+          tenantConfig: bravoCfg,
+        });
+        expect(lockedRun.result?.summary.expiredCount).toBe(0);
+        throw new Error('__RELEASE_LOCK_ROLLBACK__');
+      }).catch((err: Error) => {
+        if (err.message !== '__RELEASE_LOCK_ROLLBACK__') throw err;
+      });
+
+      const unlockedRun = await execManual(ctxBravo, {
+        triggerSource: 'manual',
+        triggeredById: 'system:quote-expiry-unlocked',
+        defaultRunHourLocal: 0,
+        tenantConfig: bravoCfg,
+      });
+      expect(unlockedRun.result?.summary.expiredCount).toBe(1);
+      const bravoAfter = await intakeRepo.getQuoteById<{ status: string }>(ctxBravo, 'QUO-R675-B-LOCKED', { includeRestricted: true });
+      expect(bravoAfter?.status).toBe('Expired');
+    } finally {
+      await secondPoolManager.closeAllPools();
+    }
+  }, 30_000);
 });
