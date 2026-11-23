@@ -1111,7 +1111,10 @@ export function buildSeedClientCareTemplateDocxBytes(): Uint8Array {
         bold: true,
       },
       {
-        text: 'Your matter will be billed on a {{ matter.fundingType }} basis. Our current estimate of professional charges is {{ financial.feeEstimate | currency }} ({{ financial.feeEstimate | words }}) plus VAT and disbursements. The applicable lead hourly charge-out rate is {{ financial.hourlyRate | currency }} per hour plus VAT. Any payment on account required is set out in the costs information enclosed. {{ financial.retainerAmount | currency }}',
+        text: 'Your matter will be billed on a {{ matter.fundingType }} basis. Our current estimate of professional charges is {{ financial.feeEstimate | currency }} ({{ financial.feeEstimate | words }}) plus VAT and disbursements. The applicable lead hourly charge-out rate is {{ financial.hourlyRate | currency }} per hour plus VAT. Any payment on account required is set out in the costs information enclosed.',
+      },
+      {
+        text: 'Payment on account requested: {{ financial.retainerAmount | currency }}',
       },
       {
         text: '4. Client Identification, Regulatory & Complaints Procedure',

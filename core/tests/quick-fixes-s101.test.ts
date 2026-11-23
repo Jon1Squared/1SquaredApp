@@ -387,6 +387,9 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       ).get('word/document.xml')!.data,
     );
     expect(zeroFieldXml).not.toContain('£0.00');
+    expect(zeroFieldXml).not.toContain('. £');
+    expect(zeroFieldXml).toContain('Payment on account requested:');
+    expect(zeroFieldXml).not.toMatch(/Payment on account requested:\s*£/);
 
     const defaultCostsCfg = createDefaultMatterCostsConfig(seedStore.values);
     const matterZeroSnap: Matter = {
@@ -431,6 +434,9 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       ).get('word/document.xml')!.data,
     );
     expect(zeroSnapXml).not.toContain('£0.00');
+    expect(zeroSnapXml).not.toContain('. £');
+    expect(zeroSnapXml).toContain('Payment on account requested:');
+    expect(zeroSnapXml).not.toMatch(/Payment on account requested:\s*£/);
 
     // R687: save real matters through saveMatterRecord so fieldValues.matterCosts is written by the real validator
     const savedPoaNo = await wrapActor(partnerSession, () =>
@@ -488,6 +494,9 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
     expect(poaNoXml).not.toContain('£500.00');
     expect(poaNoXml).not.toContain('£0.00');
     expect(poaNoXml).not.toContain('of .');
+    expect(poaNoXml).not.toContain('. £');
+    expect(poaNoXml).toContain('Payment on account requested:');
+    expect(poaNoXml).not.toMatch(/Payment on account requested:\s*£/);
 
     const savedPoaYes = await wrapActor(partnerSession, () =>
       saveMatterRecord(
@@ -542,6 +551,8 @@ describe('S1-01 quick fixes: B2, non-engagement tasks, R636, R598, and documentG
       ).get('word/document.xml')!.data,
     );
     expect(poaYesXml).toContain('£2,500.00');
+    expect(poaYesXml).toContain('Payment on account requested: £2,500.00');
+    expect(poaYesXml).not.toContain('. £');
 
     // When financial.retainerAmount is required, generation fails closed with blocked_missing_required
     const tplVer = (await docRepo.getTemplateVersionById(nalfCtx, 'TPL-SEED-CCL-V1'))!;
