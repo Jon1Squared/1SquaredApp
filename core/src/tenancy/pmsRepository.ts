@@ -2690,14 +2690,27 @@ export class TenantPmsRepository extends TenantScopedRepository {
 
   public async getInvoices(
     ctx: TenantContext,
-    filter?: { matterCode?: string; clientCode?: string },
+    filter?: {
+      matterCode?: string;
+      matterCodes?: readonly string[];
+      clientCode?: string;
+    },
   ): Promise<TenantPmsInvoiceDetail[]> {
+    const cleanMatterCodes = Array.from(
+      new Set((filter?.matterCodes ?? []).map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (filter?.matterCodes !== undefined && cleanMatterCodes.length === 0) {
+      return [];
+    }
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const invClauses = ['tenant_id = $1'];
       const invParams: unknown[] = [ctx.tenantId];
       if (filter?.matterCode) {
         invParams.push(filter.matterCode);
         invClauses.push(`matter_code = $${invParams.length}`);
+      } else if (cleanMatterCodes.length > 0) {
+        invParams.push(cleanMatterCodes);
+        invClauses.push(`matter_code = ANY($${invParams.length}::text[])`);
       }
       if (filter?.clientCode) {
         invParams.push(filter.clientCode);
@@ -2769,6 +2782,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async listInvoicesByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsInvoiceDetail[]> {
+    return this.getInvoices(ctx, { matterCodes });
+  }
+
   public async getDisbursements(
     ctx: TenantContext,
     matterCode: string,
@@ -2782,6 +2802,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async listDisbursementsByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsDisbursement[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+        [ctx.tenantId, cleanCodes],
+      );
+      return this.mapDisbursementRows(ctx, res.rows);
+    });
+  }
+
   public async getClientAccountLedger(
     ctx: TenantContext,
     matterCode: string,
@@ -2790,6 +2827,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const res = await tx.query<DbGenericPayloadRow>(
         'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date ASC, transaction_id ASC',
         [ctx.tenantId, matterCode],
+      );
+      return this.mapClientAccountRows(ctx, res.rows);
+    });
+  }
+
+  public async listClientAccountEntriesByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsClientAccountEntry[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date ASC, transaction_id ASC',
+        [ctx.tenantId, cleanCodes],
       );
       return this.mapClientAccountRows(ctx, res.rows);
     });

@@ -23110,20 +23110,15 @@ export async function getMatterKeyDatesSnapshot(
     };
   }
   const keyDateRepo = getKeyDateRepository();
-  const [keyDates, keyDateNotApplicable, allReminders, allCalendarSyncs] =
-    await Promise.all([
-      keyDateRepo.listKeyDatesForMatter(ctx, matter.id, user.id),
-      keyDateRepo.listNotApplicableForMatter(ctx, matter.id, user.id),
-      keyDateRepo.listAllReminderStates(ctx, user.id),
-      keyDateRepo.listAllVisibleCalendarSyncs(ctx, user.id),
-    ]);
-  const keyDateIdSet = new Set(keyDates.map((kd) => kd.id));
-  const keyDateReminderStates = allReminders.filter((rs) =>
-    keyDateIdSet.has(rs.keyDateId),
-  );
-  const keyDateCalendarSyncs = allCalendarSyncs.filter((cs) =>
-    keyDateIdSet.has(cs.keyDateId),
-  );
+  const [keyDates, keyDateNotApplicable] = await Promise.all([
+    keyDateRepo.listKeyDatesForMatter(ctx, matter.id, user.id),
+    keyDateRepo.listNotApplicableForMatter(ctx, matter.id, user.id),
+  ]);
+  const keyDateIds = keyDates.map((kd) => kd.id);
+  const [keyDateReminderStates, keyDateCalendarSyncs] = await Promise.all([
+    keyDateRepo.listReminderStatesForKeyDateIds(ctx, keyDateIds, user.id),
+    keyDateRepo.listCalendarSyncsForKeyDateIds(ctx, keyDateIds, user.id),
+  ]);
   const canVerifyByKeyDateId: Record<
     string,
     { allowed: boolean; reason?: string }

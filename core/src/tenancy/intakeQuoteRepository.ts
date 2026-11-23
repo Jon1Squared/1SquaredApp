@@ -1388,8 +1388,26 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     viewerId: string,
     options?: {
       status?: string;
+      statuses?: readonly string[];
+      excludeStatuses?: readonly string[];
+      openOnly?: boolean;
       assignedTeamId?: string;
       assignedToId?: string;
+      assignedToOrTeams?: {
+        readonly assignedToId?: string;
+        readonly assignedTeamIds?: readonly string[];
+      };
+      linkedPersonId?: string;
+      relatedPersonId?: string;
+      linkedOrganisationId?: string;
+      relatedOrganisationId?: string;
+      convertedMatterId?: string;
+      linkedPersonIds?: readonly string[];
+      linkedOrganisationIds?: readonly string[];
+      query?: string;
+      excludeIds?: readonly string[];
+      limit?: number;
+      offset?: number;
       includeRestricted?: boolean;
       hasRestrictedMatterAccess?: boolean;
     },
@@ -1414,6 +1432,21 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         params.push(options.status);
         clauses.push(`e.status = $${params.length}`);
       }
+      const statuses = Array.from(new Set((options?.statuses ?? []).filter(Boolean)));
+      if (statuses.length > 0) {
+        params.push(statuses);
+        clauses.push(`e.status = ANY($${params.length}::text[])`);
+      }
+      const excludeStatuses = new Set((options?.excludeStatuses ?? []).filter(Boolean));
+      if (options?.openOnly) {
+        for (const closed of ['Converted', 'Declined', 'Referred out', 'No response']) {
+          excludeStatuses.add(closed);
+        }
+      }
+      if (excludeStatuses.size > 0) {
+        params.push(Array.from(excludeStatuses));
+        clauses.push(`e.status <> ALL($${params.length}::text[])`);
+      }
       if (options?.assignedTeamId) {
         params.push(options.assignedTeamId);
         clauses.push(`e.assigned_team_id = $${params.length}`);
@@ -1422,13 +1455,101 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         params.push(options.assignedToId);
         clauses.push(`e.assigned_to_id = $${params.length}`);
       }
-
-      const res = await tx.query<EnquiryRow>(
-        `SELECT * FROM enquiries e
-         WHERE ${clauses.join(' AND ')}
-         ORDER BY e.received_at DESC, e.id ASC`,
-        params,
+      if (options?.assignedToOrTeams) {
+        const orParts: string[] = [];
+        const assignedTo = options.assignedToOrTeams.assignedToId?.trim();
+        const teamIds = Array.from(
+          new Set((options.assignedToOrTeams.assignedTeamIds ?? []).filter(Boolean)),
+        );
+        if (assignedTo) {
+          params.push(assignedTo);
+          orParts.push(`e.assigned_to_id = $${params.length}`);
+        }
+        if (teamIds.length > 0) {
+          params.push(teamIds);
+          orParts.push(`e.assigned_team_id = ANY($${params.length}::text[])`);
+        }
+        if (orParts.length > 0) {
+          clauses.push(`(${orParts.join(' OR ')})`);
+        }
+      }
+      if (options?.linkedPersonId?.trim()) {
+        params.push(options.linkedPersonId.trim());
+        clauses.push(`e.linked_person_id = $${params.length}`);
+      }
+      if (options?.relatedPersonId?.trim()) {
+        params.push(options.relatedPersonId.trim());
+        const idx = params.length;
+        clauses.push(
+          `(e.linked_person_id = $${idx} OR e.referrer_person_id = $${idx} OR e.taken_by_id = $${idx} OR e.assigned_to_id = $${idx} OR e.created_by_id = $${idx})`,
+        );
+      }
+      if (options?.linkedOrganisationId?.trim()) {
+        params.push(options.linkedOrganisationId.trim());
+        clauses.push(`e.linked_organisation_id = $${params.length}`);
+      }
+      if (options?.relatedOrganisationId?.trim()) {
+        params.push(options.relatedOrganisationId.trim());
+        const idx = params.length;
+        clauses.push(
+          `(e.linked_organisation_id = $${idx} OR e.referred_to_organisation_id = $${idx})`,
+        );
+      }
+      if (options?.convertedMatterId?.trim()) {
+        params.push(options.convertedMatterId.trim());
+        clauses.push(`e.converted_matter_id = $${params.length}`);
+      }
+      const linkedPersonIds = Array.from(
+        new Set((options?.linkedPersonIds ?? []).filter(Boolean)),
       );
+      if (linkedPersonIds.length > 0) {
+        params.push(linkedPersonIds);
+        clauses.push(`e.linked_person_id = ANY($${params.length}::text[])`);
+      }
+      const linkedOrgIds = Array.from(
+        new Set((options?.linkedOrganisationIds ?? []).filter(Boolean)),
+      );
+      if (linkedOrgIds.length > 0) {
+        params.push(linkedOrgIds);
+        clauses.push(`e.linked_organisation_id = ANY($${params.length}::text[])`);
+      }
+      const excludeIds = Array.from(
+        new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
+      );
+      if (excludeIds.length > 0) {
+        params.push(excludeIds);
+        clauses.push(`e.id <> ALL($${params.length}::text[])`);
+      }
+      const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+      if (cleanQuery) {
+        params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
+        const pat = `$${params.length}`;
+        clauses.push(
+          `(
+             lower(COALESCE(e.id, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(e.reference, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(e.first_name, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(e.last_name, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(trim(concat_ws(' ', NULLIF(e.first_name, ''), NULLIF(e.last_name, '')))) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(e.calling_on_behalf_of, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(e.email, '')) LIKE ${pat} ESCAPE '\\'
+           )`,
+        );
+      }
+
+      let sql = `SELECT * FROM enquiries e
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY e.received_at DESC, e.id ASC`;
+      if (typeof options?.limit === 'number' && Number.isFinite(options.limit)) {
+        params.push(Math.max(1, Math.min(500, Math.floor(options.limit))));
+        sql += ` LIMIT $${params.length}`;
+      }
+      if (typeof options?.offset === 'number' && Number.isFinite(options.offset)) {
+        params.push(Math.max(0, Math.floor(options.offset)));
+        sql += ` OFFSET $${params.length}`;
+      }
+
+      const res = await tx.query<EnquiryRow>(sql, params);
       const hiddenMatterIds =
         includeRestricted || hasRestrictedMatterAccess
           ? new Set<string>()
@@ -1804,7 +1925,16 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     viewerId: string,
     options?: {
       status?: string;
+      statuses?: readonly string[];
+      excludeStatuses?: readonly string[];
       sourceEnquiryId?: string;
+      convertedMatterId?: string;
+      linkedPersonId?: string;
+      linkedOrganisationId?: string;
+      query?: string;
+      excludeIds?: readonly string[];
+      limit?: number;
+      offset?: number;
       includeRestricted?: boolean;
       hasRestrictedMatterAccess?: boolean;
     },
@@ -1829,17 +1959,67 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         params.push(options.status);
         clauses.push(`q.status = $${params.length}`);
       }
+      const statuses = Array.from(new Set((options?.statuses ?? []).filter(Boolean)));
+      if (statuses.length > 0) {
+        params.push(statuses);
+        clauses.push(`q.status = ANY($${params.length}::text[])`);
+      }
+      const excludeStatuses = Array.from(
+        new Set((options?.excludeStatuses ?? []).filter(Boolean)),
+      );
+      if (excludeStatuses.length > 0) {
+        params.push(excludeStatuses);
+        clauses.push(`q.status <> ALL($${params.length}::text[])`);
+      }
       if (options?.sourceEnquiryId) {
         params.push(options.sourceEnquiryId);
         clauses.push(`q.source_enquiry_id = $${params.length}`);
       }
-
-      const res = await tx.query<QuoteRow>(
-        `SELECT * FROM quotes q
-         WHERE ${clauses.join(' AND ')}
-         ORDER BY q.created_at DESC, q.id ASC`,
-        params,
+      if (options?.convertedMatterId?.trim()) {
+        params.push(options.convertedMatterId.trim());
+        clauses.push(`q.converted_matter_id = $${params.length}`);
+      }
+      if (options?.linkedPersonId?.trim()) {
+        params.push(options.linkedPersonId.trim());
+        clauses.push(`q.client_person_id = $${params.length}`);
+      }
+      if (options?.linkedOrganisationId?.trim()) {
+        params.push(options.linkedOrganisationId.trim());
+        clauses.push(`q.client_organisation_id = $${params.length}`);
+      }
+      const excludeIds = Array.from(
+        new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
       );
+      if (excludeIds.length > 0) {
+        params.push(excludeIds);
+        clauses.push(`q.id <> ALL($${params.length}::text[])`);
+      }
+      const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+      if (cleanQuery) {
+        params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
+        const pat = `$${params.length}`;
+        clauses.push(
+          `(
+             lower(COALESCE(q.id, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(q.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
+             OR lower(COALESCE(q.prospect_name, '')) LIKE ${pat} ESCAPE '\\'
+           )`,
+        );
+      }
+
+      let sql = `SELECT * FROM quotes q
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY q.created_at DESC, q.id ASC`;
+      if (typeof options?.limit === 'number' && Number.isFinite(options.limit)) {
+        params.push(Math.max(1, Math.min(500, Math.floor(options.limit))));
+        sql += ` LIMIT $${params.length}`;
+      }
+      if (typeof options?.offset === 'number' && Number.isFinite(options.offset)) {
+        params.push(Math.max(0, Math.floor(options.offset)));
+        sql += ` OFFSET $${params.length}`;
+      }
+
+      const res = await tx.query<QuoteRow>(sql, params);
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'quotes.listVisibleQuotes');
         return mapRowToQuote(row) as unknown as T;
@@ -2037,17 +2217,35 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   public async listQuotesByIds<T = TenantQuoteRecord>(
     ctx: TenantContext,
     quoteIds: readonly string[],
+    options?: {
+      includeRestricted?: boolean;
+      viewerId?: string;
+      hasRestrictedMatterAccess?: boolean;
+    },
   ): Promise<T[]> {
     const cleanIds = Array.from(
       new Set(quoteIds.map((x) => x?.trim()).filter(Boolean) as string[]),
     );
     if (cleanIds.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
+      const enforceVisibility = options !== undefined && !options.includeRestricted;
+      const viewerId = (options?.viewerId ?? ctx.actorId ?? '').trim() || '__none__';
+      const sqlParams: unknown[] = [ctx.tenantId, cleanIds];
+      const whereClauses = ['q.tenant_id = $1', 'q.id = ANY($2::text[])'];
+      if (enforceVisibility) {
+        sqlParams.push(viewerId);
+        const vIdx = sqlParams.length;
+        whereClauses.push(
+          options?.hasRestrictedMatterAccess
+            ? buildQuoteDraftOnlySqlPredicate(vIdx)
+            : buildQuoteVisibleSqlPredicate(vIdx),
+        );
+      }
       const res = await tx.query<QuoteRow>(
         `SELECT * FROM quotes q
-         WHERE q.tenant_id = $1 AND q.id = ANY($2::text[])
+         WHERE ${whereClauses.join(' AND ')}
          ORDER BY q.id ASC`,
-        [ctx.tenantId, cleanIds],
+        sqlParams,
       );
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'quotes.listQuotesByIds');

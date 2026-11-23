@@ -1663,9 +1663,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
     });
   }
 
-  public async listVisibleMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(
+  private resolveMatterViewerOptions(
     ctx: TenantContext,
-    viewerOrOptions:
+    viewerOrOptions?:
       | string
       | {
           viewerId?: string;
@@ -1673,8 +1673,15 @@ export class TenantMatterRepository extends TenantScopedRepository {
           includeRestricted?: boolean;
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
-        } = ctx.actorId,
-  ): Promise<TMatter[]> {
+          limit?: number;
+          offset?: number;
+        },
+  ): {
+    viewerId: string;
+    includeRestricted: boolean;
+    limit: number | null;
+    offset: number | null;
+  } {
     const viewerId =
       typeof viewerOrOptions === 'string'
         ? viewerOrOptions
@@ -1689,32 +1696,156 @@ export class TenantMatterRepository extends TenantScopedRepository {
               viewerOrOptions.includeRestricted,
           )
         : false;
+    const limit =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      typeof viewerOrOptions.limit === 'number' &&
+      Number.isFinite(viewerOrOptions.limit)
+        ? Math.max(1, Math.min(500, Math.floor(viewerOrOptions.limit)))
+        : null;
+    const offset =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      typeof viewerOrOptions.offset === 'number' &&
+      Number.isFinite(viewerOrOptions.offset)
+        ? Math.max(0, Math.floor(viewerOrOptions.offset))
+        : null;
+    return { viewerId, includeRestricted, limit, offset };
+  }
+
+  private buildMatterEntityFilterClauses(
+    filters: {
+      readonly ids?: readonly string[];
+      readonly matterIds?: readonly string[];
+      readonly clientIds?: readonly string[];
+      readonly partyEntityIds?: readonly string[];
+      readonly contactIds?: readonly string[];
+      readonly sourceEnquiryIds?: readonly string[];
+      readonly sourceQuoteIds?: readonly string[];
+      readonly ownerPersonId?: string;
+      readonly conflictReferenceEntityId?: string;
+      readonly includeMerged?: boolean;
+    },
+    params: unknown[],
+  ): { orClauses: string[]; andClauses: string[] } {
+    const ids = Array.from(
+      new Set([...(filters.ids ?? []), ...(filters.matterIds ?? [])].filter(Boolean)),
+    );
+    const clientIds = Array.from(new Set((filters.clientIds ?? []).filter(Boolean)));
+    const partyEntityIds = Array.from(
+      new Set((filters.partyEntityIds ?? []).filter(Boolean)),
+    );
+    const contactIds = Array.from(new Set((filters.contactIds ?? []).filter(Boolean)));
+    const sourceEnquiryIds = Array.from(
+      new Set((filters.sourceEnquiryIds ?? []).filter(Boolean)),
+    );
+    const sourceQuoteIds = Array.from(
+      new Set((filters.sourceQuoteIds ?? []).filter(Boolean)),
+    );
+    const ownerPersonId = filters.ownerPersonId?.trim();
+    const conflictReferenceEntityId = filters.conflictReferenceEntityId?.trim();
+    const orClauses: string[] = [];
+    const andClauses: string[] = [];
+    if (filters.includeMerged === false) {
+      andClauses.push('m.merged_into_id IS NULL');
+    }
+    if (ids.length > 0) {
+      params.push(ids);
+      orClauses.push(`m.id = ANY($${params.length}::text[])`);
+    }
+    if (clientIds.length > 0) {
+      params.push(clientIds);
+      const idx = params.length;
+      orClauses.push(
+        `(m.client_id = ANY($${idx}::text[]) OR COALESCE(m.additional_client_ids_json, '[]'::jsonb) ?| $${idx}::text[])`,
+      );
+    }
+    if (partyEntityIds.length > 0) {
+      params.push(partyEntityIds);
+      const idx = params.length;
+      orClauses.push(
+        `(m.client_id = ANY($${idx}::text[]) OR COALESCE(m.additional_client_ids_json, '[]'::jsonb) ?| $${idx}::text[] OR EXISTS (SELECT 1 FROM public.matter_parties mp WHERE mp.tenant_id = m.tenant_id AND mp.matter_id = m.id AND (mp.entity_id = ANY($${idx}::text[]) OR mp.acting_solicitor_person_id = ANY($${idx}::text[]) OR mp.acting_solicitor_organisation_id = ANY($${idx}::text[]))))`,
+      );
+    }
+    if (contactIds.length > 0) {
+      params.push(contactIds);
+      const idx = params.length;
+      orClauses.push(
+        `(m.opening_record_json->>'instructingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'billingContactId' = ANY($${idx}::text[]) OR m.instructing_contact_id = ANY($${idx}::text[]) OR m.billing_contact_id = ANY($${idx}::text[]) OR m.referrer_person_id = ANY($${idx}::text[]) OR m.referrer_organisation_id = ANY($${idx}::text[]) OR m.fields_json->>'referrerContactId' = ANY($${idx}::text[]))`,
+      );
+    }
+    if (sourceEnquiryIds.length > 0) {
+      params.push(sourceEnquiryIds);
+      orClauses.push(`m.source_enquiry_id = ANY($${params.length}::text[])`);
+    }
+    if (sourceQuoteIds.length > 0) {
+      params.push(sourceQuoteIds);
+      orClauses.push(`m.source_quote_id = ANY($${params.length}::text[])`);
+    }
+    if (ownerPersonId) {
+      params.push(ownerPersonId);
+      const idx = params.length;
+      orClauses.push(
+        `(m.responsible_partner_id = $${idx} OR m.responsible_fee_earner_id = $${idx} OR m.supervisor_id = $${idx})`,
+      );
+    }
+    if (conflictReferenceEntityId) {
+      const escaped = conflictReferenceEntityId.replace(/[\\%_]/g, '\\$&');
+      params.push(`%${escaped}%`);
+      const idx = params.length;
+      orClauses.push(
+        `(m.conflict_check_record_json::text ILIKE $${idx} ESCAPE '\\' OR COALESCE(m.fields_json->'conflictCheckRecord', '{}'::jsonb)::text ILIKE $${idx} ESCAPE '\\' OR COALESCE(m.fields_json->'conflictCheck', '{}'::jsonb)::text ILIKE $${idx} ESCAPE '\\')`,
+      );
+    }
+    return { orClauses, andClauses };
+  }
+
+  public async listVisibleMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(
+    ctx: TenantContext,
+    viewerOrOptions:
+      | string
+      | {
+          viewerId?: string;
+          viewerUserId?: string;
+          includeRestricted?: boolean;
+          hasRestrictedAccessPermission?: boolean;
+          hasRestrictedMatterAccess?: boolean;
+          limit?: number;
+          offset?: number;
+        } = ctx.actorId,
+  ): Promise<TMatter[]> {
+    const { viewerId, includeRestricted, limit, offset } =
+      this.resolveMatterViewerOptions(ctx, viewerOrOptions);
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = includeRestricted
-        ? await tx.query<DbMatterRow>(
-            `SELECT *
-             FROM public.matters
-             WHERE tenant_id = $1
-               AND client_id <> 'O-KEYDATE-STUB'
-             ORDER BY id ASC`,
-            [ctx.tenantId],
-          )
-        : await tx.query<DbMatterRow>(
-            `SELECT *
-             FROM public.matters
-             WHERE tenant_id = $1
-               AND client_id <> 'O-KEYDATE-STUB'
-               AND (
-                 (
-                   is_staff_matter = FALSE
-                   AND has_ethical_wall = FALSE
-                   AND jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) = 0
-                 )
-                 OR restricted_access_user_ids_json ? $2
+      const params: unknown[] = includeRestricted ? [ctx.tenantId] : [ctx.tenantId, viewerId];
+      let sql = includeRestricted
+        ? `SELECT *
+           FROM public.matters
+           WHERE tenant_id = $1
+             AND client_id <> 'O-KEYDATE-STUB'
+           ORDER BY id ASC`
+        : `SELECT *
+           FROM public.matters
+           WHERE tenant_id = $1
+             AND client_id <> 'O-KEYDATE-STUB'
+             AND (
+               (
+                 is_staff_matter = FALSE
+                 AND has_ethical_wall = FALSE
+                 AND jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) = 0
                )
-             ORDER BY id ASC`,
-            [ctx.tenantId, viewerId],
-          );
+               OR restricted_access_user_ids_json ? $2
+             )
+           ORDER BY id ASC`;
+      if (limit !== null) {
+        params.push(limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      if (offset !== null) {
+        params.push(offset);
+        sql += ` OFFSET $${params.length}`;
+      }
+      const res = await tx.query<DbMatterRow>(sql, params);
       const visibleRows = res.rows.filter((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'Matter');
         return includeRestricted || this.canViewerAccessMatterRow(row, viewerId);
@@ -1768,73 +1899,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       readonly conflictReferenceEntityId?: string;
     },
   ): Promise<TMatter[]> {
-    const ids = Array.from(
-      new Set([...(filters.ids ?? []), ...(filters.matterIds ?? [])].filter(Boolean)),
-    );
-    const clientIds = Array.from(new Set((filters.clientIds ?? []).filter(Boolean)));
-    const partyEntityIds = Array.from(
-      new Set((filters.partyEntityIds ?? []).filter(Boolean)),
-    );
-    const contactIds = Array.from(new Set((filters.contactIds ?? []).filter(Boolean)));
-    const sourceEnquiryIds = Array.from(
-      new Set((filters.sourceEnquiryIds ?? []).filter(Boolean)),
-    );
-    const sourceQuoteIds = Array.from(
-      new Set((filters.sourceQuoteIds ?? []).filter(Boolean)),
-    );
-    const ownerPersonId = filters.ownerPersonId?.trim();
-    const conflictReferenceEntityId = filters.conflictReferenceEntityId?.trim();
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const orClauses: string[] = [];
       const params: unknown[] = [ctx.tenantId];
-      if (ids.length > 0) {
-        params.push(ids);
-        orClauses.push(`m.id = ANY($${params.length}::text[])`);
-      }
-      if (clientIds.length > 0) {
-        params.push(clientIds);
-        const idx = params.length;
-        orClauses.push(
-          `(m.client_id = ANY($${idx}::text[]) OR COALESCE(m.additional_client_ids_json, '[]'::jsonb) ?| $${idx}::text[])`,
-        );
-      }
-      if (partyEntityIds.length > 0) {
-        params.push(partyEntityIds);
-        const idx = params.length;
-        orClauses.push(
-          `(m.client_id = ANY($${idx}::text[]) OR COALESCE(m.additional_client_ids_json, '[]'::jsonb) ?| $${idx}::text[] OR EXISTS (SELECT 1 FROM public.matter_parties mp WHERE mp.tenant_id = m.tenant_id AND mp.matter_id = m.id AND (mp.entity_id = ANY($${idx}::text[]) OR mp.acting_solicitor_person_id = ANY($${idx}::text[]) OR mp.acting_solicitor_organisation_id = ANY($${idx}::text[]))))`,
-        );
-      }
-      if (contactIds.length > 0) {
-        params.push(contactIds);
-        const idx = params.length;
-        orClauses.push(
-          `(m.opening_record_json->>'instructingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'billingContactId' = ANY($${idx}::text[]) OR m.instructing_contact_id = ANY($${idx}::text[]) OR m.billing_contact_id = ANY($${idx}::text[]) OR m.referrer_person_id = ANY($${idx}::text[]) OR m.referrer_organisation_id = ANY($${idx}::text[]) OR m.fields_json->>'referrerContactId' = ANY($${idx}::text[]))`,
-        );
-      }
-      if (sourceEnquiryIds.length > 0) {
-        params.push(sourceEnquiryIds);
-        orClauses.push(`m.source_enquiry_id = ANY($${params.length}::text[])`);
-      }
-      if (sourceQuoteIds.length > 0) {
-        params.push(sourceQuoteIds);
-        orClauses.push(`m.source_quote_id = ANY($${params.length}::text[])`);
-      }
-      if (ownerPersonId) {
-        params.push(ownerPersonId);
-        const idx = params.length;
-        orClauses.push(
-          `(m.responsible_partner_id = $${idx} OR m.responsible_fee_earner_id = $${idx} OR m.supervisor_id = $${idx})`,
-        );
-      }
-      if (conflictReferenceEntityId) {
-        const escaped = conflictReferenceEntityId.replace(/[\\%_]/g, '\\$&');
-        params.push(`%${escaped}%`);
-        const idx = params.length;
-        orClauses.push(
-          `(m.conflict_check_record_json::text ILIKE $${idx} ESCAPE '\\' OR COALESCE(m.fields_json->'conflictCheckRecord', '{}'::jsonb)::text ILIKE $${idx} ESCAPE '\\' OR COALESCE(m.fields_json->'conflictCheck', '{}'::jsonb)::text ILIKE $${idx} ESCAPE '\\')`,
-        );
-      }
+      const { orClauses } = this.buildMatterEntityFilterClauses(filters, params);
       if (orClauses.length === 0) return [];
       const res = await tx.query<DbMatterRow>(
         `SELECT m.* FROM public.matters m
@@ -1853,6 +1920,93 @@ export class TenantMatterRepository extends TenantScopedRepository {
         res.rows.map((r) => r.id),
       );
       return res.rows.map((row) =>
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+      );
+    });
+  }
+
+  /**
+   * Lists matters related to an entity/owner/source filter with viewer visibility enforcement (`S1-02b`).
+   */
+  public async listVisibleMattersForEntity<
+    TMatter extends TenantMatterRecord = TenantMatterRecord,
+  >(
+    ctx: TenantContext,
+    filters: {
+      readonly ids?: readonly string[];
+      readonly matterIds?: readonly string[];
+      readonly clientIds?: readonly string[];
+      readonly partyEntityIds?: readonly string[];
+      readonly contactIds?: readonly string[];
+      readonly sourceEnquiryIds?: readonly string[];
+      readonly sourceQuoteIds?: readonly string[];
+      readonly ownerPersonId?: string;
+      readonly conflictReferenceEntityId?: string;
+      readonly includeMerged?: boolean;
+      readonly limit?: number;
+    },
+    viewerOrOptions:
+      | string
+      | {
+          viewerId?: string;
+          viewerUserId?: string;
+          includeRestricted?: boolean;
+          hasRestrictedAccessPermission?: boolean;
+          hasRestrictedMatterAccess?: boolean;
+          limit?: number;
+        } = ctx.actorId,
+  ): Promise<TMatter[]> {
+    const resolved = this.resolveMatterViewerOptions(ctx, viewerOrOptions);
+    const limit =
+      typeof filters.limit === 'number' && Number.isFinite(filters.limit)
+        ? Math.max(1, Math.min(500, Math.floor(filters.limit)))
+        : resolved.limit;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const params: unknown[] = resolved.includeRestricted
+        ? [ctx.tenantId]
+        : [ctx.tenantId, resolved.viewerId];
+      const { orClauses, andClauses } = this.buildMatterEntityFilterClauses(
+        filters,
+        params,
+      );
+      if (orClauses.length === 0) return [];
+      const clauses = [
+        'm.tenant_id = $1',
+        "m.client_id <> 'O-KEYDATE-STUB'",
+        `(${orClauses.join(' OR ')})`,
+        ...andClauses,
+      ];
+      if (!resolved.includeRestricted) {
+        clauses.push(`(
+          (
+            m.is_staff_matter = FALSE
+            AND m.has_ethical_wall = FALSE
+            AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+          )
+          OR m.restricted_access_user_ids_json ? $2
+        )`);
+      }
+      let sql = `SELECT m.* FROM public.matters m
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY m.id ASC`;
+      if (limit !== null) {
+        params.push(limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      const res = await tx.query<DbMatterRow>(sql, params);
+      const visibleRows = res.rows.filter((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+        return (
+          resolved.includeRestricted ||
+          this.canViewerAccessMatterRow(row, resolved.viewerId)
+        );
+      });
+      const partiesMap = await this.loadPartiesByMatterIdsInTx(
+        tx,
+        ctx,
+        visibleRows.map((r) => r.id),
+      );
+      return visibleRows.map((row) =>
         mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
       );
     });
@@ -1979,61 +2133,75 @@ export class TenantMatterRepository extends TenantScopedRepository {
           includeRestricted?: boolean;
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
+          includeMerged?: boolean;
+          excludeIds?: readonly string[];
+          limit?: number;
         } = ctx.actorId,
   ): Promise<TMatter[]> {
     const cleanQuery = query?.trim().toLowerCase() ?? '';
-    if (!cleanQuery) {
+    const optsObj =
+      typeof viewerOrOptions === 'object' && viewerOrOptions !== null
+        ? viewerOrOptions
+        : undefined;
+    const excludeIds = Array.from(
+      new Set((optsObj?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    const { viewerId, includeRestricted, limit } =
+      this.resolveMatterViewerOptions(ctx, viewerOrOptions);
+    if (!cleanQuery && excludeIds.length === 0 && optsObj?.includeMerged === undefined) {
       return this.listVisibleMatters<TMatter>(ctx, viewerOrOptions);
     }
-    const viewerId =
-      typeof viewerOrOptions === 'string'
-        ? viewerOrOptions
-        : viewerOrOptions?.viewerUserId ??
-          viewerOrOptions?.viewerId ??
-          ctx.actorId;
-    const includeRestricted =
-      typeof viewerOrOptions === 'object' && viewerOrOptions !== null
-        ? Boolean(
-            viewerOrOptions.hasRestrictedMatterAccess ??
-              viewerOrOptions.hasRestrictedAccessPermission ??
-              viewerOrOptions.includeRestricted,
-          )
-        : false;
-    const likePattern = `%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const params: unknown[] = includeRestricted
-        ? [ctx.tenantId, likePattern]
-        : [ctx.tenantId, viewerId, likePattern];
-      const patternParam = includeRestricted ? '$2' : '$3';
-      const visibilitySql = includeRestricted
-        ? ''
-        : ` AND (
-             (
-               is_staff_matter = FALSE
-               AND has_ethical_wall = FALSE
-               AND jsonb_array_length(COALESCE(restricted_access_user_ids_json, '[]'::jsonb)) = 0
-             )
-             OR restricted_access_user_ids_json ? $2
-           )`;
-      const res = await tx.query<DbMatterRow>(
-        `SELECT m.*
+        ? [ctx.tenantId]
+        : [ctx.tenantId, viewerId];
+      const clauses = [
+        'm.tenant_id = $1',
+        "m.client_id <> 'O-KEYDATE-STUB'",
+      ];
+      if (!includeRestricted) {
+        clauses.push(`(
+          (
+            m.is_staff_matter = FALSE
+            AND m.has_ethical_wall = FALSE
+            AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+          )
+          OR m.restricted_access_user_ids_json ? $2
+        )`);
+      }
+      if (optsObj?.includeMerged === false) {
+        clauses.push('m.merged_into_id IS NULL');
+      }
+      if (excludeIds.length > 0) {
+        params.push(excludeIds);
+        clauses.push(`m.id <> ALL($${params.length}::text[])`);
+      }
+      if (cleanQuery) {
+        const likePattern = `%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`;
+        params.push(likePattern);
+        const patternParam = `$${params.length}`;
+        clauses.push(`(
+          lower(COALESCE(m.id, '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.matter_number, '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.title, '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.fields_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'
+          OR EXISTS (
+            SELECT 1 FROM public.matter_parties mp
+            WHERE mp.tenant_id = m.tenant_id
+              AND mp.matter_id = m.id
+              AND lower(COALESCE(mp.metadata_json->>'name', '')) LIKE ${patternParam} ESCAPE '\\'
+          )
+        )`);
+      }
+      let sql = `SELECT m.*
          FROM public.matters m
-         WHERE m.tenant_id = $1
-           AND m.client_id <> 'O-KEYDATE-STUB'${visibilitySql}
-           AND (
-             lower(COALESCE(m.matter_number, '')) LIKE ${patternParam} ESCAPE '\\'
-             OR lower(COALESCE(m.title, '')) LIKE ${patternParam} ESCAPE '\\'
-             OR lower(COALESCE(m.fields_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'
-             OR EXISTS (
-               SELECT 1 FROM public.matter_parties mp
-               WHERE mp.tenant_id = m.tenant_id
-                 AND mp.matter_id = m.id
-                 AND lower(COALESCE(mp.metadata_json->>'name', '')) LIKE ${patternParam} ESCAPE '\\'
-             )
-           )
-         ORDER BY m.id ASC`,
-        params,
-      );
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY m.id ASC`;
+      if (limit !== null) {
+        params.push(limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      const res = await tx.query<DbMatterRow>(sql, params);
       const visibleRows = res.rows.filter((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'Matter');
         return includeRestricted || this.canViewerAccessMatterRow(row, viewerId);
