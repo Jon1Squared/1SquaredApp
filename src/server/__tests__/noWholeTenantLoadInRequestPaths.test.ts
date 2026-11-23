@@ -147,9 +147,9 @@ export interface TemporaryConflictGraphAllowListEntry extends AllowListEntry {
 }
 
 /**
- * Temporary allow-list confining `loadFullConflictSearchGraph` and its 6 named
- * live conflict callers strictly to backlog item `B22` (removed once scoped candidate
- * pre-filter parity is proven equivalent in production, `R677`).
+ * Temporary allow-list confining `loadFullConflictSearchGraph` and its 7 named
+ * live conflict callers (including `previewIntakeDuplicatesAndConflictsRecord`) strictly to
+ * backlog item `B22` (removed once scoped candidate pre-filter parity is proven equivalent in production, `R677`).
  */
 export const TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST: readonly TemporaryConflictGraphAllowListEntry[] =
   [
@@ -208,9 +208,16 @@ export const TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST: readonly TemporaryConflictGrap
       reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
       backlogItem: 'B22',
     },
+    {
+      file: 'src/server/services.ts',
+      fn: 'previewIntakeDuplicatesAndConflictsRecord',
+      callees: ['loadFullConflictSearchGraph'],
+      reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+      backlogItem: 'B22',
+    },
   ];
 
-export const MAX_TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST_COUNT = 7;
+export const MAX_TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST_COUNT = 8;
 
 /**
  * Snapshot & client-form baseline deferred strictly to WP1b (S1-02b)
@@ -582,7 +589,7 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
     expect(aliasRes.unexpected.some((f) => f.callee === 'listAllOrganisations')).toBe(true);
   });
 
-  it('R677: flags unapproved loadFullConflictSearchGraph callers and confines the 7 conflict-graph entries to TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST (B22)', () => {
+  it('R677: flags unapproved loadFullConflictSearchGraph callers and confines the 8 conflict-graph entries to TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST (B22)', () => {
     expect(TARGET_WHOLE_TENANT_CALLEES.has('loadFullConflictSearchGraph')).toBe(
       true,
     );

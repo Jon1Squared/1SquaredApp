@@ -69,6 +69,27 @@ export const ACTION_PERMISSIONS = {
     reason:
       'Every authenticated user can run global server-side search; TenantSearchRepository enforces per-entity RBAC permissions and record-level visibility inside SQL WHERE clauses before ranking or counting.',
   },
+  previewIntakeDuplicatesAndConflictsAction: {
+    kind: 'permission',
+    key: {
+      anyOf: [
+        'contact:create',
+        'contact:edit',
+        'employee:edit_core',
+        'enquiry:create',
+        'enquiry:edit',
+        'quote:edit',
+        'matter:create',
+        'matter:edit',
+      ],
+    },
+    enforcedBy: 'action',
+  },
+  searchEntityPickerAction: {
+    kind: 'authenticated',
+    reason:
+      'Authenticated form entity pickers execute read-only SQL searches enforcing quote:view, restricted matter / personal Draft SQL visibility predicates, and stripping all HR/employment/payroll/override/Entra fields.',
+  },
   getMyNotificationPreferencesAction: {
     kind: 'permission',
     key: 'notification:view_own',

@@ -153,9 +153,17 @@ import {
   saveMatterRateOverrideRecord,
   deleteMatterRateOverrideRecord,
   resolveApplicableRatesRecord,
+  previewIntakeDuplicatesAndConflictsRecord,
+  searchEntityPickerRecord,
   updateMyNotificationPreferences,
   type NotificationPreferenceUpdateEntry,
 } from '@/server/services';
+import type {
+  EntityPickerSearchInput,
+  EntityPickerSearchResult,
+  IntakePreviewInput,
+  IntakePreviewResult,
+} from '@/domain/intakePreviewTypes';
 import type {
   KeyDateCalculation,
   KeyDateExceptionKind,
@@ -1918,6 +1926,28 @@ export async function searchGlobalRecordsAction(input: {
 }): Promise<GlobalSearchResponse> {
   return guardedAction('searchGlobalRecordsAction', async (actor) =>
     searchGlobalRecords(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function previewIntakeDuplicatesAndConflictsAction(
+  input: IntakePreviewInput,
+): Promise<IntakePreviewResult> {
+  return guardedAction(
+    'previewIntakeDuplicatesAndConflictsAction',
+    async (actor) =>
+      previewIntakeDuplicatesAndConflictsRecord(input, actor.personId, {
+        tenantCtx: actor.tenantContext,
+      }),
+  );
+}
+
+export async function searchEntityPickerAction(
+  input: EntityPickerSearchInput,
+): Promise<EntityPickerSearchResult> {
+  return guardedAction('searchEntityPickerAction', async (actor) =>
+    searchEntityPickerRecord(input, actor.personId, {
       tenantCtx: actor.tenantContext,
     }),
   );

@@ -110,14 +110,28 @@ import {
   searchMatterConflicts,
   type MatterConflictSearchInput,
 } from '@/domain/matterConflicts';
+import {
+  sanitizePersonForClientPreview,
+  scoreFuzzyPersonOrgQuery,
+} from '@/domain/intakePreview';
+import type {
+  EntityPickerOption,
+  EntityPickerSearchInput,
+  EntityPickerSearchResult,
+  IntakePreviewInput,
+  IntakePreviewResult,
+} from '@/domain/intakePreviewTypes';
+import { normaliseComparableName } from '@/domain/normalise';
 import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import {
   computeEnquiryConflictSnapshot,
   enquiryDisplayName,
+  findEnquiryEntityMatches,
   getMissingRoutingFields,
   isEnquiryOpen,
   isEnquiryRouted,
   isReadyForRetentionAnonymisation,
+  mergePeopleWithEnquiries,
   runEnquiryConflictSearch,
   validateEnquiryInput,
 } from '@/domain/enquiries';
@@ -29919,3 +29933,807 @@ export async function searchGlobalRecords(
 
   return response;
 }
+
+const INTAKE_PREVIEW_REQUIRED_PERMISSIONS = [
+  'contact:create',
+  'contact:edit',
+  'employee:edit_core',
+  'enquiry:create',
+  'enquiry:edit',
+  'quote:edit',
+  'matter:create',
+  'matter:edit',
+] as const satisfies readonly PermissionKey[];
+
+/**
+ * Server-side read-only duplicate, known-entity, and optional preliminary conflict preview
+ * for Person, Organisation, Enquiry, Quote, and Home Quick Capture forms (S1-02b C2).
+ *
+ * Uses SQL candidate queries when `includeConflicts !== true`, and `loadFullConflictSearchGraph`
+ * with viewer visibility filtering + restricted matter redaction ONLY when `includeConflicts`
+ * is true (backlog B22). Never mutates matters, writes audit logs, or returns HR/payroll data.
+ */
+export async function previewIntakeDuplicatesAndConflictsRecord(
+  input: IntakePreviewInput,
+  byId?: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<IntakePreviewResult> {
+  const ctx =
+    options?.tenantCtx ?? resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const catalogueRepo = getCatalogueRepository();
+
+  const [staffPeople, teams, rbacConfig, choiceValues] = await Promise.all([
+    loadStaffPeople(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+    catalogueRepo.listAllChoiceValues<ChoiceValue>(ctx),
+  ]);
+
+  const actorId = (byId ?? ctx.actorId ?? '').trim();
+  const actor = staffPeople.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
+  if (!actor) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: 'Authentication is required to preview duplicates and conflicts.',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      actorUserId: actorId || 'anonymous',
+    });
+  }
+
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined;
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: staffPeople,
+    teams,
+    tokenRoles: effectiveTokenRoles,
+    tokenRolesActorId: actor.id,
+    config: { rbac: rbacConfig },
+    context: ctx,
+  });
+
+  const canPreviewIntake = INTAKE_PREVIEW_REQUIRED_PERMISSIONS.some((perm) =>
+    permSet.permissions.has(perm),
+  );
+  if (!canPreviewIntake) {
+    throw new AuthorisationError({
+      code: 'FORBIDDEN',
+      message: 'You do not have permission to preview intake duplicates or conflicts.',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      actorUserId: actor.id,
+      requiredPermission: 'enquiry:create',
+    });
+  }
+
+  const hasRestrictedMatterAccess = permSet.permissions.has('matter:restricted:access');
+  const firstName = input.firstName?.trim() ?? '';
+  const surname = (input.surname ?? input.lastName ?? '').trim();
+  const lastName = (input.lastName ?? input.surname ?? '').trim();
+  const preferredName = input.preferredName?.trim() ?? '';
+  const otherNames = (input.otherNames ?? []).map((n) => n.trim()).filter(Boolean);
+  const companyNumber = input.companyNumber?.trim() ?? '';
+  const otherPartiesNamed = input.otherPartiesNamed?.trim() ?? '';
+  const emails = (input.emails ?? []).map((e) => e.trim()).filter(Boolean);
+  const phones = (input.phones ?? []).map((p) => p.trim()).filter(Boolean);
+  const addresses = (input.addresses ?? []).filter(Boolean);
+  const postcodes = addresses.map((a) => a.postcode?.trim() ?? '').filter(Boolean);
+  const linkedPersonId = input.linkedPersonId?.trim() || null;
+  const linkedOrganisationId = input.linkedOrganisationId?.trim() || null;
+  const excludeId = input.excludeId?.trim() || undefined;
+  const excludeEnquiryId = input.excludeEnquiryId?.trim() || null;
+  const dismissedDuplicateIds = input.dismissedDuplicateIds ?? [];
+
+  const [linkedPersonDirect, linkedOrgDirect] = await Promise.all([
+    linkedPersonId
+      ? partyRepo.getPersonById<Person>(ctx, linkedPersonId)
+      : Promise.resolve<Person | null>(null),
+    linkedOrganisationId
+      ? partyRepo.getOrganisationById<Organisation>(ctx, linkedOrganisationId)
+      : Promise.resolve<Organisation | null>(null),
+  ]);
+
+  let behalfRaw = (input.callingOnBehalfOf ?? input.legalName ?? '').trim();
+  if (!behalfRaw && input.kind === 'person' && linkedOrgDirect) {
+    behalfRaw = linkedOrgDirect.legalName;
+  }
+
+  const personOtherTerms = [...otherNames];
+  if (behalfRaw && behalfRaw.includes(' ')) {
+    personOtherTerms.push(behalfRaw);
+  }
+  const hasPersonSignal = Boolean(
+    firstName ||
+      surname ||
+      preferredName ||
+      personOtherTerms.length > 0 ||
+      emails.length > 0 ||
+      phones.length > 0 ||
+      postcodes.length > 0,
+  );
+  const hasOrgSignal = Boolean(
+    behalfRaw ||
+      otherNames.length > 0 ||
+      companyNumber ||
+      emails.length > 0 ||
+      phones.length > 0 ||
+      postcodes.length > 0,
+  );
+  const enquirySearchTerms = Array.from(
+    new Set(
+      [
+        `${firstName} ${lastName}`.trim(),
+        preferredName ? `${preferredName} ${lastName}`.trim() : '',
+        behalfRaw,
+        ...otherNames,
+        ...otherPartiesNamed.split(/[,;/\n]+/).map((s) => s.trim()),
+      ].filter(Boolean),
+    ),
+  );
+  const hasEnquirySignal = Boolean(
+    enquirySearchTerms.length > 0 ||
+      emails.length > 0 ||
+      phones.length > 0 ||
+      linkedPersonId ||
+      linkedOrganisationId,
+  );
+
+  const [sqlCandidatePeople, sqlCandidateOrgs, sqlCandidateEnquiries, quoteOpenEnquiries] =
+    await Promise.all([
+      hasPersonSignal
+        ? partyRepo.findSqlDuplicateCandidates<Person>(ctx, {
+            kind: 'person',
+            id: excludeId,
+            firstName,
+            preferredName,
+            surname,
+            otherNames: personOtherTerms,
+            emails,
+            phones,
+            postcodes,
+            fuzzy: true,
+          })
+        : Promise.resolve<Person[]>([]),
+      hasOrgSignal
+        ? partyRepo.findSqlDuplicateCandidates<Organisation>(ctx, {
+            kind: 'organisation',
+            id: excludeId,
+            legalName: behalfRaw,
+            otherNames,
+            companyNumber,
+            emails,
+            phones,
+            postcodes,
+            fuzzy: true,
+          })
+        : Promise.resolve<Organisation[]>([]),
+      hasEnquirySignal
+        ? intakeRepo.findSqlConflictEnquiryCandidates<Enquiry>(ctx, {
+            terms: enquirySearchTerms,
+            emails,
+            phones,
+            linkedPersonIds: linkedPersonId ? [linkedPersonId] : [],
+            linkedOrganisationIds: linkedOrganisationId ? [linkedOrganisationId] : [],
+            excludeEnquiryId,
+            viewerId: actor.id,
+            hasRestrictedMatterAccess,
+          })
+        : Promise.resolve<Enquiry[]>([]),
+      input.kind === 'quote' && (linkedPersonId || linkedOrganisationId)
+        ? Promise.all([
+            linkedPersonId
+              ? intakeRepo.listVisibleEnquiries<Enquiry>(ctx, actor.id, {
+                  openOnly: true,
+                  linkedPersonId,
+                  hasRestrictedMatterAccess,
+                  limit: 25,
+                })
+              : Promise.resolve<Enquiry[]>([]),
+            linkedOrganisationId
+              ? intakeRepo.listVisibleEnquiries<Enquiry>(ctx, actor.id, {
+                  openOnly: true,
+                  linkedOrganisationId,
+                  hasRestrictedMatterAccess,
+                  limit: 25,
+                })
+              : Promise.resolve<Enquiry[]>([]),
+          ]).then(([byP, byO]) => dedupeById([...byP, ...byO]))
+        : Promise.resolve<Enquiry[]>([]),
+    ]);
+
+  const candidatePeopleAll = dedupeById([
+    ...sqlCandidatePeople,
+    ...(linkedPersonDirect ? [linkedPersonDirect] : []),
+  ]).map((p) => sanitizePersonForClientPreview(p));
+  const candidateOrgsAll = dedupeById([
+    ...sqlCandidateOrgs,
+    ...(linkedOrgDirect ? [linkedOrgDirect] : []),
+  ]);
+
+  const candidatePeopleWithoutSelf = excludeId
+    ? candidatePeopleAll.filter((p) => p.id !== excludeId)
+    : candidatePeopleAll;
+  const candidateOrgsWithoutSelf = excludeId
+    ? candidateOrgsAll.filter((o) => o.id !== excludeId)
+    : candidateOrgsAll;
+
+  const visibleEnquiriesForMerge = sqlCandidateEnquiries.map((e) => ({
+    ...e,
+    conflictSnapshot: undefined,
+  }));
+
+  const duplicatePeople =
+    input.kind === 'person' || input.kind === 'quick_enquiry'
+      ? findPersonDuplicates(
+          {
+            id: excludeId,
+            firstName,
+            surname,
+            preferredName,
+            emails,
+            phones,
+            addresses: addresses.filter((a) => (a.line1 ?? '').trim() && (a.postcode ?? '').trim()),
+          },
+          mergePeopleWithEnquiries(
+            candidatePeopleAll,
+            visibleEnquiriesForMerge,
+            choiceValues,
+            excludeEnquiryId,
+          ),
+          [...dismissedDuplicateIds],
+          { fuzzy: true },
+        )
+          .filter(
+            (m) =>
+              input.kind !== 'person' ||
+              m.reasons.some((r) => r !== 'address' && r !== 'postcode'),
+          )
+          .map((m) => ({
+            ...m,
+            record: sanitizePersonForClientPreview(m.record),
+          }))
+      : [];
+
+  const duplicateOrganisations =
+    input.kind === 'organisation' || (input.kind === 'quick_enquiry' && Boolean(behalfRaw))
+      ? findOrganisationDuplicates(
+          {
+            id: excludeId,
+            legalName: behalfRaw,
+            otherNames,
+            companyNumber,
+            emails,
+            phones,
+            addresses: addresses.filter((a) => (a.line1 ?? '').trim() && (a.postcode ?? '').trim()),
+          },
+          candidateOrgsAll,
+          [...dismissedDuplicateIds],
+          { fuzzy: true },
+        ).filter(
+          (m) =>
+            input.kind !== 'organisation' ||
+            m.reasons.some((r) => r !== 'address' && r !== 'postcode'),
+        )
+      : [];
+
+  const primaryAddr = addresses[0];
+  const entityMatchesPeoplePool =
+    input.kind === 'organisation'
+      ? mergePeopleWithEnquiries(
+          candidatePeopleWithoutSelf,
+          visibleEnquiriesForMerge,
+          choiceValues,
+          excludeEnquiryId,
+        )
+      : candidatePeopleWithoutSelf;
+
+  const entityMatchesRaw = findEnquiryEntityMatches(
+    {
+      firstName: input.kind === 'organisation' ? '' : firstName,
+      lastName: input.kind === 'organisation' ? '' : lastName,
+      email: emails[0] ?? '',
+      phone: phones[0] ?? '',
+      callingOnBehalfOf: behalfRaw,
+      postcode: primaryAddr?.postcode ?? '',
+      addressLine1: primaryAddr?.line1 ?? '',
+      addressLine2: primaryAddr?.line2 ?? '',
+      otherPartiesNamed:
+        input.kind === 'organisation' ? '' : otherPartiesNamed,
+    },
+    entityMatchesPeoplePool,
+    candidateOrgsWithoutSelf,
+    visibleEnquiriesForMerge,
+    excludeEnquiryId,
+  );
+
+  const entityMatches = {
+    people: entityMatchesRaw.people.map((entry) => ({
+      ...entry,
+      person: sanitizePersonForClientPreview(entry.person),
+    })),
+    organisations: entityMatchesRaw.organisations,
+  };
+
+  let activeLinkedEnquiries: Enquiry[] = [];
+  if (input.kind === 'quote') {
+    const pNorm = normaliseComparableName(
+      linkedPersonDirect
+        ? `${linkedPersonDirect.firstName} ${linkedPersonDirect.surname}`
+        : `${firstName} ${surname}`,
+    );
+    const oNorm = normaliseComparableName(
+      linkedOrgDirect?.legalName || behalfRaw,
+    );
+    const openCandidates = dedupeById([
+      ...quoteOpenEnquiries,
+      ...visibleEnquiriesForMerge.filter((e) => isEnquiryOpen(e)),
+    ]);
+    activeLinkedEnquiries = openCandidates
+      .filter((e) => {
+        if (!isEnquiryOpen(e)) return false;
+        if (linkedPersonId && (e.linkedPersonId === linkedPersonId || e.id === linkedPersonId)) {
+          return true;
+        }
+        if (linkedOrganisationId && e.linkedOrganisationId === linkedOrganisationId) {
+          return true;
+        }
+        if (pNorm && normaliseComparableName(`${e.firstName} ${e.lastName}`) === pNorm) {
+          return true;
+        }
+        if (oNorm && e.callingOnBehalfOf && normaliseComparableName(e.callingOnBehalfOf) === oNorm) {
+          return true;
+        }
+        return false;
+      })
+      .map((e) => ({ ...e, conflictSnapshot: undefined }));
+  }
+
+  let conflictSearch: IntakePreviewResult['conflictSearch'] = null;
+  let possibleConflicts: IntakePreviewResult['possibleConflicts'] = [];
+
+  const hasConflictSignal = Boolean(
+    enquirySearchTerms.length > 0 ||
+      emails.length > 0 ||
+      phones.length > 0 ||
+      postcodes.length > 0 ||
+      linkedPersonId ||
+      linkedOrganisationId,
+  );
+
+  if (input.includeConflicts && hasConflictSignal) {
+    const graph = await loadFullConflictSearchGraph(
+      ctx,
+      {
+        terms: enquirySearchTerms,
+        emails,
+        phones,
+        postcodes,
+        linkedPersonIds: linkedPersonId ? [linkedPersonId] : [],
+        linkedOrganisationIds: linkedOrganisationId ? [linkedOrganisationId] : [],
+        excludeEnquiryId,
+      },
+      actor.id,
+      staffPeople,
+      teams,
+      rbacConfig,
+    );
+    const graphPeople = dedupeById([
+      ...staffPeople,
+      ...graph.people,
+      ...(linkedPersonDirect ? [linkedPersonDirect] : []),
+    ]);
+    const graphOrgs = dedupeById([
+      ...graph.organisations,
+      ...(linkedOrgDirect ? [linkedOrgDirect] : []),
+    ]);
+    const finalGraphPeople = excludeId
+      ? graphPeople.filter((p) => p.id !== excludeId)
+      : graphPeople;
+    const finalGraphOrgs = excludeId
+      ? graphOrgs.filter((o) => o.id !== excludeId)
+      : graphOrgs;
+    const visibleEnquiriesForConflict = graph.enquiries.filter((e) =>
+      graph.canViewEnquiry(e),
+    );
+
+    const searchRes = runEnquiryConflictSearch(
+      {
+        firstName: input.kind === 'organisation' ? '' : firstName,
+        lastName: input.kind === 'organisation' ? '' : lastName,
+        callingOnBehalfOf: behalfRaw,
+        otherPartiesNamed,
+        email: emails[0] ?? '',
+        phone: phones[0] ?? '',
+        address: {
+          line1: primaryAddr?.line1 ?? '',
+          line2: primaryAddr?.line2 ?? '',
+          postcode: primaryAddr?.postcode ?? '',
+        },
+        linkedPersonId:
+          input.kind === 'person' || input.kind === 'organisation'
+            ? null
+            : linkedPersonId,
+        linkedOrganisationId:
+          input.kind === 'organisation' ? null : linkedOrganisationId,
+      },
+      finalGraphPeople,
+      finalGraphOrgs,
+      graph.matters,
+      choiceValues,
+      visibleEnquiriesForConflict,
+      excludeEnquiryId,
+      graph.links,
+      graph.canViewMatter,
+      ctx.tenantId,
+    );
+    conflictSearch = searchRes;
+    possibleConflicts = searchRes.allConflicts;
+  }
+
+  return {
+    duplicatePeople,
+    duplicateOrganisations,
+    entityMatches,
+    activeLinkedEnquiries,
+    possibleConflicts,
+    conflictSearch,
+  };
+}
+
+/**
+ * Server-side scoped entity picker lookup for link dropdowns, client lookups,
+ * prospect pickers, and corporate-group expansion (S1-02b C2).
+ *
+ * Enforces RBAC, restricted matter / personal-Draft enquiry SQL filtering, and
+ * strips all HR/employment, payroll, sensitive, override, and Entra fields.
+ */
+export async function searchEntityPickerRecord(
+  input: EntityPickerSearchInput,
+  byId?: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<EntityPickerSearchResult> {
+  const ctx =
+    options?.tenantCtx ?? resolveDefaultServiceTenantContext(null, byId);
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+
+  const [staffPeople, teams, rbacConfig] = await Promise.all([
+    loadStaffPeople(ctx),
+    getHrAndRbacRepository().listAllTeams<Team>(ctx),
+    loadEffectiveTenantRbacConfig(ctx),
+  ]);
+  const actorId = (byId ?? ctx.actorId ?? '').trim();
+  const actor = staffPeople.find((p) => p.id === actorId && !p.mergedIntoId) ?? null;
+  if (!actor) {
+    throw new AuthorisationError({
+      code: 'UNAUTHENTICATED',
+      message: 'Authentication is required to search records.',
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+      actorUserId: actorId || 'anonymous',
+    });
+  }
+
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    activeSession?.personId === actor.id ? activeSession.tokenRoles : undefined;
+  const permSet = resolvePersonPermissionSet(actor, {
+    allPeople: staffPeople,
+    teams,
+    tokenRoles: effectiveTokenRoles,
+    tokenRolesActorId: actor.id,
+    config: { rbac: rbacConfig },
+    context: ctx,
+  });
+
+  const hasRestrictedMatterAccess = permSet.permissions.has('matter:restricted:access');
+  const canViewQuotes = permSet.permissions.has('quote:view');
+  const limit = Math.max(1, Math.min(50, Math.floor(input.limit ?? 20)));
+  const excludeIds = Array.from(
+    new Set((input.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
+  );
+  const excludeSet = new Set(excludeIds);
+  const types = new Set(input.entityTypes);
+
+  if (input.corporateGroupOfOrgId?.trim()) {
+    const groupOrgId = input.corporateGroupOfOrgId.trim();
+    const [targetOrg, groupOrgs] = await Promise.all([
+      partyRepo.getOrganisationById<Organisation>(ctx, groupOrgId),
+      partyRepo.expandCorporateGroupOrganisationIds<Organisation>(ctx, [groupOrgId]),
+    ]);
+    const combinedOrgs = dedupeById([
+      ...(targetOrg?.parentOrganisationId
+        ? await partyRepo.listOrganisationsByIds<Organisation>(ctx, [
+            targetOrg.parentOrganisationId,
+          ])
+        : []),
+      ...groupOrgs,
+    ]).filter((o) => !o.mergedIntoId && o.id !== groupOrgId && !excludeSet.has(o.id));
+    return {
+      items: combinedOrgs.slice(0, limit).map((o) => ({
+        id: o.id,
+        recordType: 'organisation' as const,
+        label: o.legalName,
+        subtitle:
+          targetOrg?.parentOrganisationId === o.id
+            ? 'Parent company'
+            : o.parentOrganisationId === groupOrgId
+              ? 'Subsidiary company'
+              : 'Group company',
+        reference: o.id,
+        href: `/organisations/${o.id}`,
+        organisation: o,
+      })),
+    };
+  }
+
+  if (input.personQuery) {
+    const fn = input.personQuery.firstName?.trim() ?? '';
+    const sn = input.personQuery.surname?.trim() ?? '';
+    const orgQ = input.personQuery.organisationName?.trim() ?? '';
+    if (!fn && !sn && !orgQ) {
+      return { items: [] };
+    }
+    const wantPeople = types.has('person');
+    const wantOrgs = types.has('organisation');
+    const [candPeople, candOrgsDirect, candEnquiries] = await Promise.all([
+      wantPeople
+        ? partyRepo.findSqlDuplicateCandidates<Person>(ctx, {
+            kind: 'person',
+            firstName: fn,
+            surname: sn,
+            otherNames: orgQ ? [orgQ] : [],
+            fuzzy: true,
+          })
+        : Promise.resolve<Person[]>([]),
+      wantOrgs || orgQ
+        ? partyRepo.findSqlDuplicateCandidates<Organisation>(ctx, {
+            kind: 'organisation',
+            legalName: orgQ || `${fn} ${sn}`.trim(),
+            fuzzy: true,
+          })
+        : Promise.resolve<Organisation[]>([]),
+      wantPeople && input.includeEnquiryProspects
+        ? intakeRepo.findSqlConflictEnquiryCandidates<Enquiry>(ctx, {
+            terms: [fn, sn, `${fn} ${sn}`.trim(), orgQ].filter(Boolean),
+            viewerId: actor.id,
+            hasRestrictedMatterAccess,
+          })
+        : Promise.resolve<Enquiry[]>([]),
+    ]);
+
+    const mergedPeople = input.includeEnquiryProspects
+      ? mergePeopleWithEnquiries(candPeople, candEnquiries, [])
+      : candPeople;
+    const personIds = mergedPeople.map((p) => p.id);
+    const links =
+      personIds.length > 0
+        ? await partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
+            personIds,
+          })
+        : [];
+    const linkedOrgIds = Array.from(
+      new Set(links.map((l) => l.organisationId).filter(Boolean)),
+    );
+    const missingOrgIds = linkedOrgIds.filter(
+      (id) => !candOrgsDirect.some((o) => o.id === id),
+    );
+    const linkedOrgsExtra =
+      missingOrgIds.length > 0
+        ? await partyRepo.listOrganisationsByIds<Organisation>(ctx, missingOrgIds)
+        : [];
+    const allOrgs = dedupeById([...candOrgsDirect, ...linkedOrgsExtra]);
+
+    return {
+      items: scoreFuzzyPersonOrgQuery({
+        personQuery: input.personQuery,
+        people: mergedPeople,
+        organisations: allOrgs,
+        links,
+        includePeople: wantPeople,
+        includeOrganisations: wantOrgs,
+        excludeIds: excludeSet,
+        excludeDemo: input.excludeDemo,
+        employeesOnly: input.employeesOnly,
+        nonEmployeesOnly: input.nonEmployeesOnly,
+        limit,
+      }),
+    };
+  }
+
+  const query = input.query?.trim() ?? '';
+  const fetchLimit = Math.min(100, limit * 2);
+
+  const [peopleRaw, orgsRaw, mattersRaw, enquiriesRaw, quotesRaw] =
+    await Promise.all([
+      types.has('person')
+        ? partyRepo.searchPeople<Person>(ctx, query, {
+            includeMerged: false,
+            employeesOnly: input.employeesOnly,
+            excludeIds,
+            limit: fetchLimit,
+          })
+        : Promise.resolve<Person[]>([]),
+      types.has('organisation')
+        ? partyRepo.searchOrganisations<Organisation>(ctx, query, {
+            includeMerged: false,
+            excludeIds,
+            limit,
+          })
+        : Promise.resolve<Organisation[]>([]),
+      types.has('matter')
+        ? matterRepo.searchVisibleMatters<Matter>(ctx, query, {
+            viewerId: actor.id,
+            hasRestrictedMatterAccess,
+            includeMerged: false,
+            excludeIds,
+            limit,
+          })
+        : Promise.resolve<Matter[]>([]),
+      types.has('enquiry')
+        ? intakeRepo.listVisibleEnquiries<Enquiry>(ctx, actor.id, {
+            query,
+            excludeIds,
+            hasRestrictedMatterAccess,
+            limit,
+          })
+        : Promise.resolve<Enquiry[]>([]),
+      types.has('quote') && canViewQuotes
+        ? intakeRepo.listVisibleQuotes<Quote>(ctx, actor.id, {
+            query,
+            excludeIds,
+            hasRestrictedMatterAccess,
+            limit,
+          })
+        : Promise.resolve<Quote[]>([]),
+    ]);
+
+  const filteredPeople = peopleRaw
+    .filter((p) => {
+      if (excludeSet.has(p.id)) return false;
+      if (input.excludeDemo && p.demo) return false;
+      if (input.nonEmployeesOnly && p.isEmployee) return false;
+      return true;
+    })
+    .slice(0, limit);
+
+  let linkedOrgById = new Map<string, Organisation>();
+  const personLinksByPersonId = new Map<string, PersonOrganisationLink[]>();
+  if (input.includeLinkedOrgs && filteredPeople.length > 0) {
+    const pLinks = await partyRepo.listLinksForEntities<PersonOrganisationLink>(
+      ctx,
+      { personIds: filteredPeople.map((p) => p.id) },
+    );
+    for (const l of pLinks) {
+      if (!l.isCurrent) continue;
+      const arr = personLinksByPersonId.get(l.personId) ?? [];
+      arr.push(l);
+      personLinksByPersonId.set(l.personId, arr);
+    }
+    const orgIds = Array.from(
+      new Set(pLinks.filter((l) => l.isCurrent).map((l) => l.organisationId)),
+    );
+    if (orgIds.length > 0) {
+      const orgRows = await partyRepo.listOrganisationsByIds<Organisation>(ctx, orgIds);
+      linkedOrgById = new Map(orgRows.map((o) => [o.id, o]));
+    }
+  }
+
+  const matterClientIds = mattersRaw.map((m) => m.clientId).filter(Boolean);
+  const quoteClientPersonIds = quotesRaw
+    .map((q) => q.linkedPersonId)
+    .filter((id): id is string => Boolean(id));
+  const quoteClientOrgIds = quotesRaw
+    .map((q) => q.linkedOrganisationId)
+    .filter((id): id is string => Boolean(id));
+  const batchPersonIds = Array.from(
+    new Set([
+      ...matterClientIds.filter((id) => id.startsWith('P-')),
+      ...quoteClientPersonIds,
+    ]),
+  );
+  const batchOrgIds = Array.from(
+    new Set([
+      ...matterClientIds.filter((id) => id.startsWith('O-')),
+      ...quoteClientOrgIds,
+    ]),
+  );
+  const [batchPeople, batchOrgs] = await Promise.all([
+    batchPersonIds.length > 0
+      ? partyRepo.listPeopleByIds<Person>(ctx, batchPersonIds)
+      : Promise.resolve<Person[]>([]),
+    batchOrgIds.length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(ctx, batchOrgIds)
+      : Promise.resolve<Organisation[]>([]),
+  ]);
+  const clientNameById = new Map<string, string>([
+    ...batchPeople.map((p) => [p.id, personDisplayName(p)] as const),
+    ...batchOrgs.map((o) => [o.id, o.legalName] as const),
+  ]);
+
+  const items: EntityPickerOption[] = [];
+
+  for (const m of mattersRaw) {
+    const clientName = clientNameById.get(m.clientId) ?? '';
+    items.push({
+      id: m.id,
+      recordType: 'matter',
+      label: `${m.matterNumber} — ${m.title || 'Untitled matter'}`,
+      subtitle: clientName,
+      reference: m.matterNumber,
+      href: `/matters/${m.id}`,
+      matter: m,
+    });
+  }
+
+  for (const e of enquiriesRaw) {
+    const safeEnquiry: Enquiry = { ...e, conflictSnapshot: undefined };
+    items.push({
+      id: safeEnquiry.id,
+      recordType: 'enquiry',
+      label: `${safeEnquiry.reference} — ${enquiryDisplayName(safeEnquiry, 'Unnamed enquiry')}`,
+      subtitle: safeEnquiry.summary || safeEnquiry.callingOnBehalfOf || '',
+      reference: safeEnquiry.reference,
+      href: `/enquiries/${safeEnquiry.id}`,
+      enquiry: safeEnquiry,
+    });
+  }
+
+  for (const q of quotesRaw) {
+    items.push({
+      id: q.id,
+      recordType: 'quote',
+      label: `${q.reference} — ${quoteClientDisplayName(q, batchPeople, batchOrgs)}`,
+      subtitle: q.scope || '',
+      reference: q.reference,
+      href: `/quotes/${q.id}`,
+      quote: q,
+    });
+  }
+
+  for (const o of orgsRaw) {
+    items.push({
+      id: o.id,
+      recordType: 'organisation',
+      label: o.legalName,
+      subtitle: [
+        (o.otherNames ?? []).map((n) => n.name).join(', '),
+        o.companyNumber ? `Co. ${o.companyNumber}` : '',
+        o.generalEmail,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      reference: o.id,
+      href: `/organisations/${o.id}`,
+      organisation: o,
+    });
+  }
+
+  for (const p of filteredPeople) {
+    const safePerson = sanitizePersonForClientPreview(p, {
+      preserveNonEmployeeDob: true,
+    });
+    const linkedOrgs = (personLinksByPersonId.get(p.id) ?? [])
+      .map((l) => linkedOrgById.get(l.organisationId))
+      .filter((o): o is Organisation => Boolean(o && !o.mergedIntoId));
+    items.push({
+      id: p.id,
+      recordType: 'person',
+      label: personDisplayName(p),
+      subtitle: [p.jobTitle || null, primaryEmail(p), p.addresses?.[0]?.town ?? null]
+        .filter(Boolean)
+        .join(' · '),
+      reference: p.id,
+      href: `/people/${p.id}`,
+      person: safePerson,
+      ...(input.includeLinkedOrgs ? { linkedOrgs } : {}),
+    });
+  }
+
+  return { items: items.slice(0, limit) };
+}
+
