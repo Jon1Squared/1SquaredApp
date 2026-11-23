@@ -31,6 +31,13 @@ import {
   type IntakeEvidenceArtifactRef,
   type TenantContext,
 } from '../src/index';
+import {
+  E_SIGNATURE_OUTCOMES,
+  IDENTITY_VERIFICATION_OUTCOMES,
+  INTAKE_CHECK_OUTCOMES_BY_KIND,
+  PAYMENT_REQUEST_OUTCOMES,
+  SANCTIONS_PEP_OUTCOMES,
+} from '../src/api/index';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 
@@ -141,6 +148,23 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
   it('exposes CORE_API_VERSION 2.1.0, evidence storage category, and deep-merged integrations.intakeChecks config with fail-closed validation', async () => {
     expect(CORE_API_VERSION).toBe('2.1.0');
     expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(23);
+
+    // R690: all four exported outcome tuple arrays must be deeply frozen at runtime
+    for (const outcomeList of [
+      IDENTITY_VERIFICATION_OUTCOMES,
+      SANCTIONS_PEP_OUTCOMES,
+      E_SIGNATURE_OUTCOMES,
+      PAYMENT_REQUEST_OUTCOMES,
+      INTAKE_CHECK_OUTCOMES_BY_KIND.identity_verification,
+      INTAKE_CHECK_OUTCOMES_BY_KIND.sanctions_pep,
+      INTAKE_CHECK_OUTCOMES_BY_KIND.e_signature,
+      INTAKE_CHECK_OUTCOMES_BY_KIND.payment_request,
+    ]) {
+      expect(Object.isFrozen(outcomeList)).toBe(true);
+      expect(() => {
+        (outcomeList as unknown as string[]).push('tampered_outcome');
+      }).toThrow(TypeError);
+    }
 
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 's103-evid-'));
     tempDirs.push(tmpRoot);
@@ -645,11 +669,10 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       }),
     ).toBeNull();
 
-    // R684: Forged actorRoles claim (and unverified OIDC token with elevated roles) cannot bypass tenant isolation
+    // R684 / R693: Forged actorRoles claim (and unverified OIDC token with elevated roles) cannot bypass tenant isolation
     const forgedActorRolesCtx: TenantContext = Object.freeze({
       ...ctxAlpha,
       actorRoles: Object.freeze(['admin', 'managing_partner']),
-      blobContainerName: ctxBravo.blobContainerName,
     });
     await expect(
       providers.idVerification.recordManualCheck(forgedActorRolesCtx, {
@@ -659,7 +682,16 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         verificationMethod: 'Forged actorRoles check',
         evidenceRefs: [evidRefBravo],
       }),
-    ).rejects.toThrow(/^TENANCY_ISOLATION_ERROR/);
+    ).rejects.toThrow(/^STORAGE_TENANCY_ISOLATION_ERROR/);
+    const alphaOnlyUnderForgedRoles =
+      await providers.idVerification.recordManualCheck(forgedActorRolesCtx, {
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ACTOR-ROLES-ALPHA-ONLY',
+        outcome: 'verified',
+        verificationMethod: 'Forged actorRoles Alpha-bound check',
+        evidenceRefs: [evidRefAlpha],
+      });
+    expect(alphaOnlyUnderForgedRoles.tenantId).toBe(ctxAlpha.tenantId);
     expect(
       await repo.getLatestCheckForSubject(ctxAlpha, {
         checkKind: 'identity_verification',
@@ -672,6 +704,13 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
         checkKind: 'identity_verification',
         subjectType: 'person',
         subjectId: 'P-C-FORGED-ACTOR-ROLES',
+      }),
+    ).toBeNull();
+    expect(
+      await repo.getLatestCheckForSubject(ctxBravo, {
+        checkKind: 'identity_verification',
+        subjectType: 'person',
+        subjectId: 'P-C-FORGED-ACTOR-ROLES-ALPHA-ONLY',
       }),
     ).toBeNull();
     expect(() =>
@@ -1220,8 +1259,16 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       now: new Date(Date.now() + 10_000),
     });
     expect(drainOrdinalMismatch.sentCount).toBe(0);
-    expect(drainOrdinalMismatch.retriedCount).toBe(1);
+    expect(drainOrdinalMismatch.retriedCount).toBe(0);
+    expect(drainOrdinalMismatch.failedPermanentCount).toBe(1);
     expect(mixedGraphPayloads).toHaveLength(0);
+    const ordinalRowAfter = await outboxRepo.withTenantTransaction(ctxAlpha, (tx) =>
+      tx.query<{ status: string }>(
+        `SELECT status FROM public.email_outbox WHERE tenant_id = $1 AND id = $2`,
+        [ctxAlpha.tenantId, enqOrdinalMismatch.record.id],
+      ),
+    );
+    expect(ordinalRowAfter.rows[0]?.status).toBe('failed_permanent');
 
     const enqShaMismatch = await outboxRepo.enqueueEmail(ctxAlpha, {
       idempotencyKey: 's103-r674-sha-mismatch',
@@ -1249,7 +1296,15 @@ describe('S1-03: Intake check interfaces, manual adapters, evidence storage & ou
       now: new Date(Date.now() + 20_000),
     });
     expect(drainShaMismatch.sentCount).toBe(0);
-    expect(drainShaMismatch.retriedCount).toBe(1);
+    expect(drainShaMismatch.retriedCount).toBe(0);
+    expect(drainShaMismatch.failedPermanentCount).toBe(1);
     expect(mixedGraphPayloads).toHaveLength(0);
+    const shaRowAfter = await outboxRepo.withTenantTransaction(ctxAlpha, (tx) =>
+      tx.query<{ status: string }>(
+        `SELECT status FROM public.email_outbox WHERE tenant_id = $1 AND id = $2`,
+        [ctxAlpha.tenantId, enqShaMismatch.record.id],
+      ),
+    );
+    expect(shaRowAfter.rows[0]?.status).toBe('failed_permanent');
   });
 });

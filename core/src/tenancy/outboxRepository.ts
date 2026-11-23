@@ -341,6 +341,7 @@ function computeAttemptFailurePlan(params: {
   readonly error: unknown;
   readonly maxAttempts?: number;
   readonly baseBackoffSeconds?: number;
+  readonly forcePermanent?: boolean;
   readonly now: Date;
 }): {
   readonly nextAttemptCount: number;
@@ -362,7 +363,8 @@ function computeAttemptFailurePlan(params: {
       ? params.error.trim()
       : sanitizeJobErrorCode(params.error);
   const nextAttemptCount = params.currentAttemptCount + 1;
-  const permanentFailure = nextAttemptCount >= maxAttempts;
+  const permanentFailure =
+    Boolean(params.forcePermanent) || nextAttemptCount >= maxAttempts;
   const backoffSeconds = Math.min(
     MAX_OUTBOX_BACKOFF_SECONDS,
     baseBackoffSeconds * 2 ** Math.max(0, nextAttemptCount - 1),
@@ -858,6 +860,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       readonly error: unknown;
       readonly maxAttempts?: number;
       readonly baseBackoffSeconds?: number;
+      readonly forcePermanent?: boolean;
       readonly failedAt?: Date;
       readonly auditEntriesOnPermanentFailure?: readonly FirmAuditEntryInput[];
     },
@@ -891,6 +894,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
             error: params.error,
             maxAttempts: params.maxAttempts,
             baseBackoffSeconds: params.baseBackoffSeconds,
+            forcePermanent: params.forcePermanent,
             now,
           }).errorCode,
           record: null,
@@ -903,6 +907,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         error: params.error,
         maxAttempts: params.maxAttempts,
         baseBackoffSeconds: params.baseBackoffSeconds,
+        forcePermanent: params.forcePermanent,
         now,
       });
 

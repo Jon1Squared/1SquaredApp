@@ -261,12 +261,16 @@ export async function drainEmailOutboxForTenant(
         // result.status === 'disabled' — provider disabled mid-flight; treat cleanly as skipped
         skippedDisabled = true;
       } catch (err) {
+        const isAttachmentIntegrityError =
+          err instanceof Error &&
+          /^EMAIL_OUTBOX_ATTACHMENT_(MISSING|CORRUPTED):/.test(err.message);
         const failRes = await outboxRepo.markOutboxAttemptFailed(ctx, {
           id: row.id,
           claimToken: row.claimToken,
           error: err,
           maxAttempts,
           baseBackoffSeconds,
+          forcePermanent: isAttachmentIntegrityError,
           failedAt: now,
           auditEntriesOnPermanentFailure: [
             {
@@ -278,7 +282,9 @@ export async function drainEmailOutboxForTenant(
               newValue: 'failed_permanent',
               byId: actorId,
               at: now.toISOString(),
-              reason: `Permanent delivery failure for outbox item ${row.id} after ${maxAttempts} attempts (template=${row.templateKey}).`,
+              reason: isAttachmentIntegrityError
+                ? `Permanent failure for outbox item ${row.id}: attachment integrity verification failed (template=${row.templateKey}).`
+                : `Permanent delivery failure for outbox item ${row.id} after ${maxAttempts} attempts (template=${row.templateKey}).`,
             },
           ],
         });

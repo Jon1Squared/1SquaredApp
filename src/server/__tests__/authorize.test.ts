@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getPlatformTelemetryRecorder } from '@platform/core';
+import {
+  expectedBlobContainerName,
+  getPlatformTelemetryRecorder,
+} from '@platform/core';
 import { MockSharePointGraphBackend } from '@platform/core/testing';
 import { updateTenantRbacConfigAction } from '@/app/actions';
 import { GET as matterDocumentsGet } from '@/app/api/matters/[id]/documents/route';
@@ -527,7 +530,10 @@ describe('S0-02: authorize.ts runtime enforcement (ADR 0025)', () => {
       environment: tenantCfg.environment,
       correlationId: 'corr-r561-setup',
       postgresDatabaseName: 'pg_tenant_not_a_law_firm_test',
-      blobContainerName: 'tenant-not-a-law-firm-docs',
+      blobContainerName: expectedBlobContainerName(
+        tenantCfg.tenantId,
+        tenantCfg.environment,
+      ),
       keyVaultSecretPrefix: 'kv-not-a-law-firm-test',
     };
     const p9Orig = structuredClone(seedStore.people.find((p) => p.id === 'P-000009')!);

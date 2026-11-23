@@ -2162,12 +2162,12 @@ export interface IntakeEvidenceArtifactRef {
   readonly scanStatus: MalwareScanStatus | 'quarantined';
 }
 
-export const IDENTITY_VERIFICATION_OUTCOMES = [
+export const IDENTITY_VERIFICATION_OUTCOMES = Object.freeze([
   'verified',
   'failed',
   'pending',
   'expired',
-] as const;
+] as const);
 
 export type IdentityVerificationOutcome =
   (typeof IDENTITY_VERIFICATION_OUTCOMES)[number];
@@ -2216,11 +2216,11 @@ export interface IdentityVerificationProvider {
   ): Promise<IdentityVerificationRecord | null>;
 }
 
-export const SANCTIONS_PEP_OUTCOMES = [
+export const SANCTIONS_PEP_OUTCOMES = Object.freeze([
   'clear',
   'match_flagged',
   'pending',
-] as const;
+] as const);
 
 export type SanctionsPepOutcome = (typeof SANCTIONS_PEP_OUTCOMES)[number];
 
@@ -2266,11 +2266,11 @@ export interface SanctionsPepScreeningProvider {
   ): Promise<SanctionsPepScreeningRecord | null>;
 }
 
-export const E_SIGNATURE_OUTCOMES = [
+export const E_SIGNATURE_OUTCOMES = Object.freeze([
   'requested_manual',
   'signed_uploaded',
   'declined',
-] as const;
+] as const);
 
 export type ESignatureOutcome = (typeof E_SIGNATURE_OUTCOMES)[number];
 
@@ -2320,11 +2320,11 @@ export interface ESignatureProvider {
   ): Promise<ESignatureEnvelopeRecord | null>;
 }
 
-export const PAYMENT_REQUEST_OUTCOMES = [
+export const PAYMENT_REQUEST_OUTCOMES = Object.freeze([
   'requested_manual',
   'receipt_recorded_manual',
   'cancelled',
-] as const;
+] as const);
 
 export type PaymentRequestOutcome =
   (typeof PAYMENT_REQUEST_OUTCOMES)[number];
