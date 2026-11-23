@@ -217,10 +217,10 @@ import {
 } from '../../src/domain/matterConflicts';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import { resolveMatterDefaultResponsiblePersonIds } from '../../src/domain/keyDates';
-import PersonProfilePage from '../../src/app/people/[id]/page';
-import EditPersonPage from '../../src/app/people/[id]/edit/page';
-import OrganisationProfilePage from '../../src/app/organisations/[id]/page';
-import EditOrganisationPage from '../../src/app/organisations/[id]/edit/page';
+import PersonProfilePage from '../../src/app/(app)/people/[id]/page';
+import EditPersonPage from '../../src/app/(app)/people/[id]/edit/page';
+import OrganisationProfilePage from '../../src/app/(app)/organisations/[id]/page';
+import EditOrganisationPage from '../../src/app/(app)/organisations/[id]/edit/page';
 import {
   computeEnquiryConflictSnapshot,
   detectPreliminaryConflicts,

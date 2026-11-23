@@ -522,13 +522,13 @@ import {
 
 export const USER_COOKIE = 'onesquared_user';
 
-async function loadStaffPeople(ctx: TenantContext): Promise<Person[]> {
+export async function loadStaffPeople(ctx: TenantContext): Promise<Person[]> {
   return getPartyRepository().listAllPeople<Person>(ctx, {
     employeesAndLeaversOnly: true,
   });
 }
 
-function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
+export function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
   for (const item of items) {
@@ -1406,7 +1406,7 @@ export function getKeyDateRepository(): TenantKeyDateRepository {
   return global.__oneSquaredKeyDateRepo;
 }
 
-function resolveDefaultServiceTenantContext(
+export function resolveDefaultServiceTenantContext(
   _store?: FirmStore | null,
   preferredActorId?: string | null,
   options?: {
@@ -1456,7 +1456,7 @@ function resolveDefaultServiceTenantContext(
   throw err;
 }
 
-async function loadTenantCatalogueStoreView(
+export async function loadTenantCatalogueStoreView(
   ctx: TenantContext,
   options?: { includePmsLinks?: boolean },
 ): Promise<FirmStore> {
@@ -1652,7 +1652,7 @@ async function loadTenantCatalogueStoreView(
   };
 }
 
-async function loadEffectiveTenantRbacConfig(
+export async function loadEffectiveTenantRbacConfig(
   ctx: TenantContext,
   preloadedOverride?: Partial<RbacConfiguration> | null,
   explicitTenantConfig?: TenantConfiguration,
@@ -5880,7 +5880,7 @@ function sanitizeAndValidateSubmittedMatterCosts(params: {
   };
 }
 
-function resolveMatterSignOffEstimateGbp(
+export function resolveMatterSignOffEstimateGbp(
   store: FirmStore,
   tenantCfg: ReturnType<typeof getActiveTenantConfiguration>,
   matter: Matter,

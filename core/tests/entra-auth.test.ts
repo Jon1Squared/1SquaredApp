@@ -32,7 +32,7 @@ import { switchUserAction } from '../../src/app/actions';
 import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-entra-id/route';
 import { GET as logoutGet } from '../../src/app/api/auth/logout/route';
 import { POST as extractMatterPost } from '../../src/app/api/matters/extract/route';
-import AdminCatchAllPage from '../../src/app/admin/[[...slug]]/page';
+import AdminCatchAllPage from '../../src/app/(app)/admin/[[...slug]]/page';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
 
 const TEST_TENANT_ID = '00000000-0000-4000-8000-000000000099';

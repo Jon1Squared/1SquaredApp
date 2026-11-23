@@ -91,7 +91,6 @@ export type HomeSnapshotBaseProps = Pick<
   | 'currentUser'
   | 'effectiveWorkPerson'
   | 'homePagesConfig'
-  | 'searchIndex'
   | 'signOffs'
   | 'people'
   | 'organisations'
@@ -170,7 +169,6 @@ export function HomeClient({
   effectiveWorkPerson,
   activeRoleKey,
   homePagesConfig,
-  searchIndex,
   signOffs,
   people,
   organisations,
@@ -5190,7 +5188,7 @@ export function HomeClient({
         <h1 className="hero-greeting" suppressHydrationWarning>
           {greetingPrefix}, {greetingName}
         </h1>
-        <HeroHomeSearch searchIndex={searchIndex} />
+        <HeroHomeSearch />
         {canApproveTemplates && pendingTemplateApprovalsCount > 0 ? (
           <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}>
             <Link

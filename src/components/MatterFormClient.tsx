@@ -191,7 +191,7 @@ interface MatterFormClientProps {
   people: Person[];
   organisations: Organisation[];
   links: PersonOrganisationLink[];
-  matters: Matter[];
+  matters?: Matter[];
   enquiries?: Enquiry[];
   lists?: ChoiceList[];
   values: ChoiceValue[];
@@ -298,7 +298,7 @@ export function MatterFormClient({
   people: initialPeople,
   organisations: initialOrganisations,
   links: initialLinks,
-  matters,
+  matters = [],
   enquiries = [],
   lists = [],
   values,
