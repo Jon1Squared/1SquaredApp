@@ -525,6 +525,154 @@ function dedupeById<T extends { id: string }>(items: readonly T[]): T[] {
   return out;
 }
 
+export interface ScopedConflictSignals {
+  readonly terms?: readonly string[];
+  readonly emails?: readonly string[];
+  readonly phones?: readonly string[];
+  readonly postcodes?: readonly string[];
+  readonly companyNumbers?: readonly string[];
+  readonly linkedPersonIds?: readonly string[];
+  readonly linkedOrganisationIds?: readonly string[];
+  readonly excludeEnquiryId?: string | null;
+}
+
+export function extractConflictSignalsFromParties(
+  parties: readonly ConflictCheckParty[],
+  opts?: { readonly excludeEnquiryId?: string | null },
+): ScopedConflictSignals {
+  const termSet = new Set<string>();
+  const emailSet = new Set<string>();
+  const companySet = new Set<string>();
+  const linkedPersonSet = new Set<string>();
+  const linkedOrgSet = new Set<string>();
+
+  for (const p of parties) {
+    const trimmedName = typeof p.name === 'string' ? p.name.trim() : '';
+    if (trimmedName) {
+      termSet.add(trimmedName);
+      if (trimmedName.includes('@')) {
+        emailSet.add(trimmedName.toLowerCase());
+      }
+    }
+    const trimmedSub =
+      typeof p.subtitle === 'string' ? p.subtitle.trim() : '';
+    if (trimmedSub && trimmedSub.includes('@')) {
+      emailSet.add(trimmedSub.toLowerCase());
+    }
+    const rawPrev = p.identifiers?.previousNames;
+    if (typeof rawPrev === 'string' && rawPrev.trim()) {
+      for (const token of rawPrev.split(/[,;/\n]+/)) {
+        const clean = token.trim();
+        if (clean) termSet.add(clean);
+      }
+    }
+    const compNo = p.identifiers?.companyNumber?.trim();
+    if (compNo) companySet.add(compNo);
+    if (p.linkedRecordId) {
+      if (p.entityType === 'person') linkedPersonSet.add(p.linkedRecordId);
+      else linkedOrgSet.add(p.linkedRecordId);
+    }
+  }
+
+  return {
+    terms: Array.from(termSet),
+    emails: Array.from(emailSet),
+    companyNumbers: Array.from(companySet),
+    linkedPersonIds: Array.from(linkedPersonSet),
+    linkedOrganisationIds: Array.from(linkedOrgSet),
+    excludeEnquiryId: opts?.excludeEnquiryId ?? null,
+  };
+}
+
+export async function loadFullConflictSearchGraph(
+  ctx: TenantContext,
+  _signals: ScopedConflictSignals,
+  viewerId: string,
+  staffPeople: readonly Person[],
+  teams: readonly Team[],
+  rbacConfig?: RbacConfiguration,
+): Promise<{
+  people: Person[];
+  organisations: Organisation[];
+  links: PersonOrganisationLink[];
+  matters: Matter[];
+  enquiries: Enquiry[];
+  canViewMatter: (m: Matter) => boolean;
+  canViewEnquiry: (e: Enquiry) => boolean;
+}> {
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+
+  const [peopleRaw, organisations, links, matters, enquiries] = await Promise.all([
+    partyRepo.listAllPeople<Person>(ctx),
+    partyRepo.listAllOrganisations<Organisation>(ctx),
+    partyRepo.listAllLinks<PersonOrganisationLink>(ctx),
+    matterRepo.listAllMattersUnfiltered<Matter>(ctx),
+    intakeRepo.listAllEnquiriesUnfiltered<Enquiry>(ctx),
+  ]);
+
+  const allPeopleOut = dedupeById([...staffPeople, ...peopleRaw]);
+  const actor = allPeopleOut.find((p) => p.id === viewerId) ?? null;
+  const activeSession = getActiveActorSession();
+  const effectiveTokenRoles =
+    actor && activeSession?.personId === actor.id
+      ? activeSession.tokenRoles
+      : undefined;
+  const hasRestrictedAccess = hasPersonPermission(
+    actor,
+    'matter:restricted:access',
+    {
+      allPeople: allPeopleOut,
+      teams: [...teams],
+      tokenRoles: effectiveTokenRoles,
+      tokenRolesActorId: viewerId,
+      ...(rbacConfig ? { config: { rbac: rbacConfig } } : {}),
+    },
+  );
+  const hiddenEnquiryIdList = await intakeRepo.listHiddenEnquiryIds(ctx, viewerId, {
+    hasRestrictedMatterAccess: hasRestrictedAccess,
+  });
+  const hiddenEnquiryIds = new Set(hiddenEnquiryIdList);
+
+  return {
+    people: allPeopleOut,
+    organisations,
+    links,
+    matters,
+    enquiries,
+    canViewMatter: (m: Matter) =>
+      Boolean(viewerId) &&
+      canPersonAccessMatter(m, viewerId, actor, {
+        allPeople: allPeopleOut,
+        teams: [...teams],
+        tokenRoles: effectiveTokenRoles,
+        tokenRolesActorId: viewerId,
+        ...(rbacConfig ? { config: { rbac: rbacConfig } } : {}),
+      }),
+    canViewEnquiry: (e: Enquiry) =>
+      Boolean(viewerId) && !hiddenEnquiryIds.has(e.id),
+  };
+}
+
+export async function loadScopedConflictSearchGraphForParity(
+  ctx: TenantContext,
+  signals: ScopedConflictSignals,
+  viewerId: string,
+  staffPeople: readonly Person[],
+  teams: readonly Team[],
+  rbacConfig?: RbacConfiguration,
+) {
+  return loadScopedConflictSearchGraph(
+    ctx,
+    signals,
+    viewerId,
+    staffPeople,
+    teams,
+    rbacConfig,
+  );
+}
+
 async function loadScopedConflictSearchGraph(
   ctx: TenantContext,
   signals: {
@@ -554,17 +702,134 @@ async function loadScopedConflictSearchGraph(
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
 
+  const harvestPersonSignals = (
+    p: Person,
+    termSet: Set<string>,
+    emailSet: Set<string>,
+    phoneSet: Set<string>,
+    postcodeSet: Set<string>,
+  ) => {
+    for (const nm of [
+      personDisplayName(p),
+      `${p.firstName} ${p.surname}`,
+      p.preferredName ? `${p.preferredName} ${p.surname}` : '',
+      ...(p.otherNames ?? []).map((n) => n.name),
+    ]) {
+      const t = nm?.trim();
+      if (t) termSet.add(t);
+    }
+    for (const em of p.emails ?? []) {
+      const addr = em?.address?.trim().toLowerCase();
+      if (addr) emailSet.add(addr);
+    }
+    for (const ph of p.phones ?? []) {
+      const num = ph?.number?.trim();
+      if (num) phoneSet.add(num);
+    }
+    for (const a of p.addresses ?? []) {
+      const pc = a?.postcode?.trim();
+      if (pc) postcodeSet.add(pc);
+    }
+  };
+
+  const harvestOrgSignals = (
+    o: Organisation,
+    termSet: Set<string>,
+    emailSet: Set<string>,
+    phoneSet: Set<string>,
+    postcodeSet: Set<string>,
+    companySet: Set<string>,
+  ) => {
+    for (const nm of [o.legalName, ...(o.otherNames ?? []).map((n) => n.name)]) {
+      const t = nm?.trim();
+      if (t) termSet.add(t);
+    }
+    if (o.generalEmail?.trim()) emailSet.add(o.generalEmail.trim().toLowerCase());
+    if (o.mainPhone?.trim()) phoneSet.add(o.mainPhone.trim());
+    for (const a of [
+      o.registeredAddress,
+      o.correspondenceAddress,
+      o.billingAddress,
+    ]) {
+      const pc = a?.postcode?.trim();
+      if (pc) postcodeSet.add(pc);
+    }
+    if (o.companyNumber?.trim()) companySet.add(o.companyNumber.trim());
+  };
+
+  const seedTermSet = new Set((signals.terms ?? []).map((t) => t.trim()).filter(Boolean));
+  const seedEmailSet = new Set(
+    (signals.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean),
+  );
+  const seedPhoneSet = new Set((signals.phones ?? []).map((p) => p.trim()).filter(Boolean));
+  const seedPostcodeSet = new Set(
+    (signals.postcodes ?? []).map((pc) => pc.trim()).filter(Boolean),
+  );
+  const seedCompanySet = new Set(
+    (signals.companyNumbers ?? []).map((c) => c.trim()).filter(Boolean),
+  );
+
+  // Hydrate explicitly linked entities first so their otherNames, emails & company numbers seed candidate lookup
+  const [seedPeopleLoaded, seedOrgsLoaded] = await Promise.all([
+    (signals.linkedPersonIds ?? []).length > 0
+      ? partyRepo.listPeopleByIds<Person>(ctx, signals.linkedPersonIds ?? [])
+      : Promise.resolve<Person[]>([]),
+    (signals.linkedOrganisationIds ?? []).length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(
+          ctx,
+          signals.linkedOrganisationIds ?? [],
+        )
+      : Promise.resolve<Organisation[]>([]),
+  ]);
+  for (const p of seedPeopleLoaded) {
+    harvestPersonSignals(p, seedTermSet, seedEmailSet, seedPhoneSet, seedPostcodeSet);
+  }
+  for (const o of seedOrgsLoaded) {
+    harvestOrgSignals(
+      o,
+      seedTermSet,
+      seedEmailSet,
+      seedPhoneSet,
+      seedPostcodeSet,
+      seedCompanySet,
+    );
+  }
+
   const cand = await partyRepo.findSqlConflictCandidates<
     Person,
     Organisation,
     PersonOrganisationLink
-  >(ctx, signals);
+  >(ctx, {
+    terms: Array.from(seedTermSet),
+    emails: Array.from(seedEmailSet),
+    phones: Array.from(seedPhoneSet),
+    postcodes: Array.from(seedPostcodeSet),
+    companyNumbers: Array.from(seedCompanySet),
+    linkedPersonIds: signals.linkedPersonIds,
+    linkedOrganisationIds: signals.linkedOrganisationIds,
+  });
+
+  const mergedOrganisationsMap = new Map<string, Organisation>();
+  for (const o of [...seedOrgsLoaded, ...cand.organisations]) {
+    if (o?.id && !mergedOrganisationsMap.has(o.id)) {
+      mergedOrganisationsMap.set(o.id, o);
+    }
+  }
+  const mergedPeopleMap = new Map<string, Person>();
+  for (const p of [...seedPeopleLoaded, ...cand.people]) {
+    if (p?.id && !mergedPeopleMap.has(p.id)) {
+      mergedPeopleMap.set(p.id, p);
+    }
+  }
 
   const seedOrgIds = Array.from(
-    new Set([
-      ...(signals.linkedOrganisationIds ?? []),
-      ...cand.organisations.map((o) => o.id),
-    ].filter(Boolean)),
+    new Set(
+      [
+        ...(signals.linkedOrganisationIds ?? []),
+        ...mergedOrganisationsMap.keys(),
+        ...cand.links.map((l) => l.organisationId).filter(Boolean),
+      ].filter(Boolean),
+    ),
   );
   const corpGroupOrgs =
     seedOrgIds.length > 0
@@ -573,43 +838,112 @@ async function loadScopedConflictSearchGraph(
           seedOrgIds,
         )
       : [];
-
-  const mergedOrganisationsMap = new Map<string, Organisation>();
-  for (const o of [...cand.organisations, ...corpGroupOrgs]) {
+  for (const o of corpGroupOrgs) {
     if (o?.id && !mergedOrganisationsMap.has(o.id)) {
       mergedOrganisationsMap.set(o.id, o);
     }
   }
-  const mergedPeopleMap = new Map<string, Person>();
-  for (const p of [...cand.people]) {
-    if (p?.id && !mergedPeopleMap.has(p.id)) {
-      mergedPeopleMap.set(p.id, p);
+
+  const preLinkPersonIds = Array.from(
+    new Set(
+      [
+        ...(signals.linkedPersonIds ?? []),
+        ...mergedPeopleMap.keys(),
+        ...cand.links.map((l) => l.personId).filter(Boolean),
+      ].filter(Boolean),
+    ),
+  );
+  const preLinkOrgIds = Array.from(mergedOrganisationsMap.keys());
+  const graphLinks =
+    preLinkPersonIds.length > 0 || preLinkOrgIds.length > 0
+      ? await partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
+          personIds: preLinkPersonIds,
+          organisationIds: preLinkOrgIds,
+        })
+      : [];
+
+  // Hydrate all link & corporate-group counterparts before querying matters & enquiries
+  const expandedPersonIdSet = new Set<string>(preLinkPersonIds);
+  const expandedOrgIdSet = new Set<string>(preLinkOrgIds);
+  for (const l of [...cand.links, ...graphLinks]) {
+    if (l.personId) expandedPersonIdSet.add(l.personId);
+    if (l.organisationId) expandedOrgIdSet.add(l.organisationId);
+  }
+  const missingCounterpartPersonIds = Array.from(expandedPersonIdSet).filter(
+    (id) => !mergedPeopleMap.has(id),
+  );
+  const missingCounterpartOrgIds = Array.from(expandedOrgIdSet).filter(
+    (id) => !mergedOrganisationsMap.has(id),
+  );
+  if (
+    missingCounterpartPersonIds.length > 0 ||
+    missingCounterpartOrgIds.length > 0
+  ) {
+    const [cpPeople, cpOrgs, cpGroupOrgs] = await Promise.all([
+      missingCounterpartPersonIds.length > 0
+        ? partyRepo.listPeopleByIds<Person>(ctx, missingCounterpartPersonIds)
+        : Promise.resolve<Person[]>([]),
+      missingCounterpartOrgIds.length > 0
+        ? partyRepo.listOrganisationsByIds<Organisation>(
+            ctx,
+            missingCounterpartOrgIds,
+          )
+        : Promise.resolve<Organisation[]>([]),
+      missingCounterpartOrgIds.length > 0
+        ? partyRepo.expandCorporateGroupOrganisationIds<Organisation>(
+            ctx,
+            missingCounterpartOrgIds,
+          )
+        : Promise.resolve<Organisation[]>([]),
+    ]);
+    for (const p of cpPeople) mergedPeopleMap.set(p.id, p);
+    for (const o of [...cpOrgs, ...cpGroupOrgs]) {
+      mergedOrganisationsMap.set(o.id, o);
+      expandedOrgIdSet.add(o.id);
     }
   }
 
-  const allOrgIds = Array.from(mergedOrganisationsMap.keys());
-  const allCandPersonIds = Array.from(
-    new Set([
-      ...(signals.linkedPersonIds ?? []),
-      ...Array.from(mergedPeopleMap.keys()),
-    ].filter(Boolean)),
-  );
+  // Second-pass signal harvest across candidate + linked counterpart + corporate-group closure
+  const expandedTermSet = new Set<string>(seedTermSet);
+  const expandedEmailSet = new Set<string>(seedEmailSet);
+  const expandedPhoneSet = new Set<string>(seedPhoneSet);
+  const expandedPostcodeSet = new Set<string>(seedPostcodeSet);
+  const expandedCompanySet = new Set<string>(seedCompanySet);
+  for (const p of mergedPeopleMap.values()) {
+    harvestPersonSignals(
+      p,
+      expandedTermSet,
+      expandedEmailSet,
+      expandedPhoneSet,
+      expandedPostcodeSet,
+    );
+  }
+  for (const o of mergedOrganisationsMap.values()) {
+    harvestOrgSignals(
+      o,
+      expandedTermSet,
+      expandedEmailSet,
+      expandedPhoneSet,
+      expandedPostcodeSet,
+      expandedCompanySet,
+    );
+  }
 
-  const [graphLinks, matchedMatterIds, matchedEnquiries] = await Promise.all([
-    allCandPersonIds.length > 0 || allOrgIds.length > 0
-      ? partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
-          personIds: allCandPersonIds,
-          organisationIds: allOrgIds,
-        })
-      : Promise.resolve<PersonOrganisationLink[]>([]),
+  const allOrgIds = Array.from(expandedOrgIdSet);
+  const allCandPersonIds = Array.from(expandedPersonIdSet);
+  const expandedTerms = Array.from(expandedTermSet);
+  const expandedEmails = Array.from(expandedEmailSet);
+  const expandedPhones = Array.from(expandedPhoneSet);
+
+  const [matchedMatterIds, matchedEnquiries] = await Promise.all([
     matterRepo.listMatterIdsMatchingCandidateGraph(ctx, {
       candidateEntityIds: [...allCandPersonIds, ...allOrgIds],
-      candidateTerms: signals.terms,
+      candidateTerms: expandedTerms,
     }),
     intakeRepo.findSqlConflictEnquiryCandidates<Enquiry>(ctx, {
-      terms: signals.terms,
-      emails: signals.emails,
-      phones: signals.phones,
+      terms: expandedTerms,
+      emails: expandedEmails,
+      phones: expandedPhones,
       linkedPersonIds: allCandPersonIds,
       linkedOrganisationIds: allOrgIds,
       excludeEnquiryId: signals.excludeEnquiryId,
@@ -618,7 +952,7 @@ async function loadScopedConflictSearchGraph(
     }),
   ]);
 
-  // Expand links with any person/org IDs connected across corporate group links
+  // Expand links with any person/org IDs connected across matched matters/enquiries
   const extraLinkPersonIds = new Set<string>(allCandPersonIds);
   const extraLinkOrgIds = new Set<string>(allOrgIds);
   for (const l of graphLinks) {
@@ -628,6 +962,7 @@ async function loadScopedConflictSearchGraph(
   for (const e of matchedEnquiries) {
     if (e.linkedPersonId) extraLinkPersonIds.add(e.linkedPersonId);
     if (e.linkedOrganisationId) extraLinkOrgIds.add(e.linkedOrganisationId);
+    if (e.referrerPersonId) extraLinkPersonIds.add(e.referrerPersonId);
   }
 
   const matters =
@@ -647,8 +982,19 @@ async function loadScopedConflictSearchGraph(
         extraLinkPersonIds.add(ac);
       }
     }
-    if (m.instructingContactId) extraLinkPersonIds.add(m.instructingContactId);
-    if (m.billingContactId) extraLinkPersonIds.add(m.billingContactId);
+    if (m.instructingContactId) {
+      extraLinkPersonIds.add(m.instructingContactId);
+      extraLinkOrgIds.add(m.instructingContactId);
+    }
+    if (m.billingContactId) {
+      extraLinkPersonIds.add(m.billingContactId);
+      extraLinkOrgIds.add(m.billingContactId);
+    }
+    if (m.referrerContactId) {
+      extraLinkPersonIds.add(m.referrerContactId);
+      extraLinkOrgIds.add(m.referrerContactId);
+    }
+    if (m.responsiblePartnerId) extraLinkPersonIds.add(m.responsiblePartnerId);
     for (const pt of m.parties ?? []) {
       if (pt.linkedRecordId) {
         if (pt.entityType === 'person') extraLinkPersonIds.add(pt.linkedRecordId);
@@ -7141,41 +7487,18 @@ export async function saveMatterRecord(
     people: allPeopleWithPending,
     organisations: allOrganisationsWithPending,
   });
-  const saveMatterSearchTerms = Array.from(
-    new Set(
-      effectiveConflictParties.flatMap((cp) =>
-        [cp.name, cp.identifiers?.previousNames].filter(
-          (x): x is string => typeof x === 'string' && x.trim().length > 0,
-        ),
-      ),
-    ),
-  );
-  const saveMatterCompanyNumbers = Array.from(
-    new Set(
-      effectiveConflictParties
-        .map((cp) => cp.identifiers?.companyNumber)
-        .filter((x): x is string => typeof x === 'string' && x.trim().length > 0),
-    ),
-  );
-  const saveMatterLinkedIds = Array.from(
-    new Set(
-      effectiveConflictParties
-        .map((cp) => cp.linkedRecordId)
-        .filter((x): x is string => typeof x === 'string' && x.trim().length > 0),
-    ),
-  );
-  const conflictGraph = await loadScopedConflictSearchGraph(
-    extensionCtx,
+  const saveMatterConflictSignals = extractConflictSignalsFromParties(
+    effectiveConflictParties,
     {
-      terms: saveMatterSearchTerms,
-      companyNumbers: saveMatterCompanyNumbers,
-      linkedPersonIds: saveMatterLinkedIds,
-      linkedOrganisationIds: saveMatterLinkedIds,
       excludeEnquiryId:
         input.sourceEnquiryId !== undefined
           ? input.sourceEnquiryId
           : existing?.sourceEnquiryId ?? null,
     },
+  );
+  const conflictGraph = await loadFullConflictSearchGraph(
+    extensionCtx,
+    saveMatterConflictSignals,
     opts.byId,
     people,
     teams,
@@ -9059,45 +9382,12 @@ export async function runMatterConflictSearchRecord(
     allPeople: staffPeople,
     teams,
   });
-  const searchTerms = Array.from(
-    new Set(
-      (input.parties ?? []).flatMap((p) =>
-        [p.name, p.identifiers?.previousNames].filter(
-          (x): x is string => typeof x === 'string' && x.trim().length > 0,
-        ),
-      ),
-    ),
-  );
-  const searchCompanyNumbers = Array.from(
-    new Set(
-      (input.parties ?? [])
-        .map((p) => p.identifiers?.companyNumber)
-        .filter((x): x is string => typeof x === 'string' && x.trim().length > 0),
-    ),
-  );
-  const linkedPersonIds = Array.from(
-    new Set(
-      (input.parties ?? [])
-        .filter((p) => p.linkedRecordId && p.entityType === 'person')
-        .map((p) => p.linkedRecordId as string),
-    ),
-  );
-  const linkedOrganisationIds = Array.from(
-    new Set(
-      (input.parties ?? [])
-        .filter((p) => p.linkedRecordId && p.entityType !== 'person')
-        .map((p) => p.linkedRecordId as string),
-    ),
-  );
-  const graph = await loadScopedConflictSearchGraph(
+  const searchSignals = extractConflictSignalsFromParties(input.parties ?? [], {
+    excludeEnquiryId: input.sourceEnquiryId,
+  });
+  const graph = await loadFullConflictSearchGraph(
     ctx,
-    {
-      terms: searchTerms,
-      companyNumbers: searchCompanyNumbers,
-      linkedPersonIds,
-      linkedOrganisationIds,
-      excludeEnquiryId: input.sourceEnquiryId,
-    },
+    searchSignals,
     byId,
     staffPeople,
     teams,
@@ -9124,7 +9414,7 @@ export async function runMatterConflictSearchRecord(
       people,
       organisations,
       links,
-      tenantId: getActiveTenantConfiguration().tenantId,
+      tenantId: ctx.tenantId,
       canView: canViewMatter,
       canViewEnquiry,
     },
@@ -9284,34 +9574,28 @@ export async function updateMatterConflictRecord(
       ...(record.parties ?? []).map((p) => p.linkedRecordId),
     ].filter((x): x is string => Boolean(x)),
   );
-  const conflictSearchTerms = Array.from(
-    new Set(
-      (record.parties ?? []).flatMap((p) =>
-        [p.name, p.identifiers?.previousNames].filter(
-          (x): x is string => typeof x === 'string' && x.trim().length > 0,
-        ),
-      ),
-    ),
+  const conflictUpdateSignals = extractConflictSignalsFromParties(
+    record.parties ?? [],
+    { excludeEnquiryId: matter.sourceEnquiryId },
   );
-  const conflictCompanyNumbers = Array.from(
-    new Set(
-      (record.parties ?? [])
-        .map((p) => p.identifiers?.companyNumber)
-        .filter((x): x is string => typeof x === 'string' && x.trim().length > 0),
-    ),
-  );
-  const conflictLinkedPersonIds = Array.from(conflictPartyIds);
-  const conflictLinkedOrgIds = Array.from(conflictPartyIds);
   const [graph, directPeople, directOrgs, sourceEnquiryDirect, sourceQuoteDirect] =
     await Promise.all([
-      loadScopedConflictSearchGraph(
+      loadFullConflictSearchGraph(
         conflictCtx,
         {
-          terms: conflictSearchTerms,
-          companyNumbers: conflictCompanyNumbers,
-          linkedPersonIds: conflictLinkedPersonIds,
-          linkedOrganisationIds: conflictLinkedOrgIds,
-          excludeEnquiryId: matter.sourceEnquiryId,
+          ...conflictUpdateSignals,
+          linkedPersonIds: Array.from(
+            new Set([
+              ...(conflictUpdateSignals.linkedPersonIds ?? []),
+              ...conflictPartyIds,
+            ]),
+          ),
+          linkedOrganisationIds: Array.from(
+            new Set([
+              ...(conflictUpdateSignals.linkedOrganisationIds ?? []),
+              ...conflictPartyIds,
+            ]),
+          ),
         },
         byId,
         staffPeople,
@@ -14459,8 +14743,8 @@ export async function saveEnquiryRecord(
     }
   }
 
-  // Server-side Quick Conflict Check snapshot (passes scoped SQL candidate graph and redacts restricted hits via canViewMatter, R257)
-  const conflictGraph = await loadScopedConflictSearchGraph(
+  // Server-side Quick Conflict Check snapshot (Option 1 full evaluation + restricted redaction via canViewMatter)
+  const conflictGraph = await loadFullConflictSearchGraph(
     enqCtx,
     {
       terms: [
@@ -15839,15 +16123,18 @@ export async function prepareEnquiryConversion(
   const searchTerms = [
     `${enq.firstName} ${enq.lastName}`.trim(),
     enq.callingOnBehalfOf,
-    enq.otherPartiesNamed,
+    ...enq.otherPartiesNamed.split(/[,;/\n]+/).map((s) => s.trim()),
   ].filter(Boolean);
-  const graph = await loadScopedConflictSearchGraph(
+  const graph = await loadFullConflictSearchGraph(
     enqCtx,
     {
       terms: searchTerms,
       emails: enq.email ? [enq.email] : [],
       phones: enq.phone ? [enq.phone] : [],
-      linkedPersonIds: targetPersonId ? [targetPersonId] : [],
+      postcodes: enq.address?.postcode ? [enq.address.postcode] : [],
+      linkedPersonIds: [targetPersonId, enq.referrerPersonId].filter(
+        (x): x is string => Boolean(x),
+      ),
       linkedOrganisationIds: targetOrgId ? [targetOrgId] : [],
       excludeEnquiryId: enq.id,
     },
@@ -21128,7 +21415,7 @@ export async function prepareQuoteConversionRecord(
     existingPerson?.phones[0]?.number ||
     existingOrg?.mainPhone ||
     '';
-  const graph = await loadScopedConflictSearchGraph(
+  const graph = await loadFullConflictSearchGraph(
     ctx,
     {
       terms: [

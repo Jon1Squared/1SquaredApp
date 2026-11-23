@@ -1967,7 +1967,10 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       );
       if (pIds.length > 0) {
         sqlParams.push(pIds);
-        orClauses.push(`e.linked_person_id = ANY($${sqlParams.length}::text[])`);
+        const idx = sqlParams.length;
+        orClauses.push(
+          `(e.linked_person_id = ANY($${idx}::text[]) OR e.referrer_person_id = ANY($${idx}::text[]) OR e.summary_and_notes_json->>'referrerPersonId' = ANY($${idx}::text[]))`,
+        );
       }
       const oIds = Array.from(
         new Set((params.linkedOrganisationIds ?? []).map((x) => x.trim()).filter(Boolean)),
@@ -1986,16 +1989,18 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       const terms = Array.from(
         new Set((params.terms ?? []).map((t) => t.trim()).filter((t) => t.length >= 2)),
       );
-      for (const term of terms.slice(0, 8)) {
+      for (const term of terms) {
         const escaped = term.replace(/[\\%_]/g, '\\$&');
         sqlParams.push(`%${escaped}%`, term);
         const likeIdx = sqlParams.length - 1;
         const trgmIdx = sqlParams.length;
+        const enqOtherExpr = `COALESCE(e.summary_and_notes_json->>'otherPartiesNamed', e.profile_json->>'otherPartiesNamed', '')`;
+        const enqConcatLower = `lower(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') || ' ' || COALESCE(e.calling_on_behalf_of, '') || ' ' || COALESCE(e.organisation_name, '') || ' ' || ${enqOtherExpr})`;
         orClauses.push(
-          `(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') ILIKE $${likeIdx} OR COALESCE(e.calling_on_behalf_of, '') ILIKE $${likeIdx} OR COALESCE(e.organisation_name, '') ILIKE $${likeIdx} OR COALESCE(e.summary_and_notes_json->>'otherPartiesNamed', e.profile_json->>'otherPartiesNamed', '') ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') || ' ' || COALESCE(e.calling_on_behalf_of, '') || ' ' || COALESCE(e.organisation_name, '') || ' ' || COALESCE(e.summary_and_notes_json->>'otherPartiesNamed', e.profile_json->>'otherPartiesNamed', ''))) >= 0.28)`,
+          `(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') ILIKE $${likeIdx} OR COALESCE(e.calling_on_behalf_of, '') ILIKE $${likeIdx} OR COALESCE(e.organisation_name, '') ILIKE $${likeIdx} OR ${enqOtherExpr} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${enqConcatLower}) >= 0.28 OR word_similarity(${enqConcatLower}, $${trgmIdx}) >= 0.28 OR (length(trim(COALESCE(e.calling_on_behalf_of, ''))) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(COALESCE(e.calling_on_behalf_of, '')))) > 0) OR (length(trim(COALESCE(e.organisation_name, ''))) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(COALESCE(e.organisation_name, '')))) > 0))`,
         );
       }
-      for (const ph of (params.phones ?? []).slice(0, 4)) {
+      for (const ph of params.phones ?? []) {
         const digits = ph.replace(/\D/g, '');
         if (digits.length >= 7) {
           const suffix = digits.slice(-7);

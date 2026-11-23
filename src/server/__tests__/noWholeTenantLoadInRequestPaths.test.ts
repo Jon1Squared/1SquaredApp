@@ -95,6 +95,18 @@ export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
     fn: 'hydrateTenantPmsSource',
     reason: 'Legacy batch/seed PMS hydrator wrapper delegating to getTenantPmsSource.',
   },
+  {
+    file: 'src/server/services.ts',
+    fn: 'loadFullConflictSearchGraph',
+    callees: [
+      'listAllPeople',
+      'listAllOrganisations',
+      'listAllLinks',
+      'listAllMattersUnfiltered',
+      'listAllEnquiriesUnfiltered',
+    ],
+    reason: 'conflict completeness: candidate pre-filter not yet proven equivalent',
+  },
 ];
 
 /**

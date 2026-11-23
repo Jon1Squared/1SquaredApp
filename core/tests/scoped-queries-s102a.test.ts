@@ -3,6 +3,7 @@ import {
   CORE_REQUIRED_SCHEMA_VERSION,
   getGlobalTenantPostgresPoolManager,
   resolveTenantFromVerifiedToken,
+  TenantHrAndRbacRepository,
   TenantIntakeQuoteRepository,
   TenantMatterRepository,
   TenantMigrationRunner,
@@ -17,19 +18,24 @@ import {
 } from '@/platform/tenantRuntime';
 import { setTestEntraSessionOverride } from '@/server/entraAuth';
 import {
+  extractConflictSignalsFromParties,
   getAppSnapshot,
   getClientPmsViewBundle,
+  loadFullConflictSearchGraph,
+  loadScopedConflictSearchGraphForParity,
   markQuoteSentRecord,
   runMatterConflictSearchRecord,
   findCandidateDuplicatesForRecord,
 } from '@/server/services';
+import { searchMatterConflicts } from '@/domain/matterConflicts';
+import { runEnquiryConflictSearch } from '@/domain/enquiries';
 import { verifyFinanceActorAndPermission } from '@/server/financeServices';
 import { computeMatterPartyUsageCounts } from '@/domain/matterParties';
 import { loadAndValidateTenantConfig } from '../src/config-engine';
 import notALawFirmConfig from '../../client-not-a-law-firm/config/base.json';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
-import type { Matter, Organisation, Person } from '@/domain/types';
+import type { ConflictCheckParty, Enquiry, Matter, Organisation, Person, Team } from '@/domain/types';
 
 function makeCtx(tenantId: string, actorId = 'P-000001'): TenantContext {
   return resolveTenantFromVerifiedToken({
@@ -686,5 +692,744 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
         fuzzy: true,
       }),
     ).toEqual([]);
+  });
+
+  it('R659: 8-scenario two-tenant conflict parity harness (full graph vs scoped candidate pre-filter + live Option 1 redaction)', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const cfgAlpha = loadAndValidateTenantConfig(
+      { ...notALawFirmConfig, tenantId: tenantAlpha },
+      { environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    const cfgBravo = loadAndValidateTenantConfig(
+      { ...notALawFirmConfig, tenantId: tenantBravo },
+      { environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    setActiveTenantConfigForTesting(cfgAlpha as unknown as Record<string, unknown>);
+    const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxAlpha,
+      tenantConfig: cfgAlpha as never,
+      store: seed,
+      modules: ['catalogues', 'hr', 'parties', 'matters', 'intake', 'quotes', 'tasks'],
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxBravo,
+      tenantConfig: cfgBravo as never,
+      store: seed,
+      modules: ['catalogues', 'hr', 'parties', 'matters', 'intake', 'quotes', 'tasks'],
+      clearFirst: true,
+    });
+
+    const partyRepo = new TenantPartyRepository();
+    const matterRepo = new TenantMatterRepository();
+    const intakeRepo = new TenantIntakeQuoteRepository();
+    const hrRepo = new TenantHrAndRbacRepository();
+
+    const basePerson = structuredClone(
+      seed.people.find((p) => !p.isEmployee) ?? seed.people[0]!,
+    ) as Person;
+    const baseOrg = structuredClone(seed.organisations[0]!) as Organisation;
+    const rawBaseMatter = structuredClone(seed.matters[0]!) as Matter;
+    const baseMatter: Matter = {
+      ...rawBaseMatter,
+      openingRecord: undefined,
+      sourceEnquiryId: null,
+    };
+
+    // Neutral unlinked client org so Scenarios 1–6 do not share links with seed O-000001
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R659-NEUTRAL-CLIENT',
+      legalName: 'Neutral Fixture Client Corp',
+      otherNames: [],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: null,
+      notDuplicateOf: [],
+    });
+
+    // Scenario 1: Linked person -> org counterpart matched against a FREE-TEXT matter party
+    await partyRepo.putPerson(ctxAlpha, {
+      ...basePerson,
+      id: 'P-R659-LNK-1',
+      firstName: 'Celyn',
+      surname: 'Owen',
+      emails: [],
+      phones: [],
+      addresses: [],
+      notDuplicateOf: [],
+    });
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R659-LNK-CO',
+      legalName: 'Snowdonia Counterpart Logistics Ltd',
+      otherNames: [],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: null,
+      notDuplicateOf: [],
+    });
+    await partyRepo.putLink(ctxAlpha, {
+      id: 'LNK-R659-1',
+      personId: 'P-R659-LNK-1',
+      organisationId: 'O-R659-LNK-CO',
+      jobTitle: 'Director',
+      department: '',
+      roleWithinOrganisation: 'Director',
+      isPrimaryContact: true,
+      isCurrent: true,
+      startDate: '2024-01-01',
+      endDate: null,
+      contactStatusId: null,
+      contactRoleIds: [],
+      notes: '',
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:00:00Z',
+    } as never);
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S1-FREE',
+      matterNumber: 'MAT-R659-01',
+      title: 'Scenario 1 Link Counterpart Free Text Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [
+        {
+          id: 'mp-r659-s1',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'organisation',
+          linkedRecordId: null,
+          name: 'Snowdonia Counterpart Logistics Ltd',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+
+    // Scenario 2: Referrer person on matter & referrer person on enquiry
+    await partyRepo.putPerson(ctxAlpha, {
+      ...basePerson,
+      id: 'P-R659-REF',
+      firstName: 'Huw',
+      surname: 'ReferrerTarget',
+      emails: [],
+      phones: [],
+      addresses: [],
+      notDuplicateOf: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S2-REF',
+      matterNumber: 'MAT-R659-02',
+      title: 'Scenario 2 Matter Referrer',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: 'P-R659-REF',
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [],
+    });
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R659-S2-REF',
+      reference: 'ENQ-R659-02',
+      status: 'Assigned',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Client',
+      lastName: 'OnRefEnq',
+      email: 'client-ref-enq@invented.example',
+      phone: '',
+      referrerPersonId: 'P-R659-REF',
+      otherPartiesNamed: 'Huw ReferrerTarget',
+      summary: 'Scenario 2 Referrer Enquiry',
+      receivedAt: '2026-11-02T10:00:00Z',
+    } as never);
+
+    // Scenario 3: > 8 parties/terms (hit on party #10)
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S3-TENPLUS',
+      matterNumber: 'MAT-R659-03',
+      title: 'Scenario 3 Tenth Party Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [
+        {
+          id: 'mp-r659-s3',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'organisation',
+          linkedRecordId: null,
+          name: 'Decimus Tenth Party Target Ltd',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+
+    // Scenario 4: Linked organisation's former name held as separate record in otherNames
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R659-S4-LINKED',
+      legalName: 'Calderwood Current Co Ltd',
+      otherNames: [{ id: 'on-r659-s4', name: 'Meridian Former Legacy Co' }],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: null,
+      notDuplicateOf: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S4-FORMER',
+      matterNumber: 'MAT-R659-04',
+      title: 'Scenario 4 Former Name Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [
+        {
+          id: 'mp-r659-s4',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'organisation',
+          linkedRecordId: null,
+          name: 'Meridian Former Legacy Co',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+
+    // Scenario 5: previousNames with separators ("Meyrick, Bowen; Parry / Pritchard")
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S5-PREVSEP',
+      matterNumber: 'MAT-R659-05',
+      title: 'Scenario 5 Separator PreviousNames Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [
+        {
+          id: 'mp-r659-s5',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'person',
+          linkedRecordId: null,
+          name: 'Bowen',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+
+    // Scenario 6: Email-address party
+    await partyRepo.putPerson(ctxAlpha, {
+      ...basePerson,
+      id: 'P-R659-S6-EMAIL',
+      firstName: 'Hidden',
+      surname: 'EmailOwner',
+      emails: [
+        {
+          id: 'em-r659-s6',
+          address: 'conflict-email-hit@invented.example',
+          typeId: 'email_type.work',
+          isPrimary: true,
+        },
+      ],
+      phones: [],
+      addresses: [],
+      notDuplicateOf: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S6-EMAIL',
+      matterNumber: 'MAT-R659-06',
+      title: 'Scenario 6 Email Hit Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [
+        {
+          id: 'mp-r659-s6',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'person',
+          linkedRecordId: 'P-R659-S6-EMAIL',
+          name: 'Hidden EmailOwner',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+
+    // Scenario 7: Company number (second company number in multi-party input)
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R659-S7-COMPNO',
+      legalName: 'Zirconium Distinct Enterprise Ltd',
+      otherNames: [],
+      companyNumber: '09222333',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: null,
+      notDuplicateOf: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S7-COMPNO',
+      matterNumber: 'MAT-R659-07',
+      title: 'Scenario 7 Company Number Matter',
+      clientId: 'O-R659-S7-COMPNO',
+      additionalClientIds: [],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+      parties: [],
+    });
+
+    // Scenario 8: Restricted + ethical wall matter + restricted enquiry
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R659-S8-WALL',
+      legalName: 'Walled Restricted Target Group',
+      otherNames: [],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      notDuplicateOf: [],
+    });
+    await matterRepo.putMatter(ctxAlpha, {
+      ...baseMatter,
+      id: 'M-R659-S8-WALL',
+      matterNumber: 'MAT-R659-08',
+      title: 'Confidential Staff Ethical Wall Matter',
+      clientId: 'O-R659-NEUTRAL-CLIENT',
+      additionalClientIds: [],
+      responsiblePartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000001',
+      teamMemberIds: ['P-000001'],
+      instructingContactId: null,
+      billingContactId: null,
+      referrerContactId: null,
+      isStaffMatter: true,
+      hasEthicalWall: true,
+      restrictedAccessUserIds: ['P-000001'],
+      parties: [
+        {
+          id: 'mp-r659-s8',
+          relationshipCode: 'OP',
+          capacityCodes: [],
+          entityType: 'organisation',
+          linkedRecordId: 'O-R659-S8-WALL',
+          name: 'Walled Restricted Target Group',
+          role: 'Opponent',
+          notes: '',
+        },
+      ],
+    });
+    await intakeRepo.putEnquiry(ctxAlpha, {
+      id: 'ENQ-R659-S8-PRIV',
+      reference: 'ENQ-R659-08',
+      status: 'Draft',
+      createdById: 'P-000001',
+      takenById: 'P-000001',
+      firstName: 'Private',
+      lastName: 'DraftWall',
+      otherPartiesNamed: 'Walled Restricted Target Group',
+      summary: 'Private Draft Wall Enquiry',
+      receivedAt: '2026-11-02T11:00:00Z',
+    } as never);
+
+    const parties: ConflictCheckParty[] = [
+      // #1 Link counterpart (S1)
+      {
+        id: 'cp-r659-1',
+        name: 'Celyn Owen',
+        entityType: 'person',
+        role: 'Client',
+        linkedRecordId: 'P-R659-LNK-1',
+        isClientFixed: true,
+      },
+      // #2-#9 Filler parties + Referrer (S2) + Former Name Linked Org (S4) + PreviousNames w/ separators (S5) + Email party (S6) + 2 companyNumbers (S7)
+      {
+        id: 'cp-r659-2',
+        name: 'Huw ReferrerTarget',
+        entityType: 'person',
+        role: 'Referrer',
+        linkedRecordId: 'P-R659-REF',
+      },
+      {
+        id: 'cp-r659-3',
+        name: 'Calderwood Current Co Ltd',
+        entityType: 'organisation',
+        role: 'Client',
+        linkedRecordId: 'O-R659-S4-LINKED',
+      },
+      {
+        id: 'cp-r659-4',
+        name: 'Kestrel Random Witness',
+        entityType: 'person',
+        role: 'Witness',
+        linkedRecordId: null,
+        identifiers: { previousNames: 'Meyrick, Bowen; Parry / Pritchard' },
+      },
+      {
+        id: 'cp-r659-5',
+        name: 'conflict-email-hit@invented.example',
+        entityType: 'person',
+        role: 'Other party',
+        linkedRecordId: null,
+      },
+      {
+        id: 'cp-r659-6',
+        name: 'Quartz First Reg Co',
+        entityType: 'organisation',
+        role: 'Other party',
+        linkedRecordId: null,
+        identifiers: { companyNumber: '99111222' },
+      },
+      {
+        id: 'cp-r659-7',
+        name: 'Cobalt Unmatched Label Co',
+        entityType: 'organisation',
+        role: 'Other party',
+        linkedRecordId: null,
+        identifiers: { companyNumber: '09222333' },
+      },
+      {
+        id: 'cp-r659-8',
+        name: 'Walled Restricted Target Group',
+        entityType: 'organisation',
+        role: 'Client',
+        linkedRecordId: null,
+        isClientFixed: true,
+      },
+      {
+        id: 'cp-r659-9',
+        name: 'Filler Ninth Party Corp',
+        entityType: 'organisation',
+        role: 'Witness',
+        linkedRecordId: null,
+      },
+      // #10 Hit beyond 8-term cap (S3)
+      {
+        id: 'cp-r659-10',
+        name: 'Decimus Tenth Party Target Ltd',
+        entityType: 'organisation',
+        role: 'Opponent',
+        linkedRecordId: null,
+      },
+      {
+        id: 'cp-r659-11',
+        name: 'Eleventh Filler Person',
+        entityType: 'person',
+        role: 'Witness',
+        linkedRecordId: null,
+      },
+    ];
+
+    const staffPeople = await partyRepo.listAllPeople<Person>(ctxAlpha, {
+      employeesAndLeaversOnly: true,
+    });
+    const teams = await hrRepo.listAllTeams<Team>(ctxAlpha);
+    const signals = extractConflictSignalsFromParties(parties);
+
+    const compareForViewer = async (viewerId: string, expectRedactedWall: boolean) => {
+      const fullGraph = await loadFullConflictSearchGraph(
+        ctxAlpha,
+        signals,
+        viewerId,
+        staffPeople,
+        teams,
+      );
+      const scopedGraph = await loadScopedConflictSearchGraphForParity(
+        ctxAlpha,
+        signals,
+        viewerId,
+        staffPeople,
+        teams,
+      );
+
+      const fullMatches = searchMatterConflicts(
+        { parties },
+        {
+          matters: fullGraph.matters,
+          enquiries: fullGraph.enquiries,
+          people: fullGraph.people,
+          organisations: fullGraph.organisations,
+          links: fullGraph.links,
+          tenantId: tenantAlpha,
+          canView: fullGraph.canViewMatter,
+          canViewEnquiry: fullGraph.canViewEnquiry,
+        },
+      );
+      const scopedMatches = searchMatterConflicts(
+        { parties },
+        {
+          matters: scopedGraph.matters,
+          enquiries: scopedGraph.enquiries,
+          people: scopedGraph.people,
+          organisations: scopedGraph.organisations,
+          links: scopedGraph.links,
+          tenantId: tenantAlpha,
+          canView: scopedGraph.canViewMatter,
+          canViewEnquiry: scopedGraph.canViewEnquiry,
+        },
+      );
+
+      const normalizeMatches = (list: typeof fullMatches) =>
+        [...list]
+          .map((m) => ({
+            partyId: m.partyId,
+            matchedRecordId: m.matchedRecordId,
+            matchedRecordName: m.matchedRecordName,
+            whereFound: m.whereFound,
+            matterId: m.matterId,
+            restricted: Boolean(m.restricted),
+          }))
+          .sort((a, b) =>
+            `${a.partyId}:${a.matterId ?? ''}:${a.matchedRecordId}:${a.whereFound}:${a.matchedRecordName}`.localeCompare(
+              `${b.partyId}:${b.matterId ?? ''}:${b.matchedRecordId}:${b.whereFound}:${b.matchedRecordName}`,
+            ),
+          );
+
+      // Verify all 8 scenarios produced hits in full first
+      const serialized = JSON.stringify(fullMatches);
+      expect(serialized).toContain('M-R659-S1-FREE');
+      expect(serialized).toContain('M-R659-S2-REF');
+      expect(serialized).toContain('M-R659-S3-TENPLUS');
+      expect(serialized).toContain('M-R659-S4-FORMER');
+      expect(serialized).toContain('M-R659-S5-PREVSEP');
+      expect(serialized).toContain('M-R659-S6-EMAIL');
+      expect(serialized).toContain('M-R659-S7-COMPNO');
+      if (expectRedactedWall) {
+        expect(serialized).not.toContain('Confidential Staff Ethical Wall Matter');
+        expect(serialized).not.toContain('Private Draft Wall Enquiry');
+        expect(fullMatches.some((m) => m.restricted && m.whereFound.includes('Restricted matter'))).toBe(true);
+        expect(fullMatches.some((m) => m.restricted && m.whereFound.includes('Restricted enquiry'))).toBe(true);
+      } else {
+        expect(serialized).toContain('M-R659-S8-WALL');
+      }
+
+      expect(normalizeMatches(scopedMatches)).toEqual(normalizeMatches(fullMatches));
+    };
+
+    // Unauthorised fee earner (P-000002): redacted restricted matter & draft enquiry
+    await compareForViewer('P-000002', true);
+    // Restricted-access partner (P-000001): full unredacted matter & own draft enquiry
+    await compareForViewer('P-000001', false);
+
+    // Live Option 1 check: runMatterConflictCheckRecord uses loadFullConflictSearchGraph with P-000002 redaction
+    setTestEntraSessionOverride({
+      personId: 'P-000002',
+      tenantId: tenantAlpha,
+      oid: 'oid-r659-p2',
+      tid: 'tid-r659',
+      sub: 'P-000002',
+      email: 'p2@notalawfirm.example',
+      displayName: 'Fee Earner Two',
+      entraRoles: [],
+      mappedRoles: [],
+      entraGroups: [],
+      mfaVerified: false,
+      amr: [],
+      authenticatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const liveMatterRes = await runMatterConflictSearchRecord({ parties }, 'P-000002');
+    expect(JSON.stringify(liveMatterRes.matches)).toContain('M-R659-S3-TENPLUS');
+    expect(JSON.stringify(liveMatterRes.matches)).not.toContain(
+      'Confidential Staff Ethical Wall Matter',
+    );
+
+    // Enquiry conflict search parity (Full vs Scoped)
+    const enqInput = {
+      firstName: 'Huw',
+      lastName: 'ReferrerTarget',
+      callingOnBehalfOf: 'Snowdonia Counterpart Logistics Ltd',
+      otherPartiesNamed: 'Meyrick, Bowen; Decimus Tenth Party Target Ltd',
+      email: 'conflict-email-hit@invented.example',
+    };
+    const enqSignals: ReturnType<typeof extractConflictSignalsFromParties> = {
+      terms: [
+        enqInput.firstName,
+        enqInput.lastName,
+        `${enqInput.firstName} ${enqInput.lastName}`,
+        enqInput.callingOnBehalfOf,
+        ...enqInput.otherPartiesNamed.split(/[,;/\n]+/).map((s) => s.trim()),
+      ].filter(Boolean),
+      emails: [enqInput.email],
+    };
+    const fullEnqGraph = await loadFullConflictSearchGraph(
+      ctxAlpha,
+      enqSignals,
+      'P-000002',
+      staffPeople,
+      teams,
+    );
+    const scopedEnqGraph = await loadScopedConflictSearchGraphForParity(
+      ctxAlpha,
+      enqSignals,
+      'P-000002',
+      staffPeople,
+      teams,
+    );
+    const fullEnqHits = runEnquiryConflictSearch(
+      enqInput,
+      fullEnqGraph.people,
+      fullEnqGraph.organisations,
+      fullEnqGraph.matters,
+      seed.values,
+      fullEnqGraph.enquiries,
+      null,
+      fullEnqGraph.links,
+      fullEnqGraph.canViewMatter,
+      tenantAlpha,
+    );
+    const scopedEnqHits = runEnquiryConflictSearch(
+      enqInput,
+      scopedEnqGraph.people,
+      scopedEnqGraph.organisations,
+      scopedEnqGraph.matters,
+      seed.values,
+      scopedEnqGraph.enquiries,
+      null,
+      scopedEnqGraph.links,
+      scopedEnqGraph.canViewMatter,
+      tenantAlpha,
+    );
+    expect(scopedEnqHits.allConflicts.map((h) => h.detail).sort()).toEqual(
+      fullEnqHits.allConflicts.map((h) => h.detail).sort(),
+    );
+    expect(fullEnqHits.allConflicts.length).toBeGreaterThan(0);
+
+    // Second-tenant isolation: Bravo sees ZERO Alpha Scenario 1-8 hits
+    const bravoStaff = await partyRepo.listAllPeople<Person>(ctxBravo, {
+      employeesAndLeaversOnly: true,
+    });
+    const bravoTeams = await hrRepo.listAllTeams<Team>(ctxBravo);
+    const bravoFull = await loadFullConflictSearchGraph(
+      ctxBravo,
+      signals,
+      'P-000001',
+      bravoStaff,
+      bravoTeams,
+    );
+    const bravoScoped = await loadScopedConflictSearchGraphForParity(
+      ctxBravo,
+      signals,
+      'P-000001',
+      bravoStaff,
+      bravoTeams,
+    );
+    const bravoMatchesFull = searchMatterConflicts(
+      { parties },
+      {
+        matters: bravoFull.matters,
+        enquiries: bravoFull.enquiries,
+        people: bravoFull.people,
+        organisations: bravoFull.organisations,
+        links: bravoFull.links,
+        tenantId: tenantBravo,
+        canView: bravoFull.canViewMatter,
+        canViewEnquiry: bravoFull.canViewEnquiry,
+      },
+    );
+    const bravoMatchesScoped = searchMatterConflicts(
+      { parties },
+      {
+        matters: bravoScoped.matters,
+        enquiries: bravoScoped.enquiries,
+        people: bravoScoped.people,
+        organisations: bravoScoped.organisations,
+        links: bravoScoped.links,
+        tenantId: tenantBravo,
+        canView: bravoScoped.canViewMatter,
+        canViewEnquiry: bravoScoped.canViewEnquiry,
+      },
+    );
+    expect(bravoMatchesScoped.map((m) => m.id).sort()).toEqual(
+      bravoMatchesFull.map((m) => m.id).sort(),
+    );
+    const bravoFullJson = JSON.stringify(bravoMatchesFull);
+    const bravoScopedJson = JSON.stringify(bravoMatchesScoped);
+    expect(bravoFullJson).not.toContain('R659');
+    expect(bravoScopedJson).not.toContain('R659');
+    expect(bravoFullJson).not.toContain('Confidential Staff Ethical Wall Matter');
+    expect(bravoScopedJson).not.toContain('Confidential Staff Ethical Wall Matter');
+    expect(bravoFullJson).not.toContain('Private Draft Wall Enquiry');
+    expect(bravoScopedJson).not.toContain('Private Draft Wall Enquiry');
   });
 });

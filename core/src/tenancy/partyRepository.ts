@@ -4113,7 +4113,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
             );
           }
         }
-        for (const term of fullTerms.slice(0, 6)) {
+        for (const term of fullTerms) {
           params.push(`%${escapeSqlLikePattern(term)}%`);
           const likeIdx = params.length;
           params.push(term);
@@ -4213,7 +4213,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
         params.push(phoneticKeys);
         orClauses.push(`phonetic_keys && $${params.length}::text[]`);
       }
-      for (const name of orgNames.slice(0, 5)) {
+      for (const name of orgNames) {
         const comp = normaliseComparableNameKey(name);
         const searchTerm = comp || name;
         params.push(`%${escapeSqlLikePattern(searchTerm)}%`, searchTerm);
@@ -4366,7 +4366,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           kind: 'organisation',
           legalName: term,
           otherNames: [term],
-          companyNumber: cleanCompanyNos[0],
+          companyNumbers: cleanCompanyNos,
           emails: cleanEmails,
           phones: cleanPhones,
           postcodes: cleanPostcodes,
@@ -4395,7 +4395,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
         }),
         this.findSqlDuplicateCandidates<TOrg>(ctx, {
           kind: 'organisation',
-          companyNumber: cleanCompanyNos[0],
+          companyNumbers: cleanCompanyNos,
           emails: cleanEmails,
           phones: cleanPhones,
           postcodes: cleanPostcodes,

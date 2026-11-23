@@ -2121,16 +2121,18 @@ export class TenantMatterRepository extends TenantScopedRepository {
         sqlParams.push(entityIds);
         const idx = sqlParams.length;
         orClauses.push(
-          `(m.client_id = ANY($${idx}::text[]) OR COALESCE(m.additional_client_ids_json, '[]'::jsonb) ?| $${idx}::text[] OR m.opening_record_json->>'instructingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'billingContactId' = ANY($${idx}::text[]) OR m.instructing_contact_id = ANY($${idx}::text[]) OR m.billing_contact_id = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.matter_parties mp WHERE mp.tenant_id = m.tenant_id AND mp.matter_id = m.id AND (mp.entity_id = ANY($${idx}::text[]) OR mp.acting_solicitor_person_id = ANY($${idx}::text[]) OR mp.acting_solicitor_organisation_id = ANY($${idx}::text[]))))`,
+          `(m.client_id = ANY($${idx}::text[]) OR COALESCE(m.additional_client_ids_json, '[]'::jsonb) ?| $${idx}::text[] OR m.opening_record_json->>'instructingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'billingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'referrerContactId' = ANY($${idx}::text[]) OR m.instructing_contact_id = ANY($${idx}::text[]) OR m.billing_contact_id = ANY($${idx}::text[]) OR m.referrer_person_id = ANY($${idx}::text[]) OR m.referrer_organisation_id = ANY($${idx}::text[]) OR m.fields_json->>'referrerContactId' = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.matter_parties mp WHERE mp.tenant_id = m.tenant_id AND mp.matter_id = m.id AND (mp.entity_id = ANY($${idx}::text[]) OR mp.acting_solicitor_person_id = ANY($${idx}::text[]) OR mp.acting_solicitor_organisation_id = ANY($${idx}::text[]))))`,
         );
       }
-      for (const term of terms.slice(0, 8)) {
+      for (const term of terms) {
         const escaped = term.replace(/[\\%_]/g, '\\$&');
         sqlParams.push(`%${escaped}%`, term);
         const likeIdx = sqlParams.length - 1;
         const trgmIdx = sqlParams.length;
+        const mpNameLower = `lower(COALESCE(mp.metadata_json->>'name', ''))`;
+        const mpNameTrimLower = `lower(trim(COALESCE(mp.metadata_json->>'name', '')))`;
         orClauses.push(
-          `EXISTS (SELECT 1 FROM public.matter_parties mp WHERE mp.tenant_id = m.tenant_id AND mp.matter_id = m.id AND (COALESCE(mp.metadata_json->>'name', '') ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(COALESCE(mp.metadata_json->>'name', ''))) >= 0.28))`,
+          `EXISTS (SELECT 1 FROM public.matter_parties mp WHERE mp.tenant_id = m.tenant_id AND mp.matter_id = m.id AND (COALESCE(mp.metadata_json->>'name', '') ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${mpNameLower}) >= 0.28 OR word_similarity(${mpNameLower}, $${trgmIdx}) >= 0.28 OR (length(${mpNameTrimLower}) >= 3 AND strpos(lower($${trgmIdx}), ${mpNameTrimLower}) > 0)))`,
         );
       }
       const res = await tx.query<{ tenant_id: string; id: string }>(
