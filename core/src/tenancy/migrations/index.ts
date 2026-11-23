@@ -3196,25 +3196,31 @@ ALTER TABLE public.people
         return [];
       };
 
-      const peopleRes = await client.query<{
-        id: string;
-        first_name: string | null;
-        preferred_name: string | null;
-        other_names: string | null;
-        surname: string | null;
-        phones_json: unknown;
-        addresses_json: unknown;
-        profile_json: unknown;
-      }>(
-        `SELECT id, first_name, preferred_name, other_names, surname,
-                phones_json, addresses_json, profile_json
-           FROM public.people
-          WHERE tenant_id = $1
-          ORDER BY id ASC`,
-        [ctx.tenantId],
-      );
-      for (let i = 0; i < peopleRes.rows.length; i += BATCH_SIZE) {
-        const chunk = peopleRes.rows.slice(i, i + BATCH_SIZE).map((row) => {
+      let lastPersonId: string | null = null;
+      while (true) {
+        interface PeopleBackfillRow {
+          id: string;
+          first_name: string | null;
+          preferred_name: string | null;
+          other_names: string | null;
+          surname: string | null;
+          phones_json: unknown;
+          addresses_json: unknown;
+          profile_json: unknown;
+        }
+        const peopleRes: PgTypes.QueryResult<PeopleBackfillRow> =
+          await client.query<PeopleBackfillRow>(
+            `SELECT id, first_name, preferred_name, other_names, surname,
+                    phones_json, addresses_json, profile_json
+               FROM public.people
+              WHERE tenant_id = $1
+                AND ($2::text IS NULL OR id > $2::text)
+              ORDER BY id ASC
+              LIMIT $3`,
+            [ctx.tenantId, lastPersonId, BATCH_SIZE],
+          );
+        if (peopleRes.rows.length === 0) break;
+        const chunk = peopleRes.rows.map((row) => {
           const phones = Array.isArray(row.phones_json)
             ? row.phones_json.map((p) =>
                 typeof p === 'string'
@@ -3242,46 +3248,52 @@ ALTER TABLE public.people
             phoneticKeys: keys.phoneticKeys,
           };
         });
-        if (chunk.length > 0) {
-          await client.query(
-            `UPDATE public.people AS p
-                SET phone_last9_keys = v."phoneLast9Keys",
-                    postcode_keys = v."postcodeKeys",
-                    phonetic_keys = v."phoneticKeys"
-               FROM jsonb_to_recordset($2::jsonb) AS v(
-                 id text,
-                 "phoneLast9Keys" text[],
-                 "postcodeKeys" text[],
-                 "phoneticKeys" text[]
-               )
-              WHERE p.tenant_id = $1 AND p.id = v.id`,
-            [ctx.tenantId, JSON.stringify(chunk)],
-          );
-        }
+        await client.query(
+          `UPDATE public.people AS p
+              SET phone_last9_keys = v."phoneLast9Keys",
+                  postcode_keys = v."postcodeKeys",
+                  phonetic_keys = v."phoneticKeys"
+             FROM jsonb_to_recordset($2::jsonb) AS v(
+               id text,
+               "phoneLast9Keys" text[],
+               "postcodeKeys" text[],
+               "phoneticKeys" text[]
+             )
+            WHERE p.tenant_id = $1 AND p.id = v.id`,
+          [ctx.tenantId, JSON.stringify(chunk)],
+        );
+        lastPersonId = peopleRes.rows[peopleRes.rows.length - 1]!.id;
+        if (peopleRes.rows.length < BATCH_SIZE) break;
       }
 
-      const orgRes = await client.query<{
-        id: string;
-        legal_name: string | null;
-        trading_name: string | null;
-        company_number: string | null;
-        general_email: string | null;
-        main_phone: string | null;
-        website: string | null;
-        registered_address_json: { postcode?: string } | null;
-        trading_address_json: { postcode?: string } | null;
-        profile_json: unknown;
-      }>(
-        `SELECT id, legal_name, trading_name, company_number, general_email,
-                main_phone, website, registered_address_json, trading_address_json,
-                profile_json
-           FROM public.organisations
-          WHERE tenant_id = $1
-          ORDER BY id ASC`,
-        [ctx.tenantId],
-      );
-      for (let i = 0; i < orgRes.rows.length; i += BATCH_SIZE) {
-        const chunk = orgRes.rows.slice(i, i + BATCH_SIZE).map((row) => {
+      let lastOrgId: string | null = null;
+      while (true) {
+        interface OrgBackfillRow {
+          id: string;
+          legal_name: string | null;
+          trading_name: string | null;
+          company_number: string | null;
+          general_email: string | null;
+          main_phone: string | null;
+          website: string | null;
+          registered_address_json: { postcode?: string } | null;
+          trading_address_json: { postcode?: string } | null;
+          profile_json: unknown;
+        }
+        const orgRes: PgTypes.QueryResult<OrgBackfillRow> =
+          await client.query<OrgBackfillRow>(
+            `SELECT id, legal_name, trading_name, company_number, general_email,
+                    main_phone, website, registered_address_json, trading_address_json,
+                    profile_json
+               FROM public.organisations
+              WHERE tenant_id = $1
+                AND ($2::text IS NULL OR id > $2::text)
+              ORDER BY id ASC
+              LIMIT $3`,
+            [ctx.tenantId, lastOrgId, BATCH_SIZE],
+          );
+        if (orgRes.rows.length === 0) break;
+        const chunk = orgRes.rows.map((row) => {
           const prof =
             row.profile_json &&
             typeof row.profile_json === 'object' &&
@@ -3312,26 +3324,26 @@ ALTER TABLE public.people
             phoneticKeys: keys.phoneticKeys,
           };
         });
-        if (chunk.length > 0) {
-          await client.query(
-            `UPDATE public.organisations AS o
-                SET norm_company_number = v."normCompanyNumber",
-                    email_domains = v."emailDomains",
-                    phone_last9_keys = v."phoneLast9Keys",
-                    postcode_keys = v."postcodeKeys",
-                    phonetic_keys = v."phoneticKeys"
-               FROM jsonb_to_recordset($2::jsonb) AS v(
-                 id text,
-                 "normCompanyNumber" text,
-                 "emailDomains" text[],
-                 "phoneLast9Keys" text[],
-                 "postcodeKeys" text[],
-                 "phoneticKeys" text[]
-               )
-              WHERE o.tenant_id = $1 AND o.id = v.id`,
-            [ctx.tenantId, JSON.stringify(chunk)],
-          );
-        }
+        await client.query(
+          `UPDATE public.organisations AS o
+              SET norm_company_number = v."normCompanyNumber",
+                  email_domains = v."emailDomains",
+                  phone_last9_keys = v."phoneLast9Keys",
+                  postcode_keys = v."postcodeKeys",
+                  phonetic_keys = v."phoneticKeys"
+             FROM jsonb_to_recordset($2::jsonb) AS v(
+               id text,
+               "normCompanyNumber" text,
+               "emailDomains" text[],
+               "phoneLast9Keys" text[],
+               "postcodeKeys" text[],
+               "phoneticKeys" text[]
+             )
+            WHERE o.tenant_id = $1 AND o.id = v.id`,
+          [ctx.tenantId, JSON.stringify(chunk)],
+        );
+        lastOrgId = orgRes.rows[orgRes.rows.length - 1]!.id;
+        if (orgRes.rows.length < BATCH_SIZE) break;
       }
     },
   };

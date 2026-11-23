@@ -39,7 +39,15 @@ import { loadAndValidateTenantConfig } from '../src/config-engine';
 import notALawFirmConfig from '../../client-not-a-law-firm/config/base.json';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
-import type { ConflictCheckParty, Enquiry, Matter, Organisation, Person, Team } from '@/domain/types';
+import type {
+  ConflictCheckParty,
+  Enquiry,
+  Matter,
+  Organisation,
+  Person,
+  PersonOrganisationLink,
+  Team,
+} from '@/domain/types';
 
 function makeCtx(tenantId: string, actorId = 'P-000001'): TenantContext {
   return resolveTenantFromVerifiedToken({
@@ -2021,19 +2029,23 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
 
     // 1. Per-ID EXISTS hidden checks (Draft vs restricted matter vs public, Alpha vs Bravo)
-    await matterRepo.putMatter(ctxAlpha, {
-      ...(structuredClone(seed.matters[0]!) as Matter),
-      id: 'M-R671-REST',
-      matterNumber: 'MAT-R671-R1',
-      title: 'R671 Restricted Matter',
-      responsiblePartnerId: 'P-000001',
-      leadFeeEarnerId: 'P-000001',
-      teamMemberIds: ['P-000001'],
-      isStaffMatter: true,
-      hasEthicalWall: false,
-      restrictedAccessUserIds: ['P-000001'],
-      parties: [],
-    });
+    await matterRepo.putMatter(
+      ctxAlpha,
+      {
+        ...(structuredClone(seed.matters[0]!) as Matter),
+        id: 'M-R671-REST',
+        matterNumber: 'MAT-R671-R1',
+        title: 'R671 Restricted Matter',
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001'],
+        isStaffMatter: true,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: ['P-000001'],
+        parties: [],
+      },
+      { expectedRowVersion: null },
+    );
     await intakeRepo.putEnquiry(ctxAlpha, {
       id: 'ENQ-R671-DRAFT',
       reference: 'ENQ-R671-D1',
@@ -2239,7 +2251,7 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     expect(await typedPms.getClientByCode!(ctxBravo, 'PMS-C-R671')).toBeNull();
     expect(await typedPms.getMatterByCode!(ctxBravo, 'PMS-M-R671')).toBeNull();
 
-    // 3. Stop-word-only terms skip unnecessary name queries while non-stop words match
+    // 3. Stop-word-only terms skip unnecessary name queries while non-stop words match; if ALL terms are stop-words, fall back to raw term (R685)
     const { vi } = await import('vitest');
     const baseOrg = structuredClone(seed.organisations[0]!) as Organisation;
     await partyRepo.putOrganisation(ctxAlpha, {
@@ -2257,19 +2269,40 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       parentOrganisationId: null,
       notDuplicateOf: [],
     });
+    await partyRepo.putOrganisation(ctxAlpha, {
+      ...baseOrg,
+      id: 'O-R685-STOPWORD-ORG',
+      legalName: 'The Limited Company',
+      otherNames: [],
+      companyNumber: '',
+      generalEmail: '',
+      mainPhone: '',
+      website: '',
+      registeredAddress: null,
+      correspondenceAddress: null,
+      billingAddress: null,
+      parentOrganisationId: null,
+      notDuplicateOf: [],
+    });
     const dupSpy = vi.spyOn(partyRepo, 'findSqlDuplicateCandidates');
     try {
-      await partyRepo.findSqlConflictCandidates(ctxAlpha, {
-        terms: ['the', 'and', 'limited', 'llp', 'ltd', 'plc'],
+      const mixedRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        terms: ['the', 'and', 'limited', 'cyf', 'company', 'The Law Shop'],
       });
-      expect(dupSpy).not.toHaveBeenCalled();
+      // Noise-only stop-word entries are stripped when at least one informative term remains ('The Law Shop')
+      const orgLegalNamesQueried = dupSpy.mock.calls
+        .map((c) => c[1])
+        .filter((arg) => arg.kind === 'organisation')
+        .map((arg) => arg.legalName);
+      expect(orgLegalNamesQueried).toEqual(['The Law Shop']);
+      expect(mixedRes.organisations.some((o) => o.id === 'O-R671-SHOP')).toBe(true);
 
       dupSpy.mockClear();
-      const nonStopRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
-        terms: ['The Law Shop'],
+      const rawFallbackRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        terms: ['The Limited Company'],
       });
       expect(dupSpy).toHaveBeenCalled();
-      expect(nonStopRes.organisations.some((o) => o.id === 'O-R671-SHOP')).toBe(true);
+      expect(rawFallbackRes.organisations.some((o) => o.id === 'O-R685-STOPWORD-ORG')).toBe(true);
     } finally {
       dupSpy.mockRestore();
     }
@@ -2565,4 +2598,127 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
       await secondPoolManager.closeAllPools();
     }
   }, 30_000);
+
+  it('R685: expands deep merge_history via recursive CTE with cycle termination and maxDepth=10 warning across two tenants', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const partyRepo = new TenantPartyRepository();
+    for (let i = 0; i <= 12; i += 1) {
+      await partyRepo.putPerson(ctxAlpha, {
+        id: `P-R685-CH-${String(i).padStart(2, '0')}`,
+        recordType: 'person',
+        firstName: `SecretChain${i}`,
+        surname: `HiddenPerson${i}`,
+        mergedIntoId: i < 12 ? `P-R685-CH-${String(i + 1).padStart(2, '0')}` : null,
+        emails: [],
+        phones: [],
+        addresses: [],
+        relationshipRoleIds: [],
+        notDuplicateOf: [],
+      } as never);
+    }
+    for (let i = 0; i < 12; i += 1) {
+      await partyRepo.putMergeHistory(ctxAlpha, {
+        id: `MRG-R685-CH-${i}`,
+        recordType: 'person',
+        mergedId: `P-R685-CH-${String(i).padStart(2, '0')}`,
+        survivorId: `P-R685-CH-${String(i + 1).padStart(2, '0')}`,
+        byId: 'P-000001',
+        at: '2026-11-01T10:00:00Z',
+      } as never);
+    }
+
+    // Also create a cyclic 2-node merge pair to verify cycle guard terminates cleanly
+    await partyRepo.putPerson(ctxAlpha, {
+      id: 'P-R685-CYC-A',
+      recordType: 'person',
+      firstName: 'CycleA',
+      surname: 'Loop',
+      mergedIntoId: 'P-R685-CYC-B',
+      emails: [],
+      phones: [],
+      addresses: [],
+      relationshipRoleIds: [],
+      notDuplicateOf: [],
+    } as never);
+    await partyRepo.putPerson(ctxAlpha, {
+      id: 'P-R685-CYC-B',
+      recordType: 'person',
+      firstName: 'CycleB',
+      surname: 'Loop',
+      mergedIntoId: 'P-R685-CYC-A',
+      emails: [],
+      phones: [],
+      addresses: [],
+      relationshipRoleIds: [],
+      notDuplicateOf: [],
+    } as never);
+    await partyRepo.putMergeHistory(ctxAlpha, {
+      id: 'MRG-R685-CYC-1',
+      recordType: 'person',
+      mergedId: 'P-R685-CYC-A',
+      survivorId: 'P-R685-CYC-B',
+      byId: 'P-000001',
+      at: '2026-11-01T10:00:00Z',
+    } as never);
+    await partyRepo.putMergeHistory(ctxAlpha, {
+      id: 'MRG-R685-CYC-2',
+      recordType: 'person',
+      mergedId: 'P-R685-CYC-B',
+      survivorId: 'P-R685-CYC-A',
+      byId: 'P-000001',
+      at: '2026-11-01T10:05:00Z',
+    } as never);
+
+    const { vi } = await import('vitest');
+    const warnMessages: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnMessages.push(args.map((a) => String(a)).join(' '));
+    });
+    try {
+      const chainRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        linkedPersonIds: ['P-R685-CH-00'],
+      });
+      const chainIds = chainRes.people.map((p) => p.id);
+      expect(chainIds).toContain('P-R685-CH-00');
+      expect(chainIds).toContain('P-R685-CH-05');
+      expect(chainIds).toContain('P-R685-CH-10');
+      expect(chainIds).not.toContain('P-R685-CH-11');
+      expect(chainIds).not.toContain('P-R685-CH-12');
+
+      const depthWarn = warnMessages.find((msg) => msg.includes('tenancy.merge_history.depth_guard_hit'));
+      expect(depthWarn).toBeDefined();
+      expect(depthWarn).toContain(tenantAlpha);
+      expect(depthWarn).toContain(ctxAlpha.correlationId);
+      expect(depthWarn).not.toContain('SecretChain');
+      expect(depthWarn).not.toContain('P-R685-CH');
+
+      warnMessages.length = 0;
+      const cycleRes = await partyRepo.findSqlConflictCandidates(ctxAlpha, {
+        linkedPersonIds: ['P-R685-CYC-A'],
+      });
+      expect(cycleRes.people.map((p) => p.id).sort()).toEqual(['P-R685-CYC-A', 'P-R685-CYC-B']);
+      expect(warnMessages.some((msg) => msg.includes('tenancy.merge_history.depth_guard_hit'))).toBe(false);
+
+      // Bravo isolation: sees zero Alpha merge-history chain nodes
+      const bravoChain = await partyRepo.findSqlConflictCandidates(ctxBravo, {
+        linkedPersonIds: ['P-R685-CH-00'],
+      });
+      expect(bravoChain.people).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });

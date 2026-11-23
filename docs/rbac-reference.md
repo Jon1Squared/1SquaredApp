@@ -23,7 +23,7 @@ Related Architecture Decision Records:
 ## 1. Central Permission Registry (`PERMISSION_REGISTRY`)
 
 Defined in `core/src/domain/rbac/registry.ts` and exported from `@platform/core`.
-Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 68 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 9 job-only permissions; 77 total).
+Every permission uses the `resource:action` naming convention, carries a sensitivity classification (`standard | confidential | restricted | critical`), states whether multi-factor authentication (`requiresMfa`) is required, and optionally marks `jobOnly: true` for permissions reserved exclusively for unattended background jobs (`ALL_USER_PERMISSION_KEYS` has 68 user permissions; `ALL_JOB_ONLY_PERMISSION_KEYS` has 10 job-only permissions; 78 total).
 
 | Permission Key | Domain | Sensitivity | Requires MFA | Description |
 | :--- | :--- | :--- | :--- | :--- |

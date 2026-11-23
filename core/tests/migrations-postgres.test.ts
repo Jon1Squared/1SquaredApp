@@ -2251,4 +2251,168 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       await client.end();
     }
   });
+
+  it('R685: 0024 keyset-paginates backfill (>500 rows), is idempotent on re-run, and reverses cleanly (up -> down -> up)', async () => {
+    const tenantAlpha = 'mig-s102a-r685-a';
+    const tenantBravo = 'mig-s102a-r685-b';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeTestTenantContext(tenantAlpha);
+    const ctxBravo = makeTestTenantContext(tenantBravo);
+    const runner = new TenantMigrationRunner();
+    const preMigrations = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0024');
+    await runner.applyUp(ctxAlpha, preMigrations);
+    await runner.rollbackVersion(ctxAlpha, '0024');
+    await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+
+    const mig0024 = CORE_TENANT_MIGRATIONS.find((m) => m.version === '0024')!;
+    expect(mig0024).toBeDefined();
+
+    const client = await createDirectMigrationClient({ ctx: ctxAlpha });
+    try {
+      await client.query(`DELETE FROM public.people WHERE tenant_id = $1 AND id LIKE 'P-R685-%'`, [tenantAlpha]);
+      await client.query(`DELETE FROM public.organisations WHERE tenant_id = $1 AND id LIKE 'O-R685-%'`, [tenantAlpha]);
+
+      const bulkPeople = Array.from({ length: 515 }, (_, i) => ({
+        id: `P-R685-${String(i).padStart(4, '0')}`,
+        firstName: `Kestrel${i}`,
+        surname: i === 514 ? 'LastPagePerson' : 'PagedPerson',
+        phone: `0770090${String(i).padStart(4, '0')}`,
+        postcode: 'CF10 3ZZ',
+      }));
+      await client.query(
+        `INSERT INTO public.people (
+           tenant_id, id, first_name, surname, phones_json, addresses_json, profile_json
+         )
+         SELECT
+           $1,
+           v.id,
+           v."firstName",
+           v.surname,
+           jsonb_build_array(jsonb_build_object('number', v.phone)),
+           jsonb_build_array(jsonb_build_object('postcode', v.postcode)),
+           '{}'::jsonb
+         FROM jsonb_to_recordset($2::jsonb) AS v(
+           id text,
+           "firstName" text,
+           surname text,
+           phone text,
+           postcode text
+         )`,
+        [tenantAlpha, JSON.stringify(bulkPeople)],
+      );
+
+      const bulkOrgs = Array.from({ length: 510 }, (_, i) => ({
+        id: `O-R685-${String(i).padStart(4, '0')}`,
+        legalName: i === 509 ? 'Zeta Final Page Org Ltd' : `Paged Org ${i} Ltd`,
+        companyNumber: `10${String(i).padStart(6, '0')}`,
+        email: `org${i}@paged-r685.example`,
+        phone: `0292018${String(i).padStart(4, '0')}`,
+      }));
+      await client.query(
+        `INSERT INTO public.organisations (
+           tenant_id, id, legal_name, company_number, general_email, main_phone, profile_json
+         )
+         SELECT
+           $1,
+           v.id,
+           v."legalName",
+           v."companyNumber",
+           v.email,
+           v.phone,
+           '{}'::jsonb
+         FROM jsonb_to_recordset($2::jsonb) AS v(
+           id text,
+           "legalName" text,
+           "companyNumber" text,
+           email text,
+           phone text
+         )`,
+        [tenantAlpha, JSON.stringify(bulkOrgs)],
+      );
+
+      // Apply 0024 -> spans 2 pages on both tables
+      const applied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      expect(applied.map((m) => m.version)).toContain('0024');
+
+      const { computePersonLookupKeys, computeOrganisationLookupKeys } = await import('../src/tenancy/candidateKeys');
+      const expectedLastPerson = computePersonLookupKeys({
+        firstName: 'Kestrel514',
+        surname: 'LastPagePerson',
+        phones: [{ number: '07700900514' }],
+        addresses: [{ postcode: 'CF10 3ZZ' }],
+      });
+      const expectedLastOrg = computeOrganisationLookupKeys({
+        legalName: 'Zeta Final Page Org Ltd',
+        companyNumber: '10000509',
+        generalEmail: 'org509@paged-r685.example',
+        mainPhone: '02920180509',
+      });
+
+      const lastPersonRow = await client.query<{
+        phone_last9_keys: string[];
+        postcode_keys: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT phone_last9_keys, postcode_keys, phonetic_keys FROM public.people WHERE tenant_id = $1 AND id = 'P-R685-0514'`,
+        [tenantAlpha],
+      );
+      expect(lastPersonRow.rows[0]?.phone_last9_keys).toEqual(expectedLastPerson.phoneLast9Keys);
+      expect(lastPersonRow.rows[0]?.postcode_keys).toEqual(expectedLastPerson.postcodeKeys);
+      expect(lastPersonRow.rows[0]?.phonetic_keys).toEqual(expectedLastPerson.phoneticKeys);
+
+      const lastOrgRow = await client.query<{
+        norm_company_number: string | null;
+        email_domains: string[];
+        phonetic_keys: string[];
+      }>(
+        `SELECT norm_company_number, email_domains, phonetic_keys FROM public.organisations WHERE tenant_id = $1 AND id = 'O-R685-0509'`,
+        [tenantAlpha],
+      );
+      expect(lastOrgRow.rows[0]?.norm_company_number).toBe(expectedLastOrg.normCompanyNumber);
+      expect(lastOrgRow.rows[0]?.email_domains).toEqual(expectedLastOrg.emailDomains);
+      expect(lastOrgRow.rows[0]?.phonetic_keys).toEqual(expectedLastOrg.phoneticKeys);
+
+      // Re-run afterUpSql directly (idempotent: clears & repopulates cleanly without duplicating/erasing)
+      await client.query(
+        `UPDATE public.people SET phone_last9_keys = '{}'::text[] WHERE tenant_id = $1 AND id IN ('P-R685-0000', 'P-R685-0514')`,
+        [tenantAlpha],
+      );
+      await mig0024.afterUpSql!(client, ctxAlpha);
+      await mig0024.afterUpSql!(client, ctxAlpha);
+      const repopulated = await client.query<{ id: string; phone_last9_keys: string[] }>(
+        `SELECT id, phone_last9_keys FROM public.people WHERE tenant_id = $1 AND id = 'P-R685-0514'`,
+        [tenantAlpha],
+      );
+      expect(repopulated.rows[0]?.phone_last9_keys).toEqual(expectedLastPerson.phoneLast9Keys);
+
+      // Full down -> up round-trip preserves rows and repopulates keys across pages
+      expect(await runner.rollbackVersion(ctxAlpha, '0024')).toBe(true);
+      const reapplied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0024']);
+
+      const afterRoundTrip = await client.query<{
+        phonetic_keys: string[];
+        postcode_keys: string[];
+      }>(
+        `SELECT phonetic_keys, postcode_keys FROM public.people WHERE tenant_id = $1 AND id = 'P-R685-0514'`,
+        [tenantAlpha],
+      );
+      expect(afterRoundTrip.rows[0]?.phonetic_keys).toEqual(expectedLastPerson.phoneticKeys);
+      expect(afterRoundTrip.rows[0]?.postcode_keys).toEqual(expectedLastPerson.postcodeKeys);
+
+      // Two-tenant isolation: Bravo has zero Alpha rows
+      const bravoCount = await client.query<{ cnt: string }>(
+        `SELECT count(*)::text AS cnt FROM public.people WHERE tenant_id = $1`,
+        [tenantBravo],
+      );
+      expect(Number(bravoCount.rows[0]?.cnt ?? 0)).toBe(0);
+    } finally {
+      await client.end();
+    }
+  }, 30_000);
 });

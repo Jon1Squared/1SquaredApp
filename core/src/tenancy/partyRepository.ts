@@ -38,6 +38,7 @@ import {
   extractEmailDomainKey,
   extractTokenPhoneticKeys,
   FREE_EMAIL_DOMAINS_SET,
+  NAME_ORG_SUFFIXES,
   normaliseComparableNameKey,
   normalisePhoneLast9Key,
   normalisePostcodeKey,
@@ -4317,47 +4318,113 @@ export class TenantPartyRepository extends TenantScopedRepository {
     const personMap = new Map<string, TPerson>();
     const orgMap = new Map<string, TOrg>();
 
+    const visitedMergePersonIds = new Set<string>();
+    const visitedMergeOrgIds = new Set<string>();
+
     const expandMergeHistoryIds = async (
       personIds: Set<string>,
       orgIds: Set<string>,
     ): Promise<void> => {
-      const checkedIds = new Set<string>();
-      for (let hop = 0; hop < 3; hop += 1) {
-        const frontier = [
-          ...Array.from(personIds),
-          ...Array.from(orgIds),
-        ].filter((id) => id && !checkedIds.has(id));
-        if (frontier.length === 0) break;
-        for (const id of frontier) checkedIds.add(id);
-        const mergeLists = await Promise.all(
-          frontier.map((id) => this.listMergeHistoryForEntity(ctx, id)),
+      const seedPairs: Array<{
+        recordType: 'person' | 'organisation';
+        id: string;
+      }> = [
+        ...Array.from(personIds)
+          .filter((id) => Boolean(id) && !visitedMergePersonIds.has(id))
+          .map((id) => ({ recordType: 'person' as const, id })),
+        ...Array.from(orgIds)
+          .filter((id) => Boolean(id) && !visitedMergeOrgIds.has(id))
+          .map((id) => ({ recordType: 'organisation' as const, id })),
+      ];
+      if (seedPairs.length === 0) return;
+
+      for (const seed of seedPairs) {
+        if (seed.recordType === 'person') visitedMergePersonIds.add(seed.id);
+        else visitedMergeOrgIds.add(seed.id);
+      }
+
+      const MAX_MERGE_DEPTH = 10;
+      await this.withTenantReadTransaction(ctx, async (tx) => {
+        const res = await tx.query<{
+          tenant_id: string;
+          record_type: string;
+          entity_id: string;
+          depth: number;
+        }>(
+          `WITH RECURSIVE seeds AS (
+             SELECT DISTINCT
+               v."recordType"::text AS record_type,
+               v.id::text AS entity_id
+             FROM jsonb_to_recordset($2::jsonb) AS v("recordType" text, id text)
+           ),
+           chain(tenant_id, record_type, entity_id, depth, path) AS (
+             SELECT
+               $1::text AS tenant_id,
+               s.record_type,
+               s.entity_id,
+               0 AS depth,
+               ARRAY[s.entity_id]::text[] AS path
+             FROM seeds s
+             UNION ALL
+             SELECT
+               c.tenant_id,
+               c.record_type,
+               CASE
+                 WHEN mh.merged_id = c.entity_id THEN mh.survivor_id
+                 ELSE mh.merged_id
+               END AS entity_id,
+               c.depth + 1 AS depth,
+               c.path || CASE
+                 WHEN mh.merged_id = c.entity_id THEN mh.survivor_id
+                 ELSE mh.merged_id
+               END
+             FROM chain c
+             JOIN public.merge_history mh
+               ON mh.tenant_id = $1
+              AND mh.record_type = c.record_type
+              AND (mh.merged_id = c.entity_id OR mh.survivor_id = c.entity_id)
+             WHERE c.depth <= $3
+               AND NOT (
+                 (CASE WHEN mh.merged_id = c.entity_id THEN mh.survivor_id ELSE mh.merged_id END) = ANY(c.path)
+               )
+           )
+           SELECT
+             $1::text AS tenant_id,
+             record_type,
+             entity_id,
+             MIN(depth)::int AS depth
+           FROM chain
+           GROUP BY record_type, entity_id`,
+          [ctx.tenantId, JSON.stringify(seedPairs), MAX_MERGE_DEPTH],
         );
-        let discoveredNew = false;
-        for (const list of mergeLists) {
-          for (const mh of list) {
-            if (mh.recordType === 'person') {
-              if (mh.survivorId && !personIds.has(mh.survivorId)) {
-                personIds.add(mh.survivorId);
-                discoveredNew = true;
-              }
-              if (mh.mergedId && !personIds.has(mh.mergedId)) {
-                personIds.add(mh.mergedId);
-                discoveredNew = true;
-              }
-            } else if (mh.recordType === 'organisation') {
-              if (mh.survivorId && !orgIds.has(mh.survivorId)) {
-                orgIds.add(mh.survivorId);
-                discoveredNew = true;
-              }
-              if (mh.mergedId && !orgIds.has(mh.mergedId)) {
-                orgIds.add(mh.mergedId);
-                discoveredNew = true;
-              }
-            }
+
+        let depthGuardHit = false;
+        for (const row of res.rows) {
+          this.assertRowTenant(ctx, row.tenant_id, 'merge_history.expand');
+          if (row.depth > MAX_MERGE_DEPTH) {
+            depthGuardHit = true;
+            continue;
+          }
+          if (row.record_type === 'person') {
+            visitedMergePersonIds.add(row.entity_id);
+            personIds.add(row.entity_id);
+          } else if (row.record_type === 'organisation') {
+            visitedMergeOrgIds.add(row.entity_id);
+            orgIds.add(row.entity_id);
           }
         }
-        if (!discoveredNew) break;
-      }
+        if (depthGuardHit) {
+          console.warn(
+            JSON.stringify({
+              level: 'warn',
+              event: 'tenancy.merge_history.depth_guard_hit',
+              tenantId: ctx.tenantId,
+              correlationId: ctx.correlationId,
+              maxDepth: MAX_MERGE_DEPTH,
+            }),
+          );
+        }
+      });
     };
 
     // Step 1: Traverse multi-hop merge history chains BEFORE loading seed people/organisations
@@ -4380,24 +4447,21 @@ export class TenantPartyRepository extends TenantScopedRepository {
       'at',
       'by',
       'to',
-      'limited',
-      'ltd',
-      'llp',
-      'plc',
-      'inc',
       'corp',
-      'co',
       'uk',
       'group',
       'holdings',
+      ...NAME_ORG_SUFFIXES,
     ]);
-    const effectiveTerms = cleanTerms.filter((term) => {
+    const filteredTerms = cleanTerms.filter((term) => {
       const tokens = normaliseComparableNameKey(term).split(' ').filter(Boolean);
       const informativeTokens = tokens.filter(
         (t) => !STOP_WORDS.has(t) && t.length >= 2,
       );
       return informativeTokens.length > 0;
     });
+    const effectiveTerms =
+      filteredTerms.length > 0 ? filteredTerms : cleanTerms;
 
     // Step 2: Query people & organisations matching terms/emails/phones/postcodes/companyNos
     for (const term of effectiveTerms) {

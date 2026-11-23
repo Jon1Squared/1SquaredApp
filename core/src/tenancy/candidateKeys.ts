@@ -23,7 +23,7 @@ const NAME_TITLES = new Set([
   'lady',
 ]);
 
-const NAME_ORG_SUFFIXES = new Set([
+export const NAME_ORG_SUFFIXES = new Set([
   'ltd',
   'limited',
   'llp',
