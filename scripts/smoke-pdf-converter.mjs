@@ -11,7 +11,9 @@
  *     returning HTTP 200 `application/pdf` and forwarding `x-correlation-id`.
  */
 
-const baseUrl = (process.argv[2] || 'http://127.0.0.1:8199').replace(/\/+$/, '');
+const args = process.argv.slice(2);
+const baseUrl = (args.find((a) => !a.startsWith('--')) || 'http://127.0.0.1:8199').replace(/\/+$/, '');
+const expectTimeout = args.includes('--expect-timeout');
 const READY_TIMEOUT_MS = 60_000;
 
 function crc32(bytes) {
@@ -179,11 +181,23 @@ async function main() {
       'Content-Type':
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'x-tenant-id': 'smoke-tenant',
-      'x-correlation-id': 'smoke-valid-docx',
+      'x-correlation-id': expectTimeout
+        ? 'smoke-timeout-docx'
+        : 'smoke-valid-docx',
     },
     body: docxBytes,
     signal: AbortSignal.timeout(45_000),
   });
+  if (expectTimeout) {
+    if (convertRes.status !== 504) {
+      const errBody = await convertRes.text();
+      throw new Error(
+        `Expected HTTP 504 on timeout smoke test, got HTTP ${convertRes.status} ${errBody}`,
+      );
+    }
+    console.log('[PDF Smoke] Passed --expect-timeout (HTTP 504 on forced timeout).');
+    return;
+  }
   if (convertRes.status !== 200) {
     const errBody = await convertRes.text();
     throw new Error(`/convert failed: HTTP ${convertRes.status} ${errBody}`);

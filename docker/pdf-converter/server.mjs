@@ -37,18 +37,43 @@ const SOFFICE_TIMEOUT_MS = Number(
   process.env.PDF_CONVERTER_SOFFICE_TIMEOUT_MS || 45_000,
 );
 const READINESS_PROBE_TIMEOUT_MS = Number(
-  process.env.PDF_CONVERTER_READINESS_TIMEOUT_MS || 10_000,
+  process.env.PDF_CONVERTER_READINESS_TIMEOUT_MS || 4_500,
 );
 const READINESS_CACHE_MS = Math.max(
   1_000,
   Number(process.env.PDF_CONVERTER_READINESS_CACHE_MS || 60_000),
 );
-const SOFFICE_BIN = process.env.PDF_CONVERTER_SOFFICE_BIN || 'soffice';
+const IS_PRODUCTION_ENV = process.env.NODE_ENV === 'production';
+// Test-only LibreOffice override hooks (`R686`): ignored when NODE_ENV=production.
+const SOFFICE_BIN =
+  !IS_PRODUCTION_ENV && process.env.PDF_CONVERTER_SOFFICE_BIN
+    ? process.env.PDF_CONVERTER_SOFFICE_BIN
+    : 'soffice';
 let SOFFICE_PRE_ARGS = [];
-if (process.env.PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON) {
-  const parsedArgs = JSON.parse(process.env.PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON);
-  if (Array.isArray(parsedArgs)) {
-    SOFFICE_PRE_ARGS = parsedArgs.map((arg) => String(arg));
+if (!IS_PRODUCTION_ENV && process.env.PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON) {
+  try {
+    const parsedArgs = JSON.parse(
+      process.env.PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON,
+    );
+    if (Array.isArray(parsedArgs)) {
+      SOFFICE_PRE_ARGS = parsedArgs.map((arg) => String(arg));
+    } else {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'pdf_converter.invalid_pre_args_json',
+          reason: 'Expected JSON array',
+        }),
+      );
+    }
+  } catch {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'pdf_converter.invalid_pre_args_json',
+        reason: 'Malformed JSON',
+      }),
+    );
   }
 }
 const SAFE_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -152,13 +177,21 @@ function readRequestBodyWithLimit(req, maxBytes) {
     let totalBytes = 0;
     let settled = false;
 
+    const cleanup = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      req.removeListener('close', onClose);
+    };
+
     const fail = (err) => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(err);
     };
 
-    req.on('data', (chunk) => {
+    const onData = (chunk) => {
       if (settled) return;
       totalBytes += chunk.byteLength;
       if (totalBytes > maxBytes) {
@@ -169,17 +202,31 @@ function readRequestBodyWithLimit(req, maxBytes) {
         return;
       }
       chunks.push(chunk);
-    });
+    };
 
-    req.on('end', () => {
+    const onEnd = () => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve(Buffer.concat(chunks, totalBytes));
-    });
+    };
 
-    req.on('error', (err) => {
+    const onError = (err) => {
       fail(err);
-    });
+    };
+
+    const onClose = () => {
+      if (!settled && !req.complete) {
+        const abortErr = new Error('Client aborted request body upload');
+        abortErr.code = 'CLIENT_ABORT';
+        fail(abortErr);
+      }
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('close', onClose);
   });
 }
 
@@ -235,6 +282,13 @@ function runSofficeConvert(args, timeoutMs) {
       timedOut = true;
       killProcessTree();
       forceFinishTimer = setTimeout(() => {
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            event: 'pdf_converter.kill_unconfirmed',
+            pid: child.pid ?? null,
+          }),
+        );
         const timeoutErr = new Error(
           `soffice timed out after ${timeoutMs} ms`,
         );
@@ -387,7 +441,7 @@ const server = http.createServer(async (req, res) => {
         res,
         503,
         { errorCode: 'PDF_CONVERTER_BUSY' },
-        { 'Retry-After': '2' },
+        { 'Retry-After': '2', Connection: 'close' },
       );
       return;
     }
@@ -438,6 +492,27 @@ const server = http.createServer(async (req, res) => {
       });
       res.end(pdfBuffer);
     } catch (err) {
+      const isClientAbort =
+        err && typeof err === 'object' && err.code === 'CLIENT_ABORT';
+      if (isClientAbort) {
+        logEvent({
+          level: 'warn',
+          event: 'pdf_converter.client_aborted',
+          correlationId,
+          ...(tenantId ? { tenantId } : {}),
+          outcome: 'aborted',
+          statusCode: 499,
+          durationMs: Date.now() - startedAt,
+          inputBytes,
+          outputBytes: 0,
+          errorCode: 'PDF_CONVERTER_CLIENT_ABORT',
+        });
+        if (!res.destroyed && !res.writableEnded) {
+          res.destroy();
+        }
+        return;
+      }
+
       const isSizeLimit =
         err && typeof err === 'object' && err.code === 'SIZE_LIMIT';
       const isTimeout =

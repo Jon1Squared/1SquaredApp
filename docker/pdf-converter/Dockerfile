@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
+      tini \
       libreoffice-writer-nogui \
       fonts-liberation2 \
       fonts-noto-core \
@@ -22,4 +23,5 @@ COPY --chown=node:node server.mjs /app/server.mjs
 USER node
 EXPOSE 8080
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "/app/server.mjs"]
