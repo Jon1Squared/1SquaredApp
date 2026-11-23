@@ -1031,6 +1031,16 @@ resource pdfConverterContainerApp 'Microsoft.App/containerApps@2025-07-01' = if 
       scale: {
         minReplicas: pdfConverterMinReplicas
         maxReplicas: 4
+        rules: [
+          {
+            name: 'http-concurrency'
+            http: {
+              metadata: {
+                concurrentRequests: '2'
+              }
+            }
+          }
+        ]
       }
     }
   }

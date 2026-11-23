@@ -1,5 +1,9 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import net, { type AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BuiltInOpenXmlPdfConverter,
@@ -354,5 +358,262 @@ describe('S1-10: HttpPdfConverter, FallbackAwarePdfConverter & converter config 
         correlationId: 'corr-fail',
       }),
     ).rejects.toMatchObject({ code: 'PDF_CONVERTER_UNCONFIGURED' });
+  });
+
+  it('R670/R671: server.mjs enforces MAX_CONCURRENCY (503 + Retry-After), caches /health/ready > probe interval, kills full process tree on timeout, returns clean 413 on oversized chunked uploads, and HttpPdfConverter caps PDF response size', async () => {
+    const tempDirs: string[] = [];
+    const childProcs: ChildProcess[] = [];
+    const trackedPids: number[] = [];
+
+    const reservePort = (): Promise<number> =>
+      new Promise((resolve, reject) => {
+        const srv = net.createServer();
+        srv.on('error', reject);
+        srv.listen(0, '127.0.0.1', () => {
+          const { port } = srv.address() as AddressInfo;
+          srv.close((err) => (err ? reject(err) : resolve(port)));
+        });
+      });
+
+    const waitForLive = async (baseUrl: string): Promise<void> => {
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(`${baseUrl}/health/live`);
+          if (res.status === 200) return;
+        } catch {
+          // Retry until server binds
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error(`Timed out waiting for ${baseUrl}/health/live`);
+    };
+
+    const startConverterProcess = async (envOverrides: Record<string, string>) => {
+      const port = await reservePort();
+      const baseUrl = `http://127.0.0.1:${port}`;
+      const serverScript = path.resolve(
+        __dirname,
+        '../../docker/pdf-converter/server.mjs',
+      );
+      const proc = spawn(process.execPath, [serverScript], {
+        env: {
+          ...process.env,
+          PORT: String(port),
+          HOSTNAME: '127.0.0.1',
+          ...envOverrides,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      childProcs.push(proc);
+      await waitForLive(baseUrl);
+      return { baseUrl, proc, port };
+    };
+
+    try {
+      const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), 's110-r670-'));
+      tempDirs.push(workRoot);
+
+      const versionLogPath = path.join(workRoot, 'version-calls.log');
+      const grandchildPidPath = path.join(workRoot, 'grandchild.pid');
+      const mockSofficePath = path.join(workRoot, 'mock-soffice.mjs');
+      fs.writeFileSync(
+        mockSofficePath,
+        [
+          "import { spawn } from 'node:child_process';",
+          "import fs from 'node:fs';",
+          "import path from 'node:path';",
+          'const args = process.argv.slice(2);',
+          "if (args.includes('--version')) {",
+          "  if (process.env.MOCK_VERSION_LOG) fs.appendFileSync(process.env.MOCK_VERSION_LOG, '1\\n', 'utf8');",
+          "  process.stdout.write('LibreOffice 24.8.0.0\\n');",
+          '  process.exit(0);',
+          '}',
+          "if (process.env.MOCK_MODE === 'hang') {",
+          "  const grand = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], { stdio: 'ignore' });",
+          '  if (process.env.MOCK_GRANDCHILD_PID_FILE && grand.pid) {',
+          '    fs.writeFileSync(process.env.MOCK_GRANDCHILD_PID_FILE, String(grand.pid), "utf8");',
+          '  }',
+          '  setInterval(() => {}, 60000);',
+          '} else {',
+          "  const outDirIdx = args.indexOf('--outdir');",
+          '  const outDir = outDirIdx >= 0 ? args[outDirIdx + 1] : process.cwd();',
+          '  const delay = Number(process.env.MOCK_DELAY_MS || 350);',
+          '  await new Promise((r) => setTimeout(r, delay));',
+          "  fs.writeFileSync(path.join(outDir, 'input.pdf'), Buffer.from('%PDF-1.4\\n1 0 obj<<>>endobj\\n%%EOF\\n'));",
+          '  process.exit(0);',
+          '}',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const zipBody = buildValidDocxArchive({
+        paragraphs: [{ text: 'Concurrency and timeout check' }],
+      });
+
+      // 1. Concurrency refusal (MAX_CONCURRENCY=2 -> 2x 200, 1x 503 + Retry-After) + /health/ready caching (single --version invocation across 3 calls)
+      const busySrv = await startConverterProcess({
+        PDF_CONVERTER_MAX_CONCURRENCY: '2',
+        PDF_CONVERTER_SOFFICE_BIN: process.execPath,
+        PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON: JSON.stringify([mockSofficePath]),
+        MOCK_VERSION_LOG: versionLogPath,
+        MOCK_DELAY_MS: '400',
+      });
+
+      const r1 = await fetch(`${busySrv.baseUrl}/health/ready`);
+      const r2 = await fetch(`${busySrv.baseUrl}/health/ready`);
+      const r3 = await fetch(`${busySrv.baseUrl}/health/ready`);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect(r3.status).toBe(200);
+      const versionCount = fs
+        .readFileSync(versionLogPath, 'utf8')
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean).length;
+      expect(versionCount).toBe(1);
+
+      const convertResults = await Promise.all(
+        [1, 2, 3].map(async () => {
+          const res = await fetch(`${busySrv.baseUrl}/convert`, {
+            method: 'POST',
+            headers: {
+              'content-type':
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            },
+            body: Buffer.from(zipBody),
+          });
+          return {
+            status: res.status,
+            retryAfter: res.headers.get('retry-after'),
+            body: Buffer.from(await res.arrayBuffer()),
+          };
+        }),
+      );
+      const okResults = convertResults.filter((r) => r.status === 200);
+      const busyResults = convertResults.filter((r) => r.status === 503);
+      expect(okResults).toHaveLength(2);
+      expect(busyResults).toHaveLength(1);
+      expect(busyResults[0]!.retryAfter).toBeTruthy();
+      expect(JSON.parse(busyResults[0]!.body.toString('utf8'))).toMatchObject({
+        errorCode: 'PDF_CONVERTER_BUSY',
+      });
+
+      // 2. Timeout kills full process tree including spawned grandchild PID
+      const timeoutSrv = await startConverterProcess({
+        PDF_CONVERTER_SOFFICE_TIMEOUT_MS: '300',
+        PDF_CONVERTER_SOFFICE_BIN: process.execPath,
+        PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON: JSON.stringify([mockSofficePath]),
+        MOCK_MODE: 'hang',
+        MOCK_GRANDCHILD_PID_FILE: grandchildPidPath,
+      });
+      const timeoutRes = await fetch(`${timeoutSrv.baseUrl}/convert`, {
+        method: 'POST',
+        body: Buffer.from(zipBody),
+      });
+      expect(timeoutRes.status).toBe(504);
+      const grandchildPid = Number(
+        fs.readFileSync(grandchildPidPath, 'utf8').trim(),
+      );
+      expect(grandchildPid).toBeGreaterThan(0);
+      trackedPids.push(grandchildPid);
+      await new Promise((r) => setTimeout(r, 150));
+      let grandchildAlive = true;
+      try {
+        process.kill(grandchildPid, 0);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
+          grandchildAlive = false;
+        }
+      }
+      expect(grandchildAlive).toBe(false);
+
+      // 3. Oversized chunked POST (no Content-Length) returns clean HTTP 413 JSON (not ECONNRESET)
+      const sizeSrv = await startConverterProcess({
+        PDF_CONVERTER_MAX_DOCX_BYTES: '1024',
+        PDF_CONVERTER_SOFFICE_BIN: process.execPath,
+        PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON: JSON.stringify([mockSofficePath]),
+      });
+      const chunkedRes = await new Promise<{ status: number; body: string }>(
+        (resolve, reject) => {
+          const req = http.request(
+            {
+              hostname: '127.0.0.1',
+              port: sizeSrv.port,
+              path: '/convert',
+              method: 'POST',
+              headers: {
+                'Content-Type':
+                  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'Transfer-Encoding': 'chunked',
+              },
+            },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on('data', (c: Buffer) => chunks.push(c));
+              res.on('end', () => {
+                resolve({
+                  status: res.statusCode ?? 0,
+                  body: Buffer.concat(chunks).toString('utf8'),
+                });
+              });
+            },
+          );
+          req.on('error', reject);
+          req.write(Buffer.from(zipBody.subarray(0, 400)));
+          req.write(Buffer.alloc(2048, 0x41));
+          req.end();
+        },
+      );
+      expect(chunkedRes.status).toBe(413);
+      expect(JSON.parse(chunkedRes.body)).toMatchObject({
+        errorCode: 'PDF_CONVERTER_SIZE_LIMIT',
+      });
+
+      // 4. HttpPdfConverter enforces maxPdfBytes response ceiling (streaming without/with Content-Length)
+      const oversizedPdf = Buffer.concat([
+        Buffer.from('%PDF-1.4\n'),
+        Buffer.alloc(4096, 0x20),
+      ]);
+      const converterCapped = new HttpPdfConverter({
+        baseUrl: 'http://pdf.invalid',
+        maxPdfBytes: 1024,
+        fetchImpl: (async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(oversizedPdf.subarray(0, 600));
+                controller.enqueue(oversizedPdf.subarray(600));
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/pdf' } },
+          )) as typeof fetch,
+      });
+      await expect(
+        converterCapped.convertDocxToPdf({
+          docxBytes: zipBody,
+          title: 'Oversized PDF response check',
+        }),
+      ).rejects.toMatchObject({ code: 'PDF_CONVERTER_SIZE_LIMIT' });
+    } finally {
+      for (const proc of childProcs) {
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // Already exited
+        }
+      }
+      for (const pid of trackedPids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Already terminated
+        }
+      }
+      for (const dir of tempDirs) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 });

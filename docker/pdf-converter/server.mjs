@@ -5,14 +5,15 @@
  * Security & privacy invariants:
  * - Exposes ONLY `GET /health/live`, `GET /health/ready`, and `POST /convert`.
  * - Enforces byte ceiling (`MAX_DOCX_BYTES`, default 25 MiB), ZIP magic check
- *   (`PK\x03\x04`), per-request isolated temporary directory + UNO profile, and
+ *   (`PK\x03\x04`), parallel concurrency cap (`MAX_CONCURRENCY`, default 2, HTTP 503),
+ *   per-request isolated temporary directory + UNO profile, and process-tree
  *   subprocess timeout (`45s` default inside Container App `60s` client budget).
  * - Structured JSON logs emit only operational metadata (`correlationId`, optional
  *   sanitised `tenantId`, byte sizes, timing, HTTP status, and error codes).
  *   Never logs headers, document titles, filenames, or document bytes.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -28,16 +29,33 @@ const HOSTNAME = process.env.HOSTNAME || '0.0.0.0';
 const MAX_DOCX_BYTES = Number(
   process.env.PDF_CONVERTER_MAX_DOCX_BYTES || 25 * 1024 * 1024,
 );
+const MAX_CONCURRENCY = Math.max(
+  1,
+  Math.floor(Number(process.env.PDF_CONVERTER_MAX_CONCURRENCY || 2)),
+);
 const SOFFICE_TIMEOUT_MS = Number(
   process.env.PDF_CONVERTER_SOFFICE_TIMEOUT_MS || 45_000,
 );
 const READINESS_PROBE_TIMEOUT_MS = Number(
   process.env.PDF_CONVERTER_READINESS_TIMEOUT_MS || 10_000,
 );
-const READINESS_CACHE_MS = 5_000;
+const READINESS_CACHE_MS = Math.max(
+  1_000,
+  Number(process.env.PDF_CONVERTER_READINESS_CACHE_MS || 60_000),
+);
+const SOFFICE_BIN = process.env.PDF_CONVERTER_SOFFICE_BIN || 'soffice';
+let SOFFICE_PRE_ARGS = [];
+if (process.env.PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON) {
+  const parsedArgs = JSON.parse(process.env.PDF_CONVERTER_SOFFICE_PRE_ARGS_JSON);
+  if (Array.isArray(parsedArgs)) {
+    SOFFICE_PRE_ARGS = parsedArgs.map((arg) => String(arg));
+  }
+}
 const SAFE_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 let cachedReadyAt = 0;
+let readyCheckInFlight = null;
+let activeConversions = 0;
 
 function sanitizeIdentifier(rawValue) {
   if (typeof rawValue !== 'string') return undefined;
@@ -92,15 +110,28 @@ function hasPdfSignature(buf) {
 
 async function checkSofficeReady() {
   const now = Date.now();
-  if (now - cachedReadyAt < READINESS_CACHE_MS) {
+  if (cachedReadyAt > 0 && now - cachedReadyAt < READINESS_CACHE_MS) {
     return true;
   }
-  await execFileAsync('soffice', ['--headless', '--version'], {
-    timeout: READINESS_PROBE_TIMEOUT_MS,
-    maxBuffer: 512 * 1024,
-  });
-  cachedReadyAt = Date.now();
-  return true;
+  if (readyCheckInFlight) {
+    return readyCheckInFlight;
+  }
+  readyCheckInFlight = execFileAsync(
+    SOFFICE_BIN,
+    [...SOFFICE_PRE_ARGS, '--headless', '--version'],
+    {
+      timeout: READINESS_PROBE_TIMEOUT_MS,
+      maxBuffer: 512 * 1024,
+    },
+  )
+    .then(() => {
+      cachedReadyAt = Date.now();
+      return true;
+    })
+    .finally(() => {
+      readyCheckInFlight = null;
+    });
+  return readyCheckInFlight;
 }
 
 function readRequestBodyWithLimit(req, maxBytes) {
@@ -133,7 +164,7 @@ function readRequestBodyWithLimit(req, maxBytes) {
       if (totalBytes > maxBytes) {
         const err = new Error('DOCX payload exceeds maximum allowed size');
         err.code = 'SIZE_LIMIT';
-        req.destroy();
+        req.resume();
         fail(err);
         return;
       }
@@ -152,6 +183,91 @@ function readRequestBodyWithLimit(req, maxBytes) {
   });
 }
 
+function runSofficeConvert(args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(SOFFICE_BIN, [...SOFFICE_PRE_ARGS, ...args], {
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (child.stdout) child.stdout.resume();
+    if (child.stderr) child.stderr.resume();
+
+    let timedOut = false;
+    let settled = false;
+    let forceFinishTimer = null;
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (forceFinishTimer) clearTimeout(forceFinishTimer);
+      if (err) reject(err);
+      else resolve();
+    };
+
+    const killProcessTree = () => {
+      if (child.pid) {
+        if (process.platform === 'win32') {
+          try {
+            spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+              stdio: 'ignore',
+              windowsHide: true,
+            });
+          } catch {
+            // Best-effort process tree termination
+          }
+        } else {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            // Best-effort process group termination
+          }
+        }
+      }
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // Already exited
+      }
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree();
+      forceFinishTimer = setTimeout(() => {
+        const timeoutErr = new Error(
+          `soffice timed out after ${timeoutMs} ms`,
+        );
+        timeoutErr.code = 'ETIMEDOUT';
+        timeoutErr.killed = true;
+        finish(timeoutErr);
+      }, 1_500);
+    }, timeoutMs);
+
+    child.on('error', (err) => finish(err));
+    child.on('close', (code, signal) => {
+      if (timedOut) {
+        const timeoutErr = new Error(
+          `soffice timed out after ${timeoutMs} ms`,
+        );
+        timeoutErr.code = 'ETIMEDOUT';
+        timeoutErr.killed = true;
+        finish(timeoutErr);
+        return;
+      }
+      if (code !== 0) {
+        const exitErr = new Error(
+          `soffice exited with code ${code ?? 'null'} (signal ${signal ?? 'none'})`,
+        );
+        exitErr.code = 'RENDER_FAILED';
+        finish(exitErr);
+        return;
+      }
+      finish(null);
+    });
+  });
+}
+
 async function convertDocxBufferToPdf(docxBuffer) {
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'onesquared-pdf-'));
   try {
@@ -162,8 +278,7 @@ async function convertDocxBufferToPdf(docxBuffer) {
     await fs.writeFile(inputPath, docxBuffer);
 
     const profileUri = pathToFileURL(profileDir).href;
-    await execFileAsync(
-      'soffice',
+    await runSofficeConvert(
       [
         '--headless',
         '--norestore',
@@ -176,10 +291,7 @@ async function convertDocxBufferToPdf(docxBuffer) {
         workDir,
         inputPath,
       ],
-      {
-        timeout: SOFFICE_TIMEOUT_MS,
-        maxBuffer: 4 * 1024 * 1024,
-      },
+      SOFFICE_TIMEOUT_MS,
     );
 
     const pdfBytes = await fs.readFile(outputPath);
@@ -257,6 +369,30 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (activeConversions >= MAX_CONCURRENCY) {
+      req.resume();
+      logEvent({
+        level: 'warn',
+        event: 'pdf_converter.rejected_busy',
+        correlationId,
+        ...(tenantId ? { tenantId } : {}),
+        outcome: 'busy',
+        statusCode: 503,
+        durationMs: Date.now() - startedAt,
+        inputBytes: 0,
+        outputBytes: 0,
+        errorCode: 'PDF_CONVERTER_BUSY',
+      });
+      sendJson(
+        res,
+        503,
+        { errorCode: 'PDF_CONVERTER_BUSY' },
+        { 'Retry-After': '2' },
+      );
+      return;
+    }
+
+    activeConversions += 1;
     let inputBytes = 0;
     try {
       const docxBuffer = await readRequestBodyWithLimit(req, MAX_DOCX_BYTES);
@@ -330,7 +466,14 @@ const server = http.createServer(async (req, res) => {
         outputBytes: 0,
         errorCode,
       });
-      sendJson(res, statusCode, { errorCode });
+      sendJson(
+        res,
+        statusCode,
+        { errorCode },
+        isSizeLimit ? { Connection: 'close' } : {},
+      );
+    } finally {
+      activeConversions = Math.max(0, activeConversions - 1);
     }
     return;
   }
@@ -342,6 +485,7 @@ server.headersTimeout = 15_000;
 server.requestTimeout = SOFFICE_TIMEOUT_MS + 30_000;
 
 server.listen(PORT, HOSTNAME, () => {
+  checkSofficeReady().catch(() => {});
   logEvent({
     level: 'info',
     event: 'pdf_converter.started',

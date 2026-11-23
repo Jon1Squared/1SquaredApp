@@ -19,6 +19,7 @@ import { readAndValidateDocxZip, unescapeXmlText } from './docxEngine';
 
 export const DEFAULT_HTTP_PDF_CONVERTER_TIMEOUT_MS = 60_000;
 export const DEFAULT_HTTP_PDF_CONVERTER_MAX_DOCX_BYTES = 25 * 1024 * 1024;
+export const DEFAULT_HTTP_PDF_CONVERTER_MAX_PDF_BYTES = 50 * 1024 * 1024;
 
 export type PdfConverterErrorCode =
   | 'PDF_CONVERTER_UNCONFIGURED'
@@ -433,12 +434,14 @@ export class HttpPdfConverter implements DocumentPdfConverter {
   public readonly baseUrl: string;
   public readonly timeoutMs: number;
   public readonly maxDocxBytes: number;
+  public readonly maxPdfBytes: number;
   private readonly fetchImpl: typeof fetch;
 
   public constructor(options: {
     baseUrl: string;
     timeoutMs?: number;
     maxDocxBytes?: number;
+    maxPdfBytes?: number;
     fetchImpl?: typeof fetch;
   }) {
     this.baseUrl = options.baseUrl.trim().replace(/\/+$/, '');
@@ -446,6 +449,8 @@ export class HttpPdfConverter implements DocumentPdfConverter {
       options.timeoutMs ?? DEFAULT_HTTP_PDF_CONVERTER_TIMEOUT_MS;
     this.maxDocxBytes =
       options.maxDocxBytes ?? DEFAULT_HTTP_PDF_CONVERTER_MAX_DOCX_BYTES;
+    this.maxPdfBytes =
+      options.maxPdfBytes ?? DEFAULT_HTTP_PDF_CONVERTER_MAX_PDF_BYTES;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -507,7 +512,62 @@ export class HttpPdfConverter implements DocumentPdfConverter {
         );
       }
 
-      const pdfBytes = new Uint8Array(await response.arrayBuffer());
+      const contentLengthHeader = response.headers?.get('content-length');
+      if (contentLengthHeader !== null && contentLengthHeader !== undefined) {
+        const declaredPdfLength = Number(contentLengthHeader);
+        if (
+          Number.isFinite(declaredPdfLength) &&
+          declaredPdfLength > this.maxPdfBytes
+        ) {
+          response.body?.cancel().catch(() => {});
+          throw new PdfConverterError(
+            'PDF_CONVERTER_SIZE_LIMIT',
+            `PDF response (${declaredPdfLength} bytes) exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+          );
+        }
+      }
+
+      let pdfBytes: Uint8Array;
+      if (response.body && typeof response.body.getReader === 'function') {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
+          totalBytes += value.byteLength;
+          if (totalBytes > this.maxPdfBytes) {
+            reader.cancel().catch(() => {});
+            controller.abort(
+              new PdfConverterError(
+                'PDF_CONVERTER_SIZE_LIMIT',
+                `PDF response exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+              ),
+            );
+            throw new PdfConverterError(
+              'PDF_CONVERTER_SIZE_LIMIT',
+              `PDF response (${totalBytes} bytes) exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+            );
+          }
+          chunks.push(value);
+        }
+        pdfBytes = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          pdfBytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+      } else {
+        pdfBytes = new Uint8Array(await response.arrayBuffer());
+        if (pdfBytes.byteLength > this.maxPdfBytes) {
+          throw new PdfConverterError(
+            'PDF_CONVERTER_SIZE_LIMIT',
+            `PDF response (${pdfBytes.byteLength} bytes) exceeds maximum limit (${this.maxPdfBytes} bytes).`,
+          );
+        }
+      }
+
       if (!hasPdfMagicSignature(pdfBytes)) {
         throw new PdfConverterError(
           'PDF_CONVERTER_INVALID_OUTPUT',
@@ -592,6 +652,7 @@ export function selectDocumentPdfConverter(
     converterUrl?: string;
     timeoutMs?: number;
     maxDocxBytes?: number;
+    maxPdfBytes?: number;
     fetchImpl?: typeof fetch;
     onFallbackWarning?: (event: PdfConverterFallbackWarningEvent) => void;
   },
@@ -610,6 +671,7 @@ export function selectDocumentPdfConverter(
     baseUrl,
     timeoutMs: options?.timeoutMs,
     maxDocxBytes: options?.maxDocxBytes,
+    maxPdfBytes: options?.maxPdfBytes,
     fetchImpl: options?.fetchImpl,
   });
 

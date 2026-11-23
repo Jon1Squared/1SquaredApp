@@ -623,6 +623,7 @@ describe('S0-13: Azure Container Apps & PostgreSQL Bicep infrastructure contract
     expect(pdfBlock).toContain('allowInsecure: false');
     expect(pdfBlock).toContain('targetPort: 8080');
     expect(pdfBlock).toContain('minReplicas: pdfConverterMinReplicas');
+    expect(pdfBlock).toMatch(/concurrentRequests:\s*'2'/);
     expect(pdfBlock).toMatch(/type:\s*'Startup'[\s\S]*?path:\s*'\/health\/live'[\s\S]*?port:\s*8080/);
     expect(pdfBlock).toMatch(/type:\s*'Liveness'[\s\S]*?path:\s*'\/health\/live'[\s\S]*?port:\s*8080[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
     expect(pdfBlock).toMatch(/type:\s*'Readiness'[\s\S]*?path:\s*'\/health\/ready'[\s\S]*?port:\s*8080[\s\S]*?timeoutSeconds:\s*5[\s\S]*?failureThreshold:\s*3/);
