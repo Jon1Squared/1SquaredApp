@@ -3108,7 +3108,7 @@ export const SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024: TenantMigration
       'Expand-phase migration adding indexed lookup/candidate columns on public.people and public.organisations plus restricted-matter partial index for server-side B15 SQL scoping.',
     dependsOn: ['0009', '0018'],
     tablesChanged: ['people', 'organisations', 'matters'],
-    backfillSignature: 'ts-candidate-keys-v1',
+    backfillSignature: 'ts-candidate-keys-v2',
     upSql: `
 ALTER TABLE public.people
   ADD COLUMN IF NOT EXISTS phone_last9_keys TEXT[] NOT NULL DEFAULT '{}'::text[],

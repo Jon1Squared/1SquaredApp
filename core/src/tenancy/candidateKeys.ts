@@ -275,8 +275,9 @@ export function computePersonLookupKeys(person: {
   }
   const postcodeSet = new Set<string>();
   for (const addr of person.addresses ?? []) {
-    if (isValidUkPostcodeKey(addr.postcode)) {
-      postcodeSet.add(normalisePostcodeKey(addr.postcode));
+    const pc = normalisePostcodeKey(addr.postcode);
+    if (pc.length >= 2) {
+      postcodeSet.add(pc);
     }
   }
   const phoneticKeys = extractTokenPhoneticKeys([
@@ -329,8 +330,9 @@ export function computeOrganisationLookupKeys(org: {
     org.correspondenceAddress,
     org.billingAddress,
   ]) {
-    if (addr && isValidUkPostcodeKey(addr.postcode)) {
-      postcodeSet.add(normalisePostcodeKey(addr.postcode));
+    const pc = addr ? normalisePostcodeKey(addr.postcode) : '';
+    if (pc.length >= 2) {
+      postcodeSet.add(pc);
     }
   }
   const phoneticKeys = extractTokenPhoneticKeys([

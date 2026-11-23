@@ -585,4 +585,106 @@ describe('S1-02a B15: SQL-scoped repositories, Draft privacy, candidate parity, 
     });
     expect(bravoBySeed.people).toEqual([]);
   });
+
+  it('R665: findSqlDuplicateCandidates preserves reverse containment (short stored name in long query) and non-UK/partial/billingAddress postcodes across two tenants', async () => {
+    const tenantAlpha = 's102a-alpha';
+    const tenantBravo = 's102a-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeCtx(tenantAlpha, 'P-000001');
+    const ctxBravo = makeCtx(tenantBravo, 'P-000001');
+    const runner = new TenantMigrationRunner();
+    await runner.applyUp(ctxAlpha);
+    await runner.applyUp(ctxBravo);
+
+    const partyRepo = new TenantPartyRepository();
+    await partyRepo.clearTenantData(ctxAlpha);
+    await partyRepo.clearTenantData(ctxBravo);
+
+    await partyRepo.putOrganisation(ctxAlpha, {
+      id: 'O-R665-SHORT',
+      recordType: 'organisation',
+      legalName: 'Ace',
+      otherNames: [{ id: 'on-r665', name: 'OakFormer' }],
+      registeredAddress: { line1: '350 5th Ave', postcode: '10001' },
+      billingAddress: { line1: '10 Rue de Rivoli', postcode: '75008' },
+      relationshipTypeIds: [],
+      notDuplicateOf: [],
+    } as never);
+
+    await partyRepo.putPerson(ctxAlpha, {
+      id: 'P-R665-NONUK',
+      recordType: 'person',
+      firstName: 'Aoife',
+      surname: 'Murphy',
+      emails: [],
+      phones: [],
+      addresses: [
+        { id: 'ad-1', line1: '14 St Stephen Green', postcode: 'D02 X285' },
+        { id: 'ad-2', line1: '2 Queen St', postcode: 'CF10' },
+      ],
+      relationshipRoleIds: [],
+      notDuplicateOf: [],
+    } as never);
+
+    // Reverse substring containment: short stored name inside long query string
+    const reverseLegal = await partyRepo.findSqlDuplicateCandidates<Organisation>(
+      ctxAlpha,
+      {
+        kind: 'organisation',
+        legalName: 'Acewidgets International Holdings Group',
+        fuzzy: true,
+      },
+    );
+    expect(reverseLegal.some((o) => o.id === 'O-R665-SHORT')).toBe(true);
+
+    const reverseOther = await partyRepo.findSqlDuplicateCandidates<Organisation>(
+      ctxAlpha,
+      {
+        kind: 'organisation',
+        legalName: 'Oakformer International Holdings Group',
+        fuzzy: true,
+      },
+    );
+    expect(reverseOther.some((o) => o.id === 'O-R665-SHORT')).toBe(true);
+
+    // Non-UK postcodes (registeredAddress + billingAddress) & partial UK postcode
+    const byUsZip = await partyRepo.findSqlDuplicateCandidates<Organisation>(
+      ctxAlpha,
+      { kind: 'organisation', postcodes: ['10001'], fuzzy: true },
+    );
+    expect(byUsZip.some((o) => o.id === 'O-R665-SHORT')).toBe(true);
+
+    const byBillingFr = await partyRepo.findSqlDuplicateCandidates<Organisation>(
+      ctxAlpha,
+      { kind: 'organisation', postcodes: ['75008'], fuzzy: true },
+    );
+    expect(byBillingFr.some((o) => o.id === 'O-R665-SHORT')).toBe(true);
+
+    const byEircode = await partyRepo.findSqlDuplicateCandidates<Person>(
+      ctxAlpha,
+      { kind: 'person', postcodes: ['D02 X285'], fuzzy: true },
+    );
+    expect(byEircode.some((p) => p.id === 'P-R665-NONUK')).toBe(true);
+
+    const byPartialUk = await partyRepo.findSqlDuplicateCandidates<Person>(
+      ctxAlpha,
+      { kind: 'person', postcodes: ['CF10'], fuzzy: true },
+    );
+    expect(byPartialUk.some((p) => p.id === 'P-R665-NONUK')).toBe(true);
+
+    // Second tenant isolation
+    expect(
+      await partyRepo.findSqlDuplicateCandidates(ctxBravo, {
+        kind: 'organisation',
+        legalName: 'Acewidgets International Holdings Group',
+        postcodes: ['10001', '75008'],
+        fuzzy: true,
+      }),
+    ).toEqual([]);
+  });
 });

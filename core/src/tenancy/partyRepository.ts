@@ -4010,6 +4010,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           readonly legalName?: string;
           readonly otherNames?: readonly string[];
           readonly companyNumber?: string;
+          readonly companyNumbers?: readonly string[];
           readonly emails?: readonly string[];
           readonly phones?: readonly string[];
           readonly postcodes?: readonly string[];
@@ -4117,8 +4118,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
           const likeIdx = params.length;
           params.push(term);
           const termIdx = params.length;
+          const pConcat = `lower(COALESCE(p.first_name, '') || ' ' || COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.other_names, '') || ' ' || COALESCE(p.surname, ''))`;
+          const pFull = `lower(trim(COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '')))`;
+          const pPref = `lower(trim(COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '')))`;
+          const pOther = `lower(trim(COALESCE(p.other_names, '')))`;
           orClauses.push(
-            `(COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} OR word_similarity($${termIdx}, lower(COALESCE(p.first_name, '') || ' ' || COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.other_names, '') || ' ' || COALESCE(p.surname, ''))) >= 0.28)`,
+            `(COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} OR word_similarity($${termIdx}, ${pConcat}) >= 0.28 OR word_similarity(${pConcat}, $${termIdx}) >= 0.28 OR (length(${pFull}) >= 3 AND strpos(lower($${termIdx}), ${pFull}) > 0) OR (length(${pPref}) >= 3 AND strpos(lower($${termIdx}), ${pPref}) > 0) OR (length(${pOther}) >= 3 AND strpos(lower($${termIdx}), ${pOther}) > 0))`,
           );
         }
 
@@ -4141,9 +4146,13 @@ export class TenantPartyRepository extends TenantScopedRepository {
       }
 
       // Organisation candidate lookup
-      const companyNos = query.companyNumber
-        ? [normaliseRegNumberKey(query.companyNumber)].filter(Boolean)
-        : [];
+      const companyNos = Array.from(
+        new Set(
+          [query.companyNumber, ...(query.companyNumbers ?? [])]
+            .map(normaliseRegNumberKey)
+            .filter(Boolean),
+        ),
+      );
       const emails = Array.from(
         new Set(
           (query.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean),
@@ -4210,9 +4219,10 @@ export class TenantPartyRepository extends TenantScopedRepository {
         params.push(`%${escapeSqlLikePattern(searchTerm)}%`, searchTerm);
         const likeIdx = params.length - 1;
         const trgmIdx = params.length;
+        const orgConcat = `lower(COALESCE(legal_name, '') || ' ' || COALESCE(trading_name, ''))`;
         const otherNameValueSql = `COALESCE(elem->>'name', CASE WHEN jsonb_typeof(elem) = 'string' THEN elem #>> '{}' ELSE '' END)`;
         orClauses.push(
-          `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(COALESCE(legal_name, '') || ' ' || COALESCE(trading_name, ''))) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25 OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(profile_json->'otherNames') = 'array' THEN profile_json->'otherNames' ELSE '[]'::jsonb END) AS elem WHERE ${otherNameValueSql} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(${otherNameValueSql})) >= 0.28 OR similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.25))`,
+          `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${orgConcat}) >= 0.28 OR word_similarity(${orgConcat}, $${trgmIdx}) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25 OR (length(trim(legal_name)) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(legal_name))) > 0) OR (length(trim(trading_name)) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(trading_name))) > 0) OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(profile_json->'otherNames') = 'array' THEN profile_json->'otherNames' ELSE '[]'::jsonb END) AS elem WHERE ${otherNameValueSql} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(${otherNameValueSql})) >= 0.28 OR word_similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.28 OR similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.25 OR (length(trim(${otherNameValueSql})) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(${otherNameValueSql}))) > 0)))`,
         );
       }
 

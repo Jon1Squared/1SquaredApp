@@ -10889,7 +10889,11 @@ export async function findCandidateDuplicatesForRecord(
           companyNumber: record.companyNumber,
           emails: record.generalEmail ? [record.generalEmail] : [],
           phones: record.mainPhone ? [record.mainPhone] : [],
-          postcodes: [record.registeredAddress, record.correspondenceAddress]
+          postcodes: [
+            record.registeredAddress,
+            record.correspondenceAddress,
+            record.billingAddress,
+          ]
             .filter((a): a is Address => Boolean(a))
             .map((a) => a.postcode)
             .filter(Boolean),
@@ -10904,9 +10908,11 @@ export async function findCandidateDuplicatesForRecord(
       companyNumber: record.companyNumber,
       emails: record.generalEmail ? [record.generalEmail] : [],
       phones: record.mainPhone ? [record.mainPhone] : [],
-      addresses: [record.registeredAddress, record.correspondenceAddress].filter(
-        (a): a is Address => Boolean(a),
-      ),
+      addresses: [
+        record.registeredAddress,
+        record.correspondenceAddress,
+        record.billingAddress,
+      ].filter((a): a is Address => Boolean(a)),
     },
     candidateOrganisations,
     record.notDuplicateOf,
