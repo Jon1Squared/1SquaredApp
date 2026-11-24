@@ -783,10 +783,21 @@ export class TenantDocumentRepository extends TenantScopedRepository {
     ctx: TenantContext,
     documentId: string,
   ): Promise<DocumentLinkRecord[]> {
+    return this.listLinksForDocumentIds(ctx, [documentId]);
+  }
+
+  public async listLinksForDocumentIds(
+    ctx: TenantContext,
+    documentIds: readonly string[],
+  ): Promise<DocumentLinkRecord[]> {
+    const cleanIds = Array.from(
+      new Set(documentIds.map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbDocumentLinkRow>(
-        'SELECT * FROM document_links WHERE tenant_id = $1 AND document_id = $2 ORDER BY created_at ASC',
-        [ctx.tenantId, documentId],
+        'SELECT * FROM document_links WHERE tenant_id = $1 AND document_id = ANY($2::text[]) ORDER BY created_at ASC',
+        [ctx.tenantId, cleanIds],
       );
       return res.rows.map((r) => {
         this.assertRowTenant(ctx, r.tenant_id, 'DocumentLinkRecord');

@@ -174,7 +174,6 @@ import {
   type PmsLinkedRecordSummary,
   type PmsLinksAdminPageData,
   type PmsLinksSubTab,
-  type PmsSuggestedMatch,
 } from '@/domain/pms';
 import {
   emitTenantTelemetryEvent,
@@ -16607,9 +16606,9 @@ export async function getClientPmsViewBundle(
       ].filter((code): code is string => Boolean(code)),
     ),
   );
-  const [clientData, agedDebtLists] = await Promise.all([
+  const [clientData, agedDebtList] = await Promise.all([
     pmsRepo.getClientPmsDataByCodes(ctx, scopedClientCodes),
-    Promise.all(scopedClientCodes.map((code) => pmsRepo.getAgedDebt(ctx, code))),
+    pmsRepo.listAgedDebtByClientCodes(ctx, scopedClientCodes),
   ]);
   const allPmsClients = clientData.clients;
   const visibleMatterFins = clientData.matterFinancials.filter((m) =>
@@ -16618,9 +16617,9 @@ export async function getClientPmsViewBundle(
   const visibleInvoices = clientData.invoiceBalances.filter((i) =>
     accessibleLinkedPmsMatterCodes.has(i.matter_code),
   );
-  const visibleAgedDebt = agedDebtLists
-    .flat()
-    .filter((i) => accessibleLinkedPmsMatterCodes.has(i.matter_code));
+  const visibleAgedDebt = agedDebtList.filter((i) =>
+    accessibleLinkedPmsMatterCodes.has(i.matter_code),
+  );
 
   const pmsClient = link
     ? allPmsClients.find((c) => c.client_code === link.pmsCode) ?? null
@@ -23205,10 +23204,23 @@ export async function verifyProposedKeyDateRecord(
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
         });
 
-        const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-          ctx,
-          verifier.id,
+        const verifierHasRestrictedAccess = hasPersonPermission(
+          verifier,
+          'matter:restricted:access',
+          rbacOptions,
         );
+        const targetReminderKeyDateIds = [kd.id, kd.supersedesKeyDateId].filter(
+          (id): id is string => Boolean(id),
+        );
+        const reminderStatesWorking =
+          await keyDateRepo.listReminderStatesForKeyDateIds(
+            ctx,
+            targetReminderKeyDateIds,
+            {
+              viewerId: verifier.id,
+              hasRestrictedMatterAccess: verifierHasRestrictedAccess,
+            },
+          );
         const existingSync = await keyDateRepo.getCalendarSync(ctx, kd.id, verifier.id);
 
         const storeTasks = await loadKeyDateReminderTasks(
@@ -23488,10 +23500,20 @@ export async function supersedeConfirmedKeyDateRecord(
           nextAuditId: () => `AU-PENDING-${++pendingIdx}`,
         });
 
-        const reminderStatesWorking = await keyDateRepo.listAllReminderStates(
-          ctx,
-          actor.id,
+        const actorHasRestrictedAccess = hasPersonPermission(
+          actor,
+          'matter:restricted:access',
+          rbacOptions,
         );
+        const reminderStatesWorking =
+          await keyDateRepo.listReminderStatesForKeyDateIds(
+            ctx,
+            [supersededKeyDate.id, replacementKeyDate.id],
+            {
+              viewerId: actor.id,
+              hasRestrictedMatterAccess: actorHasRestrictedAccess,
+            },
+          );
         const existingSync = await keyDateRepo.getCalendarSync(
           ctx,
           supersededKeyDate.id,
@@ -25292,13 +25314,17 @@ export async function queryKeyDatesTeamDiaryRecord(
     'matter:restricted:access',
     rbacOptions,
   );
-  const [keyDates, reminderStates, enquiries] = await Promise.all([
+  const [keyDates, enquiries] = await Promise.all([
     keyDateRepo.listAllVisibleKeyDates(ctx, viewer.id),
-    keyDateRepo.listAllReminderStates(ctx, viewer.id),
     intakeRepo.listVisibleEnquiries<Enquiry>(ctx, viewer.id, {
       hasRestrictedMatterAccess,
     }),
   ]);
+  const reminderStates = await keyDateRepo.listReminderStatesForKeyDateIds(
+    ctx,
+    keyDates.map((kd) => kd.id),
+    viewer.id,
+  );
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, rbacOptions),
   );
@@ -25340,19 +25366,33 @@ export async function getKeyDateExceptionsReportRecord(
     rbac: rbacOptions,
   });
   const keyDateRepo = getKeyDateRepository();
-  const [keyDates, notApplicable, reminderStates, calendarSyncs, values] =
-    await Promise.all([
-      keyDateRepo.listKeyDatesForExceptionsReport(ctx, viewer.id, {
-        includeMissingMatterOrphans: canConfigure,
-      }),
-      keyDateRepo.listAllVisibleNotApplicable(ctx, viewer.id),
-      keyDateRepo.listAllReminderStates(ctx, viewer.id),
-      keyDateRepo.listAllVisibleCalendarSyncs(ctx, viewer.id),
-      getCatalogueRepository().listAllChoiceValues<ChoiceValue>(ctx),
-    ]);
+  const [keyDates, values] = await Promise.all([
+    keyDateRepo.listKeyDatesForExceptionsReport(ctx, viewer.id, {
+      includeMissingMatterOrphans: canConfigure,
+    }),
+    getCatalogueRepository().listAllChoiceValues<ChoiceValue>(ctx),
+  ]);
   const visibleMatters = matters.filter((m) =>
     canPersonAccessMatter(m, viewer.id, viewer, rbacOptions),
   );
+  const keyDateIds = keyDates.map((kd) => kd.id);
+  const exceptionMatterIds = Array.from(
+    new Set(
+      [
+        ...keyDates.map((kd) => kd.matterId),
+        ...visibleMatters.map((m) => m.id),
+      ].filter((id): id is string => Boolean(id)),
+    ),
+  );
+  const [notApplicable, reminderStates, calendarSyncs] = await Promise.all([
+    keyDateRepo.listNotApplicableForMatterIds(
+      ctx,
+      exceptionMatterIds,
+      viewer.id,
+    ),
+    keyDateRepo.listReminderStatesForKeyDateIds(ctx, keyDateIds, viewer.id),
+    keyDateRepo.listCalendarSyncsForKeyDateIds(ctx, keyDateIds, viewer.id),
+  ]);
   return computeKeyDateExceptions({
     viewer,
     todayIso,

@@ -1288,9 +1288,15 @@ import type {
   TemplateUsageReportFilter,
 } from '@platform/core';
 
-export async function getDocumentGenerationSnapshotAction() {
+export async function getDocumentGenerationSnapshotAction(input?: {
+  readonly includeDocuments?: boolean;
+  readonly entityScope?: {
+    readonly entityType: 'matter' | 'organisation' | 'person';
+    readonly entityId: string;
+  };
+}) {
   return guardedAction('getDocumentGenerationSnapshotAction', (actor) =>
-    getDocumentGenerationSnapshotForUser(actor.personId, actor.session),
+    getDocumentGenerationSnapshotForUser(actor.personId, actor.session, input),
   );
 }
 

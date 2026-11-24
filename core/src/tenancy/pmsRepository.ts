@@ -2653,30 +2653,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
-  public async getAgedDebt(
+  private async loadAgedDebtWhere(
     ctx: TenantContext,
-    clientCode?: string,
+    whereClauseSql: string,
+    params: readonly unknown[],
   ): Promise<TenantPmsInvoiceBalance[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const extractInfo = await this.getExtractInfoInTx(tx, ctx);
-      const invRes = clientCode
-        ? await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND client_code = $2',
-            [ctx.tenantId, clientCode],
-          )
-        : await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1',
-            [ctx.tenantId],
-          );
-      const payRes = clientCode
-        ? await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND client_code = $2 ORDER BY payment_date ASC, receipt_id ASC',
-            [ctx.tenantId, clientCode],
-          )
-        : await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
-            [ctx.tenantId],
-          );
+      const [extractInfo, invRes, payRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_invoices WHERE ${whereClauseSql}`,
+          params,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_payments WHERE ${whereClauseSql} ORDER BY payment_date ASC, receipt_id ASC`,
+          params,
+        ),
+      ]);
       const balances = computeDerivedInvoiceBalances({
         asAtDate: extractInfo.asAtDate,
         invoices: this.mapInvoiceRows(ctx, invRes.rows),
@@ -2686,6 +2679,48 @@ export class TenantPmsRepository extends TenantScopedRepository {
         .filter((i) => i.invoice_type !== 'Credit note')
         .sort((a, b) => a.invoice_number.localeCompare(b.invoice_number));
     });
+  }
+
+  public async getAgedDebt(
+    ctx: TenantContext,
+    clientCode?: string,
+  ): Promise<TenantPmsInvoiceBalance[]> {
+    return clientCode
+      ? this.loadAgedDebtWhere(ctx, 'tenant_id = $1 AND client_code = $2', [
+          ctx.tenantId,
+          clientCode,
+        ])
+      : this.loadAgedDebtWhere(ctx, 'tenant_id = $1', [ctx.tenantId]);
+  }
+
+  public async listAgedDebtByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsInvoiceBalance[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.loadAgedDebtWhere(
+      ctx,
+      'tenant_id = $1 AND matter_code = ANY($2::text[])',
+      [ctx.tenantId, cleanCodes],
+    );
+  }
+
+  public async listAgedDebtByClientCodes(
+    ctx: TenantContext,
+    clientCodes: readonly string[],
+  ): Promise<TenantPmsInvoiceBalance[]> {
+    const cleanCodes = Array.from(
+      new Set(clientCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.loadAgedDebtWhere(
+      ctx,
+      'tenant_id = $1 AND client_code = ANY($2::text[])',
+      [ctx.tenantId, cleanCodes],
+    );
   }
 
   public async getInvoices(

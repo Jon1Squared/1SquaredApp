@@ -2254,4 +2254,193 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
     },
     45_000,
   );
+
+  it(
+    '16. R702: server paging, SQL total counts, server search/filters, and open-tasks-first across list loaders',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const taskRepo = new TenantTaskWorkflowRepository();
+      const olderOpenId = 'TSK-R702-OPEN-1';
+      const doneIds = ['TSK-R702-DONE-1', 'TSK-R702-DONE-2', 'TSK-R702-DONE-3'];
+
+      await taskRepo.putTask(env.ctxAlpha, {
+        ...structuredClone(env.alphaUrgentPublicTask),
+        id: olderOpenId,
+        reference: 'TSK-R702-OPEN',
+        title: 'R702-Older-Open-Task',
+        description: 'Older open task must never drop behind newer done tasks',
+        status: 'To do',
+        taskTypeId: 'tt_general',
+        priorityId: 'tp_normal',
+        dueAt: '2020-01-15T09:00:00Z',
+        assignedTeamId: null,
+        assignedPersonId: 'P-000001',
+        assignedPersonIds: ['P-000001'],
+        createdById: 'P-000001',
+        createdAt: '2020-01-01T09:00:00Z',
+        updatedAt: '2020-01-01T09:00:00Z',
+        completedAt: null,
+        completedById: null,
+        linkedRecords: [],
+      });
+
+      for (const [idx, id] of doneIds.entries()) {
+        await taskRepo.putTask(env.ctxAlpha, {
+          ...structuredClone(env.alphaUrgentPublicTask),
+          id,
+          reference: `TSK-R702-DONE-${idx + 1}`,
+          title: `R702-Done-Task-${idx + 1}`,
+          description: 'Newer completed task for R702 paging test',
+          status: 'Done',
+          taskTypeId: 'tt_general',
+          priorityId: 'tp_normal',
+          dueAt: `2099-05-0${idx + 1}T09:00:00Z`,
+          assignedTeamId: null,
+          assignedPersonId: 'P-000001',
+          assignedPersonIds: ['P-000001'],
+          createdById: 'P-000001',
+          createdAt: `2099-05-0${idx + 1}T09:00:00Z`,
+          updatedAt: `2099-05-0${idx + 1}T09:00:00Z`,
+          completedAt: `2099-05-0${idx + 1}T10:00:00Z`,
+          completedById: 'P-000001',
+          linkedRecords: [],
+        });
+      }
+
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        // Tasks: default is open tasks first (newer done tasks never push open tasks off page 1)
+        const openTasksPage = await loadTasksListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          query: 'R702-',
+        });
+        expect(openTasksPage.tasks.map((t) => t.id)).toEqual([olderOpenId]);
+        expect(openTasksPage.pagination.totalCount).toBe(1);
+        expect(openTasksPage.pagination.page).toBe(1);
+        expect(openTasksPage.pagination.pageSize).toBe(2);
+
+        const donePage1 = await loadTasksListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          statusFilter: 'done',
+          query: 'R702-',
+        });
+        const donePage2 = await loadTasksListPageData('P-000001', {
+          page: 2,
+          pageSize: 2,
+          statusFilter: 'done',
+          query: 'R702-',
+        });
+        expect(donePage1.tasks).toHaveLength(2);
+        expect(donePage2.tasks).toHaveLength(1);
+        expect(donePage1.pagination.totalCount).toBe(3);
+        const allDoneIds = [...donePage1.tasks, ...donePage2.tasks].map((t) => t.id);
+        expect(new Set(allDoneIds)).toEqual(new Set(doneIds));
+
+        const allTasksPage1 = await loadTasksListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          statusFilter: 'all',
+          query: 'R702-',
+        });
+        expect(allTasksPage1.tasks[0]?.id).toBe(olderOpenId);
+        expect(allTasksPage1.pagination.totalCount).toBe(4);
+
+        // People: server paging + server query
+        const peopleP1 = await loadPeopleListPageData('P-000001', { page: 1, pageSize: 2 });
+        const peopleP2 = await loadPeopleListPageData('P-000001', { page: 2, pageSize: 2 });
+        expect(peopleP1.people).toHaveLength(2);
+        expect(peopleP2.people.length).toBeGreaterThan(0);
+        expect(peopleP1.pagination.totalCount).toBeGreaterThan(2);
+        const p1Ids = new Set(peopleP1.people.map((p) => p.id));
+        expect(peopleP2.people.some((p) => p1Ids.has(p.id))).toBe(false);
+
+        const searchPersonTarget = peopleP2.people[0]!;
+        const peopleSearched = await loadPeopleListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          query: searchPersonTarget.surname,
+        });
+        expect(peopleSearched.people.some((p) => p.id === searchPersonTarget.id)).toBe(true);
+
+        // Organisations: server paging + SQL active matter counts
+        const orgsP1 = await loadOrganisationsListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+        });
+        const orgsP2 = await loadOrganisationsListPageData('P-000001', {
+          page: 2,
+          pageSize: 2,
+        });
+        expect(orgsP1.organisations.length).toBeLessThanOrEqual(2);
+        expect(orgsP1.pagination.totalCount).toBeGreaterThan(2);
+        const o1Ids = new Set(orgsP1.organisations.map((o) => o.id));
+        expect(orgsP2.organisations.some((o) => o1Ids.has(o.id))).toBe(false);
+        expect(orgsP1.activeMatterCountsByOrgId).toBeDefined();
+
+        // Matters: server paging + server search + visibility enforcement
+        const mattersP1 = await loadMattersListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+        });
+        const mattersP2 = await loadMattersListPageData('P-000001', {
+          page: 2,
+          pageSize: 2,
+        });
+        expect(mattersP1.matters).toHaveLength(2);
+        expect(mattersP1.pagination.totalCount).toBeGreaterThan(2);
+        const m1Ids = new Set(mattersP1.matters.map((m) => m.id));
+        expect(mattersP2.matters.some((m) => m1Ids.has(m.id))).toBe(false);
+        const searchMatterTarget = mattersP2.matters[0]!;
+        const mattersSearched = await loadMattersListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          query: searchMatterTarget.matterNumber,
+        });
+        expect(mattersSearched.matters.some((m) => m.id === searchMatterTarget.id)).toBe(true);
+
+        // Enquiries: server paging + server search
+        const enqP1 = await loadEnquiriesListPageData('P-000001', {
+          page: 1,
+          pageSize: 1,
+          tab: 'all',
+        });
+        const enqP2 = await loadEnquiriesListPageData('P-000001', {
+          page: 2,
+          pageSize: 1,
+          tab: 'all',
+        });
+        expect(enqP1.enquiries.length).toBeLessThanOrEqual(1);
+        expect(enqP1.enquiriesPagination.totalCount).toBeGreaterThanOrEqual(2);
+        if (enqP2.enquiries[0]) {
+          expect(enqP2.enquiries[0].id).not.toBe(enqP1.enquiries[0]?.id);
+          const enqSearched = await loadEnquiriesListPageData('P-000001', {
+            page: 1,
+            pageSize: 1,
+            tab: 'all',
+            query: enqP2.enquiries[0].reference,
+          });
+          expect(enqSearched.enquiries.some((e) => e.id === enqP2.enquiries[0]!.id)).toBe(true);
+        }
+      });
+
+      // Restricted matter stays excluded from counts & server search for excluded fee earner
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const hiddenSearch = await loadMattersListPageData('P-000002', {
+          page: 1,
+          pageSize: 10,
+          query: env.alphaStaffMatter.matterNumber,
+        });
+        expect(
+          hiddenSearch.matters.some((m) => m.id === env.alphaStaffMatter.id),
+        ).toBe(false);
+      });
+    },
+    45_000,
+  );
 });

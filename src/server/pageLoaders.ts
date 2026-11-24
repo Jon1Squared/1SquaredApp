@@ -27,8 +27,9 @@ import {
 } from '@platform/core';
 import { isActionDenied } from '@/domain/actionResult';
 import { attentionList, type AttentionItem } from '@/domain/attention';
-import { addMonths, toIsoDate } from '@/domain/dates';
+import { addDays, addMonths, toIsoDate } from '@/domain/dates';
 import { findRecordsOwnedByLeavers } from '@/domain/employment';
+import type { EnquiriesQueueTab } from '@/domain/enquiries';
 import {
   createDefaultRoleConfigs,
   resolveActiveViewingRole,
@@ -216,6 +217,44 @@ export async function withOptionalPageActor<R>(
 
 export interface LoaderOptions {
   readonly tenantCtx?: TenantContext | null;
+}
+
+export const DEFAULT_LIST_PAGE_SIZE = 100;
+
+export interface ListPaginationMeta {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly totalCount: number;
+}
+
+export interface ListQueryOptions extends LoaderOptions {
+  readonly page?: number;
+  readonly pageSize?: number;
+  readonly query?: string;
+}
+
+function normaliseListPagination(options?: ListQueryOptions): {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly offset: number;
+  readonly query: string;
+} {
+  const rawPage =
+    typeof options?.page === 'number' && Number.isFinite(options.page)
+      ? Math.floor(options.page)
+      : 1;
+  const rawSize =
+    typeof options?.pageSize === 'number' && Number.isFinite(options.pageSize)
+      ? Math.floor(options.pageSize)
+      : DEFAULT_LIST_PAGE_SIZE;
+  const page = Math.max(1, rawPage);
+  const pageSize = Math.max(1, Math.min(200, rawSize));
+  return {
+    page,
+    pageSize,
+    offset: (page - 1) * pageSize,
+    query: options?.query?.trim() ?? '',
+  };
 }
 
 export interface ShellContextData {
@@ -961,27 +1000,107 @@ export async function loadHomePageData(
 // Route 2-5: People (`/people`, `/people/[id]`, `/people/new`, `/people/[id]/edit`)
 // ============================================================================
 
+export type PeopleListTabFilter = 'all' | 'external' | 'enquiry' | 'employee' | 'archived';
+
+export interface PeopleListLoaderOptions extends ListQueryOptions {
+  readonly tab?: PeopleListTabFilter;
+  readonly roleFilter?: string;
+  readonly statusFilter?: string;
+  readonly ownerFilter?: string;
+}
+
 export async function loadPeopleListPageData(
   actorId: string,
-  options?: LoaderOptions,
+  options?: PeopleListLoaderOptions,
 ): Promise<{
   shell: ShellContextData;
   people: Person[];
   organisations: Organisation[];
   links: PersonOrganisationLink[];
   enquiries: Enquiry[];
+  pagination: ListPaginationMeta;
+  filters: {
+    readonly tab: PeopleListTabFilter;
+    readonly query: string;
+    readonly roleFilter: string;
+    readonly statusFilter: string;
+    readonly ownerFilter: string;
+  };
 }> {
   const shell = await loadShellContext(actorId, options);
   const partyRepo = getPartyRepository();
   const intakeRepo = getIntakeQuoteRepository();
-
-  const [rawPeople, enquiries] = await Promise.all([
-    partyRepo.listPeoplePage<Person>(shell.ctx, { includeMerged: false, limit: 500 }),
-    intakeRepo.listVisibleEnquiries<Enquiry>(shell.ctx, shell.currentUserId, {
-      hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
-      limit: 500,
-    }),
+  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const tab: PeopleListTabFilter = options?.tab ?? 'all';
+  const roleFilter = options?.roleFilter?.trim() || 'all';
+  const statusFilter = options?.statusFilter?.trim() || 'all';
+  const ownerFilter = options?.ownerFilter?.trim() || 'all';
+  const inactiveStatusIds = collectStatusIdsBySystemKey(shell.values, [
+    'archived',
+    'deceased',
+    'merged',
+    'dissolved',
   ]);
+  const isEnquiryOnlyView =
+    tab === 'enquiry' || statusFilter === 'enquiry_stage';
+
+  let rawPeople: Person[] = [];
+  let enquiries: Enquiry[] = [];
+  let totalCount = 0;
+
+  if (isEnquiryOnlyView) {
+    const enqRes = await intakeRepo.listVisibleEnquiriesPageWithCount<Enquiry>(
+      shell.ctx,
+      shell.currentUserId,
+      {
+        openOnly: true,
+        query,
+        hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+        limit: pageSize,
+        offset,
+      },
+    );
+    enquiries = enqRes.items;
+    totalCount = enqRes.totalCount;
+  } else {
+    const shouldIncludeSampleEnquiries =
+      (tab === 'all' || tab === 'external') &&
+      page === 1 &&
+      statusFilter === 'all';
+    const [peopleRes, openEnqs] = await Promise.all([
+      partyRepo.listPeoplePageWithCount<Person>(shell.ctx, {
+        includeMerged: false,
+        employeesOnly: tab === 'employee',
+        nonEmployeesOnly: tab === 'external',
+        archivedOnly: tab === 'archived',
+        inactiveStatusIds,
+        excludeInactiveStatusIds:
+          tab === 'archived' ? [] : inactiveStatusIds,
+        relationshipRoleId: roleFilter !== 'all' ? roleFilter : undefined,
+        relationshipStatusId:
+          statusFilter !== 'all' ? statusFilter : undefined,
+        relationshipOwnerId: ownerFilter !== 'all' ? ownerFilter : undefined,
+        query,
+        limit: pageSize,
+        offset,
+      }),
+      shouldIncludeSampleEnquiries
+        ? intakeRepo.listVisibleEnquiries<Enquiry>(
+            shell.ctx,
+            shell.currentUserId,
+            {
+              openOnly: true,
+              query,
+              hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+              limit: 50,
+            },
+          )
+        : Promise.resolve<Enquiry[]>([]),
+    ]);
+    rawPeople = peopleRes.items;
+    totalCount = peopleRes.totalCount;
+    enquiries = openEnqs;
+  }
 
   const filteredStaffById = new Map(shell.filteredStaffPeople.map((p) => [p.id, p]));
   const people = rawPeople.map((p) =>
@@ -1008,7 +1127,15 @@ export async function loadPeopleListPageData(
       ? await partyRepo.listOrganisationsByIds<Organisation>(shell.ctx, orgIds)
       : [];
 
-  return { shell, people, organisations, links, enquiries };
+  return {
+    shell,
+    people,
+    organisations,
+    links,
+    enquiries,
+    pagination: { page, pageSize, totalCount },
+    filters: { tab, query, roleFilter, statusFilter, ownerFilter },
+  };
 }
 
 export async function loadPersonDetailPageData(
@@ -1420,41 +1547,147 @@ export async function loadPersonFormPageData(
 // Route 6-9: Organisations
 // ============================================================================
 
+export type OrganisationsListTabFilter =
+  | 'all'
+  | 'clients'
+  | 'prospects'
+  | 'referrers'
+  | 'archived';
+
+export interface OrganisationsListLoaderOptions extends ListQueryOptions {
+  readonly tab?: OrganisationsListTabFilter;
+  readonly typeFilter?: string;
+  readonly statusFilter?: string;
+  readonly orgTypeFilter?: string;
+  readonly sectorFilter?: string;
+  readonly ownerFilter?: string;
+}
+
 export async function loadOrganisationsListPageData(
   actorId: string,
-  options?: LoaderOptions,
+  options?: OrganisationsListLoaderOptions,
 ): Promise<{
   shell: ShellContextData;
   organisations: Organisation[];
   people: Person[];
   links: PersonOrganisationLink[];
   matters: Matter[];
+  activeMatterCountsByOrgId: Record<string, number>;
+  pagination: ListPaginationMeta;
+  filters: {
+    readonly tab: OrganisationsListTabFilter;
+    readonly query: string;
+    readonly typeFilter: string;
+    readonly statusFilter: string;
+    readonly orgTypeFilter: string;
+    readonly sectorFilter: string;
+    readonly ownerFilter: string;
+  };
 }> {
   const shell = await loadShellContext(actorId, options);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
+  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const tab: OrganisationsListTabFilter = options?.tab ?? 'all';
+  const typeFilter = options?.typeFilter?.trim() || 'all';
+  const statusFilter = options?.statusFilter?.trim() || 'all';
+  const orgTypeFilter = options?.orgTypeFilter?.trim() || 'all';
+  const sectorFilter = options?.sectorFilter?.trim() || 'all';
+  const ownerFilter = options?.ownerFilter?.trim() || 'all';
 
-  const [organisations, matters] = await Promise.all([
-    partyRepo.listOrganisationsPage<Organisation>(shell.ctx, {
-      includeMerged: false,
-      limit: 500,
-    }),
-    matterRepo.listVisibleMatters<Matter>(shell.ctx, {
-      viewerId: shell.currentUserId,
-      hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
-      limit: 500,
-    }),
+  const inactiveStatusIds = collectStatusIdsBySystemKey(shell.values, [
+    'archived',
+    'deceased',
+    'merged',
+    'dissolved',
   ]);
-  const links =
-    organisations.length > 0
-      ? await partyRepo.listLinksForEntities<PersonOrganisationLink>(shell.ctx, {
-          organisationIds: organisations.map((o) => o.id),
+  const clientRelTypeIds = shell.values
+    .filter(
+      (v) =>
+        v.listKey === 'organisation_relationship_type' &&
+        v.label.toLowerCase().includes('client'),
+    )
+    .map((v) => v.id);
+  const clientStatusIds = shell.values
+    .filter(
+      (v) =>
+        v.listKey === 'relationship_status' &&
+        v.label.toLowerCase().includes('active client'),
+    )
+    .map((v) => v.id);
+  const prospectRelTypeIds = shell.values
+    .filter(
+      (v) =>
+        v.listKey === 'organisation_relationship_type' &&
+        v.label.toLowerCase().includes('prospect'),
+    )
+    .map((v) => v.id);
+  const prospectStatusIds = shell.values
+    .filter(
+      (v) =>
+        v.listKey === 'relationship_status' &&
+        v.label.toLowerCase().includes('prospect'),
+    )
+    .map((v) => v.id);
+  const closedMatterStatusIds = shell.values
+    .filter((v) => {
+      if (v.listKey !== 'matter_status') return false;
+      const lower = v.label.toLowerCase();
+      return lower === 'closed' || lower === 'archived';
+    })
+    .map((v) => v.id);
+
+  const tabFilter =
+    tab === 'clients' || tab === 'prospects' || tab === 'referrers'
+      ? {
+          mode: tab,
+          clientRelTypeIds,
+          clientStatusIds,
+          prospectRelTypeIds,
+          prospectStatusIds,
+        }
+      : undefined;
+
+  const orgRes = await partyRepo.listOrganisationsPageWithCount<Organisation>(
+    shell.ctx,
+    {
+      includeMerged: false,
+      archivedOnly: tab === 'archived',
+      inactiveStatusIds,
+      excludeInactiveStatusIds:
+        tab === 'archived' ? [] : inactiveStatusIds,
+      relationshipTypeId: typeFilter !== 'all' ? typeFilter : undefined,
+      relationshipStatusId:
+        statusFilter !== 'all' ? statusFilter : undefined,
+      organisationTypeId: orgTypeFilter !== 'all' ? orgTypeFilter : undefined,
+      sectorId: sectorFilter !== 'all' ? sectorFilter : undefined,
+      relationshipPartnerId: ownerFilter !== 'all' ? ownerFilter : undefined,
+      tabFilter,
+      query,
+      limit: pageSize,
+      offset,
+    },
+  );
+  const organisations = orgRes.items;
+  const orgIds = organisations.map((o) => o.id);
+
+  const [links, activeMatterCountsByOrgId] = await Promise.all([
+    orgIds.length > 0
+      ? partyRepo.listLinksForEntities<PersonOrganisationLink>(shell.ctx, {
+          organisationIds: orgIds,
         })
-      : [];
+      : Promise.resolve<PersonOrganisationLink[]>([]),
+    orgIds.length > 0
+      ? matterRepo.countVisibleActiveMattersByOrgIds(shell.ctx, orgIds, {
+          viewerId: shell.currentUserId,
+          hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+          closedStatusIds: closedMatterStatusIds,
+        })
+      : Promise.resolve<Record<string, number>>({}),
+  ]);
   const { people } = await collectReferencedParties({
     ctx: shell.ctx,
     shell,
-    matters,
     links,
     extraPersonIds: organisations.flatMap((o) => [
       o.relationshipPartnerId,
@@ -1462,7 +1695,24 @@ export async function loadOrganisationsListPageData(
     ]),
   });
 
-  return { shell, organisations, people, links, matters };
+  return {
+    shell,
+    organisations,
+    people,
+    links,
+    matters: [],
+    activeMatterCountsByOrgId,
+    pagination: { page, pageSize, totalCount: orgRes.totalCount },
+    filters: {
+      tab,
+      query,
+      typeFilter,
+      statusFilter,
+      orgTypeFilter,
+      sectorFilter,
+      ownerFilter,
+    },
+  };
 }
 
 export async function loadOrganisationDetailPageData(
@@ -1695,9 +1945,24 @@ export async function loadOrganisationFormPageData(
 // Route 10-13: Matters
 // ============================================================================
 
+export type MattersListTabFilter =
+  | 'all'
+  | 'mine'
+  | 'Transactional'
+  | 'Contentious'
+  | 'Advisory';
+
+export interface MattersListLoaderOptions extends ListQueryOptions {
+  readonly tab?: MattersListTabFilter;
+  readonly practiceAreaId?: string;
+  readonly statusFilter?: string;
+  readonly feeEarnerFilter?: string;
+  readonly billingBasisFilter?: string;
+}
+
 export async function loadMattersListPageData(
   actorId: string,
-  options?: LoaderOptions,
+  options?: MattersListLoaderOptions,
 ): Promise<{
   shell: ShellContextData;
   matters: Matter[];
@@ -1705,29 +1970,72 @@ export async function loadMattersListPageData(
   organisations: Organisation[];
   tasks: Task[];
   matterFinance?: MatterFinanceRowsResult;
+  pagination: ListPaginationMeta;
+  filters: {
+    readonly tab: MattersListTabFilter;
+    readonly query: string;
+    readonly practiceAreaId: string;
+    readonly statusFilter: string;
+    readonly feeEarnerFilter: string;
+    readonly billingBasisFilter: string;
+  };
 }> {
   const shell = await loadShellContext(actorId, options);
   const matterRepo = getMatterRepository();
   const taskRepo = getTaskWorkflowRepository();
+  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const tab: MattersListTabFilter = options?.tab ?? 'all';
+  const practiceAreaId = options?.practiceAreaId?.trim() || 'all';
+  const statusFilter = options?.statusFilter?.trim() || 'all';
+  const feeEarnerFilter = options?.feeEarnerFilter?.trim() || 'all';
+  const billingBasisFilter = options?.billingBasisFilter?.trim() || 'all';
 
-  const [matters, matterFinanceRes] = await Promise.all([
-    matterRepo.listVisibleMatters<Matter>(shell.ctx, {
+  const cmiIncompleteStatusIds = shell.values
+    .filter(
+      (v) =>
+        v.listKey === 'matter_status' &&
+        v.label.toLowerCase() === 'cmi incomplete',
+    )
+    .map((v) => v.id);
+
+  const pageRes = await matterRepo.listVisibleMattersPageWithCount<Matter>(
+    shell.ctx,
+    {
       viewerId: shell.currentUserId,
       hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
-    }),
-    shell.finance.canViewMatter
-      ? getMatterFinanceRows(shell.ctx, undefined, { summaryOnly: true })
-      : Promise.resolve(null),
-  ]);
+      includeMerged: false,
+      sortOrder: 'id_asc',
+      limit: pageSize,
+      offset,
+      query,
+      mineOnly: tab === 'mine',
+      typeBadge:
+        tab === 'Transactional' || tab === 'Contentious' || tab === 'Advisory'
+          ? tab
+          : undefined,
+      practiceAreaId: practiceAreaId !== 'all' ? practiceAreaId : undefined,
+      statusId: statusFilter !== 'all' ? statusFilter : undefined,
+      cmiIncompleteStatusIds,
+      leadFeeEarnerId:
+        feeEarnerFilter !== 'all' ? feeEarnerFilter : undefined,
+      billingBasisId:
+        billingBasisFilter !== 'all' ? billingBasisFilter : undefined,
+    },
+  );
+  const matters = pageRes.items;
   const matterIds = matters.map((m) => m.id);
-  const tasks =
+  const [tasks, matterFinanceRes] = await Promise.all([
     matterIds.length > 0
-      ? await taskRepo.listVisibleTasks<Task>(shell.ctx, shell.currentUserId, {
+      ? taskRepo.listVisibleTasks<Task>(shell.ctx, shell.currentUserId, {
           linkedRecordIds: matterIds,
           openOnly: true,
           hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
         })
-      : [];
+      : Promise.resolve<Task[]>([]),
+    matterIds.length > 0 && shell.finance.canViewMatter
+      ? getMatterFinanceRows(shell.ctx, matterIds, { summaryOnly: true })
+      : Promise.resolve(null),
+  ]);
   const { people, organisations } = await collectReferencedParties({
     ctx: shell.ctx,
     shell,
@@ -1745,6 +2053,15 @@ export async function loadMattersListPageData(
       matterFinanceRes && !isActionDenied(matterFinanceRes)
         ? matterFinanceRes
         : undefined,
+    pagination: { page, pageSize, totalCount: pageRes.totalCount },
+    filters: {
+      tab,
+      query,
+      practiceAreaId,
+      statusFilter,
+      feeEarnerFilter,
+      billingBasisFilter,
+    },
   };
 }
 
@@ -2324,9 +2641,24 @@ export async function loadMatterFormPageData(
 // Route 14-16: Enquiries (`/enquiries`, `/enquiries/[id]`, `/enquiries/new`)
 // ============================================================================
 
+export interface EnquiriesListLoaderOptions extends ListQueryOptions {
+  readonly tab?: EnquiriesQueueTab | 'all';
+  readonly typeFilter?: 'all' | 'enquiry' | 'quote';
+  readonly urgencyFilter?: string;
+  readonly statusFilter?: string;
+  readonly practiceAreaFilter?: string;
+  readonly teamFilter?: string;
+  readonly channelFilter?: string;
+  readonly feeBasisFilter?: string;
+  readonly feeEarnerFilter?: string;
+  readonly validUntilFrom?: string;
+  readonly validUntilTo?: string;
+  readonly followUpDueFilter?: 'all' | 'overdue' | 'today' | 'this_week';
+}
+
 export async function loadEnquiriesListPageData(
   actorId: string,
-  options?: LoaderOptions,
+  options?: EnquiriesListLoaderOptions,
 ): Promise<{
   shell: ShellContextData;
   enquiries: Enquiry[];
@@ -2335,27 +2667,178 @@ export async function loadEnquiriesListPageData(
   people: Person[];
   organisations: Organisation[];
   matters: Matter[];
+  pagination: ListPaginationMeta;
+  enquiriesPagination: ListPaginationMeta;
+  quotesPagination: ListPaginationMeta;
+  filters: {
+    readonly tab: EnquiriesQueueTab;
+    readonly query: string;
+    readonly typeFilter: 'all' | 'enquiry' | 'quote';
+    readonly urgencyFilter: string;
+    readonly statusFilter: string;
+    readonly practiceAreaFilter: string;
+    readonly teamFilter: string;
+    readonly channelFilter: string;
+    readonly feeBasisFilter: string;
+    readonly feeEarnerFilter: string;
+    readonly validUntilFrom: string;
+    readonly validUntilTo: string;
+    readonly followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week';
+  };
 }> {
   const shell = await loadShellContext(actorId, options);
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
   const matterRepo = getMatterRepository();
+  const { page, pageSize, offset, query } = normaliseListPagination(options);
 
-  const [enquiries, quotes] = await Promise.all([
-    intakeRepo.listVisibleEnquiries<Enquiry>(ctx, currentUserId, {
-      hasRestrictedMatterAccess,
-      limit: 500,
-    }),
-    shell.canViewQuotes
-      ? intakeRepo.listVisibleQuotes<Quote>(ctx, currentUserId, {
+  const requestedTab = options?.tab ?? 'all';
+  const uiTab: EnquiriesQueueTab = requestedTab === 'all' ? 'open' : requestedTab;
+  const typeFilter: 'all' | 'enquiry' | 'quote' =
+    options?.typeFilter ?? 'all';
+  const urgencyFilter = options?.urgencyFilter?.trim() || 'all';
+  const statusFilter = options?.statusFilter?.trim() || 'all';
+  const practiceAreaFilter = options?.practiceAreaFilter?.trim() || 'all';
+  const teamFilter = options?.teamFilter?.trim() || 'all';
+  const channelFilter = options?.channelFilter?.trim() || 'all';
+  const feeBasisFilter = options?.feeBasisFilter?.trim() || 'all';
+  const feeEarnerFilter = options?.feeEarnerFilter?.trim() || 'all';
+  const validUntilFrom = options?.validUntilFrom?.trim() || '';
+  const validUntilTo = options?.validUntilTo?.trim() || '';
+  const followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week' =
+    options?.followUpDueFilter ?? 'all';
+
+  const myTeamIds = userTeams(currentUserId, shell.teams).map((t) => t.id);
+  const now = new Date();
+  const todayYmd = toIsoDate(now);
+  const weekEndYmd = toIsoDate(addDays(now, 7));
+
+  const quoteOnlyFilterActive =
+    typeFilter === 'quote' ||
+    requestedTab === 'open_quotes' ||
+    feeBasisFilter !== 'all' ||
+    Boolean(validUntilFrom) ||
+    Boolean(validUntilTo) ||
+    followUpDueFilter !== 'all' ||
+    statusFilter.startsWith('quote:');
+  const enquiryOnlyFilterActive =
+    typeFilter === 'enquiry' || statusFilter.startsWith('enquiry:');
+
+  const shouldQueryEnquiries = !quoteOnlyFilterActive;
+  const shouldQueryQuotes = shell.canViewQuotes && !enquiryOnlyFilterActive;
+
+  const [enqRes, quotesRes] = await Promise.all([
+    shouldQueryEnquiries
+      ? intakeRepo.listVisibleEnquiriesPageWithCount<Enquiry>(
+          ctx,
+          currentUserId,
+          {
+            hasRestrictedMatterAccess,
+            limit: pageSize,
+            offset,
+            query,
+            ...(requestedTab === 'drafts'
+              ? { status: 'Draft', createdOrTakenById: currentUserId }
+              : requestedTab === 'team'
+                ? {
+                    openOnly: true,
+                    excludeStatuses: ['Draft'],
+                    assignedTeamIds: myTeamIds,
+                    requireAssignedTeam: myTeamIds.length === 0,
+                  }
+                : requestedTab === 'mine'
+                  ? {
+                      openOnly: true,
+                      excludeStatuses: ['Draft'],
+                      assignedToId: currentUserId,
+                    }
+                  : requestedTab === 'open'
+                    ? { openOnly: true, excludeStatuses: ['Draft'] }
+                    : requestedTab === 'closed'
+                      ? {
+                          statuses: [
+                            'Converted',
+                            'Declined',
+                            'Referred out',
+                            'No response',
+                          ],
+                        }
+                      : {}),
+            ...(practiceAreaFilter !== 'all' ? { practiceAreaId: practiceAreaFilter } : {}),
+            ...(teamFilter !== 'all' ? { assignedTeamId: teamFilter } : {}),
+            ...(urgencyFilter !== 'all' ? { urgencyId: urgencyFilter } : {}),
+            ...(channelFilter !== 'all' ? { channelId: channelFilter } : {}),
+            ...(feeEarnerFilter !== 'all' ? { assignedToId: feeEarnerFilter } : {}),
+            ...(statusFilter.startsWith('enquiry:')
+              ? { status: statusFilter.slice('enquiry:'.length) }
+              : {}),
+          },
+        )
+      : Promise.resolve<{ readonly items: Enquiry[]; readonly totalCount: number }>({
+          items: [],
+          totalCount: 0,
+        }),
+    shouldQueryQuotes
+      ? intakeRepo.listVisibleQuotesPageWithCount<Quote>(ctx, currentUserId, {
           hasRestrictedMatterAccess,
-          limit: 500,
+          limit: pageSize,
+          offset,
+          query,
+          ...(statusFilter === 'quote:Superseded'
+            ? { supersededInHistoryOnly: true }
+            : requestedTab === 'drafts'
+              ? { status: 'Draft', createdOrPreparedById: currentUserId }
+              : requestedTab === 'team'
+                ? {
+                    effectiveOpenTodayYmd: todayYmd,
+                    assignedTeamIds: myTeamIds,
+                    requireAssignedTeam: myTeamIds.length === 0,
+                  }
+                : requestedTab === 'mine'
+                  ? {
+                      effectiveOpenTodayYmd: todayYmd,
+                      feeEarnerId: currentUserId,
+                    }
+                  : requestedTab === 'open' || requestedTab === 'open_quotes'
+                    ? { effectiveOpenTodayYmd: todayYmd }
+                    : requestedTab === 'closed'
+                      ? { effectiveClosedTodayYmd: todayYmd }
+                      : {}),
+          ...(practiceAreaFilter !== 'all' ? { practiceAreaId: practiceAreaFilter } : {}),
+          ...(teamFilter !== 'all' ? { assignedTeamId: teamFilter } : {}),
+          ...(urgencyFilter !== 'all' ? { urgencyId: urgencyFilter } : {}),
+          ...(channelFilter !== 'all' ? { channelId: channelFilter } : {}),
+          ...(feeBasisFilter !== 'all' ? { feeBasis: feeBasisFilter } : {}),
+          ...(feeEarnerFilter !== 'all' ? { feeEarnerId: feeEarnerFilter } : {}),
+          ...(validUntilFrom ? { validUntilFrom } : {}),
+          ...(validUntilTo ? { validUntilTo } : {}),
+          ...(followUpDueFilter !== 'all'
+            ? {
+                followUpDue: {
+                  mode: followUpDueFilter,
+                  todayYmd,
+                  weekEndYmd,
+                },
+              }
+            : {}),
+          ...(statusFilter.startsWith('quote:') &&
+          statusFilter !== 'quote:Superseded'
+            ? statusFilter === 'quote:Expired'
+              ? { effectiveExpiredTodayYmd: todayYmd }
+              : { status: statusFilter.slice('quote:'.length) }
+            : {}),
         })
-      : Promise.resolve<Quote[]>([]),
+      : Promise.resolve<{ readonly items: Quote[]; readonly totalCount: number }>({
+          items: [],
+          totalCount: 0,
+        }),
   ]);
+
+  const enquiries = enqRes.items;
+  const quotes = quotesRes.items;
   for (const q of quotes) {
-    applyQuoteEffectiveLifecycle(q, new Date(), { appendExpiredTimeline: false });
+    applyQuoteEffectiveLifecycle(q, now, { appendExpiredTimeline: false });
   }
   const linkedTargetIds = [
     ...enquiries.map((e) => e.id),
@@ -2392,7 +2875,48 @@ export async function loadEnquiriesListPageData(
     tasks,
   });
 
-  return { shell, enquiries, quotes, tasks, people, organisations, matters };
+  const enquiriesPagination: ListPaginationMeta = {
+    page,
+    pageSize,
+    totalCount: enqRes.totalCount,
+  };
+  const quotesPagination: ListPaginationMeta = {
+    page,
+    pageSize,
+    totalCount: quotesRes.totalCount,
+  };
+
+  return {
+    shell,
+    enquiries,
+    quotes,
+    tasks,
+    people,
+    organisations,
+    matters,
+    pagination: {
+      page,
+      pageSize,
+      totalCount: enqRes.totalCount + quotesRes.totalCount,
+    },
+    enquiriesPagination,
+    quotesPagination,
+    filters: {
+      tab: uiTab,
+      query,
+      typeFilter,
+      urgencyFilter,
+      statusFilter,
+      practiceAreaFilter,
+      teamFilter,
+      channelFilter,
+      feeBasisFilter,
+      feeEarnerFilter,
+      validUntilFrom,
+      validUntilTo,
+      followUpDueFilter,
+    },
+  };
 }
 
 export async function loadEnquiryDetailPageData(
@@ -2762,9 +3286,20 @@ async function hydrateLinkedRecordsForTasks(
   return { matters, enquiries, quotes, extraPersonIds, extraOrgIds };
 }
 
+export type TasksListTabFilter = 'my' | 'team' | 'created' | 'all';
+
+export interface TasksListLoaderOptions extends ListQueryOptions {
+  readonly tab?: TasksListTabFilter;
+  readonly statusFilter?: string;
+  readonly priorityFilter?: string;
+  readonly typeFilter?: string;
+  readonly teamFilter?: string;
+  readonly recordTypeFilter?: string;
+}
+
 export async function loadTasksListPageData(
   actorId: string,
-  options?: LoaderOptions,
+  options?: TasksListLoaderOptions,
 ): Promise<{
   shell: ShellContextData;
   tasks: Task[];
@@ -2773,13 +3308,49 @@ export async function loadTasksListPageData(
   matters: Matter[];
   enquiries: Enquiry[];
   quotes: Quote[];
+  pagination: ListPaginationMeta;
+  filters: {
+    readonly tab: TasksListTabFilter;
+    readonly query: string;
+    readonly statusFilter: string;
+    readonly priorityFilter: string;
+    readonly typeFilter: string;
+    readonly teamFilter: string;
+    readonly recordTypeFilter: string;
+  };
 }> {
   const shell = await loadShellContext(actorId, options);
   const taskRepo = getTaskWorkflowRepository();
-  const tasks = await taskRepo.listVisibleTasks<Task>(shell.ctx, shell.currentUserId, {
-    hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
-    limit: 500,
-  });
+  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const tab: TasksListTabFilter = options?.tab ?? 'all';
+  const statusFilter = options?.statusFilter?.trim() || 'open';
+  const priorityFilter = options?.priorityFilter?.trim() || 'all';
+  const typeFilter = options?.typeFilter?.trim() || 'all';
+  const teamFilter = options?.teamFilter?.trim() || 'all';
+  const recordTypeFilter = options?.recordTypeFilter?.trim() || 'all';
+  const myTeamIds = userTeams(shell.currentUserId, shell.teams).map((t) => t.id);
+
+  const pageRes = await taskRepo.listVisibleTasksPageWithCount<Task>(
+    shell.ctx,
+    shell.currentUserId,
+    {
+      hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+      statusFilter,
+      overdueBeforeIso: statusFilter === 'overdue' ? toIsoDate(new Date()) : undefined,
+      tabFilter:
+        tab !== 'all'
+          ? { mode: tab, actorId: shell.currentUserId, teamIds: myTeamIds }
+          : undefined,
+      priorityId: priorityFilter !== 'all' ? priorityFilter : undefined,
+      taskTypeId: typeFilter !== 'all' ? typeFilter : undefined,
+      assignedTeamId: teamFilter !== 'all' ? teamFilter : undefined,
+      recordType: recordTypeFilter !== 'all' ? recordTypeFilter : undefined,
+      query,
+      limit: pageSize,
+      offset,
+    },
+  );
+  const tasks = pageRes.items;
   const { matters, enquiries, quotes, extraPersonIds, extraOrgIds } =
     await hydrateLinkedRecordsForTasks(
       shell.ctx,
@@ -2799,7 +3370,25 @@ export async function loadTasksListPageData(
     extraOrgIds,
   });
 
-  return { shell, tasks, people, organisations, matters, enquiries, quotes };
+  return {
+    shell,
+    tasks,
+    people,
+    organisations,
+    matters,
+    enquiries,
+    quotes,
+    pagination: { page, pageSize, totalCount: pageRes.totalCount },
+    filters: {
+      tab,
+      query,
+      statusFilter,
+      priorityFilter,
+      typeFilter,
+      teamFilter,
+      recordTypeFilter,
+    },
+  };
 }
 
 export async function loadTaskDetailPageData(

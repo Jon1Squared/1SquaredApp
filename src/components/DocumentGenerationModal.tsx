@@ -132,7 +132,7 @@ export function DocumentGenerationModal({
       }
 
       setLoadingSnapshot(true);
-      getDocumentGenerationSnapshotAction()
+      getDocumentGenerationSnapshotAction({ includeDocuments: false })
         .then((snap) => {
           if (cancelled) return;
           if (isActionDenied(snap)) {

@@ -161,7 +161,9 @@ export function DocumentTemplatesAdminPanel({
 
   const loadData = useCallback(async () => {
     try {
-      const snap = await getDocumentGenerationSnapshotAction();
+      const snap = await getDocumentGenerationSnapshotAction({
+        includeDocuments: false,
+      });
       if (isActionDenied(snap)) {
         setSnapshot(null);
         setUsageReport(null);

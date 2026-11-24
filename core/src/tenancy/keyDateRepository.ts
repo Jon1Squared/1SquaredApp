@@ -1193,6 +1193,73 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  public async listNotApplicableForMatterIds(
+    ctx: TenantContext,
+    matterIds: readonly string[],
+    viewerOrOptions:
+      | string
+      | {
+          readonly viewerId?: string;
+          readonly includeRestricted?: boolean;
+          readonly hasRestrictedMatterAccess?: boolean;
+        } = ctx.actorId,
+  ): Promise<KeyDateNotApplicable[]> {
+    const cleanIds = Array.from(
+      new Set(matterIds.map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    const includeRestricted =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.includeRestricted);
+    const hasRestrictedMatterAccess =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.hasRestrictedMatterAccess);
+    const viewerId =
+      typeof viewerOrOptions === 'string'
+        ? viewerOrOptions
+        : viewerOrOptions?.viewerId ?? ctx.actorId;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res =
+        includeRestricted || hasRestrictedMatterAccess
+          ? await tx.query<DbNotApplicableRow>(
+              `SELECT * FROM key_date_not_applicable
+               WHERE tenant_id = $1 AND matter_id = ANY($2::text[])
+               ORDER BY matter_id ASC, key_date_type_id ASC`,
+              [ctx.tenantId, cleanIds],
+            )
+          : await tx.query<DbNotApplicableRow>(
+              `SELECT na.*
+               FROM key_date_not_applicable na
+               INNER JOIN matters m
+                 ON m.tenant_id = na.tenant_id AND m.id = na.matter_id
+               WHERE na.tenant_id = $1
+                 AND na.matter_id = ANY($2::text[])
+                 AND (
+                   (
+                     m.is_staff_matter = FALSE
+                     AND m.has_ethical_wall = FALSE
+                     AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+                   )
+                   OR m.restricted_access_user_ids_json ? $3
+                 )
+               ORDER BY na.matter_id ASC, na.key_date_type_id ASC`,
+              [ctx.tenantId, cleanIds, viewerId],
+            );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'KeyDateNotApplicable');
+        return {
+          matterId: r.matter_id,
+          keyDateTypeId: r.key_date_type_id,
+          reason: r.reason,
+          recordedById: r.recorded_by_id,
+          recordedAt: toIsoString(r.recorded_at),
+        };
+      });
+    });
+  }
+
   public async listAllVisibleNotApplicable(
     ctx: TenantContext,
     viewerId: string = ctx.actorId,

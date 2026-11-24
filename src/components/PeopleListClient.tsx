@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { isInactiveStatus } from '@/domain/attention';
@@ -9,6 +9,7 @@ import { getEnquiryStagePeople, type EnquiryStagePersonEntry } from '@/domain/en
 import { optionsFor, resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import { mainLinkFor } from '@/domain/searchIndex';
+import type { ListPaginationMeta, PeopleListTabFilter } from '@/server/pageLoaders';
 import type {
   ChoiceValue,
   Enquiry,
@@ -19,8 +20,10 @@ import type {
 import {
   DataList,
   DataListFilterBar,
+  DataListPagination,
   PersonChip,
   useListDensity,
+  useServerListNavigation,
   type ActiveFilterChipItem,
   type DataListColumn,
   type DataListSortState,
@@ -36,9 +39,26 @@ interface Props {
   enquiries?: Enquiry[];
   currentUserId?: string;
   firmName?: string;
+  pagination?: ListPaginationMeta;
+  initialFilters?: {
+    tab: PeopleListTabFilter;
+    query: string;
+    roleFilter: string;
+    statusFilter: string;
+    ownerFilter: string;
+  };
 }
 
-type PeopleTab = 'all' | 'external' | 'enquiry' | 'employee' | 'archived';
+type PeopleTab = PeopleListTabFilter;
+
+const PEOPLE_PARAM_DEFAULTS = {
+  tab: 'all',
+  q: '',
+  role: 'all',
+  status: 'all',
+  owner: 'all',
+  page: 1,
+};
 
 type PeopleListRow =
   | {
@@ -80,16 +100,95 @@ export function PeopleListClient({
   enquiries = [],
   currentUserId = '',
   firmName = 'Firm',
+  pagination,
+  initialFilters,
 }: Props) {
   const router = useRouter();
+  const { navigateNow, navigateDebounced } = useServerListNavigation({
+    basePath: '/people',
+    router,
+    defaults: PEOPLE_PARAM_DEFAULTS,
+  });
 
-  const [tab, setTab] = useState<PeopleTab>('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [roleFilter, setRoleFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [ownerFilter, setOwnerFilter] = useState('all');
+  const [tab, setTab] = useState<PeopleTab>(initialFilters?.tab ?? 'all');
+  const [searchQuery, setSearchQuery] = useState(initialFilters?.query ?? '');
+  const [roleFilter, setRoleFilter] = useState(initialFilters?.roleFilter ?? 'all');
+  const [statusFilter, setStatusFilter] = useState(initialFilters?.statusFilter ?? 'all');
+  const [ownerFilter, setOwnerFilter] = useState(initialFilters?.ownerFilter ?? 'all');
   const [sort, setSort] = useState<DataListSortState | null>(null);
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
+
+  const initialKey = JSON.stringify(initialFilters ?? null);
+  const prevInitialKeyRef = useRef(initialKey);
+  useEffect(() => {
+    if (prevInitialKeyRef.current === initialKey) return;
+    prevInitialKeyRef.current = initialKey;
+    if (!initialFilters) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setTab(initialFilters.tab);
+      setSearchQuery(initialFilters.query);
+      setRoleFilter(initialFilters.roleFilter);
+      setStatusFilter(initialFilters.statusFilter);
+      setOwnerFilter(initialFilters.ownerFilter);
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialKey, initialFilters]);
+
+  const toQueryMap = (overrides?: Partial<{
+    tab: PeopleTab;
+    query: string;
+    roleFilter: string;
+    statusFilter: string;
+    ownerFilter: string;
+    page: number;
+  }>) => ({
+    tab: overrides?.tab ?? tab,
+    q: overrides?.query ?? searchQuery,
+    role: overrides?.roleFilter ?? roleFilter,
+    status: overrides?.statusFilter ?? statusFilter,
+    owner: overrides?.ownerFilter ?? ownerFilter,
+    page: overrides?.page ?? 1,
+  });
+
+  const handleTabChange = (next: PeopleTab) => {
+    setTab(next);
+    if (pagination) navigateNow(toQueryMap({ tab: next, page: 1 }), 'replace');
+  };
+  const handleSearchChange = (next: string) => {
+    setSearchQuery(next);
+    if (pagination) navigateDebounced(toQueryMap({ query: next, page: 1 }));
+  };
+  const handleRoleChange = (next: string) => {
+    setRoleFilter(next);
+    if (pagination) navigateNow(toQueryMap({ roleFilter: next, page: 1 }), 'replace');
+  };
+  const handleStatusChange = (next: string) => {
+    setStatusFilter(next);
+    if (pagination) navigateNow(toQueryMap({ statusFilter: next, page: 1 }), 'replace');
+  };
+  const handleOwnerChange = (next: string) => {
+    setOwnerFilter(next);
+    if (pagination) navigateNow(toQueryMap({ ownerFilter: next, page: 1 }), 'replace');
+  };
+  const handleClearAll = () => {
+    setRoleFilter('all');
+    setStatusFilter('all');
+    setOwnerFilter('all');
+    setSearchQuery('');
+    if (pagination) {
+      navigateNow(
+        toQueryMap({ roleFilter: 'all', statusFilter: 'all', ownerFilter: 'all', query: '', page: 1 }),
+        'replace',
+      );
+    }
+  };
+  const handlePageChange = (nextPage: number) => {
+    navigateNow(toQueryMap({ page: nextPage }), 'push');
+  };
 
   const orgById = useMemo(
     () => new Map(organisations.map((o) => [o.id, o])),
@@ -485,45 +584,45 @@ export function PeopleListClient({
           role="tab"
           aria-selected={tab === 'all'}
           className={`tab-btn ${tab === 'all' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('all')}
+          onClick={() => handleTabChange('all')}
         >
-          All active ({allActiveCount})
+          All active{tab === 'all' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${allActiveCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'external'}
           className={`tab-btn ${tab === 'external' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('external')}
+          onClick={() => handleTabChange('external')}
         >
-          External ({externalCount})
+          External{tab === 'external' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${externalCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'enquiry'}
           className={`tab-btn ${tab === 'enquiry' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('enquiry')}
+          onClick={() => handleTabChange('enquiry')}
         >
-          Enquiry stage ({enquiryCount})
+          Enquiry stage{tab === 'enquiry' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${enquiryCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'employee'}
           className={`tab-btn ${tab === 'employee' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('employee')}
+          onClick={() => handleTabChange('employee')}
         >
-          Firm staff ({employeeCount})
+          Firm staff{tab === 'employee' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${employeeCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'archived'}
           className={`tab-btn ${tab === 'archived' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('archived')}
+          onClick={() => handleTabChange('archived')}
         >
-          Archived ({archivedCount})
+          Archived{tab === 'archived' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${archivedCount})` : ''}
         </button>
         </div>
         <div
@@ -544,7 +643,7 @@ export function PeopleListClient({
 
       <DataListFilterBar
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchChange}
         searchPlaceholder="Search name, email, phone, organisation, reference…"
         searchAriaLabel="Search people"
         primaryFilters={
@@ -555,7 +654,7 @@ export function PeopleListClient({
               aria-label="Filter by relationship role"
               className="field-select list-filter-row__select"
               value={roleFilter}
-              onChange={(e) => setRoleFilter(e.target.value)}
+              onChange={(e) => handleRoleChange(e.target.value)}
             >
               <option value="all">All relationship roles</option>
               {roleOptions.map((r) => (
@@ -570,7 +669,7 @@ export function PeopleListClient({
               aria-label="Filter by relationship status"
               className="field-select list-filter-row__select"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => handleStatusChange(e.target.value)}
             >
               <option value="all">All statuses</option>
               <option value="enquiry_stage">Enquiry stage</option>
@@ -594,7 +693,7 @@ export function PeopleListClient({
               aria-label="Filter by relationship owner"
               className="field-select"
               value={ownerFilter}
-              onChange={(e) => setOwnerFilter(e.target.value)}
+              onChange={(e) => handleOwnerChange(e.target.value)}
             >
               <option value="all">All relationship owners</option>
               {employees.map((e) => (
@@ -612,7 +711,7 @@ export function PeopleListClient({
                   key: 'role',
                   label: 'Role',
                   valueLabel: resolveLabel(values, roleFilter),
-                  onRemove: () => setRoleFilter('all'),
+                  onRemove: () => handleRoleChange('all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -625,7 +724,7 @@ export function PeopleListClient({
                     statusFilter === 'enquiry_stage'
                       ? 'Enquiry stage'
                       : resolveLabel(values, statusFilter),
-                  onRemove: () => setStatusFilter('all'),
+                  onRemove: () => handleStatusChange('all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -635,17 +734,12 @@ export function PeopleListClient({
                   key: 'owner',
                   label: 'Owner',
                   valueLabel: empById.get(ownerFilter) ?? ownerFilter,
-                  onRemove: () => setOwnerFilter('all'),
+                  onRemove: () => handleOwnerChange('all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
         ]}
-        onClearAll={() => {
-          setRoleFilter('all');
-          setStatusFilter('all');
-          setOwnerFilter('all');
-          setSearchQuery('');
-        }}
+        onClearAll={handleClearAll}
         density={density}
         onDensityChange={setDensity}
       />
@@ -703,6 +797,15 @@ export function PeopleListClient({
           );
         }}
       />
+      {pagination ? (
+        <DataListPagination
+          page={pagination.page}
+          pageSize={pagination.pageSize}
+          totalCount={pagination.totalCount}
+          onPageChange={handlePageChange}
+          itemLabel="people"
+        />
+      ) : null}
     </div>
   );
 }

@@ -4796,6 +4796,11 @@ export class TenantPartyRepository extends TenantScopedRepository {
       readonly nonEmployeesOnly?: boolean;
       readonly employeesAndLeaversOnly?: boolean;
       readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipRoleId?: string;
+      readonly relationshipStatusId?: string;
+      readonly relationshipOwnerId?: string;
       readonly excludeIds?: readonly string[];
       readonly query?: string;
     },
@@ -4811,6 +4816,17 @@ export class TenantPartyRepository extends TenantScopedRepository {
           .filter(Boolean) as string[],
       ),
     );
+    const inactiveStatusIds = Array.from(
+      new Set(
+        (options?.inactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const archivedOnly = options?.archivedOnly ?? false;
+    const relationshipRoleId = options?.relationshipRoleId?.trim() || undefined;
+    const relationshipStatusId = options?.relationshipStatusId?.trim() || undefined;
+    const relationshipOwnerId = options?.relationshipOwnerId?.trim() || undefined;
     const excludeIds = Array.from(
       new Set(
         (options?.excludeIds ?? [])
@@ -4834,11 +4850,34 @@ export class TenantPartyRepository extends TenantScopedRepository {
         `(p.is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records eer_chk WHERE eer_chk.tenant_id = p.tenant_id AND eer_chk.person_id = p.id))`,
       );
     }
-    if (excludeInactiveStatusIds.length > 0) {
+    if (archivedOnly) {
+      if (inactiveStatusIds.length > 0) {
+        params.push(inactiveStatusIds);
+        clauses.push(
+          `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') = ANY($${params.length}::text[])`,
+        );
+      } else {
+        clauses.push('FALSE');
+      }
+    } else if (excludeInactiveStatusIds.length > 0) {
       params.push(excludeInactiveStatusIds);
       clauses.push(
         `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
       );
+    }
+    if (relationshipRoleId) {
+      params.push(relationshipRoleId);
+      clauses.push(`p.relationship_role_ids_json ? $${params.length}`);
+    }
+    if (relationshipStatusId) {
+      params.push(relationshipStatusId);
+      clauses.push(
+        `COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId') = $${params.length}`,
+      );
+    }
+    if (relationshipOwnerId) {
+      params.push(relationshipOwnerId);
+      clauses.push(`p.profile_json->>'relationshipOwnerId' = $${params.length}`);
     }
     if (excludeIds.length > 0) {
       params.push(excludeIds);
@@ -4880,6 +4919,11 @@ export class TenantPartyRepository extends TenantScopedRepository {
       readonly nonEmployeesOnly?: boolean;
       readonly employeesAndLeaversOnly?: boolean;
       readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipRoleId?: string;
+      readonly relationshipStatusId?: string;
+      readonly relationshipOwnerId?: string;
       readonly excludeIds?: readonly string[];
       readonly query?: string;
       readonly limit?: number;
@@ -4998,6 +5042,20 @@ export class TenantPartyRepository extends TenantScopedRepository {
     options?: {
       readonly includeMerged?: boolean;
       readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipTypeId?: string;
+      readonly relationshipStatusId?: string;
+      readonly organisationTypeId?: string;
+      readonly sectorId?: string;
+      readonly relationshipPartnerId?: string;
+      readonly tabFilter?: {
+        readonly mode: 'clients' | 'prospects' | 'referrers';
+        readonly clientRelTypeIds: readonly string[];
+        readonly clientStatusIds: readonly string[];
+        readonly prospectRelTypeIds: readonly string[];
+        readonly prospectStatusIds: readonly string[];
+      };
       readonly excludeIds?: readonly string[];
       readonly query?: string;
     },
@@ -5010,6 +5068,19 @@ export class TenantPartyRepository extends TenantScopedRepository {
           .filter(Boolean) as string[],
       ),
     );
+    const inactiveStatusIds = Array.from(
+      new Set(
+        (options?.inactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const archivedOnly = options?.archivedOnly ?? false;
+    const relationshipTypeId = options?.relationshipTypeId?.trim() || undefined;
+    const relationshipStatusId = options?.relationshipStatusId?.trim() || undefined;
+    const organisationTypeId = options?.organisationTypeId?.trim() || undefined;
+    const sectorId = options?.sectorId?.trim() || undefined;
+    const relationshipPartnerId = options?.relationshipPartnerId?.trim() || undefined;
     const excludeIds = Array.from(
       new Set(
         (options?.excludeIds ?? [])
@@ -5024,11 +5095,79 @@ export class TenantPartyRepository extends TenantScopedRepository {
     if (!includeMerged) {
       clauses.push('merged_into_id IS NULL');
     }
-    if (excludeInactiveStatusIds.length > 0) {
+    if (archivedOnly) {
+      if (inactiveStatusIds.length > 0) {
+        params.push(inactiveStatusIds);
+        clauses.push(
+          `COALESCE(profile_json->>'recordStatusId', 'record_status.active') = ANY($${params.length}::text[])`,
+        );
+      } else {
+        clauses.push('FALSE');
+      }
+    } else if (excludeInactiveStatusIds.length > 0) {
       params.push(excludeInactiveStatusIds);
       clauses.push(
         `COALESCE(profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
       );
+    }
+    if (relationshipTypeId) {
+      params.push(relationshipTypeId);
+      clauses.push(`relationship_type_ids_json ? $${params.length}`);
+    }
+    if (relationshipStatusId) {
+      params.push(relationshipStatusId);
+      clauses.push(
+        `COALESCE(client_status_id, profile_json->>'relationshipStatusId') = $${params.length}`,
+      );
+    }
+    if (organisationTypeId) {
+      params.push(organisationTypeId);
+      clauses.push(`organisation_type_id = $${params.length}`);
+    }
+    if (sectorId) {
+      params.push(sectorId);
+      const sIdx = params.length;
+      clauses.push(
+        `(sector_ids_json ? $${sIdx} OR profile_json->>'sectorId' = $${sIdx})`,
+      );
+    }
+    if (relationshipPartnerId) {
+      params.push(relationshipPartnerId);
+      clauses.push(`relationship_partner_id = $${params.length}`);
+    }
+    if (options?.tabFilter) {
+      const buildGroupMatchSql = (
+        relIds: readonly string[],
+        statIds: readonly string[],
+      ): string => {
+        const parts: string[] = [];
+        if (relIds.length > 0) {
+          params.push([...relIds]);
+          parts.push(`relationship_type_ids_json ?| $${params.length}::text[]`);
+        }
+        if (statIds.length > 0) {
+          params.push([...statIds]);
+          parts.push(
+            `COALESCE(client_status_id, profile_json->>'relationshipStatusId') = ANY($${params.length}::text[])`,
+          );
+        }
+        return parts.length > 0 ? `(${parts.join(' OR ')})` : 'FALSE';
+      };
+      const isClientSql = buildGroupMatchSql(
+        options.tabFilter.clientRelTypeIds,
+        options.tabFilter.clientStatusIds,
+      );
+      const isProspectSql = buildGroupMatchSql(
+        options.tabFilter.prospectRelTypeIds,
+        options.tabFilter.prospectStatusIds,
+      );
+      if (options.tabFilter.mode === 'clients') {
+        clauses.push(isClientSql);
+      } else if (options.tabFilter.mode === 'prospects') {
+        clauses.push(isProspectSql);
+      } else if (options.tabFilter.mode === 'referrers') {
+        clauses.push(`NOT (${isClientSql}) AND NOT (${isProspectSql})`);
+      }
     }
     if (excludeIds.length > 0) {
       params.push(excludeIds);
@@ -5060,6 +5199,20 @@ export class TenantPartyRepository extends TenantScopedRepository {
     options?: {
       readonly includeMerged?: boolean;
       readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipTypeId?: string;
+      readonly relationshipStatusId?: string;
+      readonly organisationTypeId?: string;
+      readonly sectorId?: string;
+      readonly relationshipPartnerId?: string;
+      readonly tabFilter?: {
+        readonly mode: 'clients' | 'prospects' | 'referrers';
+        readonly clientRelTypeIds: readonly string[];
+        readonly clientStatusIds: readonly string[];
+        readonly prospectRelTypeIds: readonly string[];
+        readonly prospectStatusIds: readonly string[];
+      };
       readonly excludeIds?: readonly string[];
       readonly query?: string;
       readonly limit?: number;

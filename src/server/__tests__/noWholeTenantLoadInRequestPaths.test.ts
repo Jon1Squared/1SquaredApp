@@ -24,6 +24,42 @@ const TARGET_WHOLE_TENANT_CALLEES = new Set([
   'getFirmFinanceRollupsSql',
   'listAllVisibleKeyDates',
   'loadFullConflictSearchGraph',
+  // R702: newly guarded repository/service readers
+  'listAllReminderStates',
+  'listAllVisibleCalendarSyncs',
+  'listAllVisibleNotApplicable',
+  'listAllDocumentLinks',
+  'getAgedDebt',
+]);
+
+/**
+ * R702: Visible list readers that are safe only when bounded by `limit` or an entity scope
+ * (linked record / converted matter / assignee / related party); unbounded calls are flagged.
+ */
+const UNBOUNDED_VISIBLE_LIST_CALLEES = new Set([
+  'listVisibleMatters',
+  'listVisibleEnquiries',
+  'listVisibleTasks',
+  'listVisibleSignOffs',
+]);
+
+const SCOPING_OR_LIMIT_KEYS = new Set([
+  'limit',
+  'linkedRecordId',
+  'linkedRecordIds',
+  'relatedPersonId',
+  'relatedOrganisationId',
+  'linkedPersonId',
+  'linkedPersonIds',
+  'linkedOrganisationId',
+  'linkedOrganisationIds',
+  'convertedMatterId',
+  'sourceEnquiryId',
+  'assignedPersonId',
+  'assignedPersonIdOrMulti',
+  'assignedTeamId',
+  'assignedToId',
+  'assignedToOrTeams',
 ]);
 
 const TARGET_PAGE_CALLEES = new Set(['getAppSnapshot', 'getAppSnapshotInScope']);
@@ -113,7 +149,11 @@ export const PERMANENT_ALLOW_LIST: readonly AllowListEntry[] = [
   {
     file: 'src/server/storePostgresImport.ts',
     fn: 'importFirmStoreModulesToPostgres',
-    callees: ['listAllMattersUnfiltered', 'listAllEnquiriesUnfiltered'],
+    callees: [
+      'listAllMattersUnfiltered',
+      'listAllEnquiriesUnfiltered',
+      'listAllDocumentLinks',
+    ],
     reason: 'Seed/migration store import verification utility across all tenant records.',
   },
   {
@@ -230,6 +270,64 @@ export const DEFERRED_S1_02B_ALLOW_LIST: readonly AllowListEntry[] = [];
 // Exact S1-02b baseline ratcheted to zero
 export const MAX_DEFERRED_S1_02B_BASELINE_COUNT = 0;
 
+export interface B15TailAllowListEntry extends AllowListEntry {
+  readonly backlogItem: 'B15';
+}
+
+/**
+ * R702: Residual unbounded request-path visible-list loaders tracked explicitly against B15.
+ * Must stay empty of any newly guarded S1-02b reader and must never exceed MAX_B15_TAIL_ALLOW_LIST_COUNT.
+ */
+export const B15_TAIL_ALLOW_LIST: readonly B15TailAllowListEntry[] = [
+  {
+    file: 'src/server/pageLoaders.ts',
+    fn: 'loadHomePageData',
+    callees: [
+      'listVisibleMatters',
+      'listVisibleEnquiries',
+      'listVisibleTasks',
+      'listVisibleSignOffs',
+    ],
+    reason:
+      'Home workspace role KPIs and worklists aggregate across visible matters, enquiries, tasks, and sign-offs pending panel-specific SQL aggregates/LIMITs.',
+    backlogItem: 'B15',
+  },
+  {
+    file: 'src/server/services.ts',
+    fn: 'resolveKeyDatesActorAndData',
+    callees: ['listVisibleMatters'],
+    reason:
+      'Key dates firm/team diary and exceptions report cross-reference visible matters when includeVisibleMatters is enabled.',
+    backlogItem: 'B15',
+  },
+  {
+    file: 'src/server/services.ts',
+    fn: 'queryKeyDatesTeamDiaryRecord',
+    callees: ['listVisibleEnquiries'],
+    reason:
+      'Key dates team diary cross-references visible enquiries for pre-matter limitation and deadline rows.',
+    backlogItem: 'B15',
+  },
+  {
+    file: 'src/server/services.ts',
+    fn: 'listRegistersWorkspaceDataRecord',
+    callees: ['listVisibleMatters'],
+    reason:
+      'Firm registers workspace loads visible matters for the matter selector and record access checks.',
+    backlogItem: 'B15',
+  },
+  {
+    file: 'src/server/documentGenerationServices.ts',
+    fn: 'getInitializedDocGenContext',
+    callees: ['listVisibleMatters'],
+    reason:
+      'Document generation fallback when a caller invokes generateDocumentService without an explicit matterId.',
+    backlogItem: 'B15',
+  },
+];
+
+export const MAX_B15_TAIL_ALLOW_LIST_COUNT = 5;
+
 interface AstCallFinding {
   readonly file: string;
   readonly line: number;
@@ -294,6 +392,7 @@ function collectWholeTenantAliases(
   const aliasMap = new Map<string, string>();
   const allMonitored = new Set([
     ...TARGET_WHOLE_TENANT_CALLEES,
+    ...UNBOUNDED_VISIBLE_LIST_CALLEES,
     ...TARGET_PAGE_CALLEES,
     ...TARGET_CLIENT_SCAN_CALLEES,
   ]);
@@ -342,6 +441,30 @@ function hasEmployeesAndLeaversOnlyOption(node: ts.CallExpression): boolean {
       prop.initializer.kind === ts.SyntaxKind.TrueKeyword
     );
   });
+}
+
+function hasScopingOrLimitOption(node: ts.CallExpression): boolean {
+  for (const arg of node.arguments) {
+    if (!ts.isObjectLiteralExpression(arg)) continue;
+    for (const prop of arg.properties) {
+      if (
+        ts.isShorthandPropertyAssignment(prop) &&
+        SCOPING_OR_LIMIT_KEYS.has(prop.name.text)
+      ) {
+        return true;
+      }
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const keyName = ts.isIdentifier(prop.name)
+        ? prop.name.text
+        : ts.isStringLiteral(prop.name)
+          ? prop.name.text
+          : null;
+      if (keyName && SCOPING_OR_LIMIT_KEYS.has(keyName)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function getEnclosingFunctionName(node: ts.Node): string {
@@ -395,11 +518,13 @@ export function scanSourceTextForWholeTenantCalls(
   deferred: AstCallFinding[];
   permanentAllowMatched: AstCallFinding[];
   temporaryConflictMatched: AstCallFinding[];
+  b15TailMatched: AstCallFinding[];
 } {
   const unexpected: AstCallFinding[] = [];
   const deferred: AstCallFinding[] = [];
   const permanentAllowMatched: AstCallFinding[] = [];
   const temporaryConflictMatched: AstCallFinding[] = [];
+  const b15TailMatched: AstCallFinding[] = [];
 
   const sourceFile = ts.createSourceFile(
     relPath,
@@ -426,6 +551,11 @@ export function scanSourceTextForWholeTenantCalls(
           } else {
             flagged = true;
           }
+        } else if (
+          UNBOUNDED_VISIBLE_LIST_CALLEES.has(callee) &&
+          !hasScopingOrLimitOption(node)
+        ) {
+          flagged = true;
         } else if (TARGET_PAGE_CALLEES.has(callee)) {
           flagged = true;
         } else if (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee)) {
@@ -449,6 +579,8 @@ export function scanSourceTextForWholeTenantCalls(
             matchesAllowList(finding, TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST)
           ) {
             temporaryConflictMatched.push(finding);
+          } else if (matchesAllowList(finding, B15_TAIL_ALLOW_LIST)) {
+            b15TailMatched.push(finding);
           } else if (matchesAllowList(finding, DEFERRED_S1_02B_ALLOW_LIST)) {
             deferred.push(finding);
           } else {
@@ -466,6 +598,7 @@ export function scanSourceTextForWholeTenantCalls(
     deferred,
     permanentAllowMatched,
     temporaryConflictMatched,
+    b15TailMatched,
   };
 }
 
@@ -474,18 +607,22 @@ function scanWholeTenantCalls(): {
   deferred: AstCallFinding[];
   permanentAllowMatched: AstCallFinding[];
   temporaryConflictMatched: AstCallFinding[];
+  b15TailMatched: AstCallFinding[];
 } {
   const scanDirs = [
     path.join(REPO_ROOT, 'src', 'server'),
     path.join(REPO_ROOT, 'src', 'pms'),
     path.join(REPO_ROOT, 'src', 'app'),
     path.join(REPO_ROOT, 'src', 'components'),
+    path.join(REPO_ROOT, 'src', 'domain'),
+    path.join(REPO_ROOT, 'src', 'platform'),
   ];
   const files = scanDirs.flatMap((d) => walkSourceFiles(d));
   const unexpected: AstCallFinding[] = [];
   const deferred: AstCallFinding[] = [];
   const permanentAllowMatched: AstCallFinding[] = [];
   const temporaryConflictMatched: AstCallFinding[] = [];
+  const b15TailMatched: AstCallFinding[] = [];
 
   for (const absPath of files) {
     const relPath = path.relative(REPO_ROOT, absPath).replace(/\\/g, '/');
@@ -495,6 +632,7 @@ function scanWholeTenantCalls(): {
     deferred.push(...fileRes.deferred);
     permanentAllowMatched.push(...fileRes.permanentAllowMatched);
     temporaryConflictMatched.push(...fileRes.temporaryConflictMatched);
+    b15TailMatched.push(...fileRes.b15TailMatched);
   }
 
   return {
@@ -502,12 +640,13 @@ function scanWholeTenantCalls(): {
     deferred,
     permanentAllowMatched,
     temporaryConflictMatched,
+    b15TailMatched,
   };
 }
 
 describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', () => {
-  it('enforces 0 non-allow-listed whole-tenant repository or snapshot calls across src/server, src/app, src/components, and src/pms', () => {
-    const { unexpected, deferred } = scanWholeTenantCalls();
+  it('enforces 0 non-allow-listed whole-tenant repository or snapshot calls across src/server, src/app, src/components, src/pms, src/domain, and src/platform', () => {
+    const { unexpected, deferred, b15TailMatched } = scanWholeTenantCalls();
 
     if (unexpected.length > 0) {
       const formatted = unexpected
@@ -515,9 +654,14 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
         .join('\n');
       expect(
         unexpected,
-        `Found ${unexpected.length} non-scoped whole-tenant call sites outside PERMANENT_ALLOW_LIST & S1-02b baseline:\n${formatted}`,
+        `Found ${unexpected.length} non-scoped whole-tenant call sites outside PERMANENT_ALLOW_LIST, B15_TAIL_ALLOW_LIST & S1-02b baseline:\n${formatted}`,
       ).toEqual([]);
     }
+
+    expect(B15_TAIL_ALLOW_LIST.length).toBeLessThanOrEqual(
+      MAX_B15_TAIL_ALLOW_LIST_COUNT,
+    );
+    expect(b15TailMatched.length).toBeGreaterThan(0);
 
     expect(deferred.length).toBeLessThanOrEqual(
       MAX_DEFERRED_S1_02B_BASELINE_COUNT,
@@ -532,6 +676,8 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
       path.join(REPO_ROOT, 'src', 'components'),
       path.join(REPO_ROOT, 'src', 'pms'),
       path.join(REPO_ROOT, 'src', 'server'),
+      path.join(REPO_ROOT, 'src', 'domain'),
+      path.join(REPO_ROOT, 'src', 'platform'),
     ];
     const runtimeFiles = runtimeDirs.flatMap((d) => walkSourceFiles(d));
     const hits: string[] = [];
@@ -673,5 +819,53 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
           f.callee === 'loadFullConflictSearchGraph',
       ),
     ).toBe(true);
+  });
+
+  it('R702: flags the 5 newly guarded whole-tenant readers and unbounded visible list loaders in synthetic fixtures and caps B15_TAIL_ALLOW_LIST', () => {
+    const newlyGuardedCallees = [
+      'listAllReminderStates',
+      'listAllVisibleCalendarSyncs',
+      'listAllVisibleNotApplicable',
+      'listAllDocumentLinks',
+      'getAgedDebt',
+    ] as const;
+
+    for (const callee of newlyGuardedCallees) {
+      expect(TARGET_WHOLE_TENANT_CALLEES.has(callee)).toBe(true);
+      const synthetic = scanSourceTextForWholeTenantCalls(
+        'src/server/syntheticR702.ts',
+        `export async function badCaller(repo: any, ctx: unknown) { return repo.${callee}(ctx); }`,
+      );
+      expect(
+        synthetic.unexpected.some(
+          (f) => f.fn === 'badCaller' && f.callee === callee,
+        ),
+      ).toBe(true);
+    }
+
+    const unboundedVisible = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticR702Visible.ts',
+      `export async function unboundedMatterLoad(matterRepo: any, ctx: unknown, viewerId: string) { return matterRepo.listVisibleMatters(ctx, { viewerId }); }`,
+    );
+    expect(
+      unboundedVisible.unexpected.some(
+        (f) => f.fn === 'unboundedMatterLoad' && f.callee === 'listVisibleMatters',
+      ),
+    ).toBe(true);
+
+    const boundedVisible = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticR702VisibleBounded.ts',
+      `export async function boundedMatterLoad(matterRepo: any, ctx: unknown, viewerId: string) { return matterRepo.listVisibleMatters(ctx, { viewerId, limit: 100 }); }`,
+    );
+    expect(boundedVisible.unexpected).toEqual([]);
+
+    expect(B15_TAIL_ALLOW_LIST.length).toBeLessThanOrEqual(
+      MAX_B15_TAIL_ALLOW_LIST_COUNT,
+    );
+    for (const entry of B15_TAIL_ALLOW_LIST) {
+      expect(entry.backlogItem).toBe('B15');
+      expect(entry.callees.length).toBeGreaterThan(0);
+      expect(entry.reason.trim().length).toBeGreaterThan(0);
+    }
   });
 });

@@ -213,7 +213,7 @@ export function HomeClient({
 
   useEffect(() => {
     let active = true;
-    void getDocumentGenerationSnapshotAction()
+    void getDocumentGenerationSnapshotAction({ includeDocuments: false })
       .then((snap) => {
         if (!active || isActionDenied(snap)) return;
         setPendingTemplateApprovalsCount(snap.pendingApprovalsCount);

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Calendar } from 'lucide-react';
@@ -13,12 +13,15 @@ import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
 import { isTaskOpen } from '@/domain/tasks';
 import type { ChoiceValue, Matter, Organisation, Person, Task } from '@/domain/types';
 import type { PmsMatterFinancials } from '@/pms/types';
+import type { ListPaginationMeta, MattersListTabFilter } from '@/server/pageLoaders';
 import {
   DataList,
   DataListFilterBar,
+  DataListPagination,
   PersonChip,
   RelativeTime,
   useListDensity,
+  useServerListNavigation,
   type ActiveFilterChipItem,
   type DataListColumn,
   type DataListSortState,
@@ -28,6 +31,7 @@ import { StatusPill } from './SearchBox';
 interface MattersListClientProps {
   matters: Matter[];
   people: Person[];
+  employees?: Person[];
   organisations: Organisation[];
   tasks?: Task[];
   values: ChoiceValue[];
@@ -35,9 +39,28 @@ interface MattersListClientProps {
   canViewFinance?: boolean;
   pmsSummaryByMatterId?: Record<string, PmsMatterFinancials>;
   pmsAsAtDate: string | undefined;
+  pagination?: ListPaginationMeta;
+  initialFilters?: {
+    tab: MattersListTabFilter;
+    query: string;
+    practiceAreaId: string;
+    statusFilter: string;
+    feeEarnerFilter: string;
+    billingBasisFilter: string;
+  };
 }
 
-type MattersTab = 'all' | 'mine' | 'Transactional' | 'Contentious' | 'Advisory';
+type MattersTab = MattersListTabFilter;
+
+const MATTERS_PARAM_DEFAULTS = {
+  tab: 'all',
+  q: '',
+  practiceArea: 'all',
+  status: 'all',
+  feeEarner: 'all',
+  billingBasis: 'all',
+  page: 1,
+};
 
 const STATUS_SORT_ORDER: Record<string, number> = {
   'cmi incomplete': 0,
@@ -68,6 +91,7 @@ function matterStatusTone(statusLabel: string): PillTone {
 export function MattersListClient({
   matters = [],
   people,
+  employees: employeesProp,
   organisations,
   tasks = [],
   values,
@@ -75,18 +99,114 @@ export function MattersListClient({
   canViewFinance = false,
   pmsSummaryByMatterId = {},
   pmsAsAtDate,
+  pagination,
+  initialFilters,
 }: MattersListClientProps) {
   const router = useRouter();
+  const { navigateNow, navigateDebounced } = useServerListNavigation({
+    basePath: '/matters',
+    router,
+    defaults: MATTERS_PARAM_DEFAULTS,
+  });
 
-  const [tab, setTab] = useState<MattersTab>('all');
-  const [query, setQuery] = useState('');
-  const [practiceAreaId, setPracticeAreaId] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [feeEarnerFilter, setFeeEarnerFilter] = useState('all');
-  const [billingBasisFilter, setBillingBasisFilter] = useState('all');
+  const [tab, setTab] = useState<MattersTab>(initialFilters?.tab ?? 'all');
+  const [query, setQuery] = useState(initialFilters?.query ?? '');
+  const [practiceAreaId, setPracticeAreaId] = useState(
+    initialFilters?.practiceAreaId ?? 'all',
+  );
+  const [statusFilter, setStatusFilter] = useState(
+    initialFilters?.statusFilter ?? 'all',
+  );
+  const [feeEarnerFilter, setFeeEarnerFilter] = useState(
+    initialFilters?.feeEarnerFilter ?? 'all',
+  );
+  const [billingBasisFilter, setBillingBasisFilter] = useState(
+    initialFilters?.billingBasisFilter ?? 'all',
+  );
   const [showPmsColumns, setShowPmsColumns] = useState(true);
   const [sort, setSort] = useState<DataListSortState | null>(null);
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
+
+  const initialKey = JSON.stringify(initialFilters ?? null);
+  const prevInitialKeyRef = useRef(initialKey);
+  useEffect(() => {
+    if (prevInitialKeyRef.current === initialKey) return;
+    prevInitialKeyRef.current = initialKey;
+    if (!initialFilters) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setTab(initialFilters.tab);
+      setQuery(initialFilters.query);
+      setPracticeAreaId(initialFilters.practiceAreaId);
+      setStatusFilter(initialFilters.statusFilter);
+      setFeeEarnerFilter(initialFilters.feeEarnerFilter);
+      setBillingBasisFilter(initialFilters.billingBasisFilter);
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialKey, initialFilters]);
+
+  const toQueryMap = (overrides?: Partial<{
+    tab: MattersTab;
+    query: string;
+    practiceAreaId: string;
+    statusFilter: string;
+    feeEarnerFilter: string;
+    billingBasisFilter: string;
+    page: number;
+  }>) => ({
+    tab: overrides?.tab ?? tab,
+    q: overrides?.query ?? query,
+    practiceArea: overrides?.practiceAreaId ?? practiceAreaId,
+    status: overrides?.statusFilter ?? statusFilter,
+    feeEarner: overrides?.feeEarnerFilter ?? feeEarnerFilter,
+    billingBasis: overrides?.billingBasisFilter ?? billingBasisFilter,
+    page: overrides?.page ?? 1,
+  });
+
+  const handleTabChange = (next: MattersTab) => {
+    setTab(next);
+    if (pagination) navigateNow(toQueryMap({ tab: next, page: 1 }), 'replace');
+  };
+  const handleSearchChange = (next: string) => {
+    setQuery(next);
+    if (pagination) navigateDebounced(toQueryMap({ query: next, page: 1 }));
+  };
+  const handleFilter = (
+    key: 'practiceAreaId' | 'statusFilter' | 'feeEarnerFilter' | 'billingBasisFilter',
+    val: string,
+  ) => {
+    if (key === 'practiceAreaId') setPracticeAreaId(val);
+    if (key === 'statusFilter') setStatusFilter(val);
+    if (key === 'feeEarnerFilter') setFeeEarnerFilter(val);
+    if (key === 'billingBasisFilter') setBillingBasisFilter(val);
+    if (pagination) navigateNow(toQueryMap({ [key]: val, page: 1 }), 'replace');
+  };
+  const handleClearAll = () => {
+    setPracticeAreaId('all');
+    setStatusFilter('all');
+    setFeeEarnerFilter('all');
+    setBillingBasisFilter('all');
+    setQuery('');
+    if (pagination) {
+      navigateNow(
+        toQueryMap({
+          practiceAreaId: 'all',
+          statusFilter: 'all',
+          feeEarnerFilter: 'all',
+          billingBasisFilter: 'all',
+          query: '',
+          page: 1,
+        }),
+        'replace',
+      );
+    }
+  };
+  const handlePageChange = (nextPage: number) => {
+    navigateNow(toQueryMap({ page: nextPage }), 'push');
+  };
 
   const clientNameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -121,10 +241,14 @@ export function MattersListClient({
 
   const employees = useMemo(
     () =>
-      people
-        .filter((p) => p.isEmployee && !p.mergedIntoId)
-        .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b))),
-    [people],
+      employeesProp && employeesProp.length > 0
+        ? [...employeesProp]
+            .filter((p) => !p.mergedIntoId)
+            .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b)))
+        : people
+            .filter((p) => p.isEmployee && !p.mergedIntoId)
+            .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b))),
+    [employeesProp, people],
   );
 
   const isMyMatter = (m: Matter): boolean => {
@@ -465,9 +589,9 @@ export function MattersListClient({
               role="tab"
               aria-selected={tab === 'all'}
               className={`tab-btn ${tab === 'all' ? 'tab-btn--active' : ''}`}
-              onClick={() => setTab('all')}
+              onClick={() => handleTabChange('all')}
             >
-              All matters ({matters.length})
+              All matters{tab === 'all' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${matters.length})` : ''}
             </button>
             {currentUserId ? (
               <button
@@ -475,9 +599,9 @@ export function MattersListClient({
                 role="tab"
                 aria-selected={tab === 'mine'}
                 className={`tab-btn ${tab === 'mine' ? 'tab-btn--active' : ''}`}
-                onClick={() => setTab('mine')}
+                onClick={() => handleTabChange('mine')}
               >
-                My matters ({mineCount})
+                My matters{tab === 'mine' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${mineCount})` : ''}
               </button>
             ) : null}
             <button
@@ -485,27 +609,27 @@ export function MattersListClient({
               role="tab"
               aria-selected={tab === 'Transactional'}
               className={`tab-btn ${tab === 'Transactional' ? 'tab-btn--active' : ''}`}
-              onClick={() => setTab('Transactional')}
+              onClick={() => handleTabChange('Transactional')}
             >
-              Transactional ({transactionalCount})
+              Transactional{tab === 'Transactional' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${transactionalCount})` : ''}
             </button>
             <button
               type="button"
               role="tab"
               aria-selected={tab === 'Contentious'}
               className={`tab-btn ${tab === 'Contentious' ? 'tab-btn--active' : ''}`}
-              onClick={() => setTab('Contentious')}
+              onClick={() => handleTabChange('Contentious')}
             >
-              Contentious ({contentiousCount})
+              Contentious{tab === 'Contentious' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${contentiousCount})` : ''}
             </button>
             <button
               type="button"
               role="tab"
               aria-selected={tab === 'Advisory'}
               className={`tab-btn ${tab === 'Advisory' ? 'tab-btn--active' : ''}`}
-              onClick={() => setTab('Advisory')}
+              onClick={() => handleTabChange('Advisory')}
             >
-              Advisory ({advisoryCount})
+              Advisory{tab === 'Advisory' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${advisoryCount})` : ''}
             </button>
         </div>
             <div
@@ -526,7 +650,7 @@ export function MattersListClient({
 
           <DataListFilterBar
             searchValue={query}
-            onSearchChange={setQuery}
+            onSearchChange={handleSearchChange}
             searchPlaceholder="Search matter number, title, client, work type…"
             searchAriaLabel="Search matters"
             primaryFilters={
@@ -537,7 +661,7 @@ export function MattersListClient({
                   aria-label="Filter by practice area"
                   className="field-select list-filter-row__select"
                   value={practiceAreaId}
-                  onChange={(e) => setPracticeAreaId(e.target.value)}
+                  onChange={(e) => handleFilter('practiceAreaId', e.target.value)}
                 >
                   <option value="all">All practice areas</option>
                   {practiceAreas.map((pa) => (
@@ -552,7 +676,7 @@ export function MattersListClient({
                   aria-label="Filter by matter status"
                   className="field-select list-filter-row__select"
                   value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
+                  onChange={(e) => handleFilter('statusFilter', e.target.value)}
                 >
                   <option value="all">All statuses</option>
                   {matterStatuses.map((s) => (
@@ -582,7 +706,7 @@ export function MattersListClient({
                     aria-label="Filter by lead fee earner"
                     className="field-select"
                     value={feeEarnerFilter}
-                    onChange={(e) => setFeeEarnerFilter(e.target.value)}
+                    onChange={(e) => handleFilter('feeEarnerFilter', e.target.value)}
                   >
                     <option value="all">All fee earners</option>
                     {employees.map((emp) => (
@@ -602,7 +726,7 @@ export function MattersListClient({
                     aria-label="Filter by billing basis"
                     className="field-select"
                     value={billingBasisFilter}
-                    onChange={(e) => setBillingBasisFilter(e.target.value)}
+                    onChange={(e) => handleFilter('billingBasisFilter', e.target.value)}
                   >
                     <option value="all">All billing bases</option>
                     {billingBases.map((bb) => (
@@ -636,7 +760,7 @@ export function MattersListClient({
                       key: 'practiceArea',
                       label: 'Practice area',
                       valueLabel: resolveLabel(values, practiceAreaId),
-                      onRemove: () => setPracticeAreaId('all'),
+                      onRemove: () => handleFilter('practiceAreaId', 'all'),
                     } satisfies ActiveFilterChipItem,
                   ]
                 : []),
@@ -646,7 +770,7 @@ export function MattersListClient({
                       key: 'status',
                       label: 'Status',
                       valueLabel: resolveLabel(values, statusFilter),
-                      onRemove: () => setStatusFilter('all'),
+                      onRemove: () => handleFilter('statusFilter', 'all'),
                     } satisfies ActiveFilterChipItem,
                   ]
                 : []),
@@ -656,10 +780,10 @@ export function MattersListClient({
                       key: 'feeEarner',
                       label: 'Fee earner',
                       valueLabel: (() => {
-                        const fe = people.find((p) => p.id === feeEarnerFilter);
+                        const fe = employees.find((p) => p.id === feeEarnerFilter) ?? people.find((p) => p.id === feeEarnerFilter);
                         return fe ? personDisplayName(fe) : feeEarnerFilter;
                       })(),
-                      onRemove: () => setFeeEarnerFilter('all'),
+                      onRemove: () => handleFilter('feeEarnerFilter', 'all'),
                     } satisfies ActiveFilterChipItem,
                   ]
                 : []),
@@ -669,18 +793,12 @@ export function MattersListClient({
                       key: 'billingBasis',
                       label: 'Billing basis',
                       valueLabel: resolveLabel(values, billingBasisFilter),
-                      onRemove: () => setBillingBasisFilter('all'),
+                      onRemove: () => handleFilter('billingBasisFilter', 'all'),
                     } satisfies ActiveFilterChipItem,
                   ]
                 : []),
             ]}
-            onClearAll={() => {
-              setPracticeAreaId('all');
-              setStatusFilter('all');
-              setFeeEarnerFilter('all');
-              setBillingBasisFilter('all');
-              setQuery('');
-            }}
+            onClearAll={handleClearAll}
             density={density}
             onDensityChange={setDensity}
           />
@@ -736,6 +854,15 @@ export function MattersListClient({
               );
             }}
           />
+          {pagination ? (
+            <DataListPagination
+              page={pagination.page}
+              pageSize={pagination.pageSize}
+              totalCount={pagination.totalCount}
+              onPageChange={handlePageChange}
+              itemLabel="matters"
+            />
+          ) : null}
     </div>
   );
 }

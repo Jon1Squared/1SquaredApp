@@ -522,7 +522,9 @@ export async function getMatterFinanceRows(
 
   const [agedDebtRows, pmsInvoices, pmsAllDisbursements, allClientAccountEntries] =
     await Promise.all([
-      pmsRepo.getAgedDebt(ctx),
+      targetMatterCodes.length > 0
+        ? pmsRepo.listAgedDebtByMatterCodes(ctx, targetMatterCodes)
+        : Promise.resolve([]),
       pmsRepo.listInvoicesByMatterCodes(ctx, targetMatterCodes),
       disbMatterCodes.length > 0
         ? pmsRepo.listDisbursementsByMatterCodes(ctx, disbMatterCodes)

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Calendar } from 'lucide-react';
@@ -16,6 +16,7 @@ import {
   isUserTeamLeadFor,
   userTeams,
 } from '@/domain/tasks';
+import type { ListPaginationMeta, TasksListTabFilter } from '@/server/pageLoaders';
 import type {
   ChoiceValue,
   Enquiry,
@@ -29,8 +30,10 @@ import type {
 import {
   DataList,
   DataListFilterBar,
+  DataListPagination,
   PersonChip,
   useListDensity,
+  useServerListNavigation,
   type ActiveFilterChipItem,
   type DataListColumn,
   type DataListSortState,
@@ -48,9 +51,30 @@ interface Props {
   values: ChoiceValue[];
   currentUserId: string;
   currentUserRole?: import('@/domain/types').AppRole;
+  pagination?: ListPaginationMeta;
+  initialFilters?: {
+    tab: TasksListTabFilter;
+    query: string;
+    statusFilter: string;
+    priorityFilter: string;
+    typeFilter: string;
+    teamFilter: string;
+    recordTypeFilter: string;
+  };
 }
 
-type TasksTab = 'my' | 'team' | 'created' | 'all';
+type TasksTab = TasksListTabFilter;
+
+const TASKS_PARAM_DEFAULTS = {
+  tab: 'my',
+  q: '',
+  status: 'open',
+  priority: 'all',
+  type: 'all',
+  team: 'all',
+  recordType: 'all',
+  page: 1,
+};
 
 const PRIORITY_RANK: Record<string, number> = {
   urgent: 1,
@@ -115,8 +139,15 @@ export function TasksListClient({
   values,
   currentUserId,
   currentUserRole,
+  pagination,
+  initialFilters,
 }: Props) {
   const router = useRouter();
+  const { navigateNow, navigateDebounced } = useServerListNavigation({
+    basePath: '/tasks',
+    router,
+    defaults: TASKS_PARAM_DEFAULTS,
+  });
 
   const currentUser = useMemo(
     () => people.find((p) => p.id === currentUserId) ?? null,
@@ -126,15 +157,113 @@ export function TasksListClient({
   const myTeams = useMemo(() => userTeams(currentUserId, teams), [currentUserId, teams]);
   const myTeamIds = useMemo(() => new Set(myTeams.map((t) => t.id)), [myTeams]);
 
-  const [tab, setTab] = useState<TasksTab>('my');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [priorityFilter, setPriorityFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('open');
-  const [typeFilter, setTypeFilter] = useState('all');
-  const [teamFilter, setTeamFilter] = useState('all');
-  const [recordTypeFilter, setRecordTypeFilter] = useState('all');
+  const [tab, setTab] = useState<TasksTab>(initialFilters?.tab ?? 'my');
+  const [searchQuery, setSearchQuery] = useState(initialFilters?.query ?? '');
+  const [priorityFilter, setPriorityFilter] = useState(
+    initialFilters?.priorityFilter ?? 'all',
+  );
+  const [statusFilter, setStatusFilter] = useState(
+    initialFilters?.statusFilter ?? 'open',
+  );
+  const [typeFilter, setTypeFilter] = useState(initialFilters?.typeFilter ?? 'all');
+  const [teamFilter, setTeamFilter] = useState(initialFilters?.teamFilter ?? 'all');
+  const [recordTypeFilter, setRecordTypeFilter] = useState(
+    initialFilters?.recordTypeFilter ?? 'all',
+  );
   const [sort, setSort] = useState<DataListSortState | null>(null);
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
+
+  const initialKey = JSON.stringify(initialFilters ?? null);
+  const prevInitialKeyRef = useRef(initialKey);
+  useEffect(() => {
+    if (prevInitialKeyRef.current === initialKey) return;
+    prevInitialKeyRef.current = initialKey;
+    if (!initialFilters) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setTab(initialFilters.tab);
+      setSearchQuery(initialFilters.query);
+      setPriorityFilter(initialFilters.priorityFilter);
+      setStatusFilter(initialFilters.statusFilter);
+      setTypeFilter(initialFilters.typeFilter);
+      setTeamFilter(initialFilters.teamFilter);
+      setRecordTypeFilter(initialFilters.recordTypeFilter);
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialKey, initialFilters]);
+
+  const toQueryMap = (overrides?: Partial<{
+    tab: TasksTab;
+    query: string;
+    priorityFilter: string;
+    statusFilter: string;
+    typeFilter: string;
+    teamFilter: string;
+    recordTypeFilter: string;
+    page: number;
+  }>) => ({
+    tab: overrides?.tab ?? tab,
+    q: overrides?.query ?? searchQuery,
+    priority: overrides?.priorityFilter ?? priorityFilter,
+    status: overrides?.statusFilter ?? statusFilter,
+    type: overrides?.typeFilter ?? typeFilter,
+    team: overrides?.teamFilter ?? teamFilter,
+    recordType: overrides?.recordTypeFilter ?? recordTypeFilter,
+    page: overrides?.page ?? 1,
+  });
+
+  const handleTabChange = (next: TasksTab) => {
+    setTab(next);
+    if (pagination) navigateNow(toQueryMap({ tab: next, page: 1 }), 'replace');
+  };
+  const handleSearchChange = (next: string) => {
+    setSearchQuery(next);
+    if (pagination) navigateDebounced(toQueryMap({ query: next, page: 1 }));
+  };
+  const handleFilter = (
+    key:
+      | 'priorityFilter'
+      | 'statusFilter'
+      | 'typeFilter'
+      | 'teamFilter'
+      | 'recordTypeFilter',
+    val: string,
+  ) => {
+    if (key === 'priorityFilter') setPriorityFilter(val);
+    if (key === 'statusFilter') setStatusFilter(val);
+    if (key === 'typeFilter') setTypeFilter(val);
+    if (key === 'teamFilter') setTeamFilter(val);
+    if (key === 'recordTypeFilter') setRecordTypeFilter(val);
+    if (pagination) navigateNow(toQueryMap({ [key]: val, page: 1 }), 'replace');
+  };
+  const handleClearAll = () => {
+    setPriorityFilter('all');
+    setStatusFilter('open');
+    setTypeFilter('all');
+    setTeamFilter('all');
+    setRecordTypeFilter('all');
+    setSearchQuery('');
+    if (pagination) {
+      navigateNow(
+        toQueryMap({
+          priorityFilter: 'all',
+          statusFilter: 'open',
+          typeFilter: 'all',
+          teamFilter: 'all',
+          recordTypeFilter: 'all',
+          query: '',
+          page: 1,
+        }),
+        'replace',
+      );
+    }
+  };
+  const handlePageChange = (nextPage: number) => {
+    navigateNow(toQueryMap({ page: nextPage }), 'push');
+  };
 
   const taskTypes = useMemo(
     () => valuesForList(values, 'task_type').filter((v) => v.active),
@@ -206,7 +335,11 @@ export function TasksListClient({
 
   const tabTasks = useMemo(() => {
     if (tab === 'my') {
-      return tasks.filter((t) => t.assignedPersonId === currentUserId);
+      return tasks.filter(
+        (t) =>
+          t.assignedPersonId === currentUserId ||
+          Boolean(t.assignedPersonIds?.includes(currentUserId)),
+      );
     }
     if (tab === 'team') {
       return tasks.filter((t) => {
@@ -493,27 +626,27 @@ export function TasksListClient({
           role="tab"
           aria-selected={tab === 'my'}
           className={`tab-btn ${tab === 'my' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('my')}
+          onClick={() => handleTabChange('my')}
         >
-          My tasks ({myOpenCount})
+          My tasks{tab === 'my' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${myOpenCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'team'}
           className={`tab-btn ${tab === 'team' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('team')}
+          onClick={() => handleTabChange('team')}
         >
-          Team queue ({teamOpenCount})
+          Team queue{tab === 'team' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${teamOpenCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'created'}
           className={`tab-btn ${tab === 'created' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('created')}
+          onClick={() => handleTabChange('created')}
         >
-          Created by me ({createdCount})
+          Created by me{tab === 'created' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${createdCount})` : ''}
         </button>
         {(appRole === 'admin' || appRole === 'team_lead') && (
           <button
@@ -521,9 +654,9 @@ export function TasksListClient({
             role="tab"
             aria-selected={tab === 'all'}
             className={`tab-btn ${tab === 'all' ? 'tab-btn--active' : ''}`}
-            onClick={() => setTab('all')}
+            onClick={() => handleTabChange('all')}
           >
-            All open ({allOpenCount})
+            All open{tab === 'all' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${allOpenCount})` : ''}
           </button>
         )}
         <div
@@ -544,7 +677,7 @@ export function TasksListClient({
 
       <DataListFilterBar
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchChange}
         searchPlaceholder="Search reference, title, linked record, assignee…"
         searchAriaLabel="Search tasks"
         primaryFilters={
@@ -553,7 +686,7 @@ export function TasksListClient({
               aria-label="Filter by priority"
               className="field-select list-filter-row__select"
               value={priorityFilter}
-              onChange={(e) => setPriorityFilter(e.target.value)}
+              onChange={(e) => handleFilter('priorityFilter', e.target.value)}
             >
               <option value="all">All priorities</option>
               {taskPriorities.map((tp) => (
@@ -566,7 +699,7 @@ export function TasksListClient({
               aria-label="Filter by status"
               className="field-select list-filter-row__select"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => handleFilter('statusFilter', e.target.value)}
             >
               <option value="open">Open tasks</option>
               <option value="overdue">Overdue only</option>
@@ -596,7 +729,7 @@ export function TasksListClient({
                 aria-label="Filter by task type"
                 className="field-select"
                 value={typeFilter}
-                onChange={(e) => setTypeFilter(e.target.value)}
+                onChange={(e) => handleFilter('typeFilter', e.target.value)}
               >
                 <option value="all">All task types</option>
                 {taskTypes.map((tt) => (
@@ -615,7 +748,7 @@ export function TasksListClient({
                 aria-label="Filter by team"
                 className="field-select"
                 value={teamFilter}
-                onChange={(e) => setTeamFilter(e.target.value)}
+                onChange={(e) => handleFilter('teamFilter', e.target.value)}
               >
                 <option value="all">All teams</option>
                 {teams
@@ -636,7 +769,7 @@ export function TasksListClient({
                 aria-label="Filter by linked record type"
                 className="field-select"
                 value={recordTypeFilter}
-                onChange={(e) => setRecordTypeFilter(e.target.value)}
+                onChange={(e) => handleFilter('recordTypeFilter', e.target.value)}
               >
                 <option value="all">All record types</option>
                 <option value="enquiry">Enquiry</option>
@@ -655,7 +788,7 @@ export function TasksListClient({
                   key: 'priority',
                   label: 'Priority',
                   valueLabel: resolveLabel(values, priorityFilter),
-                  onRemove: () => setPriorityFilter('all'),
+                  onRemove: () => handleFilter('priorityFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -672,7 +805,7 @@ export function TasksListClient({
                         : statusFilter === 'overdue'
                           ? 'Overdue'
                           : statusFilter,
-                  onRemove: () => setStatusFilter('open'),
+                  onRemove: () => handleFilter('statusFilter', 'open'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -682,7 +815,7 @@ export function TasksListClient({
                   key: 'type',
                   label: 'Task type',
                   valueLabel: resolveLabel(values, typeFilter),
-                  onRemove: () => setTypeFilter('all'),
+                  onRemove: () => handleFilter('typeFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -692,7 +825,7 @@ export function TasksListClient({
                   key: 'team',
                   label: 'Team',
                   valueLabel: nameOfTeam(teamFilter),
-                  onRemove: () => setTeamFilter('all'),
+                  onRemove: () => handleFilter('teamFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -703,19 +836,12 @@ export function TasksListClient({
                   label: 'Record type',
                   valueLabel:
                     recordTypeFilter.charAt(0).toUpperCase() + recordTypeFilter.slice(1),
-                  onRemove: () => setRecordTypeFilter('all'),
+                  onRemove: () => handleFilter('recordTypeFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
         ]}
-        onClearAll={() => {
-          setPriorityFilter('all');
-          setStatusFilter('open');
-          setTypeFilter('all');
-          setTeamFilter('all');
-          setRecordTypeFilter('all');
-          setSearchQuery('');
-        }}
+        onClearAll={handleClearAll}
         density={density}
         onDensityChange={setDensity}
       />
@@ -771,6 +897,15 @@ export function TasksListClient({
           );
         }}
       />
+      {pagination ? (
+        <DataListPagination
+          page={pagination.page}
+          pageSize={pagination.pageSize}
+          totalCount={pagination.totalCount}
+          onPageChange={handlePageChange}
+          itemLabel="tasks"
+        />
+      ) : null}
     </div>
   );
 }

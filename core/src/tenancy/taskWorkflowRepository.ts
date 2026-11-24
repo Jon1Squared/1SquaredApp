@@ -1009,6 +1009,176 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     });
   }
 
+  private buildVisibleTasksWhereSql(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      status?: string;
+      statusFilter?: 'open' | 'overdue' | 'done' | 'all' | string;
+      overdueBeforeIso?: string;
+      openOnly?: boolean;
+      assignedTeamId?: string;
+      assignedPersonId?: string;
+      assignedPersonIdOrMulti?: string;
+      linkedRecordType?: string;
+      linkedRecordId?: string;
+      linkedRecordIds?: readonly string[];
+      tabFilter?: {
+        readonly mode: 'my' | 'team' | 'created' | 'all';
+        readonly actorId?: string;
+        readonly teamIds?: readonly string[];
+      };
+      priorityId?: string;
+      taskTypeId?: string;
+      recordType?: string;
+      query?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeRestricted = Boolean(options?.includeRestricted);
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const params: unknown[] = includeRestricted
+      ? [ctx.tenantId]
+      : [ctx.tenantId, viewerId];
+    const clauses: string[] = ['t.tenant_id = $1'];
+    if (!includeRestricted) {
+      clauses.push(
+        hasRestrictedMatterAccess
+          ? TASK_DRAFT_ONLY_SQL_PREDICATE
+          : TASK_VISIBLE_SQL_PREDICATE,
+      );
+    }
+    if (options?.status) {
+      params.push(options.status);
+      clauses.push(`t.status = $${params.length}`);
+    } else if (options?.statusFilter && options.statusFilter !== 'all') {
+      if (options.statusFilter === 'open') {
+        clauses.push(`t.status IN ('To do', 'In progress', 'Waiting')`);
+      } else if (options.statusFilter === 'done') {
+        clauses.push(`t.status IN ('Done', 'Cancelled')`);
+      } else if (options.statusFilter === 'overdue') {
+        const cutoff =
+          options.overdueBeforeIso?.trim().slice(0, 10) ||
+          new Date().toISOString().slice(0, 10);
+        params.push(cutoff);
+        clauses.push(
+          `t.status IN ('To do', 'In progress', 'Waiting') AND t.due_at IS NOT NULL AND t.due_at <> '' AND substring(t.due_at from 1 for 10) < $${params.length}`,
+        );
+      } else {
+        params.push(options.statusFilter);
+        clauses.push(`t.status = $${params.length}`);
+      }
+    }
+    if (options?.openOnly) {
+      clauses.push(`t.status IN ('To do', 'In progress', 'Waiting')`);
+    }
+    if (options?.overdueBeforeIso && options?.statusFilter === undefined) {
+      params.push(options.overdueBeforeIso.slice(0, 10));
+      clauses.push(
+        `t.due_at IS NOT NULL AND t.due_at <> '' AND substring(t.due_at from 1 for 10) < $${params.length}`,
+      );
+    }
+    if (options?.tabFilter && options.tabFilter.mode !== 'all') {
+      const tabActorId = options.tabFilter.actorId?.trim() || viewerId;
+      if (options.tabFilter.mode === 'my') {
+        params.push(tabActorId);
+        const aIdx = params.length;
+        clauses.push(
+          `(t.assigned_person_id = $${aIdx} OR t.assigned_person_ids_json ? $${aIdx})`,
+        );
+      } else if (options.tabFilter.mode === 'created') {
+        params.push(tabActorId);
+        clauses.push(`t.created_by_id = $${params.length}`);
+      } else if (options.tabFilter.mode === 'team') {
+        const teamIds = Array.from(
+          new Set((options.tabFilter.teamIds ?? []).map((x) => x.trim()).filter(Boolean)),
+        );
+        if (teamIds.length > 0 && !options.assignedTeamId) {
+          params.push(teamIds);
+          clauses.push(`t.assigned_team_id = ANY($${params.length}::text[])`);
+        } else {
+          clauses.push(`t.assigned_team_id IS NOT NULL AND t.assigned_team_id <> ''`);
+        }
+      }
+    }
+    if (options?.priorityId) {
+      params.push(options.priorityId);
+      clauses.push(`t.priority_id = $${params.length}`);
+    }
+    if (options?.taskTypeId) {
+      params.push(options.taskTypeId);
+      clauses.push(`t.task_type_id = $${params.length}`);
+    }
+    if (options?.assignedTeamId) {
+      params.push(options.assignedTeamId);
+      clauses.push(`t.assigned_team_id = $${params.length}`);
+    }
+    const assigneeId = options?.assignedPersonIdOrMulti ?? options?.assignedPersonId;
+    if (assigneeId) {
+      params.push(assigneeId);
+      clauses.push(
+        `(t.assigned_person_id = $${params.length} OR t.assigned_person_ids_json ? $${params.length})`,
+      );
+    }
+    if (options?.recordType) {
+      params.push(options.recordType);
+      clauses.push(
+        `EXISTS (
+           SELECT 1 FROM task_linked_records tlr
+           WHERE tlr.tenant_id = t.tenant_id
+             AND tlr.task_id = t.id
+             AND tlr.record_type = $${params.length}
+         )`,
+      );
+    }
+    if (options?.linkedRecordType && options?.linkedRecordId) {
+      params.push(options.linkedRecordType, options.linkedRecordId);
+      const typeIdx = params.length - 1;
+      const idIdx = params.length;
+      clauses.push(
+        `EXISTS (
+           SELECT 1 FROM task_linked_records tlr
+           WHERE tlr.tenant_id = t.tenant_id
+             AND tlr.task_id = t.id
+             AND tlr.record_type = $${typeIdx}
+             AND tlr.record_id = $${idIdx}
+         )`,
+      );
+    }
+    const linkedRecordIds = Array.from(
+      new Set((options?.linkedRecordIds ?? []).map((x) => x.trim()).filter(Boolean)),
+    );
+    if (linkedRecordIds.length > 0) {
+      params.push(linkedRecordIds);
+      clauses.push(
+        `EXISTS (
+           SELECT 1 FROM task_linked_records tlr
+           WHERE tlr.tenant_id = t.tenant_id
+             AND tlr.task_id = t.id
+             AND tlr.record_id = ANY($${params.length}::text[])
+         )`,
+      );
+    }
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+    if (cleanQuery) {
+      const patVal = `%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`;
+      params.push(patVal);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(t.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(t.reference, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(t.title, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(t.description, '')) LIKE ${pat} ESCAPE '\\'
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
   public async listVisibleTasks<T = TenantTaskRecord>(
     ctx: TenantContext,
     viewerId: string,
@@ -1028,73 +1198,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const includeRestricted = Boolean(options?.includeRestricted);
-      const hasRestrictedMatterAccess = Boolean(
-        options?.hasRestrictedMatterAccess,
+      const { whereSql, params } = this.buildVisibleTasksWhereSql(
+        ctx,
+        viewerId,
+        options,
       );
-      const params: unknown[] = includeRestricted
-        ? [ctx.tenantId]
-        : [ctx.tenantId, viewerId];
-      const clauses: string[] = ['t.tenant_id = $1'];
-      if (!includeRestricted) {
-        clauses.push(
-          hasRestrictedMatterAccess
-            ? TASK_DRAFT_ONLY_SQL_PREDICATE
-            : TASK_VISIBLE_SQL_PREDICATE,
-        );
-      }
-      if (options?.status) {
-        params.push(options.status);
-        clauses.push(`t.status = $${params.length}`);
-      }
-      if (options?.openOnly) {
-        clauses.push(`t.status IN ('To do', 'In progress', 'Waiting')`);
-      }
-      if (options?.overdueBeforeIso) {
-        params.push(options.overdueBeforeIso.slice(0, 10));
-        clauses.push(
-          `t.due_at IS NOT NULL AND t.due_at <> '' AND substring(t.due_at from 1 for 10) < $${params.length}`,
-        );
-      }
-      if (options?.assignedTeamId) {
-        params.push(options.assignedTeamId);
-        clauses.push(`t.assigned_team_id = $${params.length}`);
-      }
-      const assigneeId = options?.assignedPersonIdOrMulti ?? options?.assignedPersonId;
-      if (assigneeId) {
-        params.push(assigneeId);
-        clauses.push(
-          `(t.assigned_person_id = $${params.length} OR t.assigned_person_ids_json ? $${params.length})`,
-        );
-      }
-      if (options?.linkedRecordType && options?.linkedRecordId) {
-        params.push(options.linkedRecordType, options.linkedRecordId);
-        const typeIdx = params.length - 1;
-        const idIdx = params.length;
-        clauses.push(
-          `EXISTS (
-             SELECT 1 FROM task_linked_records tlr
-             WHERE tlr.tenant_id = t.tenant_id
-               AND tlr.task_id = t.id
-               AND tlr.record_type = $${typeIdx}
-               AND tlr.record_id = $${idIdx}
-           )`,
-        );
-      }
-      const linkedRecordIds = Array.from(
-        new Set((options?.linkedRecordIds ?? []).map((x) => x.trim()).filter(Boolean)),
-      );
-      if (linkedRecordIds.length > 0) {
-        params.push(linkedRecordIds);
-        clauses.push(
-          `EXISTS (
-             SELECT 1 FROM task_linked_records tlr
-             WHERE tlr.tenant_id = t.tenant_id
-               AND tlr.task_id = t.id
-               AND tlr.record_id = ANY($${params.length}::text[])
-           )`,
-        );
-      }
       let limitClause = '';
       if (options?.limit && options.limit > 0) {
         params.push(Math.floor(options.limit));
@@ -1103,7 +1211,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
 
       const res = await tx.query<TaskRow>(
         `SELECT * FROM tasks t
-         WHERE ${clauses.join(' AND ')}
+         WHERE ${whereSql}
          ORDER BY t.created_at DESC, t.id ASC${limitClause}`,
         params,
       );
@@ -1118,6 +1226,86 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       return res.rows.map(
         (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
       );
+    });
+  }
+
+  /**
+   * Loads a bounded page of visible tasks plus total match count (`R702`).
+   * Always orders open tasks before completed/cancelled tasks so newer done tasks
+   * can never push older open tasks off page 1.
+   */
+  public async listVisibleTasksPageWithCount<T = TenantTaskRecord>(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      statusFilter?: 'open' | 'overdue' | 'done' | 'all' | string;
+      overdueBeforeIso?: string;
+      tabFilter?: {
+        readonly mode: 'my' | 'team' | 'created' | 'all';
+        readonly actorId?: string;
+        readonly teamIds?: readonly string[];
+      };
+      priorityId?: string;
+      taskTypeId?: string;
+      assignedTeamId?: string;
+      recordType?: string;
+      query?: string;
+      hasRestrictedMatterAccess?: boolean;
+      limit?: number;
+      offset?: number;
+    },
+  ): Promise<{ readonly items: T[]; readonly totalCount: number }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 100;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const { whereSql, params } = this.buildVisibleTasksWhereSql(ctx, viewerId, {
+      statusFilter: options?.statusFilter,
+      overdueBeforeIso: options?.overdueBeforeIso,
+      tabFilter: options?.tabFilter,
+      priorityId: options?.priorityId,
+      taskTypeId: options?.taskTypeId,
+      assignedTeamId: options?.assignedTeamId,
+      recordType: options?.recordType,
+      query: options?.query,
+      hasRestrictedMatterAccess: options?.hasRestrictedMatterAccess,
+    });
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM tasks t WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const pageParams = [...params, limit, offset];
+      const res = await tx.query<TaskRow>(
+        `SELECT * FROM tasks t
+         WHERE ${whereSql}
+         ORDER BY
+           CASE WHEN t.status IN ('To do', 'In progress', 'Waiting') THEN 0 ELSE 1 END ASC,
+           NULLIF(t.due_at, '') ASC NULLS LAST,
+           t.created_at DESC,
+           t.id ASC
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'tasks.listVisibleTasksPageWithCount');
+      }
+      const linkedMap = await this.loadTaskLinkedRecordsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return {
+        items: res.rows.map(
+          (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
+        ),
+        totalCount,
+      };
     });
   }
 

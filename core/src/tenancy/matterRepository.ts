@@ -2351,7 +2351,11 @@ export class TenantMatterRepository extends TenantScopedRepository {
       excludeIds?: readonly string[];
       query?: string;
       statusId?: string;
+      cmiIncompleteStatusIds?: readonly string[];
       practiceAreaId?: string;
+      typeBadge?: string;
+      billingBasisId?: string;
+      mineOnly?: boolean;
       responsiblePartnerId?: string;
       leadFeeEarnerId?: string;
       staffRestrictedOnly?: boolean;
@@ -2369,7 +2373,17 @@ export class TenantMatterRepository extends TenantScopedRepository {
       ),
     );
     const statusId = viewerOrOptions?.statusId?.trim() || undefined;
+    const cmiIncompleteStatusIds = Array.from(
+      new Set(
+        (viewerOrOptions?.cmiIncompleteStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
     const practiceAreaId = viewerOrOptions?.practiceAreaId?.trim() || undefined;
+    const typeBadge = viewerOrOptions?.typeBadge?.trim() || undefined;
+    const billingBasisId = viewerOrOptions?.billingBasisId?.trim() || undefined;
+    const mineOnly = Boolean(viewerOrOptions?.mineOnly);
     const responsiblePartnerId =
       viewerOrOptions?.responsiblePartnerId?.trim() || undefined;
     const leadFeeEarnerId =
@@ -2421,11 +2435,38 @@ export class TenantMatterRepository extends TenantScopedRepository {
       }
       if (statusId) {
         params.push(statusId);
-        clauses.push(`m.status_id = $${params.length}`);
+        const sIdx = params.length;
+        if (cmiIncompleteStatusIds.includes(statusId)) {
+          clauses.push(
+            `(m.status_id = $${sIdx} OR m.opening_record_json->>'amlStatus' IN ('Pending', 'CMI incomplete'))`,
+          );
+        } else {
+          clauses.push(`m.status_id = $${sIdx}`);
+        }
       }
       if (practiceAreaId) {
         params.push(practiceAreaId);
         clauses.push(`m.practice_area_id = $${params.length}`);
+      }
+      if (typeBadge) {
+        params.push(typeBadge);
+        clauses.push(`m.opening_record_json->>'typeBadge' = $${params.length}`);
+      }
+      if (billingBasisId) {
+        params.push(billingBasisId);
+        clauses.push(`m.opening_record_json->>'billingBasisId' = $${params.length}`);
+      }
+      if (mineOnly) {
+        params.push(viewerId);
+        const vIdx = params.length;
+        clauses.push(
+          `(
+            m.responsible_fee_earner_id = $${vIdx}
+            OR m.responsible_partner_id = $${vIdx}
+            OR m.supervisor_id = $${vIdx}
+            OR (m.opening_record_json->'teamMemberIds') ? $${vIdx}
+          )`,
+        );
       }
       if (responsiblePartnerId) {
         params.push(responsiblePartnerId);
@@ -2499,6 +2540,81 @@ export class TenantMatterRepository extends TenantScopedRepository {
         ),
         totalCount,
       };
+    });
+  }
+
+  /**
+   * Counts visible, unmerged, non-closed matters per organisation `client_id` in SQL (`R702`)
+   * so `/organisations` avoids fetching a capped full-tenant matters array solely for row counts.
+   */
+  public async countVisibleActiveMattersByOrgIds(
+    ctx: TenantContext,
+    organisationIds: readonly string[],
+    options?: {
+      readonly viewerId?: string;
+      readonly viewerUserId?: string;
+      readonly includeRestricted?: boolean;
+      readonly hasRestrictedMatterAccess?: boolean;
+      readonly closedStatusIds?: readonly string[];
+    },
+  ): Promise<Record<string, number>> {
+    const cleanOrgIds = Array.from(
+      new Set(
+        organisationIds
+          .map((id) => id?.trim())
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+    if (cleanOrgIds.length === 0) return {};
+    const closedStatusIds = Array.from(
+      new Set(
+        (options?.closedStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+    const { viewerId, includeRestricted } = this.resolveMatterViewerOptions(
+      ctx,
+      options ?? ctx.actorId,
+    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const params: unknown[] = includeRestricted
+        ? [ctx.tenantId, cleanOrgIds]
+        : [ctx.tenantId, cleanOrgIds, viewerId];
+      const clauses = [
+        'm.tenant_id = $1',
+        "m.client_id <> 'O-KEYDATE-STUB'",
+        'm.client_id = ANY($2::text[])',
+        "NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL",
+      ];
+      if (!includeRestricted) {
+        clauses.push(`(
+          (
+            m.is_staff_matter = FALSE
+            AND m.has_ethical_wall = FALSE
+            AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+          )
+          OR m.restricted_access_user_ids_json ? $3
+        )`);
+      }
+      if (closedStatusIds.length > 0) {
+        params.push(closedStatusIds);
+        clauses.push(
+          `(m.status_id IS NULL OR m.status_id <> ALL($${params.length}::text[]))`,
+        );
+      }
+      const res = await tx.query<{ client_id: string; cnt: number }>(
+        `SELECT m.client_id, COUNT(*)::int AS cnt
+         FROM public.matters m
+         WHERE ${clauses.join(' AND ')}
+         GROUP BY m.client_id`,
+        params,
+      );
+      const out: Record<string, number> = {};
+      for (const row of res.rows) {
+        out[row.client_id] = Number(row.cnt ?? 0);
+      }
+      return out;
     });
   }
 

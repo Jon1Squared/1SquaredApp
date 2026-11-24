@@ -1383,6 +1383,193 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     });
   }
 
+  private buildVisibleEnquiriesWhereSql(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      status?: string;
+      statuses?: readonly string[];
+      excludeStatuses?: readonly string[];
+      openOnly?: boolean;
+      assignedTeamId?: string;
+      assignedTeamIds?: readonly string[];
+      requireAssignedTeam?: boolean;
+      assignedToId?: string;
+      assignedToOrTeams?: {
+        readonly assignedToId?: string;
+        readonly assignedTeamIds?: readonly string[];
+      };
+      createdOrTakenById?: string;
+      practiceAreaId?: string;
+      urgencyId?: string;
+      channelId?: string;
+      linkedPersonId?: string;
+      relatedPersonId?: string;
+      linkedOrganisationId?: string;
+      relatedOrganisationId?: string;
+      convertedMatterId?: string;
+      linkedPersonIds?: readonly string[];
+      linkedOrganisationIds?: readonly string[];
+      query?: string;
+      excludeIds?: readonly string[];
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeRestricted = Boolean(options?.includeRestricted);
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const params: unknown[] = includeRestricted
+      ? [ctx.tenantId]
+      : [ctx.tenantId, viewerId];
+    const clauses: string[] = ['e.tenant_id = $1'];
+    if (!includeRestricted) {
+      clauses.push(
+        hasRestrictedMatterAccess
+          ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
+          : ENQUIRY_VISIBLE_SQL_PREDICATE,
+      );
+    }
+    if (options?.status) {
+      params.push(options.status);
+      clauses.push(`e.status = $${params.length}`);
+    }
+    const statuses = Array.from(new Set((options?.statuses ?? []).filter(Boolean)));
+    if (statuses.length > 0) {
+      params.push(statuses);
+      clauses.push(`e.status = ANY($${params.length}::text[])`);
+    }
+    const excludeStatuses = new Set((options?.excludeStatuses ?? []).filter(Boolean));
+    if (options?.openOnly) {
+      for (const closed of ['Converted', 'Declined', 'Referred out', 'No response']) {
+        excludeStatuses.add(closed);
+      }
+    }
+    if (excludeStatuses.size > 0) {
+      params.push(Array.from(excludeStatuses));
+      clauses.push(`e.status <> ALL($${params.length}::text[])`);
+    }
+    if (options?.assignedTeamId) {
+      params.push(options.assignedTeamId);
+      clauses.push(`e.assigned_team_id = $${params.length}`);
+    }
+    const assignedTeamIds = Array.from(
+      new Set((options?.assignedTeamIds ?? []).map((x) => x.trim()).filter(Boolean)),
+    );
+    if (assignedTeamIds.length > 0) {
+      params.push(assignedTeamIds);
+      clauses.push(`e.assigned_team_id = ANY($${params.length}::text[])`);
+    } else if (options?.requireAssignedTeam) {
+      clauses.push(`e.assigned_team_id IS NOT NULL AND e.assigned_team_id <> ''`);
+    }
+    if (options?.assignedToId) {
+      params.push(options.assignedToId);
+      clauses.push(`e.assigned_to_id = $${params.length}`);
+    }
+    if (options?.assignedToOrTeams) {
+      const orParts: string[] = [];
+      const assignedTo = options.assignedToOrTeams.assignedToId?.trim();
+      const teamIds = Array.from(
+        new Set((options.assignedToOrTeams.assignedTeamIds ?? []).filter(Boolean)),
+      );
+      if (assignedTo) {
+        params.push(assignedTo);
+        orParts.push(`e.assigned_to_id = $${params.length}`);
+      }
+      if (teamIds.length > 0) {
+        params.push(teamIds);
+        orParts.push(`e.assigned_team_id = ANY($${params.length}::text[])`);
+      }
+      if (orParts.length > 0) {
+        clauses.push(`(${orParts.join(' OR ')})`);
+      }
+    }
+    if (options?.createdOrTakenById?.trim()) {
+      params.push(options.createdOrTakenById.trim());
+      const cIdx = params.length;
+      clauses.push(`(e.taken_by_id = $${cIdx} OR e.created_by_id = $${cIdx})`);
+    }
+    if (options?.practiceAreaId?.trim()) {
+      params.push(options.practiceAreaId.trim());
+      clauses.push(`e.practice_area_id = $${params.length}`);
+    }
+    if (options?.urgencyId?.trim()) {
+      params.push(options.urgencyId.trim());
+      clauses.push(`e.urgency_id = $${params.length}`);
+    }
+    if (options?.channelId?.trim()) {
+      params.push(options.channelId.trim());
+      clauses.push(`e.channel_id = $${params.length}`);
+    }
+    if (options?.linkedPersonId?.trim()) {
+      params.push(options.linkedPersonId.trim());
+      clauses.push(`e.linked_person_id = $${params.length}`);
+    }
+    if (options?.relatedPersonId?.trim()) {
+      params.push(options.relatedPersonId.trim());
+      const idx = params.length;
+      clauses.push(
+        `(e.linked_person_id = $${idx} OR e.referrer_person_id = $${idx} OR e.taken_by_id = $${idx} OR e.assigned_to_id = $${idx} OR e.created_by_id = $${idx})`,
+      );
+    }
+    if (options?.linkedOrganisationId?.trim()) {
+      params.push(options.linkedOrganisationId.trim());
+      clauses.push(`e.linked_organisation_id = $${params.length}`);
+    }
+    if (options?.relatedOrganisationId?.trim()) {
+      params.push(options.relatedOrganisationId.trim());
+      const idx = params.length;
+      clauses.push(
+        `(e.linked_organisation_id = $${idx} OR e.referred_to_organisation_id = $${idx})`,
+      );
+    }
+    if (options?.convertedMatterId?.trim()) {
+      params.push(options.convertedMatterId.trim());
+      clauses.push(`e.converted_matter_id = $${params.length}`);
+    }
+    const linkedPersonIds = Array.from(
+      new Set((options?.linkedPersonIds ?? []).filter(Boolean)),
+    );
+    if (linkedPersonIds.length > 0) {
+      params.push(linkedPersonIds);
+      clauses.push(`e.linked_person_id = ANY($${params.length}::text[])`);
+    }
+    const linkedOrgIds = Array.from(
+      new Set((options?.linkedOrganisationIds ?? []).filter(Boolean)),
+    );
+    if (linkedOrgIds.length > 0) {
+      params.push(linkedOrgIds);
+      clauses.push(`e.linked_organisation_id = ANY($${params.length}::text[])`);
+    }
+    const excludeIds = Array.from(
+      new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (excludeIds.length > 0) {
+      params.push(excludeIds);
+      clauses.push(`e.id <> ALL($${params.length}::text[])`);
+    }
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+    if (cleanQuery) {
+      params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(e.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.reference, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.first_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.last_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(trim(concat_ws(' ', NULLIF(e.first_name, ''), NULLIF(e.last_name, '')))) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.calling_on_behalf_of, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.email, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.phone, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.summary_and_notes_json->>'summary', '')) LIKE ${pat} ESCAPE '\\'
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
   public async listVisibleEnquiries<T = TenantEnquiryRecord>(
     ctx: TenantContext,
     viewerId: string,
@@ -1412,133 +1599,18 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<T[]> {
+    const includeRestricted = Boolean(options?.includeRestricted);
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const { whereSql, params } = this.buildVisibleEnquiriesWhereSql(
+      ctx,
+      viewerId,
+      options,
+    );
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const includeRestricted = Boolean(options?.includeRestricted);
-      const hasRestrictedMatterAccess = Boolean(
-        options?.hasRestrictedMatterAccess,
-      );
-      const params: unknown[] = includeRestricted
-        ? [ctx.tenantId]
-        : [ctx.tenantId, viewerId];
-      const clauses: string[] = ['e.tenant_id = $1'];
-      if (!includeRestricted) {
-        clauses.push(
-          hasRestrictedMatterAccess
-            ? ENQUIRY_DRAFT_ONLY_SQL_PREDICATE
-            : ENQUIRY_VISIBLE_SQL_PREDICATE,
-        );
-      }
-      if (options?.status) {
-        params.push(options.status);
-        clauses.push(`e.status = $${params.length}`);
-      }
-      const statuses = Array.from(new Set((options?.statuses ?? []).filter(Boolean)));
-      if (statuses.length > 0) {
-        params.push(statuses);
-        clauses.push(`e.status = ANY($${params.length}::text[])`);
-      }
-      const excludeStatuses = new Set((options?.excludeStatuses ?? []).filter(Boolean));
-      if (options?.openOnly) {
-        for (const closed of ['Converted', 'Declined', 'Referred out', 'No response']) {
-          excludeStatuses.add(closed);
-        }
-      }
-      if (excludeStatuses.size > 0) {
-        params.push(Array.from(excludeStatuses));
-        clauses.push(`e.status <> ALL($${params.length}::text[])`);
-      }
-      if (options?.assignedTeamId) {
-        params.push(options.assignedTeamId);
-        clauses.push(`e.assigned_team_id = $${params.length}`);
-      }
-      if (options?.assignedToId) {
-        params.push(options.assignedToId);
-        clauses.push(`e.assigned_to_id = $${params.length}`);
-      }
-      if (options?.assignedToOrTeams) {
-        const orParts: string[] = [];
-        const assignedTo = options.assignedToOrTeams.assignedToId?.trim();
-        const teamIds = Array.from(
-          new Set((options.assignedToOrTeams.assignedTeamIds ?? []).filter(Boolean)),
-        );
-        if (assignedTo) {
-          params.push(assignedTo);
-          orParts.push(`e.assigned_to_id = $${params.length}`);
-        }
-        if (teamIds.length > 0) {
-          params.push(teamIds);
-          orParts.push(`e.assigned_team_id = ANY($${params.length}::text[])`);
-        }
-        if (orParts.length > 0) {
-          clauses.push(`(${orParts.join(' OR ')})`);
-        }
-      }
-      if (options?.linkedPersonId?.trim()) {
-        params.push(options.linkedPersonId.trim());
-        clauses.push(`e.linked_person_id = $${params.length}`);
-      }
-      if (options?.relatedPersonId?.trim()) {
-        params.push(options.relatedPersonId.trim());
-        const idx = params.length;
-        clauses.push(
-          `(e.linked_person_id = $${idx} OR e.referrer_person_id = $${idx} OR e.taken_by_id = $${idx} OR e.assigned_to_id = $${idx} OR e.created_by_id = $${idx})`,
-        );
-      }
-      if (options?.linkedOrganisationId?.trim()) {
-        params.push(options.linkedOrganisationId.trim());
-        clauses.push(`e.linked_organisation_id = $${params.length}`);
-      }
-      if (options?.relatedOrganisationId?.trim()) {
-        params.push(options.relatedOrganisationId.trim());
-        const idx = params.length;
-        clauses.push(
-          `(e.linked_organisation_id = $${idx} OR e.referred_to_organisation_id = $${idx})`,
-        );
-      }
-      if (options?.convertedMatterId?.trim()) {
-        params.push(options.convertedMatterId.trim());
-        clauses.push(`e.converted_matter_id = $${params.length}`);
-      }
-      const linkedPersonIds = Array.from(
-        new Set((options?.linkedPersonIds ?? []).filter(Boolean)),
-      );
-      if (linkedPersonIds.length > 0) {
-        params.push(linkedPersonIds);
-        clauses.push(`e.linked_person_id = ANY($${params.length}::text[])`);
-      }
-      const linkedOrgIds = Array.from(
-        new Set((options?.linkedOrganisationIds ?? []).filter(Boolean)),
-      );
-      if (linkedOrgIds.length > 0) {
-        params.push(linkedOrgIds);
-        clauses.push(`e.linked_organisation_id = ANY($${params.length}::text[])`);
-      }
-      const excludeIds = Array.from(
-        new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
-      );
-      if (excludeIds.length > 0) {
-        params.push(excludeIds);
-        clauses.push(`e.id <> ALL($${params.length}::text[])`);
-      }
-      const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
-      if (cleanQuery) {
-        params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
-        const pat = `$${params.length}`;
-        clauses.push(
-          `(
-             lower(COALESCE(e.id, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(e.reference, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(e.first_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(e.last_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(trim(concat_ws(' ', NULLIF(e.first_name, ''), NULLIF(e.last_name, '')))) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(e.calling_on_behalf_of, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(e.email, '')) LIKE ${pat} ESCAPE '\\'
-           )`,
-        );
-      }
-
       let sql = `SELECT * FROM enquiries e
-         WHERE ${clauses.join(' AND ')}
+         WHERE ${whereSql}
          ORDER BY e.received_at DESC, e.id ASC`;
       if (typeof options?.limit === 'number' && Number.isFinite(options.limit)) {
         params.push(Math.max(1, Math.min(500, Math.floor(options.limit))));
@@ -1564,6 +1636,83 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
             : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
         ) as unknown as T;
       });
+    });
+  }
+
+  /**
+   * Loads a bounded page of visible enquiries plus total SQL match count (`R702`).
+   */
+  public async listVisibleEnquiriesPageWithCount<T = TenantEnquiryRecord>(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      status?: string;
+      statuses?: readonly string[];
+      excludeStatuses?: readonly string[];
+      openOnly?: boolean;
+      assignedTeamId?: string;
+      assignedTeamIds?: readonly string[];
+      requireAssignedTeam?: boolean;
+      assignedToId?: string;
+      createdOrTakenById?: string;
+      practiceAreaId?: string;
+      urgencyId?: string;
+      channelId?: string;
+      query?: string;
+      excludeIds?: readonly string[];
+      limit?: number;
+      offset?: number;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<{ readonly items: T[]; readonly totalCount: number }> {
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 100;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const { whereSql, params } = this.buildVisibleEnquiriesWhereSql(
+      ctx,
+      viewerId,
+      options,
+    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM enquiries e WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const pageParams = [...params, limit, offset];
+      const res = await tx.query<EnquiryRow>(
+        `SELECT * FROM enquiries e
+         WHERE ${whereSql}
+         ORDER BY e.received_at DESC, e.id ASC
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const hiddenMatterIds = hasRestrictedMatterAccess
+        ? new Set<string>()
+        : await this.listHiddenRestrictedMatterIdsInTx(tx, ctx, viewerId);
+
+      const items = res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'enquiries.listVisibleEnquiriesPageWithCount',
+        );
+        const mapped = mapRowToEnquiry(row);
+        return (
+          hasRestrictedMatterAccess
+            ? mapped
+            : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
+        ) as unknown as T;
+      });
+      return { items, totalCount };
     });
   }
 
@@ -1943,6 +2092,205 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     });
   }
 
+  private buildVisibleQuotesWhereSql(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      status?: string;
+      statuses?: readonly string[];
+      excludeStatuses?: readonly string[];
+      effectiveOpenTodayYmd?: string;
+      effectiveClosedTodayYmd?: string;
+      effectiveExpiredTodayYmd?: string;
+      supersededInHistoryOnly?: boolean;
+      assignedTeamId?: string;
+      assignedTeamIds?: readonly string[];
+      requireAssignedTeam?: boolean;
+      feeEarnerId?: string;
+      createdOrPreparedById?: string;
+      practiceAreaId?: string;
+      feeBasis?: string;
+      urgencyId?: string;
+      channelId?: string;
+      validUntilFrom?: string;
+      validUntilTo?: string;
+      followUpDue?: {
+        readonly mode: 'overdue' | 'today' | 'this_week';
+        readonly todayYmd: string;
+        readonly weekEndYmd: string;
+      };
+      sourceEnquiryId?: string;
+      convertedMatterId?: string;
+      linkedPersonId?: string;
+      linkedOrganisationId?: string;
+      query?: string;
+      excludeIds?: readonly string[];
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeRestricted = Boolean(options?.includeRestricted);
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const params: unknown[] = includeRestricted
+      ? [ctx.tenantId]
+      : [ctx.tenantId, viewerId];
+    const clauses: string[] = ['q.tenant_id = $1'];
+    if (!includeRestricted) {
+      clauses.push(
+        hasRestrictedMatterAccess
+          ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+          : QUOTE_VISIBLE_SQL_PREDICATE,
+      );
+    }
+    if (options?.status) {
+      params.push(options.status);
+      clauses.push(`q.status = $${params.length}`);
+    }
+    if (options?.effectiveOpenTodayYmd) {
+      params.push(options.effectiveOpenTodayYmd);
+      clauses.push(
+        `q.status IN ('Sent', 'Follow-up due') AND (q.valid_until IS NULL OR q.valid_until = '' OR q.valid_until >= $${params.length})`,
+      );
+    } else if (options?.effectiveClosedTodayYmd) {
+      params.push(options.effectiveClosedTodayYmd);
+      clauses.push(
+        `(q.status IN ('Accepted', 'Declined', 'Expired', 'Superseded') OR (q.status IN ('Sent', 'Follow-up due') AND q.valid_until IS NOT NULL AND q.valid_until <> '' AND q.valid_until < $${params.length}))`,
+      );
+    } else if (options?.effectiveExpiredTodayYmd) {
+      params.push(options.effectiveExpiredTodayYmd);
+      clauses.push(
+        `(q.status = 'Expired' OR (q.status IN ('Sent', 'Follow-up due') AND q.valid_until IS NOT NULL AND q.valid_until <> '' AND q.valid_until < $${params.length}))`,
+      );
+    } else if (options?.supersededInHistoryOnly) {
+      clauses.push(
+        `(q.status = 'Superseded' OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(q.version_history_json, '[]'::jsonb)) vh WHERE vh->>'status' = 'Superseded'))`,
+      );
+    }
+    const statuses = Array.from(new Set((options?.statuses ?? []).filter(Boolean)));
+    if (statuses.length > 0) {
+      params.push(statuses);
+      clauses.push(`q.status = ANY($${params.length}::text[])`);
+    }
+    const excludeStatuses = Array.from(
+      new Set((options?.excludeStatuses ?? []).filter(Boolean)),
+    );
+    if (excludeStatuses.length > 0) {
+      params.push(excludeStatuses);
+      clauses.push(`q.status <> ALL($${params.length}::text[])`);
+    }
+    if (options?.assignedTeamId) {
+      params.push(options.assignedTeamId);
+      clauses.push(`q.assigned_team_id = $${params.length}`);
+    }
+    const assignedTeamIds = Array.from(
+      new Set((options?.assignedTeamIds ?? []).map((x) => x.trim()).filter(Boolean)),
+    );
+    if (assignedTeamIds.length > 0) {
+      params.push(assignedTeamIds);
+      clauses.push(`q.assigned_team_id = ANY($${params.length}::text[])`);
+    } else if (options?.requireAssignedTeam) {
+      clauses.push(`q.assigned_team_id IS NOT NULL AND q.assigned_team_id <> ''`);
+    }
+    if (options?.feeEarnerId?.trim()) {
+      params.push(options.feeEarnerId.trim());
+      clauses.push(`q.prepared_by_id = $${params.length}`);
+    }
+    if (options?.createdOrPreparedById?.trim()) {
+      params.push(options.createdOrPreparedById.trim());
+      const cIdx = params.length;
+      clauses.push(
+        `(q.prepared_by_id = $${cIdx} OR q.profile_json->>'createdById' = $${cIdx})`,
+      );
+    }
+    if (options?.practiceAreaId?.trim()) {
+      params.push(options.practiceAreaId.trim());
+      clauses.push(`q.practice_area_id = $${params.length}`);
+    }
+    if (options?.feeBasis?.trim()) {
+      params.push(options.feeBasis.trim());
+      clauses.push(`q.fee_basis = $${params.length}`);
+    }
+    if (options?.urgencyId?.trim()) {
+      params.push(options.urgencyId.trim());
+      clauses.push(
+        `EXISTS (SELECT 1 FROM enquiries le WHERE le.tenant_id = q.tenant_id AND le.id = q.source_enquiry_id AND le.urgency_id = $${params.length})`,
+      );
+    }
+    if (options?.channelId?.trim()) {
+      params.push(options.channelId.trim());
+      clauses.push(
+        `EXISTS (SELECT 1 FROM enquiries le WHERE le.tenant_id = q.tenant_id AND le.id = q.source_enquiry_id AND le.channel_id = $${params.length})`,
+      );
+    }
+    if (options?.validUntilFrom?.trim()) {
+      params.push(options.validUntilFrom.trim());
+      clauses.push(`q.valid_until >= $${params.length}`);
+    }
+    if (options?.validUntilTo?.trim()) {
+      params.push(options.validUntilTo.trim());
+      clauses.push(`q.valid_until <= $${params.length}`);
+    }
+    if (options?.followUpDue) {
+      const f = options.followUpDue;
+      clauses.push(
+        `NULLIF(COALESCE(q.profile_json->>'nextFollowUpDate', ''), '') IS NOT NULL`,
+      );
+      if (f.mode === 'overdue') {
+        params.push(f.todayYmd);
+        clauses.push(`(q.profile_json->>'nextFollowUpDate') < $${params.length}`);
+      } else if (f.mode === 'today') {
+        params.push(f.todayYmd);
+        clauses.push(`substring(q.profile_json->>'nextFollowUpDate' from 1 for 10) = $${params.length}`);
+      } else if (f.mode === 'this_week') {
+        params.push(f.todayYmd, f.weekEndYmd);
+        clauses.push(
+          `substring(q.profile_json->>'nextFollowUpDate' from 1 for 10) >= $${params.length - 1} AND substring(q.profile_json->>'nextFollowUpDate' from 1 for 10) <= $${params.length}`,
+        );
+      }
+    }
+    if (options?.sourceEnquiryId) {
+      params.push(options.sourceEnquiryId);
+      clauses.push(`q.source_enquiry_id = $${params.length}`);
+    }
+    if (options?.convertedMatterId?.trim()) {
+      params.push(options.convertedMatterId.trim());
+      clauses.push(`q.converted_matter_id = $${params.length}`);
+    }
+    if (options?.linkedPersonId?.trim()) {
+      params.push(options.linkedPersonId.trim());
+      clauses.push(`q.client_person_id = $${params.length}`);
+    }
+    if (options?.linkedOrganisationId?.trim()) {
+      params.push(options.linkedOrganisationId.trim());
+      clauses.push(`q.client_organisation_id = $${params.length}`);
+    }
+    const excludeIds = Array.from(
+      new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (excludeIds.length > 0) {
+      params.push(excludeIds);
+      clauses.push(`q.id <> ALL($${params.length}::text[])`);
+    }
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+    if (cleanQuery) {
+      params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(q.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.prospect_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.profile_json->>'prospectOrganisationName', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.pricing_breakdown_json->>'scope', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.source_enquiry_id, '')) LIKE ${pat} ESCAPE '\\'
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
   public async listVisibleQuotes<T = TenantQuoteRecord>(
     ctx: TenantContext,
     viewerId: string,
@@ -1962,76 +2310,14 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<T[]> {
+    const { whereSql, params } = this.buildVisibleQuotesWhereSql(
+      ctx,
+      viewerId,
+      options,
+    );
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const includeRestricted = Boolean(options?.includeRestricted);
-      const hasRestrictedMatterAccess = Boolean(
-        options?.hasRestrictedMatterAccess,
-      );
-      const params: unknown[] = includeRestricted
-        ? [ctx.tenantId]
-        : [ctx.tenantId, viewerId];
-      const clauses: string[] = ['q.tenant_id = $1'];
-      if (!includeRestricted) {
-        clauses.push(
-          hasRestrictedMatterAccess
-            ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
-            : QUOTE_VISIBLE_SQL_PREDICATE,
-        );
-      }
-      if (options?.status) {
-        params.push(options.status);
-        clauses.push(`q.status = $${params.length}`);
-      }
-      const statuses = Array.from(new Set((options?.statuses ?? []).filter(Boolean)));
-      if (statuses.length > 0) {
-        params.push(statuses);
-        clauses.push(`q.status = ANY($${params.length}::text[])`);
-      }
-      const excludeStatuses = Array.from(
-        new Set((options?.excludeStatuses ?? []).filter(Boolean)),
-      );
-      if (excludeStatuses.length > 0) {
-        params.push(excludeStatuses);
-        clauses.push(`q.status <> ALL($${params.length}::text[])`);
-      }
-      if (options?.sourceEnquiryId) {
-        params.push(options.sourceEnquiryId);
-        clauses.push(`q.source_enquiry_id = $${params.length}`);
-      }
-      if (options?.convertedMatterId?.trim()) {
-        params.push(options.convertedMatterId.trim());
-        clauses.push(`q.converted_matter_id = $${params.length}`);
-      }
-      if (options?.linkedPersonId?.trim()) {
-        params.push(options.linkedPersonId.trim());
-        clauses.push(`q.client_person_id = $${params.length}`);
-      }
-      if (options?.linkedOrganisationId?.trim()) {
-        params.push(options.linkedOrganisationId.trim());
-        clauses.push(`q.client_organisation_id = $${params.length}`);
-      }
-      const excludeIds = Array.from(
-        new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
-      );
-      if (excludeIds.length > 0) {
-        params.push(excludeIds);
-        clauses.push(`q.id <> ALL($${params.length}::text[])`);
-      }
-      const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
-      if (cleanQuery) {
-        params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
-        const pat = `$${params.length}`;
-        clauses.push(
-          `(
-             lower(COALESCE(q.id, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(q.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(q.prospect_name, '')) LIKE ${pat} ESCAPE '\\'
-           )`,
-        );
-      }
-
       let sql = `SELECT * FROM quotes q
-         WHERE ${clauses.join(' AND ')}
+         WHERE ${whereSql}
          ORDER BY q.created_at DESC, q.id ASC`;
       if (typeof options?.limit === 'number' && Number.isFinite(options.limit)) {
         params.push(Math.max(1, Math.min(500, Math.floor(options.limit))));
@@ -2047,6 +2333,82 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         this.assertRowTenant(ctx, row.tenant_id, 'quotes.listVisibleQuotes');
         return mapRowToQuote(row) as unknown as T;
       });
+    });
+  }
+
+  /**
+   * Loads a bounded page of visible quotes plus total SQL match count (`R702`).
+   */
+  public async listVisibleQuotesPageWithCount<T = TenantQuoteRecord>(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      status?: string;
+      statuses?: readonly string[];
+      excludeStatuses?: readonly string[];
+      effectiveOpenTodayYmd?: string;
+      effectiveClosedTodayYmd?: string;
+      effectiveExpiredTodayYmd?: string;
+      supersededInHistoryOnly?: boolean;
+      assignedTeamId?: string;
+      assignedTeamIds?: readonly string[];
+      requireAssignedTeam?: boolean;
+      feeEarnerId?: string;
+      createdOrPreparedById?: string;
+      practiceAreaId?: string;
+      feeBasis?: string;
+      urgencyId?: string;
+      channelId?: string;
+      validUntilFrom?: string;
+      validUntilTo?: string;
+      followUpDue?: {
+        readonly mode: 'overdue' | 'today' | 'this_week';
+        readonly todayYmd: string;
+        readonly weekEndYmd: string;
+      };
+      query?: string;
+      excludeIds?: readonly string[];
+      limit?: number;
+      offset?: number;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<{ readonly items: T[]; readonly totalCount: number }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 100;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const { whereSql, params } = this.buildVisibleQuotesWhereSql(
+      ctx,
+      viewerId,
+      options,
+    );
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM quotes q WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const pageParams = [...params, limit, offset];
+      const res = await tx.query<QuoteRow>(
+        `SELECT * FROM quotes q
+         WHERE ${whereSql}
+         ORDER BY q.created_at DESC, q.id ASC
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const items = res.rows.map((row) => {
+        this.assertRowTenant(
+          ctx,
+          row.tenant_id,
+          'quotes.listVisibleQuotesPageWithCount',
+        );
+        return mapRowToQuote(row) as unknown as T;
+      });
+      return { items, totalCount };
     });
   }
 
