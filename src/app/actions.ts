@@ -150,7 +150,9 @@ import {
   saveClientRateOverrideRecord,
   deleteClientRateOverrideRecord,
   getEntityRecordForEditRecord,
+  getExpiredEnquiriesCountRecord,
   listClientPriorMattersRecord,
+  loadPmsLinksAdminDataRecord,
   listMatterRateOverridesRecord,
   saveMatterRateOverrideRecord,
   deleteMatterRateOverrideRecord,
@@ -167,6 +169,7 @@ import type {
   IntakePreviewResult,
 } from '@/domain/intakePreviewTypes';
 import type { ClientPriorMatterSummary } from '@/domain/matterOpeningRecord';
+import type { PmsLinksAdminPageData, PmsLinksSubTab } from '@/domain/pms';
 import type {
   KeyDateCalculation,
   KeyDateExceptionKind,
@@ -2057,6 +2060,29 @@ export async function updateMyNotificationPreferencesAction(input: {
         };
       }
     },
+  );
+}
+
+export async function loadPmsLinksAdminDataAction(input: {
+  readonly subTab?: PmsLinksSubTab;
+  readonly query?: string;
+  readonly page?: number;
+  readonly pageSize?: number;
+}): Promise<PmsLinksAdminPageData | ActionDenied> {
+  return guardedAction('loadPmsLinksAdminDataAction', async (actor) =>
+    loadPmsLinksAdminDataRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function getExpiredEnquiriesCountAction(
+  retentionMonths: number,
+): Promise<{ readonly count: number } | ActionDenied> {
+  return guardedAction('getExpiredEnquiriesCountAction', async (actor) =>
+    getExpiredEnquiriesCountRecord(retentionMonths, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
   );
 }
 

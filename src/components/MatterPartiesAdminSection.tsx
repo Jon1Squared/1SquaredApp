@@ -13,6 +13,7 @@ import {
   CAPACITY_GROUPS,
   computeMatterPartyUsageCounts,
   getProfilesForWorkType,
+  type MatterPartyUsageCounts,
   WORK_TYPE_PROFILES,
 } from '@/domain/matterParties';
 import type {
@@ -32,7 +33,8 @@ interface MatterPartiesAdminSectionProps {
   taxonomy: MatterPartyTaxonomy;
   migrationReport?: MatterPartyMigrationReport;
   values: ChoiceValue[];
-  matters: Matter[];
+  matters?: Matter[];
+  usageCounts?: MatterPartyUsageCounts;
 }
 
 type SubTab = 'relationships' | 'capacities' | 'work_type_profiles';
@@ -54,7 +56,8 @@ export function MatterPartiesAdminSection({
   taxonomy: initialTaxonomy,
   migrationReport,
   values,
-  matters,
+  matters = [],
+  usageCounts: usageCountsProp,
 }: MatterPartiesAdminSectionProps) {
   const { showToast } = useToast();
   const [subTab, setSubTab] = useState<SubTab>('relationships');
@@ -95,8 +98,8 @@ export function MatterPartiesAdminSection({
   }, [initialTaxonomy]);
 
   const usageCounts = useMemo(
-    () => computeMatterPartyUsageCounts(matters),
-    [matters],
+    () => usageCountsProp ?? computeMatterPartyUsageCounts(matters),
+    [usageCountsProp, matters],
   );
 
   const sortedRelationships = useMemo(

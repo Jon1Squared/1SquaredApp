@@ -31,6 +31,8 @@ import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import { isActionDenied } from '@/domain/actionResult';
 import {
   getEntityRecordForEditRecord,
+  getExpiredEnquiriesCountRecord,
+  loadPmsLinksAdminDataRecord,
   previewIntakeDuplicatesAndConflictsRecord,
   resetConflictPreviewRateLimiterForTests,
   runMatterConflictSearchRecord,
@@ -41,6 +43,7 @@ import {
 } from '@/server/services';
 import { getPlatformTelemetryRecorder } from '@/server/telemetry';
 import {
+  loadAdminPageData,
   loadEnquiriesListPageData,
   loadEnquiryDetailPageData,
   loadHomePageData,
@@ -60,6 +63,8 @@ import {
   loadTaskDetailPageData,
   loadTasksListPageData,
 } from '@/server/pageLoaders';
+import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
+import { computeMatterPartyUsageCounts } from '@/domain/matterParties';
 import { redactRecordId } from '@/domain/matterConflicts';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
@@ -2047,6 +2052,204 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(reloadedBaseOrg?.possibleMatchIds).toContain(
           secondOrgRes.organisation.id,
         );
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '15. R700: /admin/pms-links, retention count, and matter party usage counts work identically from SQL regardless of landing tab and without loading full client arrays',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const cfgAlpha = getActiveTenantConfiguration();
+      const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
+      await importFirmStoreModulesToPostgres({
+        ctx: env.ctxAlpha,
+        tenantConfig: cfgAlpha,
+        store: structuredClone(seed),
+        modules: ['pms'],
+        clearFirst: false,
+      });
+
+      const partyRepo = new TenantPartyRepository();
+      const matterRepo = new TenantMatterRepository();
+      const intakeRepo = new TenantIntakeQuoteRepository();
+
+      // Seed unlinked non-merged records in Alpha
+      await partyRepo.putOrganisation(env.ctxAlpha, {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R700-UNLINKED',
+        legalName: 'Unlinked Cambria Quarry Ltd',
+        companyNumber: '07778889',
+        mergedIntoId: null,
+      });
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-R700-UNLINKED',
+        firstName: 'Elen',
+        surname: 'Davies-R700',
+        isEmployee: false,
+        mergedIntoId: null,
+      });
+
+      // Seed closed unconverted enquiries past retention period + negative controls (open, converted, recent closed, already anonymised)
+      await intakeRepo.putEnquiry(env.ctxAlpha, {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-R700-EXP-1',
+        reference: 'ENQ-R700-EXP-1',
+        status: 'Declined',
+        convertedMatterId: null,
+        anonymisedAt: null,
+        receivedAt: '2022-01-15T10:00:00.000Z',
+        closedAt: '2022-02-01T10:00:00.000Z',
+      });
+      await intakeRepo.putEnquiry(env.ctxAlpha, {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-R700-EXP-2',
+        reference: 'ENQ-R700-EXP-2',
+        status: 'No response',
+        convertedMatterId: null,
+        anonymisedAt: null,
+        receivedAt: '2022-03-10T10:00:00.000Z',
+        closedAt: '2022-03-25T10:00:00.000Z',
+      });
+      await intakeRepo.putEnquiry(env.ctxAlpha, {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-R700-CONV-OLD',
+        reference: 'ENQ-R700-CONV-OLD',
+        status: 'Converted',
+        convertedMatterId: 'M-000001',
+        anonymisedAt: null,
+        receivedAt: '2020-01-01T00:00:00.000Z',
+      });
+      await intakeRepo.putEnquiry(env.ctxAlpha, {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-R700-ANON-OLD',
+        reference: 'ENQ-R700-ANON-OLD',
+        status: 'Declined',
+        convertedMatterId: null,
+        anonymisedAt: '2024-01-01T00:00:00.000Z',
+        receivedAt: '2021-01-01T00:00:00.000Z',
+      });
+
+      const allMatters = await matterRepo.listAllMattersUnfiltered<Matter>(env.ctxAlpha);
+      const expectedUsageCounts = computeMatterPartyUsageCounts(allMatters);
+      const allEnquiries = await intakeRepo.listVisibleEnquiries<Enquiry>(
+        env.ctxAlpha,
+        'P-000001',
+        { includeRestricted: true },
+      );
+      const retentionMonths = seed.enquirySettings.retentionMonths || 12;
+      const now = new Date();
+      const expectedRetentionCount = allEnquiries.filter((e) =>
+        isReadyForRetentionAnonymisation(e, retentionMonths, now),
+      ).length;
+      expect(expectedRetentionCount).toBeGreaterThanOrEqual(2);
+
+      const adminActor = makeActorSession(
+        'P-000001',
+        ['admin', 'managing_partner', 'partner', 'risk_compliance', 'fee_earner'],
+        env.tenantAlpha,
+      );
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(adminActor.verifiedSession);
+
+      await runWithActiveActorSession(adminActor, async () => {
+        const pmsLanding = await loadAdminPageData('P-000001', {
+          slug: ['pms-links'],
+          mfaVerified: true,
+        });
+        expect('redirectTo' in pmsLanding).toBe(false);
+        if ('redirectTo' in pmsLanding) return;
+
+        // No 500-capped client arrays required
+        expect(pmsLanding.matters).toEqual([]);
+        expect(pmsLanding.organisations).toEqual([]);
+        expect(pmsLanding.enquiries).toEqual([]);
+
+        // Landing on /admin/pms-links directly exposes unlinked orgs + linked display labels (never raw IDs)
+        const landingAny = pmsLanding as unknown as {
+          initialPmsLinksData?: {
+            unlinkedOrganisationsPage?: { items: Array<{ id: string }>; totalCount: number };
+            linkedRecordTitles?: Record<string, { label: string }>;
+          };
+          expiredUnconvertedEnquiriesCount?: number;
+          matterPartyUsageCounts?: unknown;
+        };
+        expect(landingAny.initialPmsLinksData).toBeDefined();
+        expect(
+          landingAny.initialPmsLinksData?.unlinkedOrganisationsPage?.items.some(
+            (o) => o.id === 'O-R700-UNLINKED',
+          ),
+        ).toBe(true);
+        expect(landingAny.expiredUnconvertedEnquiriesCount).toBe(expectedRetentionCount);
+        expect(landingAny.matterPartyUsageCounts).toEqual(expectedUsageCounts);
+
+        // Landing on enquiry-settings still gets SQL counts without enquiries/matters
+        const enqLanding = await loadAdminPageData('P-000001', {
+          slug: ['enquiry-settings'],
+          mfaVerified: true,
+        });
+        expect('redirectTo' in enqLanding).toBe(false);
+        if ('redirectTo' in enqLanding) return;
+        expect(
+          (enqLanding as unknown as { expiredUnconvertedEnquiriesCount?: number })
+            .expiredUnconvertedEnquiriesCount,
+        ).toBe(expectedRetentionCount);
+
+        // Linked display titles resolve non-raw labels for PMS links
+        for (const l of pmsLanding.initialPmsLinksData?.pmsAdmin.pmsLinks ?? []) {
+          const titleMeta =
+            pmsLanding.initialPmsLinksData?.linkedRecordTitles[l.onesquaredId];
+          if (titleMeta) {
+            expect(titleMeta.label).not.toBe('');
+            expect(titleMeta.href).toMatch(/^\//);
+          }
+        }
+
+        // Server search & sub-tab fetching via loadPmsLinksAdminDataRecord (no 500 cap, zero Bravo data)
+        const searchedOrgs = await loadPmsLinksAdminDataRecord(
+          { subTab: 'organisations', query: 'Cambria', page: 1, pageSize: 25 },
+          'P-000001',
+        );
+        expect(isActionDenied(searchedOrgs)).toBe(false);
+        if (!isActionDenied(searchedOrgs)) {
+          expect(
+            searchedOrgs.unlinkedOrganisationsPage.items.map((o) => o.id),
+          ).toEqual(['O-R700-UNLINKED']);
+          expect(searchedOrgs.unlinkedOrganisationsPage.totalCount).toBe(1);
+        }
+
+        const unlinkedPeopleRes = await loadPmsLinksAdminDataRecord(
+          { subTab: 'people', query: 'Davies-R700', page: 1, pageSize: 25 },
+          'P-000001',
+        );
+        expect(isActionDenied(unlinkedPeopleRes)).toBe(false);
+        if (!isActionDenied(unlinkedPeopleRes)) {
+          expect(
+            unlinkedPeopleRes.unlinkedPeoplePage.items.map((p) => p.id),
+          ).toEqual(['P-R700-UNLINKED']);
+        }
+
+        const sqlCountRes = await getExpiredEnquiriesCountRecord(
+          retentionMonths,
+          'P-000001',
+        );
+        expect(isActionDenied(sqlCountRes)).toBe(false);
+        if (!isActionDenied(sqlCountRes)) {
+          expect(sqlCountRes.count).toBe(expectedRetentionCount);
+        }
+      });
+
+      // Unauthorised fee_earner is denied PMS links data and retention count
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const deniedPms = await loadPmsLinksAdminDataRecord({}, 'P-000002');
+        expect(isActionDenied(deniedPms)).toBe(true);
+        const deniedRet = await getExpiredEnquiriesCountRecord(12, 'P-000002');
+        expect(isActionDenied(deniedRet)).toBe(true);
       });
     },
     45_000,

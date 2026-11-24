@@ -4788,6 +4788,137 @@ export class TenantPartyRepository extends TenantScopedRepository {
     });
   }
 
+  private buildPeoplePageWhereSql(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly employeesOnly?: boolean;
+      readonly nonEmployeesOnly?: boolean;
+      readonly employeesAndLeaversOnly?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeMerged = options?.includeMerged ?? true;
+    const employeesOnly = options?.employeesOnly ?? false;
+    const nonEmployeesOnly = options?.nonEmployeesOnly ?? false;
+    const employeesAndLeaversOnly = options?.employeesAndLeaversOnly ?? false;
+    const excludeInactiveStatusIds = Array.from(
+      new Set(
+        (options?.excludeInactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const excludeIds = Array.from(
+      new Set(
+        (options?.excludeIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+
+    const clauses = ['p.tenant_id = $1'];
+    const params: unknown[] = [ctx.tenantId];
+    if (!includeMerged) {
+      clauses.push('p.merged_into_id IS NULL');
+    }
+    if (employeesOnly) {
+      clauses.push('p.is_employee = TRUE');
+    } else if (nonEmployeesOnly) {
+      clauses.push('p.is_employee = FALSE');
+    } else if (employeesAndLeaversOnly) {
+      clauses.push(
+        `(p.is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records eer_chk WHERE eer_chk.tenant_id = p.tenant_id AND eer_chk.person_id = p.id))`,
+      );
+    }
+    if (excludeInactiveStatusIds.length > 0) {
+      params.push(excludeInactiveStatusIds);
+      clauses.push(
+        `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
+      );
+    }
+    if (excludeIds.length > 0) {
+      params.push(excludeIds);
+      clauses.push(`p.id <> ALL($${params.length}::text[])`);
+    }
+    if (cleanQuery) {
+      params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(p.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
+           OR lower(trim(concat_ws(' ', NULLIF(p.preferred_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.job_title, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.primary_email_lower, '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM public.person_emails pe
+             WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower LIKE ${pat} ESCAPE '\\'
+           )
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
+  /**
+   * Loads a bounded page of tenant people plus the total SQL match count (`R700`, `R702`).
+   */
+  public async listPeoplePageWithCount<
+    TPerson extends TenantPersonRecord = TenantPersonRecord,
+  >(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly employeesOnly?: boolean;
+      readonly nonEmployeesOnly?: boolean;
+      readonly employeesAndLeaversOnly?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<{ readonly items: TPerson[]; readonly totalCount: number }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 50;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const { whereSql, params } = this.buildPeoplePageWhereSql(ctx, options);
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM public.people p WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const pageParams = [...params, limit, offset];
+      const res = await tx.query<DbPersonRow>(
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE ${whereSql}
+         ORDER BY lower(COALESCE(p.surname, '')), lower(COALESCE(p.first_name, '')), p.id ASC
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const items = res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Person');
+        return mapPersonRow<TPerson>(row);
+      });
+      return { items, totalCount };
+    });
+  }
+
   /**
    * Loads a bounded page of tenant people directly from SQL (`S1-02b`).
    */
@@ -4796,20 +4927,15 @@ export class TenantPartyRepository extends TenantScopedRepository {
     options?: {
       readonly includeMerged?: boolean;
       readonly employeesOnly?: boolean;
+      readonly nonEmployeesOnly?: boolean;
       readonly employeesAndLeaversOnly?: boolean;
       readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
       readonly query?: string;
       readonly limit?: number;
       readonly offset?: number;
     },
   ): Promise<TPerson[]> {
-    const includeMerged = options?.includeMerged ?? true;
-    const employeesOnly = options?.employeesOnly ?? false;
-    const employeesAndLeaversOnly = options?.employeesAndLeaversOnly ?? false;
-    const excludeInactiveStatusIds = Array.from(
-      new Set((options?.excludeInactiveStatusIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
-    );
-    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
     const limit =
       typeof options?.limit === 'number' && Number.isFinite(options.limit)
         ? Math.max(1, Math.min(500, Math.floor(options.limit)))
@@ -4818,59 +4944,23 @@ export class TenantPartyRepository extends TenantScopedRepository {
       typeof options?.offset === 'number' && Number.isFinite(options.offset)
         ? Math.max(0, Math.floor(options.offset))
         : null;
+    const { whereSql, params } = this.buildPeoplePageWhereSql(ctx, options);
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const clauses = ['p.tenant_id = $1'];
-      const params: unknown[] = [ctx.tenantId];
-      if (!includeMerged) {
-        clauses.push('p.merged_into_id IS NULL');
-      }
-      if (employeesOnly) {
-        clauses.push('p.is_employee = TRUE');
-      } else if (employeesAndLeaversOnly) {
-        clauses.push(
-          `(p.is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records eer_chk WHERE eer_chk.tenant_id = p.tenant_id AND eer_chk.person_id = p.id))`,
-        );
-      }
-      if (excludeInactiveStatusIds.length > 0) {
-        params.push(excludeInactiveStatusIds);
-        clauses.push(
-          `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
-        );
-      }
-      if (cleanQuery) {
-        params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
-        const pat = `$${params.length}`;
-        clauses.push(
-          `(
-             lower(COALESCE(p.id, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
-             OR lower(trim(concat_ws(' ', NULLIF(p.preferred_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.job_title, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.primary_email_lower, '')) LIKE ${pat} ESCAPE '\\'
-             OR EXISTS (
-               SELECT 1 FROM public.person_emails pe
-               WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower LIKE ${pat} ESCAPE '\\'
-             )
-           )`,
-        );
-      }
+      const pageParams = [...params];
       let sql = `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
          ${PEOPLE_LEFT_JOIN_HR}
-         WHERE ${clauses.join(' AND ')}
+         WHERE ${whereSql}
          ORDER BY lower(COALESCE(p.surname, '')), lower(COALESCE(p.first_name, '')), p.id ASC`;
       if (limit !== null) {
-        params.push(limit);
-        sql += ` LIMIT $${params.length}`;
+        pageParams.push(limit);
+        sql += ` LIMIT $${pageParams.length}`;
       }
       if (offset !== null) {
-        params.push(offset);
-        sql += ` OFFSET $${params.length}`;
+        pageParams.push(offset);
+        sql += ` OFFSET $${pageParams.length}`;
       }
-      const res = await tx.query<DbPersonRow>(sql, params);
+      const res = await tx.query<DbPersonRow>(sql, pageParams);
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'Person');
         return mapPersonRow<TPerson>(row);
@@ -4892,68 +4982,119 @@ export class TenantPartyRepository extends TenantScopedRepository {
       readonly limit?: number;
     },
   ): Promise<TPerson[]> {
-    const excludeIds = Array.from(
-      new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
-    );
     const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 25)));
-    if (excludeIds.length === 0) {
-      return this.listPeoplePage<TPerson>(ctx, {
-        includeMerged: options?.includeMerged ?? false,
-        employeesOnly: options?.employeesOnly,
-        employeesAndLeaversOnly: options?.employeesAndLeaversOnly,
-        query,
-        limit,
-      });
+    return this.listPeoplePage<TPerson>(ctx, {
+      includeMerged: options?.includeMerged ?? false,
+      employeesOnly: options?.employeesOnly,
+      employeesAndLeaversOnly: options?.employeesAndLeaversOnly,
+      excludeIds: options?.excludeIds,
+      query,
+      limit,
+    });
+  }
+
+  private buildOrganisationsPageWhereSql(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeMerged = options?.includeMerged ?? true;
+    const excludeInactiveStatusIds = Array.from(
+      new Set(
+        (options?.excludeInactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const excludeIds = Array.from(
+      new Set(
+        (options?.excludeIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+
+    const clauses = ['tenant_id = $1'];
+    const params: unknown[] = [ctx.tenantId];
+    if (!includeMerged) {
+      clauses.push('merged_into_id IS NULL');
     }
-    const cleanQuery = query?.trim().toLowerCase() ?? '';
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const clauses = ['p.tenant_id = $1'];
-      const params: unknown[] = [ctx.tenantId];
-      if (!(options?.includeMerged ?? false)) {
-        clauses.push('p.merged_into_id IS NULL');
-      }
-      if (options?.employeesOnly) {
-        clauses.push('p.is_employee = TRUE');
-      } else if (options?.employeesAndLeaversOnly) {
-        clauses.push(
-          `(p.is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records eer_chk WHERE eer_chk.tenant_id = p.tenant_id AND eer_chk.person_id = p.id))`,
-        );
-      }
+    if (excludeInactiveStatusIds.length > 0) {
+      params.push(excludeInactiveStatusIds);
+      clauses.push(
+        `COALESCE(profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
+      );
+    }
+    if (excludeIds.length > 0) {
       params.push(excludeIds);
-      clauses.push(`p.id <> ALL($${params.length}::text[])`);
-      if (cleanQuery) {
-        params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
-        const pat = `$${params.length}`;
-        clauses.push(
-          `(
-             lower(COALESCE(p.id, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
-             OR lower(trim(concat_ws(' ', NULLIF(p.preferred_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.job_title, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(p.primary_email_lower, '')) LIKE ${pat} ESCAPE '\\'
-             OR EXISTS (
-               SELECT 1 FROM public.person_emails pe
-               WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower LIKE ${pat} ESCAPE '\\'
-             )
-           )`,
-        );
-      }
-      params.push(limit);
-      const res = await tx.query<DbPersonRow>(
-        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
-         ${PEOPLE_LEFT_JOIN_HR}
-         WHERE ${clauses.join(' AND ')}
-         ORDER BY lower(COALESCE(p.surname, '')), lower(COALESCE(p.first_name, '')), p.id ASC
-         LIMIT $${params.length}`,
+      clauses.push(`id <> ALL($${params.length}::text[])`);
+    }
+    if (cleanQuery) {
+      params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(legal_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(trading_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(company_number, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(general_email, '')) LIKE ${pat} ESCAPE '\\'
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
+  /**
+   * Loads a bounded page of tenant organisations plus total SQL match count (`R700`, `R702`).
+   */
+  public async listOrganisationsPageWithCount<
+    TOrg extends TenantOrganisationRecord = TenantOrganisationRecord,
+  >(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<{ readonly items: TOrg[]; readonly totalCount: number }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 50;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const { whereSql, params } = this.buildOrganisationsPageWhereSql(ctx, options);
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM public.organisations WHERE ${whereSql}`,
         params,
       );
-      return res.rows.map((row) => {
-        this.assertRowTenant(ctx, row.tenant_id, 'Person');
-        return mapPersonRow<TPerson>(row);
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const pageParams = [...params, limit, offset];
+      const res = await tx.query<DbOrganisationRow>(
+        `SELECT * FROM public.organisations
+         WHERE ${whereSql}
+         ORDER BY lower(COALESCE(legal_name, '')), id ASC
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const items = res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
       });
+      return { items, totalCount };
     });
   }
 
@@ -4965,16 +5106,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
     options?: {
       readonly includeMerged?: boolean;
       readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
       readonly query?: string;
       readonly limit?: number;
       readonly offset?: number;
     },
   ): Promise<TOrg[]> {
-    const includeMerged = options?.includeMerged ?? true;
-    const excludeInactiveStatusIds = Array.from(
-      new Set((options?.excludeInactiveStatusIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
-    );
-    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
     const limit =
       typeof options?.limit === 'number' && Number.isFinite(options.limit)
         ? Math.max(1, Math.min(500, Math.floor(options.limit)))
@@ -4983,44 +5120,22 @@ export class TenantPartyRepository extends TenantScopedRepository {
       typeof options?.offset === 'number' && Number.isFinite(options.offset)
         ? Math.max(0, Math.floor(options.offset))
         : null;
+    const { whereSql, params } = this.buildOrganisationsPageWhereSql(ctx, options);
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const clauses = ['tenant_id = $1'];
-      const params: unknown[] = [ctx.tenantId];
-      if (!includeMerged) {
-        clauses.push('merged_into_id IS NULL');
-      }
-      if (excludeInactiveStatusIds.length > 0) {
-        params.push(excludeInactiveStatusIds);
-        clauses.push(
-          `COALESCE(profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
-        );
-      }
-      if (cleanQuery) {
-        params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
-        const pat = `$${params.length}`;
-        clauses.push(
-          `(
-             lower(COALESCE(id, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(legal_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(trading_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(company_number, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(general_email, '')) LIKE ${pat} ESCAPE '\\'
-           )`,
-        );
-      }
+      const pageParams = [...params];
       let sql = `SELECT * FROM public.organisations
-         WHERE ${clauses.join(' AND ')}
+         WHERE ${whereSql}
          ORDER BY lower(COALESCE(legal_name, '')), id ASC`;
       if (limit !== null) {
-        params.push(limit);
-        sql += ` LIMIT $${params.length}`;
+        pageParams.push(limit);
+        sql += ` LIMIT $${pageParams.length}`;
       }
       if (offset !== null) {
-        params.push(offset);
-        sql += ` OFFSET $${params.length}`;
+        pageParams.push(offset);
+        sql += ` OFFSET $${pageParams.length}`;
       }
-      const res = await tx.query<DbOrganisationRow>(sql, params);
+      const res = await tx.query<DbOrganisationRow>(sql, pageParams);
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
         return mapOrganisationRow<TOrg>(row);
@@ -5040,51 +5155,12 @@ export class TenantPartyRepository extends TenantScopedRepository {
       readonly limit?: number;
     },
   ): Promise<TOrg[]> {
-    const excludeIds = Array.from(
-      new Set((options?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
-    );
     const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 25)));
-    if (excludeIds.length === 0) {
-      return this.listOrganisationsPage<TOrg>(ctx, {
-        includeMerged: options?.includeMerged ?? false,
-        query,
-        limit,
-      });
-    }
-    const cleanQuery = query?.trim().toLowerCase() ?? '';
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const clauses = ['tenant_id = $1'];
-      const params: unknown[] = [ctx.tenantId];
-      if (!(options?.includeMerged ?? false)) {
-        clauses.push('merged_into_id IS NULL');
-      }
-      params.push(excludeIds);
-      clauses.push(`id <> ALL($${params.length}::text[])`);
-      if (cleanQuery) {
-        params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
-        const pat = `$${params.length}`;
-        clauses.push(
-          `(
-             lower(COALESCE(id, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(legal_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(trading_name, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(company_number, '')) LIKE ${pat} ESCAPE '\\'
-             OR lower(COALESCE(general_email, '')) LIKE ${pat} ESCAPE '\\'
-           )`,
-        );
-      }
-      params.push(limit);
-      const res = await tx.query<DbOrganisationRow>(
-        `SELECT * FROM public.organisations
-         WHERE ${clauses.join(' AND ')}
-         ORDER BY lower(COALESCE(legal_name, '')), id ASC
-         LIMIT $${params.length}`,
-        params,
-      );
-      return res.rows.map((row) => {
-        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
-        return mapOrganisationRow<TOrg>(row);
-      });
+    return this.listOrganisationsPage<TOrg>(ctx, {
+      includeMerged: options?.includeMerged ?? false,
+      excludeIds: options?.excludeIds,
+      query,
+      limit,
     });
   }
 

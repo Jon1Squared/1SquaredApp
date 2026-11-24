@@ -75,6 +75,7 @@ import { diffRecords } from '@/domain/audit';
 import { validateCustomFields } from '@/domain/customFields';
 import {
   addDays,
+  addMonths,
   addWorkingDays,
   calculateFirstContactDue,
   formatDate,
@@ -169,6 +170,10 @@ import {
   isValidPmsAsAtDate,
   PMS_AS_AT_UNAVAILABLE_LABEL,
   suggestMatterMatches,
+  type PmsAdminSnapshot,
+  type PmsLinkedRecordSummary,
+  type PmsLinksAdminPageData,
+  type PmsLinksSubTab,
   type PmsSuggestedMatch,
 } from '@/domain/pms';
 import {
@@ -16703,14 +16708,7 @@ export async function getClientPmsViewBundle(
   };
 }
 
-export interface PmsAdminSnapshot {
-  extractInfo: PmsExtractInfo;
-  pmsLinks: PmsLink[];
-  pmsFeeEarners: PmsFeeEarner[];
-  pmsClients: PmsClient[];
-  pmsMatters: PmsMatter[];
-  suggestedMatterMatches: PmsSuggestedMatch[];
-}
+export type { PmsAdminSnapshot } from '@/domain/pms';
 
 export async function getPmsAdminSnapshot(
   byId?: FinanceActorInput,
@@ -30785,5 +30783,353 @@ export async function listClientPriorMattersRecord(
   return {
     matters: visible.map(toClientPriorMatterSummary),
   };
+}
+
+const VALID_PMS_LINKS_SUBTABS = new Set<PmsLinksSubTab>([
+  'organisations',
+  'people',
+  'employees',
+  'matters',
+]);
+
+/**
+ * Resolves linked display labels and a paged, searched SQL page of unlinked
+ * 1Squared records from a validated `PmsAdminSnapshot` (`R700`), eliminating
+ * client-side reliance on full-tenant directory arrays.
+ */
+export async function buildPmsLinksAdminDataFromSnapshot(
+  ctx: TenantContext,
+  actorId: string,
+  hasRestrictedMatterAccess: boolean,
+  pmsAdmin: PmsAdminSnapshot,
+  input?: {
+    readonly subTab?: PmsLinksSubTab;
+    readonly query?: string;
+    readonly page?: number;
+    readonly pageSize?: number;
+  },
+): Promise<PmsLinksAdminPageData | ActionDenied> {
+  const subTab = input?.subTab ?? 'organisations';
+  if (!VALID_PMS_LINKS_SUBTABS.has(subTab)) {
+    return buildActionDenied(
+      'VALIDATION_ERROR',
+      'subTab must be organisations, people, employees, or matters.',
+    );
+  }
+  const rawQuery = input?.query ?? '';
+  if (typeof rawQuery !== 'string' || rawQuery.length > 200) {
+    return buildActionDenied(
+      'VALIDATION_ERROR',
+      'query must be a string of 200 characters or fewer.',
+    );
+  }
+  const pageRaw = input?.page ?? 1;
+  if (
+    typeof pageRaw !== 'number' ||
+    !Number.isInteger(pageRaw) ||
+    pageRaw < 1
+  ) {
+    return buildActionDenied(
+      'VALIDATION_ERROR',
+      'page must be a positive integer.',
+    );
+  }
+  const pageSizeRaw = input?.pageSize ?? 50;
+  if (
+    typeof pageSizeRaw !== 'number' ||
+    !Number.isInteger(pageSizeRaw) ||
+    pageSizeRaw < 1 ||
+    pageSizeRaw > 100
+  ) {
+    return buildActionDenied(
+      'VALIDATION_ERROR',
+      'pageSize must be an integer between 1 and 100.',
+    );
+  }
+
+  const query = rawQuery.trim();
+  const page = pageRaw;
+  const pageSize = pageSizeRaw;
+  const offset = (page - 1) * pageSize;
+
+  const partyRepo = getPartyRepository();
+  const matterRepo = getMatterRepository();
+
+  const linkedOrgIds = Array.from(
+    new Set(
+      pmsAdmin.pmsLinks
+        .filter((l) => l.entityType === 'organisation')
+        .map((l) => l.onesquaredId),
+    ),
+  );
+  const linkedPersonIds = Array.from(
+    new Set(
+      pmsAdmin.pmsLinks
+        .filter((l) => l.entityType === 'person')
+        .map((l) => l.onesquaredId),
+    ),
+  );
+  const linkedEmployeeIds = Array.from(
+    new Set(
+      pmsAdmin.pmsLinks
+        .filter((l) => l.entityType === 'employee')
+        .map((l) => l.onesquaredId),
+    ),
+  );
+  const linkedMatterIds = Array.from(
+    new Set(
+      pmsAdmin.pmsLinks
+        .filter((l) => l.entityType === 'matter')
+        .map((l) => l.onesquaredId),
+    ),
+  );
+
+  const [linkedOrgs, linkedPeople, linkedMatters] = await Promise.all([
+    linkedOrgIds.length > 0
+      ? partyRepo.listOrganisationsByIds<Organisation>(ctx, linkedOrgIds)
+      : Promise.resolve<Organisation[]>([]),
+    linkedPersonIds.length > 0 || linkedEmployeeIds.length > 0
+      ? partyRepo.listPeopleByIds<Person>(ctx, [
+          ...linkedPersonIds,
+          ...linkedEmployeeIds,
+        ])
+      : Promise.resolve<Person[]>([]),
+    linkedMatterIds.length > 0
+      ? matterRepo.listMattersByIds<Matter>(ctx, linkedMatterIds, {
+          viewerId: actorId,
+          hasRestrictedMatterAccess,
+        })
+      : Promise.resolve<Matter[]>([]),
+  ]);
+
+  const linkedRecordTitles: Record<string, PmsLinkedRecordSummary> = {};
+  for (const o of linkedOrgs) {
+    linkedRecordTitles[o.id] = {
+      id: o.id,
+      entityType: 'organisation',
+      label: o.legalName,
+      href: `/organisations/${o.id}`,
+      companyNumber: o.companyNumber || undefined,
+    };
+  }
+  for (const p of linkedPeople) {
+    linkedRecordTitles[p.id] = {
+      id: p.id,
+      entityType: p.isEmployee ? 'employee' : 'person',
+      label: personDisplayName(p),
+      href: `/people/${p.id}`,
+      primaryEmail: primaryEmail(p) || undefined,
+    };
+  }
+  for (const m of linkedMatters) {
+    linkedRecordTitles[m.id] = {
+      id: m.id,
+      entityType: 'matter',
+      label: `${m.matterNumber} — ${m.title}`,
+      href: `/matters/${m.id}`,
+      matterNumber: m.matterNumber,
+      title: m.title,
+      openedAt: m.openedAt,
+    };
+  }
+
+  let unlinkedOrganisationsPage: PmsLinksAdminPageData['unlinkedOrganisationsPage'] =
+    { items: [], totalCount: 0 };
+  let unlinkedPeoplePage: PmsLinksAdminPageData['unlinkedPeoplePage'] = {
+    items: [],
+    totalCount: 0,
+  };
+  let unlinkedEmployeesPage: PmsLinksAdminPageData['unlinkedEmployeesPage'] = {
+    items: [],
+    totalCount: 0,
+  };
+  let unlinkedMattersPage: PmsLinksAdminPageData['unlinkedMattersPage'] = {
+    items: [],
+    totalCount: 0,
+  };
+
+  if (subTab === 'organisations') {
+    const res = await partyRepo.listOrganisationsPageWithCount<Organisation>(
+      ctx,
+      {
+        includeMerged: false,
+        excludeIds: linkedOrgIds,
+        query,
+        limit: pageSize,
+        offset,
+      },
+    );
+    unlinkedOrganisationsPage = {
+      items: res.items.map((o) => ({
+        id: o.id,
+        legalName: o.legalName,
+        companyNumber: o.companyNumber ?? '',
+        generalEmail: o.generalEmail ?? '',
+      })),
+      totalCount: res.totalCount,
+    };
+  } else if (subTab === 'people') {
+    const res = await partyRepo.listPeoplePageWithCount<Person>(ctx, {
+      includeMerged: false,
+      nonEmployeesOnly: true,
+      excludeIds: linkedPersonIds,
+      query,
+      limit: pageSize,
+      offset,
+    });
+    unlinkedPeoplePage = {
+      items: res.items.map((p) => ({
+        id: p.id,
+        displayName: personDisplayName(p),
+        primaryEmail: primaryEmail(p) || '',
+      })),
+      totalCount: res.totalCount,
+    };
+  } else if (subTab === 'employees') {
+    const res = await partyRepo.listPeoplePageWithCount<Person>(ctx, {
+      includeMerged: false,
+      employeesOnly: true,
+      excludeIds: linkedEmployeeIds,
+      query,
+      limit: pageSize,
+      offset,
+    });
+    unlinkedEmployeesPage = {
+      items: res.items.map((p) => ({
+        id: p.id,
+        displayName: personDisplayName(p),
+        jobTitle: p.jobTitle ?? '',
+        primaryEmail: primaryEmail(p) || '',
+      })),
+      totalCount: res.totalCount,
+    };
+  } else {
+    const res = await matterRepo.listVisibleMattersPageWithCount<Matter>(ctx, {
+      viewerId: actorId,
+      hasRestrictedMatterAccess,
+      includeMerged: false,
+      excludeIds: linkedMatterIds,
+      query,
+      limit: pageSize,
+      offset,
+    });
+    unlinkedMattersPage = {
+      items: res.items.map((m) => ({
+        id: m.id,
+        matterNumber: m.matterNumber,
+        title: m.title,
+        openedAt: m.openedAt,
+      })),
+      totalCount: res.totalCount,
+    };
+  }
+
+  return {
+    pmsAdmin,
+    subTab,
+    query,
+    page,
+    pageSize,
+    linkedRecordTitles,
+    unlinkedOrganisationsPage,
+    unlinkedPeoplePage,
+    unlinkedEmployeesPage,
+    unlinkedMattersPage,
+  };
+}
+
+/**
+ * Guarded service loader for `/admin/pms-links` (`R700`): enforces
+ * `finance:manage_links` and fetches server-paged, searched unlinked records.
+ */
+export async function loadPmsLinksAdminDataRecord(
+  input: {
+    readonly subTab?: PmsLinksSubTab;
+    readonly query?: string;
+    readonly page?: number;
+    readonly pageSize?: number;
+  },
+  byId?: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<PmsLinksAdminPageData | ActionDenied> {
+  const ctx =
+    options?.tenantCtx ?? resolveDefaultServiceTenantContext(null, byId);
+  const auth = await resolveServiceActorPermissions(
+    ctx,
+    byId,
+    'Authentication is required to manage PMS links.',
+  );
+  if (!auth.ok) return auth.denial;
+  const { actor, permSet } = auth;
+
+  if (!permSet.permissions.has('finance:manage_links')) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission (finance:manage_links) to manage PMS links.',
+    );
+  }
+
+  const snap = await getPmsAdminSnapshot(actor.id);
+  if (isActionDenied(snap)) return snap;
+
+  return buildPmsLinksAdminDataFromSnapshot(
+    ctx,
+    actor.id,
+    permSet.permissions.has('matter:restricted:access'),
+    snap,
+    input,
+  );
+}
+
+/**
+ * Returns the exact SQL count of closed unconverted enquiries eligible for
+ * retention anonymisation (`received_at < cutoffIso`, `R700`).
+ */
+export async function getExpiredEnquiriesCountRecord(
+  retentionMonths: number,
+  byId?: string,
+  options?: { tenantCtx?: TenantContext | null },
+): Promise<{ readonly count: number } | ActionDenied> {
+  const ctx =
+    options?.tenantCtx ?? resolveDefaultServiceTenantContext(null, byId);
+  const auth = await resolveServiceActorPermissions(
+    ctx,
+    byId,
+    'Authentication is required to check retention counts.',
+  );
+  if (!auth.ok) return auth.denial;
+  const { permSet } = auth;
+
+  if (
+    !permSet.permissions.has('admin:access') &&
+    !permSet.permissions.has('enquiry:anonymise')
+  ) {
+    return buildActionDenied(
+      'FORBIDDEN',
+      'You do not have permission to view enquiry retention counts.',
+    );
+  }
+
+  if (
+    typeof retentionMonths !== 'number' ||
+    !Number.isFinite(retentionMonths) ||
+    retentionMonths < 1 ||
+    retentionMonths > 120
+  ) {
+    return buildActionDenied(
+      'VALIDATION_ERROR',
+      'retentionMonths must be a number between 1 and 120.',
+    );
+  }
+
+  const cutoffIso = addMonths(
+    new Date(),
+    -Math.max(1, Math.floor(retentionMonths)),
+  ).toISOString();
+  const count = await getIntakeQuoteRepository().countEnquiriesReadyForRetention(
+    ctx,
+    cutoffIso,
+  );
+  return { count };
 }
 

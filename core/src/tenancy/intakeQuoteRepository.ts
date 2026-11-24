@@ -1591,6 +1591,29 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   }
 
   /**
+   * Counts closed unconverted enquiries eligible for retention anonymisation
+   * (`received_at < cutoffIso`), matching `isReadyForRetentionAnonymisation`.
+   */
+  public async countEnquiriesReadyForRetention(
+    ctx: TenantContext,
+    cutoffIso: string,
+  ): Promise<number> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt
+         FROM public.enquiries e
+         WHERE e.tenant_id = $1
+           AND e.status IN ('Declined', 'Referred out', 'No response')
+           AND e.converted_matter_id IS NULL
+           AND e.anonymised_at IS NULL
+           AND e.received_at < $2::timestamptz`,
+        [ctx.tenantId, cutoffIso],
+      );
+      return Number(res.rows[0]?.cnt ?? 0);
+    });
+  }
+
+  /**
    * Anonymises unconverted closed enquiries past the retention cutoff (`retentionMonths`)
    * and writes `audit_entries` in the same PostgreSQL transaction (`S0-17a`).
    */

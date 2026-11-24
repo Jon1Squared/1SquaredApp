@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import Link from 'next/link';
 import {
   createRecordFromPmsAction,
   linkPmsRecordAction,
+  loadPmsLinksAdminDataAction,
   rerunAutomaticPmsMatchingAction,
   unlinkPmsRecordAction,
 } from '@/app/actions';
@@ -15,20 +16,24 @@ import {
   formatPmsAsAtLabel,
   isValidPmsAsAtDate,
   PMS_AS_AT_UNAVAILABLE_LABEL,
+  type PmsAdminSnapshot,
+  type PmsLinksAdminPageData,
+  type PmsLinksSubTab,
 } from '@/domain/pms';
 import type { Matter, Organisation, Person, PmsEntityType } from '@/domain/types';
-import type { PmsAdminSnapshot } from '@/server/services';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
 interface Props {
   pmsAdmin: PmsAdminSnapshot;
-  organisations: Organisation[];
-  people: Person[];
-  matters: Matter[];
+  initialData?: PmsLinksAdminPageData;
+  organisations?: Organisation[];
+  people?: Person[];
+  matters?: Matter[];
+  onPmsLinksCountChange?: (nextCount: number) => void;
 }
 
-type SubTab = 'organisations' | 'people' | 'employees' | 'matters';
+const PMS_LINKS_PAGE_SIZE = 50;
 
 const MATCHED_BY_LABELS: Record<string, string> = {
   auto_company_number: 'Auto (company number)',
@@ -37,66 +42,223 @@ const MATCHED_BY_LABELS: Record<string, string> = {
   seed: 'Initial demo link',
 };
 
-export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters }: Props) {
+function PmsPaginationControls({
+  page,
+  pageSize,
+  totalCount,
+  loading,
+  onPageChange,
+}: {
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  loading: boolean;
+  onPageChange: (nextPage: number) => void;
+}) {
+  if (totalCount === 0) return null;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(totalCount, page * pageSize);
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        marginTop: 12,
+        paddingTop: 10,
+        borderTop: '1px solid var(--border-subtle)',
+        flexWrap: 'wrap',
+      }}
+    >
+      <span className="muted" style={{ fontSize: 12.5 }}>
+        Showing {start}–{end} of {totalCount}
+      </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button
+          type="button"
+          className="btn btn--secondary btn--sm"
+          disabled={loading || page <= 1}
+          onClick={() => onPageChange(page - 1)}
+        >
+          Previous
+        </button>
+        <span className="muted" style={{ fontSize: 12.5 }}>
+          Page {page} of {totalPages}
+        </span>
+        <button
+          type="button"
+          className="btn btn--secondary btn--sm"
+          disabled={loading || page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function PmsLinksAdminSection({
+  pmsAdmin: initialPmsAdmin,
+  initialData,
+  organisations = [],
+  people = [],
+  matters = [],
+  onPmsLinksCountChange,
+}: Props) {
   const { showToast } = useToast();
-  const [subTab, setSubTab] = useState<SubTab>('organisations');
+  const [subTab, setSubTab] = useState<PmsLinksSubTab>(
+    initialData?.subTab ?? 'organisations',
+  );
+  const [searchInput, setSearchInput] = useState(initialData?.query ?? '');
+  const [debouncedQuery, setDebouncedQuery] = useState(
+    initialData?.query ?? '',
+  );
+  const [page, setPage] = useState<number>(initialData?.page ?? 1);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  const [pageData, setPageData] = useState<PmsLinksAdminPageData | null>(
+    initialData ?? null,
+  );
+  const [loadingPage, setLoadingPage] = useState<boolean>(!initialData);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
-  // Manual link selection per 1Squared record ID
-  const [selectedPmsCodeBy1SqId, setSelectedPmsCodeBy1SqId] = useState<Record<string, string>>({});
+  const [selectedPmsCodeBy1SqId, setSelectedPmsCodeBy1SqId] = useState<
+    Record<string, string>
+  >({});
 
-  const activeOrgs = useMemo(
-    () =>
-      organisations
-        .filter((o) => !o.mergedIntoId)
-        .sort((a, b) => a.legalName.localeCompare(b.legalName)),
-    [organisations],
+  const seqRef = useRef(0);
+  const lastFetchedSignatureRef = useRef<string | null>(
+    initialData
+      ? JSON.stringify({
+          subTab: initialData.subTab,
+          query: initialData.query,
+          page: initialData.page,
+          refreshTick: 0,
+        })
+      : null,
   );
-  const activePeople = useMemo(
-    () =>
-      people
-        .filter((p) => !p.mergedIntoId && !p.isEmployee)
-        .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b))),
-    [people],
-  );
-  const activeEmployees = useMemo(
-    () =>
-      people
-        .filter((p) => !p.mergedIntoId && p.isEmployee)
-        .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b))),
-    [people],
-  );
-  const activeMatters = useMemo(
-    () =>
-      matters
-        .filter((m) => !m.mergedIntoId)
-        .sort((a, b) => a.matterNumber.localeCompare(b.matterNumber)),
-    [matters],
+
+  // Debounce server search query and reset page to 1 when query changes.
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (trimmed === debouncedQuery) return;
+    const t = setTimeout(() => {
+      setPage(1);
+      setDebouncedQuery(trimmed);
+    }, 280);
+    return () => clearTimeout(t);
+  }, [searchInput, debouncedQuery]);
+
+  // Fetch the active sub-tab's resolved link titles and SQL-paged unlinked rows.
+  useEffect(() => {
+    const sig = JSON.stringify({
+      subTab,
+      query: debouncedQuery,
+      page,
+      refreshTick,
+    });
+    if (lastFetchedSignatureRef.current === sig) return;
+
+    let cancelled = false;
+    const seq = ++seqRef.current;
+
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      setLoadingPage(true);
+      void loadPmsLinksAdminDataAction({
+        subTab,
+        query: debouncedQuery,
+        page,
+        pageSize: PMS_LINKS_PAGE_SIZE,
+      })
+        .then((res) => {
+          if (cancelled || seq !== seqRef.current) return;
+          if (isActionDenied(res)) {
+            setLoadError(res.message || "Couldn't load PMS link data. Try again.");
+          } else {
+            lastFetchedSignatureRef.current = sig;
+            setPageData(res);
+            setLoadError(null);
+            onPmsLinksCountChange?.(res.pmsAdmin.pmsLinks.length);
+          }
+          setLoadingPage(false);
+        })
+        .catch(() => {
+          if (cancelled || seq !== seqRef.current) return;
+          setLoadError("Couldn't load PMS link data. Try again.");
+          setLoadingPage(false);
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [subTab, debouncedQuery, page, refreshTick, onPmsLinksCountChange]);
+
+  const activePmsAdmin = pageData?.pmsAdmin ?? initialPmsAdmin;
+  const linkedRecordTitles = useMemo(
+    () => pageData?.linkedRecordTitles ?? {},
+    [pageData?.linkedRecordTitles],
   );
 
   const pmsOrgClients = useMemo(
-    () => pmsAdmin.pmsClients.filter((c) => c.client_type === 'Organisation'),
-    [pmsAdmin.pmsClients],
+    () => activePmsAdmin.pmsClients.filter((c) => c.client_type === 'Organisation'),
+    [activePmsAdmin.pmsClients],
   );
   const pmsIndClients = useMemo(
-    () => pmsAdmin.pmsClients.filter((c) => c.client_type === 'Individual'),
-    [pmsAdmin.pmsClients],
+    () => activePmsAdmin.pmsClients.filter((c) => c.client_type === 'Individual'),
+    [activePmsAdmin.pmsClients],
   );
 
   const linksByType = useMemo(() => {
-    const map: Record<PmsEntityType, typeof pmsAdmin.pmsLinks> = {
+    const map: Record<PmsEntityType, typeof activePmsAdmin.pmsLinks> = {
       organisation: [],
       person: [],
       employee: [],
       matter: [],
     };
-    for (const l of pmsAdmin.pmsLinks) {
+    for (const l of activePmsAdmin.pmsLinks) {
       map[l.entityType].push(l);
     }
     return map;
-  }, [pmsAdmin.pmsLinks]);
+  }, [activePmsAdmin.pmsLinks]);
 
-  const handleLink = (entityType: PmsEntityType, onesquaredId: string, pmsCode: string) => {
+  const fallbackOrgById = useMemo(
+    () => new Map(organisations.map((o) => [o.id, o])),
+    [organisations],
+  );
+  const fallbackPersonById = useMemo(
+    () => new Map(people.map((p) => [p.id, p])),
+    [people],
+  );
+  const fallbackMatterById = useMemo(
+    () => new Map(matters.map((m) => [m.id, m])),
+    [matters],
+  );
+
+  const triggerReload = () => {
+    lastFetchedSignatureRef.current = null;
+    setRefreshTick((t) => t + 1);
+  };
+
+  const handleSubTabChange = (nextTab: PmsLinksSubTab) => {
+    if (nextTab === subTab) return;
+    setSubTab(nextTab);
+    setPage(1);
+    setLoadError(null);
+  };
+
+  const handleLink = (
+    entityType: PmsEntityType,
+    onesquaredId: string,
+    pmsCode: string,
+  ) => {
     if (!pmsCode) return;
     startTransition(async () => {
       const res = await linkPmsRecordAction(entityType, onesquaredId, pmsCode);
@@ -105,6 +267,7 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         return;
       }
       showToast(`Linked ${pmsCode} in 1Squared`);
+      triggerReload();
     });
   };
 
@@ -116,6 +279,7 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         return;
       }
       showToast(`Unlinked ${pmsCode}`);
+      triggerReload();
     });
   };
 
@@ -127,10 +291,15 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         return;
       }
       showToast(`Re-ran automatic PMS matching (${res.totalLinks} links active)`);
+      triggerReload();
     });
   };
 
-  const handleCreateFromPms = (entityType: PmsEntityType, pmsCode: string, label: string) => {
+  const handleCreateFromPms = (
+    entityType: PmsEntityType,
+    pmsCode: string,
+    label: string,
+  ) => {
     startTransition(async () => {
       const res = await createRecordFromPmsAction(entityType, pmsCode);
       if (isActionDenied(res)) {
@@ -142,33 +311,41 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         return;
       }
       showToast(`Created ${label} in 1Squared and linked to ${pmsCode}`);
+      triggerReload();
     });
   };
 
-  // Unlinked counts
-  const linkedOrg1SqIds = new Set(linksByType.organisation.map((l) => l.onesquaredId));
   const linkedOrgPmsCodes = new Set(linksByType.organisation.map((l) => l.pmsCode));
-  const unlinked1SqOrgs = activeOrgs.filter((o) => !linkedOrg1SqIds.has(o.id));
-  const unlinkedPmsOrgs = pmsOrgClients.filter((c) => !linkedOrgPmsCodes.has(c.client_code));
+  const unlinkedPmsOrgs = pmsOrgClients.filter(
+    (c) => !linkedOrgPmsCodes.has(c.client_code),
+  );
 
-  const linkedPerson1SqIds = new Set(linksByType.person.map((l) => l.onesquaredId));
   const linkedPersonPmsCodes = new Set(linksByType.person.map((l) => l.pmsCode));
-  const unlinked1SqPeople = activePeople.filter((p) => !linkedPerson1SqIds.has(p.id));
-  const unlinkedPmsPeople = pmsIndClients.filter((c) => !linkedPersonPmsCodes.has(c.client_code));
+  const unlinkedPmsPeople = pmsIndClients.filter(
+    (c) => !linkedPersonPmsCodes.has(c.client_code),
+  );
 
-  const linkedEmp1SqIds = new Set(linksByType.employee.map((l) => l.onesquaredId));
   const linkedEmpPmsCodes = new Set(linksByType.employee.map((l) => l.pmsCode));
-  const unlinked1SqEmps = activeEmployees.filter((p) => !linkedEmp1SqIds.has(p.id));
-  const unlinkedPmsEmps = pmsAdmin.pmsFeeEarners.filter(
+  const unlinkedPmsEmps = activePmsAdmin.pmsFeeEarners.filter(
     (fe) => !linkedEmpPmsCodes.has(fe.fee_earner_id),
   );
 
-  const linkedMatter1SqIds = new Set(linksByType.matter.map((l) => l.onesquaredId));
   const linkedMatterPmsCodes = new Set(linksByType.matter.map((l) => l.pmsCode));
-  const unlinked1SqMatters = activeMatters.filter((m) => !linkedMatter1SqIds.has(m.id));
-  const unlinkedPmsMatters = pmsAdmin.pmsMatters.filter(
+  const unlinkedPmsMatters = activePmsAdmin.pmsMatters.filter(
     (pm) => !linkedMatterPmsCodes.has(pm.matter_code),
   );
+
+  const unlinkedOrgs = pageData?.unlinkedOrganisationsPage.items ?? [];
+  const unlinkedOrgsTotal = pageData?.unlinkedOrganisationsPage.totalCount ?? 0;
+
+  const unlinkedPeople = pageData?.unlinkedPeoplePage.items ?? [];
+  const unlinkedPeopleTotal = pageData?.unlinkedPeoplePage.totalCount ?? 0;
+
+  const unlinkedEmps = pageData?.unlinkedEmployeesPage.items ?? [];
+  const unlinkedEmpsTotal = pageData?.unlinkedEmployeesPage.totalCount ?? 0;
+
+  const unlinkedMatters = pageData?.unlinkedMattersPage.items ?? [];
+  const unlinkedMattersTotal = pageData?.unlinkedMattersPage.totalCount ?? 0;
 
   return (
     <div>
@@ -180,8 +357,8 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
             </h2>
             <StatusPill
               label={
-                isValidPmsAsAtDate(pmsAdmin.extractInfo.asAtDate)
-                  ? `PMS · as at ${formatPmsAsAtLabel(pmsAdmin.extractInfo.asAtDate)}`
+                isValidPmsAsAtDate(activePmsAdmin.extractInfo.asAtDate)
+                  ? `PMS · as at ${formatPmsAsAtLabel(activePmsAdmin.extractInfo.asAtDate)}`
                   : `PMS · ${PMS_AS_AT_UNAVAILABLE_LABEL}`
               }
               tone="neutral"
@@ -205,11 +382,11 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
       </div>
 
       {/* Sub-navigation */}
-      <div className="tabs-bar" style={{ marginBottom: 20 }}>
+      <div className="tabs-bar" style={{ marginBottom: 16 }}>
         <button
           type="button"
           className={`tab-btn ${subTab === 'organisations' ? 'tab-btn--active' : ''}`}
-          onClick={() => setSubTab('organisations')}
+          onClick={() => handleSubTabChange('organisations')}
         >
           Organisations ({linksByType.organisation.length} linked · {unlinkedPmsOrgs.length} PMS
           unmatched)
@@ -217,7 +394,7 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         <button
           type="button"
           className={`tab-btn ${subTab === 'people' ? 'tab-btn--active' : ''}`}
-          onClick={() => setSubTab('people')}
+          onClick={() => handleSubTabChange('people')}
         >
           Individual clients ({linksByType.person.length} linked · {unlinkedPmsPeople.length} PMS
           unmatched)
@@ -225,7 +402,7 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         <button
           type="button"
           className={`tab-btn ${subTab === 'employees' ? 'tab-btn--active' : ''}`}
-          onClick={() => setSubTab('employees')}
+          onClick={() => handleSubTabChange('employees')}
         >
           Fee earners ({linksByType.employee.length} linked · {unlinkedPmsEmps.length} PMS
           unmatched)
@@ -233,11 +410,67 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
         <button
           type="button"
           className={`tab-btn ${subTab === 'matters' ? 'tab-btn--active' : ''}`}
-          onClick={() => setSubTab('matters')}
+          onClick={() => handleSubTabChange('matters')}
         >
           Matters ({linksByType.matter.length} linked · {unlinkedPmsMatters.length} PMS unmatched)
         </button>
       </div>
+
+      {/* Server search bar for unlinked 1Squared records */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          marginBottom: 18,
+          flexWrap: 'wrap',
+        }}
+      >
+        <input
+          type="search"
+          className="field-input"
+          style={{ maxWidth: 420 }}
+          aria-label="Search unlinked 1Squared records"
+          placeholder="Search unlinked 1Squared records by name, reference, company no. or email…"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+        />
+        {searchInput ? (
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => {
+              setSearchInput('');
+              setDebouncedQuery('');
+              setPage(1);
+            }}
+          >
+            Clear
+          </button>
+        ) : null}
+        {loadingPage ? (
+          <span className="muted" style={{ fontSize: 12.5 }}>
+            Loading…
+          </span>
+        ) : null}
+      </div>
+
+      {loadError ? (
+        <div className="banner banner--warning" role="alert" style={{ marginBottom: 18 }}>
+          <div>
+            <strong>{loadError}</strong>
+          </div>
+          <div className="banner__actions">
+            <button
+              type="button"
+              className="btn btn--secondary btn--sm"
+              onClick={triggerReload}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {/* 1. ORGANISATIONS */}
       {subTab === 'organisations' && (
@@ -250,14 +483,22 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
               <p className="muted">No organisations linked yet.</p>
             ) : (
               linksByType.organisation.map((link) => {
-                const org = activeOrgs.find((o) => o.id === link.onesquaredId);
-                const pmsClient = pmsOrgClients.find((c) => c.client_code === link.pmsCode);
+                const resolved = linkedRecordTitles[link.onesquaredId];
+                const fallbackOrg = fallbackOrgById.get(link.onesquaredId);
+                const pmsClient = pmsOrgClients.find(
+                  (c) => c.client_code === link.pmsCode,
+                );
+                const orgLabel = resolved?.label ?? fallbackOrg?.legalName;
+                const companyNumber =
+                  resolved?.companyNumber ?? fallbackOrg?.companyNumber;
                 return (
                   <div key={link.id} className="list-row">
                     <div className="list-row__main">
                       <div className="list-row__title">
-                        {org ? (
-                          <Link href={`/organisations/${org.id}`}>{org.legalName}</Link>
+                        {orgLabel ? (
+                          <Link href={resolved?.href ?? `/organisations/${link.onesquaredId}`}>
+                            {orgLabel}
+                          </Link>
                         ) : (
                           link.onesquaredId
                         )}{' '}
@@ -267,7 +508,7 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
                         </strong>
                       </div>
                       <div className="list-row__meta">
-                        Co. number: {org?.companyNumber || '—'} · PMS Co. number:{' '}
+                        Co. number: {companyNumber || '—'} · PMS Co. number:{' '}
                         {pmsClient?.company_number || '—'} ·{' '}
                         {MATCHED_BY_LABELS[link.matchedBy] ?? link.matchedBy} · Linked{' '}
                         {formatDate(link.matchedAt)}
@@ -295,57 +536,72 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
 
           <div className="subcard">
             <div className="section-label" style={{ marginBottom: 10 }}>
-              1Squared organisations not linked to PMS ({unlinked1SqOrgs.length})
+              1Squared organisations not linked to PMS ({unlinkedOrgsTotal})
             </div>
-            {unlinked1SqOrgs.length === 0 ? (
-              <p className="muted">All 1Squared organisations are linked.</p>
+            {loadingPage && unlinkedOrgs.length === 0 ? (
+              <p className="muted">Loading unlinked organisations…</p>
+            ) : unlinkedOrgsTotal === 0 ? (
+              <p className="muted">
+                {debouncedQuery
+                  ? 'No unlinked 1Squared organisations match your search.'
+                  : 'All 1Squared organisations are linked.'}
+              </p>
             ) : (
-              unlinked1SqOrgs.map((org) => {
-                const chosen = selectedPmsCodeBy1SqId[org.id] ?? '';
-                return (
-                  <div key={org.id} className="list-row">
-                    <div className="list-row__main">
-                      <div className="list-row__title">
-                        <Link href={`/organisations/${org.id}`}>{org.legalName}</Link>{' '}
-                        <span className="muted">({org.id})</span>
+              <>
+                {unlinkedOrgs.map((org) => {
+                  const chosen = selectedPmsCodeBy1SqId[org.id] ?? '';
+                  return (
+                    <div key={org.id} className="list-row">
+                      <div className="list-row__main">
+                        <div className="list-row__title">
+                          <Link href={`/organisations/${org.id}`}>{org.legalName}</Link>{' '}
+                          <span className="muted">({org.id})</span>
+                        </div>
+                        <div className="list-row__meta">
+                          Co. number: {org.companyNumber || 'None'} · Email:{' '}
+                          {org.generalEmail || '—'}
+                        </div>
                       </div>
-                      <div className="list-row__meta">
-                        Co. number: {org.companyNumber || 'None'} · Email:{' '}
-                        {org.generalEmail || '—'}
+                      <div className="list-row__aside" style={{ gap: 8 }}>
+                        <select
+                          aria-label={`Select PMS client for ${org.legalName}`}
+                          className="field-select"
+                          style={{ width: 280, fontSize: 13 }}
+                          value={chosen}
+                          onChange={(e) =>
+                            setSelectedPmsCodeBy1SqId((prev) => ({
+                              ...prev,
+                              [org.id]: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">Link to PMS client…</option>
+                          {unlinkedPmsOrgs.map((c) => (
+                            <option key={c.client_code} value={c.client_code}>
+                              {c.client_code} — {c.client_name} ({c.company_number || 'no reg'})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          disabled={pending || !chosen}
+                          onClick={() => handleLink('organisation', org.id, chosen)}
+                        >
+                          Link
+                        </button>
                       </div>
                     </div>
-                    <div className="list-row__aside" style={{ gap: 8 }}>
-                      <select
-                        aria-label={`Select PMS client for ${org.legalName}`}
-                        className="field-select"
-                        style={{ width: 280, fontSize: 13 }}
-                        value={chosen}
-                        onChange={(e) =>
-                          setSelectedPmsCodeBy1SqId((prev) => ({
-                            ...prev,
-                            [org.id]: e.target.value,
-                          }))
-                        }
-                      >
-                        <option value="">Link to PMS client…</option>
-                        {unlinkedPmsOrgs.map((c) => (
-                          <option key={c.client_code} value={c.client_code}>
-                            {c.client_code} — {c.client_name} ({c.company_number || 'no reg'})
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        disabled={pending || !chosen}
-                        onClick={() => handleLink('organisation', org.id, chosen)}
-                      >
-                        Link
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
+                  );
+                })}
+                <PmsPaginationControls
+                  page={page}
+                  pageSize={PMS_LINKS_PAGE_SIZE}
+                  totalCount={unlinkedOrgsTotal}
+                  loading={loadingPage}
+                  onPageChange={setPage}
+                />
+              </>
             )}
           </div>
 
@@ -401,14 +657,25 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
               <p className="muted">No individual clients linked yet.</p>
             ) : (
               linksByType.person.map((link) => {
-                const person = activePeople.find((p) => p.id === link.onesquaredId);
-                const pmsClient = pmsIndClients.find((c) => c.client_code === link.pmsCode);
+                const resolved = linkedRecordTitles[link.onesquaredId];
+                const fallbackPerson = fallbackPersonById.get(link.onesquaredId);
+                const pmsClient = pmsIndClients.find(
+                  (c) => c.client_code === link.pmsCode,
+                );
+                const personLabel =
+                  resolved?.label ??
+                  (fallbackPerson ? personDisplayName(fallbackPerson) : undefined);
+                const personEmail =
+                  resolved?.primaryEmail ??
+                  (fallbackPerson ? primaryEmail(fallbackPerson) : undefined);
                 return (
                   <div key={link.id} className="list-row">
                     <div className="list-row__main">
                       <div className="list-row__title">
-                        {person ? (
-                          <Link href={`/people/${person.id}`}>{personDisplayName(person)}</Link>
+                        {personLabel ? (
+                          <Link href={resolved?.href ?? `/people/${link.onesquaredId}`}>
+                            {personLabel}
+                          </Link>
                         ) : (
                           link.onesquaredId
                         )}{' '}
@@ -418,7 +685,7 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
                         </strong>
                       </div>
                       <div className="list-row__meta">
-                        1Squared email: {person ? primaryEmail(person) || '—' : '—'} · PMS email:{' '}
+                        1Squared email: {personEmail || '—'} · PMS email:{' '}
                         {pmsClient?.email || '—'} ·{' '}
                         {MATCHED_BY_LABELS[link.matchedBy] ?? link.matchedBy}
                       </div>
@@ -445,51 +712,72 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
 
           <div className="subcard">
             <div className="section-label" style={{ marginBottom: 10 }}>
-              1Squared people not linked to PMS ({unlinked1SqPeople.length})
+              1Squared people not linked to PMS ({unlinkedPeopleTotal})
             </div>
-            {unlinked1SqPeople.map((p) => {
-              const chosen = selectedPmsCodeBy1SqId[p.id] ?? '';
-              return (
-                <div key={p.id} className="list-row">
-                  <div className="list-row__main">
-                    <div className="list-row__title">
-                      <Link href={`/people/${p.id}`}>{personDisplayName(p)}</Link>{' '}
-                      <span className="muted">({p.id})</span>
+            {loadingPage && unlinkedPeople.length === 0 ? (
+              <p className="muted">Loading unlinked people…</p>
+            ) : unlinkedPeopleTotal === 0 ? (
+              <p className="muted">
+                {debouncedQuery
+                  ? 'No unlinked 1Squared people match your search.'
+                  : 'All 1Squared individual clients are linked.'}
+              </p>
+            ) : (
+              <>
+                {unlinkedPeople.map((p) => {
+                  const chosen = selectedPmsCodeBy1SqId[p.id] ?? '';
+                  return (
+                    <div key={p.id} className="list-row">
+                      <div className="list-row__main">
+                        <div className="list-row__title">
+                          <Link href={`/people/${p.id}`}>{p.displayName}</Link>{' '}
+                          <span className="muted">({p.id})</span>
+                        </div>
+                        <div className="list-row__meta">
+                          Email: {p.primaryEmail || 'None'}
+                        </div>
+                      </div>
+                      <div className="list-row__aside" style={{ gap: 8 }}>
+                        <select
+                          aria-label={`Select PMS client for ${p.displayName}`}
+                          className="field-select"
+                          style={{ width: 280, fontSize: 13 }}
+                          value={chosen}
+                          onChange={(e) =>
+                            setSelectedPmsCodeBy1SqId((prev) => ({
+                              ...prev,
+                              [p.id]: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">Link to PMS individual client…</option>
+                          {unlinkedPmsPeople.map((c) => (
+                            <option key={c.client_code} value={c.client_code}>
+                              {c.client_code} — {c.client_name} ({c.email || 'no email'})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          disabled={pending || !chosen}
+                          onClick={() => handleLink('person', p.id, chosen)}
+                        >
+                          Link
+                        </button>
+                      </div>
                     </div>
-                    <div className="list-row__meta">Email: {primaryEmail(p) || 'None'}</div>
-                  </div>
-                  <div className="list-row__aside" style={{ gap: 8 }}>
-                    <select
-                      aria-label={`Select PMS client for ${personDisplayName(p)}`}
-                      className="field-select"
-                      style={{ width: 280, fontSize: 13 }}
-                      value={chosen}
-                      onChange={(e) =>
-                        setSelectedPmsCodeBy1SqId((prev) => ({
-                          ...prev,
-                          [p.id]: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">Link to PMS individual client…</option>
-                      {unlinkedPmsPeople.map((c) => (
-                        <option key={c.client_code} value={c.client_code}>
-                          {c.client_code} — {c.client_name} ({c.email || 'no email'})
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="btn btn--secondary btn--sm"
-                      disabled={pending || !chosen}
-                      onClick={() => handleLink('person', p.id, chosen)}
-                    >
-                      Link
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                  );
+                })}
+                <PmsPaginationControls
+                  page={page}
+                  pageSize={PMS_LINKS_PAGE_SIZE}
+                  totalCount={unlinkedPeopleTotal}
+                  loading={loadingPage}
+                  onPageChange={setPage}
+                />
+              </>
+            )}
           </div>
 
           <div className="subcard">
@@ -519,7 +807,9 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
                       type="button"
                       className="btn btn--primary btn--sm"
                       disabled={pending}
-                      onClick={() => handleCreateFromPms('person', c.client_code, c.client_name)}
+                      onClick={() =>
+                        handleCreateFromPms('person', c.client_code, c.client_name)
+                      }
                     >
                       + Create in 1Squared
                     </button>
@@ -539,15 +829,25 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
               Matched employees &amp; PMS fee earners ({linksByType.employee.length})
             </div>
             {linksByType.employee.map((link) => {
-              const emp = activeEmployees.find((p) => p.id === link.onesquaredId);
-              const fe = pmsAdmin.pmsFeeEarners.find((f) => f.fee_earner_id === link.pmsCode);
-              const feFullName = fe ? `${fe.first_name} ${fe.last_name}` : 'PMS fee earner';
+              const resolved = linkedRecordTitles[link.onesquaredId];
+              const fallbackEmp = fallbackPersonById.get(link.onesquaredId);
+              const fe = activePmsAdmin.pmsFeeEarners.find(
+                (f) => f.fee_earner_id === link.pmsCode,
+              );
+              const feFullName = fe
+                ? `${fe.first_name} ${fe.last_name}`
+                : 'PMS fee earner';
+              const empLabel =
+                resolved?.label ??
+                (fallbackEmp ? personDisplayName(fallbackEmp) : undefined);
               return (
                 <div key={link.id} className="list-row">
                   <div className="list-row__main">
                     <div className="list-row__title">
-                      {emp ? (
-                        <Link href={`/people/${emp.id}`}>{personDisplayName(emp)}</Link>
+                      {empLabel ? (
+                        <Link href={resolved?.href ?? `/people/${link.onesquaredId}`}>
+                          {empLabel}
+                        </Link>
                       ) : (
                         link.onesquaredId
                       )}{' '}
@@ -558,7 +858,8 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
                     </div>
                     <div className="list-row__meta">
                       Email: {fe?.email || '—'} · Grade: {fe?.grade || '—'} · Dept:{' '}
-                      {fe?.department || '—'} · Standard rate: £{fe?.standard_hourly_rate ?? 0}/hr
+                      {fe?.department || '—'} · Standard rate: £
+                      {fe?.standard_hourly_rate ?? 0}/hr
                     </div>
                   </div>
                   <div className="list-row__aside">
@@ -599,7 +900,8 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
                         <StatusPill label={fe.grade} tone="neutral" />
                       </div>
                       <div className="list-row__meta">
-                        {fe.department} · {fe.email} · Standard rate £{fe.standard_hourly_rate}/hr
+                        {fe.department} · {fe.email} · Standard rate £
+                        {fe.standard_hourly_rate}/hr
                       </div>
                     </div>
                     <div className="list-row__aside">
@@ -622,53 +924,72 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
 
           <div className="subcard">
             <div className="section-label" style={{ marginBottom: 10 }}>
-              1Squared employees without a PMS fee earner code ({unlinked1SqEmps.length})
+              1Squared employees without a PMS fee earner code ({unlinkedEmpsTotal})
             </div>
-            {unlinked1SqEmps.map((emp) => {
-              const chosen = selectedPmsCodeBy1SqId[emp.id] ?? '';
-              return (
-                <div key={emp.id} className="list-row">
-                  <div className="list-row__main">
-                    <div className="list-row__title">
-                      <Link href={`/people/${emp.id}`}>{personDisplayName(emp)}</Link>{' '}
-                      <span className="muted">({emp.id})</span>
+            {loadingPage && unlinkedEmps.length === 0 ? (
+              <p className="muted">Loading unlinked employees…</p>
+            ) : unlinkedEmpsTotal === 0 ? (
+              <p className="muted">
+                {debouncedQuery
+                  ? 'No unlinked employees match your search.'
+                  : 'All 1Squared employees have a PMS fee earner code.'}
+              </p>
+            ) : (
+              <>
+                {unlinkedEmps.map((emp) => {
+                  const chosen = selectedPmsCodeBy1SqId[emp.id] ?? '';
+                  return (
+                    <div key={emp.id} className="list-row">
+                      <div className="list-row__main">
+                        <div className="list-row__title">
+                          <Link href={`/people/${emp.id}`}>{emp.displayName}</Link>{' '}
+                          <span className="muted">({emp.id})</span>
+                        </div>
+                        <div className="list-row__meta">
+                          {emp.jobTitle || 'Employee'} · {emp.primaryEmail || 'No email'}
+                        </div>
+                      </div>
+                      <div className="list-row__aside" style={{ gap: 8 }}>
+                        <select
+                          aria-label={`Select PMS fee earner for ${emp.displayName}`}
+                          className="field-select"
+                          style={{ width: 260, fontSize: 13 }}
+                          value={chosen}
+                          onChange={(e) =>
+                            setSelectedPmsCodeBy1SqId((prev) => ({
+                              ...prev,
+                              [emp.id]: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">Link to PMS fee earner…</option>
+                          {unlinkedPmsEmps.map((fe) => (
+                            <option key={fe.fee_earner_id} value={fe.fee_earner_id}>
+                              {fe.fee_earner_id} — {fe.first_name} {fe.last_name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          disabled={pending || !chosen}
+                          onClick={() => handleLink('employee', emp.id, chosen)}
+                        >
+                          Link
+                        </button>
+                      </div>
                     </div>
-                    <div className="list-row__meta">
-                      {emp.jobTitle || 'Employee'} · {primaryEmail(emp) || 'No email'}
-                    </div>
-                  </div>
-                  <div className="list-row__aside" style={{ gap: 8 }}>
-                    <select
-                      aria-label={`Select PMS fee earner for ${personDisplayName(emp)}`}
-                      className="field-select"
-                      style={{ width: 260, fontSize: 13 }}
-                      value={chosen}
-                      onChange={(e) =>
-                        setSelectedPmsCodeBy1SqId((prev) => ({
-                          ...prev,
-                          [emp.id]: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value="">Link to PMS fee earner…</option>
-                      {unlinkedPmsEmps.map((fe) => (
-                        <option key={fe.fee_earner_id} value={fe.fee_earner_id}>
-                          {fe.fee_earner_id} — {fe.first_name} {fe.last_name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="btn btn--secondary btn--sm"
-                      disabled={pending || !chosen}
-                      onClick={() => handleLink('employee', emp.id, chosen)}
-                    >
-                      Link
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                  );
+                })}
+                <PmsPaginationControls
+                  page={page}
+                  pageSize={PMS_LINKS_PAGE_SIZE}
+                  totalCount={unlinkedEmpsTotal}
+                  loading={loadingPage}
+                  onPageChange={setPage}
+                />
+              </>
+            )}
           </div>
         </div>
       )}
@@ -676,16 +997,16 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
       {/* 4. MATTERS */}
       {subTab === 'matters' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-          {pmsAdmin.suggestedMatterMatches.length > 0 && (
+          {activePmsAdmin.suggestedMatterMatches.length > 0 && (
             <div className="subcard" style={{ borderLeft: '4px solid var(--accent)' }}>
               <div className="section-label" style={{ marginBottom: 8 }}>
-                Suggested matter matches ({pmsAdmin.suggestedMatterMatches.length})
+                Suggested matter matches ({activePmsAdmin.suggestedMatterMatches.length})
               </div>
               <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
                 Matters have no shared reference between systems until linked. These candidates
                 share the same linked client and work type or description.
               </p>
-              {pmsAdmin.suggestedMatterMatches.map((s) => (
+              {activePmsAdmin.suggestedMatterMatches.map((s) => (
                 <div
                   key={`${s.onesquaredId}-${s.pmsCode}`}
                   className="list-row"
@@ -721,15 +1042,23 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
               <p className="muted">No matters linked yet.</p>
             ) : (
               linksByType.matter.map((link) => {
-                const m = activeMatters.find((x) => x.id === link.onesquaredId);
-                const pm = pmsAdmin.pmsMatters.find((x) => x.matter_code === link.pmsCode);
+                const resolved = linkedRecordTitles[link.onesquaredId];
+                const fallbackMatter = fallbackMatterById.get(link.onesquaredId);
+                const pm = activePmsAdmin.pmsMatters.find(
+                  (x) => x.matter_code === link.pmsCode,
+                );
+                const matterLabel =
+                  resolved?.label ??
+                  (fallbackMatter
+                    ? `${fallbackMatter.matterNumber} — ${fallbackMatter.title}`
+                    : undefined);
                 return (
                   <div key={link.id} className="list-row">
                     <div className="list-row__main">
                       <div className="list-row__title">
-                        {m ? (
-                          <Link href={`/matters/${m.id}`}>
-                            {m.matterNumber} — {m.title}
+                        {matterLabel ? (
+                          <Link href={resolved?.href ?? `/matters/${link.onesquaredId}`}>
+                            {matterLabel}
                           </Link>
                         ) : (
                           link.onesquaredId
@@ -767,55 +1096,72 @@ export function PmsLinksAdminSection({ pmsAdmin, organisations, people, matters 
 
           <div className="subcard">
             <div className="section-label" style={{ marginBottom: 10 }}>
-              1Squared matters not linked to PMS ({unlinked1SqMatters.length})
+              1Squared matters not linked to PMS ({unlinkedMattersTotal})
             </div>
-            {unlinked1SqMatters.length === 0 ? (
-              <p className="muted">All 1Squared matters are linked to PMS.</p>
+            {loadingPage && unlinkedMatters.length === 0 ? (
+              <p className="muted">Loading unlinked matters…</p>
+            ) : unlinkedMattersTotal === 0 ? (
+              <p className="muted">
+                {debouncedQuery
+                  ? 'No unlinked 1Squared matters match your search.'
+                  : 'All 1Squared matters are linked to PMS.'}
+              </p>
             ) : (
-              unlinked1SqMatters.map((m) => {
-                const chosen = selectedPmsCodeBy1SqId[m.id] ?? '';
-                return (
-                  <div key={m.id} className="list-row">
-                    <div className="list-row__main">
-                      <div className="list-row__title">
-                        <Link href={`/matters/${m.id}`}>
-                          {m.matterNumber} — {m.title}
-                        </Link>
+              <>
+                {unlinkedMatters.map((m) => {
+                  const chosen = selectedPmsCodeBy1SqId[m.id] ?? '';
+                  return (
+                    <div key={m.id} className="list-row">
+                      <div className="list-row__main">
+                        <div className="list-row__title">
+                          <Link href={`/matters/${m.id}`}>
+                            {m.matterNumber} — {m.title}
+                          </Link>
+                        </div>
+                        <div className="list-row__meta">
+                          Opened {m.openedAt ? formatDate(m.openedAt) : '—'}
+                        </div>
                       </div>
-                      <div className="list-row__meta">Opened {formatDate(m.openedAt)}</div>
+                      <div className="list-row__aside" style={{ gap: 8 }}>
+                        <select
+                          aria-label={`Select PMS matter for ${m.matterNumber}`}
+                          className="field-select"
+                          style={{ width: 320, fontSize: 13 }}
+                          value={chosen}
+                          onChange={(e) =>
+                            setSelectedPmsCodeBy1SqId((prev) => ({
+                              ...prev,
+                              [m.id]: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">Link to PMS matter…</option>
+                          {unlinkedPmsMatters.map((pm) => (
+                            <option key={pm.matter_code} value={pm.matter_code}>
+                              {pm.matter_code} — {pm.matter_description} ({pm.client_code})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          disabled={pending || !chosen}
+                          onClick={() => handleLink('matter', m.id, chosen)}
+                        >
+                          Link
+                        </button>
+                      </div>
                     </div>
-                    <div className="list-row__aside" style={{ gap: 8 }}>
-                      <select
-                        aria-label={`Select PMS matter for ${m.matterNumber}`}
-                        className="field-select"
-                        style={{ width: 320, fontSize: 13 }}
-                        value={chosen}
-                        onChange={(e) =>
-                          setSelectedPmsCodeBy1SqId((prev) => ({
-                            ...prev,
-                            [m.id]: e.target.value,
-                          }))
-                        }
-                      >
-                        <option value="">Link to PMS matter…</option>
-                        {unlinkedPmsMatters.map((pm) => (
-                          <option key={pm.matter_code} value={pm.matter_code}>
-                            {pm.matter_code} — {pm.matter_description} ({pm.client_code})
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        className="btn btn--secondary btn--sm"
-                        disabled={pending || !chosen}
-                        onClick={() => handleLink('matter', m.id, chosen)}
-                      >
-                        Link
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
+                  );
+                })}
+                <PmsPaginationControls
+                  page={page}
+                  pageSize={PMS_LINKS_PAGE_SIZE}
+                  totalCount={unlinkedMattersTotal}
+                  loading={loadingPage}
+                  onPageChange={setPage}
+                />
+              </>
             )}
           </div>
 

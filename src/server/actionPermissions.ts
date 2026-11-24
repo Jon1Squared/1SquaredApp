@@ -537,6 +537,16 @@ export const ACTION_PERMISSIONS = {
     key: 'finance:manage_links',
     enforcedBy: 'action',
   },
+  loadPmsLinksAdminDataAction: {
+    kind: 'permission',
+    key: 'finance:manage_links',
+    enforcedBy: 'action',
+  },
+  getExpiredEnquiriesCountAction: {
+    kind: 'permission',
+    key: { anyOf: ['admin:access', 'enquiry:anonymise'] },
+    enforcedBy: 'action',
+  },
 
   // S0-05: Record mutations — tasks, enquiries, organisations, links, notes, duplicates/merge, leavers & quotes (20)
   reassignLeaverOwnedRecordsAction: {

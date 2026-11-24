@@ -39,10 +39,12 @@ import {
 import { sanitizePersonForClientPreview } from '@/domain/intakePreview';
 import { systemKeyOf } from '@/domain/lists';
 import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
+import type { MatterPartyUsageCounts } from '@/domain/matterParties';
 import {
   toClientPriorMatterSummary,
   type ClientPriorMatterSummary,
 } from '@/domain/matterOpeningRecord';
+import type { PmsLinksAdminPageData } from '@/domain/pms';
 import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
@@ -76,6 +78,7 @@ import {
 } from './rbacRuntime';
 import {
   activeEmployees,
+  buildPmsLinksAdminDataFromSnapshot,
   dedupeById,
   findCandidateDuplicatesForRecord,
   getCatalogueRepository,
@@ -3044,6 +3047,9 @@ export async function loadAdminPageData(
       enquirySettings: EnquirySettings;
       taskSettings: LoadedStoreView['taskSettings'];
       pmsAdmin?: PmsAdminSnapshot;
+      initialPmsLinksData?: PmsLinksAdminPageData;
+      expiredUnconvertedEnquiriesCount: number;
+      matterPartyUsageCounts: MatterPartyUsageCounts;
       isLiveEnvironment: boolean;
       defaultRoleConfigs: ReturnType<typeof createDefaultRoleConfigs>;
       orgStructure: OrgStructureCatalogue;
@@ -3102,19 +3108,18 @@ export async function loadAdminPageData(
           ? (first as AdminTab)
           : 'lists';
 
-  const needsWhereUsedSample = initialTabWithoutPms === 'lists';
-  const needsEnquiriesForAdmin =
-    initialTabWithoutPms === 'lists' || initialTabWithoutPms === 'enquiry-settings';
+  const retentionCutoffIso = addMonths(
+    new Date(),
+    -Math.max(1, Math.floor(shell.store.enquirySettings.retentionMonths || 12)),
+  ).toISOString();
 
   const [
     firmAuditPage,
     pmsAdminResult,
     dbEmployeeMigrationReport,
     registersMeta,
-    boundedPeople,
-    boundedOrgs,
-    boundedMatters,
-    boundedEnquiries,
+    expiredUnconvertedEnquiriesCount,
+    matterPartyUsageCounts,
   ] = await Promise.all([
     listFirmAuditEntriesPage(actorId, {
       limit: 250,
@@ -3123,30 +3128,30 @@ export async function loadAdminPageData(
     getPmsAdminSnapshot(actorId),
     getHrAndRbacRepository().getEmployeeMigrationReport<EmployeeMigrationReport>(ctx),
     resolveRegistersSummary(ctx, activeTenantCfg),
-    needsWhereUsedSample
-      ? getPartyRepository().listPeoplePage<Person>(ctx, { limit: 500 })
-      : Promise.resolve<Person[]>([]),
-    needsWhereUsedSample
-      ? getPartyRepository().listOrganisationsPage<Organisation>(ctx, { limit: 500 })
-      : Promise.resolve<Organisation[]>([]),
-    needsWhereUsedSample
-      ? getMatterRepository().listVisibleMatters<Matter>(ctx, {
-          viewerId: actorId,
-          hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
-          limit: 500,
-        })
-      : Promise.resolve<Matter[]>([]),
-    needsEnquiriesForAdmin
-      ? getIntakeQuoteRepository().listVisibleEnquiries<Enquiry>(ctx, actorId, {
-          hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
-          limit: 500,
-        })
-      : Promise.resolve<Enquiry[]>([]),
+    getIntakeQuoteRepository().countEnquiriesReadyForRetention(
+      ctx,
+      retentionCutoffIso,
+    ),
+    getMatterRepository().getMatterPartyUsageSummary(ctx),
   ]);
 
   const pmsAdmin = isActionDenied(pmsAdminResult) ? undefined : pmsAdminResult;
   const initialTab: AdminTab =
     first === 'pms-links' && !pmsAdmin ? 'lists' : initialTabWithoutPms;
+
+  let initialPmsLinksData: PmsLinksAdminPageData | undefined;
+  if (initialTab === 'pms-links' && pmsAdmin) {
+    const pmsDataRes = await buildPmsLinksAdminDataFromSnapshot(
+      ctx,
+      actorId,
+      shell.hasRestrictedMatterAccess,
+      pmsAdmin,
+      { subTab: 'organisations', query: '', page: 1, pageSize: 50 },
+    );
+    if (!isActionDenied(pmsDataRes)) {
+      initialPmsLinksData = pmsDataRes;
+    }
+  }
 
   const appRoleByPersonId: Record<string, AppRole> = {};
   const rolesByPersonId: Record<string, HomeRoleKey[]> = {};
@@ -3164,28 +3169,23 @@ export async function loadAdminPageData(
     });
   }
 
-  const staffById = new Set(shell.filteredStaffPeople.map((p) => p.id));
-  const combinedPeople = dedupeById([
-    ...shell.filteredStaffPeople,
-    ...boundedPeople
-      .filter((p) => !staffById.has(p.id))
-      .map((p) => sanitizePersonForClientPreview(p)),
-  ]);
-
   return {
     shell,
     initialTab,
     lists: shell.lists,
     values: shell.values,
     customFields: shell.customFields,
-    people: combinedPeople,
-    organisations: boundedOrgs,
-    matters: boundedMatters,
-    enquiries: boundedEnquiries,
+    people: shell.filteredStaffPeople,
+    organisations: [],
+    matters: [],
+    enquiries: [],
     teams,
     enquirySettings: shell.store.enquirySettings,
     taskSettings: shell.store.taskSettings,
     pmsAdmin,
+    initialPmsLinksData,
+    expiredUnconvertedEnquiriesCount,
+    matterPartyUsageCounts,
     isLiveEnvironment: activeTenantCfg.environment === 'live',
     defaultRoleConfigs: createDefaultRoleConfigs(
       activeTenantCfg.branding.primaryDomain,

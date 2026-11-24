@@ -2337,6 +2337,382 @@ export class TenantMatterRepository extends TenantScopedRepository {
     });
   }
 
+  public async listVisibleMattersPageWithCount<
+    TMatter extends TenantMatterRecord = TenantMatterRecord,
+  >(
+    ctx: TenantContext,
+    viewerOrOptions?: {
+      viewerId?: string;
+      viewerUserId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedAccessPermission?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+      includeMerged?: boolean;
+      excludeIds?: readonly string[];
+      query?: string;
+      statusId?: string;
+      practiceAreaId?: string;
+      responsiblePartnerId?: string;
+      leadFeeEarnerId?: string;
+      staffRestrictedOnly?: boolean;
+      sortOrder?: 'id_asc' | 'updated_desc';
+      limit?: number;
+      offset?: number;
+    },
+  ): Promise<{ readonly items: TMatter[]; readonly totalCount: number }> {
+    const cleanQuery = viewerOrOptions?.query?.trim().toLowerCase() ?? '';
+    const excludeIds = Array.from(
+      new Set(
+        (viewerOrOptions?.excludeIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const statusId = viewerOrOptions?.statusId?.trim() || undefined;
+    const practiceAreaId = viewerOrOptions?.practiceAreaId?.trim() || undefined;
+    const responsiblePartnerId =
+      viewerOrOptions?.responsiblePartnerId?.trim() || undefined;
+    const leadFeeEarnerId =
+      viewerOrOptions?.leadFeeEarnerId?.trim() || undefined;
+    const staffRestrictedOnly = Boolean(viewerOrOptions?.staffRestrictedOnly);
+    const { viewerId, includeRestricted } = this.resolveMatterViewerOptions(
+      ctx,
+      viewerOrOptions ?? ctx.actorId,
+    );
+    const limit =
+      typeof viewerOrOptions?.limit === 'number' &&
+      Number.isFinite(viewerOrOptions.limit)
+        ? Math.max(1, Math.min(500, Math.floor(viewerOrOptions.limit)))
+        : 50;
+    const offset =
+      typeof viewerOrOptions?.offset === 'number' &&
+      Number.isFinite(viewerOrOptions.offset)
+        ? Math.max(0, Math.floor(viewerOrOptions.offset))
+        : 0;
+    const sortSql =
+      viewerOrOptions?.sortOrder === 'updated_desc'
+        ? 'm.updated_at DESC, m.id ASC'
+        : 'm.id ASC';
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const params: unknown[] = includeRestricted
+        ? [ctx.tenantId]
+        : [ctx.tenantId, viewerId];
+      const clauses = ['m.tenant_id = $1', "m.client_id <> 'O-KEYDATE-STUB'"];
+      if (!includeRestricted) {
+        // Must remain identical to canViewerAccessMatterRow (`Suggestion 2`).
+        clauses.push(`(
+          (
+            m.is_staff_matter = FALSE
+            AND m.has_ethical_wall = FALSE
+            AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+          )
+          OR m.restricted_access_user_ids_json ? $2
+        )`);
+      }
+      if (viewerOrOptions?.includeMerged === false) {
+        clauses.push(
+          "NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL",
+        );
+      }
+      if (excludeIds.length > 0) {
+        params.push(excludeIds);
+        clauses.push(`m.id <> ALL($${params.length}::text[])`);
+      }
+      if (statusId) {
+        params.push(statusId);
+        clauses.push(`m.status_id = $${params.length}`);
+      }
+      if (practiceAreaId) {
+        params.push(practiceAreaId);
+        clauses.push(`m.practice_area_id = $${params.length}`);
+      }
+      if (responsiblePartnerId) {
+        params.push(responsiblePartnerId);
+        clauses.push(`m.responsible_partner_id = $${params.length}`);
+      }
+      if (leadFeeEarnerId) {
+        params.push(leadFeeEarnerId);
+        clauses.push(`m.responsible_fee_earner_id = $${params.length}`);
+      }
+      if (staffRestrictedOnly) {
+        clauses.push(
+          `(m.is_staff_matter = TRUE OR m.has_ethical_wall = TRUE OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0)`,
+        );
+      }
+      if (cleanQuery) {
+        const likePattern = `%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`;
+        params.push(likePattern);
+        const patternParam = `$${params.length}`;
+        clauses.push(`(
+          lower(COALESCE(m.id, '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.matter_number, '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.title, '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.opening_record_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'
+          OR EXISTS (
+            SELECT 1 FROM public.people cp
+            WHERE cp.tenant_id = m.tenant_id AND cp.id = m.client_id
+              AND lower(trim(concat_ws(' ', NULLIF(cp.first_name, ''), NULLIF(cp.surname, '')))) LIKE ${patternParam} ESCAPE '\\'
+          )
+          OR EXISTS (
+            SELECT 1 FROM public.organisations co
+            WHERE co.tenant_id = m.tenant_id AND co.id = m.client_id
+              AND lower(COALESCE(co.legal_name, '')) LIKE ${patternParam} ESCAPE '\\'
+          )
+          OR EXISTS (
+            SELECT 1 FROM public.matter_parties mp
+            WHERE mp.tenant_id = m.tenant_id
+              AND mp.matter_id = m.id
+              AND lower(COALESCE(mp.metadata_json->>'name', '')) LIKE ${patternParam} ESCAPE '\\'
+          )
+        )`);
+      }
+
+      const whereSql = clauses.join(' AND ');
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM public.matters m WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+
+      const pageParams = [...params, limit, offset];
+      const res = await tx.query<DbMatterRow>(
+        `SELECT m.*
+         FROM public.matters m
+         WHERE ${whereSql}
+         ORDER BY ${sortSql}
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const visibleRows = res.rows.filter((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Matter');
+        return includeRestricted || this.canViewerAccessMatterRow(row, viewerId);
+      });
+      const partiesMap = await this.loadPartiesByMatterIdsInTx(
+        tx,
+        ctx,
+        visibleRows.map((r) => r.id),
+      );
+      return {
+        items: visibleRows.map((row) =>
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+        ),
+        totalCount,
+      };
+    });
+  }
+
+  /**
+   * Aggregates matter party relationship, capacity, and work-type usage counts
+   * across all non-stub, unmerged tenant matters in SQL (`R700`), matching
+   * `computeMatterPartyUsageCounts`.
+   */
+  public async getMatterPartyUsageSummary(ctx: TenantContext): Promise<{
+    readonly byRelationshipCode: Record<string, number>;
+    readonly byCapacityCode: Record<string, number>;
+    readonly byWorkTypeSubcategoryId: Record<string, number>;
+  }> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const [relRes, capRes, subRes] = await Promise.all([
+        tx.query<{ code: string; cnt: number }>(
+          `WITH active_matters AS (
+             SELECT *
+             FROM public.matters m
+             WHERE m.tenant_id = $1
+               AND m.client_id <> 'O-KEYDATE-STUB'
+               AND NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL
+           ),
+           rel_entries AS (
+             SELECT 'CL'::text AS code
+             FROM active_matters m
+             WHERE m.client_id IS NOT NULL AND m.client_id <> ''
+             UNION ALL
+             SELECT 'JC'::text AS code
+             FROM active_matters m
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE
+                 WHEN jsonb_typeof(m.additional_client_ids_json) = 'array'
+                 THEN m.additional_client_ids_json
+                 ELSE '[]'::jsonb
+               END
+             ) AS jc
+             UNION ALL
+             SELECT 'CC'::text AS code
+             FROM active_matters m
+             WHERE m.instructing_contact_id IS NOT NULL
+               AND m.instructing_contact_id <> ''
+               AND m.instructing_contact_id IS DISTINCT FROM m.client_id
+             UNION ALL
+             SELECT NULLIF(COALESCE(mp.metadata_json->>'relationshipCode', mp.relationship_id), '') AS code
+             FROM active_matters m
+             JOIN public.matter_parties mp
+               ON mp.tenant_id = m.tenant_id AND mp.matter_id = m.id
+             UNION ALL
+             SELECT NULLIF(cp->>'relationshipCode', '') AS code
+             FROM active_matters m
+             CROSS JOIN LATERAL jsonb_array_elements(
+               CASE
+                 WHEN jsonb_typeof(m.conflict_check_record_json->'parties') = 'array'
+                 THEN m.conflict_check_record_json->'parties'
+                 ELSE '[]'::jsonb
+               END
+             ) cp
+             WHERE COALESCE((cp->>'isClientFixed')::boolean, false) = false
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM public.matter_parties mp2
+                 WHERE mp2.tenant_id = m.tenant_id
+                   AND mp2.matter_id = m.id
+                   AND COALESCE(
+                     mp2.metadata_json->>'id',
+                     CASE
+                       WHEN mp2.id LIKE m.id || ':%'
+                       THEN substr(mp2.id, char_length(m.id) + 2)
+                       ELSE mp2.id
+                     END
+                   ) = cp->>'id'
+               )
+           )
+           SELECT code, COUNT(*)::int AS cnt
+           FROM rel_entries
+           WHERE code IS NOT NULL AND code <> ''
+           GROUP BY code`,
+          [ctx.tenantId],
+        ),
+        tx.query<{ code: string; cnt: number }>(
+          `WITH active_matters AS (
+             SELECT *
+             FROM public.matters m
+             WHERE m.tenant_id = $1
+               AND m.client_id <> 'O-KEYDATE-STUB'
+               AND NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL
+           ),
+           cap_entries AS (
+             SELECT cap_code AS code
+             FROM active_matters m
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE
+                 WHEN jsonb_typeof(m.fields_json->'clientCapacityCodes') = 'array'
+                 THEN m.fields_json->'clientCapacityCodes'
+                 ELSE '[]'::jsonb
+               END
+             ) cap_code
+             WHERE m.client_id IS NOT NULL AND m.client_id <> ''
+             UNION ALL
+             SELECT cap_code AS code
+             FROM active_matters m
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE
+                 WHEN jsonb_typeof(m.additional_client_ids_json) = 'array'
+                 THEN m.additional_client_ids_json
+                 ELSE '[]'::jsonb
+               END
+             ) jc_id
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE
+                 WHEN jsonb_typeof(m.fields_json->'jointClientCapacityCodes'->jc_id) = 'array'
+                 THEN m.fields_json->'jointClientCapacityCodes'->jc_id
+                 ELSE '[]'::jsonb
+               END
+             ) cap_code
+             UNION ALL
+             SELECT cap_code AS code
+             FROM active_matters m
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE
+                 WHEN jsonb_typeof(m.fields_json->'instructingContactCapacityCodes') = 'array'
+                 THEN m.fields_json->'instructingContactCapacityCodes'
+                 ELSE '["CAP_REPRESENTATIVE","CAP_DECISION_MAKER"]'::jsonb
+               END
+             ) cap_code
+             WHERE m.instructing_contact_id IS NOT NULL
+               AND m.instructing_contact_id <> ''
+               AND m.instructing_contact_id IS DISTINCT FROM m.client_id
+             UNION ALL
+             SELECT cap_code AS code
+             FROM active_matters m
+             JOIN public.matter_parties mp
+               ON mp.tenant_id = m.tenant_id AND mp.matter_id = m.id
+             CROSS JOIN LATERAL (
+               SELECT jsonb_array_elements_text(mp.metadata_json->'capacityCodes') AS cap_code
+               WHERE jsonb_typeof(mp.metadata_json->'capacityCodes') = 'array'
+               UNION ALL
+               SELECT mp.capacity_id AS cap_code
+               WHERE jsonb_typeof(mp.metadata_json->'capacityCodes') IS DISTINCT FROM 'array'
+                 AND mp.capacity_id IS NOT NULL AND mp.capacity_id <> ''
+             ) mp_caps
+             UNION ALL
+             SELECT cap_code AS code
+             FROM active_matters m
+             CROSS JOIN LATERAL jsonb_array_elements(
+               CASE
+                 WHEN jsonb_typeof(m.conflict_check_record_json->'parties') = 'array'
+                 THEN m.conflict_check_record_json->'parties'
+                 ELSE '[]'::jsonb
+               END
+             ) cp
+             CROSS JOIN LATERAL jsonb_array_elements_text(
+               CASE
+                 WHEN jsonb_typeof(cp->'capacityCodes') = 'array'
+                 THEN cp->'capacityCodes'
+                 ELSE '[]'::jsonb
+               END
+             ) cap_code
+             WHERE COALESCE((cp->>'isClientFixed')::boolean, false) = false
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM public.matter_parties mp2
+                 WHERE mp2.tenant_id = m.tenant_id
+                   AND mp2.matter_id = m.id
+                   AND COALESCE(
+                     mp2.metadata_json->>'id',
+                     CASE
+                       WHEN mp2.id LIKE m.id || ':%'
+                       THEN substr(mp2.id, char_length(m.id) + 2)
+                       ELSE mp2.id
+                     END
+                   ) = cp->>'id'
+               )
+           )
+           SELECT code, COUNT(*)::int AS cnt
+           FROM cap_entries
+           WHERE code IS NOT NULL AND code <> ''
+           GROUP BY code`,
+          [ctx.tenantId],
+        ),
+        tx.query<{ code: string; cnt: number }>(
+          `SELECT m.work_type_subcategory_id AS code, COUNT(*)::int AS cnt
+           FROM public.matters m
+           WHERE m.tenant_id = $1
+             AND m.client_id <> 'O-KEYDATE-STUB'
+             AND NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL
+             AND m.work_type_subcategory_id IS NOT NULL
+             AND m.work_type_subcategory_id <> ''
+           GROUP BY m.work_type_subcategory_id`,
+          [ctx.tenantId],
+        ),
+      ]);
+
+      const byRelationshipCode: Record<string, number> = {};
+      for (const row of relRes.rows) {
+        if (row.code) byRelationshipCode[row.code] = Number(row.cnt);
+      }
+      const byCapacityCode: Record<string, number> = {};
+      for (const row of capRes.rows) {
+        if (row.code) byCapacityCode[row.code] = Number(row.cnt);
+      }
+      const byWorkTypeSubcategoryId: Record<string, number> = {};
+      for (const row of subRes.rows) {
+        if (row.code) byWorkTypeSubcategoryId[row.code] = Number(row.cnt);
+      }
+      return {
+        byRelationshipCode,
+        byCapacityCode,
+        byWorkTypeSubcategoryId,
+      };
+    });
+  }
+
   public async countMatterPartyUsages(
     ctx: TenantContext,
     filter: { readonly relationshipTypeId?: string; readonly capacityId?: string },

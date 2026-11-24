@@ -51,6 +51,9 @@ export default async function AdminCatchAllPage({
         taskSettings={data.taskSettings}
         enquiries={data.enquiries}
         pmsAdmin={data.pmsAdmin}
+        initialPmsLinksData={data.initialPmsLinksData}
+        expiredUnconvertedEnquiriesCount={data.expiredUnconvertedEnquiriesCount}
+        matterPartyUsageCounts={data.matterPartyUsageCounts}
         isLiveEnvironment={data.isLiveEnvironment}
         homePagesConfig={shell.homePagesConfig}
         defaultRoleConfigs={data.defaultRoleConfigs}

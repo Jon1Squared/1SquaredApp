@@ -35,6 +35,7 @@ import type {
   PmsClient,
   PmsClientFinancials,
   PmsDepartmentFinancials,
+  PmsExtractInfo,
   PmsFeeEarner,
   PmsFeeEarnerPerformance,
   PmsFeeEarnerWeeklyTime,
@@ -1008,5 +1009,80 @@ export function buildFirmFinanceRollups(
     pmsMonthlyFeesBilled: { months, yearToDateTotal },
     pmsCashReceived,
     pmsDepartmentFinancials: { departments, firmTotal },
+  };
+}
+
+export interface PmsAdminSnapshot {
+  extractInfo: PmsExtractInfo;
+  pmsLinks: PmsLink[];
+  pmsFeeEarners: PmsFeeEarner[];
+  pmsClients: PmsClient[];
+  pmsMatters: PmsMatter[];
+  suggestedMatterMatches: PmsSuggestedMatch[];
+}
+
+export type PmsLinksSubTab = 'organisations' | 'people' | 'employees' | 'matters';
+
+export interface PmsLinkedRecordSummary {
+  readonly id: string;
+  readonly entityType: PmsEntityType;
+  readonly label: string;
+  readonly href: string;
+  readonly companyNumber?: string;
+  readonly primaryEmail?: string;
+  readonly matterNumber?: string;
+  readonly title?: string;
+  readonly openedAt?: string | null;
+}
+
+export interface PmsUnlinkedOrganisationRow {
+  readonly id: string;
+  readonly legalName: string;
+  readonly companyNumber: string;
+  readonly generalEmail: string;
+}
+
+export interface PmsUnlinkedPersonRow {
+  readonly id: string;
+  readonly displayName: string;
+  readonly primaryEmail: string;
+}
+
+export interface PmsUnlinkedEmployeeRow {
+  readonly id: string;
+  readonly displayName: string;
+  readonly jobTitle: string;
+  readonly primaryEmail: string;
+}
+
+export interface PmsUnlinkedMatterRow {
+  readonly id: string;
+  readonly matterNumber: string;
+  readonly title: string;
+  readonly openedAt: string | null;
+}
+
+export interface PmsLinksAdminPageData {
+  readonly pmsAdmin: PmsAdminSnapshot;
+  readonly subTab: PmsLinksSubTab;
+  readonly query: string;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly linkedRecordTitles: Record<string, PmsLinkedRecordSummary>;
+  readonly unlinkedOrganisationsPage: {
+    readonly items: readonly PmsUnlinkedOrganisationRow[];
+    readonly totalCount: number;
+  };
+  readonly unlinkedPeoplePage: {
+    readonly items: readonly PmsUnlinkedPersonRow[];
+    readonly totalCount: number;
+  };
+  readonly unlinkedEmployeesPage: {
+    readonly items: readonly PmsUnlinkedEmployeeRow[];
+    readonly totalCount: number;
+  };
+  readonly unlinkedMattersPage: {
+    readonly items: readonly PmsUnlinkedMatterRow[];
+    readonly totalCount: number;
   };
 }
