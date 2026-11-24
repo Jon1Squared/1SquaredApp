@@ -735,9 +735,10 @@ export function PersonFormClient({
   // Records owned by this person if they are a leaver (or being marked as a leaver)
   const leaverRecordsForPerson = useMemo(() => {
     if (!existing) return [];
-    if (leaverOwnedRecordsProp) {
-      const fromProp = leaverOwnedRecordsProp.filter((r) => r.leaverId === existing.id);
-      if (fromProp.length > 0) return fromProp;
+    if (leaverOwnedRecordsProp !== undefined) {
+      return empStatus === 'Leaver'
+        ? leaverOwnedRecordsProp.filter((r) => r.leaverId === existing.id)
+        : [];
     }
     if (empStatus === 'Leaver') {
       const sourcePeople = allPeople.length > 0 ? allPeople : [existing, ...employees];
@@ -752,10 +753,17 @@ export function PersonFormClient({
             }
           : p,
       );
-      return findRecordsOwnedByLeavers(simulatedPeople, organisations, matters, [], [], existing.id);
+      return findRecordsOwnedByLeavers(
+        simulatedPeople,
+        organisations,
+        matters,
+        [],
+        enquiries,
+        existing.id,
+      );
     }
     return [];
-  }, [existing, leaverOwnedRecordsProp, empStatus, allPeople, organisations, matters]);
+  }, [existing, leaverOwnedRecordsProp, empStatus, allPeople, employees, organisations, matters, enquiries]);
 
   // Right-to-work evidence on file (shown in Compliance tab without altering Client ID verification status)
   const rightToWorkEvidence = useMemo(() => {

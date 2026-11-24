@@ -78,7 +78,12 @@ export function sanitizePersonForClientPreview(
   if (person.createdFromEnquiryId !== undefined) {
     safe.createdFromEnquiryId = person.createdFromEnquiryId;
   }
-  if (options?.preserveNonEmployeeDob && !person.isEmployee && person.dateOfBirth !== undefined) {
+  if (
+    options?.preserveNonEmployeeDob &&
+    !person.isEmployee &&
+    !person.employment &&
+    person.dateOfBirth !== undefined
+  ) {
     safe.dateOfBirth = person.dateOfBirth;
   }
   return safe;

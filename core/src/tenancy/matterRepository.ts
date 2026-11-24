@@ -1747,7 +1747,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
     const orClauses: string[] = [];
     const andClauses: string[] = [];
     if (filters.includeMerged === false) {
-      andClauses.push("NULLIF(COALESCE(m.fields_json->>'mergedIntoId', ''), '') IS NULL");
+      andClauses.push("NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL");
     }
     if (ids.length > 0) {
       params.push(ids);
@@ -1771,7 +1771,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       params.push(contactIds);
       const idx = params.length;
       orClauses.push(
-        `(m.opening_record_json->>'instructingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'billingContactId' = ANY($${idx}::text[]) OR m.instructing_contact_id = ANY($${idx}::text[]) OR m.billing_contact_id = ANY($${idx}::text[]) OR m.referrer_person_id = ANY($${idx}::text[]) OR m.referrer_organisation_id = ANY($${idx}::text[]) OR m.fields_json->>'referrerContactId' = ANY($${idx}::text[]))`,
+        `(m.opening_record_json->>'instructingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'billingContactId' = ANY($${idx}::text[]) OR m.opening_record_json->>'referrerContactId' = ANY($${idx}::text[]) OR m.instructing_contact_id = ANY($${idx}::text[]) OR m.billing_contact_id = ANY($${idx}::text[]) OR m.referrer_person_id = ANY($${idx}::text[]) OR m.referrer_organisation_id = ANY($${idx}::text[]) OR m.fields_json->>'referrerContactId' = ANY($${idx}::text[]))`,
       );
     }
     if (sourceEnquiryIds.length > 0) {
@@ -1800,6 +1800,11 @@ export class TenantMatterRepository extends TenantScopedRepository {
     return { orClauses, andClauses };
   }
 
+  /**
+   * Lists visible tenant matters for a viewer.
+   * Note: SQL `LIMIT` / `OFFSET` runs BEFORE the TypeScript `canViewerAccessMatterRow` re-check,
+   * so the SQL WHERE visibility predicate and `canViewerAccessMatterRow` must remain identical.
+   */
   public async listVisibleMatters<TMatter extends TenantMatterRecord = TenantMatterRecord>(
     ctx: TenantContext,
     viewerOrOptions:
@@ -1810,24 +1815,33 @@ export class TenantMatterRepository extends TenantScopedRepository {
           includeRestricted?: boolean;
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
+          includeMerged?: boolean;
           limit?: number;
           offset?: number;
         } = ctx.actorId,
   ): Promise<TMatter[]> {
     const { viewerId, includeRestricted, limit, offset } =
       this.resolveMatterViewerOptions(ctx, viewerOrOptions);
+    const includeMerged =
+      typeof viewerOrOptions === 'object' && viewerOrOptions !== null
+        ? viewerOrOptions.includeMerged
+        : undefined;
+    const mergedClause =
+      includeMerged === false
+        ? "\n             AND NULLIF(COALESCE(opening_record_json->>'mergedIntoId', ''), '') IS NULL"
+        : '';
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const params: unknown[] = includeRestricted ? [ctx.tenantId] : [ctx.tenantId, viewerId];
       let sql = includeRestricted
         ? `SELECT *
            FROM public.matters
            WHERE tenant_id = $1
-             AND client_id <> 'O-KEYDATE-STUB'
+             AND client_id <> 'O-KEYDATE-STUB'${mergedClause}
            ORDER BY id ASC`
         : `SELECT *
            FROM public.matters
            WHERE tenant_id = $1
-             AND client_id <> 'O-KEYDATE-STUB'
+             AND client_id <> 'O-KEYDATE-STUB'${mergedClause}
              AND (
                (
                  is_staff_matter = FALSE
@@ -2170,7 +2184,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
         )`);
       }
       if (optsObj?.includeMerged === false) {
-        clauses.push("NULLIF(COALESCE(m.fields_json->>'mergedIntoId', ''), '') IS NULL");
+        clauses.push("NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL");
       }
       if (excludeIds.length > 0) {
         params.push(excludeIds);
@@ -2184,7 +2198,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           lower(COALESCE(m.id, '')) LIKE ${patternParam} ESCAPE '\\'
           OR lower(COALESCE(m.matter_number, '')) LIKE ${patternParam} ESCAPE '\\'
           OR lower(COALESCE(m.title, '')) LIKE ${patternParam} ESCAPE '\\'
-          OR lower(COALESCE(m.fields_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.opening_record_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'
           OR EXISTS (
             SELECT 1 FROM public.matter_parties mp
             WHERE mp.tenant_id = m.tenant_id
@@ -2372,7 +2386,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            FROM public.matters m
            WHERE m.tenant_id = $1
              AND m.client_id <> 'O-KEYDATE-STUB'
-             AND (m.opening_record_json->>'mergedIntoId') IS NULL`,
+             AND NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL`,
           [ctx.tenantId, rel],
         );
         return Number(res.rows[0]?.cnt ?? 0);
@@ -2438,7 +2452,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            FROM public.matters m
            WHERE m.tenant_id = $1
              AND m.client_id <> 'O-KEYDATE-STUB'
-             AND (m.opening_record_json->>'mergedIntoId') IS NULL`,
+             AND NULLIF(COALESCE(m.opening_record_json->>'mergedIntoId', ''), '') IS NULL`,
           [ctx.tenantId, cap],
         );
         return Number(res.rows[0]?.cnt ?? 0);

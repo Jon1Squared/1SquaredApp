@@ -3127,7 +3127,14 @@ export async function savePersonRecord(
     opts.employmentSubmitted ?? input.employment ?? null;
 
   const effectiveDob =
-    input.dateOfBirth !== undefined ? input.dateOfBirth : existing?.dateOfBirth ?? null;
+    existing?.employment &&
+    !userPerms.has('employee:edit_core') &&
+    (input.dateOfBirth === undefined || input.dateOfBirth === null) &&
+    existing.dateOfBirth !== null
+      ? existing.dateOfBirth
+      : input.dateOfBirth !== undefined
+        ? input.dateOfBirth
+        : existing?.dateOfBirth ?? null;
   // Pure candidate ID: only allocate from PostgreSQL sequence after all permission, MFA, and validation gates pass.
   const targetPersonId = existing?.id ?? 'P-PENDING';
 
@@ -3309,7 +3316,12 @@ export async function savePersonRecord(
       opts.byId,
       now,
     );
-  } else if (opts.worksAtFirm === false && existing?.employment) {
+  } else if (
+    opts.worksAtFirm === false &&
+    existing?.employment &&
+    existing.employment.status !== 'Leaver' &&
+    userPerms.has('employee:edit_core')
+  ) {
     // If unchecked and status wasn't already Leaver, transition to Leaver
     const leavingRes = applyLeaverEffects(
       {
@@ -3328,8 +3340,15 @@ export async function savePersonRecord(
     nextEmployment = leavingRes.employment;
   }
 
-  // Handle conversion path 3: Status set to 'Leaver'
-  if (nextEmployment && nextEmployment.status === 'Leaver') {
+  // Handle conversion path 3: Status set to 'Leaver' (preserve existing leaver record untouched when no employment payload was submitted)
+  if (
+    nextEmployment &&
+    nextEmployment.status === 'Leaver' &&
+    (rawEmpInput !== null ||
+      (opts.worksAtFirm === false &&
+        existing?.employment?.status !== 'Leaver' &&
+        userPerms.has('employee:edit_core')))
+  ) {
     const leavingDate =
       nextEmployment.contract?.leavingDate || nextEmployment.effectiveTo || today;
     const leavingRes = applyLeaverEffects(
@@ -3661,7 +3680,8 @@ export async function savePersonRecord(
       Boolean(input.isEmployee) !== Boolean(existing?.isEmployee)) ||
     (opts.worksAtFirm !== undefined &&
       Boolean(opts.worksAtFirm) !== Boolean(existing?.employment && existing.employment.status !== 'Leaver')) ||
-    (opts.worksAtFirm === false && Boolean(existing?.employment || existing?.isEmployee)) ||
+    (opts.worksAtFirm === false &&
+      Boolean(existing?.isEmployee || (existing?.employment && existing.employment.status !== 'Leaver'))) ||
     (input.employeeRoleId !== undefined &&
       (input.employeeRoleId ?? null) !== (existing?.employeeRoleId ?? null)) ||
     (input.departmentId !== undefined &&
@@ -6259,7 +6279,9 @@ export async function saveMatterRecord(
         })
       : Promise.resolve<Enquiry[]>([]),
     referencedQuoteIdsForMatterSave.length > 0
-      ? intakeRepo.listQuotesByIds<Quote>(extensionCtx, referencedQuoteIdsForMatterSave)
+      ? intakeRepo.listQuotesByIds<Quote>(extensionCtx, referencedQuoteIdsForMatterSave, {
+          includeRestricted: true,
+        })
       : Promise.resolve<Quote[]>([]),
     unnamedPartySearchTerms.length > 0
       ? partyRepo.findSqlConflictCandidates<Person, Organisation, PersonOrganisationLink>(
@@ -12548,7 +12570,9 @@ async function loadScopedTaskVisibilityContext(
         )
       : Promise.resolve<Array<KeyDate | null>>([]),
     candidateQuoteIds.size > 0
-      ? intakeRepo.listQuotesByIds<Quote>(ctx, Array.from(candidateQuoteIds))
+      ? intakeRepo.listQuotesByIds<Quote>(ctx, Array.from(candidateQuoteIds), {
+          includeRestricted: true,
+        })
       : Promise.resolve<Quote[]>([]),
     candidateEnquiryIds.size > 0
       ? intakeRepo.listEnquiriesByIds<Enquiry>(

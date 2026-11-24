@@ -2228,11 +2228,11 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     );
     if (cleanIds.length === 0) return [];
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const enforceVisibility = options !== undefined && !options.includeRestricted;
+      const includeRestricted = Boolean(options?.includeRestricted);
       const viewerId = (options?.viewerId ?? ctx.actorId ?? '').trim() || '__none__';
       const sqlParams: unknown[] = [ctx.tenantId, cleanIds];
       const whereClauses = ['q.tenant_id = $1', 'q.id = ANY($2::text[])'];
-      if (enforceVisibility) {
+      if (!includeRestricted) {
         sqlParams.push(viewerId);
         const vIdx = sqlParams.length;
         whereClauses.push(

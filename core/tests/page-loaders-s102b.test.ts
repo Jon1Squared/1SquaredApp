@@ -7,10 +7,13 @@ import {
   getGlobalTenantPostgresPoolManager,
   resolveTenantFromVerifiedToken,
   TenantIntakeQuoteRepository,
+  TenantKeyDateRepository,
   TenantMatterRepository,
   TenantMigrationRunner,
   TenantPartyRepository,
   TenantTaskWorkflowRepository,
+  type KeyDate,
+  type KeyDateReminderState,
   type TenantContext,
 } from '@platform/core';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
@@ -28,6 +31,7 @@ import {
   previewIntakeDuplicatesAndConflictsRecord,
   runMatterConflictSearchRecord,
   saveEnquiryRecord,
+  savePersonRecord,
   searchEntityPickerRecord,
 } from '@/server/services';
 import {
@@ -59,6 +63,7 @@ import type {
   Matter,
   Organisation,
   Person,
+  PersonOrganisationLink,
   Quote,
   Task,
 } from '@/domain/types';
@@ -875,6 +880,488 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           ),
         ).toBe(true);
       });
+    },
+    45_000,
+  );
+
+  it(
+    '5. R696: merged matters are excluded from picker and own-matters list (included when includeMerged: true), and shortDescription search finds visible matters',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const matterRepo = new TenantMatterRepository();
+
+      // Seed a unique visible matter with shortDescription and a merged matter owned by P-000002
+      const visibleShortDescMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-S102B-R696-VIS',
+        matterNumber: 'ALPH-R696-VIS',
+        title: 'Visible R696 Test Matter',
+        shortDescription: 'UniqueR696VisibleDesc',
+        mergedIntoId: null,
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000002',
+      };
+      await matterRepo.putMatter(env.ctxAlpha, visibleShortDescMatter);
+
+      const mergedMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-S102B-R696-MERGED',
+        matterNumber: 'ALPH-R696-MRG',
+        title: 'Merged R696 Test Matter',
+        shortDescription: 'UniqueR696MergedDesc',
+        mergedIntoId: visibleShortDescMatter.id,
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000002',
+      };
+      await matterRepo.putMatter(env.ctxAlpha, mergedMatter);
+
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+
+      await runWithActiveActorSession(feActor, async () => {
+        // 5a. Matter picker excludes merged matter when searching by matter number
+        const mergedNumPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: 'ALPH-R696-MRG' },
+          'P-000002',
+        );
+        expect(mergedNumPicker.items.some((i) => i.id === mergedMatter.id)).toBe(false);
+
+        // 5b. Own-matters list query (includeMerged: false) excludes merged matter
+        const ownMattersFiltered = await matterRepo.listVisibleMattersForEntity<Matter>(
+          env.ctxAlpha,
+          { ownerPersonId: 'P-000002', includeMerged: false },
+          { viewerId: 'P-000002', hasRestrictedMatterAccess: false },
+        );
+        expect(ownMattersFiltered.some((m) => m.id === mergedMatter.id)).toBe(false);
+        expect(ownMattersFiltered.some((m) => m.id === visibleShortDescMatter.id)).toBe(true);
+
+        // 5c. includeMerged: true still returns the merged matter
+        const ownMattersWithMerged = await matterRepo.listVisibleMattersForEntity<Matter>(
+          env.ctxAlpha,
+          { ownerPersonId: 'P-000002', includeMerged: true },
+          { viewerId: 'P-000002', hasRestrictedMatterAccess: false },
+        );
+        expect(ownMattersWithMerged.some((m) => m.id === mergedMatter.id)).toBe(true);
+
+        // 5d. Searching by shortDescription finds the visible matter
+        const shortDescPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: 'UniqueR696VisibleDesc' },
+          'P-000002',
+        );
+        expect(shortDescPicker.items.some((i) => i.id === visibleShortDescMatter.id)).toBe(true);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '6. R703: leavers preserve employment for HR actors, hide employment/DOB from non-HR actors, and non-HR contact edits keep stored employment intact',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+      const seedEmp = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000002');
+      expect(seedEmp?.employment).toBeTruthy();
+
+      const leaverPerson: Person = {
+        ...structuredClone(seedEmp!),
+        id: 'P-S102B-LEAVER-703',
+        firstName: 'Huw',
+        surname: 'LeaverTest',
+        dateOfBirth: '1984-04-12',
+        isEmployee: false,
+        emails: [
+          {
+            id: 'em-s102b-leaver',
+            address: 'huw.leavertest@invented.example',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+        employment: {
+          ...structuredClone(seedEmp!.employment!),
+          personId: 'P-S102B-LEAVER-703',
+          employeeNumber: 'EMP-9703',
+          status: 'Leaver',
+          effectiveTo: '2026-10-15',
+          contract: seedEmp!.employment!.contract
+            ? {
+                ...seedEmp!.employment!.contract,
+                leavingDate: '2026-10-15',
+                keepAsContactOnLeave: true,
+              }
+            : null,
+        },
+      };
+      await partyRepo.putPerson(env.ctxAlpha, leaverPerson);
+
+      const adminActor = makeActorSession('P-000004', ['admin'], env.tenantAlpha);
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+
+      // 6a. HR / Admin actor sees leaver employment across list, profile, and edit loaders (payroll stripped)
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(adminActor.verifiedSession);
+      await runWithActiveActorSession(adminActor, async () => {
+        const peopleList = await loadPeopleListPageData('P-000004');
+        const listLeaver = peopleList.people.find((p) => p.id === leaverPerson.id);
+        expect(listLeaver?.employment?.status).toBe('Leaver');
+        expect(listLeaver?.employment?.payroll).toBeUndefined();
+
+        const detail = await loadPersonDetailPageData('P-000004', leaverPerson.id);
+        expect(detail && !('redirectTo' in detail)).toBe(true);
+        if (detail && !('redirectTo' in detail)) {
+          expect(detail.person.employment?.status).toBe('Leaver');
+          expect(detail.person.employment?.contract?.leavingDate).toBe('2026-10-15');
+        }
+
+        const edit = await loadPersonFormPageData('P-000004', leaverPerson.id);
+        expect(edit && !('redirectTo' in edit)).toBe(true);
+        if (edit && !('redirectTo' in edit)) {
+          expect(edit.existing?.employment?.status).toBe('Leaver');
+        }
+      });
+
+      // 6b. Standard Fee Earner (has employee:view_core, lacks hr_restricted/payroll):
+      // sees core status 'Leaver' with restricted HR & payroll stripped, and contact-only edit keeps stored employment
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const feDetail = await loadPersonDetailPageData('P-000002', leaverPerson.id);
+        expect(feDetail && !('redirectTo' in feDetail)).toBe(true);
+        if (feDetail && !('redirectTo' in feDetail)) {
+          expect(feDetail.person.employment?.status).toBe('Leaver');
+          expect(feDetail.person.employment?.contract).toBeUndefined();
+          expect(feDetail.person.employment?.rightToWork).toBeUndefined();
+          expect(feDetail.person.employment?.payroll).toBeUndefined();
+        }
+
+        const saveRes = await savePersonRecord(
+          {
+            firstName: 'Huw',
+            surname: 'LeaverTest',
+            relationshipNotes: 'Updated non-HR contact note',
+            dateOfBirth: null,
+          },
+          {
+            byId: 'P-000002',
+            id: leaverPerson.id,
+            worksAtFirm: false,
+            employmentSubmitted: null,
+          },
+        );
+        expect(saveRes.errors).toBeUndefined();
+        const persistedAfterFeEdit = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          leaverPerson.id,
+        );
+        expect(persistedAfterFeEdit?.relationshipNotes).toBe('Updated non-HR contact note');
+        expect(persistedAfterFeEdit?.employment?.status).toBe('Leaver');
+        expect(persistedAfterFeEdit?.employment?.effectiveTo).toBe('2026-10-15');
+        expect(persistedAfterFeEdit?.employment?.contract?.leavingDate).toBe('2026-10-15');
+      });
+
+      // 6c. Actor without employee:view_core sees employment: null and leaverOwnedRecords: [],
+      // and saving a contact edit still preserves stored employment & DOB intact
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(seedEmp!),
+        permissionOverrides: {
+          grant: [],
+          revoke: ['employee:view_core', 'employee:edit_core', 'employee:hr_restricted', 'employee:payroll'],
+        },
+      });
+      await runWithActiveActorSession(feActor, async () => {
+        const limitedDetail = await loadPersonDetailPageData('P-000002', leaverPerson.id);
+        expect(limitedDetail && !('redirectTo' in limitedDetail)).toBe(true);
+        if (limitedDetail && !('redirectTo' in limitedDetail)) {
+          expect(limitedDetail.person.employment).toBeNull();
+        }
+
+        const limitedEdit = await loadPersonFormPageData('P-000002', leaverPerson.id);
+        expect(limitedEdit && !('redirectTo' in limitedEdit)).toBe(true);
+        if (limitedEdit && !('redirectTo' in limitedEdit)) {
+          expect(limitedEdit.existing?.employment).toBeNull();
+          expect(limitedEdit.leaverOwnedRecords).toEqual([]);
+        }
+
+        const limitedSave = await savePersonRecord(
+          {
+            firstName: 'Huw',
+            surname: 'LeaverTest',
+            relationshipNotes: 'Updated limited contact note',
+            dateOfBirth: null,
+          },
+          {
+            byId: 'P-000002',
+            id: leaverPerson.id,
+            worksAtFirm: false,
+            employmentSubmitted: null,
+          },
+        );
+        expect(limitedSave.errors).toBeUndefined();
+        const persistedAfterLimited = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          leaverPerson.id,
+        );
+        expect(persistedAfterLimited?.relationshipNotes).toBe('Updated limited contact note');
+        expect(persistedAfterLimited?.employment?.status).toBe('Leaver');
+        expect(persistedAfterLimited?.employment?.effectiveTo).toBe('2026-10-15');
+        expect(persistedAfterLimited?.dateOfBirth).toBe('1984-04-12');
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '7. R711: person profile loader returns owned people/orgs for employees and visibility-scoped main-org matters for contacts',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+
+      // Contact linked primarily to alphaPubOrg (visible to P-000002)
+      const pubContact: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-S102B-PUB-CONTACT',
+        firstName: 'Gwen',
+        surname: 'PublicContact',
+        emails: [{ id: 'em-pub-c', address: 'gwen.pub@alphapublic.example', typeId: null, isPrimary: true }],
+        recordOwnerId: 'P-000001',
+      };
+      await partyRepo.putPerson(env.ctxAlpha, pubContact);
+      const pubLink: PersonOrganisationLink = {
+        id: 'L-S102B-PUB-C',
+        personId: pubContact.id,
+        organisationId: env.alphaPubOrg.id,
+        jobTitle: 'Operations Director',
+        department: '',
+        roleWithinOrganisation: 'Director',
+        contactRoleIds: [],
+        isPrimaryContact: true,
+        isCurrent: true,
+        startDate: null,
+        endDate: null,
+        contactStatusId: null,
+        createdById: 'P-000001',
+        createdAt: '2026-11-01T10:00:00Z',
+        updatedById: 'P-000001',
+        updatedAt: '2026-11-01T10:00:00Z',
+      };
+      await partyRepo.putLink(env.ctxAlpha, pubLink);
+
+      // Contact linked primarily to alphaStaffClientOrg (staff matter must remain hidden from P-000002)
+      const staffContact: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-S102B-STAFF-CONTACT',
+        firstName: 'Bryn',
+        surname: 'StaffContact',
+        emails: [{ id: 'em-stf-c', address: 'bryn.stf@alphastaff.example', typeId: null, isPrimary: true }],
+        recordOwnerId: 'P-000001',
+      };
+      await partyRepo.putPerson(env.ctxAlpha, staffContact);
+      const staffLink: PersonOrganisationLink = {
+        ...pubLink,
+        id: 'L-S102B-STAFF-C',
+        personId: staffContact.id,
+        organisationId: env.alphaStaffClientOrg.id,
+      };
+      await partyRepo.putLink(env.ctxAlpha, staffLink);
+
+      const partnerActor = makeActorSession('P-000001', ['partner', 'fee_earner'], env.tenantAlpha);
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        const partnerProfile = await loadPersonDetailPageData('P-000001', 'P-000001');
+        expect(partnerProfile && !('redirectTo' in partnerProfile)).toBe(true);
+        if (partnerProfile && !('redirectTo' in partnerProfile)) {
+          expect(partnerProfile.allPeople.some((p) => p.id === pubContact.id)).toBe(true);
+          expect(partnerProfile.organisations.some((o) => o.id === env.alphaPubOrg.id)).toBe(true);
+        }
+      });
+
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const pubProfile = await loadPersonDetailPageData('P-000002', pubContact.id);
+        expect(pubProfile && !('redirectTo' in pubProfile)).toBe(true);
+        if (pubProfile && !('redirectTo' in pubProfile)) {
+          expect(pubProfile.matters.some((m) => m.id === env.alphaPubMatter.id)).toBe(true);
+        }
+
+        const staffContactProfile = await loadPersonDetailPageData('P-000002', staffContact.id);
+        expect(staffContactProfile && !('redirectTo' in staffContactProfile)).toBe(true);
+        if (staffContactProfile && !('redirectTo' in staffContactProfile)) {
+          expect(staffContactProfile.matters.some((m) => m.id === env.alphaStaffMatter.id)).toBe(false);
+        }
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '8. R712 & Suggestions 1/5: leaver handover loader covers all 5 record types, listQuotesByIds fails closed by default, and reminder states hide draft enquiries',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+      const matterRepo = new TenantMatterRepository();
+      const intakeRepo = new TenantIntakeQuoteRepository();
+      const taskRepo = new TenantTaskWorkflowRepository();
+      const keyDateRepo = new TenantKeyDateRepository();
+
+      const seedPartner = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000001');
+      const leaverId = 'P-S102B-LEAVER-712';
+      const leaver: Person = {
+        ...structuredClone(seedPartner!),
+        id: leaverId,
+        firstName: 'Tudur',
+        surname: 'HandoverLeaver',
+        isEmployee: false,
+        emails: [{ id: 'em-ho-l', address: 'tudur.ho@invented.example', typeId: null, isPrimary: true }],
+        employment: {
+          ...structuredClone(seedPartner!.employment!),
+          personId: leaverId,
+          employeeNumber: 'EMP-9712',
+          status: 'Leaver',
+          effectiveTo: '2026-10-20',
+          contract: seedPartner!.employment!.contract
+            ? { ...seedPartner!.employment!.contract, leavingDate: '2026-10-20', keepAsContactOnLeave: true }
+            : null,
+        },
+      };
+      await partyRepo.putPerson(env.ctxAlpha, leaver);
+
+      const ownedClientPerson: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-S102B-OWNED-C712',
+        firstName: 'Nia',
+        surname: 'OwnedClient712',
+        emails: [{ id: 'em-oc-712', address: 'nia.owned712@invented.example', typeId: null, isPrimary: true }],
+        recordOwnerId: null,
+        relationshipOwnerId: leaverId,
+      };
+      await partyRepo.putPerson(env.ctxAlpha, ownedClientPerson);
+
+      const ownedOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-S102B-OWNED-712',
+        legalName: 'Owned Handover Org 712 Ltd',
+        relationshipPartnerId: leaverId,
+      };
+      await partyRepo.putOrganisation(env.ctxAlpha, ownedOrg);
+
+      const ownedMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-S102B-OWNED-712',
+        matterNumber: 'ALPH-HO-712',
+        title: 'Owned Handover Matter 712',
+        leadFeeEarnerId: leaverId,
+        responsiblePartnerId: 'P-000001',
+      };
+      await matterRepo.putMatter(env.ctxAlpha, ownedMatter);
+
+      const ownedTask: Task = {
+        ...structuredClone(env.alphaUrgentPublicTask),
+        id: 'TSK-S102B-OWNED-712',
+        title: 'Owned Handover Task 712',
+        status: 'To do',
+        assignedPersonId: leaverId,
+        linkedRecords: [{ recordType: 'matter', recordId: ownedMatter.id }],
+      };
+      await taskRepo.putTask(env.ctxAlpha, ownedTask);
+
+      const ownedEnquiry: Enquiry = {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-S102B-OWNED-712',
+        reference: 'ENQ-88712',
+        status: 'Assigned',
+        assignedToId: leaverId,
+        firstName: 'OwnedHo',
+        lastName: 'Enquiry712',
+      };
+      await intakeRepo.putEnquiry(env.ctxAlpha, ownedEnquiry);
+
+      const adminActor = makeActorSession('P-000004', ['admin'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(adminActor.verifiedSession);
+
+      await runWithActiveActorSession(adminActor, async () => {
+        const formData = await loadPersonFormPageData('P-000004', leaverId);
+        expect(formData && !('redirectTo' in formData)).toBe(true);
+        if (formData && !('redirectTo' in formData)) {
+          expect(formData.ownedPeople.some((p) => p.id === ownedClientPerson.id)).toBe(true);
+          const types = new Set(formData.leaverOwnedRecords.map((r) => r.recordType));
+          expect(types.has('person')).toBe(true);
+          expect(types.has('organisation')).toBe(true);
+          expect(types.has('matter')).toBe(true);
+          expect(types.has('task')).toBe(true);
+          expect(types.has('enquiry')).toBe(true);
+        }
+
+        // Active employee being prepared for transition to Leaver also gets all 5 types precomputed
+        const activeEmpForm = await loadPersonFormPageData('P-000004', 'P-000001');
+        expect(activeEmpForm && !('redirectTo' in activeEmpForm)).toBe(true);
+        if (activeEmpForm && !('redirectTo' in activeEmpForm)) {
+          expect(activeEmpForm.leaverOwnedRecords.some((r) => r.recordType === 'organisation')).toBe(true);
+        }
+      });
+
+      // Suggestion 1: listQuotesByIds fails closed when options omitted, includes with includeRestricted: true
+      const feCtx = makeCtx(env.tenantAlpha, 'P-000002');
+      const hiddenDefaultQuotes = await intakeRepo.listQuotesByIds<Quote>(feCtx, [
+        env.alphaStaffQuote.id,
+      ]);
+      expect(hiddenDefaultQuotes).toEqual([]);
+      const unrestrictedQuotes = await intakeRepo.listQuotesByIds<Quote>(
+        feCtx,
+        [env.alphaStaffQuote.id],
+        { includeRestricted: true },
+      );
+      expect(unrestrictedQuotes.map((q) => q.id)).toEqual([env.alphaStaffQuote.id]);
+
+      // Suggestion 5: keyDate reminder state linked to another user's personal Draft enquiry stays hidden
+      const draftEnqKd: KeyDate = {
+        id: 'KD-S102B-DRAFT-ENQ',
+        enquiryId: env.alphaPersonalDraftEnquiry.id,
+        category: 'internal_milestone',
+        keyDateTypeId: 'kd.internal_milestone',
+        source: 'manual',
+        title: 'Private Draft Enquiry Milestone',
+        dueDate: '2026-12-01',
+        isCritical: false,
+        status: 'confirmed',
+        teamId: 'TM-000001',
+        responsiblePersonIds: ['P-000001'],
+        verification: { required: false },
+        createdById: 'P-000001',
+        createdAt: '2026-11-10T09:00:00Z',
+        updatedById: 'P-000001',
+        updatedAt: '2026-11-10T09:00:00Z',
+        version: 1,
+      };
+      await keyDateRepo.putKeyDate(env.ctxAlpha, draftEnqKd, { expectedVersion: null });
+      const remState: KeyDateReminderState = {
+        keyDateId: draftEnqKd.id,
+        taskId: 'TSK-REM-S102B-DRAFT',
+        idempotencyKey: 'rem-s102b-draft',
+        reminderScheduleId: 'rem-default',
+        currentStageDaysBefore: 7,
+        stageEnteredAt: '2026-11-10T09:00:00Z',
+        escalationLevel: 0,
+      };
+      await keyDateRepo.putReminderState(env.ctxAlpha, remState);
+
+      const feReminders = await keyDateRepo.listReminderStatesForKeyDateIds(
+        feCtx,
+        [draftEnqKd.id],
+        { viewerId: 'P-000002', hasRestrictedMatterAccess: false },
+      );
+      expect(feReminders).toEqual([]);
+
+      const partnerReminders = await keyDateRepo.listReminderStatesForKeyDateIds(
+        env.ctxAlpha,
+        [draftEnqKd.id],
+        { viewerId: 'P-000001', hasRestrictedMatterAccess: false },
+      );
+      expect(partnerReminders.map((r) => r.keyDateId)).toEqual([draftEnqKd.id]);
     },
     45_000,
   );

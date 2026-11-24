@@ -39,6 +39,7 @@ import { sanitizePersonForClientPreview } from '@/domain/intakePreview';
 import { systemKeyOf } from '@/domain/lists';
 import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
 import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
+import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
 import { resolveSuggestedConflictReviewer } from './conflictReview';
 import { getEntraEnvStatus, getEntraSession } from './entraAuth';
@@ -409,32 +410,35 @@ async function collectReferencedParties(params: {
       : Promise.resolve<Organisation[]>([]),
   ]);
 
+  const isStaffOrLeaver = (p: Person): boolean => Boolean(p.isEmployee || p.employment);
   const sanitizedNonStaff = loadedPeople.map((p) =>
-    p.isEmployee
+    isStaffOrLeaver(p)
       ? p
       : sanitizePersonForClientPreview(p, { preserveNonEmployeeDob: true }),
   );
-  // Any employee loaded here was not in filteredStaffPeople (rare edge case); filter safely
-  const safeExtraEmployees = loadedPeople.some((p) => p.isEmployee)
-    ? await filterPeopleEmploymentForActor({
-        ctx: params.ctx,
-        peopleToFilter: loadedPeople.filter((p) => p.isEmployee),
-        actorRaw:
-          params.shell.staffPeopleRaw.find((p) => p.id === params.shell.currentUserId) ??
-          params.shell.currentUser,
-        allStaffRaw: params.shell.staffPeopleRaw,
-        teams: params.shell.teams,
-        effectiveTokenRoles: undefined,
-        rbacConfig: params.shell.rbacConfig,
-        hasRestrictedMatterAccess: params.shell.hasRestrictedMatterAccess,
-      })
-    : [];
+  // Any employee or leaver loaded here was not in filteredStaffPeople (rare edge case); filter safely
+  const extraStaffOrLeavers = loadedPeople.filter(isStaffOrLeaver);
+  const safeExtraEmployees =
+    extraStaffOrLeavers.length > 0
+      ? await filterPeopleEmploymentForActor({
+          ctx: params.ctx,
+          peopleToFilter: extraStaffOrLeavers,
+          actorRaw:
+            params.shell.staffPeopleRaw.find((p) => p.id === params.shell.currentUserId) ??
+            params.shell.currentUser,
+          allStaffRaw: params.shell.staffPeopleRaw,
+          teams: params.shell.teams,
+          effectiveTokenRoles: undefined,
+          rbacConfig: params.shell.rbacConfig,
+          hasRestrictedMatterAccess: params.shell.hasRestrictedMatterAccess,
+        })
+      : [];
 
   return {
     people: dedupeById([
       ...params.shell.filteredStaffPeople,
       ...safeExtraEmployees,
-      ...sanitizedNonStaff.filter((p) => !p.isEmployee),
+      ...sanitizedNonStaff.filter((p) => !isStaffOrLeaver(p)),
     ]),
     organisations: loadedOrgs,
   };
@@ -977,7 +981,7 @@ export async function loadPeopleListPageData(
 
   const filteredStaffById = new Map(shell.filteredStaffPeople.map((p) => [p.id, p]));
   const people = rawPeople.map((p) =>
-    p.isEmployee
+    p.isEmployee || p.employment
       ? (filteredStaffById.get(p.id) ?? sanitizePersonForClientPreview(p))
       : sanitizePersonForClientPreview(p, { preserveNonEmployeeDob: true }),
   );
@@ -1062,7 +1066,8 @@ export async function loadPersonDetailPageData(
     return { redirectTo: `/people/${rawPerson.mergedIntoId}` };
   }
 
-  const filteredPersonList = rawPerson.isEmployee
+  const isEmployeeOrLeaver = Boolean(rawPerson.isEmployee || rawPerson.employment);
+  const filteredPersonList = isEmployeeOrLeaver
     ? await filterPeopleEmploymentForActor({
         ctx,
         peopleToFilter: [rawPerson],
@@ -1097,13 +1102,15 @@ export async function loadPersonDetailPageData(
     links,
     notes,
     merges,
-    matters,
+    directMatters,
     tasks,
     enquiries,
     autoMatchesRaw,
     explicitMatchesRaw,
     audit,
     rateBundle,
+    ownedPeopleRaw,
+    ownedOrgs,
   ] = await Promise.all([
     partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, { personIds: [person.id] }),
     partyRepo.listNotesForRecord<Note>(ctx, 'person', person.id),
@@ -1114,7 +1121,7 @@ export async function loadPersonDetailPageData(
         clientIds: [person.id],
         partyEntityIds: [person.id],
         contactIds: [person.id],
-        ownerPersonId: person.isEmployee ? person.id : undefined,
+        ownerPersonId: isEmployeeOrLeaver ? person.id : undefined,
       },
       { viewerId: currentUserId, hasRestrictedMatterAccess },
     ),
@@ -1135,7 +1142,23 @@ export async function loadPersonDetailPageData(
     canViewNegotiatedRates
       ? listClientRateOverridesRecord({ clientType: 'person', clientId: person.id }, currentUserId)
       : Promise.resolve(null),
+    isEmployeeOrLeaver
+      ? partyRepo.listPeopleOwnedByPerson<Person>(ctx, person.id)
+      : Promise.resolve<Person[]>([]),
+    isEmployeeOrLeaver
+      ? partyRepo.listOrganisationsOwnedByPerson<Organisation>(ctx, person.id)
+      : Promise.resolve<Organisation[]>([]),
   ]);
+
+  const mainLink = mainLinkFor(person.id, links);
+  const mainOrgMatters = mainLink?.organisationId
+    ? await matterRepo.listVisibleMattersForEntity<Matter>(
+        ctx,
+        { clientIds: [mainLink.organisationId], includeMerged: false },
+        { viewerId: currentUserId, hasRestrictedMatterAccess },
+      )
+    : [];
+  const matters = dedupeById([...directMatters, ...mainOrgMatters]);
 
   let pmsView: ClientPmsViewBundle | undefined;
   if (shell.finance.canViewMatter) {
@@ -1161,11 +1184,19 @@ export async function loadPersonDetailPageData(
     ...autoMatchesRaw,
   ]).map((p) => sanitizePersonForClientPreview(p));
 
-  const extraOrgIds =
-    pmsView?.link?.entityType === 'organisation' && pmsView.link.onesquaredId
+  const extraOrgIds = [
+    ...(pmsView?.link?.entityType === 'organisation' && pmsView.link.onesquaredId
       ? [pmsView.link.onesquaredId]
-      : [];
-  const { people: referencedPeople, organisations } = await collectReferencedParties({
+      : []),
+    ...(mainLink?.organisationId ? [mainLink.organisationId] : []),
+  ];
+  const filteredStaffById = new Map(shell.filteredStaffPeople.map((p) => [p.id, p]));
+  const safeOwnedPeople = ownedPeopleRaw.map((p) =>
+    p.isEmployee || p.employment
+      ? (filteredStaffById.get(p.id) ?? sanitizePersonForClientPreview(p))
+      : sanitizePersonForClientPreview(p, { preserveNonEmployeeDob: true }),
+  );
+  const { people: referencedPeople, organisations: referencedOrgs } = await collectReferencedParties({
     ctx,
     shell,
     matters,
@@ -1175,7 +1206,8 @@ export async function loadPersonDetailPageData(
     extraPersonIds: [person.id, ...duplicateCandidates.map((p) => p.id)],
     extraOrgIds,
   });
-  const allPeople = dedupeById([person, ...referencedPeople]);
+  const allPeople = dedupeById([person, ...referencedPeople, ...safeOwnedPeople]);
+  const organisations = dedupeById([...referencedOrgs, ...ownedOrgs]);
 
   const canTakeByTaskId: Record<string, boolean> = {};
   for (const t of tasks) {
@@ -1248,6 +1280,7 @@ export async function loadPersonFormPageData(
   | {
       shell: ShellContextData;
       existing: Person | null;
+      ownedPeople: Person[];
       organisations: Organisation[];
       matters: Matter[];
       enquiries: Enquiry[];
@@ -1266,6 +1299,7 @@ export async function loadPersonFormPageData(
     return {
       shell,
       existing: null,
+      ownedPeople: [],
       organisations: [],
       matters: [],
       enquiries: [],
@@ -1279,7 +1313,8 @@ export async function loadPersonFormPageData(
     return { redirectTo: `/people/${rawPerson.mergedIntoId}/edit` };
   }
 
-  const filteredPersonList = rawPerson.isEmployee
+  const isEmployeeOrLeaver = Boolean(rawPerson.isEmployee || rawPerson.employment);
+  const filteredPersonList = isEmployeeOrLeaver
     ? await filterPeopleEmploymentForActor({
         ctx,
         peopleToFilter: [rawPerson],
@@ -1297,30 +1332,34 @@ export async function loadPersonFormPageData(
       })
     : [sanitizePersonForClientPreview(rawPerson, { preserveNonEmployeeDob: true })];
   const existing = filteredPersonList[0]!;
+  const canViewEmploymentAndHandover = Boolean(existing.employment);
 
-  const [links, ownedPeople, ownedOrgs, ownedMatters, ownedTasks, ownedEnquiries] =
+  const [links, ownedPeopleRaw, ownedOrgs, ownedMatters, ownedTasks, ownedEnquiries] =
     await Promise.all([
       partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, { personIds: [existing.id] }),
-      existing.isEmployee
+      canViewEmploymentAndHandover
         ? partyRepo.listPeopleOwnedByPerson<Person>(ctx, existing.id)
         : Promise.resolve<Person[]>([]),
-      existing.isEmployee
+      canViewEmploymentAndHandover
         ? partyRepo.listOrganisationsOwnedByPerson<Organisation>(ctx, existing.id)
         : Promise.resolve<Organisation[]>([]),
-      existing.isEmployee
-        ? matterRepo.listVisibleMattersForEntity<Matter>(
-            ctx,
-            { ownerPersonId: existing.id },
-            { viewerId: currentUserId, hasRestrictedMatterAccess },
-          )
-        : Promise.resolve<Matter[]>([]),
-      existing.isEmployee
+      matterRepo.listVisibleMattersForEntity<Matter>(
+        ctx,
+        {
+          clientIds: [existing.id],
+          partyEntityIds: [existing.id],
+          contactIds: [existing.id],
+          ...(canViewEmploymentAndHandover ? { ownerPersonId: existing.id } : {}),
+        },
+        { viewerId: currentUserId, hasRestrictedMatterAccess },
+      ),
+      canViewEmploymentAndHandover
         ? taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
             assignedPersonIdOrMulti: existing.id,
             hasRestrictedMatterAccess,
           })
         : Promise.resolve<Task[]>([]),
-      existing.isEmployee
+      canViewEmploymentAndHandover
         ? intakeRepo.listVisibleEnquiries<Enquiry>(ctx, currentUserId, {
             assignedToId: existing.id,
             hasRestrictedMatterAccess,
@@ -1334,9 +1373,26 @@ export async function loadPersonFormPageData(
       ? await partyRepo.listOrganisationsByIds<Organisation>(ctx, linkedOrgIds)
       : [];
   const organisations = dedupeById([...linkedOrgs, ...ownedOrgs]);
-  const leaverOwnedRecords = existing.isEmployee
+  const filteredStaffById = new Map(shell.filteredStaffPeople.map((p) => [p.id, p]));
+  const ownedPeople = canViewEmploymentAndHandover
+    ? ownedPeopleRaw.map((p) =>
+        p.isEmployee || p.employment
+          ? (filteredStaffById.get(p.id) ?? sanitizePersonForClientPreview(p))
+          : sanitizePersonForClientPreview(p, { preserveNonEmployeeDob: true }),
+      )
+    : [];
+  // Precompute handover records across all 5 types for both saved leavers and active
+  // employees whose employment status may be switched to 'Leaver' during editing (R703, R712).
+  const simulatedLeaverTarget: Person = {
+    ...existing,
+    employment: {
+      ...(existing.employment ?? ({} as Person['employment'] & object)),
+      status: 'Leaver',
+    } as NonNullable<Person['employment']>,
+  };
+  const leaverOwnedRecords = canViewEmploymentAndHandover
     ? findRecordsOwnedByLeavers(
-        [existing, ...ownedPeople],
+        [simulatedLeaverTarget, ...ownedPeople],
         ownedOrgs,
         ownedMatters,
         ownedTasks,
@@ -1348,6 +1404,7 @@ export async function loadPersonFormPageData(
   return {
     shell,
     existing,
+    ownedPeople,
     organisations,
     matters: ownedMatters,
     enquiries: ownedEnquiries,

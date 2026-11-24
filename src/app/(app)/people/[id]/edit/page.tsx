@@ -18,11 +18,17 @@ export default async function EditPersonPage({
     }
     if (!data.existing) notFound();
     const { shell } = data;
+    const peopleById = new Map(shell.employees.map((p) => [p.id, p]));
+    for (const p of data.ownedPeople) {
+      if (!peopleById.has(p.id)) {
+        peopleById.set(p.id, p);
+      }
+    }
 
     return (
       <PersonFormClient
         existing={data.existing}
-        allPeople={shell.employees}
+        allPeople={Array.from(peopleById.values())}
         organisations={data.organisations}
         matters={data.matters}
         enquiries={data.enquiries}
