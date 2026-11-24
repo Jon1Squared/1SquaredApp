@@ -39,6 +39,7 @@ interface Props {
   currentUserId: string;
   initialLinkedRecord?: TaskLinkedRecord | null;
   initialTeamId?: string | null;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
 }
 
 interface SearchableRecordItem {
@@ -73,6 +74,7 @@ export function TaskFormClient({
   currentUserId,
   initialLinkedRecord,
   initialTeamId,
+  supervisingPartnerByEmployeeId,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -140,8 +142,11 @@ export function TaskFormClient({
     } else {
       addPerson(currentUserId, 'Fee earner');
       const currentEmp = employees.find((e) => e.id === currentUserId);
-      if (currentEmp?.employment?.supervisingPartnerId) {
-        addPerson(currentEmp.employment.supervisingPartnerId, 'Supervising partner');
+      const supId =
+        currentEmp?.employment?.supervisingPartnerId ??
+        supervisingPartnerByEmployeeId?.[currentUserId];
+      if (supId) {
+        addPerson(supId, 'Supervising partner');
       }
     }
 
@@ -158,7 +163,15 @@ export function TaskFormClient({
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [linkedRecords, matters, pickedMattersById, employees, people, currentUserId]);
+  }, [
+    linkedRecords,
+    matters,
+    pickedMattersById,
+    employees,
+    people,
+    currentUserId,
+    supervisingPartnerByEmployeeId,
+  ]);
 
   const searchableRecords = useMemo<SearchableRecordItem[]>(() => {
     const items: SearchableRecordItem[] = [];

@@ -127,6 +127,7 @@ interface Props {
   firmName?: string;
   tenantId: string;
   initialErrors?: Record<string, string>;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
 }
 
 export function EnquiryFormClient({
@@ -150,6 +151,7 @@ export function EnquiryFormClient({
   firmName = 'the firm',
   tenantId: _tenantId,
   initialErrors = {},
+  supervisingPartnerByEmployeeId,
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';
@@ -1416,8 +1418,11 @@ export function EnquiryFormClient({
 
     addPerson(enquiry?.assignedToId ?? currentUserId, 'Fee earner');
     const leadEmp = employees.find((e) => e.id === (enquiry?.assignedToId ?? currentUserId));
-    if (leadEmp?.employment?.supervisingPartnerId) {
-      addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
+    const supId =
+      leadEmp?.employment?.supervisingPartnerId ??
+      supervisingPartnerByEmployeeId?.[enquiry?.assignedToId ?? currentUserId];
+    if (supId) {
+      addPerson(supId, 'Supervising partner');
     }
     const riskRoleId = valueBySystemKey(values, 'employee_role', 'risk_and_compliance')?.id;
     const colpEmp = riskRoleId
@@ -1432,7 +1437,13 @@ export function EnquiryFormClient({
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [employees, enquiry?.assignedToId, currentUserId, values]);
+  }, [
+    employees,
+    enquiry?.assignedToId,
+    currentUserId,
+    values,
+    supervisingPartnerByEmployeeId,
+  ]);
 
   const handleCreateTask = (payload: CreateTaskSubmitPayload) => {
     if (!enquiry) return;

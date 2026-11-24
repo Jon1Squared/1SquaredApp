@@ -40,6 +40,7 @@ export default async function NewTaskPage({
         currentUserId={shell.currentUserId}
         initialLinkedRecord={initialLinkedRecord}
         initialTeamId={sp.teamId ?? null}
+        supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
       />
     );
   });

@@ -1320,9 +1320,13 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(dafyddShell.currentUserPermissions).not.toContain(
         'finance:view_matter',
       );
-      expect(dafyddShell.currentUser.entraObjectId).toBe(
+      expect(dafyddShell.currentUser.entraObjectId).toBeUndefined();
+      expect(validOverride.person?.entraObjectId).toBe(
         '8f2e91c0-4a12-4b9e-9c01-dafydd000002',
       );
+      expect(
+        dafyddShell.staffPeopleRaw.find((p) => p.id === 'P-000002')?.entraObjectId,
+      ).toBe('8f2e91c0-4a12-4b9e-9c01-dafydd000002');
 
       // Audit entry recorded with before/after JSON
       const auditEntry = (await auditSinceTestStart()).find(

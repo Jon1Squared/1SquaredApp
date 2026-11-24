@@ -41,6 +41,7 @@ export default async function EnquiryDetailPage({
           canAnonymise={data.canAnonymise}
           firmName={shell.firm.name}
           tenantId={shell.tenantId}
+          supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
         />
         <div style={{ maxWidth: 1240, margin: '0 auto', padding: '0 24px 32px' }}>
           <KeyDatesPanel

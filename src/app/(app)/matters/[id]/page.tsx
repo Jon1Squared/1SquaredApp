@@ -42,6 +42,8 @@ export default async function MatterProfilePage({
           customFields={shell.customFields}
           employees={shell.employees}
           currentUser={shell.currentUser}
+          effectiveWorkPerson={shell.effectiveWorkPerson}
+          supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
           orgStructure={shell.orgStructure}
           workTypesConfig={shell.store.workTypesConfig}
           matterPartyTaxonomy={shell.store.matterPartyTaxonomy}

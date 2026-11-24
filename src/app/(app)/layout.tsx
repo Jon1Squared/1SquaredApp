@@ -32,6 +32,7 @@ export default async function WorkspaceLayout({
         urgentTaskBadgeCount={shell.urgentTaskBadgeCount}
         notifications={shell.notifications}
         firmName={shell.firm.name}
+        demoShowsWorkOfName={shell.demoShowsWorkOfName}
         entraSession={{
           email: entraSession.email,
           displayName: entraSession.displayName,

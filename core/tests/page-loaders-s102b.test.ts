@@ -1352,6 +1352,12 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         surname: 'LeaverTest',
         dateOfBirth: '1984-04-12',
         isEmployee: false,
+        entraObjectId: '00000000-0000-4000-8000-000000009718',
+        permissionOverrides: {
+          grant: ['matter:edit'],
+          revoke: [],
+          reason: 'R718 sensitive override test fixture',
+        },
         emails: [
           {
             id: 'em-s102b-leaver',
@@ -1380,7 +1386,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
       const adminActor = makeActorSession('P-000004', ['admin'], env.tenantAlpha);
       const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
 
-      // 6a. HR / Admin actor sees leaver employment across list, profile, and edit loaders (payroll stripped)
+      // 6a. HR / Admin actor sees leaver employment across list, profile, and edit loaders (payroll, overrides & Entra OID stripped)
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
       setTestEntraSessionOverride(adminActor.verifiedSession);
       await runWithActiveActorSession(adminActor, async () => {
@@ -1388,23 +1394,31 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         const listLeaver = peopleList.people.find((p) => p.id === leaverPerson.id);
         expect(listLeaver?.employment?.status).toBe('Leaver');
         expect(listLeaver?.employment?.payroll).toBeUndefined();
+        expect(listLeaver?.permissionOverrides).toBeUndefined();
+        expect(listLeaver?.entraObjectId).toBeUndefined();
 
         const detail = await loadPersonDetailPageData('P-000004', leaverPerson.id);
         expect(detail && !('redirectTo' in detail)).toBe(true);
         if (detail && !('redirectTo' in detail)) {
           expect(detail.person.employment?.status).toBe('Leaver');
           expect(detail.person.employment?.contract?.leavingDate).toBe('2026-10-15');
+          expect(detail.person.dateOfBirth).toBe('1984-04-12');
+          expect(detail.person.permissionOverrides).toBeUndefined();
+          expect(detail.person.entraObjectId).toBeUndefined();
         }
 
         const edit = await loadPersonFormPageData('P-000004', leaverPerson.id);
         expect(edit && !('redirectTo' in edit)).toBe(true);
         if (edit && !('redirectTo' in edit)) {
           expect(edit.existing?.employment?.status).toBe('Leaver');
+          expect(edit.existing?.dateOfBirth).toBe('1984-04-12');
+          expect(edit.existing?.permissionOverrides).toBeUndefined();
+          expect(edit.existing?.entraObjectId).toBeUndefined();
         }
       });
 
       // 6b. Standard Fee Earner (has employee:view_core, lacks hr_restricted/payroll):
-      // sees core status 'Leaver' with restricted HR & payroll stripped, and contact-only edit keeps stored employment
+      // sees core status 'Leaver' and DOB with restricted HR, payroll, overrides & Entra OID stripped, and contact-only edit keeps stored employment
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
       setTestEntraSessionOverride(feActor.verifiedSession);
       await runWithActiveActorSession(feActor, async () => {
@@ -1415,6 +1429,9 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           expect(feDetail.person.employment?.contract).toBeUndefined();
           expect(feDetail.person.employment?.rightToWork).toBeUndefined();
           expect(feDetail.person.employment?.payroll).toBeUndefined();
+          expect(feDetail.person.dateOfBirth).toBe('1984-04-12');
+          expect(feDetail.person.permissionOverrides).toBeUndefined();
+          expect(feDetail.person.entraObjectId).toBeUndefined();
         }
 
         const saveRes = await savePersonRecord(
@@ -1442,8 +1459,9 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(persistedAfterFeEdit?.employment?.contract?.leavingDate).toBe('2026-10-15');
       });
 
-      // 6c. Actor without employee:view_core sees employment: null and leaverOwnedRecords: [],
-      // and saving a contact edit still preserves stored employment & DOB intact
+      // 6c. Actor without employee:view_core sees employment: null, leaverOwnedRecords: [],
+      // and NO dateOfBirth, permissionOverrides, or entraObjectId;
+      // saving a contact edit (even with a non-null dateOfBirth, R728) still preserves stored employment & DOB intact
       await partyRepo.putPerson(env.ctxAlpha, {
         ...structuredClone(seedEmp!),
         permissionOverrides: {
@@ -1456,12 +1474,18 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(limitedDetail && !('redirectTo' in limitedDetail)).toBe(true);
         if (limitedDetail && !('redirectTo' in limitedDetail)) {
           expect(limitedDetail.person.employment).toBeNull();
+          expect(limitedDetail.person.dateOfBirth).toBeUndefined();
+          expect(limitedDetail.person.permissionOverrides).toBeUndefined();
+          expect(limitedDetail.person.entraObjectId).toBeUndefined();
         }
 
         const limitedEdit = await loadPersonFormPageData('P-000002', leaverPerson.id);
         expect(limitedEdit && !('redirectTo' in limitedEdit)).toBe(true);
         if (limitedEdit && !('redirectTo' in limitedEdit)) {
           expect(limitedEdit.existing?.employment).toBeNull();
+          expect(limitedEdit.existing?.dateOfBirth).toBeUndefined();
+          expect(limitedEdit.existing?.permissionOverrides).toBeUndefined();
+          expect(limitedEdit.existing?.entraObjectId).toBeUndefined();
           expect(limitedEdit.leaverOwnedRecords).toEqual([]);
         }
 
@@ -1470,7 +1494,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
             firstName: 'Huw',
             surname: 'LeaverTest',
             relationshipNotes: 'Updated limited contact note',
-            dateOfBirth: null,
+            dateOfBirth: '1999-01-01',
           },
           {
             byId: 'P-000002',
@@ -2802,6 +2826,130 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           hiddenSearch.matters.some((m) => m.id === env.alphaStaffMatter.id),
         ).toBe(false);
       });
+    },
+    45_000,
+  );
+
+  it(
+    '17. R717: getEntityRecordForEditRecord redacts restricted matter references in conflictCheckOnHire for non-participants',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+      const seedEmp = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000002');
+      expect(seedEmp?.employment).toBeTruthy();
+
+      const targetEmpId = 'P-R717-EMP';
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(seedEmp!),
+        id: targetEmpId,
+        firstName: 'R717',
+        surname: 'ConflictEmp',
+        emails: [
+          {
+            id: 'em-r717-emp',
+            address: 'r717.emp@invented.example',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+        employment: {
+          ...structuredClone(seedEmp!.employment!),
+          personId: targetEmpId,
+          employeeNumber: 'EMP-9717',
+          conflictCheckOnHire: {
+            checkedAt: '2026-11-20T10:00:00Z',
+            openMatterIds: [env.alphaStaffMatter.id, env.alphaPubMatter.id],
+            flaggedToRisk: true,
+            informationBarrierConsidered: true,
+            riskNotes: `Person is a party on 2 open matter(s) (${env.alphaStaffMatter.matterNumber}, ${env.alphaPubMatter.matterNumber}).`,
+          },
+        },
+      });
+
+      // Non-participant holding employee:view_core + contact:edit (standard fee_earner has both, lacks matter:restricted:access)
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const editRes = await getEntityRecordForEditRecord(
+          'person',
+          targetEmpId,
+          'P-000002',
+        );
+        expect(isActionDenied(editRes)).toBe(false);
+        if (!isActionDenied(editRes)) {
+          const check = editRes.person?.employment?.conflictCheckOnHire;
+          expect(check).toBeTruthy();
+          expect(check?.openMatterIds).not.toContain(env.alphaStaffMatter.id);
+          expect(check?.openMatterIds).toContain(env.alphaPubMatter.id);
+          expect(check?.riskNotes).not.toContain(env.alphaStaffMatter.matterNumber);
+          expect(check?.riskNotes).toContain(env.alphaPubMatter.matterNumber);
+        }
+      });
+
+      // Positive control: participant / restricted-matter holder sees both matters
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        const partnerRes = await getEntityRecordForEditRecord(
+          'person',
+          targetEmpId,
+          'P-000001',
+        );
+        expect(isActionDenied(partnerRes)).toBe(false);
+        if (!isActionDenied(partnerRes)) {
+          const check = partnerRes.person?.employment?.conflictCheckOnHire;
+          expect(check?.openMatterIds).toContain(env.alphaStaffMatter.id);
+          expect(check?.riskNotes).toContain(env.alphaStaffMatter.matterNumber);
+        }
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '18. R718: shell.employees never leaks dateOfBirth, permissionOverrides, entraObjectId, showsWorkOfId, or employment',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+      const emp = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000002');
+      expect(emp).toBeTruthy();
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(emp!),
+        dateOfBirth: '1988-07-19',
+        entraObjectId: '00000000-0000-4000-8000-000000009719',
+        permissionOverrides: {
+          grant: ['matter:edit'],
+          revoke: [],
+          reason: 'R718 shell strip verification',
+        },
+        showsWorkOfId: 'P-000001',
+      });
+
+      for (const actorSpec of [
+        { id: 'P-000001', roles: ['partner', 'admin'] },
+        { id: 'P-000002', roles: ['fee_earner'] },
+      ]) {
+        const session = makeActorSession(actorSpec.id, actorSpec.roles, env.tenantAlpha);
+        setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+        setTestEntraSessionOverride(session.verifiedSession);
+        await runWithActiveActorSession(session, async () => {
+          const shell = await loadShellContext(actorSpec.id);
+          expect(shell.employees.length).toBeGreaterThan(0);
+          for (const e of shell.employees) {
+            expect('dateOfBirth' in e).toBe(false);
+            expect('permissionOverrides' in e).toBe(false);
+            expect('entraObjectId' in e).toBe(false);
+            expect('showsWorkOfId' in e).toBe(false);
+            expect('employment' in e).toBe(false);
+            expect(e.dateOfBirth).toBeUndefined();
+            expect(e.permissionOverrides).toBeUndefined();
+            expect(e.entraObjectId).toBeUndefined();
+            expect(e.showsWorkOfId).toBeUndefined();
+            expect(e.employment).toBeUndefined();
+          }
+        });
+      }
     },
     45_000,
   );

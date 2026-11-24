@@ -80,8 +80,18 @@ describe('Role-based Home pages & configuration', () => {
 
   it('seeds all 8 demo personas and underlying real employees with showsWorkOfId and supportsIds', async () => {
     const shell = await loadShellContext('P-000001');
-    const demoUsers = shell.employees.filter((p) => p.isEmployee && p.demo);
+    const demoUsers = shell.staffPeopleRaw.filter((p) => p.isEmployee && p.demo);
     expect(demoUsers.length).toBe(8);
+    expect(
+      shell.employees.filter((p) => p.isEmployee && p.demo).map((p) => p.id).sort(),
+    ).toEqual(demoUsers.map((p) => p.id).sort());
+    for (const emp of shell.employees) {
+      expect(emp.dateOfBirth).toBeUndefined();
+      expect(emp.permissionOverrides).toBeUndefined();
+      expect(emp.entraObjectId).toBeUndefined();
+      expect(emp.showsWorkOfId).toBeUndefined();
+      expect(emp.employment).toBeUndefined();
+    }
 
     const demoEmails = demoUsers.map((d) => primaryEmail(d));
     expect(demoEmails).toContain('felicity.fee-earner@notalawfirm.example');
@@ -198,7 +208,7 @@ describe('Role-based Home pages & configuration', () => {
     expect(feeEarnerSwitch.ok).toBe(false);
 
     // Positive test (R215): an administrator holding ['admin'] can preview any configured role via Viewing As
-    const adamAdmin = shell1.employees.find(
+    const adamAdmin = shell1.staffPeopleRaw.find(
       (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
     await runAsTestActor(adamAdmin.id, () =>
@@ -324,7 +334,7 @@ describe('Role-based Home pages & configuration', () => {
     });
     try {
       const shell = await loadShellContext('P-000004');
-      const felicity = shell.employees.find(
+      const felicity = shell.staffPeopleRaw.find(
         (p) => primaryEmail(p) === 'felicity.fee-earner@notalawfirm.example',
       )!;
       const res = await switchUserAction(felicity.id);
@@ -353,7 +363,7 @@ describe('Role-based Home pages & configuration', () => {
     const updatedPartner = setRolePanelPlacement(partnerRole, 'aged_debt_by_age_band', 'summary');
     expect(updatedPartner.summaryPanels).toContain('aged_debt_by_age_band');
 
-    const adminUser = (await loadShellContext('P-000001')).employees.find(
+    const adminUser = (await loadShellContext('P-000001')).staffPeopleRaw.find(
       (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
     const updatedRoles = defaults.roles.map((r) => (r.key === 'partner' ? updatedPartner : r));
@@ -386,7 +396,7 @@ describe('Role-based Home pages & configuration', () => {
   });
 
   it('allows adding a custom role in Admin › Home pages and assigning roles/supports to employees', async () => {
-    const adminUser = (await loadShellContext('P-000001')).employees.find(
+    const adminUser = (await loadShellContext('P-000001')).staffPeopleRaw.find(
       (p) => primaryEmail(p) === 'adam.admin@notalawfirm.example',
     )!;
     const res = await runAsTestActor(adminUser.id, () =>

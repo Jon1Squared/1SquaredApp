@@ -21,6 +21,7 @@ export default async function NewEnquiryPage() {
         currentUserId={shell.currentUserId}
         firmName={shell.firm.name}
         tenantId={shell.tenantId}
+        supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
       />
     );
   });

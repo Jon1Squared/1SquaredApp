@@ -48,6 +48,7 @@ import {
 } from '@/domain/matterOpeningRecord';
 import type { PmsLinksAdminPageData } from '@/domain/pms';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
+import { personDisplayName } from '@/domain/names';
 import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
@@ -68,7 +69,6 @@ import {
   canUserReopenEnquiry,
   canUserTakeTask,
   canUserVerifyKeyDate,
-  filterEmploymentForUser,
   getActiveActorSession,
   getLeftRailVisibility,
   hasPersonPermission,
@@ -83,6 +83,7 @@ import {
   activeEmployees,
   buildPmsLinksAdminDataFromSnapshot,
   dedupeById,
+  filterPeopleEmploymentForActor,
   findCandidateDuplicatesForRecord,
   getCatalogueRepository,
   getHrAndRbacRepository,
@@ -292,6 +293,8 @@ export interface ShellContextData {
   readonly staffPeopleRaw: Person[];
   readonly filteredStaffPeople: Person[];
   readonly employees: Person[];
+  readonly supervisingPartnerByEmployeeId: Record<string, string>;
+  readonly demoShowsWorkOfName: string | null;
   readonly teams: Team[];
   readonly values: ChoiceValue[];
   readonly lists: ChoiceList[];
@@ -311,62 +314,71 @@ function collectStatusIdsBySystemKey(
     .map((v) => v.id);
 }
 
-async function filterPeopleEmploymentForActor(params: {
-  ctx: TenantContext;
-  peopleToFilter: readonly Person[];
-  actorRaw: Person;
-  allStaffRaw: readonly Person[];
-  teams: readonly Team[];
-  effectiveTokenRoles: readonly string[] | undefined;
-  rbacConfig: RbacConfiguration;
-  hasRestrictedMatterAccess: boolean;
-}): Promise<Person[]> {
-  const matterRepo = getMatterRepository();
-  const openMatterIdsToCheck = Array.from(
-    new Set(
-      params.peopleToFilter.flatMap(
-        (p) => p.employment?.conflictCheckOnHire?.openMatterIds ?? [],
-      ),
-    ),
-  );
-  const visibleCheckMatters =
-    openMatterIdsToCheck.length > 0
-      ? await matterRepo.listMattersByIds<Matter>(
-          params.ctx,
-          openMatterIdsToCheck,
-          {
-            viewerId: params.actorRaw.id,
-            hasRestrictedMatterAccess: params.hasRestrictedMatterAccess,
-          },
-        )
-      : [];
-  const visibleMatterById = new Map(visibleCheckMatters.map((m) => [m.id, m]));
-  const employeeMatterVisibility = {
-    canViewMatterId: (matterId: string) => visibleMatterById.has(matterId),
-    visibleMatterNumberById: new Map(
-      visibleCheckMatters.map((m) => [m.id, m.matterNumber] as const),
-    ),
+/**
+ * Slim shell projection for `shell.employees` (`R718`): exposes only the
+ * non-sensitive directory/role fields needed by header pickers, drop-downs,
+ * and department filters without `dateOfBirth`, `permissionOverrides`,
+ * `entraObjectId`, `showsWorkOfId`, `supportsIds`, or `employment`.
+ */
+export function projectEmployeeForShell(p: Person): Person {
+  const projected: Person = {
+    id: p.id,
+    recordType: 'person',
+    recordOwnerId: p.recordOwnerId,
+    recordStatusId: p.recordStatusId,
+    createdById: p.createdById,
+    createdAt: p.createdAt,
+    updatedById: p.updatedById,
+    updatedAt: p.updatedAt,
+    sourceId: p.sourceId,
+    lastVerifiedAt: p.lastVerifiedAt,
+    tags: [],
+    duplicateStatusId: p.duplicateStatusId,
+    notDuplicateOf: [],
+    possibleMatchIds: [],
+    mergedIntoId: p.mergedIntoId,
+    lastInteractionAt: p.lastInteractionAt,
+    customFields: {},
+    titleId: p.titleId,
+    firstName: p.firstName,
+    middleNames: p.middleNames,
+    surname: p.surname,
+    preferredName: p.preferredName,
+    otherNames: [],
+    jobTitle: p.employment?.jobTitle?.trim() || p.jobTitle || '',
+    emails: [],
+    phones: [],
+    preferredContactMethodId: null,
+    preferredLanguageId: null,
+    addresses: [],
+    website: '',
+    relationshipOwnerId: null,
+    relationshipStatusId: p.relationshipStatusId,
+    relationshipStandingId: null,
+    relationshipRoleIds: [],
+    originId: null,
+    firstKnownAt: null,
+    engagementLevelId: null,
+    interests: '',
+    relationshipNotes: '',
+    marketingConsentId: null,
+    consentRecord: '',
+    verificationStatusId: p.verificationStatusId,
+    verifiedAt: null,
+    verificationMethodId: null,
+    verificationReviewerId: null,
+    riskReferences: '',
+    isEmployee: true,
+    employeeRoleId: p.employeeRoleId,
+    departmentId: p.employment?.departmentId ?? p.departmentId ?? null,
   };
-
-  return params.peopleToFilter.map((p) => {
-    if (!p.employment) return p;
-    return {
-      ...p,
-      employment: filterEmploymentForUser(
-        p.employment,
-        params.actorRaw,
-        [...params.allStaffRaw],
-        [...params.teams],
-        undefined,
-        {
-          tokenRoles: params.effectiveTokenRoles,
-          tokenRolesActorId: params.actorRaw.id,
-          config: { rbac: params.rbacConfig },
-        },
-        employeeMatterVisibility,
-      ),
-    };
-  });
+  if (p.roles && p.roles.length > 0) {
+    projected.roles = [...p.roles];
+  }
+  if (typeof p.demo === 'boolean') {
+    projected.demo = p.demo;
+  }
+  return projected;
 }
 
 async function collectReferencedParties(params: {
@@ -641,14 +653,45 @@ async function loadShellContextUncached(
     rbacConfig,
     hasRestrictedMatterAccess,
   });
-  const filteredCurrentUser =
-    filteredStaffPeople.find((p) => p.id === rawUser.id) ?? rawUser;
-  const effectiveWorkPerson: Person =
+  const attachSelfContextFields = (filtered: Person, raw: Person): Person => ({
+    ...filtered,
+    ...(raw.supportsIds && raw.supportsIds.length > 0
+      ? { supportsIds: [...raw.supportsIds] }
+      : {}),
+    ...(raw.roles && raw.roles.length > 0 ? { roles: [...raw.roles] } : {}),
+  });
+  const baseCurrentUser =
+    filteredStaffPeople.find((p) => p.id === rawUser.id) ??
+    sanitizePersonForClientPreview(rawUser);
+  const filteredCurrentUser = attachSelfContextFields(baseCurrentUser, rawUser);
+  const rawEffectiveWorkPerson =
     isNonLiveDemoEnvironment() && rawUser.demo && rawUser.showsWorkOfId
-      ? (filteredStaffPeople.find((p) => p.id === rawUser.showsWorkOfId) ??
-        filteredCurrentUser)
-      : filteredCurrentUser;
-  const employees = activeEmployees(filteredStaffPeople, store.values);
+      ? (staffPeopleRaw.find((p) => p.id === rawUser.showsWorkOfId) ?? rawUser)
+      : rawUser;
+  const baseEffectiveWorkPerson =
+    filteredStaffPeople.find((p) => p.id === rawEffectiveWorkPerson.id) ??
+    filteredCurrentUser;
+  const effectiveWorkPerson: Person = attachSelfContextFields(
+    baseEffectiveWorkPerson,
+    rawEffectiveWorkPerson,
+  );
+  const demoShowsWorkOfName =
+    homePagesConfig.firmSettings.demoMode &&
+    isNonLiveDemoEnvironment() &&
+    rawUser.demo &&
+    rawUser.showsWorkOfId
+      ? personDisplayName(effectiveWorkPerson)
+      : null;
+
+  const activeEmps = activeEmployees(staffPeopleRaw, store.values);
+  const supervisingPartnerByEmployeeId: Record<string, string> = {};
+  for (const emp of activeEmps) {
+    const supId = emp.employment?.supervisingPartnerId;
+    if (supId) {
+      supervisingPartnerByEmployeeId[emp.id] = supId;
+    }
+  }
+  const employees = activeEmps.map(projectEmployeeForShell);
 
   const inactiveRecordStatusIds = collectStatusIdsBySystemKey(store.values, [
     'archived',
@@ -840,6 +883,8 @@ async function loadShellContextUncached(
     staffPeopleRaw,
     filteredStaffPeople,
     employees,
+    supervisingPartnerByEmployeeId,
+    demoShowsWorkOfName,
     teams,
     values: store.values,
     lists: store.lists,
@@ -3754,13 +3799,40 @@ export async function loadAdminPageData(
     });
   }
 
+  const isLiveEnvironment = activeTenantCfg.environment === 'live';
+  const canManageRbacAdmin = shell.currentUserPermissions.some(
+    (p) => p === 'rbac:manage_user_overrides' || p === 'rbac:manage_config',
+  );
+  const rawStaffById = new Map(shell.staffPeopleRaw.map((p) => [p.id, p]));
+  const adminPeople = shell.filteredStaffPeople.map((p) => {
+    const raw = rawStaffById.get(p.id);
+    if (!raw) return p;
+    return {
+      ...p,
+      emails: structuredClone(raw.emails ?? []),
+      ...(raw.roles !== undefined ? { roles: [...raw.roles] } : {}),
+      ...(!isLiveEnvironment && raw.showsWorkOfId !== undefined
+        ? { showsWorkOfId: raw.showsWorkOfId }
+        : {}),
+      ...(!isLiveEnvironment && raw.supportsIds !== undefined
+        ? { supportsIds: [...raw.supportsIds] }
+        : {}),
+      ...(canManageRbacAdmin
+        ? {
+            permissionOverrides: raw.permissionOverrides ?? null,
+            entraObjectId: raw.entraObjectId ?? null,
+          }
+        : {}),
+    };
+  });
+
   return {
     shell,
     initialTab,
     lists: shell.lists,
     values: shell.values,
     customFields: shell.customFields,
-    people: shell.filteredStaffPeople,
+    people: adminPeople,
     organisations: [],
     matters: [],
     enquiries: [],
@@ -3771,7 +3843,7 @@ export async function loadAdminPageData(
     initialPmsLinksData,
     expiredUnconvertedEnquiriesCount,
     matterPartyUsageCounts,
-    isLiveEnvironment: activeTenantCfg.environment === 'live',
+    isLiveEnvironment,
     defaultRoleConfigs: createDefaultRoleConfigs(
       activeTenantCfg.branding.primaryDomain,
     ),

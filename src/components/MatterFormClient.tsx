@@ -201,6 +201,8 @@ interface MatterFormClientProps {
   customFields?: CustomFieldDefinition[];
   employees: Person[];
   currentUser: Person;
+  effectiveWorkPerson?: Person;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
   orgStructure: OrgStructureCatalogue;
   workTypesConfig?: WorkTypesConfiguration;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
@@ -310,6 +312,8 @@ export function MatterFormClient({
   customFields = [],
   employees: initialEmployees,
   currentUser,
+  effectiveWorkPerson,
+  supervisingPartnerByEmployeeId,
   orgStructure,
   workTypesConfig,
   matterPartyTaxonomy,
@@ -538,12 +542,12 @@ export function MatterFormClient({
   const userMatterDefaults = useMemo(
     () =>
       resolveNewMatterDepartmentDefaults({
-        currentUser,
+        currentUser: effectiveWorkPerson ?? currentUser,
         allPeople: people,
         employees,
         practiceAreas,
       }),
-    [currentUser, people, employees, practiceAreas],
+    [effectiveWorkPerson, currentUser, people, employees, practiceAreas],
   );
 
   const initialSubcatVal = useMemo(() => {
@@ -616,16 +620,25 @@ export function MatterFormClient({
       initialQuote?.practiceAreaId ?? initialEnquiry?.practiceAreaId ?? null;
     if (!sourceFeeEarnerId && !sourcePracticeAreaId) return null;
     const partnerRoleId = valueBySystemKey(values, 'employee_role', 'partner')?.id;
+    const managingPartnerRoleId = valueBySystemKey(
+      values,
+      'employee_role',
+      'managing_partner',
+    )?.id;
+    const isPartnerEmployee = (emp: Person) =>
+      emp.employment?.roleType === 'Partner/Member' ||
+      (partnerRoleId !== undefined && emp.employeeRoleId === partnerRoleId) ||
+      (managingPartnerRoleId !== undefined &&
+        emp.employeeRoleId === managingPartnerRoleId);
     if (sourceFeeEarnerId) {
       const assignedEmp = employees.find((e) => e.id === sourceFeeEarnerId);
-      if (assignedEmp?.employment?.supervisingPartnerId) {
-        return assignedEmp.employment.supervisingPartnerId;
+      const assignedSupId =
+        assignedEmp?.employment?.supervisingPartnerId ??
+        supervisingPartnerByEmployeeId?.[sourceFeeEarnerId];
+      if (assignedSupId) {
+        return assignedSupId;
       }
-      if (
-        assignedEmp &&
-        (assignedEmp.employment?.roleType === 'Partner/Member' ||
-          (partnerRoleId !== undefined && assignedEmp.employeeRoleId === partnerRoleId))
-      ) {
+      if (assignedEmp && isPartnerEmployee(assignedEmp)) {
         return assignedEmp.id;
       }
     }
@@ -635,16 +648,20 @@ export function MatterFormClient({
         practiceAreaId: sourcePracticeAreaId,
         practiceAreas,
         includeSupervisingPartners: true,
+        supervisingPartnerByEmployeeId,
       });
-      const partner = deptPartners.find(
-        (e) =>
-          e.employment?.roleType === 'Partner/Member' ||
-          (partnerRoleId !== undefined && e.employeeRoleId === partnerRoleId),
-      );
+      const partner = deptPartners.find(isPartnerEmployee);
       if (partner) return partner.id;
     }
     return null;
-  }, [initialQuote, initialEnquiry, employees, practiceAreas, values]);
+  }, [
+    initialQuote,
+    initialEnquiry,
+    employees,
+    practiceAreas,
+    values,
+    supervisingPartnerByEmployeeId,
+  ]);
 
   const [responsiblePartnerId, setResponsiblePartnerId] = useState<string | null>(
     () =>
@@ -709,8 +726,15 @@ export function MatterFormClient({
         practiceAreas,
         includeSupervisingPartners: true,
         preserveSelectedId: responsiblePartnerId,
+        supervisingPartnerByEmployeeId,
       }),
-    [employees, practiceAreaId, practiceAreas, responsiblePartnerId],
+    [
+      employees,
+      practiceAreaId,
+      practiceAreas,
+      responsiblePartnerId,
+      supervisingPartnerByEmployeeId,
+    ],
   );
 
   const feeEarnerOptions = useMemo(
@@ -6917,6 +6941,7 @@ export function MatterFormClient({
                       practiceAreaId: nextPa,
                       practiceAreas,
                       includeSupervisingPartners: true,
+                      supervisingPartnerByEmployeeId,
                     });
                     const nextFeOpts = filterEmployeesForMatterDepartment({
                       employees,

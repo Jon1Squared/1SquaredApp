@@ -3138,12 +3138,10 @@ export async function savePersonRecord(
   const rawEmpInput: Partial<EmploymentRecord> | null =
     opts.employmentSubmitted ?? input.employment ?? null;
 
+  // R728: Non-HR actors without `employee:edit_core` cannot overwrite or clear stored DOB on people with employment.
   const effectiveDob =
-    existing?.employment &&
-    !userPerms.has('employee:edit_core') &&
-    (input.dateOfBirth === undefined || input.dateOfBirth === null) &&
-    existing.dateOfBirth !== null
-      ? existing.dateOfBirth
+    existing?.employment && !userPerms.has('employee:edit_core')
+      ? (existing.dateOfBirth ?? null)
       : input.dateOfBirth !== undefined
         ? input.dateOfBirth
         : existing?.dateOfBirth ?? null;
@@ -18057,6 +18055,21 @@ export async function updatePersonPermissionOverrides(
 
       await flushStagedAuditEntries(ctx);
     });
+    const targetOpenMatterIds = target.employment?.conflictCheckOnHire?.openMatterIds ?? [];
+    const visibleTargetMatters =
+      target.employment && targetOpenMatterIds.length > 0
+        ? await getMatterRepository().listMattersByIds<Matter>(ctx, targetOpenMatterIds, {
+            viewerId: byId,
+            hasRestrictedMatterAccess: actorPerms.permissions.has('matter:restricted:access'),
+          })
+        : [];
+    const visibleTargetMatterById = new Map(visibleTargetMatters.map((m) => [m.id, m]));
+    const overrideMatterVisibility = {
+      canViewMatterId: (matterId: string) => visibleTargetMatterById.has(matterId),
+      visibleMatterNumberById: new Map(
+        visibleTargetMatters.map((m) => [m.id, m.matterNumber] as const),
+      ),
+    };
     const safeTarget: Person = target.employment
       ? {
           ...target,
@@ -18067,6 +18080,7 @@ export async function updatePersonPermissionOverrides(
             teams,
             undefined,
             { config: { rbac: rbacConfig } },
+            overrideMatterVisibility,
           ),
         }
       : target;
@@ -30646,6 +30660,89 @@ async function resolveServiceActorPermissions(
 }
 
 /**
+ * Sanitises staff/leaver `Person` records through `sanitizePersonForClientPreview`,
+ * applies role- and matter-visibility-scoped `filterEmploymentForUser`, and reveals
+ * employee/leaver `dateOfBirth` only to actors holding `employee:view_core` (`R717`, `R718`).
+ */
+export async function filterPeopleEmploymentForActor(params: {
+  ctx: TenantContext;
+  peopleToFilter: readonly Person[];
+  actorRaw: Person;
+  allStaffRaw: readonly Person[];
+  teams: readonly Team[];
+  effectiveTokenRoles: readonly string[] | undefined;
+  rbacConfig: RbacConfiguration;
+  hasRestrictedMatterAccess: boolean;
+}): Promise<Person[]> {
+  const matterRepo = getMatterRepository();
+  const openMatterIdsToCheck = Array.from(
+    new Set(
+      params.peopleToFilter.flatMap(
+        (p) => p.employment?.conflictCheckOnHire?.openMatterIds ?? [],
+      ),
+    ),
+  );
+  const visibleCheckMatters =
+    openMatterIdsToCheck.length > 0
+      ? await matterRepo.listMattersByIds<Matter>(
+          params.ctx,
+          openMatterIdsToCheck,
+          {
+            viewerId: params.actorRaw.id,
+            hasRestrictedMatterAccess: params.hasRestrictedMatterAccess,
+          },
+        )
+      : [];
+  const visibleMatterById = new Map(visibleCheckMatters.map((m) => [m.id, m]));
+  const employeeMatterVisibility = {
+    canViewMatterId: (matterId: string) => visibleMatterById.has(matterId),
+    visibleMatterNumberById: new Map(
+      visibleCheckMatters.map((m) => [m.id, m.matterNumber] as const),
+    ),
+  };
+
+  const rbacOpts: ResolvePersonPermissionsOptions = {
+    tokenRoles: params.effectiveTokenRoles,
+    tokenRolesActorId: params.actorRaw.id,
+    config: { rbac: params.rbacConfig },
+  };
+  const actorEmpPerms = new Set(
+    resolveEmployeePermissions(
+      params.actorRaw,
+      [...params.allStaffRaw],
+      [...params.teams],
+      rbacOpts,
+    ),
+  );
+  const canViewEmployeeCore = actorEmpPerms.has('employee:view_core');
+
+  return params.peopleToFilter.map((p) => {
+    const safePerson = sanitizePersonForClientPreview(p, {
+      preserveNonEmployeeDob: true,
+    });
+    const isStaffOrLeaver = Boolean(p.isEmployee || p.employment);
+    if (isStaffOrLeaver && canViewEmployeeCore && p.dateOfBirth !== undefined) {
+      safePerson.dateOfBirth = p.dateOfBirth;
+    }
+    if (!p.employment) {
+      return safePerson;
+    }
+    return {
+      ...safePerson,
+      employment: filterEmploymentForUser(
+        p.employment,
+        params.actorRaw,
+        [...params.allStaffRaw],
+        [...params.teams],
+        undefined,
+        rbacOpts,
+        employeeMatterVisibility,
+      ),
+    };
+  });
+}
+
+/**
  * Hydrate a single full `Person` (RBAC-sanitised) or `Organisation` for
  * embedded edit modals and duplicate merge previews after picking from slim
  * picker summaries (`R710`).
@@ -30718,40 +30815,26 @@ export async function getEntityRecordForEditRecord(
     return { recordType: 'person', person: null };
   }
 
-  const safePerson = sanitizePersonForClientPreview(rawPerson, {
-    preserveNonEmployeeDob: true,
-  });
-  const canViewEmployeeCore =
-    permSet.permissions.has('employee:view_core') ||
-    permSet.permissions.has('employee:edit_core');
-  if ((rawPerson.isEmployee || rawPerson.employment) && canViewEmployeeCore) {
-    const filteredEmployment = rawPerson.employment
-      ? filterEmploymentForUser(
-          rawPerson.employment,
-          actor,
-          staffPeople,
-          teams,
-          undefined,
-          {
-            tokenRoles: effectiveTokenRoles,
-            tokenRolesActorId: actor.id,
-            config: { rbac: rbacConfig },
-            includePayroll: false,
-          },
-        )
-      : undefined;
-    return {
-      recordType: 'person',
-      person: {
-        ...safePerson,
-        ...(rawPerson.dateOfBirth !== undefined
-          ? { dateOfBirth: rawPerson.dateOfBirth }
-          : {}),
-        ...(filteredEmployment ? { employment: filteredEmployment } : {}),
-      },
-    };
+  if (rawPerson.isEmployee || rawPerson.employment) {
+    const [filtered] = await filterPeopleEmploymentForActor({
+      ctx,
+      peopleToFilter: [rawPerson],
+      actorRaw: actor,
+      allStaffRaw: staffPeople,
+      teams,
+      effectiveTokenRoles,
+      rbacConfig,
+      hasRestrictedMatterAccess: permSet.permissions.has('matter:restricted:access'),
+    });
+    return { recordType: 'person', person: filtered };
   }
-  return { recordType: 'person', person: safePerson };
+
+  return {
+    recordType: 'person',
+    person: sanitizePersonForClientPreview(rawPerson, {
+      preserveNonEmployeeDob: true,
+    }),
+  };
 }
 
 /**

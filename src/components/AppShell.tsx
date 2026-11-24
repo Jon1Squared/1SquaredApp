@@ -118,6 +118,7 @@ interface AppShellProps {
   urgentTaskBadgeCount: number;
   notifications: NotificationItem[];
   firmName?: string;
+  demoShowsWorkOfName?: string | null;
   entraSession?: Pick<
     EntraSessionPayload,
     'email' | 'displayName' | 'oid' | 'mfaVerified'
@@ -137,6 +138,7 @@ export function AppShell({
   urgentTaskBadgeCount,
   notifications,
   firmName = 'Firm',
+  demoShowsWorkOfName = null,
   entraSession = null,
   children,
 }: AppShellProps) {
@@ -871,7 +873,7 @@ export function AppShell({
           </div>
         </header>
 
-        {demoMode && currentUser.demo && currentUser.showsWorkOfId ? (
+        {demoMode && currentUser.demo && Boolean(demoShowsWorkOfName ?? currentUser.showsWorkOfId) ? (
           <div
             role="status"
             data-testid="demo-user-banner"
@@ -889,7 +891,7 @@ export function AppShell({
             }}
           >
             <span>
-              Demo user: showing <strong>{effectiveName}’s</strong> work ({userName})
+              Demo user: showing <strong>{demoShowsWorkOfName ?? effectiveName}’s</strong> work ({userName})
             </span>
             <Link
               href="/admin/lists?section=homePages"
