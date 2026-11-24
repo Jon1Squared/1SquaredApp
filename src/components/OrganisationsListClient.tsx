@@ -301,11 +301,7 @@ export function OrganisationsListClient({
 
   const isClientOrg = (o: Organisation): boolean => {
     const relKeys = o.relationshipTypeIds.map((id) => systemKeyOf(values, id));
-    const statusKey = systemKeyOf(values, o.relationshipStatusId);
-    return (
-      relKeys.some((k) => k === 'client' || k === 'former_client') ||
-      statusKey === 'active'
-    );
+    return relKeys.some((k) => k === 'client' || k === 'former_client');
   };
 
   const isProspectOrg = (o: Organisation): boolean => {

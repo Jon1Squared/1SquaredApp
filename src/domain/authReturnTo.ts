@@ -30,7 +30,19 @@ export function sanitizeReturnToPath(
     ) {
       return '/';
     }
-    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+    const candidate = `${resolved.pathname}${resolved.search}${resolved.hash}`;
+    if (
+      !candidate.startsWith('/') ||
+      candidate.startsWith('//') ||
+      candidate.includes('\\')
+    ) {
+      return '/';
+    }
+    const rechecked = new URL(candidate, base.origin);
+    if (rechecked.origin !== base.origin) {
+      return '/';
+    }
+    return candidate;
   } catch {
     return '/';
   }

@@ -2559,7 +2559,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       if (viewerOrOptions?.sortBy === 'matter') {
         sortSql = `lower(COALESCE(m.matter_number, '')) ${dirSql}, m.id ASC`;
       } else if (viewerOrOptions?.sortBy === 'openedAt') {
-        sortSql = `COALESCE(NULLIF(m.opened_at, ''), to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ${dirSql}, m.id ASC`;
+        sortSql = `COALESCE(NULLIF(m.opened_on, ''), to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ${dirSql}, m.id ASC`;
       } else if (viewerOrOptions?.sortBy === 'status') {
         if (statusSortIds.length > 0) {
           pageParams.push(statusSortIds);

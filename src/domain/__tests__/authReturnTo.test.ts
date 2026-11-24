@@ -25,6 +25,10 @@ describe('Suggestion 9: /login returnTo sanitization', () => {
     expect(sanitizeReturnToPath('//evil.com/matters')).toBe('/');
     expect(sanitizeReturnToPath('/\\evil.com')).toBe('/');
     expect(sanitizeReturnToPath('///evil.com')).toBe('/');
+    expect(sanitizeReturnToPath('/.//evil.com')).toBe('/');
+    expect(sanitizeReturnToPath('/a/..//evil.com')).toBe('/');
+    expect(sanitizeReturnToPath('/%2e%2e//evil.com')).toBe('/');
+    expect(sanitizeReturnToPath('/..//evil.com')).toBe('/');
     expect(sanitizeReturnToPath('javascript:alert(1)')).toBe('/');
     expect(sanitizeReturnToPath('/matters\r\nLocation: https://evil.com')).toBe('/');
     expect(sanitizeReturnToPath('/login')).toBe('/');

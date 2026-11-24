@@ -631,6 +631,16 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
     }
     expect(blockedReturnRedirectDigest).toContain('NEXT_REDIRECT');
     expect(blockedReturnRedirectDigest).toContain(';/;');
+
+    // R730: dot-segment payloads resolving to scheme-relative //evil.com must fall back to '/'
+    let dotSegmentRedirectDigest = '';
+    try {
+      await LoginPage({ searchParams: Promise.resolve({ returnTo: '/.//evil.com' }) });
+    } catch (err) {
+      dotSegmentRedirectDigest = String((err as { digest?: unknown })?.digest ?? '');
+    }
+    expect(dotSegmentRedirectDigest).toContain('NEXT_REDIRECT');
+    expect(dotSegmentRedirectDigest).toContain(';/;');
   });
 
   it(
@@ -3415,7 +3425,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
   );
 
   it(
-    '21. R722: server sorting maintains monotonic ordering across pages with id tie-break',
+    '21. R722 & R731: table-driven server sorting maintains monotonic ordering across pages for every allow-listed sort key in both directions',
     async () => {
       const env = await provisionAndSeedTwoTenants();
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
@@ -3423,48 +3433,335 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
       setTestEntraSessionOverride(partnerActor.verifiedSession);
 
       await runWithActiveActorSession(partnerActor, async () => {
-        const m1 = await loadMattersListPageData('P-000001', {
-          page: 1,
-          pageSize: 2,
-          sortBy: 'matter',
-          sortDir: 'asc',
-        });
-        const m2 = await loadMattersListPageData('P-000001', {
-          page: 2,
-          pageSize: 2,
-          sortBy: 'matter',
-          sortDir: 'asc',
-        });
-        expect(m1.matters).toHaveLength(2);
-        expect(m2.matters.length).toBeGreaterThan(0);
-        const lastP1 = m1.matters[m1.matters.length - 1]!.matterNumber.toLowerCase();
-        const firstP2 = m2.matters[0]!.matterNumber.toLowerCase();
-        expect(lastP1 <= firstP2).toBe(true);
+        const shell = await loadShellContext('P-000001');
+        const values = shell.values;
+        const relStatusOrder = values
+          .filter((v) => v.listKey === 'relationship_status')
+          .sort((a, b) => a.label.localeCompare(b.label))
+          .map((v) => v.id);
+        const matterStatusOrder = [
+          'cmi_incomplete',
+          'active',
+          'prospective',
+          'on_hold',
+          'completed',
+          'closed',
+          'archived',
+          'aborted',
+        ].flatMap((sysKey) =>
+          values
+            .filter(
+              (v) =>
+                v.listKey === 'matter_status' &&
+                (v.systemKey === sysKey ||
+                  values.find((x) => x.id === v.id)?.systemKey === sysKey),
+            )
+            .map((v) => v.id),
+        );
+        const relStatusRank = (statusId: string | null | undefined): number => {
+          if (!statusId) return 0;
+          const idx = relStatusOrder.indexOf(statusId);
+          return idx >= 0 ? idx + 1 : 9999;
+        };
+        const matterStatusRank = (statusId: string): number => {
+          if (matterStatusOrder.length === 0) return 0;
+          const idx = matterStatusOrder.indexOf(statusId);
+          return idx >= 0 ? idx + 1 : 999;
+        };
+        const urgencyRankMap = (urgencyId: string): number => {
+          const val = values.find((v) => v.id === urgencyId);
+          switch (val?.systemKey) {
+            case 'emergency':
+              return 0;
+            case 'urgent':
+              return 1;
+            case 'standard':
+              return 2;
+            default:
+              return 3;
+          }
+        };
+        const intakeStatusRank = (kind: 'enquiry' | 'quote', item: Enquiry | Quote): number => {
+          const st =
+            kind === 'quote'
+              ? (() => {
+                  const q = item as Quote;
+                  if (
+                    (q.status === 'Sent' || q.status === 'Follow-up due') &&
+                    q.validUntil &&
+                    q.validUntil < new Date().toISOString().slice(0, 10)
+                  ) {
+                    return 'Expired';
+                  }
+                  return q.status;
+                })()
+              : (item as Enquiry).status;
+          switch (st) {
+            case 'New':
+              return 1;
+            case 'Follow-up due':
+              return 2;
+            case 'Assigned':
+              return 3;
+            case 'Sent':
+              return 4;
+            case 'In contact':
+              return 5;
+            case 'Draft':
+              return 6;
+            case 'Accepted':
+              return 7;
+            case 'Converted':
+              return 8;
+            case 'Declined':
+              return 9;
+            case 'Referred out':
+              return 10;
+            case 'No response':
+              return 11;
+            case 'Expired':
+              return 12;
+            case 'Superseded':
+              return 13;
+            default:
+              return 99;
+          }
+        };
+        const taskPriorityRank = (priorityId: string): number => {
+          const key = values.find((v) => v.id === priorityId)?.systemKey;
+          if (key === 'urgent') return 1;
+          if (key === 'high') return 2;
+          if (key === 'low') return 4;
+          return 3;
+        };
+        const taskStatusRank = (task: Task): number => {
+          if (task.status === 'In progress') return 1;
+          if (task.status === 'To do') return 2;
+          if (task.status === 'Waiting') return 3;
+          if (task.status === 'Done') return 4;
+          return 5;
+        };
 
-        const p1 = await loadPeopleListPageData('P-000001', {
-          page: 1,
-          pageSize: 2,
-          sortBy: 'person',
-          sortDir: 'desc',
-        });
-        const p2 = await loadPeopleListPageData('P-000001', {
-          page: 2,
-          pageSize: 2,
-          sortBy: 'person',
-          sortDir: 'desc',
-        });
-        expect(p1.people).toHaveLength(2);
-        expect(p2.people.length).toBeGreaterThan(0);
-        expect(
-          p1.people[1]!.surname.toLowerCase() >= p2.people[0]!.surname.toLowerCase(),
-        ).toBe(true);
+        const assertMonotonicKey = (
+          label: string,
+          dir: 'asc' | 'desc',
+          a: number | string,
+          b: number | string,
+        ) => {
+          if (typeof a === 'number' && typeof b === 'number') {
+            expect(dir === 'asc' ? a <= b : a >= b, `${label} (${dir}): ${a} vs ${b}`).toBe(true);
+            return;
+          }
+          const sa = String(a);
+          const sb = String(b);
+          expect(dir === 'asc' ? sa <= sb : sa >= sb, `${label} (${dir}): ${sa} vs ${sb}`).toBe(true);
+        };
+
+        const sortCases: Array<{
+          readonly label: string;
+          readonly run: (
+            sortDir: 'asc' | 'desc',
+          ) => Promise<{
+            readonly p1Rows: Array<{ readonly id: string; readonly key: number | string | null }>;
+            readonly p2Rows: Array<{ readonly id: string; readonly key: number | string | null }>;
+            readonly nullsLast?: boolean;
+          }>;
+        }> = [
+          ...(['matter', 'status', 'openedAt'] as const).map((sortBy) => ({
+            label: `matters:${sortBy}`,
+            run: async (sortDir: 'asc' | 'desc') => {
+              const p1 = await loadMattersListPageData('P-000001', {
+                page: 1,
+                pageSize: 2,
+                sortBy,
+                sortDir,
+              });
+              const p2 = await loadMattersListPageData('P-000001', {
+                page: 2,
+                pageSize: 2,
+                sortBy,
+                sortDir,
+              });
+              const extractKey = (m: Matter): string | number => {
+                if (sortBy === 'matter') return m.matterNumber.toLowerCase();
+                if (sortBy === 'status') return matterStatusRank(m.matterStatusId);
+                return m.openedAt || m.createdAt;
+              };
+              return {
+                p1Rows: p1.matters.map((m) => ({ id: m.id, key: extractKey(m) })),
+                p2Rows: p2.matters.map((m) => ({ id: m.id, key: extractKey(m) })),
+              };
+            },
+          })),
+          ...(['priority', 'status', 'dueAt'] as const).map((sortBy) => ({
+            label: `tasks:${sortBy}`,
+            run: async (sortDir: 'asc' | 'desc') => {
+              const p1 = await loadTasksListPageData('P-000001', {
+                page: 1,
+                pageSize: 2,
+                tab: 'all',
+                statusFilter: 'all',
+                sortBy,
+                sortDir,
+              });
+              const p2 = await loadTasksListPageData('P-000001', {
+                page: 2,
+                pageSize: 2,
+                tab: 'all',
+                statusFilter: 'all',
+                sortBy,
+                sortDir,
+              });
+              const extractKey = (t: Task): string | number | null => {
+                if (sortBy === 'priority') return taskPriorityRank(t.priorityId);
+                if (sortBy === 'status') return taskStatusRank(t);
+                return t.dueAt ? t.dueAt : null;
+              };
+              return {
+                p1Rows: p1.tasks.map((t) => ({ id: t.id, key: extractKey(t) })),
+                p2Rows: p2.tasks.map((t) => ({ id: t.id, key: extractKey(t) })),
+                nullsLast: sortBy === 'dueAt',
+              };
+            },
+          })),
+          ...(['urgency', 'status', 'receivedAt'] as const).map((sortBy) => ({
+            label: `enquiries:${sortBy}`,
+            run: async (sortDir: 'asc' | 'desc') => {
+              const p1 = await loadEnquiriesListPageData('P-000001', {
+                page: 1,
+                pageSize: 2,
+                tab: 'all',
+                sortBy,
+                sortDir,
+              });
+              const p2 = await loadEnquiriesListPageData('P-000001', {
+                page: 2,
+                pageSize: 2,
+                tab: 'all',
+                sortBy,
+                sortDir,
+              });
+              const mapPageRows = (res: Awaited<ReturnType<typeof loadEnquiriesListPageData>>) => {
+                const enqById = new Map(res.enquiries.map((e) => [e.id, e]));
+                const quoteById = new Map(res.quotes.map((q) => [q.id, q]));
+                return res.orderedQueueItems.map((ref) => {
+                  if (ref.kind === 'enquiry') {
+                    const e = enqById.get(ref.id)!;
+                    const key =
+                      sortBy === 'urgency'
+                        ? urgencyRankMap(e.urgencyId)
+                        : sortBy === 'status'
+                          ? intakeStatusRank('enquiry', e)
+                          : Date.parse(e.receivedAt || e.createdAt);
+                    return { id: `enquiry:${e.id}`, key };
+                  }
+                  const q = quoteById.get(ref.id)!;
+                  const key =
+                    sortBy === 'urgency'
+                      ? 2
+                      : sortBy === 'status'
+                        ? intakeStatusRank('quote', q)
+                        : Date.parse(q.createdAt);
+                  return { id: `quote:${q.id}`, key };
+                });
+              };
+              return {
+                p1Rows: mapPageRows(p1),
+                p2Rows: mapPageRows(p2),
+              };
+            },
+          })),
+          ...(['person', 'status'] as const).map((sortBy) => ({
+            label: `people:${sortBy}`,
+            run: async (sortDir: 'asc' | 'desc') => {
+              const p1 = await loadPeopleListPageData('P-000001', {
+                page: 1,
+                pageSize: 2,
+                tab: 'all',
+                sortBy,
+                sortDir,
+              });
+              const p2 = await loadPeopleListPageData('P-000001', {
+                page: 2,
+                pageSize: 2,
+                tab: 'all',
+                sortBy,
+                sortDir,
+              });
+              const extractKey = (p: Person): string | number =>
+                sortBy === 'person'
+                  ? `${p.surname.toLowerCase()}\u0000${p.firstName.toLowerCase()}`
+                  : relStatusRank(p.relationshipStatusId);
+              return {
+                p1Rows: p1.people.map((p) => ({ id: p.id, key: extractKey(p) })),
+                p2Rows: p2.people.map((p) => ({ id: p.id, key: extractKey(p) })),
+              };
+            },
+          })),
+          ...(['organisation', 'status'] as const).map((sortBy) => ({
+            label: `organisations:${sortBy}`,
+            run: async (sortDir: 'asc' | 'desc') => {
+              const p1 = await loadOrganisationsListPageData('P-000001', {
+                page: 1,
+                pageSize: 2,
+                tab: 'all',
+                sortBy,
+                sortDir,
+              });
+              const p2 = await loadOrganisationsListPageData('P-000001', {
+                page: 2,
+                pageSize: 2,
+                tab: 'all',
+                sortBy,
+                sortDir,
+              });
+              const extractKey = (o: Organisation): string | number =>
+                sortBy === 'organisation'
+                  ? o.legalName.toLowerCase()
+                  : relStatusRank(o.relationshipStatusId);
+              return {
+                p1Rows: p1.organisations.map((o) => ({ id: o.id, key: extractKey(o) })),
+                p2Rows: p2.organisations.map((o) => ({ id: o.id, key: extractKey(o) })),
+              };
+            },
+          })),
+        ];
+
+        for (const testCase of sortCases) {
+          for (const dir of ['asc', 'desc'] as const) {
+            const { p1Rows, p2Rows, nullsLast } = await testCase.run(dir);
+            expect(p1Rows, `${testCase.label} (${dir}) p1`).toHaveLength(2);
+            expect(p2Rows.length, `${testCase.label} (${dir}) p2`).toBeGreaterThan(0);
+            const p1Ids = new Set(p1Rows.map((r) => r.id));
+            expect(p2Rows.some((r) => p1Ids.has(r.id)), `${testCase.label} (${dir}) distinct pages`).toBe(false);
+
+            const lastP1 = p1Rows[p1Rows.length - 1]!.key;
+            const firstP2 = p2Rows[0]!.key;
+            if (nullsLast) {
+              if (lastP1 === null) {
+                expect(firstP2, `${testCase.label} (${dir}) NULLS LAST`).toBeNull();
+              } else if (firstP2 !== null) {
+                assertMonotonicKey(testCase.label, dir, lastP1, firstP2);
+              }
+            } else if (testCase.label === 'tasks:status') {
+              // Overdue open tasks share rank 0 (before non-overdue rank 1..5); within non-overdue rows compare rank
+              if (dir === 'asc') {
+                expect((lastP1 as number) <= (firstP2 as number) || (lastP1 as number) === 0 || (firstP2 as number) === 0).toBe(true);
+              } else {
+                expect((lastP1 as number) >= (firstP2 as number) || (firstP2 as number) === 0).toBe(true);
+              }
+            } else {
+              assertMonotonicKey(testCase.label, dir, lastP1!, firstP2!);
+            }
+          }
+        }
       });
     },
-    45_000,
+    60_000,
   );
 
   it(
-    '22. R727 & R729: systemKey tabs/filters work cleanly, and oversized page/query inputs clamp without 500 errors',
+    '22. R727, R729 & R732: systemKey tabs/filters scope Clients to client relationship types only, and oversized page/query inputs clamp without 500 errors',
     async () => {
       const env = await provisionAndSeedTwoTenants();
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
@@ -3480,6 +3777,16 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
       };
       await partyRepo.putOrganisation(env.ctxAlpha, clientOrg);
 
+      // R732: Active opposing-solicitors organisation must NEVER appear in Clients, MUST appear in Referrers & others
+      const opposingOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R732-OPPOSING',
+        legalName: 'R732 Opposing Solicitors LLP',
+        relationshipTypeIds: ['organisation_relationship_type.opposing_solicitors'],
+        relationshipStatusId: 'relationship_status.active',
+      };
+      await partyRepo.putOrganisation(env.ctxAlpha, opposingOrg);
+
       expect(parseListPageParam('99999999999999999999')).toBe(MAX_LIST_PAGE_NUMBER);
       expect(parseListPageParam('not-a-number')).toBe(1);
       expect(parseListPageParam('-42')).toBe(1);
@@ -3494,15 +3801,49 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         });
         expect(clientsTab.organisations.map((o) => o.id)).toEqual([clientOrg.id]);
 
+        const clientsOpposingSearch = await loadOrganisationsListPageData('P-000001', {
+          tab: 'clients',
+          query: 'R732 Opposing',
+        });
+        expect(clientsOpposingSearch.organisations).toEqual([]);
+        expect(clientsOpposingSearch.pagination.totalCount).toBe(0);
+
+        const clientsUnfiltered = await loadOrganisationsListPageData('P-000001', {
+          tab: 'clients',
+          pageSize: 200,
+        });
+        expect(clientsUnfiltered.organisations.some((o) => o.id === opposingOrg.id)).toBe(false);
+
         const prospectsTab = await loadOrganisationsListPageData('P-000001', {
           tab: 'prospects',
+          pageSize: 200,
         });
         expect(prospectsTab.organisations.some((o) => o.id === clientOrg.id)).toBe(false);
+        expect(prospectsTab.organisations.some((o) => o.id === opposingOrg.id)).toBe(false);
+
+        const referrersOpposingSearch = await loadOrganisationsListPageData('P-000001', {
+          tab: 'referrers',
+          query: 'R732 Opposing',
+        });
+        expect(referrersOpposingSearch.organisations.map((o) => o.id)).toEqual([opposingOrg.id]);
+        expect(referrersOpposingSearch.pagination.totalCount).toBe(1);
 
         const referrersTab = await loadOrganisationsListPageData('P-000001', {
           tab: 'referrers',
+          pageSize: 200,
         });
         expect(referrersTab.organisations.some((o) => o.id === clientOrg.id)).toBe(false);
+        expect(referrersTab.organisations.some((o) => o.id === opposingOrg.id)).toBe(true);
+
+        const allOrgsTab = await loadOrganisationsListPageData('P-000001', {
+          tab: 'all',
+          pageSize: 200,
+        });
+        expect(
+          clientsUnfiltered.pagination.totalCount +
+            prospectsTab.pagination.totalCount +
+            referrersTab.pagination.totalCount,
+        ).toBeGreaterThanOrEqual(allOrgsTab.pagination.totalCount);
 
         const clampedPageRes = await loadMattersListPageData('P-000001', {
           page: 99999999999999999999,

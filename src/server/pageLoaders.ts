@@ -1740,18 +1740,14 @@ export async function loadOrganisationsListPageData(
     'merged',
     'dissolved',
   ]);
-  // R727: Resolve by stable ChoiceValue.systemKey rather than display labels.
-  // Note: `relationship_status` uses `active` (there is no `active_client` key in configuration).
+  // R727 & R732: Resolve by stable ChoiceValue.systemKey rather than display labels.
+  // Clients tab matches client/former_client relationship types only (not generic active relationship status).
   const clientRelTypeIds = collectChoiceIdsBySystemKey(
     shell.values,
     'organisation_relationship_type',
     ['client', 'former_client'],
   );
-  const clientStatusIds = collectChoiceIdsBySystemKey(
-    shell.values,
-    'relationship_status',
-    ['active'],
-  );
+  const clientStatusIds: string[] = [];
   const prospectRelTypeIds = collectChoiceIdsBySystemKey(
     shell.values,
     'organisation_relationship_type',
