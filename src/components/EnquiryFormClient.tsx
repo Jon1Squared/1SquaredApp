@@ -93,7 +93,10 @@ import {
 import { InfoPopover } from './InfoPopover';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
-import { resolveConvertConflictModalState } from '@/domain/intakePreviewState';
+import {
+  resolveConvertConflictModalState,
+  shouldShowNoMatchesMessage,
+} from '@/domain/intakePreviewState';
 import { EntitySearchSelect } from './useEntityPicker';
 import { useIntakePreview } from './useIntakePreview';
 
@@ -624,6 +627,8 @@ export function EnquiryFormClient({
 
   const {
     preview: liveIntakePreview,
+    loadingFast: liveLoadingFast,
+    loadingConflicts: liveLoadingConflicts,
     fastError: liveFastError,
     conflictError: liveConflictError,
     triggerConflictCheck,
@@ -1122,6 +1127,7 @@ export function EnquiryFormClient({
     preview: convertIntakePreview,
     loadingConflicts: loadingConvertConflicts,
     conflictError: convertConflictError,
+    conflictChecked: convertConflictChecked,
     triggerConflictCheck: triggerConvertConflictCheck,
     retryConflictCheck: retryConvertConflictCheck,
   } = useIntakePreview(
@@ -1160,6 +1166,7 @@ export function EnquiryFormClient({
     loadingConflicts: loadingConvertConflicts,
     conflictError: convertConflictError,
     conflictSearch: convertIntakePreview.conflictSearch,
+    conflictChecked: convertConflictChecked,
   });
 
   const open = enquiry ? isEnquiryOpen(enquiry) : true;
@@ -3061,6 +3068,12 @@ export function EnquiryFormClient({
                 </div>
                 {!hasSearchInputs ? (
                   <span className="new-enquiry-badge">Waiting</span>
+                ) : liveFastError || liveConflictError ? (
+                  <span className="new-enquiry-badge new-enquiry-badge--warn">
+                    Check failed
+                  </span>
+                ) : liveLoadingFast || liveLoadingConflicts ? (
+                  <span className="new-enquiry-badge">Checking…</span>
                 ) : hasHighSeverityConflict ? (
                   <span className="new-enquiry-badge new-enquiry-badge--alert">
                     Possible conflict
@@ -3162,7 +3175,14 @@ export function EnquiryFormClient({
                   </div>
                 ) : null}
 
-                {hasSearchInputs && distinctMatchedCount === 0 ? (
+                {shouldShowNoMatchesMessage({
+                  hasSearchInputs,
+                  loadingFast: liveLoadingFast,
+                  loadingConflicts: liveLoadingConflicts,
+                  fastError: liveFastError,
+                  conflictError: liveConflictError,
+                  matchCount: distinctMatchedCount,
+                }) ? (
                   <div
                     style={{
                       padding: '8px 10px',
@@ -4050,6 +4070,18 @@ export function EnquiryFormClient({
                           Try again
                         </button>
                       </div>
+                    </div>
+                  ) : convertModalState.status === 'not_enough_detail' ? (
+                    <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
+                      <StatusPill
+                        label="Not enough detail to run a conflict check"
+                        tone="neutral"
+                      />
+                      <p className="muted" style={{ fontSize: 12.5, margin: '8px 0 0' }}>
+                        Add a caller name, organisation or other party if you want to check before
+                        converting, or continue to the Matter Opening screen to run the full
+                        conflict check.
+                      </p>
                     </div>
                   ) : convertModalState.status === 'blocking_conflict' ? (
                     <div className="banner banner--warning">

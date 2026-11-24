@@ -129,7 +129,6 @@ export interface EntityPickerEnquirySummary {
   readonly lastName: string;
   readonly callingOnBehalfOf: string;
   readonly summary: string;
-  readonly notes: string;
   readonly email: string;
   readonly phone: string;
   readonly linkedPersonId?: string | null;

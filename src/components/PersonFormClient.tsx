@@ -39,6 +39,7 @@ import {
   validateNationalInsuranceNumber,
 } from '@/domain/employment';
 import { hasQuickConflictCheckInputs } from '@/domain/enquiries';
+import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
 import { InfoPopover } from './InfoPopover';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
@@ -1063,6 +1064,7 @@ export function PersonFormClient({
 
   const {
     preview: intakePreview,
+    loadingFast: duplicatePreviewLoading,
     fastError: duplicatePreviewError,
     triggerConflictCheck,
     retryFastCheck: retryDuplicatePreview,
@@ -4960,6 +4962,12 @@ export function PersonFormClient({
                 </div>
                 {!hasSearchInputs ? (
                   <span className="new-enquiry-badge">Waiting</span>
+                ) : duplicatePreviewError ? (
+                  <span className="new-enquiry-badge new-enquiry-badge--warn">
+                    Check failed
+                  </span>
+                ) : duplicatePreviewLoading ? (
+                  <span className="new-enquiry-badge">Checking…</span>
                 ) : hasHighSeverityConflict ? (
                   <span className="new-enquiry-badge new-enquiry-badge--alert">
                     Possible conflict
@@ -5017,7 +5025,14 @@ export function PersonFormClient({
                   </div>
                 ) : null}
 
-                {hasSearchInputs && distinctMatchedCount === 0 ? (
+                {shouldShowNoMatchesMessage({
+                  hasSearchInputs,
+                  loadingFast: duplicatePreviewLoading,
+                  loadingConflicts: false,
+                  fastError: duplicatePreviewError,
+                  conflictError: null,
+                  matchCount: distinctMatchedCount,
+                }) ? (
                   <div
                     style={{
                       padding: '8px 10px',

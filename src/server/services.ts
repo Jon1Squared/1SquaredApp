@@ -29699,17 +29699,23 @@ function checkAndRecordConflictPreviewRateLimit(
   actorId: string,
   nowMs: number = Date.now(),
 ): boolean {
-  const key = `${tenantId}:${actorId}`;
   const cutoff = nowMs - CONFLICT_PREVIEW_RATE_LIMIT_WINDOW_MS;
-  const recent = (conflictPreviewTimestampsByActor.get(key) ?? []).filter(
-    (ts) => ts > cutoff,
-  );
+  for (const [entryKey, timestamps] of conflictPreviewTimestampsByActor.entries()) {
+    const active = timestamps.filter((ts) => ts > cutoff);
+    if (active.length === 0) {
+      conflictPreviewTimestampsByActor.delete(entryKey);
+    } else if (active.length !== timestamps.length) {
+      conflictPreviewTimestampsByActor.set(entryKey, active);
+    }
+  }
+
+  const key = `${tenantId}:${actorId}`;
+  const recent = conflictPreviewTimestampsByActor.get(key) ?? [];
   if (recent.length >= CONFLICT_PREVIEW_RATE_LIMIT_MAX) {
-    conflictPreviewTimestampsByActor.set(key, recent);
     return false;
   }
-  recent.push(nowMs);
-  conflictPreviewTimestampsByActor.set(key, recent);
+  const updated = [...recent, nowMs];
+  conflictPreviewTimestampsByActor.set(key, updated);
   return true;
 }
 

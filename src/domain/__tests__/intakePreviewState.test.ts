@@ -5,6 +5,7 @@ import {
   meetsConflictSettledGate,
   reduceIntakePreviewHookState,
   resolveConvertConflictModalState,
+  shouldShowNoMatchesMessage,
 } from '../intakePreviewState';
 
 describe('R714: intake preview hook state & Convert modal gating', () => {
@@ -90,18 +91,128 @@ describe('R714: intake preview hook state & Convert modal gating', () => {
     expect(failedConflict.conflictError).toBe(
       INTAKE_PREVIEW_ERROR_MESSAGES.conflicts,
     );
+    expect(failedConflict.conflictChecked).toBe(false);
     expect(failedConflict.conflictResult.conflictSearch).toBeNull();
+
+    const rateLimitedConflict = reduceIntakePreviewHookState(
+      INITIAL_INTAKE_PREVIEW_HOOK_STATE,
+      {
+        type: 'CONFLICT_ERROR',
+        code: 'RATE_LIMITED',
+        message: 'Conflict preview rate limit exceeded.',
+      },
+    );
+    expect(rateLimitedConflict.loadingConflicts).toBe(false);
+    expect(rateLimitedConflict.conflictError).toBe(
+      INTAKE_PREVIEW_ERROR_MESSAGES.rateLimited,
+    );
+    expect(rateLimitedConflict.conflictChecked).toBe(false);
+
+    const insufficientDetail = reduceIntakePreviewHookState(
+      INITIAL_INTAKE_PREVIEW_HOOK_STATE,
+      { type: 'CONFLICT_INSUFFICIENT_DETAIL' },
+    );
+    expect(insufficientDetail.loadingConflicts).toBe(false);
+    expect(insufficientDetail.conflictError).toBeNull();
+    expect(insufficientDetail.conflictChecked).toBe(true);
+    expect(insufficientDetail.conflictResult.conflictSearch).toBeNull();
   });
 
-  it('disables Continue in Convert modal while loading, unexecuted, errored, or blocked', () => {
+  it('hides the no-matches message while loading, on error, without inputs, or with matches (R723)', () => {
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: true,
+        loadingFast: true,
+        loadingConflicts: false,
+        fastError: null,
+        conflictError: null,
+        matchCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: true,
+        loadingFast: false,
+        loadingConflicts: true,
+        fastError: null,
+        conflictError: null,
+        matchCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: true,
+        loadingFast: false,
+        loadingConflicts: false,
+        fastError: INTAKE_PREVIEW_ERROR_MESSAGES.duplicates,
+        conflictError: null,
+        matchCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: true,
+        loadingFast: false,
+        loadingConflicts: false,
+        fastError: null,
+        conflictError: INTAKE_PREVIEW_ERROR_MESSAGES.conflicts,
+        matchCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: false,
+        loadingFast: false,
+        loadingConflicts: false,
+        fastError: null,
+        conflictError: null,
+        matchCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: true,
+        loadingFast: false,
+        loadingConflicts: false,
+        fastError: null,
+        conflictError: null,
+        matchCount: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowNoMatchesMessage({
+        hasSearchInputs: true,
+        loadingFast: false,
+        loadingConflicts: false,
+        fastError: null,
+        conflictError: null,
+        matchCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it('disables Continue in Convert modal while loading, unexecuted, errored, or blocked, and allows Continue on not_enough_detail', () => {
     const pendingBeforeResult = resolveConvertConflictModalState({
       loadingConflicts: false,
       conflictError: null,
       conflictSearch: null,
+      conflictChecked: false,
     });
     expect(pendingBeforeResult).toEqual({
       status: 'loading',
       canContinue: false,
+      errorMessage: null,
+    });
+
+    const insufficientAfterCheck = resolveConvertConflictModalState({
+      loadingConflicts: false,
+      conflictError: null,
+      conflictSearch: null,
+      conflictChecked: true,
+    });
+    expect(insufficientAfterCheck).toEqual({
+      status: 'not_enough_detail',
+      canContinue: true,
       errorMessage: null,
     });
 

@@ -12,6 +12,7 @@ import {
 } from '@/domain/companiesHouse';
 import { formatDuplicateReasons } from '@/domain/duplicates';
 import { hasQuickConflictCheckInputs } from '@/domain/enquiries';
+import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
 import { InfoPopover } from './InfoPopover';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
@@ -419,6 +420,7 @@ export function OrganisationFormClient({
 
   const {
     preview: intakePreview,
+    loadingFast: duplicatePreviewLoading,
     fastError: duplicatePreviewError,
     triggerConflictCheck,
     retryFastCheck: retryDuplicatePreview,
@@ -1836,6 +1838,12 @@ export function OrganisationFormClient({
                 </div>
                 {!hasConflictInputs ? (
                   <span className="new-enquiry-badge">Waiting</span>
+                ) : duplicatePreviewError ? (
+                  <span className="new-enquiry-badge new-enquiry-badge--warn">
+                    Check failed
+                  </span>
+                ) : duplicatePreviewLoading ? (
+                  <span className="new-enquiry-badge">Checking…</span>
                 ) : hasHighSeverityConflict ? (
                   <span className="new-enquiry-badge new-enquiry-badge--alert">
                     Possible conflict
@@ -1865,7 +1873,14 @@ export function OrganisationFormClient({
                   overflowY: 'auto',
                 }}
               >
-                {hasConflictInputs && distinctMatchedCount === 0 ? (
+                {shouldShowNoMatchesMessage({
+                  hasSearchInputs: hasConflictInputs,
+                  loadingFast: duplicatePreviewLoading,
+                  loadingConflicts: false,
+                  fastError: duplicatePreviewError,
+                  conflictError: null,
+                  matchCount: distinctMatchedCount,
+                }) ? (
                   <div
                     style={{
                       padding: '8px 10px',

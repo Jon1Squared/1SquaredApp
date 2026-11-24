@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { searchEntityPickerAction } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import { INTAKE_PREVIEW_ERROR_MESSAGES } from '@/domain/intakePreviewState';
 import type {
   EntityPickerOption,
   EntityPickerSearchInput,
@@ -67,11 +68,7 @@ export function useEntityPicker(
           if (cancelled || seq !== seqRef.current) return;
           if (isActionDenied(res)) {
             setItems([]);
-            setError(
-              res.message
-                ? `Couldn't search directory (${res.message}). Try again.`
-                : "Couldn't search directory. Try again.",
-            );
+            setError(INTAKE_PREVIEW_ERROR_MESSAGES.picker);
           } else {
             setItems(res.items);
             setError(null);

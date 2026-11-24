@@ -183,7 +183,6 @@ export function toEntityPickerEnquirySummary(
     lastName: enquiry.lastName,
     callingOnBehalfOf: enquiry.callingOnBehalfOf,
     summary: enquiry.summary,
-    notes: enquiry.notes,
     email: enquiry.email,
     phone: enquiry.phone,
     ...(enquiry.linkedPersonId !== undefined

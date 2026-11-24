@@ -10,6 +10,8 @@ type PreliminaryConflictHit =
 export const INTAKE_PREVIEW_ERROR_MESSAGES = {
   duplicates: "Couldn't check for duplicates. Try again.",
   conflicts: "Couldn't complete conflict check. Try again.",
+  rateLimited:
+    'Too many checks in a short time. Please wait a moment and try again.',
   picker: "Couldn't search directory. Try again.",
 } as const;
 
@@ -45,6 +47,7 @@ export interface IntakePreviewHookState {
   readonly loadingConflicts: boolean;
   readonly fastError: string | null;
   readonly conflictError: string | null;
+  readonly conflictChecked: boolean;
 }
 
 export const INITIAL_INTAKE_PREVIEW_HOOK_STATE: IntakePreviewHookState = {
@@ -54,6 +57,7 @@ export const INITIAL_INTAKE_PREVIEW_HOOK_STATE: IntakePreviewHookState = {
   loadingConflicts: false,
   fastError: null,
   conflictError: null,
+  conflictChecked: false,
 };
 
 export type IntakePreviewHookAction =
@@ -66,6 +70,7 @@ export type IntakePreviewHookAction =
   | { readonly type: 'FAST_ERROR'; readonly message?: string }
   | { readonly type: 'CONFLICT_RESET' }
   | { readonly type: 'CLEAR_CONFLICTS_BELOW_THRESHOLD' }
+  | { readonly type: 'CONFLICT_INSUFFICIENT_DETAIL' }
   | { readonly type: 'CONFLICT_START' }
   | {
       readonly type: 'CONFLICT_SUCCESS';
@@ -74,7 +79,11 @@ export type IntakePreviewHookAction =
         readonly conflictSearch: ConflictSearchResult | null;
       };
     }
-  | { readonly type: 'CONFLICT_ERROR'; readonly message?: string };
+  | {
+      readonly type: 'CONFLICT_ERROR';
+      readonly message?: string;
+      readonly code?: string;
+    };
 
 export function reduceIntakePreviewHookState(
   state: IntakePreviewHookState,
@@ -115,12 +124,22 @@ export function reduceIntakePreviewHookState(
         conflictResult: EMPTY_INTAKE_CONFLICT_SLICE,
         loadingConflicts: false,
         conflictError: null,
+        conflictChecked: false,
+      };
+    case 'CONFLICT_INSUFFICIENT_DETAIL':
+      return {
+        ...state,
+        conflictResult: EMPTY_INTAKE_CONFLICT_SLICE,
+        loadingConflicts: false,
+        conflictError: null,
+        conflictChecked: true,
       };
     case 'CONFLICT_START':
       return {
         ...state,
         loadingConflicts: true,
         conflictError: null,
+        conflictChecked: false,
       };
     case 'CONFLICT_SUCCESS':
       return {
@@ -131,17 +150,40 @@ export function reduceIntakePreviewHookState(
         },
         loadingConflicts: false,
         conflictError: null,
+        conflictChecked: true,
       };
     case 'CONFLICT_ERROR':
       return {
         ...state,
         conflictResult: EMPTY_INTAKE_CONFLICT_SLICE,
         loadingConflicts: false,
-        conflictError: INTAKE_PREVIEW_ERROR_MESSAGES.conflicts,
+        conflictError:
+          action.code === 'RATE_LIMITED'
+            ? INTAKE_PREVIEW_ERROR_MESSAGES.rateLimited
+            : INTAKE_PREVIEW_ERROR_MESSAGES.conflicts,
+        conflictChecked: false,
       };
     default:
       return state;
   }
+}
+
+export function shouldShowNoMatchesMessage(input: {
+  readonly hasSearchInputs: boolean;
+  readonly loadingFast: boolean;
+  readonly loadingConflicts: boolean;
+  readonly fastError: string | null;
+  readonly conflictError: string | null;
+  readonly matchCount: number;
+}): boolean {
+  return (
+    input.hasSearchInputs &&
+    !input.loadingFast &&
+    !input.loadingConflicts &&
+    !input.fastError &&
+    !input.conflictError &&
+    input.matchCount === 0
+  );
 }
 
 export function meetsConflictSettledGate(
@@ -156,20 +198,28 @@ export function meetsConflictSettledGate(
 }
 
 export interface ConvertConflictModalState {
-  readonly status: 'loading' | 'error' | 'blocking_conflict' | 'ready';
+  readonly status:
+    | 'loading'
+    | 'error'
+    | 'blocking_conflict'
+    | 'not_enough_detail'
+    | 'ready';
   readonly canContinue: boolean;
   readonly errorMessage: string | null;
 }
 
 /**
- * Resolves Convert-to-Matter modal conflict-check state (`R714`):
+ * Resolves Convert-to-Matter modal conflict-check state (`R714`, `R723`):
  * never reports "No blocking conflicts found" or allows Continue while the
- * check is still pending, unexecuted (`conflictSearch === null`), or failed.
+ * check is still pending, unexecuted (`conflictSearch === null` with `!conflictChecked`), or failed.
+ * When a triggered check completes with `conflictSearch === null`, reports
+ * `not_enough_detail` and lets the user continue to Matter Opening or go back.
  */
 export function resolveConvertConflictModalState(input: {
   readonly loadingConflicts: boolean;
   readonly conflictError: string | null;
   readonly conflictSearch: ConflictSearchResult | null;
+  readonly conflictChecked?: boolean;
 }): ConvertConflictModalState {
   if (input.loadingConflicts) {
     return { status: 'loading', canContinue: false, errorMessage: null };
@@ -182,6 +232,13 @@ export function resolveConvertConflictModalState(input: {
     };
   }
   if (!input.conflictSearch) {
+    if (input.conflictChecked) {
+      return {
+        status: 'not_enough_detail',
+        canContinue: true,
+        errorMessage: null,
+      };
+    }
     return { status: 'loading', canContinue: false, errorMessage: null };
   }
   if (input.conflictSearch.hasBlockingConflict) {

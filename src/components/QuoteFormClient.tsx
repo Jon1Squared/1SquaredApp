@@ -37,6 +37,7 @@ import {
   DEFAULT_WORK_TYPES_CONFIG,
   resolveWorkTypeFeeArrangementSettings,
 } from '@/domain/workTypeConfig';
+import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
 import type {
   EntityPickerEnquirySummary,
   EntityPickerOrganisationSummary,
@@ -529,7 +530,16 @@ export function QuoteFormClient({
   );
 
   // Live Quick Conflict Check, Entity Matching, and Linked Active Enquiries via C2 server action
-  const { preview: quoteIntakePreview, triggerConflictCheck } = useIntakePreview({
+  const {
+    preview: quoteIntakePreview,
+    loadingFast,
+    loadingConflicts,
+    fastError,
+    conflictError,
+    triggerConflictCheck,
+    retryFastCheck,
+    retryConflictCheck,
+  } = useIntakePreview({
     kind: 'quote',
     firstName,
     surname,
@@ -672,7 +682,9 @@ export function QuoteFormClient({
       setWorkTypeSubcategoryId(enq.workTypeSubcategoryId);
     }
     if (!scope.trim() && enq.summary) {
-      setScope([enq.summary, enq.notes].filter(Boolean).join('\n\n'));
+      setScope(
+        [enq.summary, 'notes' in enq ? enq.notes : ''].filter(Boolean).join('\n\n'),
+      );
     }
     if (enq.assignedToId) {
       setFeeEarnerId(enq.assignedToId);
@@ -2147,6 +2159,12 @@ export function QuoteFormClient({
               </div>
               {!hasSearchInputs ? (
                 <span className="new-enquiry-badge">Waiting</span>
+              ) : fastError || conflictError ? (
+                <span className="new-enquiry-badge new-enquiry-badge--warn">
+                  Check failed
+                </span>
+              ) : loadingFast || loadingConflicts ? (
+                <span className="new-enquiry-badge">Checking…</span>
               ) : hasHighSeverityConflict ? (
                 <span className="new-enquiry-badge new-enquiry-badge--alert">
                   Possible conflict
@@ -2174,6 +2192,26 @@ export function QuoteFormClient({
                 overflowY: 'auto',
               }}
             >
+              {fastError || conflictError ? (
+                <div className="banner banner--warning" role="alert">
+                  <div style={{ flex: 1 }}>
+                    <span>{conflictError ?? fastError}</span>
+                  </div>
+                  <div className="banner__actions">
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      onClick={() => {
+                        if (fastError) retryFastCheck();
+                        if (conflictError) retryConflictCheck();
+                      }}
+                    >
+                      Try again
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               {linkedPersonId ? (
                 <div
                   style={{
@@ -2226,7 +2264,14 @@ export function QuoteFormClient({
                 </div>
               ) : null}
 
-              {hasSearchInputs && distinctMatchedCount === 0 ? (
+              {shouldShowNoMatchesMessage({
+                hasSearchInputs,
+                loadingFast,
+                loadingConflicts,
+                fastError,
+                conflictError,
+                matchCount: distinctMatchedCount,
+              }) ? (
                 <div
                   style={{
                     padding: '8px 10px',

@@ -468,7 +468,13 @@ export function HomeClient({
   );
 
   // Live duplicate check for Quick Enquiry Capture (Panel 13) via debounced C2 server action
-  const { preview: quickIntakePreview } = useIntakePreview(
+  const {
+    preview: quickIntakePreview,
+    fastError: quickFastError,
+    conflictError: quickConflictError,
+    retryFastCheck: retryQuickFastCheck,
+    retryConflictCheck: retryQuickConflictCheck,
+  } = useIntakePreview(
     {
       kind: 'quick_enquiry',
       firstName: qFirstName,
@@ -2806,6 +2812,26 @@ export function HomeClient({
                       />
                     </div>
                   </div>
+
+                  {quickFastError || quickConflictError ? (
+                    <div className="banner banner--warning full" role="alert">
+                      <div style={{ flex: 1 }}>
+                        <span>{quickConflictError ?? quickFastError}</span>
+                      </div>
+                      <div className="banner__actions">
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          onClick={() => {
+                            if (quickFastError) retryQuickFastCheck();
+                            if (quickConflictError) retryQuickConflictCheck();
+                          }}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {quickDuplicateHits.personHits.length > 0 ||
                   quickDuplicateHits.orgHits.length > 0 ? (
