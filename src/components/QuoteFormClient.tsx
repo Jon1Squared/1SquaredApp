@@ -682,9 +682,7 @@ export function QuoteFormClient({
       setWorkTypeSubcategoryId(enq.workTypeSubcategoryId);
     }
     if (!scope.trim() && enq.summary) {
-      setScope(
-        [enq.summary, 'notes' in enq ? enq.notes : ''].filter(Boolean).join('\n\n'),
-      );
+      setScope(enq.summary);
     }
     if (enq.assignedToId) {
       setFeeEarnerId(enq.assignedToId);

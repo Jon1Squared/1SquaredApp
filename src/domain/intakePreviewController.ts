@@ -253,13 +253,12 @@ export function createIntakePreviewController(
     }
 
     const payloadKey = JSON.stringify({ ...input, includeConflicts: true });
-    const seq = ++conflictSeq;
     if (lastConflictPayloadKey === payloadKey) {
       return;
     }
     conflictTimer = setTimeout(() => {
       conflictTimer = null;
-      if (disposed || seq !== conflictSeq) return;
+      if (disposed) return;
       executeConflictPreview(input, { force: false });
     }, conflictDebounceMs);
   }

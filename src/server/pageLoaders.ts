@@ -744,11 +744,21 @@ async function loadShellContextUncached(
       : null;
 
   const activeEmps = activeEmployees(staffPeopleRaw, store.values);
+  const canPopulateSupervisingPartners = currentUserPermissions.some(
+    (p) =>
+      p === 'matter:create' ||
+      p === 'matter:edit' ||
+      p === 'enquiry:create' ||
+      p === 'enquiry:edit' ||
+      p === 'quote:edit',
+  );
   const supervisingPartnerByEmployeeId: Record<string, string> = {};
-  for (const emp of activeEmps) {
-    const supId = emp.employment?.supervisingPartnerId;
-    if (supId) {
-      supervisingPartnerByEmployeeId[emp.id] = supId;
+  if (canPopulateSupervisingPartners) {
+    for (const emp of activeEmps) {
+      const supId = emp.employment?.supervisingPartnerId;
+      if (supId) {
+        supervisingPartnerByEmployeeId[emp.id] = supId;
+      }
     }
   }
   const employees = activeEmps.map(projectEmployeeForShell);
@@ -1171,6 +1181,7 @@ export async function loadPeopleListPageData(
         openOnly: true,
         query,
         hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+        canViewQuotes: shell.canViewQuotes,
         limit: pageSize,
         offset,
       },
@@ -1213,6 +1224,7 @@ export async function loadPeopleListPageData(
               openOnly: true,
               query,
               hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+              canViewQuotes: shell.canViewQuotes,
               limit: 50,
             },
           )
@@ -2973,6 +2985,7 @@ export async function loadEnquiriesListPageData(
     offset,
     enquiryOptions: {
       query,
+      canViewQuotes: shell.canViewQuotes,
       ...(requestedTab === 'drafts'
         ? { status: 'Draft', createdOrTakenById: currentUserId }
         : requestedTab === 'team'

@@ -251,4 +251,66 @@ describe('R723 / R724 / Suggestion 8: useIntakePreview controller wiring', () =>
     });
     serverNullHarness.controller.dispose();
   });
+
+  it('keeps resolving in-flight conflict result when typing extra char then backspacing within debounce window (Suggestion 2)', async () => {
+    vi.useFakeTimers();
+    const conflictResolvers: Array<(value: IntakePreviewResult) => void> = [];
+    const { controller, action, getState } = createHarness(
+      (input) =>
+        new Promise((resolve) => {
+          if (input.includeConflicts) {
+            conflictResolvers.push(resolve);
+            return;
+          }
+          resolve(emptyResult());
+        }),
+    );
+
+    controller.sync(
+      { kind: 'enquiry', firstName: 'Seren', lastName: '' },
+      { enabled: true, enableConflicts: true },
+    );
+    await vi.advanceTimersByTimeAsync(INTAKE_CONFLICT_PREVIEW_DEBOUNCE_MS);
+    expect(getState().loadingConflicts).toBe(true);
+    expect(conflictResolvers).toHaveLength(1);
+    expect(
+      action.mock.calls.filter(([arg]) => arg.includeConflicts === true),
+    ).toHaveLength(1);
+
+    // Type 'x' then quickly backspace back to 'Seren' within 650ms
+    controller.sync(
+      { kind: 'enquiry', firstName: 'Serenx', lastName: '' },
+      { enabled: true, enableConflicts: true },
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    controller.sync(
+      { kind: 'enquiry', firstName: 'Seren', lastName: '' },
+      { enabled: true, enableConflicts: true },
+    );
+
+    // Resolve the original 'Seren' in-flight response — loadingConflicts must clear
+    for (const resolve of conflictResolvers) {
+      resolve(
+        emptyResult({
+          conflictSearch: {
+            otherPartyClientMatches: [],
+            clientAgainstPartyMatches: [],
+            allConflicts: [],
+            hasBlockingConflict: false,
+          },
+        }),
+      );
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.runAllTimersAsync();
+
+    expect(getState().loadingConflicts).toBe(false);
+    expect(getState().conflictChecked).toBe(true);
+    expect(
+      action.mock.calls.filter(([arg]) => arg.includeConflicts === true),
+    ).toHaveLength(1);
+
+    controller.dispose();
+  });
 });

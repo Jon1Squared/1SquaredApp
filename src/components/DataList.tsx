@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -1017,16 +1017,19 @@ export function useServerListNavigation(options: {
     }, delayMs);
   };
 
-  const canSyncServerQuery = (serverQuery: string): boolean =>
-    shouldSyncServerQuery({
-      serverQuery: serverQuery.trim(),
-      lastSentQuery: lastSentQueryRef.current,
-      debouncePending: debouncePendingRef.current,
-    });
+  const canSyncServerQuery = useCallback(
+    (serverQuery: string): boolean =>
+      shouldSyncServerQuery({
+        serverQuery: serverQuery.trim(),
+        lastSentQuery: lastSentQueryRef.current,
+        debouncePending: debouncePendingRef.current,
+      }),
+    [],
+  );
 
-  const acknowledgeServerQuery = (serverQuery: string): void => {
+  const acknowledgeServerQuery = useCallback((serverQuery: string): void => {
     lastSentQueryRef.current = serverQuery.trim();
-  };
+  }, []);
 
   return {
     navigateNow,

@@ -626,7 +626,6 @@ export function MatterFormClient({
       'managing_partner',
     )?.id;
     const isPartnerEmployee = (emp: Person) =>
-      emp.employment?.roleType === 'Partner/Member' ||
       (partnerRoleId !== undefined && emp.employeeRoleId === partnerRoleId) ||
       (managingPartnerRoleId !== undefined &&
         emp.employeeRoleId === managingPartnerRoleId);

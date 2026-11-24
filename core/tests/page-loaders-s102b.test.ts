@@ -3450,6 +3450,43 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
       };
       await partyRepo.putOrganisation(env.ctxAlpha, postcodeOrg);
 
+      const intakeRepo = new TenantIntakeQuoteRepository();
+      const townEnquiry: Enquiry = {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-R739-TOWN',
+        reference: 'ENQ-9739',
+        firstName: 'Gwen',
+        lastName: 'Prys-Unrelated',
+        summary: 'Enquiry summary without town marker',
+        convertedMatterId: null,
+        address: {
+          id: 'eaddr-r739',
+          typeId: null,
+          line1: '5 Promenade',
+          line2: '',
+          town: 'Llandudno-R739',
+          county: 'Conwy',
+          postcode: 'LL30 1AA',
+          countryId: null,
+        },
+      };
+      const orgQuote: Quote = {
+        ...structuredClone(env.alphaStaffQuote),
+        id: 'QUO-R739-ORG',
+        reference: 'QTE-2026-9739',
+        status: 'Sent',
+        validUntil: '2099-12-31',
+        convertedMatterId: null,
+        linkedEnquiryId: null,
+        prospectName: 'Iwan Roberts-Unrelated',
+        prospectOrganisationName: 'Menai Bridge Holdings R739 Ltd',
+        scope: 'Scope without org marker',
+      };
+      await Promise.all([
+        intakeRepo.putEnquiry(env.ctxAlpha, townEnquiry),
+        intakeRepo.putQuote(env.ctxAlpha, orgQuote),
+      ]);
+
       await runWithActiveActorSession(partnerActor, async () => {
         // Task search by linked matter number
         const taskSearch = await loadTasksListPageData('P-000001', {
@@ -3462,15 +3499,63 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(taskSearch.tasks.map((t) => t.id)).toEqual([linkedTask.id]);
         expect(taskSearch.pagination.totalCount).toBe(1);
 
-        // Matter search by practice-area label
+        // Matter search by practice-area label with exact totalCount verified against full visible matter set
+        const allVisibleMatters = await loadMattersListPageData('P-000001', {
+          page: 1,
+          pageSize: 200,
+        });
+        const wtQuery = distinctiveWorkType!.label.toLowerCase();
+        const paMatchIds = new Set(
+          shell.values
+            .filter(
+              (v) =>
+                v.listKey === 'work_type' &&
+                !v.parentId &&
+                v.label.toLowerCase().includes(wtQuery),
+            )
+            .map((v) => v.id),
+        );
+        const wtMatchIds = new Set(
+          shell.values
+            .filter(
+              (v) =>
+                v.listKey === 'work_type' &&
+                Boolean(v.parentId) &&
+                v.label.toLowerCase().includes(wtQuery),
+            )
+            .map((v) => v.id),
+        );
+        const peopleById = new Map(allVisibleMatters.people.map((p) => [p.id, p]));
+        const orgsById = new Map(allVisibleMatters.organisations.map((o) => [o.id, o]));
+        const expectedMatterIds = allVisibleMatters.matters
+          .filter((m) => {
+            const clientPerson = peopleById.get(m.clientId);
+            const clientOrg = orgsById.get(m.clientId);
+            const clientName = clientPerson
+              ? `${clientPerson.firstName} ${clientPerson.surname}`.trim()
+              : clientOrg?.legalName ?? '';
+            return (
+              m.id.toLowerCase().includes(wtQuery) ||
+              m.matterNumber.toLowerCase().includes(wtQuery) ||
+              m.title.toLowerCase().includes(wtQuery) ||
+              (m.shortDescription ?? '').toLowerCase().includes(wtQuery) ||
+              paMatchIds.has(m.practiceAreaId) ||
+              wtMatchIds.has(m.workTypeSubcategoryId ?? '') ||
+              clientName.toLowerCase().includes(wtQuery) ||
+              m.parties.some((pt) => pt.name.toLowerCase().includes(wtQuery))
+            );
+          })
+          .map((m) => m.id);
+
         const matterSearch = await loadMattersListPageData('P-000001', {
           page: 1,
           pageSize: 50,
           query: distinctiveWorkType!.label,
         });
         expect(matterSearch.matters.some((m) => m.id === uniqueMatter.id)).toBe(true);
-        expect(matterSearch.pagination.totalCount).toBeGreaterThanOrEqual(
-          matterSearch.matters.length,
+        expect(matterSearch.pagination.totalCount).toBe(expectedMatterIds.length);
+        expect(matterSearch.matters.map((m) => m.id).sort()).toEqual(
+          expectedMatterIds.sort(),
         );
 
         // Person search by town
@@ -3490,6 +3575,34 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         });
         expect(orgSearch.organisations.map((o) => o.id)).toEqual([postcodeOrg.id]);
         expect(orgSearch.pagination.totalCount).toBe(1);
+
+        // R739: Enquiry search by non-name field (address.town)
+        const enqTownSearch = await loadEnquiriesListPageData('P-000001', {
+          tab: 'all',
+          page: 1,
+          pageSize: 10,
+          query: 'Llandudno-R739',
+        });
+        expect(enqTownSearch.orderedQueueItems).toEqual([
+          { kind: 'enquiry', id: townEnquiry.id },
+        ]);
+        expect(enqTownSearch.pagination.totalCount).toBe(1);
+        expect(enqTownSearch.enquiriesPagination.totalCount).toBe(1);
+        expect(enqTownSearch.quotesPagination.totalCount).toBe(0);
+
+        // R739: Quote search by non-name field (prospectOrganisationName)
+        const quoteOrgSearch = await loadEnquiriesListPageData('P-000001', {
+          tab: 'all',
+          page: 1,
+          pageSize: 10,
+          query: 'Menai Bridge Holdings R739 Ltd',
+        });
+        expect(quoteOrgSearch.orderedQueueItems).toEqual([
+          { kind: 'quote', id: orgQuote.id },
+        ]);
+        expect(quoteOrgSearch.pagination.totalCount).toBe(1);
+        expect(quoteOrgSearch.enquiriesPagination.totalCount).toBe(0);
+        expect(quoteOrgSearch.quotesPagination.totalCount).toBe(1);
       });
     },
     45_000,
@@ -4239,6 +4352,265 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         } finally {
           vi.useRealTimers();
         }
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '25. R734 & Suggestions 5/7: search joins and combined /enquiries query isolate staff/walled matters and Bravo rows, linked-quote enquiry search respects quote:view, and finance shell omits supervisingPartnerByEmployeeId',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const matterRepo = new TenantMatterRepository();
+      const taskRepo = new TenantTaskWorkflowRepository();
+      const intakeRepo = new TenantIntakeQuoteRepository();
+      const partyRepo = new TenantPartyRepository();
+
+      const taskMatterNumber = 'ALPH-R734-999';
+      const taskMatterTitle = 'R734-STAFF-MATTER-SECRET';
+      const intakeMarker = 'R734-INTAKE-MARKER-777';
+
+      const alphaR734StaffMatter: Matter = {
+        ...structuredClone(env.alphaStaffMatter),
+        id: 'M-R734-STAFF-A',
+        matterNumber: taskMatterNumber,
+        title: taskMatterTitle,
+        clientId: env.alphaStaffClientOrg.id,
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001'],
+        isStaffMatter: true,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: ['P-000001'],
+      };
+      const bravoR734Matter: Matter = {
+        ...structuredClone(env.bravoMatter),
+        id: 'M-R734-BRAVO-B',
+        matterNumber: taskMatterNumber,
+        title: taskMatterTitle,
+      };
+      await Promise.all([
+        matterRepo.putMatter(env.ctxAlpha, alphaR734StaffMatter),
+        matterRepo.putMatter(env.ctxBravo, bravoR734Matter),
+      ]);
+
+      const alphaStaffLinkedTask: Task = {
+        ...structuredClone(env.alphaUrgentStaffTask),
+        id: 'TSK-R734-STAFF-A',
+        reference: 'TSK-9734',
+        title: 'Neutral linked task title',
+        description: 'No matter reference in description',
+        status: 'To do',
+        assignedPersonId: 'P-000002',
+        linkedRecords: [{ recordType: 'matter', recordId: alphaR734StaffMatter.id }],
+      };
+      const bravoLinkedTask: Task = {
+        ...structuredClone(env.bravoTask),
+        id: 'TSK-R734-BRAVO-B',
+        reference: 'TSK-9734-B',
+        title: `Bravo task ${taskMatterTitle}`,
+        status: 'To do',
+        linkedRecords: [{ recordType: 'matter', recordId: bravoR734Matter.id }],
+      };
+      await Promise.all([
+        taskRepo.putTask(env.ctxAlpha, alphaStaffLinkedTask),
+        taskRepo.putTask(env.ctxBravo, bravoLinkedTask),
+      ]);
+
+      const alphaStaffEnq: Enquiry = {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-R734-STAFF-A',
+        reference: 'ENQ-9734-A',
+        status: 'Converted',
+        summary: `Alpha staff enquiry ${intakeMarker}`,
+        convertedMatterId: alphaR734StaffMatter.id,
+      };
+      const alphaStaffQuote: Quote = {
+        ...structuredClone(env.alphaStaffQuote),
+        id: 'QUO-R734-STAFF-A',
+        reference: 'QTE-2026-9734-A',
+        status: 'Accepted',
+        scope: `Alpha staff quote ${intakeMarker}`,
+        convertedMatterId: alphaR734StaffMatter.id,
+        linkedEnquiryId: null,
+      };
+      const bravoIntakeEnq: Enquiry = {
+        ...structuredClone(env.bravoEnquiry),
+        id: 'ENQ-R734-BRAVO-B',
+        reference: 'ENQ-9734-B',
+        status: 'New',
+        summary: `Bravo enquiry ${intakeMarker}`,
+        convertedMatterId: null,
+      };
+      const bravoIntakeQuote: Quote = {
+        ...structuredClone(env.bravoQuote),
+        id: 'QUO-R734-BRAVO-B',
+        reference: 'QTE-2026-9734-B',
+        status: 'Sent',
+        scope: `Bravo quote ${intakeMarker}`,
+        convertedMatterId: null,
+        linkedEnquiryId: null,
+      };
+
+      // Suggestion 5 fixtures: public open enquiry linked to a quote
+      const sug5Enquiry: Enquiry = {
+        ...structuredClone(env.alphaPublicOpenEnquiry),
+        id: 'ENQ-SUG5-A',
+        reference: 'ENQ-SUG5-001',
+        status: 'In contact',
+        firstName: 'Hefin',
+        lastName: 'QuoteLinkTest',
+        summary: 'Public enquiry without quote ref in summary',
+        convertedMatterId: null,
+      };
+      const sug5Quote: Quote = {
+        ...structuredClone(env.alphaStaffQuote),
+        id: 'QUO-SUG5-A',
+        reference: 'QTE-SUG5-9991',
+        status: 'Sent',
+        validUntil: '2099-12-31',
+        convertedMatterId: null,
+        linkedEnquiryId: sug5Enquiry.id,
+        prospectName: 'Hefin QuoteLinkTest',
+        scope: 'Public quote scope',
+      };
+
+      // Suggestion 7 fixture: finance user lacking create/edit matter, enquiry, or quote permissions
+      const seedEmp = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000002');
+      const financeActorPerson: Person = {
+        ...structuredClone(seedEmp!),
+        id: 'P-SUG7-FINANCE',
+        firstName: 'Elin',
+        surname: 'FinanceOnly',
+        isEmployee: true,
+        roles: ['finance'],
+        employeeRoleId: 'employee_role.finance',
+        permissionOverrides: undefined,
+        emails: [
+          {
+            id: 'em-sug7-fin',
+            address: 'elin.fin@invented.example',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+        employment: {
+          ...structuredClone(seedEmp!.employment!),
+          personId: 'P-SUG7-FINANCE',
+          employeeNumber: 'EMP-9735',
+          roleType: 'Business services',
+          feeEarner: null,
+        },
+      };
+
+      await Promise.all([
+        intakeRepo.putEnquiry(env.ctxAlpha, alphaStaffEnq),
+        intakeRepo.putQuote(env.ctxAlpha, alphaStaffQuote),
+        intakeRepo.putEnquiry(env.ctxBravo, bravoIntakeEnq),
+        intakeRepo.putQuote(env.ctxBravo, bravoIntakeQuote),
+        intakeRepo.putEnquiry(env.ctxAlpha, sug5Enquiry),
+        intakeRepo.putQuote(env.ctxAlpha, sug5Quote),
+        partyRepo.putPerson(env.ctxAlpha, financeActorPerson),
+      ]);
+
+      // Non-participant fee earner (also revoke quote:view to verify Suggestion 5)
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(seedEmp!),
+        permissionOverrides: {
+          grant: [],
+          revoke: ['quote:view'],
+        },
+      });
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const feTasksByTitle = await loadTasksListPageData('P-000002', {
+          tab: 'all',
+          statusFilter: 'all',
+          query: taskMatterTitle,
+        });
+        expect(feTasksByTitle.tasks).toEqual([]);
+        expect(feTasksByTitle.pagination.totalCount).toBe(0);
+
+        const feTasksByNum = await loadTasksListPageData('P-000002', {
+          tab: 'all',
+          statusFilter: 'all',
+          query: taskMatterNumber,
+        });
+        expect(feTasksByNum.tasks).toEqual([]);
+        expect(feTasksByNum.pagination.totalCount).toBe(0);
+
+        const feIntake = await loadEnquiriesListPageData('P-000002', {
+          tab: 'all',
+          query: intakeMarker,
+        });
+        expect(feIntake.orderedQueueItems).toEqual([]);
+        expect(feIntake.enquiries).toEqual([]);
+        expect(feIntake.quotes).toEqual([]);
+        expect(feIntake.pagination.totalCount).toBe(0);
+        expect(feIntake.enquiriesPagination.totalCount).toBe(0);
+        expect(feIntake.quotesPagination.totalCount).toBe(0);
+
+        // Suggestion 5: without quote:view, searching /enquiries by linked quote ref returns 0
+        const feByQuoteRef = await loadEnquiriesListPageData('P-000002', {
+          tab: 'all',
+          typeFilter: 'enquiry',
+          query: 'QTE-SUG5-9991',
+        });
+        expect(feByQuoteRef.enquiries).toEqual([]);
+        expect(feByQuoteRef.pagination.totalCount).toBe(0);
+      });
+
+      // Participant positive controls (+ zero Bravo rows)
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        const pTasksByTitle = await loadTasksListPageData('P-000001', {
+          tab: 'all',
+          statusFilter: 'all',
+          query: taskMatterTitle,
+        });
+        expect(pTasksByTitle.tasks.map((t) => t.id)).toEqual([alphaStaffLinkedTask.id]);
+        expect(pTasksByTitle.pagination.totalCount).toBe(1);
+
+        const pTasksByNum = await loadTasksListPageData('P-000001', {
+          tab: 'all',
+          statusFilter: 'all',
+          query: taskMatterNumber,
+        });
+        expect(pTasksByNum.tasks.map((t) => t.id)).toEqual([alphaStaffLinkedTask.id]);
+        expect(pTasksByNum.pagination.totalCount).toBe(1);
+
+        const pIntake = await loadEnquiriesListPageData('P-000001', {
+          tab: 'all',
+          query: intakeMarker,
+        });
+        expect(pIntake.orderedQueueItems).toHaveLength(2);
+        expect(pIntake.enquiries.map((e) => e.id)).toEqual([alphaStaffEnq.id]);
+        expect(pIntake.quotes.map((q) => q.id)).toEqual([alphaStaffQuote.id]);
+        expect(pIntake.pagination.totalCount).toBe(2);
+        expect(pIntake.enquiriesPagination.totalCount).toBe(1);
+        expect(pIntake.quotesPagination.totalCount).toBe(1);
+
+        const pByQuoteRef = await loadEnquiriesListPageData('P-000001', {
+          tab: 'all',
+          typeFilter: 'enquiry',
+          query: 'QTE-SUG5-9991',
+        });
+        expect(pByQuoteRef.enquiries.map((e) => e.id)).toEqual([sug5Enquiry.id]);
+        expect(pByQuoteRef.pagination.totalCount).toBe(1);
+
+        const partnerShell = await loadShellContext('P-000001');
+        expect(Object.keys(partnerShell.supervisingPartnerByEmployeeId).length).toBeGreaterThan(0);
+      });
+
+      // Suggestion 7: finance actor without matter/enquiry/quote create/edit gets {}
+      const financeSession = makeActorSession('P-SUG7-FINANCE', ['finance'], env.tenantAlpha);
+      setTestEntraSessionOverride(financeSession.verifiedSession);
+      await runWithActiveActorSession(financeSession, async () => {
+        const finShell = await loadShellContext('P-SUG7-FINANCE');
+        expect(finShell.supervisingPartnerByEmployeeId).toEqual({});
       });
     },
     45_000,

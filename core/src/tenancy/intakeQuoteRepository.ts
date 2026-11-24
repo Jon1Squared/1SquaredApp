@@ -1419,6 +1419,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       excludeIds?: readonly string[];
       includeRestricted?: boolean;
       hasRestrictedMatterAccess?: boolean;
+      canViewQuotes?: boolean;
     },
   ): { readonly whereSql: string; readonly params: unknown[] } {
     const includeRestricted = Boolean(options?.includeRestricted);
@@ -1558,6 +1559,13 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     if (cleanQuery) {
       params.push(`%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`);
       const pat = `$${params.length}`;
+      const linkedQuoteClause = options?.canViewQuotes
+        ? `\n           OR EXISTS (
+             SELECT 1 FROM public.quotes lq
+             WHERE lq.tenant_id = e.tenant_id AND lq.source_enquiry_id = e.id
+               AND lower(COALESCE(lq.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
+           )`
+        : '';
       clauses.push(
         `(
            lower(COALESCE(e.id, '')) LIKE ${pat} ESCAPE '\\'
@@ -1575,12 +1583,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
              SELECT 1 FROM public.organisations lo
              WHERE lo.tenant_id = e.tenant_id AND lo.id = e.linked_organisation_id
                AND (lower(COALESCE(lo.legal_name, '')) LIKE ${pat} ESCAPE '\\' OR lower(COALESCE(lo.trading_name, '')) LIKE ${pat} ESCAPE '\\')
-           )
-           OR EXISTS (
-             SELECT 1 FROM public.quotes lq
-             WHERE lq.tenant_id = e.tenant_id AND lq.source_enquiry_id = e.id
-               AND lower(COALESCE(lq.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
-           )
+           )${linkedQuoteClause}
          )`,
       );
     }
@@ -1614,6 +1617,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       offset?: number;
       includeRestricted?: boolean;
       hasRestrictedMatterAccess?: boolean;
+      canViewQuotes?: boolean;
     },
   ): Promise<T[]> {
     const includeRestricted = Boolean(options?.includeRestricted);
@@ -1680,6 +1684,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       limit?: number;
       offset?: number;
       hasRestrictedMatterAccess?: boolean;
+      canViewQuotes?: boolean;
     },
   ): Promise<{
     readonly items: T[];
@@ -2498,8 +2503,18 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     options: {
       includeEnquiries: boolean;
       includeQuotes: boolean;
-      enquiryOptions?: Parameters<TenantIntakeQuoteRepository['buildVisibleEnquiriesWhereSql']>[2];
-      quoteOptions?: Parameters<TenantIntakeQuoteRepository['buildVisibleQuotesWhereSql']>[2];
+      enquiryOptions?: Omit<
+        NonNullable<
+          Parameters<TenantIntakeQuoteRepository['buildVisibleEnquiriesWhereSql']>[2]
+        >,
+        'includeRestricted'
+      >;
+      quoteOptions?: Omit<
+        NonNullable<
+          Parameters<TenantIntakeQuoteRepository['buildVisibleQuotesWhereSql']>[2]
+        >,
+        'includeRestricted'
+      >;
       todayYmd: string;
       emergencyUrgencyIds?: readonly string[];
       urgentUrgencyIds?: readonly string[];
@@ -2551,6 +2566,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     if (options.includeEnquiries) {
       const enqBuilt = this.buildVisibleEnquiriesWhereSql(ctx, viewerId, {
         ...options.enquiryOptions,
+        includeRestricted: false,
         hasRestrictedMatterAccess,
       });
       const baseCount = combinedParams.length;
@@ -2595,6 +2611,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     if (options.includeQuotes) {
       const quoteBuilt = this.buildVisibleQuotesWhereSql(ctx, viewerId, {
         ...options.quoteOptions,
+        includeRestricted: false,
         hasRestrictedMatterAccess,
       });
       const baseCount = combinedParams.length;
