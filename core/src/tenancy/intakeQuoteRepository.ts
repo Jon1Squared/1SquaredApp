@@ -2327,10 +2327,16 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       readonly includeAll?: boolean;
       readonly viewerId?: string;
       readonly hasRestrictedMatterAccess?: boolean;
+      readonly limit?: number;
     },
   ): Promise<T[]> {
+    const candidateLimit =
+      typeof params.limit === 'number' && Number.isFinite(params.limit)
+        ? Math.max(1, Math.min(1000, Math.floor(params.limit)))
+        : 1000;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const orClauses: string[] = [];
+      const scoreParts: string[] = [];
       const sqlParams: unknown[] = [ctx.tenantId];
 
       const pIds = Array.from(
@@ -2339,23 +2345,31 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       if (pIds.length > 0) {
         sqlParams.push(pIds);
         const idx = sqlParams.length;
-        orClauses.push(
-          `(e.linked_person_id = ANY($${idx}::text[]) OR e.referrer_person_id = ANY($${idx}::text[]) OR e.summary_and_notes_json->>'referrerPersonId' = ANY($${idx}::text[]))`,
-        );
+        const pExpr = `(e.linked_person_id = ANY($${idx}::text[]) OR e.referrer_person_id = ANY($${idx}::text[]) OR e.summary_and_notes_json->>'referrerPersonId' = ANY($${idx}::text[]))`;
+        orClauses.push(pExpr);
+        scoreParts.push(`(CASE WHEN ${pExpr} THEN 100 ELSE 0 END)`);
       }
       const oIds = Array.from(
         new Set((params.linkedOrganisationIds ?? []).map((x) => x.trim()).filter(Boolean)),
       );
       if (oIds.length > 0) {
         sqlParams.push(oIds);
-        orClauses.push(`e.linked_organisation_id = ANY($${sqlParams.length}::text[])`);
+        const idx = sqlParams.length;
+        orClauses.push(`e.linked_organisation_id = ANY($${idx}::text[])`);
+        scoreParts.push(
+          `(CASE WHEN e.linked_organisation_id = ANY($${idx}::text[]) THEN 100 ELSE 0 END)`,
+        );
       }
       const emails = Array.from(
         new Set((params.emails ?? []).map((e) => e.trim().toLowerCase()).filter(Boolean)),
       );
       if (emails.length > 0) {
         sqlParams.push(emails);
-        orClauses.push(`lower(COALESCE(e.email, '')) = ANY($${sqlParams.length}::text[])`);
+        const idx = sqlParams.length;
+        orClauses.push(`lower(COALESCE(e.email, '')) = ANY($${idx}::text[])`);
+        scoreParts.push(
+          `(CASE WHEN lower(COALESCE(e.email, '')) = ANY($${idx}::text[]) THEN 80 ELSE 0 END)`,
+        );
       }
       const terms = Array.from(
         new Set((params.terms ?? []).map((t) => t.trim()).filter((t) => t.length >= 2)),
@@ -2370,15 +2384,19 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         orClauses.push(
           `(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') ILIKE $${likeIdx} OR COALESCE(e.calling_on_behalf_of, '') ILIKE $${likeIdx} OR COALESCE(e.organisation_name, '') ILIKE $${likeIdx} OR ${enqOtherExpr} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${enqConcatLower}) >= 0.28 OR word_similarity(${enqConcatLower}, $${trgmIdx}) >= 0.28 OR (length(trim(COALESCE(e.calling_on_behalf_of, ''))) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(COALESCE(e.calling_on_behalf_of, '')))) > 0) OR (length(trim(COALESCE(e.organisation_name, ''))) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(COALESCE(e.organisation_name, '')))) > 0))`,
         );
+        scoreParts.push(
+          `(CASE WHEN lower(trim(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, ''))) = lower($${trgmIdx}) OR lower(trim(COALESCE(e.calling_on_behalf_of, ''))) = lower($${trgmIdx}) OR lower(trim(COALESCE(e.organisation_name, ''))) = lower($${trgmIdx}) THEN 60 WHEN COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '') ILIKE $${likeIdx} OR COALESCE(e.calling_on_behalf_of, '') ILIKE $${likeIdx} OR COALESCE(e.organisation_name, '') ILIKE $${likeIdx} OR ${enqOtherExpr} ILIKE $${likeIdx} THEN 30 ELSE 10 END)`,
+        );
       }
       for (const ph of params.phones ?? []) {
         const digits = ph.replace(/\D/g, '');
         if (digits.length >= 7) {
           const suffix = digits.slice(-7);
           sqlParams.push(`%${suffix}%`);
-          orClauses.push(
-            `regexp_replace(COALESCE(e.phone, ''), '[^0-9]', '', 'g') LIKE $${sqlParams.length}`,
-          );
+          const idx = sqlParams.length;
+          const phoneExpr = `regexp_replace(COALESCE(e.phone, ''), '[^0-9]', '', 'g') LIKE $${idx}`;
+          orClauses.push(phoneExpr);
+          scoreParts.push(`(CASE WHEN ${phoneExpr} THEN 70 ELSE 0 END)`);
         }
       }
       if (orClauses.length === 0) return [];
@@ -2397,10 +2415,14 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         whereClauses.push(pred);
       }
 
+      const scoreExpr = scoreParts.length > 0 ? scoreParts.join(' + ') : '0';
+      sqlParams.push(candidateLimit);
+      const limitIdx = sqlParams.length;
       const res = await tx.query<EnquiryRow>(
         `SELECT * FROM enquiries e
          WHERE ${whereClauses.join(' AND ')}
-         ORDER BY e.received_at DESC, e.id ASC`,
+         ORDER BY (${scoreExpr}) DESC, e.received_at DESC, e.id ASC
+         LIMIT $${limitIdx}`,
         sqlParams,
       );
       const hiddenMatterIds =

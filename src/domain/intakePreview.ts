@@ -10,8 +10,14 @@ import {
   tokensSoundAlike,
 } from './normalise';
 import { personDisplayName, primaryEmail } from './names';
-import type { EntityPickerOption } from './intakePreviewTypes';
-import type { Organisation, Person, PersonOrganisationLink } from './types';
+import type {
+  EntityPickerEnquirySummary,
+  EntityPickerMatterSummary,
+  EntityPickerOption,
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from './intakePreviewTypes';
+import type { Enquiry, Matter, Organisation, Person, PersonOrganisationLink } from './types';
 
 /**
  * Strips all HR/employment, payroll, sensitive, override, role, and Entra fields
@@ -87,6 +93,114 @@ export function sanitizePersonForClientPreview(
     safe.dateOfBirth = person.dateOfBirth;
   }
   return safe;
+}
+
+export function toEntityPickerPersonSummary(
+  person: Person,
+  options?: { readonly preserveNonEmployeeDob?: boolean },
+): EntityPickerPersonSummary {
+  const safe = sanitizePersonForClientPreview(person, options);
+  const firstTown = safe.addresses?.[0]?.town;
+  return {
+    id: safe.id,
+    firstName: safe.firstName,
+    surname: safe.surname,
+    ...(safe.preferredName !== undefined ? { preferredName: safe.preferredName } : {}),
+    ...(safe.jobTitle !== undefined ? { jobTitle: safe.jobTitle } : {}),
+    ...(safe.dateOfBirth !== undefined ? { dateOfBirth: safe.dateOfBirth } : {}),
+    ...(safe.verificationStatusId !== undefined
+      ? { verificationStatusId: safe.verificationStatusId }
+      : {}),
+    ...(safe.relationshipStatusId !== undefined
+      ? { relationshipStatusId: safe.relationshipStatusId }
+      : {}),
+    ...(safe.verifiedAt !== undefined ? { verifiedAt: safe.verifiedAt } : {}),
+    ...(safe.isEmployee !== undefined ? { isEmployee: safe.isEmployee } : {}),
+    ...(safe.mergedIntoId !== undefined ? { mergedIntoId: safe.mergedIntoId } : {}),
+    emails: structuredClone(safe.emails ?? []),
+    phones: structuredClone(safe.phones ?? []),
+    ...(firstTown ? { addresses: [{ town: firstTown }] } : {}),
+  };
+}
+
+export function toEntityPickerOrganisationSummary(
+  org: Organisation | EntityPickerOrganisationSummary,
+): EntityPickerOrganisationSummary {
+  const addr = org.registeredAddress;
+  return {
+    id: org.id,
+    legalName: org.legalName,
+    ...(org.organisationTypeId !== undefined
+      ? { organisationTypeId: org.organisationTypeId }
+      : {}),
+    ...(org.companyNumber !== undefined ? { companyNumber: org.companyNumber } : {}),
+    ...(org.generalEmail !== undefined ? { generalEmail: org.generalEmail } : {}),
+    ...(org.mainPhone !== undefined ? { mainPhone: org.mainPhone } : {}),
+    ...(org.parentOrganisationId !== undefined
+      ? { parentOrganisationId: org.parentOrganisationId }
+      : {}),
+    ...(org.verificationStatusId !== undefined
+      ? { verificationStatusId: org.verificationStatusId }
+      : {}),
+    ...(org.relationshipStatusId !== undefined
+      ? { relationshipStatusId: org.relationshipStatusId }
+      : {}),
+    ...(org.reviewDate !== undefined ? { reviewDate: org.reviewDate } : {}),
+    ...(org.mergedIntoId !== undefined ? { mergedIntoId: org.mergedIntoId } : {}),
+    ...(addr && (addr.line1 || addr.town || addr.postcode)
+      ? {
+          registeredAddress: {
+            line1: addr.line1 ?? '',
+            town: addr.town ?? '',
+            postcode: addr.postcode ?? '',
+          },
+        }
+      : {}),
+  };
+}
+
+export function toEntityPickerMatterSummary(matter: Matter): EntityPickerMatterSummary {
+  return {
+    id: matter.id,
+    matterNumber: matter.matterNumber,
+    title: matter.title,
+    clientId: matter.clientId,
+    matterStatusId: matter.matterStatusId,
+    leadFeeEarnerId: matter.leadFeeEarnerId,
+    supervisingPartnerId: matter.supervisingPartnerId,
+    responsiblePartnerId: matter.responsiblePartnerId,
+    teamMemberIds: [...(matter.teamMemberIds ?? [])],
+  };
+}
+
+export function toEntityPickerEnquirySummary(
+  enquiry: Enquiry,
+): EntityPickerEnquirySummary {
+  return {
+    id: enquiry.id,
+    reference: enquiry.reference,
+    firstName: enquiry.firstName,
+    lastName: enquiry.lastName,
+    callingOnBehalfOf: enquiry.callingOnBehalfOf,
+    summary: enquiry.summary,
+    notes: enquiry.notes,
+    email: enquiry.email,
+    phone: enquiry.phone,
+    ...(enquiry.linkedPersonId !== undefined
+      ? { linkedPersonId: enquiry.linkedPersonId }
+      : {}),
+    ...(enquiry.linkedOrganisationId !== undefined
+      ? { linkedOrganisationId: enquiry.linkedOrganisationId }
+      : {}),
+    ...(enquiry.practiceAreaId !== undefined
+      ? { practiceAreaId: enquiry.practiceAreaId }
+      : {}),
+    ...(enquiry.workTypeSubcategoryId !== undefined
+      ? { workTypeSubcategoryId: enquiry.workTypeSubcategoryId }
+      : {}),
+    ...(enquiry.assignedToId !== undefined ? { assignedToId: enquiry.assignedToId } : {}),
+    status: enquiry.status,
+  };
 }
 
 function checkTokenMatch(
@@ -227,7 +341,7 @@ export function scoreFuzzyPersonOrgQuery(params: {
 
       const email = primaryEmail(p);
       const town = p.addresses?.[0]?.town ?? '';
-      const safePerson = sanitizePersonForClientPreview(p, {
+      const safePerson = toEntityPickerPersonSummary(p, {
         preserveNonEmployeeDob: true,
       });
       results.push({
@@ -242,7 +356,7 @@ export function scoreFuzzyPersonOrgQuery(params: {
         matchNote,
         rank: matchNote ? 2 : 1,
         person: safePerson,
-        linkedOrgs,
+        linkedOrgs: linkedOrgs.map(toEntityPickerOrganisationSummary),
       });
     }
   }
@@ -278,7 +392,7 @@ export function scoreFuzzyPersonOrgQuery(params: {
         href: `/organisations/${o.id}`,
         matchNote,
         rank: matchNote ? 2 : 1,
-        organisation: o,
+        organisation: toEntityPickerOrganisationSummary(o),
       });
     }
   }

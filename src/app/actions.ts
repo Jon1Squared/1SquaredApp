@@ -149,6 +149,8 @@ import {
   listClientRateOverridesRecord,
   saveClientRateOverrideRecord,
   deleteClientRateOverrideRecord,
+  getEntityRecordForEditRecord,
+  listClientPriorMattersRecord,
   listMatterRateOverridesRecord,
   saveMatterRateOverrideRecord,
   deleteMatterRateOverrideRecord,
@@ -164,6 +166,7 @@ import type {
   IntakePreviewInput,
   IntakePreviewResult,
 } from '@/domain/intakePreviewTypes';
+import type { ClientPriorMatterSummary } from '@/domain/matterOpeningRecord';
 import type {
   KeyDateCalculation,
   KeyDateExceptionKind,
@@ -171,7 +174,7 @@ import type {
   StandstillPeriod,
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
-import { buildActionDenied, isActionDenied } from '@/domain/actionResult';
+import { buildActionDenied, isActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { maskPayrollDetails } from '@/domain/employment';
 import {
   getActiveTenantConfiguration,
@@ -1933,7 +1936,7 @@ export async function searchGlobalRecordsAction(input: {
 
 export async function previewIntakeDuplicatesAndConflictsAction(
   input: IntakePreviewInput,
-): Promise<IntakePreviewResult> {
+): Promise<IntakePreviewResult | ActionDenied> {
   return guardedAction(
     'previewIntakeDuplicatesAndConflictsAction',
     async (actor) =>
@@ -1945,9 +1948,30 @@ export async function previewIntakeDuplicatesAndConflictsAction(
 
 export async function searchEntityPickerAction(
   input: EntityPickerSearchInput,
-): Promise<EntityPickerSearchResult> {
+): Promise<EntityPickerSearchResult | ActionDenied> {
   return guardedAction('searchEntityPickerAction', async (actor) =>
     searchEntityPickerRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function getEntityRecordForEditAction(
+  recordType: 'person' | 'organisation',
+  recordId: string,
+) {
+  return guardedAction('getEntityRecordForEditAction', async (actor) =>
+    getEntityRecordForEditRecord(recordType, recordId, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function listClientPriorMattersAction(
+  clientIds: readonly string[],
+): Promise<{ matters: ClientPriorMatterSummary[] } | ActionDenied> {
+  return guardedAction('listClientPriorMattersAction', async (actor) =>
+    listClientPriorMattersRecord(clientIds, actor.personId, {
       tenantCtx: actor.tenantContext,
     }),
   );

@@ -3956,9 +3956,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
            WHERE parent.merged_into_id IS NULL AND a.depth < 10
          ),
          descendants(id, depth) AS (
-           SELECT id, 0
-           FROM public.organisations
-           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND merged_into_id IS NULL
+           SELECT DISTINCT id, 0 FROM ancestors
            UNION ALL
            SELECT child.id, d.depth + 1
            FROM descendants d
@@ -4004,6 +4002,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           readonly postcodes?: readonly string[];
           readonly fuzzy?: boolean;
           readonly includeMerged?: boolean;
+          readonly limit?: number;
         }
       | {
           readonly kind: 'organisation';
@@ -4017,8 +4016,13 @@ export class TenantPartyRepository extends TenantScopedRepository {
           readonly postcodes?: readonly string[];
           readonly fuzzy?: boolean;
           readonly includeMerged?: boolean;
+          readonly limit?: number;
         },
   ): Promise<TRecord[]> {
+    const candidateLimit =
+      typeof query.limit === 'number' && Number.isFinite(query.limit)
+        ? Math.max(1, Math.min(1000, Math.floor(query.limit)))
+        : 1000;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       if (query.kind === 'person') {
         const emails = Array.from(
@@ -4066,26 +4070,37 @@ export class TenantPartyRepository extends TenantScopedRepository {
         );
 
         const orClauses: string[] = [];
+        const scoreParts: string[] = [];
         const params: unknown[] = [ctx.tenantId];
 
         if (query.id?.trim()) {
           params.push(query.id.trim());
-          orClauses.push(`p.id = $${params.length}`);
+          const idx = params.length;
+          orClauses.push(`p.id = $${idx}`);
+          scoreParts.push(`(CASE WHEN p.id = $${idx} THEN 100 ELSE 0 END)`);
         }
         if (emails.length > 0) {
           params.push(emails);
           const idx = params.length;
-          orClauses.push(
-            `(p.primary_email_lower = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.person_emails pe WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower = ANY($${idx}::text[])))`,
-          );
+          const emailMatchExpr = `(p.primary_email_lower = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.person_emails pe WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower = ANY($${idx}::text[])))`;
+          orClauses.push(emailMatchExpr);
+          scoreParts.push(`(CASE WHEN ${emailMatchExpr} THEN 80 ELSE 0 END)`);
         }
         if (phoneLast9s.length > 0) {
           params.push(phoneLast9s);
-          orClauses.push(`p.phone_last9_keys && $${params.length}::text[]`);
+          const idx = params.length;
+          orClauses.push(`p.phone_last9_keys && $${idx}::text[]`);
+          scoreParts.push(
+            `(CASE WHEN p.phone_last9_keys && $${idx}::text[] THEN 70 ELSE 0 END)`,
+          );
         }
         if (postcodes.length > 0) {
           params.push(postcodes);
-          orClauses.push(`p.postcode_keys && $${params.length}::text[]`);
+          const idx = params.length;
+          orClauses.push(`p.postcode_keys && $${idx}::text[]`);
+          scoreParts.push(
+            `(CASE WHEN p.postcode_keys && $${idx}::text[] THEN 50 ELSE 0 END)`,
+          );
         }
         if (phoneticOnly.length > 0 && surnameTokens.length > 0) {
           const surnameKeys = extractTokenPhoneticKeys(surnameTokens).filter(
@@ -4093,11 +4108,19 @@ export class TenantPartyRepository extends TenantScopedRepository {
           );
           if (surnameKeys.length > 0) {
             params.push(surnameKeys);
-            orClauses.push(`p.phonetic_keys && $${params.length}::text[]`);
+            const idx = params.length;
+            orClauses.push(`p.phonetic_keys && $${idx}::text[]`);
+            scoreParts.push(
+              `(CASE WHEN p.phonetic_keys && $${idx}::text[] THEN 15 ELSE 0 END)`,
+            );
           }
         } else if (phoneticOnly.length > 0 && fullTerms.length > 0) {
           params.push(phoneticOnly);
-          orClauses.push(`p.phonetic_keys && $${params.length}::text[]`);
+          const idx = params.length;
+          orClauses.push(`p.phonetic_keys && $${idx}::text[]`);
+          scoreParts.push(
+            `(CASE WHEN p.phonetic_keys && $${idx}::text[] THEN 15 ELSE 0 END)`,
+          );
         }
         // Initial + surname or first-token matches when both exist (e.g. "J. Smith" vs "John Smith")
         if (firstTokens.length > 0 && surnameTokens.length > 0) {
@@ -4109,8 +4132,13 @@ export class TenantPartyRepository extends TenantScopedRepository {
           );
           if (firstInitials.length > 0 && surnameKeys.length > 0) {
             params.push(firstInitials, surnameKeys);
+            const initIdx = params.length - 1;
+            const surIdx = params.length;
             orClauses.push(
-              `(p.phonetic_keys && $${params.length - 1}::text[] AND p.phonetic_keys && $${params.length}::text[])`,
+              `(p.phonetic_keys && $${initIdx}::text[] AND p.phonetic_keys && $${surIdx}::text[])`,
+            );
+            scoreParts.push(
+              `(CASE WHEN p.phonetic_keys && $${initIdx}::text[] AND p.phonetic_keys && $${surIdx}::text[] THEN 20 ELSE 0 END)`,
             );
           }
         }
@@ -4126,18 +4154,25 @@ export class TenantPartyRepository extends TenantScopedRepository {
           orClauses.push(
             `(COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} OR word_similarity($${termIdx}, ${pConcat}) >= 0.28 OR word_similarity(${pConcat}, $${termIdx}) >= 0.28 OR (length(${pFull}) >= 3 AND strpos(lower($${termIdx}), ${pFull}) > 0) OR (length(${pPref}) >= 3 AND strpos(lower($${termIdx}), ${pPref}) > 0) OR (length(${pOther}) >= 3 AND strpos(lower($${termIdx}), ${pOther}) > 0))`,
           );
+          scoreParts.push(
+            `(CASE WHEN ${pFull} = lower($${termIdx}) OR ${pPref} = lower($${termIdx}) THEN 60 WHEN COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} THEN 30 ELSE 10 END)`,
+          );
         }
 
         if (orClauses.length === 0) return [];
         const mergedClause = query.includeMerged
           ? ''
           : ' AND p.merged_into_id IS NULL';
+        const scoreExpr = scoreParts.length > 0 ? scoreParts.join(' + ') : '0';
+        params.push(candidateLimit);
+        const limitIdx = params.length;
         const res = await tx.query<DbPersonRow>(
           `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
            ${PEOPLE_LEFT_JOIN_HR}
            WHERE p.tenant_id = $1${mergedClause}
              AND (${orClauses.join(' OR ')})
-           ORDER BY p.id ASC`,
+           ORDER BY (${scoreExpr}) DESC, p.id ASC
+           LIMIT $${limitIdx}`,
           params,
         );
         const mapped = res.rows.map((row) => {
@@ -4197,35 +4232,62 @@ export class TenantPartyRepository extends TenantScopedRepository {
       );
 
       const orClauses: string[] = [];
+      const scoreParts: string[] = [];
       const params: unknown[] = [ctx.tenantId];
 
       if (query.id?.trim()) {
         params.push(query.id.trim());
-        orClauses.push(`id = $${params.length}`);
+        const idx = params.length;
+        orClauses.push(`id = $${idx}`);
+        scoreParts.push(`(CASE WHEN id = $${idx} THEN 100 ELSE 0 END)`);
       }
       if (companyNos.length > 0) {
         params.push(companyNos);
-        orClauses.push(`norm_company_number = ANY($${params.length}::text[])`);
+        const idx = params.length;
+        orClauses.push(`norm_company_number = ANY($${idx}::text[])`);
+        scoreParts.push(
+          `(CASE WHEN norm_company_number = ANY($${idx}::text[]) THEN 90 ELSE 0 END)`,
+        );
       }
       if (emails.length > 0) {
         params.push(emails);
-        orClauses.push(`lower(general_email) = ANY($${params.length}::text[])`);
+        const idx = params.length;
+        orClauses.push(`lower(general_email) = ANY($${idx}::text[])`);
+        scoreParts.push(
+          `(CASE WHEN lower(general_email) = ANY($${idx}::text[]) THEN 80 ELSE 0 END)`,
+        );
       }
       if (emailDomains.length > 0) {
         params.push(emailDomains);
-        orClauses.push(`email_domains && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`email_domains && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN email_domains && $${idx}::text[] THEN 45 ELSE 0 END)`,
+        );
       }
       if (phoneLast9s.length > 0) {
         params.push(phoneLast9s);
-        orClauses.push(`phone_last9_keys && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`phone_last9_keys && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN phone_last9_keys && $${idx}::text[] THEN 70 ELSE 0 END)`,
+        );
       }
       if (postcodes.length > 0) {
         params.push(postcodes);
-        orClauses.push(`postcode_keys && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`postcode_keys && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN postcode_keys && $${idx}::text[] THEN 50 ELSE 0 END)`,
+        );
       }
       if (phoneticKeys.length > 0) {
         params.push(phoneticKeys);
-        orClauses.push(`phonetic_keys && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`phonetic_keys && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN phonetic_keys && $${idx}::text[] THEN 15 ELSE 0 END)`,
+        );
       }
       for (const name of orgNames) {
         const comp = normaliseComparableNameKey(name);
@@ -4238,17 +4300,24 @@ export class TenantPartyRepository extends TenantScopedRepository {
         orClauses.push(
           `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${orgConcat}) >= 0.28 OR word_similarity(${orgConcat}, $${trgmIdx}) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25 OR (length(trim(legal_name)) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(legal_name))) > 0) OR (length(trim(trading_name)) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(trading_name))) > 0) OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(profile_json->'otherNames') = 'array' THEN profile_json->'otherNames' ELSE '[]'::jsonb END) AS elem WHERE ${otherNameValueSql} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(${otherNameValueSql})) >= 0.28 OR word_similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.28 OR similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.25 OR (length(trim(${otherNameValueSql})) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(${otherNameValueSql}))) > 0)))`,
         );
+        scoreParts.push(
+          `(CASE WHEN lower(trim(COALESCE(legal_name, ''))) = lower($${trgmIdx}) OR lower(trim(COALESCE(trading_name, ''))) = lower($${trgmIdx}) THEN 60 WHEN legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} THEN 30 ELSE 10 END)`,
+        );
       }
 
       if (orClauses.length === 0) return [];
       const mergedClause = query.includeMerged
         ? ''
         : ' AND merged_into_id IS NULL';
+      const scoreExpr = scoreParts.length > 0 ? scoreParts.join(' + ') : '0';
+      params.push(candidateLimit);
+      const limitIdx = params.length;
       const res = await tx.query<DbOrganisationRow>(
         `SELECT * FROM public.organisations
          WHERE tenant_id = $1${mergedClause}
            AND (${orClauses.join(' OR ')})
-         ORDER BY id ASC`,
+         ORDER BY (${scoreExpr}) DESC, id ASC
+         LIMIT $${limitIdx}`,
         params,
       );
       const mappedOrgs = res.rows.map((row) => {

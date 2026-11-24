@@ -49,6 +49,8 @@ import {
   resolveOrgDepartment,
   resolveOrgOffice,
 } from '@/domain/orgStructure';
+import { toEntityPickerOrganisationSummary } from '@/domain/intakePreview';
+import type { EntityPickerOrganisationSummary } from '@/domain/intakePreviewTypes';
 import type {
   Address,
   ChoiceList,
@@ -901,7 +903,9 @@ export function PersonFormClient({
 
   // Optional initial organisation link (when creating a new person)
   const [linkOrgId, setLinkOrgId] = useState(initialLinkOrgId ?? '');
-  const [selectedLinkedOrg, setSelectedLinkedOrg] = useState<Organisation | null>(
+  const [selectedLinkedOrg, setSelectedLinkedOrg] = useState<
+    Organisation | EntityPickerOrganisationSummary | null
+  >(
     () =>
       initialLinkOrgId
         ? (organisations.find((o) => o.id === initialLinkOrgId) ?? null)
@@ -1012,6 +1016,37 @@ export function PersonFormClient({
         : null,
     [linkOrgId, selectedLinkedOrg, organisations],
   );
+  const linkedOrgInitialOptions = useMemo(
+    () => [
+      ...(resolvedLinkedOrg
+        ? [
+            {
+              id: resolvedLinkedOrg.id,
+              recordType: 'organisation' as const,
+              label: `${resolvedLinkedOrg.legalName} (${resolvedLinkedOrg.id})`,
+              subtitle: resolvedLinkedOrg.companyNumber
+                ? `Co. ${resolvedLinkedOrg.companyNumber}`
+                : '',
+              reference: resolvedLinkedOrg.id,
+              href: `/organisations/${resolvedLinkedOrg.id}`,
+              organisation: toEntityPickerOrganisationSummary(resolvedLinkedOrg),
+            },
+          ]
+        : []),
+      ...organisations
+        .filter((o) => !o.mergedIntoId && o.id !== resolvedLinkedOrg?.id)
+        .map((o) => ({
+          id: o.id,
+          recordType: 'organisation' as const,
+          label: `${o.legalName} (${o.id})`,
+          subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+          reference: o.id,
+          href: `/organisations/${o.id}`,
+          organisation: toEntityPickerOrganisationSummary(o),
+        })),
+    ],
+    [resolvedLinkedOrg, organisations],
+  );
   const linkedOrgName = resolvedLinkedOrg?.legalName ?? '';
   const otherNamesJoined = useMemo(
     () =>
@@ -1040,7 +1075,7 @@ export function PersonFormClient({
     phones: cleanPhones.map((p) => p.number),
     addresses: addresses.filter((a) => a.postcode.trim() || a.line1.trim()),
     linkedOrganisationId: linkOrgId || null,
-  });
+  }, { enableConflicts: false });
 
   const liveDuplicates = useMemo(
     () =>
@@ -2086,20 +2121,7 @@ export function PersonFormClient({
                           emptyLabel="Not linked right now…"
                           searchPlaceholder="Search organisations…"
                           searchAriaLabel="Search organisations to link"
-                          initialOptions={[
-                            ...(resolvedLinkedOrg ? [resolvedLinkedOrg] : []),
-                            ...organisations.filter(
-                              (o) => !o.mergedIntoId && o.id !== resolvedLinkedOrg?.id,
-                            ),
-                          ].map((o) => ({
-                            id: o.id,
-                            recordType: 'organisation' as const,
-                            label: `${o.legalName} (${o.id})`,
-                            subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
-                            reference: o.id,
-                            href: `/organisations/${o.id}`,
-                            organisation: o,
-                          }))}
+                          initialOptions={linkedOrgInitialOptions}
                           onChange={(nextId, opt) => {
                             setLinkOrgId(nextId);
                             setSelectedLinkedOrg(opt?.organisation ?? null);
@@ -2400,20 +2422,7 @@ export function PersonFormClient({
                           emptyLabel="Not linked right now…"
                           searchPlaceholder="Search organisations…"
                           searchAriaLabel="Search organisations to link"
-                          initialOptions={[
-                            ...(resolvedLinkedOrg ? [resolvedLinkedOrg] : []),
-                            ...organisations.filter(
-                              (o) => !o.mergedIntoId && o.id !== resolvedLinkedOrg?.id,
-                            ),
-                          ].map((o) => ({
-                            id: o.id,
-                            recordType: 'organisation' as const,
-                            label: `${o.legalName} (${o.id})`,
-                            subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
-                            reference: o.id,
-                            href: `/organisations/${o.id}`,
-                            organisation: o,
-                          }))}
+                          initialOptions={linkedOrgInitialOptions}
                           onChange={(nextId, opt) => {
                             setLinkOrgId(nextId);
                             setSelectedLinkedOrg(opt?.organisation ?? null);

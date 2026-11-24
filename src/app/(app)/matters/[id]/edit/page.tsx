@@ -28,6 +28,7 @@ export default async function EditMatterPage({
         people={data.people}
         organisations={data.organisations}
         links={data.links}
+        matters={data.clientMatters}
         enquiries={data.initialEnquiry ? [data.initialEnquiry] : []}
         lists={shell.lists}
         values={shell.values}

@@ -33,11 +33,16 @@ import {
   createDefaultRoleConfigs,
   resolveActiveViewingRole,
   resolveEmployeeRoles,
+  resolveHomeRoleDataNeeds,
   type LeftRailVisibility,
 } from '@/domain/homeConfig';
 import { sanitizePersonForClientPreview } from '@/domain/intakePreview';
 import { systemKeyOf } from '@/domain/lists';
 import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
+import {
+  toClientPriorMatterSummary,
+  type ClientPriorMatterSummary,
+} from '@/domain/matterOpeningRecord';
 import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
@@ -863,13 +868,9 @@ export async function loadHomePageData(
   const canReadRegisters =
     currentUserPermissions.includes('register:view') ||
     currentUserPermissions.includes('undertaking:manage');
-  const needsRegistersOnHome =
-    canReadRegisters &&
-    !['enquiries_coordinator', 'intake', 'legal_secretary'].includes(activeRoleKey);
-
-  const summaryOnlyHomeFinance = !['finance', 'partner', 'managing_partner', 'supervisor', 'fee_earner'].includes(
-    activeRoleKey,
-  );
+  const roleDataNeeds = resolveHomeRoleDataNeeds(shell.homePagesConfig, activeRoleKey);
+  const needsRegistersOnHome = canReadRegisters && roleDataNeeds.needsRegisters;
+  const summaryOnlyHomeFinance = !roleDataNeeds.needsFullMatterFinance;
 
   const [
     matters,
@@ -1762,6 +1763,7 @@ export async function loadMatterDetailPageData(
       people: Person[];
       organisations: Organisation[];
       links: PersonOrganisationLink[];
+      clientMatters: ClientPriorMatterSummary[];
       canSignOffCosts: boolean;
       canManageMatterRateOverrides: boolean;
       initialSignOffEstimateGbp: number;
@@ -1879,13 +1881,27 @@ export async function loadMatterDetailPageData(
       matter.clientId,
       ...(matter.additionalClientIds ?? []),
     ].filter((cid): cid is string => Boolean(cid));
-    const links =
+    const initialClientIds = resolveInitialMatterClientIds({
+      existingMatter: matter,
+      initialQuote,
+      initialEnquiry,
+    });
+    const [links, clientMattersRaw] = await Promise.all([
       clientIdsForLinks.length > 0
-        ? await partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
+        ? partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
             organisationIds: clientIdsForLinks.filter((x) => x.startsWith('O-')),
             personIds: clientIdsForLinks.filter((x) => x.startsWith('P-')),
           })
-        : [];
+        : Promise.resolve<PersonOrganisationLink[]>([]),
+      initialClientIds.length > 0
+        ? matterRepo.listVisibleMattersForEntity<Matter>(
+            ctx,
+            { clientIds: initialClientIds, includeMerged: false },
+            { viewerId: currentUserId, hasRestrictedMatterAccess },
+          )
+        : Promise.resolve<Matter[]>([]),
+    ]);
+    const clientMatters = clientMattersRaw.map(toClientPriorMatterSummary);
     const { people, organisations } = await collectReferencedParties({
       ctx,
       shell,
@@ -1931,6 +1947,7 @@ export async function loadMatterDetailPageData(
       people,
       organisations,
       links,
+      clientMatters,
       canSignOffCosts:
         shell.currentUserPermissions.includes('matter:costs:sign_off') &&
         canPersonAccessMatter(matter, currentUserId, shell.currentUser, {
@@ -2062,6 +2079,33 @@ export async function loadMatterDetailPageData(
   };
 }
 
+function resolveInitialMatterClientIds(params: {
+  readonly existingMatter?: Matter | null;
+  readonly clientId?: string | null;
+  readonly initialQuote?: Quote | null;
+  readonly initialEnquiry?: Enquiry | null;
+}): string[] {
+  const { existingMatter, clientId, initialQuote, initialEnquiry } = params;
+  if (existingMatter?.clientId) {
+    const extraFromProp = existingMatter.additionalClientIds ?? [];
+    const extraFromFields =
+      (existingMatter.fieldValues?.['additionalClientIds'] as string[] | undefined) ?? [];
+    return Array.from(
+      new Set(
+        [existingMatter.clientId, ...extraFromProp, ...extraFromFields].filter(
+          (id): id is string => Boolean(id),
+        ),
+      ),
+    );
+  }
+  if (clientId) return [clientId];
+  if (initialQuote?.linkedOrganisationId) return [initialQuote.linkedOrganisationId];
+  if (initialQuote?.linkedPersonId) return [initialQuote.linkedPersonId];
+  if (initialEnquiry?.linkedOrganisationId) return [initialEnquiry.linkedOrganisationId];
+  if (initialEnquiry?.linkedPersonId) return [initialEnquiry.linkedPersonId];
+  return [];
+}
+
 export async function loadMatterFormPageData(
   actorId: string,
   params: {
@@ -2087,6 +2131,7 @@ export async function loadMatterFormPageData(
   people: Person[];
   organisations: Organisation[];
   links: PersonOrganisationLink[];
+  clientMatters: ClientPriorMatterSummary[];
   canSignOffCosts: boolean;
   initialSignOffEstimateGbp: number | null;
   suggestedMatterGovernanceAssignees: {
@@ -2176,12 +2221,27 @@ export async function loadMatterFormPageData(
       ].filter((id): id is string => Boolean(id && id.startsWith('O-'))),
     ),
   );
-  const links =
+  const initialClientIds = resolveInitialMatterClientIds({
+    existingMatter,
+    clientId: params.clientId,
+    initialQuote: initialQuoteDirect,
+    initialEnquiry,
+  });
+  const [links, clientMattersRaw] = await Promise.all([
     orgIdsForLinks.length > 0
-      ? await partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
+      ? partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
           organisationIds: orgIdsForLinks,
         })
-      : [];
+      : Promise.resolve<PersonOrganisationLink[]>([]),
+    initialClientIds.length > 0
+      ? matterRepo.listVisibleMattersForEntity<Matter>(
+          ctx,
+          { clientIds: initialClientIds, includeMerged: false },
+          { viewerId: currentUserId, hasRestrictedMatterAccess },
+        )
+      : Promise.resolve<Matter[]>([]),
+  ]);
+  const clientMatters = clientMattersRaw.map(toClientPriorMatterSummary);
   const { people, organisations } = await collectReferencedParties({
     ctx,
     shell,
@@ -2247,6 +2307,7 @@ export async function loadMatterFormPageData(
     people,
     organisations,
     links,
+    clientMatters,
     canSignOffCosts,
     initialSignOffEstimateGbp,
     suggestedMatterGovernanceAssignees: {

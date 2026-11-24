@@ -35,6 +35,8 @@ import {
 } from '@/domain/matterAiExtract';
 import {
   deleteMatterRateOverrideAction,
+  getEntityRecordForEditAction,
+  listClientPriorMattersAction,
   listMatterRateOverridesAction,
   resolveApplicableRatesAction,
   runMatterConflictSearchAction,
@@ -47,6 +49,10 @@ import {
   updateMatterConflictRecordAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import type {
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from '@/domain/intakePreviewTypes';
 import type { PartnerCostSignOffRecord } from '@/domain/matterFieldValues';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import {
@@ -118,8 +124,10 @@ import {
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
+  computeClientRelationshipCdd,
   resolveMatterRiskSections,
   summarizeMatterRiskAssessment,
+  type ClientPriorMatterSummary,
   type CustomKeyDateEntry,
 } from '@/domain/matterOpeningRecord';
 import { formatGbp, quoteWorkTypeSummary } from '@/domain/quotes';
@@ -185,7 +193,7 @@ interface MatterFormClientProps {
   people: Person[];
   organisations: Organisation[];
   links: PersonOrganisationLink[];
-  matters?: Matter[];
+  matters?: ClientPriorMatterSummary[];
   enquiries?: Enquiry[];
   lists?: ChoiceList[];
   values: ChoiceValue[];
@@ -277,6 +285,8 @@ function nextClientItemId(prefix: string): string {
   return `${prefix}-${++nextClientItemSeq}`;
 }
 
+const EMPTY_FULL_MATTERS: Matter[] = [];
+
 export function MatterFormClient({
   existing,
   isReopenedDraft = false,
@@ -292,7 +302,7 @@ export function MatterFormClient({
   people: initialPeople,
   organisations: initialOrganisations,
   links: initialLinks,
-  matters = [],
+  matters: initialClientMatters = [],
   enquiries = [],
   lists = [],
   values,
@@ -471,6 +481,14 @@ export function MatterFormClient({
     'search' | 'new_person' | 'new_org' | 'edit_person' | 'edit_org'
   >('search');
   const [editingClientRecordId, setEditingClientRecordId] = useState<string | null>(null);
+  const [hydratingClientEdit, setHydratingClientEdit] = useState<boolean>(false);
+  const hydratingClientEditSeqRef = useRef<number>(0);
+  const [pickedClientPeopleById, setPickedClientPeopleById] = useState<
+    Record<string, EntityPickerPersonSummary>
+  >({});
+  const [pickedClientOrgsById, setPickedClientOrgsById] = useState<
+    Record<string, EntityPickerOrganisationSummary>
+  >({});
   const [clientSearchFirstName, setClientSearchFirstName] = useState<string>('');
   const [clientSearchSurname, setClientSearchSurname] = useState<string>('');
   const [clientSearchOrg, setClientSearchOrg] = useState<string>('');
@@ -1792,130 +1810,119 @@ export function MatterFormClient({
   ]);
 
   // Lookup client relationship & CDD status for Q2.1 (Is this a new or existing client?)
-  const derivedClientRelationshipCdd = useMemo<{
-    option: 'New client' | 'Existing, CDD current' | 'Existing, CDD needs refresh' | '';
-    summary: string;
-  }>(() => {
-    if (clientIds.length === 0) {
-      return { option: '', summary: '' };
-    }
+  const [clientMatters, setClientMatters] = useState<ClientPriorMatterSummary[]>(
+    initialClientMatters,
+  );
+  const [loadedClientMattersKey, setLoadedClientMattersKey] = useState<string>(() =>
+    clientIds.join(','),
+  );
+  const lastRequestedClientMattersKeyRef = useRef<string>(clientIds.join(','));
+  const clientMattersSeqRef = useRef<number>(0);
 
-    let anyHasPriorMatters = false;
-    let allCddCurrent = true;
-    const details: string[] = [];
-
-    for (const cid of clientIds) {
-      const priorMatters = matters.filter(
-        (m) =>
-          m.id !== existing?.id &&
-          m.conflictCheckStatus !== 'Draft' &&
-          (m.clientId === cid || m.additionalClientIds?.includes(cid)),
-      );
-      if (priorMatters.length > 0) {
-        anyHasPriorMatters = true;
-      }
-
-      if (cid.startsWith('O-')) {
-        const org = organisations.find((o) => o.id === cid);
-        if (!org) continue;
-        const verLabel = resolveLabel(values, org.verificationStatusId).toLowerCase();
-        const relLabel = resolveLabel(values, org.relationshipStatusId).toLowerCase();
-        if (relLabel.includes('active') || relLabel.includes('existing')) {
-          anyHasPriorMatters = true;
-        }
-        const reviewExpired = Boolean(org.reviewDate && org.reviewDate < today);
-        const hasVerifiedMatter = priorMatters.some((m) => m.amlStatus === 'Verified');
-        const hasIncompleteMatter = priorMatters.some(
-          (m) => m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete',
-        );
-        const isCurrent =
-          (verLabel.includes('verified') || verLabel.includes('complete') || hasVerifiedMatter) &&
-          !verLabel.includes('expired') &&
-          !verLabel.includes('pending') &&
-          !verLabel.includes('refresh') &&
-          !reviewExpired &&
-          !hasIncompleteMatter;
-        if (!isCurrent) {
-          allCddCurrent = false;
-          details.push(
-            `${org.legalName}: ${
-              reviewExpired
-                ? `CDD review date expired (${org.reviewDate})`
-                : verLabel
-                  ? `CDD ${resolveLabel(values, org.verificationStatusId)}`
-                  : 'CDD verification not current'
-            }`,
-          );
-        } else {
-          details.push(
-            `${org.legalName}: CDD verified${
-              org.reviewDate ? ` (review due ${org.reviewDate})` : ''
-            }`,
-          );
-        }
-      } else {
-        const person = people.find((p) => p.id === cid);
-        if (!person) continue;
-        const verLabel = resolveLabel(values, person.verificationStatusId).toLowerCase();
-        const relLabel = resolveLabel(values, person.relationshipStatusId).toLowerCase();
-        if (relLabel.includes('active') || relLabel.includes('existing')) {
-          anyHasPriorMatters = true;
-        }
-        const hasVerifiedMatter = priorMatters.some((m) => m.amlStatus === 'Verified');
-        const hasIncompleteMatter = priorMatters.some(
-          (m) => m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete',
-        );
-        const isCurrent =
-          (verLabel.includes('verified') || verLabel.includes('complete') || hasVerifiedMatter) &&
-          !verLabel.includes('expired') &&
-          !verLabel.includes('pending') &&
-          !verLabel.includes('refresh') &&
-          !hasIncompleteMatter;
-        if (!isCurrent) {
-          allCddCurrent = false;
-          details.push(
-            `${personDisplayName(person)}: ${
-              verLabel
-                ? `CDD ${resolveLabel(values, person.verificationStatusId)}`
-                : 'CDD verification not current'
-            }`,
-          );
-        } else {
-          details.push(
-            `${personDisplayName(person)}: CDD verified${
-              person.verifiedAt ? ` (${person.verifiedAt})` : ''
-            }`,
-          );
-        }
-      }
-    }
-
-    if (!anyHasPriorMatters) {
-      return {
-        option: 'New client',
-        summary: 'Pre-filled from client record (no prior matters)',
-      };
-    }
-    if (allCddCurrent) {
-      return {
-        option: 'Existing, CDD current',
-        summary: `Pre-filled from client record (${details.join('; ')})`,
-      };
-    }
-    return {
-      option: 'Existing, CDD needs refresh',
-      summary: `Pre-filled from client record (${details.join('; ')})`,
-    };
-  }, [clientIds, matters, existing?.id, organisations, people, values, today]);
-
-  // Pre-fill Q2.1 when clientIds change
-  const prevClientsKeyRef = useRef<string>(clientIds.join(','));
   useEffect(() => {
-    const nextKey = clientIds.join(',');
-    const changed = prevClientsKeyRef.current !== nextKey;
-    prevClientsKeyRef.current = nextKey;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setClientMatters(initialClientMatters);
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialClientMatters]);
+
+  const clientIdsKey = clientIds.join(',');
+  useEffect(() => {
+    let cancelled = false;
+    if (clientIds.length === 0) {
+      lastRequestedClientMattersKeyRef.current = '';
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setClientMatters([]);
+        setLoadedClientMattersKey('');
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (
+      clientIdsKey === loadedClientMattersKey &&
+      lastRequestedClientMattersKeyRef.current === clientIdsKey
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    lastRequestedClientMattersKeyRef.current = clientIdsKey;
+    const seq = ++clientMattersSeqRef.current;
+    void listClientPriorMattersAction(clientIds)
+      .then((res) => {
+        if (cancelled || seq !== clientMattersSeqRef.current) return;
+        if (isActionDenied(res)) {
+          setClientMatters([]);
+          setLoadedClientMattersKey(clientIdsKey);
+          showToast(
+            res.message || 'Could not load prior client matters for CDD check.',
+          );
+          return;
+        }
+        setClientMatters(res.matters);
+        setLoadedClientMattersKey(clientIdsKey);
+      })
+      .catch(() => {
+        if (cancelled || seq !== clientMattersSeqRef.current) return;
+        setClientMatters([]);
+        setLoadedClientMattersKey(clientIdsKey);
+        showToast('Could not load prior client matters for CDD check.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clientIds, clientIdsKey, loadedClientMattersKey, showToast]);
+
+  const derivedClientRelationshipCdd = useMemo(
+    () =>
+      computeClientRelationshipCdd({
+        clientIds,
+        priorMatters: clientMatters,
+        excludeMatterId: existing?.id,
+        organisations: [...organisations, ...Object.values(pickedClientOrgsById)],
+        people: [...people, ...Object.values(pickedClientPeopleById)],
+        values,
+        today,
+      }),
+    [
+      clientIds,
+      clientMatters,
+      existing?.id,
+      organisations,
+      pickedClientOrgsById,
+      people,
+      pickedClientPeopleById,
+      values,
+      today,
+    ],
+  );
+
+  // Pre-fill Q2.1 when clientIds change, waiting until prior matters finish loading
+  const prevClientsKeyRef = useRef<string>(clientIdsKey);
+  const lastSeenClientIdsKeyRef = useRef<string>(clientIdsKey);
+  const userEditedCddRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastSeenClientIdsKeyRef.current !== clientIdsKey) {
+      lastSeenClientIdsKeyRef.current = clientIdsKey;
+      userEditedCddRef.current = false;
+    }
 
     if (!derivedClientRelationshipCdd.option) return;
+    if (clientIds.length > 0 && loadedClientMattersKey !== clientIdsKey) return;
+
+    const changed = prevClientsKeyRef.current !== clientIdsKey;
+    prevClientsKeyRef.current = clientIdsKey;
+    if (userEditedCddRef.current) return;
+
     setRiskAnswers((prev) => {
       if (!changed && prev.clientRelationshipStatus) return prev;
       if (prev.clientRelationshipStatus === derivedClientRelationshipCdd.option) return prev;
@@ -1924,7 +1931,12 @@ export function MatterFormClient({
         clientRelationshipStatus: derivedClientRelationshipCdd.option,
       };
     });
-  }, [clientIds, derivedClientRelationshipCdd.option]);
+  }, [
+    clientIds.length,
+    clientIdsKey,
+    derivedClientRelationshipCdd.option,
+    loadedClientMattersKey,
+  ]);
 
   const workTypeRiskQuestions = useMemo(
     () =>
@@ -2879,7 +2891,9 @@ export function MatterFormClient({
   }
 
   // Helper to check what fields are missing to convert a Person or Organisation to a Client
-  function getMissingClientFieldsForPerson(p: Person): string[] {
+  function getMissingClientFieldsForPerson(
+    p: Person | EntityPickerPersonSummary,
+  ): string[] {
     const missing: string[] = [];
     if (!p.firstName?.trim()) missing.push('First name');
     if (!p.surname?.trim()) missing.push('Surname');
@@ -2890,7 +2904,9 @@ export function MatterFormClient({
     return missing;
   }
 
-  function getMissingClientFieldsForOrg(o: Organisation): string[] {
+  function getMissingClientFieldsForOrg(
+    o: Organisation | EntityPickerOrganisationSummary,
+  ): string[] {
     const missing: string[] = [];
     if (!o.legalName?.trim()) missing.push('Legal name');
     if (!o.organisationTypeId) missing.push('Organisation type');
@@ -2906,7 +2922,7 @@ export function MatterFormClient({
     return clientIds
       .map((cid) => {
         if (cid.startsWith('O-')) {
-          const org = organisations.find((o) => o.id === cid);
+          const org = organisations.find((o) => o.id === cid) ?? pickedClientOrgsById[cid];
           if (!org) return null;
           const missingClientFields = getMissingClientFieldsForOrg(org);
           return {
@@ -2926,11 +2942,12 @@ export function MatterFormClient({
             person: null,
           };
         }
-        const person = people.find((p) => p.id === cid);
+        const person = people.find((p) => p.id === cid) ?? pickedClientPeopleById[cid];
         if (!person) return null;
         const primaryLink = links.find((l) => l.personId === person.id && l.isCurrent);
         const linkedOrg = primaryLink
-          ? organisations.find((o) => o.id === primaryLink.organisationId)
+          ? organisations.find((o) => o.id === primaryLink.organisationId) ??
+            pickedClientOrgsById[primaryLink.organisationId]
           : null;
         const email =
           person.emails.find((e) => e.isPrimary)?.address ?? person.emails[0]?.address ?? null;
@@ -2943,7 +2960,7 @@ export function MatterFormClient({
           details: [
             person.jobTitle || null,
             email,
-            person.addresses[0]?.town ?? null,
+            person.addresses?.[0]?.town ?? null,
           ]
             .filter(Boolean)
             .join(' · '),
@@ -2953,15 +2970,21 @@ export function MatterFormClient({
         };
       })
       .filter((x): x is NonNullable<typeof x> => Boolean(x));
-  }, [clientIds, organisations, people, links]);
+  }, [clientIds, organisations, pickedClientOrgsById, people, pickedClientPeopleById, links]);
 
   const selectedClientOrg = useMemo(
-    () => organisations.find((o) => o.id === clientId) ?? null,
-    [organisations, clientId],
+    () =>
+      organisations.find((o) => o.id === clientId) ??
+      (clientId ? pickedClientOrgsById[clientId] : undefined) ??
+      null,
+    [organisations, pickedClientOrgsById, clientId],
   );
   const selectedClientPerson = useMemo(
-    () => people.find((p) => p.id === clientId) ?? null,
-    [people, clientId],
+    () =>
+      people.find((p) => p.id === clientId) ??
+      (clientId ? pickedClientPeopleById[clientId] : undefined) ??
+      null,
+    [people, pickedClientPeopleById, clientId],
   );
   const clientDisplayName = useMemo(() => {
     if (selectedClients.length > 1) {
@@ -2973,8 +2996,13 @@ export function MatterFormClient({
   }, [selectedClients, selectedClientOrg, selectedClientPerson]);
 
   const instructingPerson = useMemo(
-    () => (instructingContactId ? people.find((p) => p.id === instructingContactId) ?? null : null),
-    [people, instructingContactId],
+    () =>
+      instructingContactId
+        ? people.find((p) => p.id === instructingContactId) ??
+          pickedClientPeopleById[instructingContactId] ??
+          null
+        : null,
+    [people, pickedClientPeopleById, instructingContactId],
   );
   const instructingDisplayName = useMemo(
     () => (instructingPerson ? personDisplayName(instructingPerson) : ''),
@@ -2983,6 +3011,12 @@ export function MatterFormClient({
 
   // Contacts linked to the selected client orgs (or person clients)
   const clientContacts = useMemo(() => {
+    const allKnownPeople: Array<Person | EntityPickerPersonSummary> = [
+      ...people,
+      ...Object.values(pickedClientPeopleById).filter(
+        (sp) => !people.some((fp) => fp.id === sp.id),
+      ),
+    ];
     const orgIds = clientIds.filter((id) => id.startsWith('O-'));
     if (orgIds.length > 0) {
       const candidatePersonIds = new Set<string>();
@@ -2993,11 +3027,13 @@ export function MatterFormClient({
           }
         }
       }
-      const linked = people.filter((p) => candidatePersonIds.has(p.id));
+      const linked = allKnownPeople.filter((p) => candidatePersonIds.has(p.id));
       if (linked.length > 0) return linked;
     }
-    return people.filter((p) => !p.isEmployee && !p.mergedIntoId && !clientIds.includes(p.id));
-  }, [clientIds, links, people]);
+    return allKnownPeople.filter(
+      (p) => !p.isEmployee && !p.mergedIntoId && !clientIds.includes(p.id),
+    );
+  }, [clientIds, links, people, pickedClientPeopleById]);
 
   // Only show Instructing contact if client(s) are under 18 or are an organisation
   const showInstructingContact = useMemo(() => {
@@ -3031,9 +3067,57 @@ export function MatterFormClient({
   }
 
   function openEditClientModal(recordId: string) {
+    const isOrg = recordId.startsWith('O-');
+    const alreadyHydrated = isOrg
+      ? organisations.some((o) => o.id === recordId)
+      : people.some((p) => p.id === recordId);
     setEditingClientRecordId(recordId);
-    setClientModalView(recordId.startsWith('O-') ? 'edit_org' : 'edit_person');
+    setClientModalView(isOrg ? 'edit_org' : 'edit_person');
     setClientModalOpen(true);
+
+    if (alreadyHydrated) {
+      setHydratingClientEdit(false);
+      return;
+    }
+
+    const seq = ++hydratingClientEditSeqRef.current;
+    setHydratingClientEdit(true);
+    void getEntityRecordForEditAction(isOrg ? 'organisation' : 'person', recordId)
+      .then((res) => {
+        if (seq !== hydratingClientEditSeqRef.current) return;
+        setHydratingClientEdit(false);
+        if (isActionDenied(res)) {
+          showToast(res.message || 'Could not load client record for editing.');
+          setClientModalOpen(false);
+          return;
+        }
+        if (res.recordType === 'organisation' && res.organisation) {
+          const fullOrg = res.organisation;
+          setOrganisations((prev) =>
+            prev.some((o) => o.id === fullOrg.id)
+              ? prev.map((o) => (o.id === fullOrg.id ? fullOrg : o))
+              : [...prev, fullOrg],
+          );
+          return;
+        }
+        if (res.recordType === 'person' && res.person) {
+          const fullPerson = res.person;
+          setPeople((prev) =>
+            prev.some((p) => p.id === fullPerson.id)
+              ? prev.map((p) => (p.id === fullPerson.id ? fullPerson : p))
+              : [...prev, fullPerson],
+          );
+          return;
+        }
+        showToast('Client record could not be loaded.');
+        setClientModalOpen(false);
+      })
+      .catch(() => {
+        if (seq !== hydratingClientEditSeqRef.current) return;
+        setHydratingClientEdit(false);
+        showToast('Could not load client record for editing.');
+        setClientModalOpen(false);
+      });
   }
 
   const hasClientSearchQuery = Boolean(
@@ -3058,8 +3142,8 @@ export function MatterFormClient({
   );
 
   function hydratePickedClients(idsToAdd: string[]) {
-    const newPeople: Person[] = [];
-    const newOrgs: Organisation[] = [];
+    const newPeople: EntityPickerPersonSummary[] = [];
+    const newOrgs: EntityPickerOrganisationSummary[] = [];
     const newLinks: PersonOrganisationLink[] = [];
     const todayIso = toIsoDate(new Date());
 
@@ -3098,17 +3182,17 @@ export function MatterFormClient({
     }
 
     if (newPeople.length > 0) {
-      setPeople((prev) => {
-        const byId = new Map(prev.map((p) => [p.id, p]));
-        for (const p of newPeople) byId.set(p.id, p);
-        return Array.from(byId.values());
+      setPickedClientPeopleById((prev) => {
+        const next = { ...prev };
+        for (const p of newPeople) next[p.id] = p;
+        return next;
       });
     }
     if (newOrgs.length > 0) {
-      setOrganisations((prev) => {
-        const byId = new Map(prev.map((o) => [o.id, o]));
-        for (const o of newOrgs) byId.set(o.id, o);
-        return Array.from(byId.values());
+      setPickedClientOrgsById((prev) => {
+        const next = { ...prev };
+        for (const o of newOrgs) next[o.id] = o;
+        return next;
       });
     }
     if (newLinks.length > 0) {
@@ -3132,12 +3216,12 @@ export function MatterFormClient({
         if (isActionDenied(res) || res.items.length === 0) return;
         const contactPeople = res.items
           .map((item) => item.person)
-          .filter((p): p is Person => Boolean(p));
+          .filter((p): p is EntityPickerPersonSummary => Boolean(p));
         if (contactPeople.length === 0) return;
-        setPeople((prev) => {
-          const byId = new Map(prev.map((p) => [p.id, p]));
-          for (const cp of contactPeople) byId.set(cp.id, cp);
-          return Array.from(byId.values());
+        setPickedClientPeopleById((prev) => {
+          const next = { ...prev };
+          for (const cp of contactPeople) next[cp.id] = cp;
+          return next;
         });
         setLinks((prev) => {
           const byPair = new Set(prev.map((l) => `${l.personId}:${l.organisationId}`));
@@ -3306,7 +3390,9 @@ export function MatterFormClient({
             ? {
                 dateOfBirth: c.person.dateOfBirth || undefined,
                 previousNames:
-                  c.person.otherNames?.map((n) => n.name).join(', ') || undefined,
+                  'otherNames' in c.person && Array.isArray(c.person.otherNames)
+                    ? c.person.otherNames.map((n) => n.name).join(', ') || undefined
+                    : undefined,
                 town: c.person.addresses?.[0]?.town || undefined,
               }
             : {};
@@ -3345,7 +3431,10 @@ export function MatterFormClient({
           ? {
               dateOfBirth: instructingPerson.dateOfBirth || undefined,
               previousNames:
-                instructingPerson.otherNames?.map((n) => n.name).join(', ') || undefined,
+                'otherNames' in instructingPerson &&
+                Array.isArray(instructingPerson.otherNames)
+                  ? instructingPerson.otherNames.map((n) => n.name).join(', ') || undefined
+                  : undefined,
               town: instructingPerson.addresses?.[0]?.town || undefined,
             }
           : undefined,
@@ -3922,7 +4011,7 @@ export function MatterFormClient({
 
   // "Include related entities" per organisation via SQL corporate-group + linked-contacts lookup
   async function handleIncludeRelatedEntities(orgParty: ConflictCheckParty) {
-    if (orgParty.relatedEntitiesIncluded) return;
+    if (orgParty.relatedEntitiesIncluded || !orgParty.linkedRecordId) return;
     const relatedToAdd: ConflictCheckParty[] = [];
     const connectedRelCode =
       orgParty.relationshipCode === 'OP' ||
@@ -3936,74 +4025,96 @@ export function MatterFormClient({
           : 'TP';
     const connectedAlignment = getRelationshipAlignment(connectedRelCode);
 
-    if (orgParty.linkedRecordId) {
+    try {
       const res = await searchEntityPickerAction({
         entityTypes: ['person', 'organisation'],
         query: '',
         corporateGroupOfOrgId: orgParty.linkedRecordId,
         limit: 50,
       });
-      if (!isActionDenied(res)) {
-        for (const item of res.items) {
-          if (item.recordType === 'person' && item.person) {
-            const lp = item.person;
-            const isDir = (lp.jobTitle || '').toLowerCase().includes('director');
-            relatedToAdd.push({
-              id: nextClientItemId(`rel-${lp.id}`),
-              name: personDisplayName(lp),
-              entityType: 'person',
-              role: 'Related party',
-              relationshipCode: connectedRelCode,
-              capacityCodes: [isDir ? 'CAP_DIRECTOR' : 'CAP_REPRESENTATIVE'],
-              connectedToPartyId: orgParty.id,
-              alignment: connectedAlignment,
-              linkedRecordId: lp.id,
-              subtitle: `${lp.jobTitle || 'Contact'} · Connected to ${orgParty.name}`,
-              parentPartyId: orgParty.id,
-            });
-          } else if (item.recordType === 'organisation' && item.organisation) {
-            const groupOrg = item.organisation;
-            const isParent = item.subtitle.toLowerCase().includes('parent');
-            const isSub =
-              item.subtitle.toLowerCase().includes('subsidiary') ||
-              groupOrg.parentOrganisationId === orgParty.linkedRecordId;
-            relatedToAdd.push({
-              id: nextClientItemId(`rel-org-${groupOrg.id}`),
-              name: groupOrg.legalName,
-              entityType: 'organisation',
-              role: 'Related party',
-              relationshipCode: connectedRelCode,
-              capacityCodes: [
-                isParent ? 'CAP_PARENT_COMPANY' : isSub ? 'CAP_SUBSIDIARY' : 'CAP_PARENT_COMPANY',
-              ],
-              connectedToPartyId: orgParty.id,
-              alignment: connectedAlignment,
-              linkedRecordId: groupOrg.id,
-              subtitle: `${item.subtitle} · Connected to ${orgParty.name}`,
-              parentPartyId: orgParty.id,
-            });
-          }
+      if (isActionDenied(res)) {
+        showToast(
+          res.message || `Could not load related entities for ${orgParty.name}.`,
+        );
+        return;
+      }
+
+      for (const item of res.items) {
+        if (item.recordType === 'person' && item.person) {
+          const lp = item.person;
+          const capacityCode =
+            item.corporateRelation === 'director'
+              ? 'CAP_DIRECTOR_OFFICER'
+              : 'CAP_REPRESENTATIVE';
+          relatedToAdd.push({
+            id: nextClientItemId(`rel-${lp.id}`),
+            name: personDisplayName(lp),
+            entityType: 'person',
+            role: 'Related party',
+            relationshipCode: connectedRelCode,
+            capacityCodes: [capacityCode],
+            connectedToPartyId: orgParty.id,
+            alignment: connectedAlignment,
+            linkedRecordId: lp.id,
+            subtitle: `${lp.jobTitle || (item.corporateRelation === 'director' ? 'Director' : 'Contact')} · Connected to ${orgParty.name}`,
+            parentPartyId: orgParty.id,
+          });
+        } else if (item.recordType === 'organisation' && item.organisation) {
+          const groupOrg = item.organisation;
+          const capacityCode =
+            item.corporateRelation === 'parent'
+              ? 'CAP_PARENT_COMPANY'
+              : 'CAP_SUBSIDIARY_GROUP_COMPANY';
+          relatedToAdd.push({
+            id: nextClientItemId(`rel-org-${groupOrg.id}`),
+            name: groupOrg.legalName,
+            entityType: 'organisation',
+            role: 'Related party',
+            relationshipCode: connectedRelCode,
+            capacityCodes: [capacityCode],
+            connectedToPartyId: orgParty.id,
+            alignment: connectedAlignment,
+            linkedRecordId: groupOrg.id,
+            subtitle: `${item.subtitle || 'Group company'} · Connected to ${orgParty.name}`,
+            parentPartyId: orgParty.id,
+          });
         }
       }
+    } catch {
+      showToast(`Could not load related entities for ${orgParty.name}.`);
+      return;
     }
 
-    setOtherParties((prev) => {
-      const updated = prev.map((p) =>
-        p.id === orgParty.id ? { ...p, relatedEntitiesIncluded: true } : p,
-      );
-      const existingNames = new Set(updated.map((p) => p.name.toLowerCase()));
-      const filteredNew = relatedToAdd.filter(
-        (r) => !existingNames.has(r.name.toLowerCase()),
-      );
-      return [...updated, ...filteredNew];
+    const existingParties = [...fixedClientParties, ...otherParties];
+    const existingRecordIds = new Set(
+      existingParties
+        .map((p) => p.linkedRecordId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    const existingNames = new Set(
+      existingParties.map((p) => p.name.trim().toLowerCase()).filter(Boolean),
+    );
+    const filteredNew = relatedToAdd.filter((r) => {
+      if (r.linkedRecordId && existingRecordIds.has(r.linkedRecordId)) return false;
+      if (existingNames.has(r.name.trim().toLowerCase())) return false;
+      existingNames.add(r.name.trim().toLowerCase());
+      if (r.linkedRecordId) existingRecordIds.add(r.linkedRecordId);
+      return true;
     });
+
+    setOtherParties((prev) => [
+      ...prev.map((p) =>
+        p.id === orgParty.id ? { ...p, relatedEntitiesIncluded: true } : p,
+      ),
+      ...filteredNew,
+    ]);
 
     if (hasRunSearch) {
       setPartiesChangedSinceSearch(true);
     }
     showToast(
-      `Added ${relatedToAdd.length} related ${
-        relatedToAdd.length === 1 ? 'entity' : 'entities'
+      `Added ${filteredNew.length} related ${
+        filteredNew.length === 1 ? 'entity' : 'entities'
       } for ${orgParty.name}`,
     );
   }
@@ -9332,12 +9443,15 @@ export function MatterFormClient({
                                       role="radio"
                                       aria-checked={isSelected}
                                       disabled={isReadOnlyFeeEarner}
-                                      onClick={() =>
+                                      onClick={() => {
+                                        if (q.id === 'clientRelationshipStatus') {
+                                          userEditedCddRef.current = true;
+                                        }
                                         setRiskAnswers((prev) => ({
                                           ...prev,
                                           [q.id]: opt.label,
-                                        }))
-                                      }
+                                        }));
+                                      }}
                                       style={{
                                         padding: '6px 14px',
                                         borderRadius: 999,
@@ -9774,12 +9888,15 @@ export function MatterFormClient({
                                       role="radio"
                                       aria-checked={isSelected}
                                       disabled={isReadOnlyFeeEarner}
-                                      onClick={() =>
+                                      onClick={() => {
+                                        if (q.id === 'clientRelationshipStatus') {
+                                          userEditedCddRef.current = true;
+                                        }
                                         setRiskAnswers((prev) => ({
                                           ...prev,
                                           [q.id]: opt.label,
-                                        }))
-                                      }
+                                        }));
+                                      }}
                                       style={{
                                         padding: '6px 14px',
                                         borderRadius: 999,
@@ -10207,7 +10324,8 @@ export function MatterFormClient({
 
                                 {pt.entityType === 'organisation' &&
                                 !pt.isClientFixed &&
-                                !pt.parentPartyId ? (
+                                !pt.parentPartyId &&
+                                Boolean(pt.linkedRecordId) ? (
                                   pt.relatedEntitiesIncluded ? (
                                     <span
                                       style={{
@@ -12600,6 +12718,11 @@ export function MatterFormClient({
               </div>
             ) : clientModalView === 'new_person' || clientModalView === 'edit_person' ? (
               <div style={{ padding: '20px 24px', maxHeight: '80vh', overflowY: 'auto' }}>
+                {hydratingClientEdit && clientModalView === 'edit_person' ? (
+                  <div className="muted" style={{ padding: '24px 0' }}>
+                    Loading full client record…
+                  </div>
+                ) : (
                 <PersonFormClient
                   embeddedInModal
                   highlightMissingClientFields={clientModalView === 'edit_person'}
@@ -12613,7 +12736,7 @@ export function MatterFormClient({
                   initialLinkOrgId={matchedOrgForNewPerson}
                   allPeople={people}
                   organisations={organisations}
-                  matters={matters}
+                  matters={EMPTY_FULL_MATTERS}
                   enquiries={enquiries}
                   employees={employees}
                   lists={lists}
@@ -12675,9 +12798,15 @@ export function MatterFormClient({
                     );
                   }}
                 />
+                )}
               </div>
             ) : (
               <div style={{ padding: '20px 24px', maxHeight: '80vh', overflowY: 'auto' }}>
+                {hydratingClientEdit && clientModalView === 'edit_org' ? (
+                  <div className="muted" style={{ padding: '24px 0' }}>
+                    Loading full client record…
+                  </div>
+                ) : (
                 <OrganisationFormClient
                   embeddedInModal
                   highlightMissingClientFields={clientModalView === 'edit_org'}
@@ -12692,7 +12821,7 @@ export function MatterFormClient({
                   }
                   allOrganisations={organisations}
                   allPeople={people}
-                  matters={matters}
+                  matters={EMPTY_FULL_MATTERS}
                   enquiries={enquiries}
                   employees={employees}
                   lists={lists}
@@ -12721,6 +12850,7 @@ export function MatterFormClient({
                     );
                   }}
                 />
+                )}
               </div>
             )}
           </div>
@@ -13092,7 +13222,7 @@ export function MatterFormClient({
                       initialSurname={initSurname}
                       allPeople={people}
                       organisations={organisations}
-                      matters={matters}
+                      matters={EMPTY_FULL_MATTERS}
                       enquiries={enquiries}
                       employees={employees}
                       lists={lists}
@@ -13198,7 +13328,7 @@ export function MatterFormClient({
                     initialCompanyNumber={newPartyIdentifiers.companyNumber}
                     allOrganisations={organisations}
                     allPeople={people}
-                    matters={matters}
+                    matters={EMPTY_FULL_MATTERS}
                     enquiries={enquiries}
                     employees={employees}
                     lists={lists}

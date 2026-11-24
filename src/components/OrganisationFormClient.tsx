@@ -431,7 +431,7 @@ export function OrganisationFormClient({
     addresses: [registeredAddress, correspondenceAddress].filter(
       (a): a is Address => Boolean(a && (a.postcode.trim() || a.line1.trim())),
     ),
-  });
+  }, { enableConflicts: false });
 
   // Live duplicate check while typing
   const liveDuplicates = useMemo(

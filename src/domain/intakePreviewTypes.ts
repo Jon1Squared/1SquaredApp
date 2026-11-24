@@ -6,7 +6,15 @@
 import type { DuplicateMatch, DuplicateReason } from './duplicates';
 import type { ConflictHit } from './enquiries';
 import type { AddressLike } from './normalise';
-import type { Enquiry, Matter, Organisation, Person, Quote } from './types';
+import type {
+  Address,
+  Email,
+  Enquiry,
+  Matter,
+  Organisation,
+  Person,
+  Phone,
+} from './types';
 
 export type IntakePreviewKind =
   | 'person'
@@ -95,6 +103,75 @@ export interface EntityPickerSearchInput {
   };
 }
 
+export type EntityPickerCorporateRelation =
+  | 'parent'
+  | 'subsidiary'
+  | 'group'
+  | 'director'
+  | 'contact';
+
+export interface EntityPickerMatterSummary {
+  readonly id: string;
+  readonly matterNumber: string;
+  readonly title: string;
+  readonly clientId: string;
+  readonly matterStatusId: Matter['matterStatusId'];
+  readonly leadFeeEarnerId: Matter['leadFeeEarnerId'];
+  readonly supervisingPartnerId: Matter['supervisingPartnerId'];
+  readonly responsiblePartnerId: Matter['responsiblePartnerId'];
+  readonly teamMemberIds: readonly string[];
+}
+
+export interface EntityPickerEnquirySummary {
+  readonly id: string;
+  readonly reference: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly callingOnBehalfOf: string;
+  readonly summary: string;
+  readonly notes: string;
+  readonly email: string;
+  readonly phone: string;
+  readonly linkedPersonId?: string | null;
+  readonly linkedOrganisationId?: string | null;
+  readonly practiceAreaId?: string;
+  readonly workTypeSubcategoryId?: string | null;
+  readonly assignedToId?: string | null;
+  readonly status: Enquiry['status'];
+}
+
+export interface EntityPickerPersonSummary {
+  readonly id: string;
+  readonly firstName: string;
+  readonly surname: string;
+  readonly preferredName?: string | null;
+  readonly jobTitle?: string;
+  readonly dateOfBirth?: string | null;
+  readonly verificationStatusId?: string | null;
+  readonly relationshipStatusId?: string | null;
+  readonly verifiedAt?: string | null;
+  readonly isEmployee?: boolean;
+  readonly mergedIntoId?: string | null;
+  readonly emails: readonly Email[];
+  readonly phones: readonly Phone[];
+  readonly addresses?: readonly Pick<Address, 'town'>[];
+}
+
+export interface EntityPickerOrganisationSummary {
+  readonly id: string;
+  readonly legalName: string;
+  readonly organisationTypeId?: string | null;
+  readonly companyNumber?: string;
+  readonly generalEmail?: string;
+  readonly mainPhone?: string;
+  readonly parentOrganisationId?: string | null;
+  readonly verificationStatusId?: string | null;
+  readonly relationshipStatusId?: string | null;
+  readonly reviewDate?: string | null;
+  readonly mergedIntoId?: string | null;
+  readonly registeredAddress?: Pick<Address, 'line1' | 'town' | 'postcode'> | null;
+}
+
 export interface EntityPickerOption {
   readonly id: string;
   readonly recordType: EntityPickerType;
@@ -104,12 +181,12 @@ export interface EntityPickerOption {
   readonly href: string;
   readonly matchNote?: 'similar spelling' | 'sounds like' | null;
   readonly rank?: number;
-  readonly person?: Person;
-  readonly organisation?: Organisation;
-  readonly matter?: Matter;
-  readonly enquiry?: Enquiry;
-  readonly quote?: Quote;
-  readonly linkedOrgs?: Organisation[];
+  readonly corporateRelation?: EntityPickerCorporateRelation;
+  readonly person?: EntityPickerPersonSummary;
+  readonly organisation?: EntityPickerOrganisationSummary;
+  readonly matterSummary?: EntityPickerMatterSummary;
+  readonly enquiry?: EntityPickerEnquirySummary;
+  readonly linkedOrgs?: EntityPickerOrganisationSummary[];
 }
 
 export interface EntityPickerSearchResult {

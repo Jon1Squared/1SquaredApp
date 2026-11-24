@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   addNoteAction,
   deleteLinkAction,
   dismissDuplicateAction,
+  getEntityRecordForEditAction,
   mergeRecordsAction,
   saveLinkAction,
 } from '@/app/actions';
@@ -70,53 +71,108 @@ export function PossibleDuplicateBanner({
       query: mergeSearchQuery,
       excludeIds: [record.id],
       excludeDemo: true,
+      nonEmployeesOnly: record.recordType === 'person',
       limit: 25,
     },
     { enabled: mergeOpen && !recordIsEmployeeOrLeaver },
   );
 
-  const remoteMergeRecords = useMemo<AnyRecord[]>(
-    () =>
-      remoteMergePickerItems
-        .map((item) => item.person ?? item.organisation ?? null)
-        .filter(
-          (r): r is Person | Organisation =>
-            Boolean(
-              r &&
-                r.id !== record.id &&
-                !r.mergedIntoId &&
-                !isEmployeeOrLeaverRecord(r),
-            ),
-        ),
-    [remoteMergePickerItems, record.id],
-  );
+  const [hydratedSurvivorsById, setHydratedSurvivorsById] = useState<
+    Record<string, AnyRecord>
+  >({});
+  const [hydratingSurvivor, setHydratingSurvivor] = useState(false);
+  const hydrateSeqRef = useRef(0);
 
-  const selectableTargets = useMemo(() => {
-    const byId = new Map<string, AnyRecord>();
+  const selectableTargetOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; displayLabel: string; full?: AnyRecord }>();
     for (const r of allSameType) {
       if (r.id !== record.id && !r.mergedIntoId && !isEmployeeOrLeaverRecord(r)) {
-        byId.set(r.id, r);
+        byId.set(r.id, {
+          id: r.id,
+          displayLabel: `${recordDisplayName(r)} (${r.id})`,
+          full: r,
+        });
       }
     }
-    for (const r of remoteMergeRecords) {
-      if (!byId.has(r.id)) {
-        byId.set(r.id, r);
-      }
+    for (const item of remoteMergePickerItems) {
+      if (item.id === record.id || byId.has(item.id)) continue;
+      if (item.recordType === 'person' && item.person?.isEmployee) continue;
+      byId.set(item.id, {
+        id: item.id,
+        displayLabel: `${item.label} (${item.id})`,
+        full: hydratedSurvivorsById[item.id],
+      });
     }
     return Array.from(byId.values());
-  }, [allSameType, remoteMergeRecords, record.id]);
+  }, [allSameType, remoteMergePickerItems, hydratedSurvivorsById, record.id]);
   const [survivorId, setSurvivorId] = useState<string>(
-    mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
+    mergeableCandidates[0]?.id ?? selectableTargetOptions[0]?.id ?? '',
   );
   const [busy, setBusy] = useState(false);
 
+  const fullRecordsById = useMemo(() => {
+    const map = new Map<string, AnyRecord>();
+    for (const c of mergeableCandidates) map.set(c.id, c);
+    for (const r of allSameType) {
+      if (!r.mergedIntoId && !isEmployeeOrLeaverRecord(r)) map.set(r.id, r);
+    }
+    for (const [id, rec] of Object.entries(hydratedSurvivorsById)) {
+      map.set(id, rec);
+    }
+    return map;
+  }, [mergeableCandidates, allSameType, hydratedSurvivorsById]);
+
+  const effectiveSurvivorId =
+    survivorId || mergeableCandidates[0]?.id || selectableTargetOptions[0]?.id || '';
   const selectedSurvivor = useMemo(
     () =>
-      selectableTargets.find((r) => r.id === survivorId) ??
+      (effectiveSurvivorId ? fullRecordsById.get(effectiveSurvivorId) : null) ??
       mergeableCandidates[0] ??
       null,
-    [selectableTargets, mergeableCandidates, survivorId],
+    [effectiveSurvivorId, fullRecordsById, mergeableCandidates],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!mergeOpen || !effectiveSurvivorId || fullRecordsById.has(effectiveSurvivorId)) {
+      queueMicrotask(() => {
+        if (!cancelled) setHydratingSurvivor(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const seq = ++hydrateSeqRef.current;
+    queueMicrotask(() => {
+      if (!cancelled) setHydratingSurvivor(true);
+    });
+    const entityKind =
+      record.recordType === 'organisation' ? 'organisation' : 'person';
+    void getEntityRecordForEditAction(entityKind, effectiveSurvivorId)
+      .then((res) => {
+        if (cancelled || seq !== hydrateSeqRef.current) return;
+        setHydratingSurvivor(false);
+        if (isActionDenied(res)) {
+          showToast(res.message);
+          return;
+        }
+        const hydrated: AnyRecord | null =
+          res.recordType === 'organisation' ? res.organisation : res.person;
+        if (hydrated && !hydrated.mergedIntoId && !isEmployeeOrLeaverRecord(hydrated)) {
+          setHydratedSurvivorsById((prev) => ({ ...prev, [hydrated.id]: hydrated }));
+        }
+      })
+      .catch(() => {
+        if (cancelled || seq !== hydrateSeqRef.current) return;
+        setHydratingSurvivor(false);
+        showToast('Could not load surviving record details for merge preview.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mergeOpen, effectiveSurvivorId, fullRecordsById, record.recordType, showToast]);
 
   const preview = useMemo(() => {
     if (!selectedSurvivor) return null;
@@ -197,10 +253,10 @@ export function PossibleDuplicateBanner({
               onClick={() => {
                 if (
                   !survivorId &&
-                  (mergeableCandidates[0]?.id || selectableTargets[0]?.id)
+                  (mergeableCandidates[0]?.id || selectableTargetOptions[0]?.id)
                 ) {
                   setSurvivorId(
-                    mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
+                    mergeableCandidates[0]?.id ?? selectableTargetOptions[0]?.id ?? '',
                   );
                 }
                 setMergeOpen(true);
@@ -249,16 +305,22 @@ export function PossibleDuplicateBanner({
                   </optgroup>
                 ) : null}
                 <optgroup label="All records">
-                  {selectableTargets.map((t) => (
+                  {selectableTargetOptions.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {recordDisplayName(t)} ({t.id})
+                      {t.displayLabel}
                     </option>
                   ))}
                 </optgroup>
               </select>
             </div>
 
-            {preview ? (
+            {hydratingSurvivor ? (
+              <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: 'var(--color-input-bg)' }}>
+                <div className="muted" style={{ fontSize: '0.92rem' }}>
+                  Loading surviving record preview…
+                </div>
+              </div>
+            ) : preview ? (
               <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: 'var(--color-input-bg)' }}>
                 <div className="section-label">Fields to copy across</div>
                 <div style={{ marginTop: 6, fontSize: '0.92rem' }}>
@@ -280,7 +342,7 @@ export function PossibleDuplicateBanner({
               <button
                 type="button"
                 className="btn btn--primary"
-                disabled={!selectedSurvivor || busy}
+                disabled={!selectedSurvivor || busy || hydratingSurvivor}
                 onClick={onConfirmMerge}
               >
                 Confirm merge

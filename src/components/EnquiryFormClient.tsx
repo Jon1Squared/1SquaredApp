@@ -58,6 +58,10 @@ import { hasMinThreeCharToken } from '@/domain/normalise';
 import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
 import { isTaskOpen, resolveRoutedTeam } from '@/domain/tasks';
 import type {
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from '@/domain/intakePreviewTypes';
+import type {
   Address,
   AuditEntry,
   ChoiceValue,
@@ -604,8 +608,12 @@ export function EnquiryFormClient({
   }, [practiceAreaId, teams, enquirySettings?.fallbackTeamId]);
 
   // Cache records linked or selected during editing so badges stay hydrated
-  const [selectedPeopleById, setSelectedPeopleById] = useState<Record<string, Person>>({});
-  const [selectedOrgsById, setSelectedOrgsById] = useState<Record<string, Organisation>>({});
+  const [selectedPeopleById, setSelectedPeopleById] = useState<
+    Record<string, Person | EntityPickerPersonSummary>
+  >({});
+  const [selectedOrgsById, setSelectedOrgsById] = useState<
+    Record<string, Organisation | EntityPickerOrganisationSummary>
+  >({});
 
   // Live preview of matching entities and preliminary conflicts via debounced C2 server action
   const useRecordedSnapshot =
@@ -633,7 +641,7 @@ export function EnquiryFormClient({
   const livePossibleConflicts = liveIntakePreview.possibleConflicts;
 
   const peopleById = useMemo(() => {
-    const map = new Map<string, Person>();
+    const map = new Map<string, Person | EntityPickerPersonSummary>();
     for (const p of people) map.set(p.id, p);
     for (const m of liveEntityMatches.people) map.set(m.person.id, m.person);
     for (const p of Object.values(selectedPeopleById)) map.set(p.id, p);
@@ -641,7 +649,7 @@ export function EnquiryFormClient({
   }, [people, liveEntityMatches.people, selectedPeopleById]);
 
   const orgsById = useMemo(() => {
-    const map = new Map<string, Organisation>();
+    const map = new Map<string, Organisation | EntityPickerOrganisationSummary>();
     for (const o of organisations) map.set(o.id, o);
     for (const m of liveEntityMatches.organisations) {
       map.set(m.organisation.id, m.organisation);
@@ -847,7 +855,7 @@ export function EnquiryFormClient({
     showToast(`Filled address: ${formatted}`);
   };
 
-  const linkExistingPerson = (p: Person) => {
+  const linkExistingPerson = (p: Person | EntityPickerPersonSummary) => {
     setSelectedPeopleById((prev) => ({ ...prev, [p.id]: p }));
     if (!p.id.startsWith('ENQ-')) {
       setLinkedPersonId(p.id);
@@ -858,15 +866,16 @@ export function EnquiryFormClient({
     const pPhone = primaryPhone(p);
     if (!email.trim() && pEmail) setEmail(pEmail);
     if (!phone.trim() && pPhone) setPhone(pPhone);
-    if (!line1.trim() && p.addresses[0]) {
-      setLine1(p.addresses[0].line1);
-      setLine2(p.addresses[0].line2);
-      setTown(p.addresses[0].town);
-      setCounty(p.addresses[0].county);
-      setPostcode(p.addresses[0].postcode);
-      setCountryId(p.addresses[0].countryId);
+    const firstAddr = p.addresses?.[0];
+    if (!line1.trim() && firstAddr && 'line1' in firstAddr) {
+      setLine1(firstAddr.line1);
+      setLine2(firstAddr.line2);
+      setTown(firstAddr.town);
+      setCounty(firstAddr.county);
+      setPostcode(firstAddr.postcode);
+      setCountryId(firstAddr.countryId);
       setAddressUserTyping(false);
-      setAddressLookupQuery(formatSingleLineAddress(p.addresses[0]));
+      setAddressLookupQuery(formatSingleLineAddress(firstAddr));
     }
     showToast(
       p.id.startsWith('ENQ-')
@@ -875,19 +884,28 @@ export function EnquiryFormClient({
     );
   };
 
-  const linkExistingOrg = (o: Organisation) => {
+  const linkExistingOrg = (o: Organisation | EntityPickerOrganisationSummary) => {
     setSelectedOrgsById((prev) => ({ ...prev, [o.id]: o }));
     setLinkedOrganisationId(o.id);
     if (!callingOnBehalfOf.trim()) setCallingOnBehalfOf(o.legalName);
-    if (!line1.trim() && o.registeredAddress) {
-      setLine1(o.registeredAddress.line1);
-      setLine2(o.registeredAddress.line2);
-      setTown(o.registeredAddress.town);
-      setCounty(o.registeredAddress.county);
-      setPostcode(o.registeredAddress.postcode);
-      setCountryId(o.registeredAddress.countryId);
+    const regAddr = o.registeredAddress;
+    if (!line1.trim() && regAddr) {
+      if ('line1' in regAddr && regAddr.line1) setLine1(regAddr.line1);
+      if ('line2' in regAddr) setLine2(regAddr.line2);
+      if ('town' in regAddr && regAddr.town) setTown(regAddr.town);
+      if ('county' in regAddr) setCounty(regAddr.county);
+      if ('postcode' in regAddr && regAddr.postcode) setPostcode(regAddr.postcode);
+      if ('countryId' in regAddr) setCountryId(regAddr.countryId);
       setAddressUserTyping(false);
-      setAddressLookupQuery(formatSingleLineAddress(o.registeredAddress));
+      setAddressLookupQuery(
+        formatSingleLineAddress({
+          line1: regAddr.line1 ?? '',
+          line2: 'line2' in regAddr ? regAddr.line2 : '',
+          town: regAddr.town ?? '',
+          county: 'county' in regAddr ? regAddr.county : '',
+          postcode: regAddr.postcode ?? '',
+        }),
+      );
     }
     showToast(`Linked enquiry to ${o.legalName} (${o.id})`);
   };

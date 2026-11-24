@@ -38,6 +38,11 @@ import {
   resolveWorkTypeFeeArrangementSettings,
 } from '@/domain/workTypeConfig';
 import type {
+  EntityPickerEnquirySummary,
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from '@/domain/intakePreviewTypes';
+import type {
   ChoiceValue,
   Enquiry,
   Matter,
@@ -471,9 +476,15 @@ export function QuoteFormClient({
   );
 
   // Local hydrated cache for records picked via C2 actions
-  const [selectedPeopleById, setSelectedPeopleById] = useState<Record<string, Person>>({});
-  const [selectedOrgsById, setSelectedOrgsById] = useState<Record<string, Organisation>>({});
-  const [selectedEnquiriesById, setSelectedEnquiriesById] = useState<Record<string, Enquiry>>({});
+  const [selectedPeopleById, setSelectedPeopleById] = useState<
+    Record<string, Person | EntityPickerPersonSummary>
+  >({});
+  const [selectedOrgsById, setSelectedOrgsById] = useState<
+    Record<string, Organisation | EntityPickerOrganisationSummary>
+  >({});
+  const [selectedEnquiriesById, setSelectedEnquiriesById] = useState<
+    Record<string, Enquiry | EntityPickerEnquirySummary>
+  >({});
 
   // Same contact search as "Add client" on the New Matter screen via debounced C2 SQL picker
   const hasContactSearchQuery = Boolean(
@@ -534,7 +545,7 @@ export function QuoteFormClient({
   const possibleConflicts = quoteIntakePreview.possibleConflicts;
 
   const peopleById = useMemo(() => {
-    const map = new Map<string, Person>();
+    const map = new Map<string, Person | EntityPickerPersonSummary>();
     for (const p of people) map.set(p.id, p);
     for (const m of liveEntityMatches.people) map.set(m.person.id, m.person);
     for (const p of Object.values(selectedPeopleById)) map.set(p.id, p);
@@ -542,7 +553,7 @@ export function QuoteFormClient({
   }, [people, liveEntityMatches.people, selectedPeopleById]);
 
   const orgsById = useMemo(() => {
-    const map = new Map<string, Organisation>();
+    const map = new Map<string, Organisation | EntityPickerOrganisationSummary>();
     for (const o of organisations) map.set(o.id, o);
     for (const m of liveEntityMatches.organisations) {
       map.set(m.organisation.id, m.organisation);
@@ -561,7 +572,7 @@ export function QuoteFormClient({
   );
 
   const enquiriesById = useMemo(() => {
-    const map = new Map<string, Enquiry>();
+    const map = new Map<string, Enquiry | EntityPickerEnquirySummary>();
     if (initialEnquiry) map.set(initialEnquiry.id, initialEnquiry);
     for (const e of enquiries) map.set(e.id, e);
     for (const e of activeEnquiriesForLinkedContact) map.set(e.id, e);
@@ -671,8 +682,8 @@ export function QuoteFormClient({
   const applyAutoEnquirySelectionForContact = (
     pId: string | null,
     oId: string | null,
-    personObj?: Person | null,
-    orgObj?: Organisation | null,
+    personObj?: Person | EntityPickerPersonSummary | null,
+    orgObj?: Organisation | EntityPickerOrganisationSummary | null,
   ) => {
     void previewIntakeDuplicatesAndConflictsAction({
       kind: 'quote',
@@ -699,7 +710,10 @@ export function QuoteFormClient({
     });
   };
 
-  const linkExistingPerson = (p: Person, linkedOrgsForPerson?: Organisation[]) => {
+  const linkExistingPerson = (
+    p: Person | EntityPickerPersonSummary,
+    linkedOrgsForPerson?: EntityPickerOrganisationSummary[] | Organisation[],
+  ) => {
     setSelectedPeopleById((prev) => ({ ...prev, [p.id]: p }));
     setLinkedPersonId(p.id);
     setFirstName(p.firstName);
@@ -709,12 +723,12 @@ export function QuoteFormClient({
     if (pEmail) setProspectEmail(pEmail);
     if (pPhone) setProspectPhone(pPhone);
 
-    const orgsList =
+    const orgsList: Array<Organisation | EntityPickerOrganisationSummary> =
       linkedOrgsForPerson ??
       links
         .filter((l) => l.personId === p.id && l.isCurrent)
         .map((l) => orgsById.get(l.organisationId))
-        .filter((o): o is Organisation => Boolean(o));
+        .filter((o): o is Organisation | EntityPickerOrganisationSummary => Boolean(o));
     if (orgsList.length > 0) {
       setSelectedOrgsById((prev) => {
         const next = { ...prev };
@@ -724,9 +738,8 @@ export function QuoteFormClient({
     }
 
     let nextOrgId = linkedOrganisationId;
-    let nextOrgObj: Organisation | null = linkedOrganisationId
-      ? orgsById.get(linkedOrganisationId) ?? null
-      : null;
+    let nextOrgObj: Organisation | EntityPickerOrganisationSummary | null =
+      linkedOrganisationId ? orgsById.get(linkedOrganisationId) ?? null : null;
 
     if (orgsList.length > 0 && !prospectOrganisationName.trim()) {
       setProspectOrganisationName(orgsList[0].legalName);
@@ -750,7 +763,7 @@ export function QuoteFormClient({
     showToast(`Linked quote to ${personDisplayName(p)} (${p.id})`);
   };
 
-  const linkExistingOrg = (o: Organisation) => {
+  const linkExistingOrg = (o: Organisation | EntityPickerOrganisationSummary) => {
     setSelectedOrgsById((prev) => ({ ...prev, [o.id]: o }));
     setLinkedOrganisationId(o.id);
     setProspectOrganisationName(o.legalName);
@@ -766,14 +779,14 @@ export function QuoteFormClient({
     const q = enquirySearch.trim().toLowerCase();
     const remoteEnquiries = enquiryPickerItems
       .map((item) => item.enquiry)
-      .filter((e): e is Enquiry => Boolean(e));
+      .filter((e): e is EntityPickerEnquirySummary => Boolean(e));
     const pool =
       activeEnquiriesForLinkedContact.length > 0 && !showAllEnquiriesInDropdown && !q
         ? activeEnquiriesForLinkedContact
         : Array.from(enquiriesById.values());
     const mergedPool = q
       ? Array.from(
-          new Map(
+          new Map<string, Enquiry | EntityPickerEnquirySummary>(
             [...remoteEnquiries, ...pool].map((e) => [e.id, e]),
           ).values(),
         )

@@ -90,6 +90,18 @@ export const ACTION_PERMISSIONS = {
     reason:
       'Authenticated form entity pickers execute read-only SQL searches enforcing quote:view, restricted matter / personal Draft SQL visibility predicates, and stripping all HR/employment/payroll/override/Entra fields.',
   },
+  listClientPriorMattersAction: {
+    kind: 'permission',
+    key: { anyOf: ['matter:create', 'matter:edit'] },
+    enforcedBy: 'action',
+  },
+  getEntityRecordForEditAction: {
+    kind: 'permission',
+    key: {
+      anyOf: ['contact:edit', 'matter:create', 'matter:edit', 'employee:edit_core'],
+    },
+    enforcedBy: 'action',
+  },
   getMyNotificationPreferencesAction: {
     kind: 'permission',
     key: 'notification:view_own',

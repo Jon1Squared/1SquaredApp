@@ -36,6 +36,7 @@ export default async function MatterProfilePage({
           people={data.people}
           organisations={data.organisations}
           links={data.links}
+          matters={data.clientMatters}
           lists={shell.lists}
           values={shell.values}
           customFields={shell.customFields}

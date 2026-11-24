@@ -6,6 +6,7 @@ import {
   CORE_REQUIRED_SCHEMA_VERSION,
   getGlobalTenantPostgresPoolManager,
   resolveTenantFromVerifiedToken,
+  TenantCatalogueRepository,
   TenantIntakeQuoteRepository,
   TenantKeyDateRepository,
   TenantMatterRepository,
@@ -27,13 +28,17 @@ import {
   verifySignedEntraSessionCookie,
 } from '@/server/entraAuth';
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
+import { isActionDenied } from '@/domain/actionResult';
 import {
+  getEntityRecordForEditRecord,
   previewIntakeDuplicatesAndConflictsRecord,
+  resetConflictPreviewRateLimiterForTests,
   runMatterConflictSearchRecord,
   saveEnquiryRecord,
   savePersonRecord,
   searchEntityPickerRecord,
 } from '@/server/services';
+import { getPlatformTelemetryRecorder } from '@/server/telemetry';
 import {
   loadEnquiriesListPageData,
   loadEnquiryDetailPageData,
@@ -704,6 +709,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           },
           'P-000002',
         );
+        if (isActionDenied(preview)) throw new Error(preview.error);
 
         const expectedRedactedId = `restricted-${redactRecordId(env.tenantAlpha, env.alphaStaffMatter.id)}`;
         const redactedStaffHit = preview.possibleConflicts.find(
@@ -800,18 +806,21 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           { entityTypes: ['matter'], query: 'Confidential Staff Employment Matter Alpha' },
           'P-000002',
         );
+        if (isActionDenied(hiddenMatterPicker)) throw new Error(hiddenMatterPicker.error);
         expect(hiddenMatterPicker.items).toEqual([]);
 
         const hiddenDraftPicker = await searchEntityPickerRecord(
           { entityTypes: ['enquiry'], query: 'PrivateDraft' },
           'P-000002',
         );
+        if (isActionDenied(hiddenDraftPicker)) throw new Error(hiddenDraftPicker.error);
         expect(hiddenDraftPicker.items).toEqual([]);
 
         const hiddenQuotePicker = await searchEntityPickerRecord(
           { entityTypes: ['quote'], query: 'Hidden Staff Matter Quote' },
           'P-000002',
         );
+        if (isActionDenied(hiddenQuotePicker)) throw new Error(hiddenQuotePicker.error);
         expect(hiddenQuotePicker.items).toEqual([]);
 
         const bravoCrossTenantPicker = await searchEntityPickerRecord(
@@ -821,15 +830,17 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           },
           'P-000002',
         );
+        if (isActionDenied(bravoCrossTenantPicker)) throw new Error(bravoCrossTenantPicker.error);
         expect(bravoCrossTenantPicker.items).toEqual([]);
 
         const personPicker = await searchEntityPickerRecord(
           { entityTypes: ['person'], query: 'Rhian' },
           'P-000002',
         );
+        if (isActionDenied(personPicker)) throw new Error(personPicker.error);
         expect(personPicker.items.length).toBeGreaterThan(0);
         for (const item of personPicker.items) {
-          expect(item.person?.employment).toBeUndefined();
+          expect((item.person as { employment?: unknown } | undefined)?.employment).toBeUndefined();
           expect((item.person as { permissionOverrides?: unknown } | undefined)?.permissionOverrides).toBeUndefined();
           expect((item.person as { entraObjectId?: unknown } | undefined)?.entraObjectId).toBeUndefined();
         }
@@ -846,6 +857,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           },
           'P-000001',
         );
+        if (isActionDenied(partnerPreview)) throw new Error(partnerPreview.error);
         const unredacted = partnerPreview.possibleConflicts.find(
           (c) =>
             c.recordId === env.alphaStaffClientOrg.id ||
@@ -925,6 +937,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           { entityTypes: ['matter'], query: 'ALPH-R696-MRG' },
           'P-000002',
         );
+        if (isActionDenied(mergedNumPicker)) throw new Error(mergedNumPicker.error);
         expect(mergedNumPicker.items.some((i) => i.id === mergedMatter.id)).toBe(false);
 
         // 5b. Own-matters list query (includeMerged: false) excludes merged matter
@@ -949,6 +962,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           { entityTypes: ['matter'], query: 'UniqueR696VisibleDesc' },
           'P-000002',
         );
+        if (isActionDenied(shortDescPicker)) throw new Error(shortDescPicker.error);
         expect(shortDescPicker.items.some((i) => i.id === visibleShortDescMatter.id)).toBe(true);
       });
     },
@@ -1362,6 +1376,560 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         { viewerId: 'P-000001', hasRestrictedMatterAccess: false },
       );
       expect(partnerReminders.map((r) => r.keyDateId)).toEqual([draftEnqKd.id]);
+    },
+    45_000,
+  );
+
+  it(
+    '9. R697: Home finance panels load from configured panels/cards for admin, support, and custom roles while summary-only roles stay summary-only',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const cfgAlpha = getActiveTenantConfiguration();
+      const seed = createSeedStore(new Date('2026-11-01T10:00:00Z'));
+      await importFirmStoreModulesToPostgres({
+        ctx: env.ctxAlpha,
+        tenantConfig: cfgAlpha,
+        store: structuredClone(seed),
+        modules: ['pms'],
+        clearFirst: false,
+      });
+
+      const partyRepo = new TenantPartyRepository();
+      const catRepo = new TenantCatalogueRepository();
+
+      // Grant support persona P-000010 (legal_secretary) matter finance viewing permission as a client firm might
+      const supportPerson = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000010');
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(supportPerson!),
+        permissionOverrides: {
+          grant: ['finance:view_matter'],
+          revoke: [],
+        },
+      });
+
+      // Add a custom role with aged_debt_by_age_band to home_pages config
+      const nextHomeConfig = structuredClone(seed.homePagesConfig);
+      nextHomeConfig.roles.push({
+        key: 'custom_debt_analyst',
+        label: 'Custom Debt Analyst',
+        shortLabel: 'Debt analyst',
+        purpose: 'Monitors aged debt by band.',
+        designNumber: '09',
+        demoUserEmail: '',
+        headlineCardIds: ['fe_open_matters'],
+        primaryPanels: ['aged_debt_by_age_band'],
+        summaryPanels: [],
+        isBuiltIn: false,
+      });
+      await catRepo.putModuleConfig(
+        env.ctxAlpha,
+        'home_pages',
+        nextHomeConfig,
+        'P-000004',
+      );
+
+      const adminActor = makeActorSession(
+        'P-000004',
+        ['admin', 'managing_partner', 'partner', 'risk_compliance', 'fee_earner', 'legal_secretary', 'finance'],
+        env.tenantAlpha,
+      );
+      const supportActor = makeActorSession('P-000010', ['legal_secretary'], env.tenantAlpha);
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+
+      // 9a. Admin role sees non-empty pmsAgedDebt
+      setTestEntraSessionOverride(adminActor.verifiedSession);
+      await runWithActiveActorSession(adminActor, async () => {
+        const adminHome = await loadHomePageData('P-000004', { previewRole: 'admin' });
+        expect(adminHome.matterFinance?.pmsAgedDebt.length ?? 0).toBeGreaterThan(0);
+
+        // 9b. Custom role configured with aged_debt_by_age_band gets non-empty pmsAgedDebt
+        const customHome = await loadHomePageData('P-000004', {
+          previewRole: 'custom_debt_analyst',
+        });
+        expect(customHome.matterFinance?.pmsAgedDebt.length ?? 0).toBeGreaterThan(0);
+      });
+
+      // 9c. Support persona (legal_secretary) sees non-empty pmsAllDisbursements for ls_unbilled_disb & disbursements_and_invoices_to_log
+      setTestEntraSessionOverride(supportActor.verifiedSession);
+      await runWithActiveActorSession(supportActor, async () => {
+        const supportHome = await loadHomePageData('P-000010', { previewRole: 'legal_secretary' });
+        expect(supportHome.matterFinance?.pmsAllDisbursements.length ?? 0).toBeGreaterThan(0);
+      });
+
+      // 9d. Role with no full-finance panels/cards (fee_earner) stays summary-only
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const feHome = await loadHomePageData('P-000002', { previewRole: 'fee_earner' });
+        expect(feHome.matterFinance).toBeDefined();
+        expect(feHome.matterFinance?.allMatterFins.length ?? 0).toBeGreaterThan(0);
+        expect(feHome.matterFinance?.pmsAgedDebt).toEqual([]);
+        expect(feHome.matterFinance?.pmsAllDisbursements).toEqual([]);
+        expect(feHome.matterFinance?.pmsInvoices).toEqual([]);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '10. R698: loadMatterFormPageData returns visible prior client matters (excluding restricted & cross-tenant) for CDD pre-fill',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const matterRepo = new TenantMatterRepository();
+
+      const verifiedPriorMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-S102B-R698-PRIOR',
+        matterNumber: 'ALPH-R698-01',
+        title: 'Earlier Verified Matter for Alpha Public Org',
+        clientId: env.alphaPubOrg.id,
+        conflictCheckStatus: 'Clear',
+        amlStatus: 'Verified',
+        isStaffMatter: false,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: [],
+      };
+      await matterRepo.putMatter(env.ctxAlpha, verifiedPriorMatter);
+
+      const restrictedPriorMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-S102B-R698-STAFF',
+        matterNumber: 'ALPH-R698-STF',
+        title: 'Hidden Restricted Prior Matter for Alpha Public Org',
+        clientId: env.alphaPubOrg.id,
+        conflictCheckStatus: 'Clear',
+        amlStatus: 'Verified',
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001'],
+      };
+      await matterRepo.putMatter(env.ctxAlpha, restrictedPriorMatter);
+
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+
+      await runWithActiveActorSession(feActor, async () => {
+        const formData = await loadMatterFormPageData('P-000002', {
+          clientId: env.alphaPubOrg.id,
+        });
+        expect(formData).not.toBeNull();
+        const clientMatters =
+          formData && 'clientMatters' in formData
+            ? ((formData as { clientMatters?: ReadonlyArray<{ id: string }> }).clientMatters ?? [])
+            : [];
+        expect(clientMatters.some((m) => m.id === verifiedPriorMatter.id)).toBe(true);
+        expect(clientMatters.some((m) => m.id === restrictedPriorMatter.id)).toBe(false);
+        expect(clientMatters.some((m) => m.id === env.bravoMatter.id)).toBe(false);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '11. R704: rejects malformed/NaN/oversized preview & picker inputs with VALIDATION_ERROR and caps candidate SQL queries',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+      const intakeRepo = new TenantIntakeQuoteRepository();
+
+      // Seed 4 matching people and 4 matching enquiries to test SQL LIMIT cap
+      for (let i = 1; i <= 4; i++) {
+        await partyRepo.putPerson(env.ctxAlpha, {
+          ...structuredClone(env.alphaRestrictedPerson),
+          id: `P-R704-CAP-${i}`,
+          firstName: 'CapCheck',
+          surname: `Alpha${i}`,
+          emails: [{ id: `em-cap-${i}`, address: `capcheck${i}@alpha.test`, typeId: null, isPrimary: true }],
+        });
+        await intakeRepo.putEnquiry(env.ctxAlpha, {
+          ...structuredClone(env.alphaPublicOpenEnquiry),
+          id: `ENQ-R704-CAP-${i}`,
+          reference: `ENQ-R704-CAP-${i}`,
+          firstName: 'CapCheckEnq',
+          lastName: `Alpha${i}`,
+          status: 'New',
+          assignedToId: 'P-000002',
+        });
+      }
+
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+
+      await runWithActiveActorSession(feActor, async () => {
+        const badKind = await previewIntakeDuplicatesAndConflictsRecord(
+          { kind: 'invalid_kind' as unknown as 'enquiry', firstName: 'Test' },
+          'P-000002',
+        );
+        expect(isActionDenied(badKind)).toBe(true);
+        if (isActionDenied(badKind)) expect(badKind.code).toBe('VALIDATION_ERROR');
+
+        const badArrayType = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'enquiry',
+            emails: 'not-an-array' as unknown as string[],
+          },
+          'P-000002',
+        );
+        expect(isActionDenied(badArrayType)).toBe(true);
+        if (isActionDenied(badArrayType)) expect(badArrayType.code).toBe('VALIDATION_ERROR');
+
+        const tooManyEmails = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'enquiry',
+            emails: Array.from({ length: 21 }, (_, idx) => `u${idx}@alpha.test`),
+          },
+          'P-000002',
+        );
+        expect(isActionDenied(tooManyEmails)).toBe(true);
+        if (isActionDenied(tooManyEmails)) expect(tooManyEmails.code).toBe('VALIDATION_ERROR');
+
+        const tooLongString = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'enquiry',
+            firstName: 'x'.repeat(201),
+          },
+          'P-000002',
+        );
+        expect(isActionDenied(tooLongString)).toBe(true);
+        if (isActionDenied(tooLongString)) expect(tooLongString.code).toBe('VALIDATION_ERROR');
+
+        const nanLimitPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: 'Alpha', limit: Number.NaN },
+          'P-000002',
+        );
+        expect(isActionDenied(nanLimitPicker)).toBe(true);
+        if (isActionDenied(nanLimitPicker)) expect(nanLimitPicker.code).toBe('VALIDATION_ERROR');
+
+        const stringLimitPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: 'Alpha', limit: 'x' as unknown as number },
+          'P-000002',
+        );
+        expect(isActionDenied(stringLimitPicker)).toBe(true);
+        if (isActionDenied(stringLimitPicker)) expect(stringLimitPicker.code).toBe('VALIDATION_ERROR');
+
+        const overLimitPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: 'Alpha', limit: 51 },
+          'P-000002',
+        );
+        expect(isActionDenied(overLimitPicker)).toBe(true);
+        if (isActionDenied(overLimitPicker)) expect(overLimitPicker.code).toBe('VALIDATION_ERROR');
+
+        const badEntityTypePicker = await searchEntityPickerRecord(
+          { entityTypes: ['secret_table' as unknown as 'matter'], query: 'Alpha' },
+          'P-000002',
+        );
+        expect(isActionDenied(badEntityTypePicker)).toBe(true);
+        if (isActionDenied(badEntityTypePicker)) expect(badEntityTypePicker.code).toBe('VALIDATION_ERROR');
+
+        // Candidate queries honor explicit SQL LIMIT cap
+        const cappedPeople = await partyRepo.findSqlDuplicateCandidates<Person>(env.ctxAlpha, {
+          kind: 'person',
+          firstName: 'CapCheck',
+          limit: 2,
+        });
+        expect(cappedPeople).toHaveLength(2);
+
+        const cappedEnqs = await intakeRepo.findSqlConflictEnquiryCandidates<Enquiry>(env.ctxAlpha, {
+          terms: ['CapCheckEnq'],
+          viewerId: 'P-000002',
+          hasRestrictedMatterAccess: false,
+          limit: 2,
+        });
+        expect(cappedEnqs).toHaveLength(2);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '12. R705: restricts conflict previews to permitted intake kinds & permissions, enforces 30/min rate limit, and emits tenant+correlation-only telemetry on restricted hits',
+    async () => {
+      resetConflictPreviewRateLimiterForTests();
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+
+      // Actor with employee:edit_core ONLY (all 5 conflict-preview permissions revoked)
+      const seedFe = await partyRepo.getPersonById<Person>(env.ctxAlpha, 'P-000002');
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(seedFe!),
+        permissionOverrides: {
+          grant: ['employee:edit_core'],
+          revoke: [
+            'enquiry:create',
+            'enquiry:edit',
+            'quote:edit',
+            'matter:create',
+            'matter:edit',
+          ],
+        },
+      });
+      const hrOnlyActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(hrOnlyActor.verifiedSession);
+
+      await runWithActiveActorSession(hrOnlyActor, async () => {
+        const hrPreview = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'enquiry',
+            callingOnBehalfOf: 'Staff Alpha Confidential Ltd',
+            includeConflicts: true,
+          },
+          'P-000002',
+        );
+        if (isActionDenied(hrPreview)) throw new Error(hrPreview.error);
+        expect(hrPreview.conflictSearch).toBeNull();
+        expect(hrPreview.possibleConflicts).toEqual([]);
+      });
+
+      // Restore normal partner/FE permissions on P-000001 and P-000002
+      const partnerActor = makeActorSession(
+        'P-000001',
+        ['admin', 'managing_partner', 'partner', 'risk_compliance', 'fee_earner'],
+        env.tenantAlpha,
+      );
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+
+      await runWithActiveActorSession(partnerActor, async () => {
+        // Disallowed kind 'person' or 'organisation' never returns conflictSearch/possibleConflicts even when includeConflicts=true
+        const personKindRes = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'person',
+            firstName: 'Cerys',
+            surname: 'Pritchard-Alpha',
+            includeConflicts: true,
+          },
+          'P-000001',
+        );
+        if (isActionDenied(personKindRes)) throw new Error(personKindRes.error);
+        expect(personKindRes.conflictSearch).toBeNull();
+        expect(personKindRes.possibleConflicts).toEqual([]);
+      });
+
+      // Restore P-000002 overrides to normal fee_earner so we can verify restricted telemetry & rate limit
+      await partyRepo.putPerson(env.ctxAlpha, seedFe!);
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setTestEntraSessionOverride(feActor.verifiedSession);
+
+      await runWithActiveActorSession(feActor, async () => {
+        const telemetryRecorder = getPlatformTelemetryRecorder();
+        telemetryRecorder.clearForTesting();
+
+        // 1st call returns restricted match and emits tenant+correlation-only telemetry event
+        const firstHit = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'enquiry',
+            callingOnBehalfOf: 'Staff Alpha Confidential Ltd',
+            includeConflicts: true,
+          },
+          'P-000002',
+        );
+        if (isActionDenied(firstHit)) throw new Error(firstHit.error);
+        expect(firstHit.possibleConflicts.some((c) => c.recordId.startsWith('restricted-'))).toBe(true);
+
+        const restrictedEvents = telemetryRecorder
+          .getRecentEntries({ tenantId: env.tenantAlpha })
+          .filter((e) => e.eventName === 'conflict.preview.restricted_match');
+        expect(restrictedEvents.length).toBeGreaterThanOrEqual(1);
+        const latestEvent = restrictedEvents[restrictedEvents.length - 1]!;
+        expect(latestEvent.tenantId).toBe(env.tenantAlpha);
+        expect(latestEvent.correlationId).toBeTruthy();
+        expect(Object.keys(latestEvent.properties ?? {})).toEqual([]);
+
+        // Next 29 calls succeed (total 30 within 60s window), 31st trips RATE_LIMITED
+        for (let i = 0; i < 29; i++) {
+          const okRes = await previewIntakeDuplicatesAndConflictsRecord(
+            {
+              kind: 'enquiry',
+              callingOnBehalfOf: 'Alpha Public Client',
+              includeConflicts: true,
+            },
+            'P-000002',
+          );
+          expect(isActionDenied(okRes)).toBe(false);
+        }
+        const rateLimited = await previewIntakeDuplicatesAndConflictsRecord(
+          {
+            kind: 'enquiry',
+            callingOnBehalfOf: 'Alpha Public Client',
+            includeConflicts: true,
+          },
+          'P-000002',
+        );
+        expect(isActionDenied(rateLimited)).toBe(true);
+        if (isActionDenied(rateLimited)) {
+          expect(rateLimited.code).toBe('RATE_LIMITED');
+        }
+      });
+      resetConflictPreviewRateLimiterForTests();
+    },
+    45_000,
+  );
+
+  it(
+    '13. R710 & R715: pickers strip restricted/conflict/fieldValues/quote/full-matter payloads, hydrate edit record via RBAC, and classify corporateRelation structurally',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+
+      // Build parent <- targetOrg -> child and sister sibling, plus a director & contact link
+      const parentOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R715-PARENT',
+        legalName: 'R715 Holding Group PLC',
+        parentOrganisationId: null,
+      };
+      const targetOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R715-TARGET',
+        legalName: 'R715 Operating Subsidiary Ltd',
+        parentOrganisationId: parentOrg.id,
+      };
+      const childOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R715-CHILD',
+        legalName: 'R715 Trading Child Ltd',
+        parentOrganisationId: targetOrg.id,
+      };
+      const sisterOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R715-SISTER',
+        legalName: 'R715 Sister Company Ltd',
+        parentOrganisationId: parentOrg.id,
+      };
+      for (const org of [parentOrg, targetOrg, childOrg, sisterOrg]) {
+        await partyRepo.putOrganisation(env.ctxAlpha, org);
+      }
+
+      const directorPerson: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-R715-DIR',
+        firstName: 'Gareth',
+        surname: 'DirectorLink',
+        jobTitle: 'Managing Associate',
+        isEmployee: false,
+      };
+      const contactPerson: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-R715-CON',
+        firstName: 'Nia',
+        surname: 'ContactLink',
+        jobTitle: 'Office Manager',
+        isEmployee: false,
+      };
+      await partyRepo.putPerson(env.ctxAlpha, directorPerson);
+      await partyRepo.putPerson(env.ctxAlpha, contactPerson);
+
+      await partyRepo.putLink(env.ctxAlpha, {
+        id: 'L-R715-DIR',
+        personId: directorPerson.id,
+        organisationId: targetOrg.id,
+        jobTitle: 'Non-Executive Director',
+        department: 'Board',
+        roleWithinOrganisation: 'Director',
+        contactRoleIds: [],
+        isPrimaryContact: true,
+        isCurrent: true,
+        startDate: '2026-01-01',
+        endDate: null,
+        contactStatusId: null,
+        createdById: 'P-000001',
+        createdAt: '2026-01-01',
+        updatedById: 'P-000001',
+        updatedAt: '2026-01-01',
+      });
+      await partyRepo.putLink(env.ctxAlpha, {
+        id: 'L-R715-CON',
+        personId: contactPerson.id,
+        organisationId: targetOrg.id,
+        jobTitle: 'Office Manager',
+        department: 'Operations',
+        roleWithinOrganisation: 'Primary Contact',
+        contactRoleIds: [],
+        isPrimaryContact: false,
+        isCurrent: true,
+        startDate: '2026-01-01',
+        endDate: null,
+        contactStatusId: null,
+        createdById: 'P-000001',
+        createdAt: '2026-01-01',
+        updatedById: 'P-000001',
+        updatedAt: '2026-01-01',
+      });
+
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+
+      await runWithActiveActorSession(feActor, async () => {
+        // R710: Slim picker payload across matter, enquiry, quote, person, organisation
+        const matterPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: env.alphaPubMatter.matterNumber },
+          'P-000002',
+        );
+        if (isActionDenied(matterPicker)) throw new Error(matterPicker.error);
+        expect(matterPicker.items.length).toBeGreaterThan(0);
+        const mItem = matterPicker.items[0]!;
+        expect(mItem.matterSummary?.id).toBe(env.alphaPubMatter.id);
+        expect(mItem.matterSummary?.teamMemberIds).toBeDefined();
+        const serializedMatter = JSON.stringify(mItem);
+        expect(serializedMatter).not.toContain('restrictedAccessUserIds');
+        expect(serializedMatter).not.toContain('conflictCheckRecord');
+        expect(serializedMatter).not.toContain('fieldValues');
+
+        const enqAndQuotePicker = await searchEntityPickerRecord(
+          { entityTypes: ['enquiry', 'quote'], query: 'Alpha' },
+          'P-000002',
+        );
+        if (isActionDenied(enqAndQuotePicker)) throw new Error(enqAndQuotePicker.error);
+        const serializedEnqQuote = JSON.stringify(enqAndQuotePicker);
+        expect(serializedEnqQuote).not.toContain('conflictSnapshot');
+        expect(serializedEnqQuote).not.toContain('conflictDecision');
+        expect(serializedEnqQuote).not.toContain('"quote":');
+
+        // R710: Full-record hydration helper works for authorised actors and strips RBAC/payroll fields
+        const hydratedOrg = await getEntityRecordForEditRecord(
+          'organisation',
+          targetOrg.id,
+          'P-000002',
+        );
+        expect(isActionDenied(hydratedOrg)).toBe(false);
+        if (!isActionDenied(hydratedOrg) && hydratedOrg.recordType === 'organisation') {
+          expect(hydratedOrg.organisation?.id).toBe(targetOrg.id);
+        }
+
+        const hydratedStaff = await getEntityRecordForEditRecord(
+          'person',
+          'P-000001',
+          'P-000002',
+        );
+        expect(isActionDenied(hydratedStaff)).toBe(false);
+        if (!isActionDenied(hydratedStaff) && hydratedStaff.recordType === 'person') {
+          expect(hydratedStaff.person?.id).toBe('P-000001');
+          expect((hydratedStaff.person as { permissionOverrides?: unknown } | undefined)?.permissionOverrides).toBeUndefined();
+          expect((hydratedStaff.person as { entraObjectId?: unknown } | undefined)?.entraObjectId).toBeUndefined();
+          expect(hydratedStaff.person?.employment?.payroll).toBeUndefined();
+        }
+
+        // R715: Corporate group & link relation classification uses stable keys
+        const corpGroupPicker = await searchEntityPickerRecord(
+          {
+            entityTypes: ['person', 'organisation'],
+            query: '',
+            corporateGroupOfOrgId: targetOrg.id,
+            limit: 50,
+          },
+          'P-000002',
+        );
+        if (isActionDenied(corpGroupPicker)) throw new Error(corpGroupPicker.error);
+        const byId = new Map(corpGroupPicker.items.map((i) => [i.id, i]));
+        expect(byId.get(parentOrg.id)?.corporateRelation).toBe('parent');
+        expect(byId.get(childOrg.id)?.corporateRelation).toBe('subsidiary');
+        expect(byId.get(sisterOrg.id)?.corporateRelation).toBe('group');
+        expect(byId.get(directorPerson.id)?.corporateRelation).toBe('director');
+        expect(byId.get(contactPerson.id)?.corporateRelation).toBe('contact');
+      });
     },
     45_000,
   );
