@@ -6,9 +6,9 @@ export const globalSearchArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How global search queries PostgreSQL full-text and trigram indexes across nine record types whilst enforcing permissions and restricted-matter rules before ranking or counting.',
-  updated: '2026-11-20',
+  updated: '2026-11-23',
   body: `
-The global search bar on **Home** and in the top navigation bar runs debounced queries exclusively on the server via \`searchGlobalRecordsAction\` and \`TenantSearchRepository\` (\`core/src/tenancy/searchRepository.ts\`). The full searchable estate is never built or shipped into browser memory on page load (\`getAppSnapshot\` returns an empty client \`searchIndex\`).
+The global search bar on **Home** and in the top navigation bar runs debounced queries exclusively on the server via \`searchGlobalRecordsAction\` and \`TenantSearchRepository\` (\`core/src/tenancy/searchRepository.ts\`). The full searchable directory is never loaded into the browser when you open a page.
 
 ## 1. Record types indexed
 

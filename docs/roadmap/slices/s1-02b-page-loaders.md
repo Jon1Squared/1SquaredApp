@@ -107,3 +107,9 @@ After WP1 (`S1-01`, `S1-03`, `S1-02a`, `S1-10`) merged into `develop`, `src/serv
 - **Change class:** Host per-route page loaders, Route Group shell split, scoped `core/src/tenancy/` readers, debounced preview/picker actions (`1` `B22` `TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST` addition `7 → 8`), UI narrowing, and AST guard closure (`MAX_DEFERRED_S1_02B_BASELINE_COUNT = 0`).
 - **Both hosting models:** Identical across Model A (`single_tenant`) and Model B (`multi_tenant`); all loaders and actions scope strictly to verified `TenantContext`.
 - **Migration and rollback:** No database migration (`CORE_REQUIRED_SCHEMA_VERSION` stays `0024`); revert cleanly via `git revert`.
+
+## Delivered status (23 November 2026)
+
+- **Guard counts:** `MAX_DEFERRED_S1_02B_BASELINE_COUNT = 0` (`38 → 0`, `DEFERRED_S1_02B_ALLOW_LIST = []`), `MAX_PERMANENT_ALLOW_LIST_COUNT = 12` (`12`, unchanged `≤ 12`), `MAX_TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST_COUNT = 8` (`7 → 8`, adding `previewIntakeDuplicatesAndConflictsRecord` tagged `B22`), `MAX_KNOWN_GAPS = 0` (`126` server actions).
+- **Seeded PG16 SQL query counts (`not-a-law-firm`):** Home (`/`) Partner `215 → 100` non-tx domain queries (`659 → 304` SQL calls) and Fee Earner `157 → 83` (`513 → 259`), Matters (`/matters`) Partner `188 → 57` and Fee Earner `147 → 57` (`576 / 475 → 173`, zero per-row N+1 queries), single shell load `50 → 33` (`178 → 101`, deduplicated once per request), and `/docs` `50 → 0`.
+- **Verification:** `core/tests/page-loaders-s102b.test.ts` (4/4 two-tenant PG16 tests), `src/server/__tests__/noWholeTenantLoadInRequestPaths.test.ts` (4/4), `src/server/__tests__/actionPermissionGuard.test.ts` (9/9), `npx vitest run isolation` (88/88), `e2e/role-journeys.spec.ts` (13/13 Playwright journeys), and full `npm run ci`.
