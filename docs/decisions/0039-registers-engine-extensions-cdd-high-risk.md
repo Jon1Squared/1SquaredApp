@@ -1,7 +1,7 @@
 # ADR 0039: Registers Engine Extensions for Client-Subject CDD and High-Risk Opening Approval
 
 - **Date:** 2026-11-24
-- **Status:** Proposed
+- **Status:** Accepted (owner, 24 Nov 2026)
 - **Roadmap:** Stage 1 decisions `S1-D5`, `S1-D7`, `S1-D10`; Work Package 2 slices `S1-04` and `S1-05` ([stage-1-plan.md](../roadmap/stage-1-plan.md)); backlog item `4`
 - **Builds on:** [ADR 0014](./0014-staff-matter-access-by-permission.md) (staff-matter & restricted access), [ADR 0025](./0025-permission-enforcement-pattern.md) (permission enforcement), [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases & repositories), [ADR 0030](./0030-tenant-aware-scheduler.md) (tenant-aware scheduler), [ADR 0032](./0032-registers-engine.md) (registers engine), [ADR 0038](./0038-intake-check-interfaces-and-manual-adapters.md) (intake check interfaces & `'evidence'` storage category)
 

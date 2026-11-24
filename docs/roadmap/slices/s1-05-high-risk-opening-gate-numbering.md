@@ -3,13 +3,13 @@
 | | |
 |---|---|
 | Backlog | Row `4` (Client and matter inception), plus `B6` (monotonic numbering invariance across format changes) |
-| Decision | Stage 1 decisions `S1-D6`, `S1-D7`, `S1-D8`, `S1-D10`; Owner decisions (24 Nov 2026); [ADR 0032](../../decisions/0032-registers-engine.md), Proposed [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md), Proposed [ADR 0040](../../decisions/0040-matter-opening-gate-and-numbering.md) |
+| Decision | Stage 1 decisions `S1-D6`, `S1-D7`, `S1-D8`, `S1-D10`; Owner decisions (24 Nov 2026); [ADR 0032](../../decisions/0032-registers-engine.md), Accepted [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md), Accepted [ADR 0040](../../decisions/0040-matter-opening-gate-and-numbering.md) |
 | Stage plan | [docs/roadmap/stage-1-plan.md](../stage-1-plan.md), WP2 (`S1-05`) |
 | Branch | `s1-05-high-risk-opening-gate-numbering`, stacked on `s1-04-cdd-workflow`, targeting `develop` |
 | Change class | Core registers engine extension (`high_risk_opening`, per-transition roles, `mustDifferFromPreviousApprover`, `allowAdminBypass: false`), Core domain matter-numbering engine (`@platform/core`), Core tenancy schema + repositories + expand migration `0026` (`core/src/tenancy/`), Core configuration schema & deep-merge (`core/schemas/`, `core/src/config-engine/`), Host transactional gate + opening paths + UI + page loaders (`src/`), Demo client config (`client-not-a-law-firm/config/base.json`), Help docs (`src/docs/`) |
 | Layer | Core API & domain (`core/src/api/`, `core/src/domain/`), Core tenancy (`core/src/tenancy/`), Core config (`core/src/config-engine/`, `core/schemas/`), Host server & UI (`src/`), Client config (`client-not-a-law-firm/`) |
 | Size | L (`3.5–4` days with `R760` Levers 2 & 3 pulled; `4–5` days un-trimmed — see §14) |
-| Depends on | `S1-04` (CDD workflow & client-subject registers); Approval of Proposed [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md) and [ADR 0040](../../decisions/0040-matter-opening-gate-and-numbering.md) before coding |
+| Depends on | `S1-04` (CDD workflow & client-subject registers); [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md) and [ADR 0040](../../decisions/0040-matter-opening-gate-and-numbering.md) Accepted (owner, 24 Nov 2026) |
 | Blocking manual tasks | None in dev/test; existing Stage 1 §8 manual demo-deploy (`caj-migrate-demo`) when WP2 deploys |
 | Baseline | `develop` at `1093e45` |
 
@@ -26,7 +26,7 @@
 | `workTypes.*.openingGate` & `matterNumbering` schemas, Zod validation, `loadAndValidateTenantConfig` deep-merge, `tenant_module_configs['matter_numbering']` | Core config engine & schemas | `core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `core/tests/tenant-config-usage.test.ts` |
 | Shared `evaluateAndEnforceOpeningGateInTx` across all opening paths (`saveMatterRecord`, `openProspectiveMatterRecord`, `updateMatterConflictRecord`, `signOffMatterCostsRecord`, `compliance_approve`), exempt `createRecordFromPms` + audit, `recordEngagementLetterSignedAction`, `signoff:approve`/`register:approve` alignment, ignore caller `matterNumber`/`matterStatusId`, PMS clash uniqueness check | Host server & HTTP/Action boundary | `src/server/services.ts`, `src/server/actionPermissions.ts`, `src/server/pageLoaders.ts`, `src/app/actions.ts` |
 | Opening gate banner/override & **Open matter** UI, server-only engagement signed trigger, high-risk banner, unified Home sign-off panel, Admin work-type opening-gate toggles | Host UI | `src/components/MatterFormClient.tsx`, `src/components/MatterProfileClient.tsx`, `src/components/HomeClient.tsx`, `src/components/RegistersWorkspaceClient.tsx`, `src/components/WorkTypesAdminPanel.tsx`, `src/components/AdminClient.tsx` |
-| Complete demo `workTypes.items[].openingGate` rules (across all 76 work types), default `matterNumbering` config, & seed duplicate `M-000010` number fix (`R744`) | Client configuration & seed fixture | `client-not-a-law-firm/config/base.json`, `data/seed-not-a-law-firm.json` |
+| Complete demo `workTypes.items[].openingGate` rules (across all 76 work types), default `matterNumbering` config, & seed duplicate `M-000007` → `BRI001-0001` fix (`R744`) | Client configuration & seed fixture | `client-not-a-law-firm/config/base.json`, `data/seed-not-a-law-firm.json`, `src/seed/demo.ts` |
 | Plain-English Help & release notes (Rule 11, Stage 1 §6 rule 6, `R757`) | Help documentation | `src/docs/articles/`, `docs/release-notes.md` |
 
 ---
@@ -193,7 +193,7 @@
   1. Create `public.tenant_opening_override_id_seq` (`OVR-000001`).
   2. Create `public.matter_opening_gate_overrides` (`tenant_id`, `id`, `matter_id`, `precondition_key IN ('conflict_cleared', 'cdd_complete', 'engagement_signed', 'funds_on_account')`, `reason CHECK (char_length(btrim(reason)) >= 10)`, `overridden_by_person_id`, `overridden_at`, `revoked_by_person_id`, `revoked_at`, `PRIMARY KEY (tenant_id, id)`, `FOREIGN KEY (tenant_id, matter_id) REFERENCES public.matters (tenant_id, id) ON DELETE CASCADE`, plus partial unique index `uq_matter_opening_gate_overrides_active` where `revoked_at IS NULL`).
   3. Expand `public.matters` with nullable `number_sequence_key TEXT NULL` and `number_sequence_value BIGINT NULL`.
-  4. **No unique `matter_number` index in `0026` (`R744`):** **Do NOT add `uq_matters_tenant_matter_number_non_draft`.** The seeded demo already contains duplicate active number `BRI001-0003` (`M-000007` and `M-000010` at `data/seed-not-a-law-firm.json:19417, 19795`), existing numbers never change in place, so adding a unique index now would fail existing tenant migrations. Fix `M-000010`'s duplicate number in `data/seed-not-a-law-firm.json` only (leaving existing tenant databases untouched), ignore caller-supplied `matterNumber` on normal saves, and log a backlog item (§11) to add the unique constraint after tenants are checked for duplicates.
+  4. **No unique `matter_number` index in `0026` (`R744`):** **Do NOT add `uq_matters_tenant_matter_number_non_draft`.** The seeded demo already contains duplicate active number `BRI001-0003` (`M-000007` and `M-000010` at `data/seed-not-a-law-firm.json:19417, 19795`), existing numbers never change in place, so adding a unique index now would fail existing tenant migrations. Because `M-000007` is PMS-linked to `PMSL-M-BRI001-0001` while `M-000010` is linked to `PMSL-M-BRI001-0003` and asserted in `core/tests/rbac.test.ts:7003`, fix **`M-000007`**'s duplicate number to `'BRI001-0001'` in `data/seed-not-a-law-firm.json` (and `src/seed/demo.ts`, leaving existing tenant databases untouched), ignore caller-supplied `matterNumber` on normal saves, and log `B29` (§11) to add the unique constraint after tenants are checked for duplicates.
   5. **Backfill SQL in `upSql`:** Populate `number_sequence_key` & `number_sequence_value` for existing non-draft `matters` rows matching `^([A-Z0-9_-]+)-([0-9]+)$` where `number_sequence_key IS NULL`, leaving `matters.matter_number` completely **untouched**.
 - **Existing matters compatibility:** Existing opened matters (`cmi_incomplete`, `active`, `on_hold`, `closed`) stay untouched; opening rules apply strictly on the first transition out of `prospective`/draft (`R741`).
 - **Reversible `downSql`:** Drops `number_sequence_key` and `number_sequence_value` from `public.matters`, drops `public.matter_opening_gate_overrides`, and drops `public.tenant_opening_override_id_seq`.
@@ -293,8 +293,10 @@ When `S1-05` lands on its implementation PR:
   - **Add to "What exists":** Two-stage `high_risk_opening` approval (`Partner` → different `Risk & Compliance`, no admin bypass, automatic `'withdrawn'` on down-score/abandon, `ADR 0039`), work-type opening gate (`workTypes.*.openingGate`) re-checked inside `withTenantTransaction` across all opening paths (`R741`, `R742`), audited `matter:opening_gate:override` (`allowCddOverride` enforcement, `0026`, `ADR 0040`), explicit **Open matter** retry (`R751`), server-stamped pre-S1-06 signed engagement action (`R753`), aligned Home `sign_off` / `/registers` write-off approvals (`R757`), and configurable token-based `matterNumbering` (`client_ref_prefix` default parity, server-enforced ignoring caller `matterNumber`, `B6` monotonicity).
   - **Set "What's missing" to:** `"Engagement signature gate awaits uploaded signed copies and outbox dispatch in S1-06; funds-on-account gate awaits ledger receipt matching in S1-08; live E-ID and Sanctions & PEP screening provider integrations remain deferred (F24, F25)."`
   - **Status:** **`Partly built`** (`R759` — moved cleanly to `Completed` only when `S1-06`/`S1-08` finish the remaining Stage 1 gates or per final Stage 1 §2 exit criteria noting deferred providers `F24`/`F25`).
-- **Add new backlog row (next free `B`-number on merge, `R744`):**
-  - *Enforce non-draft `matter_number` uniqueness constraint after tenant duplicate audit:* Pre-check existing tenant databases (`M-000007`/`M-000010`-style historical duplicates such as `BRI001-0003` in early demo data), resolve any duplicates safely with the firm, and apply a partial unique index `uq_matters_tenant_matter_number_non_draft` (`Severity: Medium`, `Stage: Before first hosted client`, `Status: Not started`). *(Note: seed JSON is fixed cleanly for new demo seeds in `S1-05`.)*
+- **Add new backlog rows (after `B26` reserved on `fix/sign-out`, plus `B27`–`B28` from `S1-04`):**
+  - **`B29` — Enforce non-draft `matter_number` uniqueness constraint after tenant duplicate audit (`R744`):** Pre-check existing tenant databases (`M-000007`/`M-000010`-style historical duplicates such as `BRI001-0003` in early demo data), resolve any duplicates safely with the firm, and apply a partial unique index `uq_matters_tenant_matter_number_non_draft` (`Severity: Medium`, `Stage: Before first hosted client`, `Status: Not started`).
+  - **`B30` — Interactive Admin matter-numbering preview builder widget (`R760` Lever 2 deferral):** Build the standalone interactive Admin UI preview builder for custom matter-numbering tokens (`S1-05` ships `matterNumbering` config schema, `base.json`, `saveMatterNumberingConfigAction` + MFA, `WorkTypesAdminPanel` gate toggles, and read-only Admin summary).
+  - **`B31` — Additional matter-numbering tokens `{WORK_TYPE}` and `{ENTITY}` (`R760` Lever 3 deferral):** Additive tokens beyond WP2's five core tokens (`{CLIENT_REF}`, `{SEQ}`/`{SEQ:N}`, `{YYYY}`, `{YY}`, `{DEPT}`) and four scopes (`client_ref_prefix`, `firm`, `year`, `department`).
 
 ---
 
@@ -311,21 +313,25 @@ When `S1-05` lands on its implementation PR:
 
 ## 13. Risks, Contradictions & Owner Decisions
 
-- **Codebase contradictions resolved:** `work_type` has no `chargeable` boolean (`pro_bono` exists on `matter_type` / `billing_basis`); demo contains duplicate `BRI001-0003`; `MatterFormClient.tsx:2006-2021` uses label matching; `services.ts:5659-5660` fails closed when governance extension is disabled; `resolveNextMatterStatusId` (`:5773-5776`) accepts arbitrary caller status; `saveMatterRecord` (`:6645-6657`) accepts caller `matterNumber`. All resolved explicitly in `S1-05`.
+- **Codebase contradictions resolved:** `work_type` has no `chargeable` boolean (`pro_bono` exists on `matter_type` / `billing_basis`); demo contains duplicate `BRI001-0003` (`M-000007` matches `PMSL-M-BRI001-0001` while `M-000010` matches `PMSL-M-BRI001-0003` and `core/tests/rbac.test.ts:7003`, so fix `M-000007` to `BRI001-0001` rather than changing `M-000010`); `MatterFormClient.tsx:2006-2021` uses label matching; `services.ts:5659-5660` fails closed when governance extension is disabled; `resolveNextMatterStatusId` (`:5773-5776`) accepts arbitrary caller status; `saveMatterRecord` (`:6645-6657`) accepts caller `matterNumber`. All resolved explicitly in `S1-05`.
 
 ### Owner answers incorporated (24 Nov 2026)
 5. **Non-chargeable / Pro Bono matters:** Confirmed — Pro Bono obeys the selected work type's rules uniformly (partner override where permitted; no automatic exemption).
 6. **High-ML-risk non-overridable list (`allowCddOverride: false`, `§4`):** Confirmed — the `23` proposed work types cannot have CDD overridden, and `technology_and_digital_fintech_and_payments` stays overridable.
 7. **Matter number allocation timing:** Confirmed — allocate permanently at first non-draft submission **after** validation passes (so rejected validation saves consume zero numbers; Referred & High-risk matters awaiting approval receive their number cleanly).
 8. **Core-locked `high_risk_opening` rules:** Confirmed — transitions, `allowedRoles`, `mustDifferFromPreviousApprover`, and `allowAdminBypass: false` are locked in core and cannot be weakened via Admin UI.
-- **Additional owner confirmations:** PMS import (`createRecordFromPms`) is exempt with an audit entry (`R742`); Home write-off approval aligns with `/registers` approvers (`R757`).
+- **Additional owner confirmations (24 Nov 2026):**
+  - PMS import (`createRecordFromPms`) is exempt with an audit entry (`R742`); Home write-off approval aligns with `/registers` approvers (`R757`).
+  - **Schedule trim (`R760` Levers 2 & 3):** Owner confirmed pulling **Levers 2 & 3** — defer the Admin interactive numbering preview widget (`B30`) and extra tokens beyond `{CLIENT_REF}`, `{SEQ}`/`{SEQ:N}`, `{YYYY}`, `{YY}`, `{DEPT}` (`B31`).
+  - **`'Referred'` conflicts (`R740`):** Owner confirmed `'Referred'` conflicts cannot be overridden (`OPENING_GATE_OVERRIDE_FORBIDDEN`; must complete conflict review).
+  - **Engagement self-certification (`R753`):** Owner confirmed closing free-choice signed status now via server-stamped `recordEngagementLetterSignedAction`.
 
 ---
 
-## 14. Estimate (`3.5–4` days with Levers 2 & 3; `4–5` days un-trimmed)
+## 14. Estimate (`3.5–4` days with Levers 2 & 3 accepted)
 
-- **Un-trimmed `S1-05` estimate (incorporating `R740`–`R745`, `R751`–`R753`, `R756`–`R757`):** **`4–5` days** (`0.5d` registers engine + `'withdrawn'` + `R756`, `0.5d` full-token numbering domain + parity tests, `0.5d` migration `0026` + repo + seed fix, `1.5d` `evaluateAndEnforceOpeningGateInTx` across all paths + `openProspectiveMatterAction` + `recordEngagementLetterSignedAction` + concurrency/two-tenant tests, `1–1.5d` UI + interactive Admin numbering preview + Playwright E2E + Help).
-- **Recommended schedule levers (`R760` Levers 2 & 3 — saves ~`0.5–1` day, bringing `S1-05` to `3.5–4` days):**
-  - **Lever 2:** Keep `matterNumbering` config schema, `client-not-a-law-firm/config/base.json`, `saveMatterNumberingConfigAction` + MFA, and tests complete in `S1-05`, and defer the interactive Admin pattern-preview builder UI widget (retaining Admin opening-gate toggles in `WorkTypesAdminPanel`).
-  - **Lever 3:** Ship the core five numbering tokens (`{CLIENT_REF}`, `{SEQ}`/`{SEQ:N}`, `{YYYY}`, `{YY}`, `{DEPT}`) and scopes (`client_ref_prefix`, `firm`, `year`, `department`) in `S1-05`, leaving `{WORK_TYPE}` and `{ENTITY}` as additive Rule 7 follow-ups.
-- **Combined WP2 total (`S1-04` + `S1-05`):** **`8–10` days un-trimmed** vs **`7–8` days with Levers 1–3 pulled** (fitting inside [stage-1-plan.md](../stage-1-plan.md) §5a's **`6–8` days** budget; confirmed via open question in WP2 report).
+- **Baseline scope estimate (un-trimmed):** `4–5` days.
+- **Confirmed `S1-05` delivery estimate (`R760` Levers 2 & 3 pulled, 24 Nov 2026 — `3.5–4` days):**
+  - **Lever 2:** Keep `matterNumbering` config schema, `client-not-a-law-firm/config/base.json`, `saveMatterNumberingConfigAction` + MFA, `WorkTypesAdminPanel` opening-gate toggles, read-only numbering summary, and tests complete in `S1-05`; defer the interactive Admin pattern-preview widget (`B30`).
+  - **Lever 3:** Ship the five core numbering tokens (`{CLIENT_REF}`, `{SEQ}`/`{SEQ:N}`, `{YYYY}`, `{YY}`, `{DEPT}`) and scopes (`client_ref_prefix`, `firm`, `year`, `department`) in `S1-05`; defer `{WORK_TYPE}` and `{ENTITY}` (`B31`).
+- **Combined WP2 total (`S1-04` + `S1-05`):** **`7–8` days** (accepted, fitting inside [stage-1-plan.md](../stage-1-plan.md) §5a's **`6–8` days** budget).

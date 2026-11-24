@@ -3,13 +3,13 @@
 | | |
 |---|---|
 | Backlog | Row `4` (Client and matter inception), plus item `16` alignment (`aml_and_cdd_queue`) |
-| Decision | Stage 1 decisions `S1-D5`, `S1-D10`; Owner decisions (24 Nov 2026); [ADR 0032](../../decisions/0032-registers-engine.md), [ADR 0038](../../decisions/0038-intake-check-interfaces-and-manual-adapters.md), Proposed [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md) |
+| Decision | Stage 1 decisions `S1-D5`, `S1-D10`; Owner decisions (24 Nov 2026); [ADR 0032](../../decisions/0032-registers-engine.md), [ADR 0038](../../decisions/0038-intake-check-interfaces-and-manual-adapters.md), Accepted [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md) |
 | Stage plan | [docs/roadmap/stage-1-plan.md](../stage-1-plan.md), WP2 (`S1-04`) |
 | Branch | `s1-04-cdd-workflow`, from `develop` (`1093e45` baseline), targeting `develop` |
 | Change class | Core extension-point & engine evolution (`@platform/core-api` v`2.2.0`, `core/src/domain/registers/`), Core tenancy schema + repositories + expand migration `0025` (`core/src/tenancy/`), Core configuration schema & deep-merge (`core/schemas/`, `core/src/config-engine/`), Host services/actions/routes/page loaders/UI (`src/`), Demo client configuration (`client-not-a-law-firm/config/`), Help documentation (`src/docs/`) |
 | Layer | Core API (`core/src/api/`), Core registers & RBAC (`core/src/domain/`), Core tenancy (`core/src/tenancy/`), Core config (`core/src/config-engine/`, `core/schemas/`), Host server & UI (`src/`), Client config (`client-not-a-law-firm/`) |
 | Size | L (`3.5–4` days with `R760` Lever 1 pulled; `4–5` days un-trimmed — see §14) |
-| Depends on | `S1-02a`, `S1-02b`, `S1-03` (all merged to `develop`); Approval of Proposed [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md) before coding |
+| Depends on | `S1-02a`, `S1-02b`, `S1-03` (all merged to `develop`); [ADR 0039](../../decisions/0039-registers-engine-extensions-cdd-high-risk.md) Accepted (owner, 24 Nov 2026) |
 | Blocking manual tasks | None in dev/test; existing Stage 1 §8 manual demo-deploy (`caj-migrate-demo`) when WP2 deploys. Risk `R3` still prohibits storing real live client CDD evidence until `azure-blob` replaces `local-fs`. |
 | Baseline | `develop` at `1093e45` |
 
@@ -293,8 +293,9 @@ When `S1-04` lands on its implementation PR:
   - **Add to "What exists":** Client-level `cdd` register workflow on People & Organisations (`0025`, `ADR 0039`), configurable client-type × risk checklist templates (with Standard → High upgrade), S1-03 `'evidence'` malware-pre-scanned upload & `/api/evidence/download` (`public.evidence_artifacts`, repointed on party merge), full employee-client CDD hiding (`R747`), manual `"Recorded manually by..."` display & `Sanctions & PEP` manual recording integration (`intake_check_records`), real CDD summary + read-only legacy matter CDD fields on `MatterFormClient`, converged `REGISTER_RECORD_VISIBLE_SQL_PREDICATE` (`R755`), and scheduled re-check reminders via `register-reminders`.
   - **Narrow "What's missing" to:** `"A High rating triggers nothing. Matter number format isn't configurable. Opening gate pre-conditions per work type and audited overrides (S1-05). Live E-ID provider and Sanctions & PEP screening provider integrations (F24, F25)."`
   - Keep row 4 status as **Partly built** until `S1-05` completes.
-- **Add new backlog row (next free `B`-number on merge, `R758`):**
-  - *CDD regulatory retention (keep 5 years after client relationship ends, then delete):* `cdd` register records, `intake_check_records`, `evidence_artifacts`, and `'evidence'` blobs are never deleted by current anonymisation/purge jobs. Build automated post-relationship `5`-year retention/disposal job **before the first hosted client** (`Severity: Medium`, `Stage: Before first hosted client`, `Status: Not started`). *(Note: deliberately left unnumbered in this planning doc to avoid colliding with `B26` on `fix/sign-out`.)*
+- **Add new backlog rows (after `B26` reserved on `fix/sign-out`):**
+  - **`B27` — CDD regulatory retention (keep 5 years after client relationship ends, then delete, `R758`):** `cdd` register records, `intake_check_records`, `evidence_artifacts`, and `'evidence'` blobs are never deleted by current anonymisation/purge jobs. Build automated post-relationship `5`-year retention/disposal job **before the first hosted client** (`Severity: Medium`, `Stage: Before first hosted client`, `Status: Not started`).
+  - **`B28` — Interactive Admin CDD checklist editor (`R760` Lever 1 deferral):** Build the full interactive Admin UI editor for per-client-type CDD checklist items (`S1-04` already ships schema, `base.json`, `saveCddConfigAction` + MFA, tests, and a read-only Admin summary).
 
 ---
 
@@ -320,12 +321,13 @@ When `S1-04` lands on its implementation PR:
 2. **Completion model (`§3.1`):** Confirmed — `cdd` becomes `'recorded'` immediately once all required items are recorded (no second approver on client CDD; two-person control sits on `S1-05` `high_risk_opening`).
 3. **`Low` risk rating tier (`§3.3`):** Confirmed — `risk_rating.low` uses the **Standard** checklist (`3`-year re-check interval).
 4. **`organisation_type` mappings (`§3.2`):** Confirmed as proposed across all 13 values.
+5. **Schedule trim (`R760` Lever 1, 24 Nov 2026):** Owner confirmed pulling **Lever 1** — keep `cdd.*` schema, demo config, `saveCddConfigAction` + MFA, tests, and a read-only Admin CDD summary in `S1-04`, and defer the interactive Admin CDD checklist editor widget to backlog **`B28`**.
 
 ---
 
-## 14. Estimate (`3.5–4` days with Lever 1; `4–5` days un-trimmed)
+## 14. Estimate (`3.5–4` days with Lever 1 accepted)
 
-- **Un-trimmed `S1-04` estimate (incorporating `R743`, `R746`–`R750`, `R754`–`R755`, `R758`):** **`4–5` days** (`0.5d` core engine + migration `0025` + merge repointing, `0.5d` config schema + seeds, `1.5d` malware-guarded evidence routes + Standard→High upgrade + employee hiding + reminders + two-tenant tests, `1.5–2d` UI + interactive Admin checklist editor + MatterForm integration + Playwright + Help).
-- **Recommended schedule lever (`R760` Lever 1 — saves ~`0.5–1` day, bringing `S1-04` to `3.5–4` days):**
+- **Baseline scope estimate (un-trimmed with interactive Admin checklist editor):** `4–5` days.
+- **Confirmed `S1-04` delivery estimate (`R760` Lever 1 pulled, 24 Nov 2026 — `3.5–4` days):**
   - Keep `cdd.*` JSON Schema, `client-not-a-law-firm/config/base.json`, `saveCddConfigAction` + MFA + service/config tests, and a read-only Admin CDD settings summary in `S1-04`.
-  - Defer the full interactive Admin checklist-item editor UI widget to a small post-WP2 follow-up, keeping combined WP2 (`S1-04` + `S1-05` with Levers 1–3) within **`7–8` days** inside [stage-1-plan.md](../stage-1-plan.md) §5a's **`6–8` days** budget (open question for owner confirmation in WP2 review report).
+  - Defer the interactive Admin checklist-item editor UI widget (`B28`), keeping combined WP2 (`S1-04` + `S1-05` with Levers 1–3) within **`7–8` days** inside [stage-1-plan.md](../stage-1-plan.md) §5a's **`6–8` days** budget.
