@@ -3138,12 +3138,12 @@ export async function savePersonRecord(
   const rawEmpInput: Partial<EmploymentRecord> | null =
     opts.employmentSubmitted ?? input.employment ?? null;
 
-  // R718 & R728: Non-HR actors without `employee:edit_core` cannot overwrite or clear stored DOB
-  // on people with employment, and actors lacking `employee:hr_restricted` do not wipe unviewed DOB.
+  // R718, R728 & R733: Only HR-restricted actors can view or modify stored DOB on employees/leavers
+  // (`isEmployee` or `employment`), protecting team leads/line managers (`employee:edit_core` without
+  // `employee:hr_restricted`) and `isEmployee`-only records without an employment object.
   const effectiveDob =
-    existing?.employment &&
-    (!userPerms.has('employee:edit_core') ||
-      (!userPerms.has('employee:hr_restricted') && !input.dateOfBirth))
+    (existing?.isEmployee || existing?.employment) &&
+    !userPerms.has('employee:hr_restricted')
       ? (existing.dateOfBirth ?? null)
       : input.dateOfBirth !== undefined
         ? input.dateOfBirth
@@ -3321,6 +3321,12 @@ export async function savePersonRecord(
         orgStructure,
         requireContractStartDate: Boolean(rawEmpInput.contract),
       });
+      if (
+        (existing?.isEmployee || existing?.employment) &&
+        !userPerms.has('employee:hr_restricted')
+      ) {
+        delete empErrors.dateOfBirth;
+      }
     }
 
     nextEmployment = applyEffectiveDatedEmploymentHistory(

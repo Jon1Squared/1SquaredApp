@@ -200,6 +200,10 @@ export function PersonFormClient({
   const canHrRestricted = userPerms.has('employee:hr_restricted');
   const canPayroll = userPerms.has('employee:payroll');
   const canSensitive = userPerms.has('employee:sensitive');
+  const isDobHiddenForActor = Boolean(
+    (existing?.isEmployee || existing?.employment) &&
+      (existing.dateOfBirth === undefined || !canHrRestricted),
+  );
 
   // Active tab in "2 · MORE DETAILS"
   const [activeTab, setActiveTab] = useState<SectionKey>('most_used');
@@ -1001,11 +1005,13 @@ export function PersonFormClient({
   const mandatoryMissingCount = nameOnlyMandatory
     ? (!firstName.trim() ? 1 : 0) +
       (!surname.trim() ? 1 : 0) +
-      (isEmployee && !dateOfBirth.trim() ? 1 : 0)
+      (isEmployee && !isDobHiddenForActor && !dateOfBirth.trim() ? 1 : 0)
     : (!firstName.trim() ? 1 : 0) +
       (!surname.trim() ? 1 : 0) +
       (!hasContactInfo ? 1 : 0) +
-      ((embeddedInModal || isEmployee) && !dateOfBirth.trim() ? 1 : 0);
+      (((embeddedInModal || isEmployee) && !isDobHiddenForActor) && !dateOfBirth.trim()
+        ? 1
+        : 0);
 
   // Live duplicate & conflict check via debounced C2 server action
   const resolvedLinkedOrg = useMemo(
@@ -1225,7 +1231,11 @@ export function PersonFormClient({
       setErrorMsg('First name and surname are required.');
       return;
     }
-    if ((highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()) {
+    if (
+      !isDobHiddenForActor &&
+      (highlightMissingClientFields || isEmployee) &&
+      !dateOfBirth.trim()
+    ) {
       setErrorMsg(
         isEmployee
           ? 'Date of birth is required when a person works at the firm.'
@@ -1476,7 +1486,7 @@ export function PersonFormClient({
           middleNames: middleNames.trim(),
           surname: surname.trim(),
           preferredName: preferredName.trim(),
-          dateOfBirth: dateOfBirth || null,
+          ...(isDobHiddenForActor ? {} : { dateOfBirth: dateOfBirth || null }),
           otherNames: otherNames.filter((n) => n.name.trim()),
           jobTitle: jobTitle.trim(),
           emails: cleanEmails,
@@ -1882,48 +1892,50 @@ export function PersonFormClient({
                   />
                 </div>
 
-                <div className="field-group">
-                  <label
-                    className="field-label"
-                    htmlFor="p-dob"
-                    style={
-                      (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
-                        ? { color: '#d93025', fontWeight: 700 }
-                        : undefined
-                    }
-                  >
-                    Date of birth{' '}
-                    {(!nameOnlyMandatory && embeddedInModal) || isEmployee ? (
-                      <span style={{ color: 'var(--coral, #d94a27)' }}>*</span>
+                {!isDobHiddenForActor ? (
+                  <div className="field-group">
+                    <label
+                      className="field-label"
+                      htmlFor="p-dob"
+                      style={
+                        (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
+                          ? { color: '#d93025', fontWeight: 700 }
+                          : undefined
+                      }
+                    >
+                      Date of birth{' '}
+                      {(!nameOnlyMandatory && embeddedInModal) || isEmployee ? (
+                        <span style={{ color: 'var(--coral, #d94a27)' }}>*</span>
+                      ) : null}
+                    </label>
+                    <input
+                      id="p-dob"
+                      type="date"
+                      required={highlightMissingClientFields || isEmployee}
+                      className="field-input"
+                      style={
+                        (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
+                          ? {
+                              borderColor: '#d93025',
+                              boxShadow: '0 0 0 2px rgba(217, 48, 37, 0.16)',
+                              background: 'rgba(217, 48, 37, 0.04)',
+                            }
+                          : undefined
+                      }
+                      value={dateOfBirth}
+                      onChange={(e) => setDateOfBirth(e.target.value)}
+                    />
+                    {highlightMissingClientFields && !dateOfBirth.trim() ? (
+                      <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
+                        Required to convert contact to a client
+                      </span>
+                    ) : isEmployee && !dateOfBirth.trim() ? (
+                      <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
+                        Date of birth is mandatory when a person works at the firm
+                      </span>
                     ) : null}
-                  </label>
-                  <input
-                    id="p-dob"
-                    type="date"
-                    required={highlightMissingClientFields || isEmployee}
-                    className="field-input"
-                    style={
-                      (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
-                        ? {
-                            borderColor: '#d93025',
-                            boxShadow: '0 0 0 2px rgba(217, 48, 37, 0.16)',
-                            background: 'rgba(217, 48, 37, 0.04)',
-                          }
-                        : undefined
-                    }
-                    value={dateOfBirth}
-                    onChange={(e) => setDateOfBirth(e.target.value)}
-                  />
-                  {highlightMissingClientFields && !dateOfBirth.trim() ? (
-                    <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
-                      Required to convert contact to a client
-                    </span>
-                  ) : isEmployee && !dateOfBirth.trim() ? (
-                    <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
-                      Date of birth is mandatory when a person works at the firm
-                    </span>
-                  ) : null}
-                </div>
+                  </div>
+                ) : null}
 
                 <div className="field-group">
                   <label className="field-label" htmlFor="p-origin">

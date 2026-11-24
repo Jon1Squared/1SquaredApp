@@ -53,6 +53,7 @@ import {
 } from '@/server/services';
 import { getPlatformTelemetryRecorder } from '@/server/telemetry';
 import {
+  formatTenantLocalIsoSeconds,
   loadAdminPageData,
   loadEnquiriesListPageData,
   loadEnquiryDetailPageData,
@@ -81,6 +82,7 @@ import {
   withOptionalPageActor,
 } from '@/server/pageLoaders';
 import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
+import { sortIntakeQueue, type IntakeQueueRow } from '@/domain/quotes';
 import { computeMatterPartyUsageCounts } from '@/domain/matterParties';
 import { redactRecordId } from '@/domain/matterConflicts';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
@@ -1621,6 +1623,163 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(persistedAfterLimited?.employment?.status).toBe('Leaver');
         expect(persistedAfterLimited?.employment?.effectiveTo).toBe('2026-10-15');
         expect(persistedAfterLimited?.dateOfBirth).toBe('1984-04-12');
+      });
+
+      // 6d. R733: Team lead / line manager (employee:edit_core without employee:hr_restricted)
+      // cannot overwrite stored DOB on an active employee OR an isEmployee-only record; HR actor can update both.
+      const r733Employee: Person = {
+        ...structuredClone(seedEmp!),
+        id: 'P-R733-ACTIVE-EMP',
+        firstName: 'Gareth',
+        surname: 'LineReport',
+        dateOfBirth: '1985-03-14',
+        isEmployee: true,
+        emails: [
+          {
+            id: 'em-r733-active',
+            address: 'gareth.r733@invented.example',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+        employment: {
+          ...structuredClone(seedEmp!.employment!),
+          personId: 'P-R733-ACTIVE-EMP',
+          employeeNumber: 'EMP-9733',
+          lineManagerId: 'P-000002',
+          feeEarner: seedEmp!.employment!.feeEarner
+            ? {
+                ...seedEmp!.employment!.feeEarner,
+                timekeeperCode: 'FE9733',
+              }
+            : null,
+        },
+      };
+      const empOnlyPerson: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-R733-EMP-ONLY',
+        firstName: 'Nia',
+        surname: 'EmployeeOnly',
+        isEmployee: true,
+        employment: null,
+        dateOfBirth: '1986-07-20',
+        emails: [
+          {
+            id: 'em-r733-only',
+            address: 'nia.r733@invented.example',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+      };
+      await Promise.all([
+        partyRepo.putPerson(env.ctxAlpha, r733Employee),
+        partyRepo.putPerson(env.ctxAlpha, empOnlyPerson),
+        partyRepo.putPerson(env.ctxAlpha, {
+          ...structuredClone(seedEmp!),
+          permissionOverrides: {
+            grant: ['employee:edit_core'],
+            revoke: ['employee:hr_restricted', 'employee:payroll'],
+          },
+        }),
+      ]);
+
+      await runWithActiveActorSession(feActor, async () => {
+        const tlSaveEmployee = await savePersonRecord(
+          {
+            firstName: 'Gareth',
+            surname: 'LineReport',
+            relationshipNotes: 'Team lead core edit',
+            dateOfBirth: '1999-05-05',
+          },
+          {
+            byId: 'P-000002',
+            id: r733Employee.id,
+            worksAtFirm: true,
+            employmentSubmitted: {
+              personId: r733Employee.id,
+              engagementType: r733Employee.employment!.engagementType,
+              status: r733Employee.employment!.status,
+              employeeNumber: r733Employee.employment!.employeeNumber,
+              jobTitle: 'Senior Solicitor (Updated)',
+              roleType: r733Employee.employment!.roleType,
+              departmentId: r733Employee.employment!.departmentId,
+              lineManagerId: r733Employee.employment!.lineManagerId,
+              isTopOfHierarchy: r733Employee.employment!.isTopOfHierarchy,
+            },
+          },
+        );
+        expect(tlSaveEmployee.errors).toBeUndefined();
+        const afterTlEmployee = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          r733Employee.id,
+        );
+        expect(afterTlEmployee?.dateOfBirth).toBe('1985-03-14');
+        expect(afterTlEmployee?.employment?.jobTitle).toBe('Senior Solicitor (Updated)');
+
+        const tlSaveEmpOnly = await savePersonRecord(
+          {
+            firstName: 'Nia',
+            surname: 'EmployeeOnly',
+            relationshipNotes: 'Team lead edit on isEmployee-only',
+            dateOfBirth: '1999-02-02',
+          },
+          {
+            byId: 'P-000002',
+            id: empOnlyPerson.id,
+            worksAtFirm: false,
+            employmentSubmitted: null,
+          },
+        );
+        expect(tlSaveEmpOnly.errors).toBeUndefined();
+        const afterTlEmpOnly = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          empOnlyPerson.id,
+        );
+        expect(afterTlEmpOnly?.dateOfBirth).toBe('1986-07-20');
+      });
+
+      setTestEntraSessionOverride(adminActor.verifiedSession);
+      await runWithActiveActorSession(adminActor, async () => {
+        const hrSaveEmployee = await savePersonRecord(
+          {
+            firstName: 'Gareth',
+            surname: 'LineReport',
+            dateOfBirth: '1985-03-15',
+          },
+          {
+            byId: 'P-000004',
+            id: r733Employee.id,
+            worksAtFirm: true,
+            employmentSubmitted: null,
+          },
+        );
+        expect(hrSaveEmployee.errors).toBeUndefined();
+        const afterHrEmployee = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          r733Employee.id,
+        );
+        expect(afterHrEmployee?.dateOfBirth).toBe('1985-03-15');
+
+        const hrSaveEmpOnly = await savePersonRecord(
+          {
+            firstName: 'Nia',
+            surname: 'EmployeeOnly',
+            dateOfBirth: '1986-07-21',
+          },
+          {
+            byId: 'P-000004',
+            id: empOnlyPerson.id,
+            worksAtFirm: false,
+            employmentSubmitted: null,
+          },
+        );
+        expect(hrSaveEmpOnly.errors).toBeUndefined();
+        const afterHrEmpOnly = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          empOnlyPerson.id,
+        );
+        expect(afterHrEmpOnly?.dateOfBirth).toBe('1986-07-21');
       });
     },
     45_000,
@@ -3337,33 +3496,54 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
   );
 
   it(
-    '20. R720: /enquiries "all" unified UNION ALL paging with unequal counts returns exact bounded non-empty pages covering the full union',
+    '20. R720 & R736: /enquiries "all" unified UNION ALL paging with unequal counts returns exact bounded non-empty pages covering the full union and interleaves tier-3 rows matching sortIntakeQueue',
     async () => {
       const env = await provisionAndSeedTwoTenants();
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
       const intakeRepo = new TenantIntakeQuoteRepository();
       const marker = 'R720-UNION-MARKER';
 
+      const standardUrgencyId = 'enquiry_urgency.standard';
+      const enqDates = [
+        '2026-11-02T09:00:00Z',
+        '2026-11-05T09:00:00Z',
+        '2026-11-08T09:00:00Z',
+      ];
+      const quoteDates = [
+        '2026-11-01T10:00:00Z',
+        '2026-11-03T10:00:00Z',
+        '2026-11-04T10:00:00Z',
+        '2026-11-06T10:00:00Z',
+        '2026-11-07T10:00:00Z',
+        '2026-11-09T10:00:00Z',
+        '2026-11-10T10:00:00Z',
+      ];
+
       const createdKeys: string[] = [];
+      const seededQueueRows: IntakeQueueRow[] = [];
       for (let i = 1; i <= 3; i++) {
         const id = `ENQ-R720-${i}`;
         createdKeys.push(`enquiry:${id}`);
-        await intakeRepo.putEnquiry(env.ctxAlpha, {
+        const enq: Enquiry = {
           ...structuredClone(env.alphaPublicOpenEnquiry),
           id,
           reference: `ENQ-720${i}`,
           status: 'New',
+          urgencyId: standardUrgencyId,
           firstName: `Enq${i}`,
           lastName: 'R720Union',
           summary: `${marker} Enquiry ${i}`,
-          receivedAt: `2026-11-0${i}T09:00:00Z`,
+          receivedAt: enqDates[i - 1]!,
+          createdAt: enqDates[i - 1]!,
           convertedMatterId: null,
-        });
+        };
+        await intakeRepo.putEnquiry(env.ctxAlpha, enq);
+        seededQueueRows.push({ kind: 'enquiry', id, enquiry: enq });
       }
       for (let j = 1; j <= 7; j++) {
         const id = `QUO-R720-${j}`;
         createdKeys.push(`quote:${id}`);
-        await intakeRepo.putQuote(env.ctxAlpha, {
+        const quote: Quote = {
           ...structuredClone(env.alphaStaffQuote),
           id,
           reference: `QTE-2026-720${j}`,
@@ -3373,15 +3553,18 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           linkedEnquiryId: null,
           prospectName: `QuoteProspect${j} R720`,
           scope: `${marker} Quote ${j}`,
-          createdAt: `2026-11-1${j}T10:00:00Z`,
-          sentAt: `2026-11-1${j}T10:05:00Z`,
+          createdAt: quoteDates[j - 1]!,
+          sentAt: quoteDates[j - 1]!,
           nextFollowUpDate: '2099-12-01',
-        });
+        };
+        await intakeRepo.putQuote(env.ctxAlpha, quote);
+        seededQueueRows.push({ kind: 'quote', id, quote });
       }
 
       const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
       setTestEntraSessionOverride(partnerActor.verifiedSession);
       await runWithActiveActorSession(partnerActor, async () => {
+        const shell = await loadShellContext('P-000001');
         const p1 = await loadEnquiriesListPageData('P-000001', {
           page: 1,
           pageSize: 4,
@@ -3419,6 +3602,14 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         ].map((r) => `${r.kind}:${r.id}`);
         expect(unionKeys).toHaveLength(10);
         expect(new Set(unionKeys)).toEqual(new Set(createdKeys));
+
+        // R736: tier-3 enquiries & quotes interleave strictly by timestamp matching sortIntakeQueue
+        const expectedOrderKeys = sortIntakeQueue(
+          seededQueueRows,
+          shell.values,
+          new Date(),
+        ).map((r) => `${r.kind}:${r.id}`);
+        expect(unionKeys).toEqual(expectedOrderKeys);
       });
     },
     45_000,
@@ -3970,6 +4161,84 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         await expect(
           listClientPriorMattersRecord([clientOrg.id], 'P-000002'),
         ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '24. R735 & R737: People "All" excludes sample enquiries when owner/role filter is set, and Tasks overdue filter uses tenant Europe/London timezone across BST',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const taskRepo = new TenantTaskWorkflowRepository();
+
+      const bstMarker = 'R737-BST-MARKER';
+      const bstTask: Task = {
+        ...structuredClone(env.alphaUrgentPublicTask),
+        id: 'TSK-R737-BST',
+        reference: 'TSK-9737',
+        title: `BST Cutoff Check ${bstMarker}`,
+        status: 'To do',
+        dueAt: '2026-07-15',
+      };
+      await taskRepo.putTask(env.ctxAlpha, bstTask);
+
+      expect(
+        formatTenantLocalIsoSeconds(
+          new Date('2026-07-15T16:45:00.000Z'),
+          'Europe/London',
+        ),
+      ).toBe('2026-07-15T17:45:00');
+
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        // R735: Sample enquiries omitted on People "all" when owner or role filter is set
+        const unfilteredPeople = await loadPeopleListPageData('P-000001', {
+          tab: 'all',
+          page: 1,
+        });
+        expect(unfilteredPeople.enquiries.length).toBeGreaterThan(0);
+
+        const ownerFiltered = await loadPeopleListPageData('P-000001', {
+          tab: 'all',
+          page: 1,
+          ownerFilter: 'P-000001',
+        });
+        expect(ownerFiltered.enquiries).toEqual([]);
+
+        const roleFiltered = await loadPeopleListPageData('P-000001', {
+          tab: 'all',
+          page: 1,
+          roleFilter: 'person_role.client',
+        });
+        expect(roleFiltered.enquiries).toEqual([]);
+
+        // R737: 16:45 UTC = 17:45 BST (> 17:30 cutoff) -> date-only task due 2026-07-15 is overdue in SQL
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+          vi.setSystemTime(new Date('2026-07-15T16:45:00.000Z'));
+          const overdueAt1745Bst = await loadTasksListPageData('P-000001', {
+            tab: 'all',
+            statusFilter: 'overdue',
+            query: bstMarker,
+          });
+          expect(overdueAt1745Bst.tasks.map((t) => t.id)).toEqual([bstTask.id]);
+          expect(overdueAt1745Bst.pagination.totalCount).toBe(1);
+
+          // 16:15 UTC = 17:15 BST (< 17:30 cutoff) -> NOT yet overdue
+          vi.setSystemTime(new Date('2026-07-15T16:15:00.000Z'));
+          const notOverdueAt1715Bst = await loadTasksListPageData('P-000001', {
+            tab: 'all',
+            statusFilter: 'overdue',
+            query: bstMarker,
+          });
+          expect(notOverdueAt1715Bst.tasks).toEqual([]);
+          expect(notOverdueAt1715Bst.pagination.totalCount).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
       });
     },
     45_000,

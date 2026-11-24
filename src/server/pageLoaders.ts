@@ -1182,7 +1182,9 @@ export async function loadPeopleListPageData(
     const shouldIncludeSampleEnquiries =
       (tab === 'all' || tab === 'external') &&
       page === 1 &&
-      statusFilter === 'all';
+      statusFilter === 'all' &&
+      roleFilter === 'all' &&
+      ownerFilter === 'all';
     const [peopleRes, openEnqs] = await Promise.all([
       partyRepo.listPeoplePageWithCount<Person>(shell.ctx, {
         includeMerged: false,
@@ -3523,9 +3525,37 @@ export interface TasksListLoaderOptions extends ListQueryOptions {
 
 export type TasksListSortColumn = 'priority' | 'status' | 'dueAt';
 
-function formatLocalIsoSeconds(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+export function formatTenantLocalIsoSeconds(
+  date: Date,
+  timeZone = 'Europe/London',
+): string {
+  const cleanTz = timeZone.trim() || 'Europe/London';
+  let effectiveTimeZone = 'Europe/London';
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: cleanTz });
+    effectiveTimeZone = cleanTz;
+  } catch {
+    effectiveTimeZone = 'Europe/London';
+  }
+  const formatter = new Intl.DateTimeFormat('en-GB', {
+    timeZone: effectiveTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
+  const parts = formatter.formatToParts(date);
+  const year = parts.find((p) => p.type === 'year')?.value ?? '1970';
+  const month = parts.find((p) => p.type === 'month')?.value ?? '01';
+  const day = parts.find((p) => p.type === 'day')?.value ?? '01';
+  const rawHour = parts.find((p) => p.type === 'hour')?.value ?? '00';
+  const hour = rawHour === '24' ? '00' : rawHour.padStart(2, '0');
+  const minute = (parts.find((p) => p.type === 'minute')?.value ?? '00').padStart(2, '0');
+  const second = (parts.find((p) => p.type === 'second')?.value ?? '00').padStart(2, '0');
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}`;
 }
 
 export async function loadTasksListPageData(
@@ -3569,7 +3599,8 @@ export async function loadTasksListPageData(
   const myTeamIds = userTeams(shell.currentUserId, shell.teams).map((t) => t.id);
   const now = new Date();
   const overdueNowUtcIso = now.toISOString();
-  const overdueNowLocalIso = formatLocalIsoSeconds(now);
+  const tenantTimeZone = getActiveTenantConfiguration().timeZone || 'Europe/London';
+  const overdueNowLocalIso = formatTenantLocalIsoSeconds(now, tenantTimeZone);
   const urgentPriorityIds = collectChoiceIdsBySystemKey(
     shell.values,
     'task_priority',

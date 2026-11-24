@@ -2572,7 +2572,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
           e.id AS id,
           COALESCE(e.received_at, e.created_at) AS sort_ts,
           CASE WHEN (e.urgency_id = ANY(${emIdx}::text[]) OR e.urgency_id = ANY(${urgIdx}::text[])) THEN 1 ELSE 3 END AS default_tier,
-          CASE WHEN e.urgency_id = ANY(${emIdx}::text[]) THEN 0 WHEN e.urgency_id = ANY(${urgIdx}::text[]) THEN 1 ELSE 2 END AS emergency_sub,
+          CASE WHEN e.urgency_id = ANY(${emIdx}::text[]) THEN 0 WHEN e.urgency_id = ANY(${urgIdx}::text[]) THEN 1 ELSE 99 END AS emergency_sub,
           NULL::text AS follow_up_key,
           CASE WHEN e.urgency_id = ANY(${emIdx}::text[]) THEN 0 WHEN e.urgency_id = ANY(${urgIdx}::text[]) THEN 1 WHEN e.urgency_id = ANY(${stdIdx}::text[]) THEN 2 ELSE 3 END AS urgency_rank,
           CASE e.status
