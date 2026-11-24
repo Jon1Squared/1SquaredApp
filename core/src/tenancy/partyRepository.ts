@@ -3758,6 +3758,24 @@ export class TenantPartyRepository extends TenantScopedRepository {
         }
       }
 
+      // 12d. Repoint intake_check_records & evidence_artifacts subject_id (`R754`):
+      await tx.query(
+        `UPDATE public.intake_check_records
+         SET subject_id = $3
+         WHERE tenant_id = $1
+           AND subject_type = $2
+           AND subject_id = $4`,
+        [ctx.tenantId, recordType, survivorId, mergedId],
+      );
+      await tx.query(
+        `UPDATE public.evidence_artifacts
+         SET subject_id = $3
+         WHERE tenant_id = $1
+           AND subject_type = $2
+           AND subject_id = $4`,
+        [ctx.tenantId, recordType, survivorId, mergedId],
+      );
+
       // 13. Record merge_history & audit_entries in the same transaction
       if (params.mergeHistory) {
         await this.upsertMergeHistoryInTx(tx, ctx, params.mergeHistory);

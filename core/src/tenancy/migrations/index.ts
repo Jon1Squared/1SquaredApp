@@ -3348,6 +3348,136 @@ ALTER TABLE public.people
     },
   };
 
+export const REGISTERS_CDD_AND_ORG_TYPE_KEYS_MIGRATION_0025: TenantMigrationDefinition =
+  {
+    version: '0025',
+    name: '0025_registers_cdd_and_org_type_keys_expand',
+    description:
+      'Expand migration adding client-subject indexes on register_records, public.evidence_artifacts table and sequence, and reversible migration 0021-pattern systemKey backfill for all 13 organisation_type choice values (ADR 0039, R743).',
+    dependsOn: ['0009', '0012', '0017', '0021', '0023'],
+    tablesChanged: ['register_records', 'evidence_artifacts', 'choice_values'],
+    upSql: `
+CREATE INDEX IF NOT EXISTS idx_register_records_tenant_person
+  ON public.register_records (tenant_id, person_id, register_type_key, status)
+  WHERE person_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_register_records_tenant_organisation
+  ON public.register_records (tenant_id, organisation_id, register_type_key, status)
+  WHERE organisation_id IS NOT NULL;
+
+CREATE SEQUENCE IF NOT EXISTS public.tenant_evidence_artifact_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.evidence_artifacts (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  blob_key TEXT NOT NULL,
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('person', 'organisation', 'matter', 'enquiry', 'quote', 'register')),
+  subject_id TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  byte_size BIGINT NOT NULL CHECK (byte_size > 0),
+  sha256 TEXT NOT NULL,
+  scan_status TEXT NOT NULL CHECK (scan_status IN ('clean', 'infected', 'pending')),
+  uploaded_by_person_id TEXT NOT NULL,
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  CONSTRAINT uq_evidence_artifacts_blob UNIQUE (tenant_id, blob_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_artifacts_tenant_subject
+  ON public.evidence_artifacts (tenant_id, subject_type, subject_id, uploaded_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.migration_0025_backfill_audit (
+  tenant_id TEXT NOT NULL,
+  entity_kind TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  written_value TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, entity_kind, record_id)
+);
+
+REVOKE ALL ON TABLE public.migration_0025_backfill_audit FROM PUBLIC;
+DO $$
+DECLARE
+  v_role TEXT := 'role_tenant_' || substring(current_database() from '^pg_tenant_(.+)$');
+BEGIN
+  IF v_role IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+    EXECUTE format('REVOKE ALL ON TABLE public.migration_0025_backfill_audit FROM %I', v_role);
+  END IF;
+END $$;
+
+WITH org_type_mapping(id, list_key, sys_key) AS (
+  VALUES
+    ('organisation_type.company', 'organisation_type', 'company'),
+    ('organisation_type.plc', 'organisation_type', 'plc'),
+    ('organisation_type.llp', 'organisation_type', 'llp'),
+    ('organisation_type.partnership', 'organisation_type', 'partnership'),
+    ('organisation_type.sole_trader', 'organisation_type', 'sole_trader'),
+    ('organisation_type.charity', 'organisation_type', 'charity'),
+    ('organisation_type.public_body', 'organisation_type', 'public_body'),
+    ('organisation_type.law_firm', 'organisation_type', 'law_firm'),
+    ('organisation_type.barristers_chambers', 'organisation_type', 'barristers_chambers'),
+    ('organisation_type.supplier', 'organisation_type', 'supplier'),
+    ('organisation_type.non_profit', 'organisation_type', 'non_profit'),
+    ('organisation_type.insurer', 'organisation_type', 'insurer'),
+    ('organisation_type.trust', 'organisation_type', 'trust')
+),
+inserted_choice_audit AS (
+  INSERT INTO public.migration_0025_backfill_audit (tenant_id, entity_kind, record_id, written_value)
+  SELECT cv.tenant_id, 'choice_value', cv.id, om.sys_key
+    FROM public.choice_values cv
+    JOIN org_type_mapping om ON om.id = cv.id AND om.list_key = cv.list_key
+   WHERE COALESCE(cv.metadata_json->>'systemKey', '') = ''
+     AND NOT EXISTS (
+       SELECT 1
+         FROM public.choice_values cv2
+        WHERE cv2.tenant_id = cv.tenant_id
+          AND cv2.list_key = cv.list_key
+          AND cv2.id <> cv.id
+          AND cv2.metadata_json->>'systemKey' = om.sys_key
+     )
+  ON CONFLICT (tenant_id, entity_kind, record_id) DO NOTHING
+  RETURNING tenant_id, record_id, written_value
+)
+UPDATE public.choice_values cv
+   SET metadata_json = jsonb_set(
+     COALESCE(cv.metadata_json, '{}'::jsonb),
+     '{systemKey}',
+     to_jsonb(ica.written_value),
+     true
+   )
+  FROM inserted_choice_audit ica
+  JOIN org_type_mapping om ON om.id = ica.record_id
+ WHERE cv.tenant_id = ica.tenant_id
+   AND cv.id = ica.record_id
+   AND cv.list_key = om.list_key
+   AND COALESCE(cv.metadata_json->>'systemKey', '') = ''
+   AND NOT EXISTS (
+     SELECT 1
+       FROM public.choice_values cv2
+      WHERE cv2.tenant_id = cv.tenant_id
+        AND cv2.list_key = cv.list_key
+        AND cv2.id <> cv.id
+        AND cv2.metadata_json->>'systemKey' = ica.written_value
+   );
+`.trim(),
+    downSql: `
+UPDATE public.choice_values cv
+   SET metadata_json = COALESCE(cv.metadata_json, '{}'::jsonb) - 'systemKey'
+  FROM public.migration_0025_backfill_audit a
+ WHERE a.tenant_id = cv.tenant_id
+   AND a.entity_kind = 'choice_value'
+   AND a.record_id = cv.id
+   AND cv.metadata_json->>'systemKey' = a.written_value;
+
+DROP TABLE IF EXISTS public.migration_0025_backfill_audit CASCADE;
+DROP INDEX IF EXISTS public.idx_evidence_artifacts_tenant_subject;
+DROP TABLE IF EXISTS public.evidence_artifacts CASCADE;
+DROP SEQUENCE IF EXISTS public.tenant_evidence_artifact_id_seq;
+DROP INDEX IF EXISTS public.idx_register_records_tenant_organisation;
+DROP INDEX IF EXISTS public.idx_register_records_tenant_person;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3373,6 +3503,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   KEY_DATE_CALENDAR_SYNC_LEASE_MIGRATION_0022,
   INTAKE_CHECKS_AND_OUTBOX_ATTACHMENTS_MIGRATION_0023,
   SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024,
+  REGISTERS_CDD_AND_ORG_TYPE_KEYS_MIGRATION_0025,
 ];
 
 export function validateMigrationCatalogueOrder(

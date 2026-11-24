@@ -147,7 +147,8 @@ export function sanitizePostgresError(
       err.message.startsWith('JOB_') ||
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
-      err.message.startsWith('TEMPLATE_')
+      err.message.startsWith('TEMPLATE_') ||
+      err.message.startsWith('EVIDENCE_')
     ) {
       return err as Error & { code?: string };
     }

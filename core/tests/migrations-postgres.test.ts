@@ -9,6 +9,7 @@ import {
   NON_LIVE_AUDIT_RESET_MIGRATION_0008,
   resolveTenantFromVerifiedToken,
   TenantCatalogueRepository,
+  TenantEvidenceArtifactRepository,
   TenantHrAndRbacRepository,
   TenantMigrationRunner,
   TenantPartyRepository,
@@ -102,6 +103,17 @@ class DiagnosticProbeRepository extends TenantScopedRepository {
       const res = await tx.query<{ cnt: string }>(
         'SELECT COUNT(*)::text AS cnt FROM document_templates WHERE tenant_id = $1',
         [ctx.tenantId],
+      );
+      return Number(res.rows[0]?.cnt ?? '0');
+    });
+  }
+
+  public async readBackfill0025AuditCountAsRuntime(
+    ctx: TenantContext,
+  ): Promise<number> {
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ cnt: string }>(
+        'SELECT COUNT(*)::text AS cnt FROM public.migration_0025_backfill_audit',
       );
       return Number(res.rows[0]?.cnt ?? '0');
     });
@@ -251,6 +263,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       ]),
     );
     expect(activeAt0017).not.toContain('matter_restriction_metadata');
+    expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
     const activeAfter0023Rollback = await runner.getActiveTables(ctx);
@@ -1092,10 +1105,11 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(colAt0015.rowCount).toBe(0);
 
-      // Roll back dependent 0023 -> 0021..0016 before 0015
+      // Roll back dependent 0025/0024/0023 -> 0021..0016 before 0015
       await expect(runner.rollbackVersion(ctx, '0015')).rejects.toThrow(
         /MIGRATION_ROLLBACK_ORDER_ERROR/,
       );
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
@@ -1161,6 +1175,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0021',
         '0023',
         '0024',
+        '0025',
       ]);
 
       const tableAfterReapply = await client.query(
@@ -1205,6 +1220,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privsUp.rows[0]).toEqual({ cro_ins: true, mro_del: true });
 
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
@@ -1230,6 +1246,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0021',
         '0023',
         '0024',
+        '0025',
       ]);
 
       const tablesReapplied = await client.query<{ table_name: string }>(
@@ -1255,6 +1272,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const runner = new TenantMigrationRunner();
     const pre0017 = CORE_TENANT_MIGRATIONS.filter((m) => m.version < '0017');
     await runner.applyUp(ctx, pre0017);
+    await runner.rollbackVersion(ctx, '0025');
     await runner.rollbackVersion(ctx, '0024');
     await runner.rollbackVersion(ctx, '0023');
     await runner.rollbackVersion(ctx, '0021');
@@ -1357,6 +1375,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
          WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
       );
 
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
@@ -1395,6 +1414,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0021',
         '0023',
         '0024',
+        '0025',
       ]);
       const rebackfilled = await client.query<{ status: string }>(
         `SELECT status FROM public.register_records WHERE tenant_id = 'mig-registers-0017' AND id = 'SO-000001'`,
@@ -1456,6 +1476,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         [...expectedIndexes].sort(),
       );
 
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0024')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
@@ -1480,6 +1501,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0021',
         '0023',
         '0024',
+        '0025',
       ]);
 
       const idxReapplied = await client.query<{ indexname: string }>(
@@ -1528,6 +1550,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privs.rows[0]).toEqual({ out_ins: true, pref_upd: true });
 
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
@@ -1547,6 +1570,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         '0020',
         '0021',
         '0023',
+        '0025',
       ]);
 
       const tablesReapplied = await client.query<{ table_name: string }>(
@@ -1617,6 +1641,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
       expect(privs.rows[0]).toEqual({ teams_ins: true, ntf_upd: true });
 
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0020')).toBe(true);
 
@@ -1646,7 +1671,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(idxDown.rowCount).toBe(0);
 
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0020', '0021']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0020', '0021', '0025']);
 
       const teamsReapplied = await client.query<{ table_name: string }>(
         `SELECT table_name
@@ -1680,6 +1705,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     const taskRepo = new TenantTaskWorkflowRepository();
 
     await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
+    expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
 
     // Seed pre-0021 rows via direct migration client (runtime repos refuse < 0021 with TENANT_SCHEMA_NOT_READY)
@@ -1743,7 +1769,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
 
       const applied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(applied.map((m) => m.version)).toEqual(['0021']);
+      expect(applied.map((m) => m.version)).toEqual(['0021', '0025']);
 
       // R619: Tenant runtime role has ZERO privileges on migration_0021_backfill_audit
       const dbRoleRes = await client.query<{
@@ -1810,6 +1836,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       );
 
       // Reversal removes ONLY values that still match what 0021 wrote (leaving admin override & pre-existing keys untouched)
+      expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctx, '0021')).toBe(true);
       const valuesDown = await client.query<{ id: string; metadata_json: { systemKey?: string } }>(
         `SELECT id, metadata_json FROM public.choice_values WHERE tenant_id = $1 AND id IN ('employee_role.partner', 'employee_role.support_staff', 'risk_rating.custom_preserved')`,
@@ -1832,7 +1859,7 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         [tenantId],
       );
       const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-      expect(reapplied.map((m) => m.version)).toEqual(['0021']);
+      expect(reapplied.map((m) => m.version)).toEqual(['0021', '0025']);
     } finally {
       await client.end();
     }
@@ -1854,6 +1881,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
 
     await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
     await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+    expect(await runner.rollbackVersion(ctxAlpha, '0025')).toBe(true);
+    expect(await runner.rollbackVersion(ctxBravo, '0025')).toBe(true);
     expect(await runner.rollbackVersion(ctxAlpha, '0021')).toBe(true);
     expect(await runner.rollbackVersion(ctxBravo, '0021')).toBe(true);
 
@@ -1944,6 +1973,8 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       expect(bravoDone?.autoTrigger).toBeUndefined();
 
       // Reversal clears only what 0021 wrote in each tenant independently
+      expect(await runner.rollbackVersion(ctxAlpha, '0025')).toBe(true);
+      expect(await runner.rollbackVersion(ctxBravo, '0025')).toBe(true);
       expect(await runner.rollbackVersion(ctxAlpha, '0021')).toBe(true);
       expect(await runner.rollbackVersion(ctxBravo, '0021')).toBe(true);
       await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
@@ -2020,13 +2051,14 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(activeUp).toContain('intake_check_records');
     expect(activeUp).toContain('email_outbox_attachments');
 
+    expect(await runner.rollbackVersion(ctx, '0025')).toBe(true);
     expect(await runner.rollbackVersion(ctx, '0023')).toBe(true);
     const activeDown = await runner.getActiveTables(ctx);
     expect(activeDown).not.toContain('intake_check_records');
     expect(activeDown).not.toContain('email_outbox_attachments');
 
     const reapplied = await runner.applyUp(ctx, CORE_TENANT_MIGRATIONS);
-    expect(reapplied.map((m) => m.version)).toEqual(['0023']);
+    expect(reapplied.map((m) => m.version)).toEqual(['0023', '0025']);
     const activeReapplied = await runner.getActiveTables(ctx);
     expect(activeReapplied).toContain('intake_check_records');
     expect(activeReapplied).toContain('email_outbox_attachments');
@@ -2420,6 +2452,359 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
       }
     } finally {
       await client.end();
+    }
+  }, 30_000);
+
+  it('S1-04 (ADR 0039 / R743): 0025_registers_cdd_and_org_type_keys_expand round-trips cleanly, grants runtime evidence access, locks audit table, backfills 13 organisation_type keys safely, and repoints on party merge', async () => {
+    const tenantAlpha = 'mig-s104-0025-alpha';
+    const tenantBravo = 'mig-s104-0025-bravo';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: tenantAlpha, environment: 'test' },
+        { tenantId: tenantBravo, environment: 'test' },
+      ],
+    });
+    const ctxAlpha = makeTestTenantContext(tenantAlpha);
+    const ctxBravo = makeTestTenantContext(tenantBravo);
+    const runner = new TenantMigrationRunner();
+
+    // 1. Pre-seed choice_values on Alpha before applying 0025, leaving 12 blank,
+    //    pre-populating `trust` with a custom systemKey, and inserting a collision on `company`.
+    const pre0025 = CORE_TENANT_MIGRATIONS.filter((m) => m.version !== '0025');
+    await runner.applyUp(ctxAlpha, pre0025);
+    await runner.rollbackVersion(ctxAlpha, '0025');
+
+    const ORG_TYPE_EXPECTED: ReadonlyArray<readonly [string, string]> = [
+      ['organisation_type.company', 'company'],
+      ['organisation_type.plc', 'plc'],
+      ['organisation_type.llp', 'llp'],
+      ['organisation_type.partnership', 'partnership'],
+      ['organisation_type.sole_trader', 'sole_trader'],
+      ['organisation_type.charity', 'charity'],
+      ['organisation_type.public_body', 'public_body'],
+      ['organisation_type.law_firm', 'law_firm'],
+      ['organisation_type.barristers_chambers', 'barristers_chambers'],
+      ['organisation_type.supplier', 'supplier'],
+      ['organisation_type.non_profit', 'non_profit'],
+      ['organisation_type.insurer', 'insurer'],
+      ['organisation_type.trust', 'trust'],
+    ];
+
+    const alphaDirect = await createDirectMigrationClient({ ctx: ctxAlpha });
+    try {
+      await alphaDirect.query(
+        `DELETE FROM public.choice_values WHERE tenant_id = $1 AND list_key = 'organisation_type'`,
+        [tenantAlpha],
+      );
+      await alphaDirect.query(
+        `INSERT INTO public.choice_lists (tenant_id, key, label)
+         VALUES ($1, 'organisation_type', 'Organisation type')
+         ON CONFLICT (tenant_id, key) DO NOTHING`,
+        [tenantAlpha],
+      );
+      for (const [idx, [id]] of ORG_TYPE_EXPECTED.entries()) {
+        const meta =
+          id === 'organisation_type.trust'
+            ? { systemKey: 'custom_trust' }
+            : {};
+        await alphaDirect.query(
+          `INSERT INTO public.choice_values (tenant_id, id, list_key, label, sort_order, active, metadata_json)
+           VALUES ($1, $2, 'organisation_type', $3, $4, TRUE, $5::jsonb)`,
+          [tenantAlpha, id, `Org Type ${idx}`, idx + 1, JSON.stringify(meta)],
+        );
+      }
+      // Colliding custom entry already occupying systemKey = 'company'
+      await alphaDirect.query(
+        `INSERT INTO public.choice_values (tenant_id, id, list_key, label, sort_order, active, metadata_json)
+         VALUES ($1, 'organisation_type.custom_company', 'organisation_type', 'Custom Company', 99, TRUE, '{"systemKey":"company"}'::jsonb)`,
+        [tenantAlpha],
+      );
+    } finally {
+      await alphaDirect.end();
+    }
+
+    // Apply 0025 onto Alpha & Bravo (on Bravo insert all 13 without collisions first)
+    await runner.applyUp(ctxBravo, pre0025);
+    await runner.rollbackVersion(ctxBravo, '0025');
+    const bravoDirect = await createDirectMigrationClient({ ctx: ctxBravo });
+    try {
+      await bravoDirect.query(
+        `DELETE FROM public.choice_values WHERE tenant_id = $1 AND list_key = 'organisation_type'`,
+        [tenantBravo],
+      );
+      await bravoDirect.query(
+        `INSERT INTO public.choice_lists (tenant_id, key, label)
+         VALUES ($1, 'organisation_type', 'Organisation type')
+         ON CONFLICT (tenant_id, key) DO NOTHING`,
+        [tenantBravo],
+      );
+      for (const [idx, [id]] of ORG_TYPE_EXPECTED.entries()) {
+        await bravoDirect.query(
+          `INSERT INTO public.choice_values (tenant_id, id, list_key, label, sort_order, active, metadata_json)
+           VALUES ($1, $2, 'organisation_type', $3, $4, TRUE, '{}'::jsonb)`,
+          [tenantBravo, id, `Org Type ${idx}`, idx + 1],
+        );
+      }
+    } finally {
+      await bravoDirect.end();
+    }
+
+    const alphaApplied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+    expect(alphaApplied.map((m) => m.version)).toEqual(['0025']);
+    const bravoApplied = await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+    expect(bravoApplied.map((m) => m.version)).toEqual(['0025']);
+
+    const poolManager = new TenantPostgresPoolManager();
+    const alphaDirectAfter = await createDirectMigrationClient({ ctx: ctxAlpha });
+    const bravoDirectAfter = await createDirectMigrationClient({ ctx: ctxBravo });
+    try {
+      // 2. Verify indexes, evidence_artifacts table, sequence, and Bravo 13/13 keys
+      const activeUp = await runner.getActiveTables(ctxAlpha);
+      expect(activeUp).toContain('evidence_artifacts');
+
+      const idxRes = await alphaDirectAfter.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND indexname IN (
+             'idx_register_records_tenant_person',
+             'idx_register_records_tenant_organisation',
+             'idx_evidence_artifacts_tenant_subject'
+           )
+         ORDER BY indexname ASC`,
+      );
+      expect(idxRes.rows.map((r) => r.indexname)).toEqual([
+        'idx_evidence_artifacts_tenant_subject',
+        'idx_register_records_tenant_organisation',
+        'idx_register_records_tenant_person',
+      ]);
+
+      const seqRes = await alphaDirectAfter.query<{ sequence_name: string }>(
+        `SELECT sequence_name FROM information_schema.sequences
+         WHERE sequence_schema = 'public'
+           AND sequence_name = 'tenant_evidence_artifact_id_seq'`,
+      );
+      expect(seqRes.rowCount).toBe(1);
+
+      const bravoChoices = await bravoDirectAfter.query<{
+        id: string;
+        sys_key: string | null;
+      }>(
+        `SELECT id, metadata_json->>'systemKey' AS sys_key
+         FROM public.choice_values
+         WHERE tenant_id = $1 AND list_key = 'organisation_type'
+         ORDER BY sort_order ASC`,
+        [tenantBravo],
+      );
+      expect(bravoChoices.rows.map((r) => [r.id, r.sys_key])).toEqual(
+        ORG_TYPE_EXPECTED.map(([id, sysKey]) => [id, sysKey]),
+      );
+
+      // Alpha collision & pre-existing check
+      const alphaChoices = await alphaDirectAfter.query<{
+        id: string;
+        sys_key: string | null;
+      }>(
+        `SELECT id, metadata_json->>'systemKey' AS sys_key
+         FROM public.choice_values
+         WHERE tenant_id = $1 AND list_key = 'organisation_type'`,
+        [tenantAlpha],
+      );
+      const alphaChoiceMap = new Map(
+        alphaChoices.rows.map((r) => [r.id, r.sys_key]),
+      );
+      expect(alphaChoiceMap.get('organisation_type.trust')).toBe('custom_trust');
+      expect(alphaChoiceMap.get('organisation_type.company')).toBeNull();
+      expect(alphaChoiceMap.get('organisation_type.custom_company')).toBe('company');
+      expect(alphaChoiceMap.get('organisation_type.llp')).toBe('llp');
+
+      // 3. Runtime role verification:
+      //    - TenantEvidenceArtifactRepository works with EVD-000001 allocation without explicit GRANTs
+      //    - scanStatus === 'infected' throws EVIDENCE_MALWARE_DETECTED
+      //    - Runtime role cannot read public.migration_0025_backfill_audit
+      const evidenceRepo = new TenantEvidenceArtifactRepository({ poolManager });
+      const probeRepo = new DiagnosticProbeRepository({ poolManager });
+      await evidenceRepo.clearTenantData(ctxAlpha);
+      await evidenceRepo.clearTenantData(ctxBravo);
+
+      const createdAlpha = await evidenceRepo.createArtifact(ctxAlpha, {
+        blobKey: `tenant-${tenantAlpha}-test/evidence/p-merged/file1.pdf`,
+        subjectType: 'person',
+        subjectId: 'P-MERGED-0025',
+        fileName: 'passport.pdf',
+        contentType: 'application/pdf',
+        byteSize: 2048,
+        sha256: 'a'.repeat(64),
+        scanStatus: 'clean',
+        uploadedByPersonId: 'P-ACTOR-1',
+      });
+      expect(createdAlpha.id).toMatch(/^EVD-\d{6}$/);
+
+      await expect(
+        evidenceRepo.createArtifact(ctxAlpha, {
+          blobKey: `tenant-${tenantAlpha}-test/evidence/p-merged/bad.pdf`,
+          subjectType: 'person',
+          subjectId: 'P-MERGED-0025',
+          fileName: 'eicar.pdf',
+          contentType: 'application/pdf',
+          byteSize: 68,
+          sha256: 'b'.repeat(64),
+          scanStatus: 'infected',
+          uploadedByPersonId: 'P-ACTOR-1',
+        }),
+      ).rejects.toThrow(/EVIDENCE_MALWARE_DETECTED/);
+
+      await expect(
+        probeRepo.readBackfill0025AuditCountAsRuntime(ctxAlpha),
+      ).rejects.toThrow(/permission denied/i);
+
+      // 4. Test executeMergeInTransaction step 12d (intake_check_records & evidence_artifacts repointing)
+      await alphaDirectAfter.query(
+        `DELETE FROM public.intake_check_records WHERE tenant_id = $1`,
+        [tenantAlpha],
+      );
+      await bravoDirectAfter.query(
+        `DELETE FROM public.intake_check_records WHERE tenant_id = $1`,
+        [tenantBravo],
+      );
+      await alphaDirectAfter.query(
+        `DELETE FROM public.people WHERE tenant_id = $1 AND id IN ('P-SURV-0025', 'P-MERGED-0025')`,
+        [tenantAlpha],
+      );
+      await alphaDirectAfter.query(
+        `DELETE FROM public.organisations WHERE tenant_id = $1 AND id IN ('O-SURV-0025', 'O-MERGED-0025')`,
+        [tenantAlpha],
+      );
+      await alphaDirectAfter.query(
+        `INSERT INTO public.people (tenant_id, id, first_name, surname, phones_json, addresses_json, profile_json)
+         VALUES ($1, 'P-SURV-0025', 'Surv', 'Client', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb),
+                ($1, 'P-MERGED-0025', 'Merg', 'Client', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb)`,
+        [tenantAlpha],
+      );
+      await alphaDirectAfter.query(
+        `INSERT INTO public.organisations (tenant_id, id, legal_name, profile_json)
+         VALUES ($1, 'O-SURV-0025', 'Surv Org Ltd', '{}'::jsonb),
+                ($1, 'O-MERGED-0025', 'Merg Org Ltd', '{}'::jsonb)`,
+        [tenantAlpha],
+      );
+      await alphaDirectAfter.query(
+        `INSERT INTO public.intake_check_records (
+           tenant_id, id, check_kind, provider, subject_type, subject_id,
+           outcome, recorded_by_person_id, correlation_id
+         ) VALUES
+           ($1, 'ICHK-0025-P', 'identity_verification', 'manual', 'person', 'P-MERGED-0025', 'verified', 'P-ACTOR-1', 'corr-1'),
+           ($1, 'ICHK-0025-O', 'sanctions_pep', 'manual', 'organisation', 'O-MERGED-0025', 'clear', 'P-ACTOR-1', 'corr-2')`,
+        [tenantAlpha],
+      );
+      await evidenceRepo.createArtifact(ctxAlpha, {
+        blobKey: `tenant-${tenantAlpha}-test/evidence/o-merged/cert.pdf`,
+        subjectType: 'organisation',
+        subjectId: 'O-MERGED-0025',
+        fileName: 'cert.pdf',
+        contentType: 'application/pdf',
+        byteSize: 1024,
+        sha256: 'c'.repeat(64),
+        scanStatus: 'clean',
+        uploadedByPersonId: 'P-ACTOR-1',
+      });
+      await evidenceRepo.createArtifact(ctxBravo, {
+        blobKey: `tenant-${tenantBravo}-test/evidence/p-bravo/other.pdf`,
+        subjectType: 'person',
+        subjectId: 'P-MERGED-0025',
+        fileName: 'other.pdf',
+        contentType: 'application/pdf',
+        byteSize: 512,
+        sha256: 'd'.repeat(64),
+        scanStatus: 'clean',
+        uploadedByPersonId: 'P-ACTOR-2',
+      });
+
+      const partyRepo = new TenantPartyRepository({ poolManager });
+      await partyRepo.executeMergeInTransaction(ctxAlpha, {
+        recordType: 'person',
+        survivorId: 'P-SURV-0025',
+        mergedId: 'P-MERGED-0025',
+      });
+      await partyRepo.executeMergeInTransaction(ctxAlpha, {
+        recordType: 'organisation',
+        survivorId: 'O-SURV-0025',
+        mergedId: 'O-MERGED-0025',
+      });
+
+      const mergedChecksAlpha = await alphaDirectAfter.query<{
+        id: string;
+        subject_id: string;
+      }>(
+        `SELECT id, subject_id FROM public.intake_check_records
+         WHERE tenant_id = $1 AND id IN ('ICHK-0025-P', 'ICHK-0025-O')
+         ORDER BY id ASC`,
+        [tenantAlpha],
+      );
+      expect(mergedChecksAlpha.rows).toEqual([
+        { id: 'ICHK-0025-O', subject_id: 'O-SURV-0025' },
+        { id: 'ICHK-0025-P', subject_id: 'P-SURV-0025' },
+      ]);
+
+      const personArtifacts = await evidenceRepo.listArtifactsForSubject(
+        ctxAlpha,
+        { subjectType: 'person', subjectId: 'P-SURV-0025' },
+      );
+      expect(personArtifacts.map((a) => a.fileName)).toEqual(['passport.pdf']);
+      const orgArtifacts = await evidenceRepo.listArtifactsForSubject(
+        ctxAlpha,
+        { subjectType: 'organisation', subjectId: 'O-SURV-0025' },
+      );
+      expect(orgArtifacts.map((a) => a.fileName)).toEqual(['cert.pdf']);
+
+      // Bravo untouched
+      const bravoArtifacts = await evidenceRepo.listArtifactsForSubject(
+        ctxBravo,
+        { subjectType: 'person', subjectId: 'P-MERGED-0025' },
+      );
+      expect(bravoArtifacts.map((a) => a.fileName)).toEqual(['other.pdf']);
+
+      // 5. Rollback preservation & full up -> down -> up round-trip:
+      //    Admin overrides `plc` to `admin_plc`; down must keep `trust` (`custom_trust`),
+      //    `custom_company` (`company`), and `plc` (`admin_plc`), while clearing `llp`.
+      await alphaDirectAfter.query(
+        `UPDATE public.choice_values
+         SET metadata_json = jsonb_set(metadata_json, '{systemKey}', '"admin_plc"'::jsonb, true)
+         WHERE tenant_id = $1 AND id = 'organisation_type.plc'`,
+        [tenantAlpha],
+      );
+
+      expect(await runner.rollbackVersion(ctxAlpha, '0025')).toBe(true);
+      const activeDown = await runner.getActiveTables(ctxAlpha);
+      expect(activeDown).not.toContain('evidence_artifacts');
+
+      const seqDown = await alphaDirectAfter.query(
+        `SELECT 1 FROM information_schema.sequences
+         WHERE sequence_schema = 'public' AND sequence_name = 'tenant_evidence_artifact_id_seq'`,
+      );
+      expect(seqDown.rowCount).toBe(0);
+
+      const afterDownChoices = await alphaDirectAfter.query<{
+        id: string;
+        sys_key: string | null;
+      }>(
+        `SELECT id, metadata_json->>'systemKey' AS sys_key
+         FROM public.choice_values
+         WHERE tenant_id = $1 AND list_key = 'organisation_type'`,
+        [tenantAlpha],
+      );
+      const downMap = new Map(
+        afterDownChoices.rows.map((r) => [r.id, r.sys_key]),
+      );
+      expect(downMap.get('organisation_type.llp')).toBeNull();
+      expect(downMap.get('organisation_type.trust')).toBe('custom_trust');
+      expect(downMap.get('organisation_type.custom_company')).toBe('company');
+      expect(downMap.get('organisation_type.plc')).toBe('admin_plc');
+
+      const reapplied = await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      expect(reapplied.map((m) => m.version)).toEqual(['0025']);
+    } finally {
+      await alphaDirectAfter.end();
+      await bravoDirectAfter.end();
+      await poolManager.closeAllPools();
     }
   }, 30_000);
 });
