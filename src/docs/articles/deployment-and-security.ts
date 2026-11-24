@@ -47,7 +47,7 @@ Whether you choose 1Squared Hosted Cloud or Self-Hosted Azure, **no two law firm
 
 ### Page loading and live intake previews
 
-Pages load only the records you are allowed to see, rather than fetching whole-firm lists into the browser, so large firms stay fast. Help and guidance pages load without reading any client, enquiry, or matter records. When staff type into new contact, organisation, enquiry, or quote forms, duplicate warnings and preliminary conflict checks run on the server with the same restricted-matter and ethical-wall protections as full conflict searches.
+List and workspace pages load page by page with only the records you are allowed to see, rather than fetching whole-firm lists into the browser, so large firms stay fast. Help and guidance pages verify your active employee access before opening, without reading any client, enquiry, or matter records. When staff type into new contact, organisation, enquiry, or quote forms, duplicate warnings and preliminary conflict checks run on the server with the same restricted-matter and ethical-wall protections as full conflict searches.
 
 ## 3. External document store & SharePoint security
 
