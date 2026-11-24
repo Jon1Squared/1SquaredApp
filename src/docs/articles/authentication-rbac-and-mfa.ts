@@ -22,6 +22,12 @@ Every server action in \`src/app/actions.ts\` and every API route handler under 
 - **Demo Mode User Switching**: Switching between seeded personas (\`demo: true\`) is governed by tenant configuration (\`isNonLiveDemoEnvironment()\`), not by \`NODE_ENV\` or the build type (Rule 6; see [Demo environment](/docs/demo-environment)). It is allowed only when the tenant \`environment\` is \`dev\`, \`test\`, \`training\`, or \`demo\` (never \`live\`, where \`enableDemoMode\` cannot be \`true\`) and \`featureFlags.enableDemoMode\` is \`true\`. The account menu hides the demo persona switcher whenever \`featureFlags.enableDemoMode\` is \`false\`. When \`isDemoModeEnabled() === true\` (\`homePagesConfig.firmSettings.demoMode\` is derived from \`isDemoModeEnabled()\` and cannot be set independently), a signed-in user can only switch to a demo persona (\`demo: true\`) whose permissions are a subset of the permissions the signed-in user already holds and who does not have access to any restricted or staff matter (\`restrictedAccessUserIds\`) that the signed-in user cannot access.
 - **Role Preview ("Viewing as" Header Switcher)**: Multi-role employees can switch their active **Viewing as** role in the top bar between their assigned roles, and System Administrators holding the built-in \`admin\` role (\`canPreviewAnyHomeRole\`) can select any configured Home role in the **Viewing as** dropdown (\`switchViewingRole\` and \`resolveActiveViewingRole\`) to preview role-specific Home workspaces and left-rail navigation without changing their underlying RBAC permissions.
 
+### Signing out
+
+Opening the account menu in the top-right corner and selecting **Sign out** ends your 1Squared session straight away and returns you to the sign-in screen.
+
+Signing out of 1Squared does not sign you out of Microsoft. If you are still signed in to your Microsoft account in the same browser, selecting **Sign in with Microsoft** may take you straight back in without asking for your password again. To sign out of Microsoft as well — for example, on a shared computer — close the browser completely.
+
 ## 2. Employee matching, provisioning & authority modes
 
 When a user signs in with Microsoft Entra ID, 1Squared resolves their employee record in the following order:
