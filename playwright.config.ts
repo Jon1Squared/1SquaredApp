@@ -45,6 +45,7 @@ export default defineConfig({
       PLATFORM_ENVIRONMENT: 'test',
       AUTH_SECRET: E2E_TEST_AUTH_SECRET,
       PLATFORM_BLOB_SIGNING_KEY: E2E_TEST_BLOB_SIGNING_KEY,
+      ENTRA_REDIRECT_URI: `${E2E_BASE_URL}/api/auth/callback/microsoft-entra-id`,
       PLAYWRIGHT_PORT: String(E2E_PORT),
       PLATFORM_POSTGRES_HOST: process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
       PLATFORM_POSTGRES_PORT: process.env.PLATFORM_POSTGRES_PORT || '5432',
