@@ -11,8 +11,10 @@
  */
 
 import type {
+  IntakeEvidenceArtifactRef,
   PermissionKey,
   RegisterApprovalRules,
+  RegisterChecklistItemValue,
   RegisterFieldDefinition,
   RegisterPermission,
   RegisterRecord,
@@ -65,7 +67,7 @@ export const DEFAULT_REGISTERS_CONFIG: RegistersConfiguration = Object.freeze({
 });
 
 export const CORE_REGISTER_TYPES: Readonly<
-  Record<'sign_off' | 'undertaking' | 'complaint' | 'breach', RegisterTypeDefinition>
+  Record<'sign_off' | 'undertaking' | 'complaint' | 'breach' | 'cdd', RegisterTypeDefinition>
 > = Object.freeze({
   sign_off: {
     key: 'sign_off',
@@ -434,6 +436,106 @@ export const CORE_REGISTER_TYPES: Readonly<
     ],
     showInNavigation: true,
   },
+  cdd: {
+    key: 'cdd',
+    label: 'Client Due Diligence',
+    pluralLabel: 'Client Due Diligence',
+    description:
+      'Client-subject due diligence checklists, manual ID and sanctions/PEP evidence, and scheduled re-check tracking.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'CDD',
+    initialStatus: 'in_progress',
+    viewPermission: 'cdd:view',
+    createPermission: 'cdd:record',
+    editPermission: 'cdd:record',
+    subjectScope: 'client',
+    requireMatterLink: false,
+    approvalRules: null,
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [30, 7, 0, -7, -30],
+      reviewDaysBefore: [],
+      recipientMode: 'client_owner_or_recent_fee_earner',
+    },
+    states: [
+      { key: 'in_progress', label: 'In progress', isTerminal: false, tone: 'warning' },
+      { key: 'recorded', label: 'Recorded', isTerminal: false, tone: 'success' },
+      { key: 'archived', label: 'Archived', isTerminal: true, tone: 'neutral' },
+      { key: 'superseded', label: 'Superseded', isTerminal: true, tone: 'neutral' },
+    ],
+    transitions: [
+      {
+        key: 'record_cdd',
+        label: 'Mark CDD recorded',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'recorded',
+        requiredPermission: 'cdd:record',
+        setsDecidedAt: true,
+      },
+      {
+        key: 'upgrade_to_high_risk',
+        label: 'Upgrade to High-risk CDD',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'in_progress',
+        requiredPermission: 'cdd:record',
+      },
+      {
+        key: 'archive_cdd',
+        label: 'Archive CDD record',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'archived',
+        requiredPermission: 'cdd:record',
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+      {
+        key: 'supersede_cdd',
+        label: 'Supersede CDD record',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'superseded',
+        requiredPermission: 'cdd:record',
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'clientCategory',
+        label: 'Client CDD category',
+        type: 'select',
+        required: true,
+        options: ['individual', 'company_or_llp', 'trust_charity_or_partnership'],
+      },
+      {
+        key: 'riskTier',
+        label: 'CDD tier',
+        type: 'select',
+        required: true,
+        options: ['standard', 'high'],
+        defaultValue: 'standard',
+      },
+      {
+        key: 'checklistItems',
+        label: 'CDD checklist items',
+        type: 'checklist',
+        required: true,
+      },
+      {
+        key: 'supportingEvidence',
+        label: 'Supporting evidence',
+        type: 'evidence',
+        required: false,
+      },
+      {
+        key: 'manualSummaryNote',
+        label: 'Compliance notes',
+        type: 'textarea',
+        required: false,
+      },
+    ],
+    showInNavigation: true,
+  },
 });
 
 const CORE_REGISTER_KEY_SET = new Set<string>(Object.keys(CORE_REGISTER_TYPES));
@@ -468,9 +570,18 @@ function cloneTransitionDefinition(
     fromStatuses: [...transitionDef.fromStatuses],
     toStatus: transitionDef.toStatus,
     requiredPermission: transitionDef.requiredPermission,
+    ...(transitionDef.allowedRoles
+      ? { allowedRoles: [...transitionDef.allowedRoles] }
+      : {}),
     requiresComment: transitionDef.requiresComment ?? false,
     forbidSelfAction: transitionDef.forbidSelfAction ?? false,
     requireAssignedApproverMatch: transitionDef.requireAssignedApproverMatch ?? false,
+    ...(transitionDef.mustDifferFromPreviousApprover !== undefined
+      ? { mustDifferFromPreviousApprover: Boolean(transitionDef.mustDifferFromPreviousApprover) }
+      : {}),
+    ...(transitionDef.distinctFromTransitionKeys
+      ? { distinctFromTransitionKeys: [...transitionDef.distinctFromTransitionKeys] }
+      : {}),
     setsDecidedAt: transitionDef.setsDecidedAt ?? false,
   };
 }
@@ -492,6 +603,9 @@ function cloneApprovalRules(
       ? { allowedApproverRoles: [...approvalRules.allowedApproverRoles] }
       : {}),
     requireAssignedApproverMatch: Boolean(approvalRules.requireAssignedApproverMatch),
+    ...(approvalRules.allowAdminBypass !== undefined
+      ? { allowAdminBypass: Boolean(approvalRules.allowAdminBypass) }
+      : {}),
   };
 }
 
@@ -584,8 +698,14 @@ export function validateRegisterTypeDefinition(
     enabled: customRegisterType.enabled ?? true,
     referencePrefix: customRegisterType.referencePrefix,
     initialStatus: customRegisterType.initialStatus,
+    ...(customRegisterType.viewPermission !== undefined
+      ? { viewPermission: customRegisterType.viewPermission }
+      : {}),
     createPermission: customRegisterType.createPermission,
     editPermission: customRegisterType.editPermission,
+    ...(customRegisterType.subjectScope !== undefined
+      ? { subjectScope: customRegisterType.subjectScope }
+      : {}),
     requireMatterLink: Boolean(customRegisterType.requireMatterLink),
     approvalRules: cloneApprovalRules(customRegisterType.approvalRules),
     reminderSchedule: cloneReminderSchedule(
@@ -768,7 +888,8 @@ export function validateRegisterFieldValues(params: {
     const isEmpty =
       val === undefined ||
       val === null ||
-      (typeof val === 'string' && val.trim().length === 0);
+      (typeof val === 'string' && val.trim().length === 0) ||
+      (Array.isArray(val) && val.length === 0);
 
     if (isEmpty) {
       if (enforceRequired && fieldDef.required) {
@@ -832,6 +953,121 @@ export function validateRegisterFieldValues(params: {
         }
         break;
       }
+      case 'checklist': {
+        if (!Array.isArray(val)) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be an array of checklist items.`,
+          );
+        }
+        const VALID_STATUSES = new Set(['pending', 'recorded', 'not_applicable', 'failed']);
+        const normalisedItems: RegisterChecklistItemValue[] = [];
+        for (const rawItem of val) {
+          if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist entry in field "${fieldDef.key}" must be an object.`,
+            );
+          }
+          const item = rawItem as Record<string, unknown>;
+          const itemKey = typeof item.itemKey === 'string' ? item.itemKey.trim() : '';
+          const label = typeof item.label === 'string' ? item.label.trim() : '';
+          const status = typeof item.status === 'string' ? item.status : '';
+          if (!itemKey || !label || typeof item.required !== 'boolean' || !VALID_STATUSES.has(status)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist item "${itemKey || 'unknown'}" in field "${fieldDef.key}" has invalid structure or status.`,
+            );
+          }
+          const trimmedNote = typeof item.note === 'string' ? item.note.trim() : '';
+          if ((status === 'not_applicable' || status === 'failed') && trimmedNote.length === 0) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist item "${label}" requires a note when marked "${status}".`,
+            );
+          }
+          if (!Array.isArray(item.evidenceRefs)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist item "${itemKey}" evidenceRefs must be an array.`,
+            );
+          }
+          for (const rawRef of item.evidenceRefs) {
+            if (
+              !rawRef ||
+              typeof rawRef !== 'object' ||
+              Array.isArray(rawRef) ||
+              typeof (rawRef as { blobKey?: unknown }).blobKey !== 'string' ||
+              !(rawRef as { blobKey: string }).blobKey.trim()
+            ) {
+              throw createRegisterDomainError(
+                REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+                `Checklist item "${itemKey}" contains an invalid evidence reference.`,
+              );
+            }
+          }
+          normalisedItems.push({
+            itemKey,
+            label,
+            required: item.required,
+            status: status as RegisterChecklistItemValue['status'],
+            recordedById: typeof item.recordedById === 'string' ? item.recordedById : null,
+            ...(typeof item.recordedByName === 'string' && item.recordedByName.trim()
+              ? { recordedByName: item.recordedByName.trim() }
+              : {}),
+            recordedAt: typeof item.recordedAt === 'string' ? item.recordedAt : null,
+            ...(trimmedNote ? { note: trimmedNote } : {}),
+            evidenceRefs: item.evidenceRefs as IntakeEvidenceArtifactRef[],
+            ...(item.intakeCheckRecordId !== undefined
+              ? {
+                  intakeCheckRecordId:
+                    typeof item.intakeCheckRecordId === 'string'
+                      ? item.intakeCheckRecordId
+                      : null,
+                }
+              : {}),
+          });
+        }
+        next[fieldDef.key] = normalisedItems;
+        break;
+      }
+      case 'evidence': {
+        if (!Array.isArray(val)) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be an array of verified evidence references.`,
+          );
+        }
+        const VALID_SCANS = new Set(['clean', 'pending', 'infected', 'quarantined']);
+        for (const rawRef of val) {
+          if (!rawRef || typeof rawRef !== 'object' || Array.isArray(rawRef)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Evidence entry in field "${fieldDef.key}" must be an object.`,
+            );
+          }
+          const ref = rawRef as Partial<IntakeEvidenceArtifactRef>;
+          if (
+            typeof ref.blobKey !== 'string' ||
+            !ref.blobKey.trim() ||
+            typeof ref.sha256 !== 'string' ||
+            !ref.sha256.trim() ||
+            typeof ref.contentType !== 'string' ||
+            !ref.contentType.trim() ||
+            typeof ref.sizeBytes !== 'number' ||
+            !Number.isFinite(ref.sizeBytes) ||
+            ref.sizeBytes <= 0 ||
+            typeof ref.scanStatus !== 'string' ||
+            !VALID_SCANS.has(ref.scanStatus)
+          ) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Evidence reference in field "${fieldDef.key}" is missing required integrity metadata.`,
+            );
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -842,11 +1078,24 @@ export function validateRegisterCreateInput(params: {
   registerType: RegisterTypeDefinition;
   title: string;
   matterId: string | null;
+  personId?: string | null;
+  organisationId?: string | null;
   dueAt: string | null;
   reviewAt: string | null;
   fieldValues: Record<string, unknown>;
-}): { title: string; dueAt: string | null; reviewAt: string | null; fieldValues: Record<string, unknown> } {
+}): {
+  title: string;
+  matterId: string | null;
+  personId: string | null;
+  organisationId: string | null;
+  dueAt: string | null;
+  reviewAt: string | null;
+  fieldValues: Record<string, unknown>;
+} {
   const { registerType, title, matterId, dueAt, reviewAt, fieldValues } = params;
+  const personId = params.personId?.trim() || null;
+  const organisationId = params.organisationId?.trim() || null;
+  const cleanMatterId = matterId?.trim() || null;
   if (!registerType.enabled) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.TYPE_DISABLED,
@@ -860,7 +1109,23 @@ export function validateRegisterCreateInput(params: {
       `Title is required when creating a ${registerType.label} record.`,
     );
   }
-  if (registerType.requireMatterLink && !matterId) {
+  const subjectScope = registerType.subjectScope ?? (registerType.requireMatterLink ? 'matter' : 'any');
+  if (subjectScope === 'client') {
+    if (cleanMatterId) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Client-scoped register type "${registerType.key}" cannot link directly to a matterId.`,
+      );
+    }
+    const hasPerson = Boolean(personId);
+    const hasOrg = Boolean(organisationId);
+    if (hasPerson === hasOrg) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Client-scoped register type "${registerType.key}" requires exactly one of personId or organisationId.`,
+      );
+    }
+  } else if ((registerType.requireMatterLink || subjectScope === 'matter') && !cleanMatterId) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
       `Register type "${registerType.key}" requires a linked matter.`,
@@ -885,10 +1150,26 @@ export function validateRegisterCreateInput(params: {
   });
   return {
     title: cleanTitle,
+    matterId: cleanMatterId,
+    personId,
+    organisationId,
     dueAt: normaliseIso(dueAt, 'dueAt'),
     reviewAt: normaliseIso(reviewAt, 'reviewAt'),
     fieldValues: normalisedFields,
   };
+}
+
+export function actorCanViewRegisterType(
+  actorPermissionSet: ReadonlySet<PermissionKey>,
+  registerType: Pick<RegisterTypeDefinition, 'key' | 'viewPermission'>,
+): boolean {
+  if (registerType.viewPermission) {
+    return actorPermissionSet.has(registerType.viewPermission as PermissionKey);
+  }
+  if (actorPermissionSet.has('register:view')) {
+    return true;
+  }
+  return registerType.key === 'undertaking' && actorPermissionSet.has('undertaking:manage');
 }
 
 export function actorCanExecuteRegisterTransition(
@@ -1164,6 +1445,8 @@ export function isRegisterPermission(key: string): key is RegisterPermission {
     key === 'register:edit' ||
     key === 'register:approve' ||
     key === 'register:configure' ||
-    key === 'undertaking:manage'
+    key === 'undertaking:manage' ||
+    key === 'cdd:view' ||
+    key === 'cdd:record'
   );
 }

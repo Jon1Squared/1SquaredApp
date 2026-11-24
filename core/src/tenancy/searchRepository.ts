@@ -13,6 +13,7 @@
 
 import type { TenantContext } from '../api/index';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
+import { buildRegisterEmployeeClientVisibleSqlPredicate } from './registerRepository';
 import { TenantScopedRepository } from './tenantScopedRepository';
 
 export type GlobalSearchEntityType =
@@ -52,6 +53,8 @@ export interface SearchActorPermissions {
   readonly permittedDiaryTeamIds: readonly string[];
   readonly canViewRegisters: boolean;
   readonly canManageUndertakings: boolean;
+  readonly canViewCdd?: boolean;
+  readonly canViewRisk?: boolean;
 }
 
 export interface GlobalSearchQueryInput {
@@ -342,8 +345,21 @@ function buildKeyDateAccessibleSql(alias: string): string {
 
 function buildRegisterAccessibleSql(alias: string): string {
   return `(
-    ($13::boolean = TRUE OR $14::boolean = TRUE)
-    AND ($13::boolean = TRUE OR ${alias}.register_type_key = 'undertaking')
+    (
+      (
+        ${alias}.register_type_key = 'cdd'
+        AND ${buildRegisterEmployeeClientVisibleSqlPredicate({
+          viewerParamIndex: 2,
+          canViewCddParamIndex: 18,
+          canBypassEmployeeCddParamIndex: 19,
+        })}
+      )
+      OR (
+        ${alias}.register_type_key <> 'cdd'
+        AND ($13::boolean = TRUE OR $14::boolean = TRUE)
+        AND ($13::boolean = TRUE OR ${alias}.register_type_key = 'undertaking')
+      )
+    )
     AND (
       ${alias}.matter_id IS NULL
       OR NOT EXISTS (
@@ -1014,6 +1030,11 @@ export class TenantSearchRepository extends TenantScopedRepository {
       activeTypes,                                      // $15
       limit,                                            // $16
       offset,                                           // $17
+      Boolean(input.actor.canViewCdd),                  // $18
+      Boolean(
+        input.actor.canViewRisk ||
+          input.actor.hasRestrictedMatterAccess,
+      ),                                                // $19
     ];
 
     return this.withTenantReadTransaction(ctx, async (tx) => {

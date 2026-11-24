@@ -29456,6 +29456,8 @@ export async function searchGlobalRecords(
       permittedDiaryTeamIds,
       canViewRegisters: permSet.permissions.has('register:view'),
       canManageUndertakings: permSet.permissions.has('undertaking:manage'),
+      canViewCdd: permSet.permissions.has('cdd:view'),
+      canViewRisk: permSet.permissions.has('risk:view'),
     },
   });
 

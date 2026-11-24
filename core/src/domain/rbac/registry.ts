@@ -734,6 +734,26 @@ export const PERMISSION_REGISTRY: Readonly<
     requiresMfa: false,
     sinceVersion: '1.1.0',
   },
+  'cdd:view': {
+    key: 'cdd:view',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'View client due diligence checklists, recorded verification dates, and evidence downloads (excluded from admin and finance; employee-clients additionally gated per ADR 0014).',
+    sensitivity: 'standard',
+    requiresMfa: false,
+    sinceVersion: '1.2.0',
+  },
+  'cdd:record': {
+    key: 'cdd:record',
+    domain: 'register',
+    module: 'registers',
+    description:
+      'Record client due diligence items, upload evidence files, record manual sanctions/PEP outcomes, and complete CDD records (excluded from admin and finance).',
+    sensitivity: 'restricted',
+    requiresMfa: false,
+    sinceVersion: '1.2.0',
+  },
   'register:run_reminders': {
     key: 'register:run_reminders',
     domain: 'register',
@@ -857,7 +877,10 @@ export const DEFAULT_RBAC_ROLES: Readonly<
     isBuiltIn: true,
     permissions: [
       ...ALL_USER_PERMISSION_KEYS.filter(
-        (key) => key !== 'undertaking:manage',
+        (key) =>
+          key !== 'undertaking:manage' &&
+          key !== 'cdd:view' &&
+          key !== 'cdd:record',
       ),
     ],
   },
@@ -928,6 +951,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:approve',
       'register:configure',
       'undertaking:manage',
+      'cdd:view',
+      'cdd:record',
       'notification:view_own',
       'notification:manage_own_preferences',
     ],
@@ -985,6 +1010,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:edit',
       'register:approve',
       'undertaking:manage',
+      'cdd:view',
+      'cdd:record',
       'notification:view_own',
       'notification:manage_own_preferences',
     ],
@@ -1034,6 +1061,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:edit',
       'register:approve',
       'register:configure',
+      'cdd:view',
+      'cdd:record',
       'notification:view_own',
       'notification:manage_own_preferences',
     ],
@@ -1101,6 +1130,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:create',
       'register:edit',
       'undertaking:manage',
+      'cdd:view',
+      'cdd:record',
       'notification:view_own',
       'notification:manage_own_preferences',
     ],
@@ -1150,6 +1181,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:edit',
       'register:approve',
       'undertaking:manage',
+      'cdd:view',
+      'cdd:record',
       'notification:view_own',
       'notification:manage_own_preferences',
     ],
@@ -1188,6 +1221,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'register:view',
       'register:create',
       'register:edit',
+      'cdd:view',
+      'cdd:record',
       'notification:view_own',
       'notification:manage_own_preferences',
     ],

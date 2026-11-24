@@ -928,9 +928,9 @@ describe('Key Dates permissions, config schema validation, and extension contrac
     });
   });
 
-  describe('Extension API v2.1.0 Contract Tests', () => {
+  describe('Extension API v2.2.0 Contract Tests', () => {
     it('supports keydate:read, keydate:write and all 3 KeyDateExtensionPoints with error/timeout isolation', async () => {
-      expect(CORE_API_VERSION).toBe('2.1.0');
+      expect(CORE_API_VERSION).toBe('2.2.0');
       const host = new ExtensionHost({
         coreApiVersion: CORE_API_VERSION,
         defaultHookTimeoutMs: 100,
