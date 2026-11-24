@@ -18,6 +18,7 @@ import {
   urgencyRank,
   type EnquiriesQueueTab,
 } from '@/domain/enquiries';
+import type { SortDirection } from '@/domain/listNavigationState';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName } from '@/domain/names';
 import {
@@ -35,7 +36,10 @@ import {
   type IntakeQueueRow,
 } from '@/domain/quotes';
 import { isTaskOpen, userTeams } from '@/domain/tasks';
-import type { ListPaginationMeta } from '@/server/pageLoaders';
+import type {
+  EnquiriesListSortColumn,
+  ListPaginationMeta,
+} from '@/server/pageLoaders';
 import type {
   ChoiceValue,
   Enquiry,
@@ -63,6 +67,10 @@ import { StatusPill } from './SearchBox';
 interface Props {
   enquiries: Enquiry[];
   quotes?: Quote[];
+  orderedQueueItems?: ReadonlyArray<{
+    readonly kind: 'enquiry' | 'quote';
+    readonly id: string;
+  }>;
   tasks: Task[];
   teams: Team[];
   people: Person[];
@@ -86,6 +94,8 @@ interface Props {
     validUntilFrom: string;
     validUntilTo: string;
     followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week';
+    sortBy?: EnquiriesListSortColumn | null;
+    sortDir?: SortDirection | null;
   };
 }
 
@@ -103,6 +113,8 @@ const ENQUIRIES_PARAM_DEFAULTS = {
   validFrom: '',
   validTo: '',
   followUp: 'all',
+  sort: '',
+  dir: '',
   page: 1,
 };
 
@@ -125,6 +137,7 @@ const STATUS_SORT_ORDER: Record<string, number> = {
 export function EnquiriesListClient({
   enquiries,
   quotes = [],
+  orderedQueueItems,
   tasks,
   teams,
   people,
@@ -137,10 +150,16 @@ export function EnquiriesListClient({
 }: Props) {
   const router = useRouter();
   const now = useMemo(() => new Date(), []);
-  const { navigateNow, navigateDebounced } = useServerListNavigation({
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
     basePath: '/enquiries',
     router,
     defaults: ENQUIRIES_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
   });
 
   const myTeams = useMemo(() => userTeams(currentUserId, teams), [currentUserId, teams]);
@@ -179,7 +198,14 @@ export function EnquiriesListClient({
   const [followUpDueFilter, setFollowUpDueFilter] = useState<
     'all' | 'overdue' | 'today' | 'this_week'
   >(initialFilters?.followUpDueFilter ?? 'all');
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
 
   const initialKey = JSON.stringify(initialFilters ?? null);
@@ -192,7 +218,10 @@ export function EnquiriesListClient({
     queueMicrotask(() => {
       if (!active) return;
       setTab(initialFilters.tab);
-      setSearchQuery(initialFilters.query);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setSearchQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
       setTypeFilter(initialFilters.typeFilter);
       setUrgencyFilter(initialFilters.urgencyFilter);
       setStatusFilter(initialFilters.statusFilter);
@@ -204,11 +233,19 @@ export function EnquiriesListClient({
       setValidUntilFrom(initialFilters.validUntilFrom);
       setValidUntilTo(initialFilters.validUntilTo);
       setFollowUpDueFilter(initialFilters.followUpDueFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
     });
     return () => {
       active = false;
     };
-  }, [initialKey, initialFilters]);
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
 
   const toQueryMap = (overrides?: Partial<{
     tab: EnquiriesQueueTab;
@@ -224,23 +261,34 @@ export function EnquiriesListClient({
     validUntilFrom: string;
     validUntilTo: string;
     followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week';
+    sort: DataListSortState | null;
     page: number;
-  }>) => ({
-    tab: overrides?.tab ?? tab,
-    q: overrides?.query ?? searchQuery,
-    type: overrides?.typeFilter ?? typeFilter,
-    urgency: overrides?.urgencyFilter ?? urgencyFilter,
-    status: overrides?.statusFilter ?? statusFilter,
-    practiceArea: overrides?.practiceAreaFilter ?? practiceAreaFilter,
-    team: overrides?.teamFilter ?? teamFilter,
-    channel: overrides?.channelFilter ?? channelFilter,
-    feeBasis: overrides?.feeBasisFilter ?? feeBasisFilter,
-    feeEarner: overrides?.feeEarnerFilter ?? feeEarnerFilter,
-    validFrom: overrides?.validUntilFrom ?? validUntilFrom,
-    validTo: overrides?.validUntilTo ?? validUntilTo,
-    followUp: overrides?.followUpDueFilter ?? followUpDueFilter,
-    page: overrides?.page ?? 1,
-  });
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? searchQuery,
+      type: overrides?.typeFilter ?? typeFilter,
+      urgency: overrides?.urgencyFilter ?? urgencyFilter,
+      status: overrides?.statusFilter ?? statusFilter,
+      practiceArea: overrides?.practiceAreaFilter ?? practiceAreaFilter,
+      team: overrides?.teamFilter ?? teamFilter,
+      channel: overrides?.channelFilter ?? channelFilter,
+      feeBasis: overrides?.feeBasisFilter ?? feeBasisFilter,
+      feeEarner: overrides?.feeEarnerFilter ?? feeEarnerFilter,
+      validFrom: overrides?.validUntilFrom ?? validUntilFrom,
+      validTo: overrides?.validUntilTo ?? validUntilTo,
+      followUp: overrides?.followUpDueFilter ?? followUpDueFilter,
+      sort: nextSort?.columnId ?? '',
+      dir: nextSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination) navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+  };
 
   const handleTabChange = (next: EnquiriesQueueTab) => {
     setTab(next);
@@ -374,6 +422,14 @@ export function EnquiriesListClient({
     }
     return map;
   }, [enquiries]);
+
+  const quoteById = useMemo(() => {
+    const map = new Map<string, Quote>();
+    for (const q of quotes) {
+      map.set(q.id, q);
+    }
+    return map;
+  }, [quotes]);
 
   const nameOfPerson = (id: string | null | undefined) => {
     if (!id) return '';
@@ -549,6 +605,29 @@ export function EnquiriesListClient({
   };
 
   const filtered = useMemo<IntakeQueueRow[]>(() => {
+    if (pagination) {
+      if (orderedQueueItems) {
+        return orderedQueueItems
+          .map((item): IntakeQueueRow | null => {
+            if (item.kind === 'enquiry') {
+              const e = enquiryById.get(item.id);
+              return e ? { kind: 'enquiry', id: e.id, enquiry: e } : null;
+            }
+            const qt = quoteById.get(item.id);
+            return qt ? { kind: 'quote', id: qt.id, quote: qt } : null;
+          })
+          .filter((row): row is IntakeQueueRow => Boolean(row));
+      }
+      return sortIntakeQueue(
+        [
+          ...enquiries.map((e): IntakeQueueRow => ({ kind: 'enquiry', id: e.id, enquiry: e })),
+          ...quotes.map((qt): IntakeQueueRow => ({ kind: 'quote', id: qt.id, quote: qt })),
+        ],
+        values,
+        now,
+      );
+    }
+
     const rows: IntakeQueueRow[] = [];
 
     if (typeFilter === 'all' || typeFilter === 'enquiry') {
@@ -662,6 +741,9 @@ export function EnquiriesListClient({
       return timeA - timeB;
     });
   }, [
+    pagination,
+    orderedQueueItems,
+    enquiries,
     tabEnquiries,
     tabQuotes,
     quotes,
@@ -679,6 +761,7 @@ export function EnquiriesListClient({
     searchQuery,
     quotesByEnquiryId,
     enquiryById,
+    quoteById,
     people,
     organisations,
     values,
@@ -1677,7 +1760,7 @@ export function EnquiriesListClient({
           )
         }
         sort={sort}
-        onSortChange={setSort}
+        onSortChange={handleSortChange}
         defaultSortLabel="Default order"
         density={density}
         emptyMessage="No enquiries or quotes match the selected queue and filters."

@@ -1,7 +1,8 @@
 import { OrganisationsListClient } from '@/components/OrganisationsListClient';
 import {
-  DEFAULT_LIST_PAGE_SIZE,
   loadOrganisationsListPageData,
+  parseListPageParam,
+  parseListPageSizeParam,
   withOptionalPageActor,
   type OrganisationsListTabFilter,
 } from '@/server/pageLoaders';
@@ -31,9 +32,10 @@ export default async function OrganisationsPage({
   const resolved = searchParams ? await searchParams : {};
   const rawTab = firstParam(resolved, 'tab') as OrganisationsListTabFilter | undefined;
   const tab: OrganisationsListTabFilter = rawTab && VALID_TABS.has(rawTab) ? rawTab : 'all';
-  const page = Number.parseInt(firstParam(resolved, 'page') ?? '1', 10) || 1;
-  const pageSize =
-    Number.parseInt(firstParam(resolved, 'pageSize') ?? '', 10) || DEFAULT_LIST_PAGE_SIZE;
+  const page = parseListPageParam(firstParam(resolved, 'page'));
+  const pageSize = parseListPageSizeParam(firstParam(resolved, 'pageSize'));
+  const rawDir = firstParam(resolved, 'dir');
+  const sortDir = rawDir === 'desc' ? 'desc' : rawDir === 'asc' ? 'asc' : undefined;
 
   return withOptionalPageActor(async (actor) => {
     const data = await loadOrganisationsListPageData(actor.personId, {
@@ -46,6 +48,8 @@ export default async function OrganisationsPage({
       orgTypeFilter: firstParam(resolved, 'orgType'),
       sectorFilter: firstParam(resolved, 'sector'),
       ownerFilter: firstParam(resolved, 'owner'),
+      sortBy: firstParam(resolved, 'sort'),
+      sortDir,
     });
     const { shell } = data;
     return (

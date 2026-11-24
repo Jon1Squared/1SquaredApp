@@ -7,6 +7,7 @@ import { Calendar } from 'lucide-react';
 import type { PillTone, UrgencyEdgeKind } from '@/domain/badges';
 import { formatDate, formatDateTime, formatKeyDateSummary } from '@/domain/dates';
 import { enquiryDisplayName } from '@/domain/enquiries';
+import type { SortDirection } from '@/domain/listNavigationState';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import { quoteClientDisplayName } from '@/domain/quotes';
@@ -16,7 +17,11 @@ import {
   isUserTeamLeadFor,
   userTeams,
 } from '@/domain/tasks';
-import type { ListPaginationMeta, TasksListTabFilter } from '@/server/pageLoaders';
+import type {
+  ListPaginationMeta,
+  TasksListSortColumn,
+  TasksListTabFilter,
+} from '@/server/pageLoaders';
 import type {
   ChoiceValue,
   Enquiry,
@@ -60,6 +65,8 @@ interface Props {
     typeFilter: string;
     teamFilter: string;
     recordTypeFilter: string;
+    sortBy?: TasksListSortColumn | null;
+    sortDir?: SortDirection | null;
   };
 }
 
@@ -73,6 +80,8 @@ const TASKS_PARAM_DEFAULTS = {
   type: 'all',
   team: 'all',
   recordType: 'all',
+  sort: '',
+  dir: '',
   page: 1,
 };
 
@@ -143,10 +152,16 @@ export function TasksListClient({
   initialFilters,
 }: Props) {
   const router = useRouter();
-  const { navigateNow, navigateDebounced } = useServerListNavigation({
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
     basePath: '/tasks',
     router,
     defaults: TASKS_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
   });
 
   const currentUser = useMemo(
@@ -170,7 +185,14 @@ export function TasksListClient({
   const [recordTypeFilter, setRecordTypeFilter] = useState(
     initialFilters?.recordTypeFilter ?? 'all',
   );
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
 
   const initialKey = JSON.stringify(initialFilters ?? null);
@@ -183,17 +205,28 @@ export function TasksListClient({
     queueMicrotask(() => {
       if (!active) return;
       setTab(initialFilters.tab);
-      setSearchQuery(initialFilters.query);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setSearchQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
       setPriorityFilter(initialFilters.priorityFilter);
       setStatusFilter(initialFilters.statusFilter);
       setTypeFilter(initialFilters.typeFilter);
       setTeamFilter(initialFilters.teamFilter);
       setRecordTypeFilter(initialFilters.recordTypeFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
     });
     return () => {
       active = false;
     };
-  }, [initialKey, initialFilters]);
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
 
   const toQueryMap = (overrides?: Partial<{
     tab: TasksTab;
@@ -203,17 +236,28 @@ export function TasksListClient({
     typeFilter: string;
     teamFilter: string;
     recordTypeFilter: string;
+    sort: DataListSortState | null;
     page: number;
-  }>) => ({
-    tab: overrides?.tab ?? tab,
-    q: overrides?.query ?? searchQuery,
-    priority: overrides?.priorityFilter ?? priorityFilter,
-    status: overrides?.statusFilter ?? statusFilter,
-    type: overrides?.typeFilter ?? typeFilter,
-    team: overrides?.teamFilter ?? teamFilter,
-    recordType: overrides?.recordTypeFilter ?? recordTypeFilter,
-    page: overrides?.page ?? 1,
-  });
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? searchQuery,
+      priority: overrides?.priorityFilter ?? priorityFilter,
+      status: overrides?.statusFilter ?? statusFilter,
+      type: overrides?.typeFilter ?? typeFilter,
+      team: overrides?.teamFilter ?? teamFilter,
+      recordType: overrides?.recordTypeFilter ?? recordTypeFilter,
+      sort: nextSort?.columnId ?? '',
+      dir: nextSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination) navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+  };
 
   const handleTabChange = (next: TasksTab) => {
     setTab(next);
@@ -357,6 +401,8 @@ export function TasksListClient({
   }, [tasks, tab, currentUserId, myTeamIds, teamFilter]);
 
   const filtered = useMemo(() => {
+    if (pagination) return tasks;
+
     const q = searchQuery.trim().toLowerCase();
 
     const list = tabTasks.filter((t) => {
@@ -434,6 +480,8 @@ export function TasksListClient({
       return a.dueAt.localeCompare(b.dueAt);
     });
   }, [
+    pagination,
+    tasks,
     tabTasks,
     priorityFilter,
     typeFilter,
@@ -864,7 +912,7 @@ export function TasksListClient({
         getRowUrgency={(t) => taskUrgencyEdge(t, resolveLabel(values, t.priorityId))}
         onRowClick={(t) => router.push(`/tasks/${t.id}`)}
         sort={sort}
-        onSortChange={setSort}
+        onSortChange={handleSortChange}
         defaultSortLabel="Default order"
         density={density}
         emptyMessage="No tasks match the selected queue and filters."

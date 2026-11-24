@@ -1,7 +1,8 @@
 import { TasksListClient } from '@/components/TasksListClient';
 import {
-  DEFAULT_LIST_PAGE_SIZE,
   loadTasksListPageData,
+  parseListPageParam,
+  parseListPageSizeParam,
   withOptionalPageActor,
   type TasksListTabFilter,
 } from '@/server/pageLoaders';
@@ -25,9 +26,10 @@ export default async function TasksPage({
   const resolved = searchParams ? await searchParams : {};
   const rawTab = firstParam(resolved, 'tab') as TasksListTabFilter | undefined;
   const tab: TasksListTabFilter = rawTab && VALID_TABS.has(rawTab) ? rawTab : 'my';
-  const page = Number.parseInt(firstParam(resolved, 'page') ?? '1', 10) || 1;
-  const pageSize =
-    Number.parseInt(firstParam(resolved, 'pageSize') ?? '', 10) || DEFAULT_LIST_PAGE_SIZE;
+  const page = parseListPageParam(firstParam(resolved, 'page'));
+  const pageSize = parseListPageSizeParam(firstParam(resolved, 'pageSize'));
+  const rawDir = firstParam(resolved, 'dir');
+  const sortDir = rawDir === 'desc' ? 'desc' : rawDir === 'asc' ? 'asc' : undefined;
 
   return withOptionalPageActor(async (actor) => {
     const data = await loadTasksListPageData(actor.personId, {
@@ -40,6 +42,8 @@ export default async function TasksPage({
       typeFilter: firstParam(resolved, 'type'),
       teamFilter: firstParam(resolved, 'team'),
       recordTypeFilter: firstParam(resolved, 'recordType'),
+      sortBy: firstParam(resolved, 'sort'),
+      sortDir,
     });
     const { shell } = data;
 

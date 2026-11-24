@@ -6,10 +6,15 @@ import { useRouter } from 'next/navigation';
 import { isInactiveStatus } from '@/domain/attention';
 import { enquiryStatusTone, type PillTone, type UrgencyEdgeKind } from '@/domain/badges';
 import { getEnquiryStagePeople, type EnquiryStagePersonEntry } from '@/domain/enquiries';
+import type { SortDirection } from '@/domain/listNavigationState';
 import { optionsFor, resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import { mainLinkFor } from '@/domain/searchIndex';
-import type { ListPaginationMeta, PeopleListTabFilter } from '@/server/pageLoaders';
+import type {
+  ListPaginationMeta,
+  PeopleListSortColumn,
+  PeopleListTabFilter,
+} from '@/server/pageLoaders';
 import type {
   ChoiceValue,
   Enquiry,
@@ -46,6 +51,8 @@ interface Props {
     roleFilter: string;
     statusFilter: string;
     ownerFilter: string;
+    sortBy?: PeopleListSortColumn | null;
+    sortDir?: SortDirection | null;
   };
 }
 
@@ -57,6 +64,8 @@ const PEOPLE_PARAM_DEFAULTS = {
   role: 'all',
   status: 'all',
   owner: 'all',
+  sort: '',
+  dir: '',
   page: 1,
 };
 
@@ -104,10 +113,16 @@ export function PeopleListClient({
   initialFilters,
 }: Props) {
   const router = useRouter();
-  const { navigateNow, navigateDebounced } = useServerListNavigation({
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
     basePath: '/people',
     router,
     defaults: PEOPLE_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
   });
 
   const [tab, setTab] = useState<PeopleTab>(initialFilters?.tab ?? 'all');
@@ -115,7 +130,14 @@ export function PeopleListClient({
   const [roleFilter, setRoleFilter] = useState(initialFilters?.roleFilter ?? 'all');
   const [statusFilter, setStatusFilter] = useState(initialFilters?.statusFilter ?? 'all');
   const [ownerFilter, setOwnerFilter] = useState(initialFilters?.ownerFilter ?? 'all');
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
 
   const initialKey = JSON.stringify(initialFilters ?? null);
@@ -128,15 +150,26 @@ export function PeopleListClient({
     queueMicrotask(() => {
       if (!active) return;
       setTab(initialFilters.tab);
-      setSearchQuery(initialFilters.query);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setSearchQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
       setRoleFilter(initialFilters.roleFilter);
       setStatusFilter(initialFilters.statusFilter);
       setOwnerFilter(initialFilters.ownerFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
     });
     return () => {
       active = false;
     };
-  }, [initialKey, initialFilters]);
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
 
   const toQueryMap = (overrides?: Partial<{
     tab: PeopleTab;
@@ -144,15 +177,26 @@ export function PeopleListClient({
     roleFilter: string;
     statusFilter: string;
     ownerFilter: string;
+    sort: DataListSortState | null;
     page: number;
-  }>) => ({
-    tab: overrides?.tab ?? tab,
-    q: overrides?.query ?? searchQuery,
-    role: overrides?.roleFilter ?? roleFilter,
-    status: overrides?.statusFilter ?? statusFilter,
-    owner: overrides?.ownerFilter ?? ownerFilter,
-    page: overrides?.page ?? 1,
-  });
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? searchQuery,
+      role: overrides?.roleFilter ?? roleFilter,
+      status: overrides?.statusFilter ?? statusFilter,
+      owner: overrides?.ownerFilter ?? ownerFilter,
+      sort: nextSort?.columnId ?? '',
+      dir: nextSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination) navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+  };
 
   const handleTabChange = (next: PeopleTab) => {
     setTab(next);
@@ -229,6 +273,28 @@ export function PeopleListClient({
   const archivedCount = archivedPeople.length;
 
   const filtered = useMemo(() => {
+    if (pagination) {
+      const serverPersonRows: PeopleListRow[] = people.map((p) => ({
+        kind: 'person' as const,
+        id: p.id,
+        person: p,
+        surname: p.surname,
+        firstName: p.firstName,
+        displayName: personDisplayName(p),
+        href: `/people/${p.id}`,
+      }));
+      const serverEnquiryRows: PeopleListRow[] = enquiryStagePeople.map((entry) => ({
+        kind: 'enquiry_person' as const,
+        id: `enq-person-${entry.id}`,
+        entry,
+        surname: entry.surname,
+        firstName: entry.firstName,
+        displayName: entry.displayName,
+        href: `/enquiries/${entry.enquiryId}`,
+      }));
+      return [...serverPersonRows, ...serverEnquiryRows];
+    }
+
     const q = searchQuery.trim().toLowerCase();
 
     const includePersonRows =
@@ -343,6 +409,8 @@ export function PeopleListClient({
       return a.surname.localeCompare(b.surname) || a.firstName.localeCompare(b.firstName);
     });
   }, [
+    pagination,
+    people,
     tab,
     activePeople,
     archivedPeople,
@@ -644,7 +712,7 @@ export function PeopleListClient({
       <DataListFilterBar
         searchValue={searchQuery}
         onSearchChange={handleSearchChange}
-        searchPlaceholder="Search name, email, phone, organisation, reference…"
+        searchPlaceholder="Search name, email, phone, organisation, town, reference…"
         searchAriaLabel="Search people"
         primaryFilters={
           <>
@@ -751,7 +819,7 @@ export function PeopleListClient({
         getRowUrgency={getRowUrgency}
         onRowClick={(row) => router.push(row.href)}
         sort={sort}
-        onSortChange={setSort}
+        onSortChange={handleSortChange}
         defaultSortLabel="Alphabetical (surname)"
         density={density}
         emptyMessage="No people match the selected view and filters."

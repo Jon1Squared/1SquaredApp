@@ -1,8 +1,9 @@
 import { EnquiriesListClient } from '@/components/EnquiriesListClient';
 import type { EnquiriesQueueTab } from '@/domain/enquiries';
 import {
-  DEFAULT_LIST_PAGE_SIZE,
   loadEnquiriesListPageData,
+  parseListPageParam,
+  parseListPageSizeParam,
   withOptionalPageActor,
 } from '@/server/pageLoaders';
 
@@ -40,9 +41,10 @@ export default async function EnquiriesPage({
     rawFollowUp === 'overdue' || rawFollowUp === 'today' || rawFollowUp === 'this_week'
       ? rawFollowUp
       : 'all';
-  const page = Number.parseInt(firstParam(resolved, 'page') ?? '1', 10) || 1;
-  const pageSize =
-    Number.parseInt(firstParam(resolved, 'pageSize') ?? '', 10) || DEFAULT_LIST_PAGE_SIZE;
+  const page = parseListPageParam(firstParam(resolved, 'page'));
+  const pageSize = parseListPageSizeParam(firstParam(resolved, 'pageSize'));
+  const rawDir = firstParam(resolved, 'dir');
+  const sortDir = rawDir === 'desc' ? 'desc' : rawDir === 'asc' ? 'asc' : undefined;
 
   return withOptionalPageActor(async (actor) => {
     const data = await loadEnquiriesListPageData(actor.personId, {
@@ -61,6 +63,8 @@ export default async function EnquiriesPage({
       validUntilFrom: firstParam(resolved, 'validFrom'),
       validUntilTo: firstParam(resolved, 'validTo'),
       followUpDueFilter,
+      sortBy: firstParam(resolved, 'sort'),
+      sortDir,
     });
     const { shell } = data;
 
@@ -68,6 +72,7 @@ export default async function EnquiriesPage({
       <EnquiriesListClient
         enquiries={data.enquiries}
         quotes={data.quotes}
+        orderedQueueItems={data.orderedQueueItems}
         tasks={data.tasks}
         teams={shell.teams}
         people={data.people}

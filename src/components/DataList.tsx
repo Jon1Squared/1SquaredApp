@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { formatDateTime, formatRelativeAge } from '@/domain/dates';
+import { shouldSyncServerQuery } from '@/domain/listNavigationState';
 import { initials } from '@/domain/names';
 
 export type DataListDensity = 'comfortable' | 'compact';
@@ -957,20 +958,30 @@ export function buildServerListUrl(
 
 /**
  * Synchronises debounced text search and immediate filter/page transitions with URL query params
- * without triggering redundant router updates on initial render.
+ * without triggering redundant router updates on initial render or clobbering active typing (`R721`).
  */
 export function useServerListNavigation(options: {
   basePath: string;
   router: { push: (href: string) => void; replace: (href: string) => void };
   defaults: Record<string, string | number>;
+  initialQuery?: string;
 }) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncePendingRef = useRef(false);
+  const lastSentQueryRef = useRef<string | null>(
+    options.initialQuery !== undefined ? options.initialQuery.trim() : null,
+  );
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      debouncePendingRef.current = false;
     };
   }, []);
+
+  const readQueryFromValues = (
+    values: Record<string, string | number | undefined>,
+  ): string => String(values.q ?? '').trim();
 
   const navigateNow = (
     nextValues: Record<string, string | number | undefined>,
@@ -980,6 +991,8 @@ export function useServerListNavigation(options: {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    debouncePendingRef.current = false;
+    lastSentQueryRef.current = readQueryFromValues(nextValues);
     const href = buildServerListUrl(options.basePath, nextValues, options.defaults);
     if (mode === 'push') {
       options.router.push(href);
@@ -993,14 +1006,34 @@ export function useServerListNavigation(options: {
     delayMs = 250,
   ) => {
     if (timerRef.current) clearTimeout(timerRef.current);
+    debouncePendingRef.current = true;
+    const sentQuery = readQueryFromValues(nextValues);
+    const href = buildServerListUrl(options.basePath, nextValues, options.defaults);
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
-      const href = buildServerListUrl(options.basePath, nextValues, options.defaults);
+      debouncePendingRef.current = false;
+      lastSentQueryRef.current = sentQuery;
       options.router.replace(href);
     }, delayMs);
   };
 
-  return { navigateNow, navigateDebounced };
+  const canSyncServerQuery = (serverQuery: string): boolean =>
+    shouldSyncServerQuery({
+      serverQuery: serverQuery.trim(),
+      lastSentQuery: lastSentQueryRef.current,
+      debouncePending: debouncePendingRef.current,
+    });
+
+  const acknowledgeServerQuery = (serverQuery: string): void => {
+    lastSentQueryRef.current = serverQuery.trim();
+  };
+
+  return {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  };
 }
 
 

@@ -6,14 +6,19 @@ import { useRouter } from 'next/navigation';
 import { Calendar } from 'lucide-react';
 import type { PillTone, UrgencyEdgeKind } from '@/domain/badges';
 import { formatDate, formatKeyDateSummary } from '@/domain/dates';
-import { resolveLabel } from '@/domain/lists';
+import type { SortDirection } from '@/domain/listNavigationState';
+import { resolveLabel, systemKeyOf } from '@/domain/lists';
 import { extractCriticalDates } from '@/domain/matters';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
 import { isTaskOpen } from '@/domain/tasks';
 import type { ChoiceValue, Matter, Organisation, Person, Task } from '@/domain/types';
 import type { PmsMatterFinancials } from '@/pms/types';
-import type { ListPaginationMeta, MattersListTabFilter } from '@/server/pageLoaders';
+import type {
+  ListPaginationMeta,
+  MattersListSortColumn,
+  MattersListTabFilter,
+} from '@/server/pageLoaders';
 import {
   DataList,
   DataListFilterBar,
@@ -47,6 +52,8 @@ interface MattersListClientProps {
     statusFilter: string;
     feeEarnerFilter: string;
     billingBasisFilter: string;
+    sortBy?: MattersListSortColumn | null;
+    sortDir?: SortDirection | null;
   };
 }
 
@@ -59,6 +66,8 @@ const MATTERS_PARAM_DEFAULTS = {
   status: 'all',
   feeEarner: 'all',
   billingBasis: 'all',
+  sort: '',
+  dir: '',
   page: 1,
 };
 
@@ -103,10 +112,16 @@ export function MattersListClient({
   initialFilters,
 }: MattersListClientProps) {
   const router = useRouter();
-  const { navigateNow, navigateDebounced } = useServerListNavigation({
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
     basePath: '/matters',
     router,
     defaults: MATTERS_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
   });
 
   const [tab, setTab] = useState<MattersTab>(initialFilters?.tab ?? 'all');
@@ -124,7 +139,14 @@ export function MattersListClient({
     initialFilters?.billingBasisFilter ?? 'all',
   );
   const [showPmsColumns, setShowPmsColumns] = useState(true);
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
 
   const initialKey = JSON.stringify(initialFilters ?? null);
@@ -137,16 +159,27 @@ export function MattersListClient({
     queueMicrotask(() => {
       if (!active) return;
       setTab(initialFilters.tab);
-      setQuery(initialFilters.query);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
       setPracticeAreaId(initialFilters.practiceAreaId);
       setStatusFilter(initialFilters.statusFilter);
       setFeeEarnerFilter(initialFilters.feeEarnerFilter);
       setBillingBasisFilter(initialFilters.billingBasisFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
     });
     return () => {
       active = false;
     };
-  }, [initialKey, initialFilters]);
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
 
   const toQueryMap = (overrides?: Partial<{
     tab: MattersTab;
@@ -155,16 +188,31 @@ export function MattersListClient({
     statusFilter: string;
     feeEarnerFilter: string;
     billingBasisFilter: string;
+    sort: DataListSortState | null;
     page: number;
-  }>) => ({
-    tab: overrides?.tab ?? tab,
-    q: overrides?.query ?? query,
-    practiceArea: overrides?.practiceAreaId ?? practiceAreaId,
-    status: overrides?.statusFilter ?? statusFilter,
-    feeEarner: overrides?.feeEarnerFilter ?? feeEarnerFilter,
-    billingBasis: overrides?.billingBasisFilter ?? billingBasisFilter,
-    page: overrides?.page ?? 1,
-  });
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    const serverSort =
+      nextSort && nextSort.columnId !== 'financials' ? nextSort : null;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? query,
+      practiceArea: overrides?.practiceAreaId ?? practiceAreaId,
+      status: overrides?.statusFilter ?? statusFilter,
+      feeEarner: overrides?.feeEarnerFilter ?? feeEarnerFilter,
+      billingBasis: overrides?.billingBasisFilter ?? billingBasisFilter,
+      sort: serverSort?.columnId ?? '',
+      dir: serverSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination && (!next || next.columnId !== 'financials')) {
+      navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+    }
+  };
 
   const handleTabChange = (next: MattersTab) => {
     setTab(next);
@@ -270,12 +318,28 @@ export function MattersListClient({
   }, [matters, tab, currentUserId]);
 
   const filteredMatters = useMemo(() => {
+    if (pagination) {
+      if (
+        sort?.columnId === 'financials' &&
+        pagination.totalCount <= pagination.pageSize
+      ) {
+        const dir = sort.direction === 'asc' ? 1 : -1;
+        return [...matters].sort((a, b) => {
+          const wA = pmsSummaryByMatterId[a.id]?.unbilled_wip ?? a.feeEstimateGbp ?? -1;
+          const wB = pmsSummaryByMatterId[b.id]?.unbilled_wip ?? b.feeEstimateGbp ?? -1;
+          if (wA !== wB) return (wA - wB) * dir;
+          return a.matterNumber.localeCompare(b.matterNumber);
+        });
+      }
+      return matters;
+    }
+
     const q = query.trim().toLowerCase();
     const list = tabMatters.filter((m) => {
       if (practiceAreaId !== 'all' && m.practiceAreaId !== practiceAreaId) return false;
       if (statusFilter !== 'all') {
-        const filterLabel = resolveLabel(values, statusFilter);
-        const isCmiFilter = filterLabel === 'CMI incomplete';
+        const isCmiFilter =
+          systemKeyOf(values, statusFilter) === 'cmi_incomplete';
         const isMatterCmi =
           m.matterStatusId === statusFilter ||
           (isCmiFilter &&
@@ -324,6 +388,8 @@ export function MattersListClient({
       return a.matterNumber.localeCompare(b.matterNumber);
     });
   }, [
+    pagination,
+    matters,
     tabMatters,
     practiceAreaId,
     statusFilter,
@@ -433,7 +499,7 @@ export function MattersListClient({
         }
         const statusLabel = resolveLabel(values, m.matterStatusId) || 'Active';
         if (
-          statusLabel === 'CMI incomplete' ||
+          systemKeyOf(values, m.matterStatusId) === 'cmi_incomplete' ||
           m.amlStatus === 'CMI incomplete' ||
           m.amlStatus === 'Pending'
         ) {
@@ -469,7 +535,7 @@ export function MattersListClient({
             header: 'WIP / Debt',
             width: '150px',
             priority: 2,
-            sortable: true,
+            sortable: !pagination || pagination.totalCount <= pagination.pageSize,
             renderPrimary: (m) => {
               const pmsFin = pmsSummaryByMatterId[m.id];
               if (pmsFin) {
@@ -554,6 +620,7 @@ export function MattersListClient({
     showPmsColumns,
     pmsSummaryByMatterId,
     tasks,
+    pagination,
   ]);
 
   const mineCount = useMemo(() => matters.filter(isMyMatter).length, [matters, currentUserId]);
@@ -810,7 +877,7 @@ export function MattersListClient({
             getRowUrgency={getMatterUrgency}
             onRowClick={(m) => router.push(`/matters/${m.id}`)}
             sort={sort}
-            onSortChange={setSort}
+            onSortChange={handleSortChange}
             defaultSortLabel="Default order"
             density={density}
             emptyMessage="No matters match the selected view and filters."
@@ -819,7 +886,7 @@ export function MattersListClient({
               const clientLabel = clientNameMap.get(m.clientId) ?? m.clientId;
               const statusLabel = resolveLabel(values, m.matterStatusId) || 'Active';
               const isCmiIncomplete =
-                statusLabel === 'CMI incomplete' ||
+                systemKeyOf(values, m.matterStatusId) === 'cmi_incomplete' ||
                 m.amlStatus === 'CMI incomplete' ||
                 m.amlStatus === 'Pending';
               const pillLabel = m.conflictCheckStatus.toLowerCase().includes('conflict')

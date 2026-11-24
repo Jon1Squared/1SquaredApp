@@ -1,8 +1,9 @@
 import React from 'react';
 import { MattersListClient } from '@/components/MattersListClient';
 import {
-  DEFAULT_LIST_PAGE_SIZE,
   loadMattersListPageData,
+  parseListPageParam,
+  parseListPageSizeParam,
   withOptionalPageActor,
   type MattersListTabFilter,
 } from '@/server/pageLoaders';
@@ -32,9 +33,10 @@ export default async function MattersPage({
   const resolved = searchParams ? await searchParams : {};
   const rawTab = firstParam(resolved, 'tab') as MattersListTabFilter | undefined;
   const tab: MattersListTabFilter = rawTab && VALID_TABS.has(rawTab) ? rawTab : 'all';
-  const page = Number.parseInt(firstParam(resolved, 'page') ?? '1', 10) || 1;
-  const pageSize =
-    Number.parseInt(firstParam(resolved, 'pageSize') ?? '', 10) || DEFAULT_LIST_PAGE_SIZE;
+  const page = parseListPageParam(firstParam(resolved, 'page'));
+  const pageSize = parseListPageSizeParam(firstParam(resolved, 'pageSize'));
+  const rawDir = firstParam(resolved, 'dir');
+  const sortDir = rawDir === 'desc' ? 'desc' : rawDir === 'asc' ? 'asc' : undefined;
 
   return withOptionalPageActor(async (actor) => {
     const data = await loadMattersListPageData(actor.personId, {
@@ -46,6 +48,8 @@ export default async function MattersPage({
       statusFilter: firstParam(resolved, 'status'),
       feeEarnerFilter: firstParam(resolved, 'feeEarner'),
       billingBasisFilter: firstParam(resolved, 'billingBasis'),
+      sortBy: firstParam(resolved, 'sort'),
+      sortDir,
     });
     const { shell, matterFinance } = data;
     return (

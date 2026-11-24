@@ -4891,6 +4891,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
            lower(COALESCE(p.id, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.other_names, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
            OR lower(trim(concat_ws(' ', NULLIF(p.preferred_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
@@ -4900,6 +4901,30 @@ export class TenantPartyRepository extends TenantScopedRepository {
              SELECT 1 FROM public.person_emails pe
              WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower LIKE ${pat} ESCAPE '\\'
            )
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(p.phones_json) = 'array' THEN p.phones_json ELSE '[]'::jsonb END
+             ) ph
+             WHERE lower(COALESCE(ph->>'number', '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(p.addresses_json) = 'array' THEN p.addresses_json ELSE '[]'::jsonb END
+             ) addr
+             WHERE lower(COALESCE(addr->>'town', '')) LIKE ${pat} ESCAPE '\\'
+               OR lower(COALESCE(addr->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.person_organisation_links pol
+             JOIN public.organisations o
+               ON o.tenant_id = pol.tenant_id AND o.id = pol.organisation_id
+             WHERE pol.tenant_id = p.tenant_id
+               AND pol.person_id = p.id
+               AND (
+                 lower(COALESCE(o.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(o.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+               )
+           )
          )`,
       );
     }
@@ -4907,7 +4932,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
   }
 
   /**
-   * Loads a bounded page of tenant people plus the total SQL match count (`R700`, `R702`).
+   * Loads a bounded page of tenant people plus the total SQL match count (`R700`, `R702`, `R722`, `R729`).
    */
   public async listPeoplePageWithCount<
     TPerson extends TenantPersonRecord = TenantPersonRecord,
@@ -4926,10 +4951,17 @@ export class TenantPartyRepository extends TenantScopedRepository {
       readonly relationshipOwnerId?: string;
       readonly excludeIds?: readonly string[];
       readonly query?: string;
+      readonly sortBy?: 'person' | 'status';
+      readonly sortDir?: 'asc' | 'desc';
+      readonly statusSortIds?: readonly string[];
       readonly limit?: number;
       readonly offset?: number;
     },
-  ): Promise<{ readonly items: TPerson[]; readonly totalCount: number }> {
+  ): Promise<{
+    readonly items: TPerson[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
     const limit =
       typeof options?.limit === 'number' && Number.isFinite(options.limit)
         ? Math.max(1, Math.min(500, Math.floor(options.limit)))
@@ -4938,6 +4970,10 @@ export class TenantPartyRepository extends TenantScopedRepository {
       typeof options?.offset === 'number' && Number.isFinite(options.offset)
         ? Math.max(0, Math.floor(options.offset))
         : 0;
+    const dirSql = options?.sortDir === 'desc' ? 'DESC' : 'ASC';
+    const statusSortIds = Array.from(
+      new Set((options?.statusSortIds ?? []).filter(Boolean)),
+    );
     const { whereSql, params } = this.buildPeoplePageWhereSql(ctx, options);
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
@@ -4946,12 +4982,33 @@ export class TenantPartyRepository extends TenantScopedRepository {
         params,
       );
       const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
-      const pageParams = [...params, limit, offset];
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams: unknown[] = [...params];
+      let sortSql = `lower(COALESCE(p.surname, '')) ${dirSql}, lower(COALESCE(p.first_name, '')) ${dirSql}, p.id ASC`;
+      if (options?.sortBy === 'status') {
+        if (statusSortIds.length > 0) {
+          pageParams.push(statusSortIds);
+          sortSql = `CASE WHEN COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId', '') = '' THEN 0 ELSE COALESCE(NULLIF(array_position($${pageParams.length}::text[], COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId')), 0), 9999) END ${dirSql}, lower(COALESCE(p.surname, '')) ASC, lower(COALESCE(p.first_name, '')) ASC, p.id ASC`;
+        } else {
+          sortSql = `lower(COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId', '')) ${dirSql}, lower(COALESCE(p.surname, '')) ASC, p.id ASC`;
+        }
+      }
+
+      pageParams.push(limit, effectiveOffset);
       const res = await tx.query<DbPersonRow>(
         `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
          ${PEOPLE_LEFT_JOIN_HR}
          WHERE ${whereSql}
-         ORDER BY lower(COALESCE(p.surname, '')), lower(COALESCE(p.first_name, '')), p.id ASC
+         ORDER BY ${sortSql}
          LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
         pageParams,
       );
@@ -4959,7 +5016,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
         this.assertRowTenant(ctx, row.tenant_id, 'Person');
         return mapPersonRow<TPerson>(row);
       });
-      return { items, totalCount };
+      return { items, totalCount, effectivePage };
     });
   }
 
@@ -5153,19 +5210,27 @@ export class TenantPartyRepository extends TenantScopedRepository {
         }
         return parts.length > 0 ? `(${parts.join(' OR ')})` : 'FALSE';
       };
-      const isClientSql = buildGroupMatchSql(
-        options.tabFilter.clientRelTypeIds,
-        options.tabFilter.clientStatusIds,
-      );
-      const isProspectSql = buildGroupMatchSql(
-        options.tabFilter.prospectRelTypeIds,
-        options.tabFilter.prospectStatusIds,
-      );
       if (options.tabFilter.mode === 'clients') {
+        const isClientSql = buildGroupMatchSql(
+          options.tabFilter.clientRelTypeIds,
+          options.tabFilter.clientStatusIds,
+        );
         clauses.push(isClientSql);
       } else if (options.tabFilter.mode === 'prospects') {
+        const isProspectSql = buildGroupMatchSql(
+          options.tabFilter.prospectRelTypeIds,
+          options.tabFilter.prospectStatusIds,
+        );
         clauses.push(isProspectSql);
       } else if (options.tabFilter.mode === 'referrers') {
+        const isClientSql = buildGroupMatchSql(
+          options.tabFilter.clientRelTypeIds,
+          options.tabFilter.clientStatusIds,
+        );
+        const isProspectSql = buildGroupMatchSql(
+          options.tabFilter.prospectRelTypeIds,
+          options.tabFilter.prospectStatusIds,
+        );
         clauses.push(`NOT (${isClientSql}) AND NOT (${isProspectSql})`);
       }
     }
@@ -5178,11 +5243,35 @@ export class TenantPartyRepository extends TenantScopedRepository {
       const pat = `$${params.length}`;
       clauses.push(
         `(
-           lower(COALESCE(id, '')) LIKE ${pat} ESCAPE '\\'
-           OR lower(COALESCE(legal_name, '')) LIKE ${pat} ESCAPE '\\'
-           OR lower(COALESCE(trading_name, '')) LIKE ${pat} ESCAPE '\\'
-           OR lower(COALESCE(company_number, '')) LIKE ${pat} ESCAPE '\\'
-           OR lower(COALESCE(general_email, '')) LIKE ${pat} ESCAPE '\\'
+           lower(COALESCE(organisations.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.company_number, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.general_email, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.main_phone, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.registered_address_json->>'town', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.registered_address_json->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.trading_address_json->>'town', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.trading_address_json->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(organisations.profile_json->'otherNames') = 'array' THEN organisations.profile_json->'otherNames' ELSE '[]'::jsonb END
+             ) onm
+             WHERE lower(COALESCE(onm->>'name', '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.person_organisation_links pol
+             JOIN public.people p
+               ON p.tenant_id = pol.tenant_id AND p.id = pol.person_id
+             WHERE pol.tenant_id = organisations.tenant_id
+               AND pol.organisation_id = organisations.id
+               AND (
+                 lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
+               )
+           )
          )`,
       );
     }
@@ -5190,7 +5279,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
   }
 
   /**
-   * Loads a bounded page of tenant organisations plus total SQL match count (`R700`, `R702`).
+   * Loads a bounded page of tenant organisations plus total SQL match count (`R700`, `R702`, `R722`, `R729`).
    */
   public async listOrganisationsPageWithCount<
     TOrg extends TenantOrganisationRecord = TenantOrganisationRecord,
@@ -5215,10 +5304,17 @@ export class TenantPartyRepository extends TenantScopedRepository {
       };
       readonly excludeIds?: readonly string[];
       readonly query?: string;
+      readonly sortBy?: 'organisation' | 'status';
+      readonly sortDir?: 'asc' | 'desc';
+      readonly statusSortIds?: readonly string[];
       readonly limit?: number;
       readonly offset?: number;
     },
-  ): Promise<{ readonly items: TOrg[]; readonly totalCount: number }> {
+  ): Promise<{
+    readonly items: TOrg[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
     const limit =
       typeof options?.limit === 'number' && Number.isFinite(options.limit)
         ? Math.max(1, Math.min(500, Math.floor(options.limit)))
@@ -5227,6 +5323,10 @@ export class TenantPartyRepository extends TenantScopedRepository {
       typeof options?.offset === 'number' && Number.isFinite(options.offset)
         ? Math.max(0, Math.floor(options.offset))
         : 0;
+    const dirSql = options?.sortDir === 'desc' ? 'DESC' : 'ASC';
+    const statusSortIds = Array.from(
+      new Set((options?.statusSortIds ?? []).filter(Boolean)),
+    );
     const { whereSql, params } = this.buildOrganisationsPageWhereSql(ctx, options);
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
@@ -5235,11 +5335,32 @@ export class TenantPartyRepository extends TenantScopedRepository {
         params,
       );
       const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
-      const pageParams = [...params, limit, offset];
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams: unknown[] = [...params];
+      let sortSql = `lower(COALESCE(organisations.legal_name, '')) ${dirSql}, organisations.id ASC`;
+      if (options?.sortBy === 'status') {
+        if (statusSortIds.length > 0) {
+          pageParams.push(statusSortIds);
+          sortSql = `CASE WHEN COALESCE(organisations.client_status_id, organisations.profile_json->>'relationshipStatusId', '') = '' THEN 0 ELSE COALESCE(NULLIF(array_position($${pageParams.length}::text[], COALESCE(organisations.client_status_id, organisations.profile_json->>'relationshipStatusId')), 0), 9999) END ${dirSql}, lower(COALESCE(organisations.legal_name, '')) ASC, organisations.id ASC`;
+        } else {
+          sortSql = `lower(COALESCE(organisations.client_status_id, organisations.profile_json->>'relationshipStatusId', '')) ${dirSql}, lower(COALESCE(organisations.legal_name, '')) ASC, organisations.id ASC`;
+        }
+      }
+
+      pageParams.push(limit, effectiveOffset);
       const res = await tx.query<DbOrganisationRow>(
         `SELECT * FROM public.organisations
          WHERE ${whereSql}
-         ORDER BY lower(COALESCE(legal_name, '')), id ASC
+         ORDER BY ${sortSql}
          LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
         pageParams,
       );
@@ -5247,7 +5368,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
         this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
         return mapOrganisationRow<TOrg>(row);
       });
-      return { items, totalCount };
+      return { items, totalCount, effectivePage };
     });
   }
 

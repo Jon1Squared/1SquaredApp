@@ -69,6 +69,10 @@ import {
   loadTaskDetailPageData,
   loadTaskFormPageData,
   loadTasksListPageData,
+  MAX_LIST_PAGE_NUMBER,
+  MAX_LIST_QUERY_LENGTH,
+  parseListPageParam,
+  parseListPageSizeParam,
   withOptionalPageActor,
 } from '@/server/pageLoaders';
 import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
@@ -2950,6 +2954,342 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           }
         });
       }
+    },
+    45_000,
+  );
+
+  it(
+    '19. R719: server search matches promised non-name fields with matching SQL totalCount across Tasks, Matters, People, and Organisations',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const matterRepo = new TenantMatterRepository();
+      const taskRepo = new TenantTaskWorkflowRepository();
+      const partyRepo = new TenantPartyRepository();
+
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+
+      // Unique matter number + unique task linked record + unique town + unique postcode
+      const shell = await runWithActiveActorSession(partnerActor, () =>
+        loadShellContext('P-000001'),
+      );
+      const distinctiveWorkType = shell.values.find(
+        (v) => v.listKey === 'work_type' && !v.parentId && v.label.trim().length >= 5,
+      );
+      expect(distinctiveWorkType).toBeTruthy();
+
+      const uniqueMatterNum = 'R719-MAT-9042';
+      const uniqueMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-R719-SEARCH',
+        matterNumber: uniqueMatterNum,
+        title: 'Unrelated Title For R719 Verification',
+        shortDescription: 'Unrelated description',
+        practiceAreaId: distinctiveWorkType!.id,
+      };
+      await matterRepo.putMatter(env.ctxAlpha, uniqueMatter);
+
+      const linkedTask: Task = {
+        ...structuredClone(env.alphaUrgentPublicTask),
+        id: 'TSK-R719-LINKED',
+        reference: 'TSK-9719',
+        title: 'Chase counterpart signature',
+        description: 'Plain task body without matter ref',
+        status: 'To do',
+        linkedRecords: [{ recordType: 'matter', recordId: uniqueMatter.id }],
+      };
+      await taskRepo.putTask(env.ctxAlpha, linkedTask);
+
+      const townPerson: Person = {
+        ...structuredClone(env.alphaRestrictedPerson),
+        id: 'P-R719-TOWN',
+        firstName: 'Owain',
+        surname: 'Llewellyn-Sample',
+        emails: [
+          {
+            id: 'em-r719-town',
+            address: 'owain.r719@invented.example',
+            typeId: null,
+            isPrimary: true,
+          },
+        ],
+        addresses: [
+          {
+            id: 'addr-r719-town',
+            typeId: null,
+            line1: '12 Pier Street',
+            line2: '',
+            town: 'Aberystwyth-R719',
+            county: 'Ceredigion',
+            postcode: 'SY23 2LN',
+            countryId: null,
+          },
+        ],
+      };
+      await partyRepo.putPerson(env.ctxAlpha, townPerson);
+
+      const postcodeOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R719-POSTCODE',
+        legalName: 'Ceredigion Marine Services Ltd',
+        companyNumber: '09719001',
+        registeredAddress: {
+          id: 'oaddr-r719',
+          typeId: null,
+          line1: 'Harbour Quay',
+          line2: '',
+          town: 'Cardigan',
+          county: 'Ceredigion',
+          postcode: 'SA43 9R7',
+          countryId: null,
+        },
+      };
+      await partyRepo.putOrganisation(env.ctxAlpha, postcodeOrg);
+
+      await runWithActiveActorSession(partnerActor, async () => {
+        // Task search by linked matter number
+        const taskSearch = await loadTasksListPageData('P-000001', {
+          page: 1,
+          pageSize: 10,
+          tab: 'all',
+          statusFilter: 'open',
+          query: uniqueMatterNum,
+        });
+        expect(taskSearch.tasks.map((t) => t.id)).toEqual([linkedTask.id]);
+        expect(taskSearch.pagination.totalCount).toBe(1);
+
+        // Matter search by practice-area label
+        const matterSearch = await loadMattersListPageData('P-000001', {
+          page: 1,
+          pageSize: 50,
+          query: distinctiveWorkType!.label,
+        });
+        expect(matterSearch.matters.some((m) => m.id === uniqueMatter.id)).toBe(true);
+        expect(matterSearch.pagination.totalCount).toBeGreaterThanOrEqual(
+          matterSearch.matters.length,
+        );
+
+        // Person search by town
+        const personSearch = await loadPeopleListPageData('P-000001', {
+          page: 1,
+          pageSize: 10,
+          query: 'Aberystwyth-R719',
+        });
+        expect(personSearch.people.map((p) => p.id)).toEqual([townPerson.id]);
+        expect(personSearch.pagination.totalCount).toBe(1);
+
+        // Organisation search by postcode
+        const orgSearch = await loadOrganisationsListPageData('P-000001', {
+          page: 1,
+          pageSize: 10,
+          query: 'SA43 9R7',
+        });
+        expect(orgSearch.organisations.map((o) => o.id)).toEqual([postcodeOrg.id]);
+        expect(orgSearch.pagination.totalCount).toBe(1);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '20. R720: /enquiries "all" unified UNION ALL paging with unequal counts returns exact bounded non-empty pages covering the full union',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const intakeRepo = new TenantIntakeQuoteRepository();
+      const marker = 'R720-UNION-MARKER';
+
+      const createdKeys: string[] = [];
+      for (let i = 1; i <= 3; i++) {
+        const id = `ENQ-R720-${i}`;
+        createdKeys.push(`enquiry:${id}`);
+        await intakeRepo.putEnquiry(env.ctxAlpha, {
+          ...structuredClone(env.alphaPublicOpenEnquiry),
+          id,
+          reference: `ENQ-720${i}`,
+          status: 'New',
+          firstName: `Enq${i}`,
+          lastName: 'R720Union',
+          summary: `${marker} Enquiry ${i}`,
+          receivedAt: `2026-11-0${i}T09:00:00Z`,
+          convertedMatterId: null,
+        });
+      }
+      for (let j = 1; j <= 7; j++) {
+        const id = `QUO-R720-${j}`;
+        createdKeys.push(`quote:${id}`);
+        await intakeRepo.putQuote(env.ctxAlpha, {
+          ...structuredClone(env.alphaStaffQuote),
+          id,
+          reference: `QTE-2026-720${j}`,
+          status: 'Sent',
+          validUntil: '2099-12-31',
+          convertedMatterId: null,
+          linkedEnquiryId: null,
+          prospectName: `QuoteProspect${j} R720`,
+          scope: `${marker} Quote ${j}`,
+          createdAt: `2026-11-1${j}T10:00:00Z`,
+          sentAt: `2026-11-1${j}T10:05:00Z`,
+          nextFollowUpDate: '2099-12-01',
+        });
+      }
+
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        const p1 = await loadEnquiriesListPageData('P-000001', {
+          page: 1,
+          pageSize: 4,
+          tab: 'all',
+          query: marker,
+        });
+        const p2 = await loadEnquiriesListPageData('P-000001', {
+          page: 2,
+          pageSize: 4,
+          tab: 'all',
+          query: marker,
+        });
+        const p3 = await loadEnquiriesListPageData('P-000001', {
+          page: 3,
+          pageSize: 4,
+          tab: 'all',
+          query: marker,
+        });
+
+        expect(p1.pagination.totalCount).toBe(10);
+        expect(p1.enquiriesPagination.totalCount).toBe(3);
+        expect(p1.quotesPagination.totalCount).toBe(7);
+
+        expect(p1.orderedQueueItems).toHaveLength(4);
+        expect(p1.enquiries.length + p1.quotes.length).toBe(4);
+        expect(p2.orderedQueueItems).toHaveLength(4);
+        expect(p2.enquiries.length + p2.quotes.length).toBe(4);
+        expect(p3.orderedQueueItems).toHaveLength(2);
+        expect(p3.enquiries.length + p3.quotes.length).toBe(2);
+
+        const unionKeys = [
+          ...p1.orderedQueueItems,
+          ...p2.orderedQueueItems,
+          ...p3.orderedQueueItems,
+        ].map((r) => `${r.kind}:${r.id}`);
+        expect(unionKeys).toHaveLength(10);
+        expect(new Set(unionKeys)).toEqual(new Set(createdKeys));
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '21. R722: server sorting maintains monotonic ordering across pages with id tie-break',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+
+      await runWithActiveActorSession(partnerActor, async () => {
+        const m1 = await loadMattersListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          sortBy: 'matter',
+          sortDir: 'asc',
+        });
+        const m2 = await loadMattersListPageData('P-000001', {
+          page: 2,
+          pageSize: 2,
+          sortBy: 'matter',
+          sortDir: 'asc',
+        });
+        expect(m1.matters).toHaveLength(2);
+        expect(m2.matters.length).toBeGreaterThan(0);
+        const lastP1 = m1.matters[m1.matters.length - 1]!.matterNumber.toLowerCase();
+        const firstP2 = m2.matters[0]!.matterNumber.toLowerCase();
+        expect(lastP1 <= firstP2).toBe(true);
+
+        const p1 = await loadPeopleListPageData('P-000001', {
+          page: 1,
+          pageSize: 2,
+          sortBy: 'person',
+          sortDir: 'desc',
+        });
+        const p2 = await loadPeopleListPageData('P-000001', {
+          page: 2,
+          pageSize: 2,
+          sortBy: 'person',
+          sortDir: 'desc',
+        });
+        expect(p1.people).toHaveLength(2);
+        expect(p2.people.length).toBeGreaterThan(0);
+        expect(
+          p1.people[1]!.surname.toLowerCase() >= p2.people[0]!.surname.toLowerCase(),
+        ).toBe(true);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '22. R727 & R729: systemKey tabs/filters work cleanly, and oversized page/query inputs clamp without 500 errors',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const partyRepo = new TenantPartyRepository();
+
+      // R727: Organisation tagged solely with system-key choice IDs resolves under clients tab
+      const clientOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R727-CLIENT',
+        legalName: 'R727 SystemKey Client Ltd',
+        relationshipTypeIds: ['organisation_relationship_type.client'],
+        relationshipStatusId: 'relationship_status.active',
+      };
+      await partyRepo.putOrganisation(env.ctxAlpha, clientOrg);
+
+      expect(parseListPageParam('99999999999999999999')).toBe(MAX_LIST_PAGE_NUMBER);
+      expect(parseListPageParam('not-a-number')).toBe(1);
+      expect(parseListPageParam('-42')).toBe(1);
+      expect(parseListPageSizeParam('9999')).toBe(200);
+
+      const partnerActor = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+      setTestEntraSessionOverride(partnerActor.verifiedSession);
+      await runWithActiveActorSession(partnerActor, async () => {
+        const clientsTab = await loadOrganisationsListPageData('P-000001', {
+          tab: 'clients',
+          query: 'R727 SystemKey Client Ltd',
+        });
+        expect(clientsTab.organisations.map((o) => o.id)).toEqual([clientOrg.id]);
+
+        const prospectsTab = await loadOrganisationsListPageData('P-000001', {
+          tab: 'prospects',
+        });
+        expect(prospectsTab.organisations.some((o) => o.id === clientOrg.id)).toBe(false);
+
+        const referrersTab = await loadOrganisationsListPageData('P-000001', {
+          tab: 'referrers',
+        });
+        expect(referrersTab.organisations.some((o) => o.id === clientOrg.id)).toBe(false);
+
+        const clampedPageRes = await loadMattersListPageData('P-000001', {
+          page: 99999999999999999999,
+          pageSize: 2,
+        });
+        const expectedLastPage = Math.max(
+          1,
+          Math.ceil(clampedPageRes.pagination.totalCount / 2),
+        );
+        expect(clampedPageRes.pagination.page).toBe(expectedLastPage);
+        expect(clampedPageRes.matters.length).toBeGreaterThan(0);
+
+        const oversizedQuery = 'a'.repeat(500);
+        const cappedQueryRes = await loadMattersListPageData('P-000001', {
+          page: Number.NaN,
+          pageSize: 2,
+          query: oversizedQuery,
+        });
+        expect(cappedQueryRes.pagination.page).toBe(1);
+        expect(cappedQueryRes.filters.query.length).toBe(MAX_LIST_QUERY_LENGTH);
+      });
     },
     45_000,
   );

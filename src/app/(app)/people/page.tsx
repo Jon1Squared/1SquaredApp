@@ -1,7 +1,8 @@
 import { PeopleListClient } from '@/components/PeopleListClient';
 import {
-  DEFAULT_LIST_PAGE_SIZE,
   loadPeopleListPageData,
+  parseListPageParam,
+  parseListPageSizeParam,
   withOptionalPageActor,
   type PeopleListTabFilter,
 } from '@/server/pageLoaders';
@@ -31,9 +32,10 @@ export default async function PeoplePage({
   const resolved = searchParams ? await searchParams : {};
   const rawTab = firstParam(resolved, 'tab') as PeopleListTabFilter | undefined;
   const tab: PeopleListTabFilter = rawTab && VALID_TABS.has(rawTab) ? rawTab : 'all';
-  const page = Number.parseInt(firstParam(resolved, 'page') ?? '1', 10) || 1;
-  const pageSize =
-    Number.parseInt(firstParam(resolved, 'pageSize') ?? '', 10) || DEFAULT_LIST_PAGE_SIZE;
+  const page = parseListPageParam(firstParam(resolved, 'page'));
+  const pageSize = parseListPageSizeParam(firstParam(resolved, 'pageSize'));
+  const rawDir = firstParam(resolved, 'dir');
+  const sortDir = rawDir === 'desc' ? 'desc' : rawDir === 'asc' ? 'asc' : undefined;
 
   return withOptionalPageActor(async (actor) => {
     const data = await loadPeopleListPageData(actor.personId, {
@@ -44,6 +46,8 @@ export default async function PeoplePage({
       roleFilter: firstParam(resolved, 'role'),
       statusFilter: firstParam(resolved, 'status'),
       ownerFilter: firstParam(resolved, 'owner'),
+      sortBy: firstParam(resolved, 'sort'),
+      sortDir,
     });
     const { shell } = data;
     return (

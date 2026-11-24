@@ -2350,6 +2350,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
       includeMerged?: boolean;
       excludeIds?: readonly string[];
       query?: string;
+      matchingPracticeAreaIds?: readonly string[];
+      matchingWorkTypeIds?: readonly string[];
       statusId?: string;
       cmiIncompleteStatusIds?: readonly string[];
       practiceAreaId?: string;
@@ -2360,11 +2362,27 @@ export class TenantMatterRepository extends TenantScopedRepository {
       leadFeeEarnerId?: string;
       staffRestrictedOnly?: boolean;
       sortOrder?: 'id_asc' | 'updated_desc';
+      sortBy?: 'matter' | 'status' | 'openedAt';
+      sortDir?: 'asc' | 'desc';
+      statusSortIds?: readonly string[];
       limit?: number;
       offset?: number;
     },
-  ): Promise<{ readonly items: TMatter[]; readonly totalCount: number }> {
+  ): Promise<{
+    readonly items: TMatter[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
     const cleanQuery = viewerOrOptions?.query?.trim().toLowerCase() ?? '';
+    const matchingPracticeAreaIds = Array.from(
+      new Set((viewerOrOptions?.matchingPracticeAreaIds ?? []).filter(Boolean)),
+    );
+    const matchingWorkTypeIds = Array.from(
+      new Set((viewerOrOptions?.matchingWorkTypeIds ?? []).filter(Boolean)),
+    );
+    const statusSortIds = Array.from(
+      new Set((viewerOrOptions?.statusSortIds ?? []).filter(Boolean)),
+    );
     const excludeIds = Array.from(
       new Set(
         (viewerOrOptions?.excludeIds ?? [])
@@ -2403,7 +2421,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
       Number.isFinite(viewerOrOptions.offset)
         ? Math.max(0, Math.floor(viewerOrOptions.offset))
         : 0;
-    const sortSql =
+    const dirSql = viewerOrOptions?.sortDir === 'desc' ? 'DESC' : 'ASC';
+    const defaultSortSql =
       viewerOrOptions?.sortOrder === 'updated_desc'
         ? 'm.updated_at DESC, m.id ASC'
         : 'm.id ASC';
@@ -2485,11 +2504,21 @@ export class TenantMatterRepository extends TenantScopedRepository {
         const likePattern = `%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`;
         params.push(likePattern);
         const patternParam = `$${params.length}`;
+        let practiceAreaClause = '';
+        if (matchingPracticeAreaIds.length > 0) {
+          params.push(matchingPracticeAreaIds);
+          practiceAreaClause = `\n          OR m.practice_area_id = ANY($${params.length}::text[])`;
+        }
+        let workTypeClause = '';
+        if (matchingWorkTypeIds.length > 0) {
+          params.push(matchingWorkTypeIds);
+          workTypeClause = `\n          OR m.work_type_subcategory_id = ANY($${params.length}::text[])`;
+        }
         clauses.push(`(
           lower(COALESCE(m.id, '')) LIKE ${patternParam} ESCAPE '\\'
           OR lower(COALESCE(m.matter_number, '')) LIKE ${patternParam} ESCAPE '\\'
           OR lower(COALESCE(m.title, '')) LIKE ${patternParam} ESCAPE '\\'
-          OR lower(COALESCE(m.opening_record_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'
+          OR lower(COALESCE(m.opening_record_json->>'shortDescription', '')) LIKE ${patternParam} ESCAPE '\\'${practiceAreaClause}${workTypeClause}
           OR EXISTS (
             SELECT 1 FROM public.people cp
             WHERE cp.tenant_id = m.tenant_id AND cp.id = m.client_id
@@ -2515,8 +2544,32 @@ export class TenantMatterRepository extends TenantScopedRepository {
         params,
       );
       const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
 
-      const pageParams = [...params, limit, offset];
+      const pageParams: unknown[] = [...params];
+      let sortSql = defaultSortSql;
+      if (viewerOrOptions?.sortBy === 'matter') {
+        sortSql = `lower(COALESCE(m.matter_number, '')) ${dirSql}, m.id ASC`;
+      } else if (viewerOrOptions?.sortBy === 'openedAt') {
+        sortSql = `COALESCE(NULLIF(m.opened_at, ''), to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) ${dirSql}, m.id ASC`;
+      } else if (viewerOrOptions?.sortBy === 'status') {
+        if (statusSortIds.length > 0) {
+          pageParams.push(statusSortIds);
+          sortSql = `COALESCE(NULLIF(array_position($${pageParams.length}::text[], m.status_id), 0), 999) ${dirSql}, lower(COALESCE(m.matter_number, '')) ASC, m.id ASC`;
+        } else {
+          sortSql = `lower(COALESCE(m.status_id, '')) ${dirSql}, m.id ASC`;
+        }
+      }
+
+      pageParams.push(limit, effectiveOffset);
       const res = await tx.query<DbMatterRow>(
         `SELECT m.*
          FROM public.matters m
@@ -2539,6 +2592,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
         ),
         totalCount,
+        effectivePage,
       };
     });
   }

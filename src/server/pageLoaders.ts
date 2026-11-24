@@ -39,6 +39,10 @@ import {
   type LeftRailVisibility,
 } from '@/domain/homeConfig';
 import { sanitizePersonForClientPreview } from '@/domain/intakePreview';
+import {
+  parseAllowListedSort,
+  type SortDirection,
+} from '@/domain/listNavigationState';
 import { systemKeyOf } from '@/domain/lists';
 import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
 import type { MatterPartyUsageCounts } from '@/domain/matterParties';
@@ -225,6 +229,8 @@ export interface LoaderOptions {
 }
 
 export const DEFAULT_LIST_PAGE_SIZE = 100;
+export const MAX_LIST_PAGE_NUMBER = 100_000;
+export const MAX_LIST_QUERY_LENGTH = 200;
 
 export interface ListPaginationMeta {
   readonly page: number;
@@ -236,6 +242,35 @@ export interface ListQueryOptions extends LoaderOptions {
   readonly page?: number;
   readonly pageSize?: number;
   readonly query?: string;
+  readonly sortBy?: string;
+  readonly sortDir?: SortDirection;
+}
+
+/**
+ * Safely parses a URL `page` search parameter into `[1, MAX_LIST_PAGE_NUMBER]`,
+ * treating non-numeric, non-finite, or negative inputs as `1` (`R729`).
+ */
+export function parseListPageParam(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+  if (!trimmed || !/^-?\d+$/.test(trimmed)) return 1;
+  if (trimmed.startsWith('-')) return 1;
+  if (trimmed.length > 9) return MAX_LIST_PAGE_NUMBER;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return 1;
+  return Math.min(MAX_LIST_PAGE_NUMBER, parsed);
+}
+
+/**
+ * Safely parses a URL `pageSize` search parameter into `[1, 200]`,
+ * defaulting to `DEFAULT_LIST_PAGE_SIZE` (`R729`).
+ */
+export function parseListPageSizeParam(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+  if (!trimmed || !/^\d+$/.test(trimmed)) return DEFAULT_LIST_PAGE_SIZE;
+  if (trimmed.length > 6) return 200;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return DEFAULT_LIST_PAGE_SIZE;
+  return Math.max(1, Math.min(200, parsed));
 }
 
 function normaliseListPagination(options?: ListQueryOptions): {
@@ -252,13 +287,13 @@ function normaliseListPagination(options?: ListQueryOptions): {
     typeof options?.pageSize === 'number' && Number.isFinite(options.pageSize)
       ? Math.floor(options.pageSize)
       : DEFAULT_LIST_PAGE_SIZE;
-  const page = Math.max(1, rawPage);
+  const page = Math.max(1, Math.min(MAX_LIST_PAGE_NUMBER, rawPage));
   const pageSize = Math.max(1, Math.min(200, rawSize));
   return {
     page,
     pageSize,
     offset: (page - 1) * pageSize,
-    query: options?.query?.trim() ?? '',
+    query: (options?.query ?? '').trim().slice(0, MAX_LIST_QUERY_LENGTH),
   };
 }
 
@@ -311,6 +346,28 @@ function collectStatusIdsBySystemKey(
   const keySet = new Set(keys);
   return values
     .filter((v) => keySet.has(systemKeyOf(values as ChoiceValue[], v.id) ?? ''))
+    .map((v) => v.id);
+}
+
+function collectChoiceIdsBySystemKey(
+  values: readonly ChoiceValue[],
+  listKey: ChoiceValue['listKey'],
+  keys: readonly string[],
+): string[] {
+  const keySet = new Set(keys);
+  return values
+    .filter(
+      (v) =>
+        v.listKey === listKey &&
+        keySet.has(systemKeyOf(values as ChoiceValue[], v.id) ?? ''),
+    )
+    .map((v) => v.id);
+}
+
+function orderedRelationshipStatusIds(values: readonly ChoiceValue[]): string[] {
+  return values
+    .filter((v) => v.listKey === 'relationship_status')
+    .sort((a, b) => a.label.localeCompare(b.label))
     .map((v) => v.id);
 }
 
@@ -1050,6 +1107,8 @@ export interface PeopleListLoaderOptions extends ListQueryOptions {
   readonly ownerFilter?: string;
 }
 
+export type PeopleListSortColumn = 'person' | 'status';
+
 export async function loadPeopleListPageData(
   actorId: string,
   options?: PeopleListLoaderOptions,
@@ -1066,6 +1125,8 @@ export async function loadPeopleListPageData(
     readonly roleFilter: string;
     readonly statusFilter: string;
     readonly ownerFilter: string;
+    readonly sortBy: PeopleListSortColumn | null;
+    readonly sortDir: SortDirection | null;
   };
 }> {
   const shell = await loadShellContext(actorId, options);
@@ -1076,18 +1137,28 @@ export async function loadPeopleListPageData(
   const roleFilter = options?.roleFilter?.trim() || 'all';
   const statusFilter = options?.statusFilter?.trim() || 'all';
   const ownerFilter = options?.ownerFilter?.trim() || 'all';
+  const parsedSort = parseAllowListedSort<PeopleListSortColumn>(
+    options?.sortBy,
+    options?.sortDir,
+    ['person', 'status'],
+  );
   const inactiveStatusIds = collectStatusIdsBySystemKey(shell.values, [
     'archived',
     'deceased',
     'merged',
     'dissolved',
   ]);
+  const statusSortIds =
+    parsedSort?.columnId === 'status'
+      ? orderedRelationshipStatusIds(shell.values)
+      : undefined;
   const isEnquiryOnlyView =
     tab === 'enquiry' || statusFilter === 'enquiry_stage';
 
   let rawPeople: Person[] = [];
   let enquiries: Enquiry[] = [];
   let totalCount = 0;
+  let effectivePage = page;
 
   if (isEnquiryOnlyView) {
     const enqRes = await intakeRepo.listVisibleEnquiriesPageWithCount<Enquiry>(
@@ -1103,6 +1174,7 @@ export async function loadPeopleListPageData(
     );
     enquiries = enqRes.items;
     totalCount = enqRes.totalCount;
+    effectivePage = enqRes.effectivePage;
   } else {
     const shouldIncludeSampleEnquiries =
       (tab === 'all' || tab === 'external') &&
@@ -1122,6 +1194,9 @@ export async function loadPeopleListPageData(
           statusFilter !== 'all' ? statusFilter : undefined,
         relationshipOwnerId: ownerFilter !== 'all' ? ownerFilter : undefined,
         query,
+        sortBy: parsedSort?.columnId,
+        sortDir: parsedSort?.direction,
+        statusSortIds,
         limit: pageSize,
         offset,
       }),
@@ -1140,6 +1215,7 @@ export async function loadPeopleListPageData(
     ]);
     rawPeople = peopleRes.items;
     totalCount = peopleRes.totalCount;
+    effectivePage = peopleRes.effectivePage;
     enquiries = openEnqs;
   }
 
@@ -1174,8 +1250,16 @@ export async function loadPeopleListPageData(
     organisations,
     links,
     enquiries,
-    pagination: { page, pageSize, totalCount },
-    filters: { tab, query, roleFilter, statusFilter, ownerFilter },
+    pagination: { page: effectivePage, pageSize, totalCount },
+    filters: {
+      tab,
+      query,
+      roleFilter,
+      statusFilter,
+      ownerFilter,
+      sortBy: parsedSort?.columnId ?? null,
+      sortDir: parsedSort?.direction ?? null,
+    },
   };
 }
 
@@ -1604,6 +1688,8 @@ export interface OrganisationsListLoaderOptions extends ListQueryOptions {
   readonly ownerFilter?: string;
 }
 
+export type OrganisationsListSortColumn = 'organisation' | 'status';
+
 export async function loadOrganisationsListPageData(
   actorId: string,
   options?: OrganisationsListLoaderOptions,
@@ -1623,18 +1709,25 @@ export async function loadOrganisationsListPageData(
     readonly orgTypeFilter: string;
     readonly sectorFilter: string;
     readonly ownerFilter: string;
+    readonly sortBy: OrganisationsListSortColumn | null;
+    readonly sortDir: SortDirection | null;
   };
 }> {
   const shell = await loadShellContext(actorId, options);
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
-  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const { pageSize, offset, query } = normaliseListPagination(options);
   const tab: OrganisationsListTabFilter = options?.tab ?? 'all';
   const typeFilter = options?.typeFilter?.trim() || 'all';
   const statusFilter = options?.statusFilter?.trim() || 'all';
   const orgTypeFilter = options?.orgTypeFilter?.trim() || 'all';
   const sectorFilter = options?.sectorFilter?.trim() || 'all';
   const ownerFilter = options?.ownerFilter?.trim() || 'all';
+  const parsedSort = parseAllowListedSort<OrganisationsListSortColumn>(
+    options?.sortBy,
+    options?.sortDir,
+    ['organisation', 'status'],
+  );
 
   const inactiveStatusIds = collectStatusIdsBySystemKey(shell.values, [
     'archived',
@@ -1642,41 +1735,37 @@ export async function loadOrganisationsListPageData(
     'merged',
     'dissolved',
   ]);
-  const clientRelTypeIds = shell.values
-    .filter(
-      (v) =>
-        v.listKey === 'organisation_relationship_type' &&
-        v.label.toLowerCase().includes('client'),
-    )
-    .map((v) => v.id);
-  const clientStatusIds = shell.values
-    .filter(
-      (v) =>
-        v.listKey === 'relationship_status' &&
-        v.label.toLowerCase().includes('active client'),
-    )
-    .map((v) => v.id);
-  const prospectRelTypeIds = shell.values
-    .filter(
-      (v) =>
-        v.listKey === 'organisation_relationship_type' &&
-        v.label.toLowerCase().includes('prospect'),
-    )
-    .map((v) => v.id);
-  const prospectStatusIds = shell.values
-    .filter(
-      (v) =>
-        v.listKey === 'relationship_status' &&
-        v.label.toLowerCase().includes('prospect'),
-    )
-    .map((v) => v.id);
-  const closedMatterStatusIds = shell.values
-    .filter((v) => {
-      if (v.listKey !== 'matter_status') return false;
-      const lower = v.label.toLowerCase();
-      return lower === 'closed' || lower === 'archived';
-    })
-    .map((v) => v.id);
+  // R727: Resolve by stable ChoiceValue.systemKey rather than display labels.
+  // Note: `relationship_status` uses `active` (there is no `active_client` key in configuration).
+  const clientRelTypeIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'organisation_relationship_type',
+    ['client', 'former_client'],
+  );
+  const clientStatusIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'relationship_status',
+    ['active'],
+  );
+  const prospectRelTypeIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'organisation_relationship_type',
+    ['prospect'],
+  );
+  const prospectStatusIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'relationship_status',
+    ['prospective'],
+  );
+  const closedMatterStatusIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'matter_status',
+    ['closed', 'archived'],
+  );
+  const statusSortIds =
+    parsedSort?.columnId === 'status'
+      ? orderedRelationshipStatusIds(shell.values)
+      : undefined;
 
   const tabFilter =
     tab === 'clients' || tab === 'prospects' || tab === 'referrers'
@@ -1705,6 +1794,9 @@ export async function loadOrganisationsListPageData(
       relationshipPartnerId: ownerFilter !== 'all' ? ownerFilter : undefined,
       tabFilter,
       query,
+      sortBy: parsedSort?.columnId,
+      sortDir: parsedSort?.direction,
+      statusSortIds,
       limit: pageSize,
       offset,
     },
@@ -1743,7 +1835,11 @@ export async function loadOrganisationsListPageData(
     links,
     matters: [],
     activeMatterCountsByOrgId,
-    pagination: { page, pageSize, totalCount: orgRes.totalCount },
+    pagination: {
+      page: orgRes.effectivePage,
+      pageSize,
+      totalCount: orgRes.totalCount,
+    },
     filters: {
       tab,
       query,
@@ -1752,6 +1848,8 @@ export async function loadOrganisationsListPageData(
       orgTypeFilter,
       sectorFilter,
       ownerFilter,
+      sortBy: parsedSort?.columnId ?? null,
+      sortDir: parsedSort?.direction ?? null,
     },
   };
 }
@@ -2001,6 +2099,19 @@ export interface MattersListLoaderOptions extends ListQueryOptions {
   readonly billingBasisFilter?: string;
 }
 
+export type MattersListSortColumn = 'matter' | 'status' | 'openedAt';
+
+const MATTER_STATUS_SORT_SYSTEM_KEYS = [
+  'cmi_incomplete',
+  'active',
+  'prospective',
+  'on_hold',
+  'completed',
+  'closed',
+  'archived',
+  'aborted',
+] as const;
+
 export async function loadMattersListPageData(
   actorId: string,
   options?: MattersListLoaderOptions,
@@ -2019,25 +2130,58 @@ export async function loadMattersListPageData(
     readonly statusFilter: string;
     readonly feeEarnerFilter: string;
     readonly billingBasisFilter: string;
+    readonly sortBy: MattersListSortColumn | null;
+    readonly sortDir: SortDirection | null;
   };
 }> {
   const shell = await loadShellContext(actorId, options);
   const matterRepo = getMatterRepository();
   const taskRepo = getTaskWorkflowRepository();
-  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const { pageSize, offset, query } = normaliseListPagination(options);
   const tab: MattersListTabFilter = options?.tab ?? 'all';
   const practiceAreaId = options?.practiceAreaId?.trim() || 'all';
   const statusFilter = options?.statusFilter?.trim() || 'all';
   const feeEarnerFilter = options?.feeEarnerFilter?.trim() || 'all';
   const billingBasisFilter = options?.billingBasisFilter?.trim() || 'all';
+  const parsedSort = parseAllowListedSort<MattersListSortColumn>(
+    options?.sortBy,
+    options?.sortDir,
+    ['matter', 'status', 'openedAt'],
+  );
 
-  const cmiIncompleteStatusIds = shell.values
-    .filter(
-      (v) =>
-        v.listKey === 'matter_status' &&
-        v.label.toLowerCase() === 'cmi incomplete',
-    )
-    .map((v) => v.id);
+  // R727: Resolve CMI-incomplete & status sort rank order via stable systemKey.
+  const cmiIncompleteStatusIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'matter_status',
+    ['cmi_incomplete'],
+  );
+  const statusSortIds =
+    parsedSort?.columnId === 'status'
+      ? MATTER_STATUS_SORT_SYSTEM_KEYS.flatMap((key) =>
+          collectChoiceIdsBySystemKey(shell.values, 'matter_status', [key]),
+        )
+      : undefined;
+  const cleanMatterQuery = query.toLowerCase();
+  const matchingPracticeAreaIds = cleanMatterQuery
+    ? shell.values
+        .filter(
+          (v) =>
+            v.listKey === 'work_type' &&
+            !v.parentId &&
+            v.label.toLowerCase().includes(cleanMatterQuery),
+        )
+        .map((v) => v.id)
+    : [];
+  const matchingWorkTypeIds = cleanMatterQuery
+    ? shell.values
+        .filter(
+          (v) =>
+            v.listKey === 'work_type' &&
+            Boolean(v.parentId) &&
+            v.label.toLowerCase().includes(cleanMatterQuery),
+        )
+        .map((v) => v.id)
+    : [];
 
   const pageRes = await matterRepo.listVisibleMattersPageWithCount<Matter>(
     shell.ctx,
@@ -2046,9 +2190,14 @@ export async function loadMattersListPageData(
       hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
       includeMerged: false,
       sortOrder: 'id_asc',
+      sortBy: parsedSort?.columnId,
+      sortDir: parsedSort?.direction,
+      statusSortIds,
       limit: pageSize,
       offset,
       query,
+      matchingPracticeAreaIds,
+      matchingWorkTypeIds,
       mineOnly: tab === 'mine',
       typeBadge:
         tab === 'Transactional' || tab === 'Contentious' || tab === 'Advisory'
@@ -2094,7 +2243,11 @@ export async function loadMattersListPageData(
       matterFinanceRes && !isActionDenied(matterFinanceRes)
         ? matterFinanceRes
         : undefined,
-    pagination: { page, pageSize, totalCount: pageRes.totalCount },
+    pagination: {
+      page: pageRes.effectivePage,
+      pageSize,
+      totalCount: pageRes.totalCount,
+    },
     filters: {
       tab,
       query,
@@ -2102,6 +2255,8 @@ export async function loadMattersListPageData(
       statusFilter,
       feeEarnerFilter,
       billingBasisFilter,
+      sortBy: parsedSort?.columnId ?? null,
+      sortDir: parsedSort?.direction ?? null,
     },
   };
 }
@@ -2697,6 +2852,8 @@ export interface EnquiriesListLoaderOptions extends ListQueryOptions {
   readonly followUpDueFilter?: 'all' | 'overdue' | 'today' | 'this_week';
 }
 
+export type EnquiriesListSortColumn = 'urgency' | 'status' | 'receivedAt';
+
 export async function loadEnquiriesListPageData(
   actorId: string,
   options?: EnquiriesListLoaderOptions,
@@ -2704,6 +2861,10 @@ export async function loadEnquiriesListPageData(
   shell: ShellContextData;
   enquiries: Enquiry[];
   quotes: Quote[];
+  orderedQueueItems: ReadonlyArray<{
+    readonly kind: 'enquiry' | 'quote';
+    readonly id: string;
+  }>;
   tasks: Task[];
   people: Person[];
   organisations: Organisation[];
@@ -2725,6 +2886,8 @@ export async function loadEnquiriesListPageData(
     readonly validUntilFrom: string;
     readonly validUntilTo: string;
     readonly followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week';
+    readonly sortBy: EnquiriesListSortColumn | null;
+    readonly sortDir: SortDirection | null;
   };
 }> {
   const shell = await loadShellContext(actorId, options);
@@ -2732,7 +2895,7 @@ export async function loadEnquiriesListPageData(
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
   const matterRepo = getMatterRepository();
-  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const { pageSize, offset, query } = normaliseListPagination(options);
 
   const requestedTab = options?.tab ?? 'all';
   const uiTab: EnquiriesQueueTab = requestedTab === 'all' ? 'open' : requestedTab;
@@ -2749,6 +2912,11 @@ export async function loadEnquiriesListPageData(
   const validUntilTo = options?.validUntilTo?.trim() || '';
   const followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week' =
     options?.followUpDueFilter ?? 'all';
+  const parsedSort = parseAllowListedSort<EnquiriesListSortColumn>(
+    options?.sortBy,
+    options?.sortDir,
+    ['urgency', 'status', 'receivedAt'],
+  );
 
   const myTeamIds = userTeams(currentUserId, shell.teams).map((t) => t.id);
   const now = new Date();
@@ -2769,115 +2937,125 @@ export async function loadEnquiriesListPageData(
   const shouldQueryEnquiries = !quoteOnlyFilterActive;
   const shouldQueryQuotes = shell.canViewQuotes && !enquiryOnlyFilterActive;
 
-  const [enqRes, quotesRes] = await Promise.all([
-    shouldQueryEnquiries
-      ? intakeRepo.listVisibleEnquiriesPageWithCount<Enquiry>(
-          ctx,
-          currentUserId,
-          {
-            hasRestrictedMatterAccess,
-            limit: pageSize,
-            offset,
-            query,
-            ...(requestedTab === 'drafts'
-              ? { status: 'Draft', createdOrTakenById: currentUserId }
-              : requestedTab === 'team'
-                ? {
-                    openOnly: true,
-                    excludeStatuses: ['Draft'],
-                    assignedTeamIds: myTeamIds,
-                    requireAssignedTeam: myTeamIds.length === 0,
-                  }
-                : requestedTab === 'mine'
-                  ? {
-                      openOnly: true,
-                      excludeStatuses: ['Draft'],
-                      assignedToId: currentUserId,
-                    }
-                  : requestedTab === 'open'
-                    ? { openOnly: true, excludeStatuses: ['Draft'] }
-                    : requestedTab === 'closed'
-                      ? {
-                          statuses: [
-                            'Converted',
-                            'Declined',
-                            'Referred out',
-                            'No response',
-                          ],
-                        }
-                      : {}),
-            ...(practiceAreaFilter !== 'all' ? { practiceAreaId: practiceAreaFilter } : {}),
-            ...(teamFilter !== 'all' ? { assignedTeamId: teamFilter } : {}),
-            ...(urgencyFilter !== 'all' ? { urgencyId: urgencyFilter } : {}),
-            ...(channelFilter !== 'all' ? { channelId: channelFilter } : {}),
-            ...(feeEarnerFilter !== 'all' ? { assignedToId: feeEarnerFilter } : {}),
-            ...(statusFilter.startsWith('enquiry:')
-              ? { status: statusFilter.slice('enquiry:'.length) }
-              : {}),
-          },
-        )
-      : Promise.resolve<{ readonly items: Enquiry[]; readonly totalCount: number }>({
-          items: [],
-          totalCount: 0,
-        }),
-    shouldQueryQuotes
-      ? intakeRepo.listVisibleQuotesPageWithCount<Quote>(ctx, currentUserId, {
-          hasRestrictedMatterAccess,
-          limit: pageSize,
-          offset,
-          query,
-          ...(statusFilter === 'quote:Superseded'
-            ? { supersededInHistoryOnly: true }
-            : requestedTab === 'drafts'
-              ? { status: 'Draft', createdOrPreparedById: currentUserId }
-              : requestedTab === 'team'
-                ? {
-                    effectiveOpenTodayYmd: todayYmd,
-                    assignedTeamIds: myTeamIds,
-                    requireAssignedTeam: myTeamIds.length === 0,
-                  }
-                : requestedTab === 'mine'
-                  ? {
-                      effectiveOpenTodayYmd: todayYmd,
-                      feeEarnerId: currentUserId,
-                    }
-                  : requestedTab === 'open' || requestedTab === 'open_quotes'
-                    ? { effectiveOpenTodayYmd: todayYmd }
-                    : requestedTab === 'closed'
-                      ? { effectiveClosedTodayYmd: todayYmd }
-                      : {}),
-          ...(practiceAreaFilter !== 'all' ? { practiceAreaId: practiceAreaFilter } : {}),
-          ...(teamFilter !== 'all' ? { assignedTeamId: teamFilter } : {}),
-          ...(urgencyFilter !== 'all' ? { urgencyId: urgencyFilter } : {}),
-          ...(channelFilter !== 'all' ? { channelId: channelFilter } : {}),
-          ...(feeBasisFilter !== 'all' ? { feeBasis: feeBasisFilter } : {}),
-          ...(feeEarnerFilter !== 'all' ? { feeEarnerId: feeEarnerFilter } : {}),
-          ...(validUntilFrom ? { validUntilFrom } : {}),
-          ...(validUntilTo ? { validUntilTo } : {}),
-          ...(followUpDueFilter !== 'all'
-            ? {
-                followUpDue: {
-                  mode: followUpDueFilter,
-                  todayYmd,
-                  weekEndYmd,
-                },
-              }
-            : {}),
-          ...(statusFilter.startsWith('quote:') &&
-          statusFilter !== 'quote:Superseded'
-            ? statusFilter === 'quote:Expired'
-              ? { effectiveExpiredTodayYmd: todayYmd }
-              : { status: statusFilter.slice('quote:'.length) }
-            : {}),
-        })
-      : Promise.resolve<{ readonly items: Quote[]; readonly totalCount: number }>({
-          items: [],
-          totalCount: 0,
-        }),
-  ]);
+  const emergencyUrgencyIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'enquiry_urgency',
+    ['emergency'],
+  );
+  const urgentUrgencyIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'enquiry_urgency',
+    ['urgent'],
+  );
+  const standardUrgencyIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'enquiry_urgency',
+    ['standard'],
+  );
 
-  const enquiries = enqRes.items;
-  const quotes = quotesRes.items;
+  const queueRes = await intakeRepo.listVisibleIntakeQueuePageWithCount<
+    Enquiry,
+    Quote
+  >(ctx, currentUserId, {
+    includeEnquiries: shouldQueryEnquiries,
+    includeQuotes: shouldQueryQuotes,
+    hasRestrictedMatterAccess,
+    todayYmd,
+    emergencyUrgencyIds,
+    urgentUrgencyIds,
+    standardUrgencyIds,
+    sortBy: parsedSort?.columnId,
+    sortDir: parsedSort?.direction,
+    limit: pageSize,
+    offset,
+    enquiryOptions: {
+      query,
+      ...(requestedTab === 'drafts'
+        ? { status: 'Draft', createdOrTakenById: currentUserId }
+        : requestedTab === 'team'
+          ? {
+              openOnly: true,
+              excludeStatuses: ['Draft'],
+              assignedTeamIds: myTeamIds,
+              requireAssignedTeam: myTeamIds.length === 0,
+            }
+          : requestedTab === 'mine'
+            ? {
+                openOnly: true,
+                excludeStatuses: ['Draft'],
+                assignedToId: currentUserId,
+              }
+            : requestedTab === 'open'
+              ? { openOnly: true, excludeStatuses: ['Draft'] }
+              : requestedTab === 'closed'
+                ? {
+                    statuses: [
+                      'Converted',
+                      'Declined',
+                      'Referred out',
+                      'No response',
+                    ],
+                  }
+                : {}),
+      ...(practiceAreaFilter !== 'all' ? { practiceAreaId: practiceAreaFilter } : {}),
+      ...(teamFilter !== 'all' ? { assignedTeamId: teamFilter } : {}),
+      ...(urgencyFilter !== 'all' ? { urgencyId: urgencyFilter } : {}),
+      ...(channelFilter !== 'all' ? { channelId: channelFilter } : {}),
+      ...(feeEarnerFilter !== 'all' ? { assignedToId: feeEarnerFilter } : {}),
+      ...(statusFilter.startsWith('enquiry:')
+        ? { status: statusFilter.slice('enquiry:'.length) }
+        : {}),
+    },
+    quoteOptions: {
+      query,
+      ...(statusFilter === 'quote:Superseded'
+        ? { supersededInHistoryOnly: true }
+        : requestedTab === 'drafts'
+          ? { status: 'Draft', createdOrPreparedById: currentUserId }
+          : requestedTab === 'team'
+            ? {
+                effectiveOpenTodayYmd: todayYmd,
+                assignedTeamIds: myTeamIds,
+                requireAssignedTeam: myTeamIds.length === 0,
+              }
+            : requestedTab === 'mine'
+              ? {
+                  effectiveOpenTodayYmd: todayYmd,
+                  feeEarnerId: currentUserId,
+                }
+              : requestedTab === 'open' || requestedTab === 'open_quotes'
+                ? { effectiveOpenTodayYmd: todayYmd }
+                : requestedTab === 'closed'
+                  ? { effectiveClosedTodayYmd: todayYmd }
+                  : {}),
+      ...(practiceAreaFilter !== 'all' ? { practiceAreaId: practiceAreaFilter } : {}),
+      ...(teamFilter !== 'all' ? { assignedTeamId: teamFilter } : {}),
+      ...(urgencyFilter !== 'all' ? { urgencyId: urgencyFilter } : {}),
+      ...(channelFilter !== 'all' ? { channelId: channelFilter } : {}),
+      ...(feeBasisFilter !== 'all' ? { feeBasis: feeBasisFilter } : {}),
+      ...(feeEarnerFilter !== 'all' ? { feeEarnerId: feeEarnerFilter } : {}),
+      ...(validUntilFrom ? { validUntilFrom } : {}),
+      ...(validUntilTo ? { validUntilTo } : {}),
+      ...(followUpDueFilter !== 'all'
+        ? {
+            followUpDue: {
+              mode: followUpDueFilter,
+              todayYmd,
+              weekEndYmd,
+            },
+          }
+        : {}),
+      ...(statusFilter.startsWith('quote:') &&
+      statusFilter !== 'quote:Superseded'
+        ? statusFilter === 'quote:Expired'
+          ? { effectiveExpiredTodayYmd: todayYmd }
+          : { status: statusFilter.slice('quote:'.length) }
+        : {}),
+    },
+  });
+
+  const enquiries = queueRes.enquiries;
+  const quotes = queueRes.quotes;
   for (const q of quotes) {
     applyQuoteEffectiveLifecycle(q, now, { appendExpiredTimeline: false });
   }
@@ -2916,29 +3094,31 @@ export async function loadEnquiriesListPageData(
     tasks,
   });
 
+  const effectivePage = queueRes.effectivePage;
   const enquiriesPagination: ListPaginationMeta = {
-    page,
+    page: effectivePage,
     pageSize,
-    totalCount: enqRes.totalCount,
+    totalCount: queueRes.enquiriesTotalCount,
   };
   const quotesPagination: ListPaginationMeta = {
-    page,
+    page: effectivePage,
     pageSize,
-    totalCount: quotesRes.totalCount,
+    totalCount: queueRes.quotesTotalCount,
   };
 
   return {
     shell,
     enquiries,
     quotes,
+    orderedQueueItems: queueRes.orderedQueueItems,
     tasks,
     people,
     organisations,
     matters,
     pagination: {
-      page,
+      page: effectivePage,
       pageSize,
-      totalCount: enqRes.totalCount + quotesRes.totalCount,
+      totalCount: queueRes.totalCount,
     },
     enquiriesPagination,
     quotesPagination,
@@ -2956,6 +3136,8 @@ export async function loadEnquiriesListPageData(
       validUntilFrom,
       validUntilTo,
       followUpDueFilter,
+      sortBy: parsedSort?.columnId ?? null,
+      sortDir: parsedSort?.direction ?? null,
     },
   };
 }
@@ -3338,6 +3520,13 @@ export interface TasksListLoaderOptions extends ListQueryOptions {
   readonly recordTypeFilter?: string;
 }
 
+export type TasksListSortColumn = 'priority' | 'status' | 'dueAt';
+
+function formatLocalIsoSeconds(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export async function loadTasksListPageData(
   actorId: string,
   options?: TasksListLoaderOptions,
@@ -3358,18 +3547,43 @@ export async function loadTasksListPageData(
     readonly typeFilter: string;
     readonly teamFilter: string;
     readonly recordTypeFilter: string;
+    readonly sortBy: TasksListSortColumn | null;
+    readonly sortDir: SortDirection | null;
   };
 }> {
   const shell = await loadShellContext(actorId, options);
   const taskRepo = getTaskWorkflowRepository();
-  const { page, pageSize, offset, query } = normaliseListPagination(options);
+  const { pageSize, offset, query } = normaliseListPagination(options);
   const tab: TasksListTabFilter = options?.tab ?? 'all';
   const statusFilter = options?.statusFilter?.trim() || 'open';
   const priorityFilter = options?.priorityFilter?.trim() || 'all';
   const typeFilter = options?.typeFilter?.trim() || 'all';
   const teamFilter = options?.teamFilter?.trim() || 'all';
   const recordTypeFilter = options?.recordTypeFilter?.trim() || 'all';
+  const parsedSort = parseAllowListedSort<TasksListSortColumn>(
+    options?.sortBy,
+    options?.sortDir,
+    ['priority', 'status', 'dueAt'],
+  );
   const myTeamIds = userTeams(shell.currentUserId, shell.teams).map((t) => t.id);
+  const now = new Date();
+  const overdueNowUtcIso = now.toISOString();
+  const overdueNowLocalIso = formatLocalIsoSeconds(now);
+  const urgentPriorityIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'task_priority',
+    ['urgent'],
+  );
+  const highPriorityIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'task_priority',
+    ['high'],
+  );
+  const lowPriorityIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'task_priority',
+    ['low'],
+  );
 
   const pageRes = await taskRepo.listVisibleTasksPageWithCount<Task>(
     shell.ctx,
@@ -3377,7 +3591,8 @@ export async function loadTasksListPageData(
     {
       hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
       statusFilter,
-      overdueBeforeIso: statusFilter === 'overdue' ? toIsoDate(new Date()) : undefined,
+      overdueNowLocalIso,
+      overdueNowUtcIso,
       tabFilter:
         tab !== 'all'
           ? { mode: tab, actorId: shell.currentUserId, teamIds: myTeamIds }
@@ -3387,6 +3602,11 @@ export async function loadTasksListPageData(
       assignedTeamId: teamFilter !== 'all' ? teamFilter : undefined,
       recordType: recordTypeFilter !== 'all' ? recordTypeFilter : undefined,
       query,
+      sortBy: parsedSort?.columnId,
+      sortDir: parsedSort?.direction,
+      urgentPriorityIds,
+      highPriorityIds,
+      lowPriorityIds,
       limit: pageSize,
       offset,
     },
@@ -3419,7 +3639,11 @@ export async function loadTasksListPageData(
     matters,
     enquiries,
     quotes,
-    pagination: { page, pageSize, totalCount: pageRes.totalCount },
+    pagination: {
+      page: pageRes.effectivePage,
+      pageSize,
+      totalCount: pageRes.totalCount,
+    },
     filters: {
       tab,
       query,
@@ -3428,6 +3652,8 @@ export async function loadTasksListPageData(
       typeFilter,
       teamFilter,
       recordTypeFilter,
+      sortBy: parsedSort?.columnId ?? null,
+      sortDir: parsedSort?.direction ?? null,
     },
   };
 }

@@ -1009,6 +1009,46 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     });
   }
 
+  private buildTaskOverdueSqlExpr(
+    params: unknown[],
+    options?: {
+      overdueBeforeIso?: string;
+      overdueNowLocalIso?: string;
+      overdueNowUtcIso?: string;
+    },
+  ): string {
+    const fallbackUtc = options?.overdueNowUtcIso?.trim() || new Date().toISOString();
+    let localIso = options?.overdueNowLocalIso?.trim();
+    let utcIso = fallbackUtc;
+    if (!localIso) {
+      if (options?.overdueBeforeIso?.trim()) {
+        const d = options.overdueBeforeIso.trim().slice(0, 10);
+        localIso = `${d}T00:00:00`;
+        utcIso = `${d}T00:00:00Z`;
+      } else {
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        localIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      }
+    }
+    params.push(localIso, utcIso);
+    const localIdx = `$${params.length - 1}`;
+    const utcIdx = `$${params.length}`;
+    return `(
+      t.status IN ('To do', 'In progress', 'Waiting')
+      AND t.due_at IS NOT NULL
+      AND t.due_at <> ''
+      AND (
+        CASE
+          WHEN t.due_at ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (t.due_at || 'T17:30:00') < ${localIdx}
+          WHEN t.due_at ~ '^\\d{4}-\\d{2}-\\d{2}T.*(Z|[+-]\\d{2}:?\\d{2})$' THEN (t.due_at::timestamptz < ${utcIdx}::timestamptz)
+          WHEN t.due_at ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN t.due_at < ${localIdx}
+          ELSE FALSE
+        END
+      )
+    )`;
+  }
+
   private buildVisibleTasksWhereSql(
     ctx: TenantContext,
     viewerId: string,
@@ -1016,6 +1056,8 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       status?: string;
       statusFilter?: 'open' | 'overdue' | 'done' | 'all' | string;
       overdueBeforeIso?: string;
+      overdueNowLocalIso?: string;
+      overdueNowUtcIso?: string;
       openOnly?: boolean;
       assignedTeamId?: string;
       assignedPersonId?: string;
@@ -1060,13 +1102,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       } else if (options.statusFilter === 'done') {
         clauses.push(`t.status IN ('Done', 'Cancelled')`);
       } else if (options.statusFilter === 'overdue') {
-        const cutoff =
-          options.overdueBeforeIso?.trim().slice(0, 10) ||
-          new Date().toISOString().slice(0, 10);
-        params.push(cutoff);
-        clauses.push(
-          `t.status IN ('To do', 'In progress', 'Waiting') AND t.due_at IS NOT NULL AND t.due_at <> '' AND substring(t.due_at from 1 for 10) < $${params.length}`,
-        );
+        clauses.push(this.buildTaskOverdueSqlExpr(params, options));
       } else {
         params.push(options.statusFilter);
         clauses.push(`t.status = $${params.length}`);
@@ -1173,6 +1209,114 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
            OR lower(COALESCE(t.reference, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(t.title, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(t.description, '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM public.people ap
+             WHERE ap.tenant_id = t.tenant_id
+               AND (
+                 ap.id = t.assigned_person_id
+                 OR (
+                   jsonb_typeof(COALESCE(t.assigned_person_ids_json, '[]'::jsonb)) = 'array'
+                   AND t.assigned_person_ids_json ? ap.id
+                 )
+               )
+               AND (
+                 lower(COALESCE(ap.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(ap.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(ap.surname, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(trim(concat_ws(' ', NULLIF(ap.first_name, ''), NULLIF(ap.surname, '')))) LIKE ${pat} ESCAPE '\\'
+               )
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.teams tm
+             WHERE tm.tenant_id = t.tenant_id
+               AND tm.id = t.assigned_team_id
+               AND lower(COALESCE(tm.name, '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.task_linked_records tlr
+             WHERE tlr.tenant_id = t.tenant_id
+               AND tlr.task_id = t.id
+               AND (
+                 lower(COALESCE(tlr.record_id, '')) LIKE ${pat} ESCAPE '\\'
+                 OR (
+                   tlr.record_type = 'matter'
+                   AND EXISTS (
+                     SELECT 1 FROM public.matters m
+                     WHERE m.tenant_id = tlr.tenant_id
+                       AND m.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(m.matter_number, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(m.title, '')) LIKE ${pat} ESCAPE '\\'
+                         OR EXISTS (
+                           SELECT 1 FROM public.people cp
+                           WHERE cp.tenant_id = m.tenant_id AND cp.id = m.client_id
+                             AND lower(trim(concat_ws(' ', NULLIF(cp.first_name, ''), NULLIF(cp.surname, '')))) LIKE ${pat} ESCAPE '\\'
+                         )
+                         OR EXISTS (
+                           SELECT 1 FROM public.organisations co
+                           WHERE co.tenant_id = m.tenant_id AND co.id = m.client_id
+                             AND lower(COALESCE(co.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                         )
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'enquiry'
+                   AND EXISTS (
+                     SELECT 1 FROM public.enquiries e
+                     WHERE e.tenant_id = tlr.tenant_id
+                       AND e.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(e.reference, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.last_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(trim(concat_ws(' ', NULLIF(e.first_name, ''), NULLIF(e.last_name, '')))) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.calling_on_behalf_of, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.summary_and_notes_json->>'summary', '')) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'quote'
+                   AND EXISTS (
+                     SELECT 1 FROM public.quotes q
+                     WHERE q.tenant_id = tlr.tenant_id
+                       AND q.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(q.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(q.prospect_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(q.profile_json->>'prospectOrganisationName', '')) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'person'
+                   AND EXISTS (
+                     SELECT 1 FROM public.people lp
+                     WHERE lp.tenant_id = tlr.tenant_id
+                       AND lp.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(lp.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(lp.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(lp.surname, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(trim(concat_ws(' ', NULLIF(lp.first_name, ''), NULLIF(lp.surname, '')))) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'organisation'
+                   AND EXISTS (
+                     SELECT 1 FROM public.organisations lo
+                     WHERE lo.tenant_id = tlr.tenant_id
+                       AND lo.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(lo.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(lo.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+               )
+           )
          )`,
       );
     }
@@ -1230,8 +1374,8 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   }
 
   /**
-   * Loads a bounded page of visible tasks plus total match count (`R702`).
-   * Always orders open tasks before completed/cancelled tasks so newer done tasks
+   * Loads a bounded page of visible tasks plus total match count (`R702`, `R719`, `R722`, `R729`).
+   * Always orders open tasks before completed/cancelled tasks by default so newer done tasks
    * can never push older open tasks off page 1.
    */
   public async listVisibleTasksPageWithCount<T = TenantTaskRecord>(
@@ -1240,6 +1384,8 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     options?: {
       statusFilter?: 'open' | 'overdue' | 'done' | 'all' | string;
       overdueBeforeIso?: string;
+      overdueNowLocalIso?: string;
+      overdueNowUtcIso?: string;
       tabFilter?: {
         readonly mode: 'my' | 'team' | 'created' | 'all';
         readonly actorId?: string;
@@ -1250,11 +1396,20 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       assignedTeamId?: string;
       recordType?: string;
       query?: string;
+      sortBy?: 'priority' | 'status' | 'dueAt';
+      sortDir?: 'asc' | 'desc';
+      urgentPriorityIds?: readonly string[];
+      highPriorityIds?: readonly string[];
+      lowPriorityIds?: readonly string[];
       hasRestrictedMatterAccess?: boolean;
       limit?: number;
       offset?: number;
     },
-  ): Promise<{ readonly items: T[]; readonly totalCount: number }> {
+  ): Promise<{
+    readonly items: T[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
     const limit =
       typeof options?.limit === 'number' && Number.isFinite(options.limit)
         ? Math.max(1, Math.min(500, Math.floor(options.limit)))
@@ -1263,9 +1418,12 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       typeof options?.offset === 'number' && Number.isFinite(options.offset)
         ? Math.max(0, Math.floor(options.offset))
         : 0;
+    const dirSql = options?.sortDir === 'desc' ? 'DESC' : 'ASC';
     const { whereSql, params } = this.buildVisibleTasksWhereSql(ctx, viewerId, {
       statusFilter: options?.statusFilter,
       overdueBeforeIso: options?.overdueBeforeIso,
+      overdueNowLocalIso: options?.overdueNowLocalIso,
+      overdueNowUtcIso: options?.overdueNowUtcIso,
       tabFilter: options?.tabFilter,
       priorityId: options?.priorityId,
       taskTypeId: options?.taskTypeId,
@@ -1280,15 +1438,63 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         params,
       );
       const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
-      const pageParams = [...params, limit, offset];
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams: unknown[] = [...params];
+      let orderBySql = `
+        CASE WHEN t.status IN ('To do', 'In progress', 'Waiting') THEN 0 ELSE 1 END ASC,
+        NULLIF(t.due_at, '') ASC NULLS LAST,
+        t.created_at DESC,
+        t.id ASC`;
+      if (options?.sortBy === 'priority') {
+        const urgentIds = Array.from(new Set((options.urgentPriorityIds ?? []).filter(Boolean)));
+        const highIds = Array.from(new Set((options.highPriorityIds ?? []).filter(Boolean)));
+        const lowIds = Array.from(new Set((options.lowPriorityIds ?? []).filter(Boolean)));
+        pageParams.push(urgentIds, highIds, lowIds);
+        const uIdx = `$${pageParams.length - 2}`;
+        const hIdx = `$${pageParams.length - 1}`;
+        const lIdx = `$${pageParams.length}`;
+        orderBySql = `
+          CASE
+            WHEN t.priority_id = ANY(${uIdx}::text[]) THEN 1
+            WHEN t.priority_id = ANY(${hIdx}::text[]) THEN 2
+            WHEN t.priority_id = ANY(${lIdx}::text[]) THEN 4
+            ELSE 3
+          END ${dirSql},
+          NULLIF(t.due_at, '') ASC NULLS LAST,
+          t.id ASC`;
+      } else if (options?.sortBy === 'status') {
+        const overdueExpr = this.buildTaskOverdueSqlExpr(pageParams, options);
+        orderBySql = `
+          CASE
+            WHEN ${overdueExpr} THEN 0
+            WHEN t.status = 'In progress' THEN 1
+            WHEN t.status = 'To do' THEN 2
+            WHEN t.status = 'Waiting' THEN 3
+            WHEN t.status = 'Done' THEN 4
+            ELSE 5
+          END ${dirSql},
+          NULLIF(t.due_at, '') ASC NULLS LAST,
+          t.id ASC`;
+      } else if (options?.sortBy === 'dueAt') {
+        orderBySql = `
+          NULLIF(t.due_at, '') ${dirSql} NULLS LAST,
+          t.id ASC`;
+      }
+
+      pageParams.push(limit, effectiveOffset);
       const res = await tx.query<TaskRow>(
         `SELECT * FROM tasks t
          WHERE ${whereSql}
-         ORDER BY
-           CASE WHEN t.status IN ('To do', 'In progress', 'Waiting') THEN 0 ELSE 1 END ASC,
-           NULLIF(t.due_at, '') ASC NULLS LAST,
-           t.created_at DESC,
-           t.id ASC
+         ORDER BY ${orderBySql}
          LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
         pageParams,
       );
@@ -1305,6 +1511,7 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
           (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
         ),
         totalCount,
+        effectivePage,
       };
     });
   }

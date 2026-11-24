@@ -432,6 +432,11 @@ function createIntakeQuoteError(code: string, message: string): Error & { code: 
   return err;
 }
 
+function rebaseSqlParams(sql: string, offset: number): string {
+  if (offset === 0) return sql;
+  return sql.replace(/\$(\d+)\b/g, (_m, n) => `$${Number(n) + offset}`);
+}
+
 function mapRowToEnquiry(row: EnquiryRow): TenantEnquiryRecord {
   const profile =
     row.profile_json && typeof row.profile_json === 'object'
@@ -1564,6 +1569,18 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
            OR lower(COALESCE(e.email, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(e.phone, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(e.summary_and_notes_json->>'summary', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.profile_json->'address'->>'town', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(e.profile_json->'address'->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM public.organisations lo
+             WHERE lo.tenant_id = e.tenant_id AND lo.id = e.linked_organisation_id
+               AND (lower(COALESCE(lo.legal_name, '')) LIKE ${pat} ESCAPE '\\' OR lower(COALESCE(lo.trading_name, '')) LIKE ${pat} ESCAPE '\\')
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.quotes lq
+             WHERE lq.tenant_id = e.tenant_id AND lq.source_enquiry_id = e.id
+               AND lower(COALESCE(lq.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
+           )
          )`,
       );
     }
@@ -1640,7 +1657,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
   }
 
   /**
-   * Loads a bounded page of visible enquiries plus total SQL match count (`R702`).
+   * Loads a bounded page of visible enquiries plus total SQL match count (`R702`, `R729`).
    */
   public async listVisibleEnquiriesPageWithCount<T = TenantEnquiryRecord>(
     ctx: TenantContext,
@@ -1664,7 +1681,11 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       offset?: number;
       hasRestrictedMatterAccess?: boolean;
     },
-  ): Promise<{ readonly items: T[]; readonly totalCount: number }> {
+  ): Promise<{
+    readonly items: T[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
     const hasRestrictedMatterAccess = Boolean(
       options?.hasRestrictedMatterAccess,
     );
@@ -1687,7 +1708,16 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         params,
       );
       const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
-      const pageParams = [...params, limit, offset];
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+      const pageParams = [...params, limit, effectiveOffset];
       const res = await tx.query<EnquiryRow>(
         `SELECT * FROM enquiries e
          WHERE ${whereSql}
@@ -1712,7 +1742,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
             : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
         ) as unknown as T;
       });
-      return { items, totalCount };
+      return { items, totalCount, effectivePage };
     });
   }
 
@@ -2283,8 +2313,38 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
            OR lower(COALESCE(q.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(q.prospect_name, '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(q.profile_json->>'prospectOrganisationName', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.profile_json->>'prospectEmail', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(q.profile_json->>'prospectPhone', '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(q.pricing_breakdown_json->>'scope', '')) LIKE ${pat} ESCAPE '\\'
            OR lower(COALESCE(q.source_enquiry_id, '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM public.people cp
+             WHERE cp.tenant_id = q.tenant_id AND cp.id = q.client_person_id
+               AND (
+                 lower(COALESCE(cp.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(cp.surname, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(trim(concat_ws(' ', NULLIF(cp.first_name, ''), NULLIF(cp.surname, '')))) LIKE ${pat} ESCAPE '\\'
+               )
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.organisations co
+             WHERE co.tenant_id = q.tenant_id AND co.id = q.client_organisation_id
+               AND (
+                 lower(COALESCE(co.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(co.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+               )
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.enquiries le
+             WHERE le.tenant_id = q.tenant_id AND le.id = q.source_enquiry_id
+               AND (
+                 lower(COALESCE(le.reference, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(le.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(le.last_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(trim(concat_ws(' ', NULLIF(le.first_name, ''), NULLIF(le.last_name, '')))) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(le.calling_on_behalf_of, '')) LIKE ${pat} ESCAPE '\\'
+               )
+           )
          )`,
       );
     }
@@ -2372,7 +2432,11 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       offset?: number;
       hasRestrictedMatterAccess?: boolean;
     },
-  ): Promise<{ readonly items: T[]; readonly totalCount: number }> {
+  ): Promise<{
+    readonly items: T[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
     const limit =
       typeof options?.limit === 'number' && Number.isFinite(options.limit)
         ? Math.max(1, Math.min(500, Math.floor(options.limit)))
@@ -2392,7 +2456,16 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         params,
       );
       const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
-      const pageParams = [...params, limit, offset];
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+      const pageParams = [...params, limit, effectiveOffset];
       const res = await tx.query<QuoteRow>(
         `SELECT * FROM quotes q
          WHERE ${whereSql}
@@ -2408,7 +2481,278 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         );
         return mapRowToQuote(row) as unknown as T;
       });
-      return { items, totalCount };
+      return { items, totalCount, effectivePage };
+    });
+  }
+
+  /**
+   * Unified `UNION ALL` SQL paging over visible enquiries and quotes (`R720`, `R722`, `R729`).
+   * Runs one combined `COUNT(*)`, one shared `ORDER BY`, and one `LIMIT`/`OFFSET` across both tables.
+   */
+  public async listVisibleIntakeQueuePageWithCount<
+    TEnquiry = TenantEnquiryRecord,
+    TQuote = TenantQuoteRecord,
+  >(
+    ctx: TenantContext,
+    viewerId: string,
+    options: {
+      includeEnquiries: boolean;
+      includeQuotes: boolean;
+      enquiryOptions?: Parameters<TenantIntakeQuoteRepository['buildVisibleEnquiriesWhereSql']>[2];
+      quoteOptions?: Parameters<TenantIntakeQuoteRepository['buildVisibleQuotesWhereSql']>[2];
+      todayYmd: string;
+      emergencyUrgencyIds?: readonly string[];
+      urgentUrgencyIds?: readonly string[];
+      standardUrgencyIds?: readonly string[];
+      sortBy?: 'urgency' | 'status' | 'receivedAt';
+      sortDir?: 'asc' | 'desc';
+      limit?: number;
+      offset?: number;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<{
+    readonly orderedQueueItems: ReadonlyArray<{
+      readonly kind: 'enquiry' | 'quote';
+      readonly id: string;
+    }>;
+    readonly enquiries: TEnquiry[];
+    readonly quotes: TQuote[];
+    readonly totalCount: number;
+    readonly enquiriesTotalCount: number;
+    readonly quotesTotalCount: number;
+    readonly effectivePage: number;
+  }> {
+    if (!options.includeEnquiries && !options.includeQuotes) {
+      return {
+        orderedQueueItems: [],
+        enquiries: [],
+        quotes: [],
+        totalCount: 0,
+        enquiriesTotalCount: 0,
+        quotesTotalCount: 0,
+        effectivePage: 1,
+      };
+    }
+
+    const hasRestrictedMatterAccess = Boolean(options.hasRestrictedMatterAccess);
+    const limit =
+      typeof options.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 100;
+    const offset =
+      typeof options.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const dirSql = options.sortDir === 'desc' ? 'DESC' : 'ASC';
+
+    const branches: string[] = [];
+    const combinedParams: unknown[] = [];
+
+    if (options.includeEnquiries) {
+      const enqBuilt = this.buildVisibleEnquiriesWhereSql(ctx, viewerId, {
+        ...options.enquiryOptions,
+        hasRestrictedMatterAccess,
+      });
+      const baseCount = combinedParams.length;
+      const emergencyIds = Array.from(
+        new Set((options.emergencyUrgencyIds ?? []).filter(Boolean)),
+      );
+      const urgentIds = Array.from(
+        new Set((options.urgentUrgencyIds ?? []).filter(Boolean)),
+      );
+      const standardIds = Array.from(
+        new Set((options.standardUrgencyIds ?? []).filter(Boolean)),
+      );
+      const emIdx = `$${enqBuilt.params.length + 1}`;
+      const urgIdx = `$${enqBuilt.params.length + 2}`;
+      const stdIdx = `$${enqBuilt.params.length + 3}`;
+      const branchSql = `
+        SELECT
+          'enquiry'::text AS kind,
+          e.id AS id,
+          COALESCE(e.received_at, e.created_at) AS sort_ts,
+          CASE WHEN (e.urgency_id = ANY(${emIdx}::text[]) OR e.urgency_id = ANY(${urgIdx}::text[])) THEN 1 ELSE 3 END AS default_tier,
+          CASE WHEN e.urgency_id = ANY(${emIdx}::text[]) THEN 0 WHEN e.urgency_id = ANY(${urgIdx}::text[]) THEN 1 ELSE 2 END AS emergency_sub,
+          NULL::text AS follow_up_key,
+          CASE WHEN e.urgency_id = ANY(${emIdx}::text[]) THEN 0 WHEN e.urgency_id = ANY(${urgIdx}::text[]) THEN 1 WHEN e.urgency_id = ANY(${stdIdx}::text[]) THEN 2 ELSE 3 END AS urgency_rank,
+          CASE e.status
+            WHEN 'New' THEN 1
+            WHEN 'Assigned' THEN 3
+            WHEN 'In contact' THEN 5
+            WHEN 'Draft' THEN 6
+            WHEN 'Converted' THEN 8
+            WHEN 'Declined' THEN 9
+            WHEN 'Referred out' THEN 10
+            WHEN 'No response' THEN 11
+            ELSE 99
+          END AS status_rank
+        FROM public.enquiries e
+        WHERE ${enqBuilt.whereSql}`;
+      branches.push(rebaseSqlParams(branchSql, baseCount));
+      combinedParams.push(...enqBuilt.params, emergencyIds, urgentIds, standardIds);
+    }
+
+    if (options.includeQuotes) {
+      const quoteBuilt = this.buildVisibleQuotesWhereSql(ctx, viewerId, {
+        ...options.quoteOptions,
+        hasRestrictedMatterAccess,
+      });
+      const baseCount = combinedParams.length;
+      const dayIdx = `$${quoteBuilt.params.length + 1}`;
+      const effStatusSql = `CASE WHEN q.status IN ('Sent', 'Follow-up due') AND q.valid_until IS NOT NULL AND q.valid_until <> '' AND q.valid_until < ${dayIdx} THEN 'Expired' ELSE q.status END`;
+      const overdueFollowUpSql = `(
+        (q.status IN ('Sent', 'Follow-up due') AND (q.valid_until IS NULL OR q.valid_until = '' OR q.valid_until >= ${dayIdx}))
+        AND (
+          (NULLIF(COALESCE(q.profile_json->>'nextFollowUpDate', ''), '') IS NOT NULL AND (
+            (q.profile_json->>'nextFollowUpDate') < ${dayIdx}
+            OR (q.status = 'Follow-up due' AND (q.profile_json->>'nextFollowUpDate') <= ${dayIdx})
+          ))
+          OR (NULLIF(COALESCE(q.profile_json->>'nextFollowUpDate', ''), '') IS NULL AND q.status = 'Follow-up due')
+        )
+      )`;
+      const branchSql = `
+        SELECT
+          'quote'::text AS kind,
+          q.id AS id,
+          q.created_at AS sort_ts,
+          CASE WHEN ${overdueFollowUpSql} THEN 2 ELSE 3 END AS default_tier,
+          99 AS emergency_sub,
+          CASE WHEN ${overdueFollowUpSql} THEN COALESCE(NULLIF(q.profile_json->>'nextFollowUpDate', ''), '0000-00-00') ELSE NULL END AS follow_up_key,
+          2 AS urgency_rank,
+          CASE (${effStatusSql})
+            WHEN 'Follow-up due' THEN 2
+            WHEN 'Sent' THEN 4
+            WHEN 'Draft' THEN 6
+            WHEN 'Accepted' THEN 7
+            WHEN 'Declined' THEN 9
+            WHEN 'Expired' THEN 12
+            WHEN 'Superseded' THEN 13
+            ELSE 99
+          END AS status_rank
+        FROM public.quotes q
+        WHERE ${quoteBuilt.whereSql}`;
+      branches.push(rebaseSqlParams(branchSql, baseCount));
+      combinedParams.push(...quoteBuilt.params, options.todayYmd);
+    }
+
+    const unionSql = branches.join('\nUNION ALL\n');
+    const orderBySql =
+      options.sortBy === 'urgency'
+        ? `u.urgency_rank ${dirSql}, u.sort_ts ASC, u.kind ASC, u.id ASC`
+        : options.sortBy === 'status'
+          ? `u.status_rank ${dirSql}, u.sort_ts ASC, u.kind ASC, u.id ASC`
+          : options.sortBy === 'receivedAt'
+            ? `u.sort_ts ${dirSql}, u.kind ASC, u.id ASC`
+            : `u.default_tier ASC, u.emergency_sub ASC, u.follow_up_key ASC NULLS LAST, u.sort_ts ASC, u.kind ASC, u.id ASC`;
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{
+        total_count: number;
+        enquiries_count: number;
+        quotes_count: number;
+      }>(
+        `WITH combined AS (${unionSql})
+         SELECT
+           COUNT(*)::int AS total_count,
+           COUNT(*) FILTER (WHERE kind = 'enquiry')::int AS enquiries_count,
+           COUNT(*) FILTER (WHERE kind = 'quote')::int AS quotes_count
+         FROM combined`,
+        combinedParams,
+      );
+      const totalCount = Number(countRes.rows[0]?.total_count ?? 0);
+      const enquiriesTotalCount = Number(countRes.rows[0]?.enquiries_count ?? 0);
+      const quotesTotalCount = Number(countRes.rows[0]?.quotes_count ?? 0);
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams = [...combinedParams, limit, effectiveOffset];
+      const pageRes = await tx.query<{ kind: 'enquiry' | 'quote'; id: string }>(
+        `WITH combined AS (${unionSql})
+         SELECT u.kind, u.id
+         FROM combined u
+         ORDER BY ${orderBySql}
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const orderedQueueItems = pageRes.rows.map((r) => ({
+        kind: r.kind,
+        id: r.id,
+      }));
+      const pageEnqIds = orderedQueueItems
+        .filter((r) => r.kind === 'enquiry')
+        .map((r) => r.id);
+      const pageQuoteIds = orderedQueueItems
+        .filter((r) => r.kind === 'quote')
+        .map((r) => r.id);
+
+      let enquiries: TEnquiry[] = [];
+      let quotes: TQuote[] = [];
+
+      if (pageEnqIds.length > 0) {
+        const [enqRowsRes, hiddenMatterIds] = await Promise.all([
+          tx.query<EnquiryRow>(
+            `SELECT * FROM public.enquiries WHERE tenant_id = $1 AND id = ANY($2::text[])`,
+            [ctx.tenantId, pageEnqIds],
+          ),
+          hasRestrictedMatterAccess
+            ? Promise.resolve(new Set<string>())
+            : this.listHiddenRestrictedMatterIdsInTx(tx, ctx, viewerId),
+        ]);
+        const byId = new Map<string, TEnquiry>();
+        for (const row of enqRowsRes.rows) {
+          this.assertRowTenant(
+            ctx,
+            row.tenant_id,
+            'intakeQueue.listVisibleIntakeQueuePageWithCount.enquiries',
+          );
+          const mapped = mapRowToEnquiry(row);
+          const clean = (
+            hasRestrictedMatterAccess
+              ? mapped
+              : this.sanitizeEnquiryConflictSnapshotForViewer(mapped, hiddenMatterIds)
+          ) as unknown as TEnquiry;
+          byId.set(row.id, clean);
+        }
+        enquiries = pageEnqIds
+          .map((id) => byId.get(id))
+          .filter((item): item is TEnquiry => Boolean(item));
+      }
+
+      if (pageQuoteIds.length > 0) {
+        const quoteRowsRes = await tx.query<QuoteRow>(
+          `SELECT * FROM public.quotes WHERE tenant_id = $1 AND id = ANY($2::text[])`,
+          [ctx.tenantId, pageQuoteIds],
+        );
+        const byId = new Map<string, TQuote>();
+        for (const row of quoteRowsRes.rows) {
+          this.assertRowTenant(
+            ctx,
+            row.tenant_id,
+            'intakeQueue.listVisibleIntakeQueuePageWithCount.quotes',
+          );
+          byId.set(row.id, mapRowToQuote(row) as unknown as TQuote);
+        }
+        quotes = pageQuoteIds
+          .map((id) => byId.get(id))
+          .filter((item): item is TQuote => Boolean(item));
+      }
+
+      return {
+        orderedQueueItems,
+        enquiries,
+        quotes,
+        totalCount,
+        enquiriesTotalCount,
+        quotesTotalCount,
+        effectivePage,
+      };
     });
   }
 

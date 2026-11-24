@@ -6,10 +6,12 @@ import { useRouter } from 'next/navigation';
 import { isInactiveStatus } from '@/domain/attention';
 import type { PillTone, UrgencyEdgeKind } from '@/domain/badges';
 import { isBefore } from '@/domain/dates';
+import type { SortDirection } from '@/domain/listNavigationState';
 import { optionsFor, resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import type {
   ListPaginationMeta,
+  OrganisationsListSortColumn,
   OrganisationsListTabFilter,
 } from '@/server/pageLoaders';
 import type {
@@ -50,6 +52,8 @@ interface Props {
     orgTypeFilter: string;
     sectorFilter: string;
     ownerFilter: string;
+    sortBy?: OrganisationsListSortColumn | null;
+    sortDir?: SortDirection | null;
   };
 }
 
@@ -63,6 +67,8 @@ const ORGS_PARAM_DEFAULTS = {
   orgType: 'all',
   sector: 'all',
   owner: 'all',
+  sort: '',
+  dir: '',
   page: 1,
 };
 
@@ -90,10 +96,16 @@ export function OrganisationsListClient({
   initialFilters,
 }: Props) {
   const router = useRouter();
-  const { navigateNow, navigateDebounced } = useServerListNavigation({
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
     basePath: '/organisations',
     router,
     defaults: ORGS_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
   });
 
   const [tab, setTab] = useState<OrganisationsTab>(initialFilters?.tab ?? 'all');
@@ -103,7 +115,14 @@ export function OrganisationsListClient({
   const [orgTypeFilter, setOrgTypeFilter] = useState(initialFilters?.orgTypeFilter ?? 'all');
   const [sectorFilter, setSectorFilter] = useState(initialFilters?.sectorFilter ?? 'all');
   const [ownerFilter, setOwnerFilter] = useState(initialFilters?.ownerFilter ?? 'all');
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
 
   const initialKey = JSON.stringify(initialFilters ?? null);
@@ -116,17 +135,28 @@ export function OrganisationsListClient({
     queueMicrotask(() => {
       if (!active) return;
       setTab(initialFilters.tab);
-      setSearchQuery(initialFilters.query);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setSearchQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
       setTypeFilter(initialFilters.typeFilter);
       setStatusFilter(initialFilters.statusFilter);
       setOrgTypeFilter(initialFilters.orgTypeFilter);
       setSectorFilter(initialFilters.sectorFilter);
       setOwnerFilter(initialFilters.ownerFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
     });
     return () => {
       active = false;
     };
-  }, [initialKey, initialFilters]);
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
 
   const toQueryMap = (overrides?: Partial<{
     tab: OrganisationsTab;
@@ -136,17 +166,28 @@ export function OrganisationsListClient({
     orgTypeFilter: string;
     sectorFilter: string;
     ownerFilter: string;
+    sort: DataListSortState | null;
     page: number;
-  }>) => ({
-    tab: overrides?.tab ?? tab,
-    q: overrides?.query ?? searchQuery,
-    type: overrides?.typeFilter ?? typeFilter,
-    status: overrides?.statusFilter ?? statusFilter,
-    orgType: overrides?.orgTypeFilter ?? orgTypeFilter,
-    sector: overrides?.sectorFilter ?? sectorFilter,
-    owner: overrides?.ownerFilter ?? ownerFilter,
-    page: overrides?.page ?? 1,
-  });
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? searchQuery,
+      type: overrides?.typeFilter ?? typeFilter,
+      status: overrides?.statusFilter ?? statusFilter,
+      orgType: overrides?.orgTypeFilter ?? orgTypeFilter,
+      sector: overrides?.sectorFilter ?? sectorFilter,
+      owner: overrides?.ownerFilter ?? ownerFilter,
+      sort: nextSort?.columnId ?? '',
+      dir: nextSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination) navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+  };
 
   const handleTabChange = (next: OrganisationsTab) => {
     setTab(next);
@@ -249,8 +290,8 @@ export function OrganisationsListClient({
       return map;
     }
     for (const m of matters) {
-      const statusLabel = resolveLabel(values, m.matterStatusId).toLowerCase();
-      if (statusLabel === 'closed' || statusLabel === 'archived') continue;
+      const statusKey = systemKeyOf(values, m.matterStatusId);
+      if (statusKey === 'closed' || statusKey === 'archived') continue;
       if (m.clientId.startsWith('O-')) {
         map.set(m.clientId, (map.get(m.clientId) ?? 0) + 1);
       }
@@ -259,25 +300,18 @@ export function OrganisationsListClient({
   }, [activeMatterCountsByOrgId, matters, values]);
 
   const isClientOrg = (o: Organisation): boolean => {
-    const relLabels = resolveLabels(values, o.relationshipTypeIds).map((s) =>
-      s.toLowerCase(),
-    );
-    const statusLabel = resolveLabel(values, o.relationshipStatusId).toLowerCase();
+    const relKeys = o.relationshipTypeIds.map((id) => systemKeyOf(values, id));
+    const statusKey = systemKeyOf(values, o.relationshipStatusId);
     return (
-      relLabels.some((r) => r.includes('client')) ||
-      statusLabel.includes('active client')
+      relKeys.some((k) => k === 'client' || k === 'former_client') ||
+      statusKey === 'active'
     );
   };
 
   const isProspectOrg = (o: Organisation): boolean => {
-    const relLabels = resolveLabels(values, o.relationshipTypeIds).map((s) =>
-      s.toLowerCase(),
-    );
-    const statusLabel = resolveLabel(values, o.relationshipStatusId).toLowerCase();
-    return (
-      relLabels.some((r) => r.includes('prospect')) ||
-      statusLabel.includes('prospect')
-    );
+    const relKeys = o.relationshipTypeIds.map((id) => systemKeyOf(values, id));
+    const statusKey = systemKeyOf(values, o.relationshipStatusId);
+    return relKeys.some((k) => k === 'prospect') || statusKey === 'prospective';
   };
 
   const activeOrganisations = useMemo(
@@ -315,6 +349,8 @@ export function OrganisationsListClient({
   const today = useMemo(() => new Date(), []);
 
   const filtered = useMemo(() => {
+    if (pagination) return organisations;
+
     const q = searchQuery.trim().toLowerCase();
 
     const source =
@@ -382,6 +418,8 @@ export function OrganisationsListClient({
       return a.legalName.localeCompare(b.legalName);
     });
   }, [
+    pagination,
+    organisations,
     tab,
     activeOrganisations,
     archivedOrganisations,
@@ -817,7 +855,7 @@ export function OrganisationsListClient({
         getRowUrgency={getRowUrgency}
         onRowClick={(o) => router.push(`/organisations/${o.id}`)}
         sort={sort}
-        onSortChange={setSort}
+        onSortChange={handleSortChange}
         defaultSortLabel="Alphabetical (legal name)"
         density={density}
         emptyMessage="No organisations match the selected view and filters."
