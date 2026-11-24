@@ -1417,8 +1417,8 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         }
       });
 
-      // 6b. Standard Fee Earner (has employee:view_core, lacks hr_restricted/payroll):
-      // sees core status 'Leaver' and DOB with restricted HR, payroll, overrides & Entra OID stripped, and contact-only edit keeps stored employment
+      // 6b. Standard Fee Earner (has employee:view_core, lacks employee:hr_restricted/payroll):
+      // sees core status 'Leaver' with DOB, restricted HR, payroll, overrides & Entra OID stripped, and contact-only edit keeps stored employment
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
       setTestEntraSessionOverride(feActor.verifiedSession);
       await runWithActiveActorSession(feActor, async () => {
@@ -1429,7 +1429,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           expect(feDetail.person.employment?.contract).toBeUndefined();
           expect(feDetail.person.employment?.rightToWork).toBeUndefined();
           expect(feDetail.person.employment?.payroll).toBeUndefined();
-          expect(feDetail.person.dateOfBirth).toBe('1984-04-12');
+          expect(feDetail.person.dateOfBirth).toBeUndefined();
           expect(feDetail.person.permissionOverrides).toBeUndefined();
           expect(feDetail.person.entraObjectId).toBeUndefined();
         }

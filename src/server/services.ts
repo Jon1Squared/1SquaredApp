@@ -3138,9 +3138,12 @@ export async function savePersonRecord(
   const rawEmpInput: Partial<EmploymentRecord> | null =
     opts.employmentSubmitted ?? input.employment ?? null;
 
-  // R728: Non-HR actors without `employee:edit_core` cannot overwrite or clear stored DOB on people with employment.
+  // R718 & R728: Non-HR actors without `employee:edit_core` cannot overwrite or clear stored DOB
+  // on people with employment, and actors lacking `employee:hr_restricted` do not wipe unviewed DOB.
   const effectiveDob =
-    existing?.employment && !userPerms.has('employee:edit_core')
+    existing?.employment &&
+    (!userPerms.has('employee:edit_core') ||
+      (!userPerms.has('employee:hr_restricted') && !input.dateOfBirth))
       ? (existing.dateOfBirth ?? null)
       : input.dateOfBirth !== undefined
         ? input.dateOfBirth
@@ -4246,6 +4249,12 @@ export async function savePersonRecord(
   if (!canReadRbacSecurityFields) {
     delete returnedPerson.permissionOverrides;
     delete returnedPerson.entraObjectId;
+  }
+  if (
+    (returnedPerson.isEmployee || returnedPerson.employment) &&
+    !userPerms.has('employee:hr_restricted')
+  ) {
+    delete returnedPerson.dateOfBirth;
   }
   return { person: returnedPerson };
   })();
@@ -30662,7 +30671,7 @@ async function resolveServiceActorPermissions(
 /**
  * Sanitises staff/leaver `Person` records through `sanitizePersonForClientPreview`,
  * applies role- and matter-visibility-scoped `filterEmploymentForUser`, and reveals
- * employee/leaver `dateOfBirth` only to actors holding `employee:view_core` (`R717`, `R718`).
+ * employee/leaver `dateOfBirth` only to actors holding `employee:hr_restricted` (`R717`, `R718`).
  */
 export async function filterPeopleEmploymentForActor(params: {
   ctx: TenantContext;
@@ -30714,14 +30723,14 @@ export async function filterPeopleEmploymentForActor(params: {
       rbacOpts,
     ),
   );
-  const canViewEmployeeCore = actorEmpPerms.has('employee:view_core');
+  const canViewHrRestricted = actorEmpPerms.has('employee:hr_restricted');
 
   return params.peopleToFilter.map((p) => {
     const safePerson = sanitizePersonForClientPreview(p, {
       preserveNonEmployeeDob: true,
     });
     const isStaffOrLeaver = Boolean(p.isEmployee || p.employment);
-    if (isStaffOrLeaver && canViewEmployeeCore && p.dateOfBirth !== undefined) {
+    if (isStaffOrLeaver && canViewHrRestricted && p.dateOfBirth !== undefined) {
       safePerson.dateOfBirth = p.dateOfBirth;
     }
     if (!p.employment) {
