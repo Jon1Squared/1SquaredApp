@@ -2,6 +2,8 @@ import Link from 'next/link';
 import { LoginScreen } from '@/components/LoginScreen';
 import { getActiveTenantConfiguration } from '@/platform/tenantRuntime';
 import { getEntraEnvStatus, getEntraSession } from '@/server/entraAuth';
+import { AuthorisationError } from '@/server/rbacRuntime';
+import { requireAuthenticatedActor } from '@/server/services';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +15,41 @@ export default async function DocsLayout({
   const entraSession = await getEntraSession();
   if (!entraSession) {
     return <LoginScreen entraEnvStatus={getEntraEnvStatus()} />;
+  }
+
+  try {
+    await requireAuthenticatedActor();
+  } catch (err) {
+    if (
+      err instanceof AuthorisationError ||
+      (err instanceof Error && err.name === 'TenancyError')
+    ) {
+      return (
+        <div
+          style={{
+            minHeight: '100vh',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+          }}
+        >
+          <div className="card" style={{ maxWidth: 440, width: '100%', padding: 28 }}>
+            <h1 style={{ fontSize: 20, marginBottom: 8 }}>Access unavailable</h1>
+            <p className="muted" style={{ marginBottom: 16 }}>
+              Your account does not currently have an active employee profile in this
+              workspace, so Help &amp; documentation cannot be opened.
+            </p>
+            <form action="/api/auth/logout" method="POST" style={{ margin: 0 }}>
+              <button type="submit" className="btn btn--primary">
+                Sign out
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+    throw err;
   }
 
   const firmDisplayName = getActiveTenantConfiguration().displayName || '1Squared';

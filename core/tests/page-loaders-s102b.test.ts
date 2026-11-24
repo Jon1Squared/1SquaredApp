@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -18,6 +20,9 @@ import {
   type TenantContext,
 } from '@platform/core';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
+import { LoginScreen } from '@/components/LoginScreen';
+import DocsLayout from '@/app/docs/layout';
+import LoginPage from '@/app/login/page';
 import {
   getActiveTenantConfiguration,
   setActiveTenantConfigForTesting,
@@ -58,10 +63,13 @@ import {
   loadPersonDetailPageData,
   loadPersonFormPageData,
   loadQuoteDetailPageData,
+  loadQuoteFormPageData,
   loadRegistersPageData,
   loadShellContext,
   loadTaskDetailPageData,
+  loadTaskFormPageData,
   loadTasksListPageData,
+  withOptionalPageActor,
 } from '@/server/pageLoaders';
 import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
 import { computeMatterPartyUsageCounts } from '@/domain/matterParties';
@@ -446,7 +454,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
     await getGlobalTenantPostgresPoolManager().closeAllPools();
   });
 
-  it('1. /docs route group isolation: Help layout and pages import zero tenant DB/loader modules and run 0 SQL queries', async () => {
+  it('1. /docs route group isolation & R706/R716 auth redirects: Help pages stay DB-free, DocsLayout rejects unmapped/leaver sessions, and expired sessions redirect to /login', async () => {
     const repoRoot = path.resolve(__dirname, '../..');
     const docsFiles = [
       'src/app/docs/layout.tsx',
@@ -468,22 +476,101 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
 
       for (const spec of importSpecs) {
         expect(spec).not.toMatch(/pageLoaders/);
-        expect(spec).not.toMatch(/services/);
         expect(spec).not.toMatch(/tenancy\//);
         expect(spec).not.toMatch(/@platform\/core/);
+        if (relPath === 'src/app/docs/layout.tsx' && /services/.test(spec)) {
+          expect(spec).toBe('@/server/services');
+        } else {
+          expect(spec).not.toMatch(/services/);
+        }
       }
     }
 
-    // Executing DocsLayout's active tenant display name read issues zero PostgreSQL pool/query calls
+    // Signed-out DocsLayout returns LoginScreen with zero PostgreSQL pool/query calls
+    const env = await provisionAndSeedTwoTenants();
+    setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+    setTestEntraSessionOverride(null);
     const poolSpy = vi.spyOn(getGlobalTenantPostgresPoolManager(), 'getPoolForTenant');
     try {
-      const displayName = getActiveTenantConfiguration().displayName;
-      expect(typeof displayName).toBe('string');
-      expect(displayName.length).toBeGreaterThan(0);
+      const signedOutEl = await DocsLayout({
+        children: React.createElement('div', null, 'Protected Help Content'),
+      });
+      expect((signedOutEl as React.ReactElement).type).toBe(LoginScreen);
       expect(poolSpy).not.toHaveBeenCalled();
     } finally {
       poolSpy.mockRestore();
     }
+
+    // R706: Unmapped session and leaver session (isEmployee: false) cannot load /docs children
+    const unmappedSession = makeActorSession('P-UNMAPPED-999', [], env.tenantAlpha);
+    setTestEntraSessionOverride(unmappedSession.verifiedSession);
+    const unmappedEl = await runWithActiveActorSession(unmappedSession, () =>
+      DocsLayout({
+        children: React.createElement('div', null, 'Protected Help Content'),
+      }),
+    );
+    const unmappedHtml = renderToStaticMarkup(unmappedEl as React.ReactElement);
+    expect(unmappedHtml).toContain('Access unavailable');
+    expect(unmappedHtml).toContain('/api/auth/logout');
+    expect(unmappedHtml).not.toContain('Protected Help Content');
+
+    // Seed a leaver (isEmployee: false) in Alpha and prove DocsLayout blocks them too
+    const partyRepo = new TenantPartyRepository();
+    const leaverPerson: Person = {
+      ...structuredClone(env.alphaRestrictedPerson),
+      id: 'P-S102B-LEAVER',
+      firstName: 'Former',
+      surname: 'Employee',
+      isEmployee: false,
+      mergedIntoId: null,
+    };
+    await partyRepo.putPerson(env.ctxAlpha, leaverPerson);
+    const leaverSession = makeActorSession(leaverPerson.id, [], env.tenantAlpha);
+    setTestEntraSessionOverride(leaverSession.verifiedSession);
+    const leaverEl = await runWithActiveActorSession(leaverSession, () =>
+      DocsLayout({
+        children: React.createElement('div', null, 'Protected Help Content'),
+      }),
+    );
+    const leaverHtml = renderToStaticMarkup(leaverEl as React.ReactElement);
+    expect(leaverHtml).toContain('Access unavailable');
+    expect(leaverHtml).not.toContain('Protected Help Content');
+
+    // Positive control: active employee renders /docs children
+    const activeSession = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
+    setTestEntraSessionOverride(activeSession.verifiedSession);
+    const activeEl = await runWithActiveActorSession(activeSession, () =>
+      DocsLayout({
+        children: React.createElement('div', null, 'Protected Help Content'),
+      }),
+    );
+    const activeHtml = renderToStaticMarkup(activeEl as React.ReactElement);
+    expect(activeHtml).toContain('Protected Help Content');
+    expect(activeHtml).not.toContain('Access unavailable');
+
+    // R716: withOptionalPageActor redirects expired/missing sessions to /login; LoginPage renders LoginScreen or redirects to /
+    setTestEntraSessionOverride(null);
+    let redirectDigest = '';
+    try {
+      await withOptionalPageActor(async () => 'never-reached');
+    } catch (err) {
+      redirectDigest = String((err as { digest?: unknown })?.digest ?? '');
+    }
+    expect(redirectDigest).toContain('NEXT_REDIRECT');
+    expect(redirectDigest).toContain('/login');
+
+    const loginSignedOutEl = await LoginPage();
+    expect((loginSignedOutEl as React.ReactElement).type).toBe(LoginScreen);
+
+    setTestEntraSessionOverride(activeSession.verifiedSession);
+    let loginRedirectDigest = '';
+    try {
+      await LoginPage();
+    } catch (err) {
+      loginRedirectDigest = String((err as { digest?: unknown })?.digest ?? '');
+    }
+    expect(loginRedirectDigest).toContain('NEXT_REDIRECT');
+    expect(loginRedirectDigest).toContain(';/;');
   });
 
   it(
@@ -518,7 +605,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         }
         expect(shell.currentUser.employment?.payroll).toBeUndefined();
 
-        // Urgent badge counts visible urgent tasks, excluding hidden staff-matter urgent task
+        // R708: Exact urgent badge count via countUrgentBadgeTasksForUser, excluding hidden staff urgent task
         const taskRepo = new TenantTaskWorkflowRepository();
         const visibleTasksForFe = await taskRepo.listVisibleTasks<Task>(env.ctxAlpha, 'P-000002', {
           hasRestrictedMatterAccess: false,
@@ -526,17 +613,111 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(visibleTasksForFe.some((t) => t.id === env.alphaUrgentPublicTask.id)).toBe(true);
         expect(visibleTasksForFe.some((t) => t.id === env.alphaUrgentStaffTask.id)).toBe(false);
 
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const [feExpectedBadge, feUnrestrictedBadge, partnerExpectedBadge] = await Promise.all([
+          taskRepo.countUrgentBadgeTasksForUser(env.ctxAlpha, 'P-000002', {
+            viewerId: 'P-000002',
+            hasRestrictedMatterAccess: false,
+            todayIso,
+          }),
+          taskRepo.countUrgentBadgeTasksForUser(env.ctxAlpha, 'P-000002', {
+            viewerId: 'P-000002',
+            hasRestrictedMatterAccess: true,
+            todayIso,
+          }),
+          taskRepo.countUrgentBadgeTasksForUser(env.ctxAlpha, 'P-000001', {
+            viewerId: 'P-000001',
+            hasRestrictedMatterAccess: true,
+            todayIso,
+          }),
+        ]);
+        expect(shell.urgentTaskBadgeCount).toBe(feExpectedBadge);
+        expect(feUnrestrictedBadge).toBe(feExpectedBadge + 1);
+
+        // Seed public + staff-matter key dates so key-dates isolation has both negative and positive controls (R708)
+        const keyDateRepo = new TenantKeyDateRepository();
+        const publicKd: KeyDate = {
+          id: 'KD-S102B-PUB-A',
+          matterId: env.alphaPubMatter.id,
+          category: 'internal_milestone',
+          keyDateTypeId: 'kd.internal_milestone',
+          source: 'manual',
+          title: 'Public Matter Alpha Key Date',
+          dueDate: '2026-12-01',
+          isCritical: false,
+          status: 'confirmed',
+          teamId: 'TM-000001',
+          responsiblePersonIds: ['P-000001', 'P-000002'],
+          verification: { required: false },
+          createdById: 'P-000001',
+          createdAt: '2026-11-10T09:00:00Z',
+          updatedById: 'P-000001',
+          updatedAt: '2026-11-10T09:00:00Z',
+          version: 1,
+        };
+        const staffKd: KeyDate = {
+          ...publicKd,
+          id: 'KD-S102B-STAFF-A',
+          matterId: env.alphaStaffMatter.id,
+          title: 'Staff Matter Hidden Key Date',
+        };
+        await keyDateRepo.putKeyDate(env.ctxAlpha, publicKd, { expectedVersion: null });
+        await keyDateRepo.putKeyDate(env.ctxAlpha, staffKd, { expectedVersion: null });
+
         setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
         setTestEntraSessionOverride(alphaPartner.verifiedSession);
-        const partnerShell = await runWithActiveActorSession(alphaPartner, () =>
-          loadShellContext('P-000001'),
+        const [partnerShell, partnerKeyDates, partnerRegisters] = await runWithActiveActorSession(
+          alphaPartner,
+          () =>
+            Promise.all([
+              loadShellContext('P-000001'),
+              loadKeyDatesPageData('P-000001'),
+              loadRegistersPageData('P-000001'),
+            ]),
         );
-        expect(partnerShell.urgentTaskBadgeCount).toBeGreaterThanOrEqual(0);
+        expect(partnerShell.urgentTaskBadgeCount).toBe(partnerExpectedBadge);
+        expect(
+          partnerKeyDates.initialDiaryEntries.some((d) => d.matterId === env.alphaStaffMatter.id),
+        ).toBe(true);
+        expect(
+          partnerKeyDates.initialDiaryEntries.some((d) => d.matterId === env.alphaPubMatter.id),
+        ).toBe(true);
+        expect(partnerRegisters.data).toMatchObject({ ok: true });
+        expect(
+          Array.isArray((partnerRegisters.data as { records?: unknown[] }).records),
+        ).toBe(true);
+
+        // User without register:view or undertaking:manage is refused on /registers and gets empty registers on Home (R708)
+        const regPartyRepo = new TenantPartyRepository();
+        const baseFinanceUser = (await regPartyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          'P-000009',
+        ))!;
+        await regPartyRepo.putPerson(env.ctxAlpha, {
+          ...structuredClone(baseFinanceUser),
+          id: 'P-S102B-NO-REG',
+          roles: ['finance'],
+          permissionOverrides: {
+            grant: [],
+            revoke: ['register:view', 'undertaking:manage'],
+          },
+        });
+        const noRegActor = makeActorSession('P-S102B-NO-REG', [], env.tenantAlpha);
+        setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+        setTestEntraSessionOverride(noRegActor.verifiedSession);
+        const [noRegRegisters, noRegHome] = await runWithActiveActorSession(noRegActor, () =>
+          Promise.all([
+            loadRegistersPageData('P-S102B-NO-REG'),
+            loadHomePageData('P-S102B-NO-REG'),
+          ]),
+        );
+        expect(noRegRegisters.shell.currentUserPermissions).not.toContain('register:view');
+        expect(noRegRegisters.data).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+        expect(noRegHome.registerRecords).toEqual([]);
+        expect(noRegHome.registerTypes).toEqual([]);
 
         setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
         setTestEntraSessionOverride(alphaFeeEarner.verifiedSession);
-        expect(shell.urgentTaskBadgeCount).toBeGreaterThanOrEqual(1);
-        // If the staff urgent task were temporarily reassigned or compared against partner/all, badge stays strictly scoped
         const homeData = await loadHomePageData('P-000002');
         expect(homeData.matters.some((m) => m.id === env.alphaPubMatter.id)).toBe(true);
         expect(homeData.matters.some((m) => m.id === env.alphaStaffMatter.id)).toBe(false);
@@ -576,6 +757,9 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(
           keyDatesData.initialDiaryEntries.some((d) => d.matterId === env.alphaStaffMatter.id),
         ).toBe(false);
+        expect(
+          keyDatesData.initialDiaryEntries.some((d) => d.matterId === env.alphaPubMatter.id),
+        ).toBe(true);
 
         const registersData = await loadRegistersPageData('P-000002');
         expect(Array.isArray(registersData.shell.currentUserPermissions)).toBe(true);
@@ -604,9 +788,21 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
   );
 
   it(
-    '3. Detail/edit loaders: uniform null for hidden records and cross-tenant tampered IDs, plus forged claim rejection',
+    '3. Detail/edit loaders: uniform null & positive controls for [id] routes, tampered query-string IDs, and forged claim rejection on list/detail loaders',
     async () => {
       const env = await provisionAndSeedTwoTenants();
+      const intakeRepo = new TenantIntakeQuoteRepository();
+      const alphaPublicQuote: Quote = {
+        ...structuredClone(env.alphaStaffQuote),
+        id: 'QUO-S102B-PUB-A',
+        reference: 'QUO-88002',
+        prospectName: 'Public Alpha Quote Prospect',
+        convertedMatterId: null,
+        linkedEnquiryId: env.alphaPublicOpenEnquiry.id,
+        feeEarnerId: 'P-000002',
+      };
+      await intakeRepo.putQuote(env.ctxAlpha, alphaPublicQuote);
+
       const alphaPartner = makeActorSession(
         'P-000001',
         ['admin', 'managing_partner', 'partner', 'risk_compliance', 'fee_earner'],
@@ -623,7 +819,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         env.tenantBravo,
       );
 
-      // 3a. Hidden Alpha records for unauthorised fee earner return identical `null` as non-existent IDs
+      // 3a. Hidden Alpha records return identical `null` as non-existent IDs; positive controls return real records; tampered query-string IDs stay isolated (R708)
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
       setTestEntraSessionOverride(alphaFeeEarner.verifiedSession);
       await runWithActiveActorSession(alphaFeeEarner, async () => {
@@ -640,6 +836,121 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
 
         expect(await loadTaskDetailPageData('P-000002', 'TSK-DOES-NOT-EXIST')).toBeNull();
         expect(await loadTaskDetailPageData('P-000002', env.alphaUrgentStaffTask.id)).toBeNull();
+
+        // Positive controls for every [id] detail/edit loader
+        const pubMatterDetail = await loadMatterDetailPageData('P-000002', env.alphaPubMatter.id);
+        expect(pubMatterDetail?.matter.id).toBe(env.alphaPubMatter.id);
+        const pubMatterEdit = await loadMatterFormPageData('P-000002', {
+          editId: env.alphaPubMatter.id,
+        });
+        expect(pubMatterEdit?.existing?.id).toBe(env.alphaPubMatter.id);
+
+        const pubPersonDetail = await loadPersonDetailPageData('P-000002', 'P-000002');
+        expect(pubPersonDetail && !('redirectTo' in pubPersonDetail)).toBe(true);
+        if (pubPersonDetail && !('redirectTo' in pubPersonDetail)) {
+          expect(pubPersonDetail.person.id).toBe('P-000002');
+        }
+        const pubPersonEdit = await loadPersonFormPageData('P-000002', 'P-000002');
+        expect(pubPersonEdit && !('redirectTo' in pubPersonEdit)).toBe(true);
+        if (pubPersonEdit && !('redirectTo' in pubPersonEdit)) {
+          expect(pubPersonEdit.existing?.id).toBe('P-000002');
+        }
+
+        const pubOrgDetail = await loadOrganisationDetailPageData('P-000002', env.alphaPubOrg.id);
+        expect(pubOrgDetail && !('redirectTo' in pubOrgDetail)).toBe(true);
+        if (pubOrgDetail && !('redirectTo' in pubOrgDetail)) {
+          expect(pubOrgDetail.organisation.id).toBe(env.alphaPubOrg.id);
+        }
+        const pubOrgEdit = await loadOrganisationFormPageData('P-000002', env.alphaPubOrg.id);
+        expect(pubOrgEdit && !('redirectTo' in pubOrgEdit)).toBe(true);
+        if (pubOrgEdit && !('redirectTo' in pubOrgEdit)) {
+          expect(pubOrgEdit.existing?.id).toBe(env.alphaPubOrg.id);
+        }
+
+        const pubEnqDetail = await loadEnquiryDetailPageData('P-000002', env.alphaPublicOpenEnquiry.id);
+        expect(pubEnqDetail?.enquiry.id).toBe(env.alphaPublicOpenEnquiry.id);
+        const pubQuoteDetail = await loadQuoteDetailPageData('P-000002', alphaPublicQuote.id);
+        expect(pubQuoteDetail?.quote.id).toBe(alphaPublicQuote.id);
+        const pubTaskDetail = await loadTaskDetailPageData('P-000002', env.alphaUrgentPublicTask.id);
+        expect(pubTaskDetail?.task.id).toBe(env.alphaUrgentPublicTask.id);
+
+        // Tampered query-string IDs on form loaders (hidden Alpha + cross-tenant Bravo) + positive controls
+        expect(
+          (await loadMatterFormPageData('P-000002', { enquiryId: env.alphaPersonalDraftEnquiry.id }))
+            ?.initialEnquiry,
+        ).toBeNull();
+        expect(
+          (await loadMatterFormPageData('P-000002', { enquiryId: env.bravoEnquiry.id }))
+            ?.initialEnquiry,
+        ).toBeNull();
+        expect(
+          (await loadMatterFormPageData('P-000002', { enquiryId: env.alphaPublicOpenEnquiry.id }))
+            ?.initialEnquiry?.id,
+        ).toBe(env.alphaPublicOpenEnquiry.id);
+
+        expect(
+          (await loadMatterFormPageData('P-000002', { quoteId: env.alphaStaffQuote.id }))
+            ?.initialQuote,
+        ).toBeNull();
+        expect(
+          (await loadMatterFormPageData('P-000002', { quoteId: env.bravoQuote.id }))
+            ?.initialQuote,
+        ).toBeNull();
+        expect(
+          (await loadMatterFormPageData('P-000002', { quoteId: alphaPublicQuote.id }))
+            ?.initialQuote?.id,
+        ).toBe(alphaPublicQuote.id);
+
+        expect(
+          (await loadMatterFormPageData('P-000002', { draftId: env.alphaStaffMatter.id }))
+            ?.existing,
+        ).toBeNull();
+        expect(
+          (await loadMatterFormPageData('P-000002', { draftId: env.bravoMatter.id }))
+            ?.existing,
+        ).toBeNull();
+
+        const tamperedBravoClientForm = await loadMatterFormPageData('P-000002', {
+          clientId: env.bravoOrg.id,
+        });
+        expect(
+          tamperedBravoClientForm?.organisations.some((o) => o.id === env.bravoOrg.id),
+        ).toBe(false);
+        const tamperedBravoPersonForm = await loadMatterFormPageData('P-000002', {
+          clientId: env.bravoPerson.id,
+        });
+        expect(
+          tamperedBravoPersonForm?.people.some((p) => p.id === env.bravoPerson.id),
+        ).toBe(false);
+
+        expect(
+          (await loadQuoteFormPageData('P-000002', env.alphaPersonalDraftEnquiry.id))
+            ?.initialEnquiry,
+        ).toBeNull();
+        expect(
+          (await loadQuoteFormPageData('P-000002', env.bravoEnquiry.id))
+            ?.initialEnquiry,
+        ).toBeNull();
+        expect(
+          (await loadQuoteFormPageData('P-000002', env.alphaPublicOpenEnquiry.id))
+            ?.initialEnquiry?.id,
+        ).toBe(env.alphaPublicOpenEnquiry.id);
+
+        const taskFormStaff = await loadTaskFormPageData('P-000002', {
+          recordType: 'matter',
+          recordId: env.alphaStaffMatter.id,
+        });
+        expect(taskFormStaff.matters.some((m) => m.id === env.alphaStaffMatter.id)).toBe(false);
+        const taskFormBravo = await loadTaskFormPageData('P-000002', {
+          recordType: 'matter',
+          recordId: env.bravoMatter.id,
+        });
+        expect(taskFormBravo.matters.some((m) => m.id === env.bravoMatter.id)).toBe(false);
+        const taskFormPub = await loadTaskFormPageData('P-000002', {
+          recordType: 'matter',
+          recordId: env.alphaPubMatter.id,
+        });
+        expect(taskFormPub.matters.some((m) => m.id === env.alphaPubMatter.id)).toBe(true);
       });
 
       // 3b. Cross-tenant tampered IDs: Alpha Partner requesting real Bravo IDs returns uniform `null`
@@ -657,7 +968,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(await loadTaskDetailPageData('P-000001', env.bravoTask.id)).toBeNull();
       });
 
-      // 3c. Forged tenant claim (session claims tenantBravo while active tenant is tenantAlpha) fails closed
+      // 3c. Forged tenant claim (session claims tenantBravo while active tenant is tenantAlpha) fails closed across all loaders
       setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
       setTestEntraSessionOverride(forgedBravoInAlphaSession.verifiedSession);
       await runWithActiveActorSession(forgedBravoInAlphaSession, async () => {
@@ -665,6 +976,21 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           /TENANCY_FORGERY_DETECTED/,
         );
         await expect(loadHomePageData('P-000001')).rejects.toThrow(
+          /TENANCY_FORGERY_DETECTED/,
+        );
+        await expect(loadPeopleListPageData('P-000001')).rejects.toThrow(
+          /TENANCY_FORGERY_DETECTED/,
+        );
+        await expect(loadOrganisationsListPageData('P-000001')).rejects.toThrow(
+          /TENANCY_FORGERY_DETECTED/,
+        );
+        await expect(loadMattersListPageData('P-000001')).rejects.toThrow(
+          /TENANCY_FORGERY_DETECTED/,
+        );
+        await expect(loadEnquiriesListPageData('P-000001')).rejects.toThrow(
+          /TENANCY_FORGERY_DETECTED/,
+        );
+        await expect(loadTasksListPageData('P-000001')).rejects.toThrow(
           /TENANCY_FORGERY_DETECTED/,
         );
         await expect(
@@ -807,13 +1133,33 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           ),
         ).toBe(true);
 
-        // Picker visibility & privacy for P-000002:
+        // Picker visibility & privacy + positive controls for P-000002 (R708):
+        const alphaPublicQuoteInTest4: Quote = {
+          ...structuredClone(env.alphaStaffQuote),
+          id: 'QUO-S102B-PUB-PICKER',
+          reference: 'QUO-88003',
+          prospectName: 'Public Alpha Quote Picker',
+          convertedMatterId: null,
+          linkedEnquiryId: env.alphaPublicOpenEnquiry.id,
+          feeEarnerId: 'P-000002',
+        };
+        await new TenantIntakeQuoteRepository().putQuote(
+          env.ctxAlpha,
+          alphaPublicQuoteInTest4,
+        );
+
         const hiddenMatterPicker = await searchEntityPickerRecord(
           { entityTypes: ['matter'], query: 'Confidential Staff Employment Matter Alpha' },
           'P-000002',
         );
         if (isActionDenied(hiddenMatterPicker)) throw new Error(hiddenMatterPicker.error);
         expect(hiddenMatterPicker.items).toEqual([]);
+        const visibleMatterPicker = await searchEntityPickerRecord(
+          { entityTypes: ['matter'], query: env.alphaPubMatter.matterNumber },
+          'P-000002',
+        );
+        if (isActionDenied(visibleMatterPicker)) throw new Error(visibleMatterPicker.error);
+        expect(visibleMatterPicker.items.some((i) => i.id === env.alphaPubMatter.id)).toBe(true);
 
         const hiddenDraftPicker = await searchEntityPickerRecord(
           { entityTypes: ['enquiry'], query: 'PrivateDraft' },
@@ -821,6 +1167,14 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         );
         if (isActionDenied(hiddenDraftPicker)) throw new Error(hiddenDraftPicker.error);
         expect(hiddenDraftPicker.items).toEqual([]);
+        const visibleEnquiryPicker = await searchEntityPickerRecord(
+          { entityTypes: ['enquiry'], query: 'PublicOpen' },
+          'P-000002',
+        );
+        if (isActionDenied(visibleEnquiryPicker)) throw new Error(visibleEnquiryPicker.error);
+        expect(
+          visibleEnquiryPicker.items.some((i) => i.id === env.alphaPublicOpenEnquiry.id),
+        ).toBe(true);
 
         const hiddenQuotePicker = await searchEntityPickerRecord(
           { entityTypes: ['quote'], query: 'Hidden Staff Matter Quote' },
@@ -828,6 +1182,14 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         );
         if (isActionDenied(hiddenQuotePicker)) throw new Error(hiddenQuotePicker.error);
         expect(hiddenQuotePicker.items).toEqual([]);
+        const visibleQuotePicker = await searchEntityPickerRecord(
+          { entityTypes: ['quote'], query: 'Public Alpha Quote Picker' },
+          'P-000002',
+        );
+        if (isActionDenied(visibleQuotePicker)) throw new Error(visibleQuotePicker.error);
+        expect(
+          visibleQuotePicker.items.some((i) => i.id === alphaPublicQuoteInTest4.id),
+        ).toBe(true);
 
         const bravoCrossTenantPicker = await searchEntityPickerRecord(
           {

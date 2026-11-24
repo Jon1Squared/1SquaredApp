@@ -30,34 +30,20 @@ import {
   loadEffectiveTenantRbacConfig,
   loadTenantCatalogueStoreView,
   resolveDefaultServiceTenantContext,
-  resolveMatterSignOffEstimateGbp,
 } from '../services';
 import {
   AuthorisationError,
-  canPersonAccessMatter,
-  canUserReopenEnquiry,
-  canUserTakeTask,
-  canUserVerifyKeyDate,
-  canViewerAccessMatterKeyDates,
   filterEmploymentForUser,
   getActiveActorSession,
-  getLeftRailVisibility,
   resolveConfiguredFirmPrimaryDomain,
-  resolveEmployeePermissions,
   resolveKeyDatePermissions,
   resolvePersonPermissions,
-  resolveUserAppRole,
-  type PermissionKey,
   type RbacConfiguration,
-  type ResolvePersonPermissionsOptions,
 } from '../rbacRuntime';
-import { resolveSuggestedConflictReviewer } from '../conflictReview';
 import { attentionList } from '@/domain/attention';
-import { findRecordsOwnedByLeavers } from '@/domain/employment';
 import {
   createDefaultHomePagesConfig,
   resolveActiveViewingRole,
-  resolveEmployeeRoles,
 } from '@/domain/homeConfig';
 import { resolvePermittedDiaryTeamIds } from '@/domain/keyDateDiary';
 import type {
@@ -70,17 +56,13 @@ import { resolveEffectiveMatterCostsConfig } from '@/domain/matterCosts';
 import { buildDefaultMatterPartyTaxonomy } from '@/domain/matterParties';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
-import { countMyUrgentBadgeTasks } from '@/domain/tasks';
 import { resolveEffectiveWorkTypesConfig } from '@/domain/workTypeConfig';
 import type {
   AppFinanceCapabilities,
-  AppRole,
   AppSnapshot,
   AuditEntry,
-  EmployeeSensitiveRecord,
   Enquiry,
   HomePagesConfig,
-  HomeRoleKey,
   Matter,
   MergeHistory,
   Note,
@@ -161,15 +143,6 @@ async function getAppSnapshotInScope(
       actorUserId: userId || 'anonymous',
     });
   }
-  const currentUserRole = resolveUserAppRole(user, teams, store.values, {
-    config: { rbac: rbacConfig },
-  });
-  const currentUserEmployeePermissions = resolveEmployeePermissions(
-    user,
-    people,
-    teams,
-    { config: { rbac: rbacConfig } },
-  );
   const activeSession = getActiveActorSession();
   const effectiveTokenRoles =
     options?.tokenRoles ??
@@ -186,9 +159,6 @@ async function getAppSnapshotInScope(
     buildDefaultOrgStructure({
       legalName: getActiveTenantConfiguration().displayName,
     });
-
-  // Never bulk-return sensitive HR records in page snapshots (R63); serve only via audited per-person read service.
-  const employeeSensitiveRecords: Record<string, EmployeeSensitiveRecord> = {};
 
   const keyDateRepo = getKeyDateRepository();
   const hasRestrictedAccess = currentUserPermissions.includes(
@@ -350,14 +320,6 @@ async function getAppSnapshotInScope(
   // Person-to-organisation links only connect People and Organisations.
   const visibleLinks = links;
 
-  const leaverOwnedRecords = findRecordsOwnedByLeavers(
-    people,
-    organisations,
-    visibleMatters,
-    visibleTasks,
-    visibleEnquiries,
-  );
-
   const activeTenantCfg = getActiveTenantConfiguration();
   const rawHomePagesConfig =
     store.homePagesConfig ??
@@ -372,7 +334,6 @@ async function getAppSnapshotInScope(
       demoMode: isDemoModeEnabled(),
     },
   };
-  const currentUserRoles = resolveEmployeeRoles(user, teams);
   const activeViewingRole = resolveActiveViewingRole(user, homePagesConfig, teams);
   const keyDatesConfig = await getKeyDatesConfig({ ctx: snapshotTenantCtx, userId: user.id });
   const currentUserKeyDatePermissions = resolveKeyDatePermissions(user, {
@@ -381,16 +342,6 @@ async function getAppSnapshotInScope(
     teams,
     rbac: { config: { rbac: rbacConfig } },
   });
-  const baseRail = getLeftRailVisibility(activeViewingRole, currentUserRoles, {
-    config: { rbac: rbacConfig },
-  });
-  const leftRailVisibility = {
-    ...baseRail,
-    keyDates:
-      Boolean(keyDatesConfig.enabled) &&
-      baseRail.keyDates &&
-      currentUserKeyDatePermissions.includes('keydate:view'),
-  };
 
   // Data-layer filtering of key dates from TenantKeyDateRepository for restricted matters & team scoping (R32, R37, S0-15):
   const permittedDiaryTeamIds = new Set(
@@ -405,30 +356,17 @@ async function getAppSnapshotInScope(
   const repoVisibleKeyDates = canViewKeyDates
     ? await keyDateRepo.listAllVisibleKeyDates(snapshotTenantCtx, user.id)
     : [];
-  const snapshotKdRbacOptions: ResolvePersonPermissionsOptions = {
-    allPeople: people,
-    teams,
-    tokenRoles: effectiveTokenRoles,
-    context: snapshotTenantCtx,
-    tokenRolesActorId: user.id,
-    config: { rbac: rbacConfig },
-    tenantId: snapshotTenantCtx.tenantId,
-  };
   const visibleKeyDates: KeyDate[] = repoVisibleKeyDates.filter((kd) => {
     if (!permittedDiaryTeamIds.has(kd.teamId)) return false;
     if (!kd.matterId) return true;
-    const m = matterByIdForKd.get(kd.matterId);
-    return canViewerAccessMatterKeyDates(m, user.id, user, people, snapshotKdRbacOptions);
+    return matterByIdForKd.has(kd.matterId);
   });
   const visibleKeyDateIdSet = new Set(visibleKeyDates.map((kd) => kd.id));
   const repoVisibleNotApplicable = canViewKeyDates
     ? await keyDateRepo.listAllVisibleNotApplicable(snapshotTenantCtx, user.id)
     : [];
   const visibleKeyDateNotApplicable: KeyDateNotApplicable[] = repoVisibleNotApplicable.filter(
-    (na) => {
-      const m = matterByIdForKd.get(na.matterId);
-      return canViewerAccessMatterKeyDates(m, user.id, user, people, snapshotKdRbacOptions);
-    },
+    (na) => matterByIdForKd.has(na.matterId),
   );
   const repoReminderStates = canViewKeyDates
     ? await keyDateRepo.listAllReminderStates(snapshotTenantCtx, user.id)
@@ -557,7 +495,6 @@ async function getAppSnapshotInScope(
         ),
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const taskBadgeCount = countMyUrgentBadgeTasks(visibleTasks, effectiveWorkPerson.id, now);
 
   const visibleNotes = notes.filter(
     (n) =>
@@ -585,98 +522,6 @@ async function getAppSnapshotInScope(
     applyQuoteEffectiveLifecycle(q, now, { appendExpiredTimeline: false });
   }
 
-  const canTakeByTaskId: Record<string, boolean> = {};
-  for (const t of visibleTasks) {
-    canTakeByTaskId[t.id] = canUserTakeTask(
-      user.id,
-      t,
-      teams,
-      people,
-      store.values,
-      currentUserPermissions,
-    );
-  }
-
-  const canVerifyByKeyDateId: Record<
-    string,
-    { allowed: boolean; reason?: string }
-  > = {};
-  for (const kd of visibleKeyDates) {
-    canVerifyByKeyDateId[kd.id] = canUserVerifyKeyDate(user, kd, {
-      config: keyDatesConfig,
-      allPeople: people,
-      teams,
-    });
-  }
-
-  const canReopenByEnquiryId: Record<string, boolean> = {};
-  for (const eq of visibleEnquiries) {
-    canReopenByEnquiryId[eq.id] =
-      currentUserPermissions.includes('enquiry:reopen') &&
-      canUserReopenEnquiry(
-        user.id,
-        eq,
-        teams,
-        people,
-        store.values,
-      );
-  }
-
-  const appRoleByPersonId: Record<string, AppRole> = {};
-  const rolesByPersonId: Record<string, HomeRoleKey[]> = {};
-  const permissionsByPersonId: Record<string, PermissionKey[]> = {};
-  for (const emp of people) {
-    if (!emp.isEmployee || emp.mergedIntoId) continue;
-    appRoleByPersonId[emp.id] = resolveUserAppRole(
-      emp,
-      teams,
-      store.values,
-      { config: { rbac: rbacConfig } },
-    );
-    rolesByPersonId[emp.id] = resolveEmployeeRoles(emp, teams);
-    permissionsByPersonId[emp.id] = resolvePersonPermissions(emp, {
-      allPeople: people,
-      teams,
-      config: { rbac: rbacConfig },
-    });
-  }
-
-  const canSignOffCostsByMatterId: Record<string, boolean> = {};
-  const signOffEstimateGbpByMatterId: Record<string, number> = {};
-  const actorCanSignOffCosts = currentUserPermissions.includes('matter:costs:sign_off');
-  for (const m of visibleMatters) {
-    canSignOffCostsByMatterId[m.id] =
-      actorCanSignOffCosts &&
-      canPersonAccessMatter(m, user.id, user, {
-        allPeople: people,
-        teams,
-        config: { rbac: rbacConfig },
-      });
-    signOffEstimateGbpByMatterId[m.id] = resolveMatterSignOffEstimateGbp(
-      store,
-      activeTenantCfg,
-      m,
-    ).estimatedFeeGbp;
-  }
-
-  const conflictReviewCfg = activeTenantCfg.conflictReview;
-  const riskReviewer = resolveSuggestedConflictReviewer(
-    { teams, orgStructure },
-    conflictReviewCfg,
-    rolesByPersonId,
-    employees,
-  );
-  const practiceManager =
-    employees.find(
-      (e) =>
-        rolesByPersonId[e.id]?.includes('managing_partner') ||
-        e.employeeRoleId === 'employee_role.practice_manager',
-    ) ?? null;
-  const suggestedMatterGovernanceAssignees = {
-    riskReviewerId: riskReviewer?.id ?? null,
-    practiceManagerId: practiceManager?.id ?? null,
-  };
-
   const firmPrimaryDomain = resolveConfiguredFirmPrimaryDomain();
 
   return {
@@ -689,20 +534,6 @@ async function getAppSnapshotInScope(
     enablePmsLiveRateSync: Boolean(activeTenantCfg.featureFlags?.enablePmsLiveRateSync),
     currentUser: filteredCurrentUser,
     currentUserId: user.id,
-    currentUserRole,
-    currentUserRoles,
-    currentUserEmployeePermissions,
-    currentUserPermissions,
-    currentUserKeyDatePermissions,
-    canTakeByTaskId,
-    canVerifyByKeyDateId,
-    canReopenByEnquiryId,
-    canSignOffCostsByMatterId,
-    signOffEstimateGbpByMatterId,
-    suggestedMatterGovernanceAssignees,
-    appRoleByPersonId,
-    rolesByPersonId,
-    permissionsByPersonId,
     keyDatesConfig,
     keyDates: visibleKeyDates,
     keyDateNotApplicable: visibleKeyDateNotApplicable,
@@ -712,11 +543,8 @@ async function getAppSnapshotInScope(
     orgStructure,
     matterPartyTaxonomy: store.matterPartyTaxonomy ?? buildDefaultMatterPartyTaxonomy(store.values),
     matterPartyMigrationReport: store.matterPartyMigrationReport,
-    employeeSensitiveRecords,
     employeeMigrationReport: dbEmployeeMigrationReport ?? undefined,
-    leaverOwnedRecords,
     activeViewingRole,
-    leftRailVisibility,
     effectiveWorkPerson,
     homePagesConfig,
     signOffs: visibleSignOffs,
@@ -774,7 +602,6 @@ async function getAppSnapshotInScope(
         registerRecords: visibleRegRecords,
       };
     })()),
-    taskBadgeCount,
     notes: visibleNotes,
     audit: visibleAudit,
     mergeHistory,

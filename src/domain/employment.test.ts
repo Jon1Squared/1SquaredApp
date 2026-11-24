@@ -48,7 +48,11 @@ import {
   saveMatterRecord,
   savePersonRecord,
 } from '../server/services';
-import { getAppSnapshot } from '../server/__tests__/testAppSnapshot';
+import {
+  loadPeopleListPageData,
+  loadPersonDetailPageData,
+  loadShellContext,
+} from '../server/pageLoaders';
 import {
   createSignedEntraSessionCookie,
   verifySignedEntraSessionCookie,
@@ -708,13 +712,26 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(filteredForBasic?.payroll).toBeUndefined();
       expect(filteredForBasic?.emergencyContacts).toBeUndefined();
 
-      // Snapshot for non-payroll/non-sensitive user P-000002 omits sensitive records and payroll
-      const snapshotForP2 = await runAsTestActor('P-000002', () =>
-        getAppSnapshot('P-000002'),
+      // Production loaders for non-payroll/non-sensitive user P-000002 omit sensitive records and payroll
+      const [shellForP2, peopleForP2, p1Detail] = await runAsTestActor('P-000002', () =>
+        Promise.all([
+          loadShellContext('P-000002'),
+          loadPeopleListPageData('P-000002', { pageSize: 200 }),
+          loadPersonDetailPageData('P-000002', 'P-000001'),
+        ]),
       );
-      expect(Object.keys(snapshotForP2.employeeSensitiveRecords)).toHaveLength(0);
-      const p1InSnapshot = snapshotForP2.people.find((p) => p.id === 'P-000001')!;
-      expect(p1InSnapshot.employment?.payroll).toBeUndefined();
+      expect('employeeSensitiveRecords' in shellForP2).toBe(false);
+      expect(shellForP2.currentUser.employment?.payroll).toBeUndefined();
+      const p1InShell = shellForP2.employees.find((p) => p.id === 'P-000001')!;
+      expect(p1InShell.employment?.payroll).toBeUndefined();
+      const p1InList = peopleForP2.people.find((p) => p.id === 'P-000001')!;
+      expect(p1InList.employment?.payroll).toBeUndefined();
+      expect(p1Detail && !('redirectTo' in p1Detail) && p1Detail.canViewPayroll).toBe(false);
+      expect(
+        p1Detail && !('redirectTo' in p1Detail)
+          ? p1Detail.person.employment?.payroll
+          : 'unexpected',
+      ).toBeUndefined();
 
       await runAsTestActor('P-000004', async () => {
         // Audit logging when viewing payroll or sensitive details via getEmployeeDetailsForUser & logEmployeeRestrictedAccess
@@ -924,17 +941,17 @@ describe('Employee section, conversion paths, migration & permissions', () => {
 
   describe('6. New Matter department pre-selection and department-scoped dropdowns', () => {
     it('pre-selects Department, Responsible Partner (from Supervising Partner), and Fee Earner for a fee earner in a legal department', async () => {
-      const snap = await runAsTestActor('P-000002', () =>
-        getAppSnapshot('P-000002'),
+      const shell = await runAsTestActor('P-000002', () =>
+        loadShellContext('P-000002'),
       ); // Dafydd Evans (Real Estate Fee Earner)
-      const practiceAreas = snap.values.filter(
+      const practiceAreas = shell.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
 
       const defaults = resolveNewMatterDepartmentDefaults({
-        currentUser: snap.currentUser,
-        allPeople: snap.people,
-        employees: snap.employees,
+        currentUser: shell.currentUser,
+        allPeople: shell.filteredStaffPeople,
+        employees: shell.employees,
         practiceAreas,
       });
 
@@ -944,17 +961,17 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('pre-selects Department and Responsible Partner but leaves Fee Earner blank for support staff in a legal department', async () => {
-      const snap = await runAsTestActor('P-000010', () =>
-        getAppSnapshot('P-000010'),
+      const shell = await runAsTestActor('P-000010', () =>
+        loadShellContext('P-000010'),
       ); // Nia Edwards (Real Estate Legal Secretary)
-      const practiceAreas = snap.values.filter(
+      const practiceAreas = shell.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
 
       const defaults = resolveNewMatterDepartmentDefaults({
-        currentUser: snap.currentUser,
-        allPeople: snap.people,
-        employees: snap.employees,
+        currentUser: shell.currentUser,
+        allPeople: shell.filteredStaffPeople,
+        employees: shell.employees,
         practiceAreas,
       });
 
@@ -964,17 +981,17 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('does not pre-select Department, Responsible Partner, or Fee Earner when logged-in user is in a Business Services department', async () => {
-      const snap = await runAsTestActor('P-000009', () =>
-        getAppSnapshot('P-000009'),
+      const shell = await runAsTestActor('P-000009', () =>
+        loadShellContext('P-000009'),
       ); // Gethin Powell (Finance)
-      const practiceAreas = snap.values.filter(
+      const practiceAreas = shell.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
 
       const defaults = resolveNewMatterDepartmentDefaults({
-        currentUser: snap.currentUser,
-        allPeople: snap.people,
-        employees: snap.employees,
+        currentUser: shell.currentUser,
+        allPeople: shell.filteredStaffPeople,
+        employees: shell.employees,
         practiceAreas,
       });
 
@@ -984,15 +1001,15 @@ describe('Employee section, conversion paths, migration & permissions', () => {
     });
 
     it('filters Responsible Partner and Fee Earner dropdown options strictly to people in the relevant department', async () => {
-      const snap = await runAsTestActor('P-000001', () =>
-        getAppSnapshot('P-000001'),
+      const shell = await runAsTestActor('P-000001', () =>
+        loadShellContext('P-000001'),
       );
-      const practiceAreas = snap.values.filter(
+      const practiceAreas = shell.values.filter(
         (v) => v.listKey === 'work_type' && !v.parentId && v.active,
       );
 
       const rePeople = filterEmployeesForMatterDepartment({
-        employees: snap.employees,
+        employees: shell.employees,
         practiceAreaId: 'work_type.real_estate_and_property',
         practiceAreas,
       });
@@ -1002,7 +1019,7 @@ describe('Employee section, conversion paths, migration & permissions', () => {
       expect(rePeople.map((p) => p.id)).not.toContain('P-000006'); // Owain Jenkins (Dispute Resolution)
 
       const pcPeople = filterEmployeesForMatterDepartment({
-        employees: snap.employees,
+        employees: shell.employees,
         practiceAreaId: 'work_type.private_client',
         practiceAreas,
       });

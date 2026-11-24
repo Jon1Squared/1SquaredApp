@@ -10,6 +10,7 @@ import 'server-only';
  */
 
 import * as React from 'react';
+import { redirect } from 'next/navigation';
 import {
   DEFAULT_REGISTERS_CONFIG,
   mergeRegistersConfigurations,
@@ -46,6 +47,7 @@ import {
   type ClientPriorMatterSummary,
 } from '@/domain/matterOpeningRecord';
 import type { PmsLinksAdminPageData } from '@/domain/pms';
+import { buildDefaultOrgStructure } from '@/domain/orgStructure';
 import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
@@ -201,16 +203,18 @@ export async function withCachedPageActor<R>(
 }
 
 /**
- * Auth-guarded wrapper for `(app)/**` pages: returns `null` when no Entra session
- * cookie exists so parallel RSC rendering alongside `(app)/layout.tsx`'s `<LoginScreen />`
- * does not raise an authentication error before login.
+ * Auth-guarded wrapper for `(app)/**` pages (`R716`): redirects to `/login` when
+ * no Entra session cookie exists so expired sessions on soft navigation never
+ * render a blank page under `(app)/layout.tsx`.
  */
 export async function withOptionalPageActor<R>(
   fn: (actor: AuthenticatedActorContext) => Promise<R> | R,
-): Promise<R | null> {
+): Promise<R> {
   if (!getActiveActorSession()) {
     const entraSession = await getEntraSession();
-    if (!entraSession) return null;
+    if (!entraSession) {
+      redirect('/login');
+    }
   }
   return withCachedPageActor(fn);
 }
@@ -596,15 +600,7 @@ async function loadShellContextUncached(
   const activeTenantCfg = getActiveTenantConfiguration();
   const orgStructure =
     store.orgStructure ??
-    ({
-      legalEntities: [],
-      divisions: [],
-      departments: [],
-      teamsOrPracticeGroups: [],
-      offices: [],
-      costCentres: [],
-      profitCentres: [],
-    } satisfies OrgStructureCatalogue);
+    buildDefaultOrgStructure({ legalName: activeTenantCfg.displayName });
 
   const homePagesConfig: HomePagesConfig = {
     ...store.homePagesConfig,

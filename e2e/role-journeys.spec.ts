@@ -1,9 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createDefaultRbacConfig } from '../core/src/domain/rbac/registry';
+import { resolveTenantFromVerifiedToken } from '../core/src/tenancy/index';
+import { TenantMatterRepository } from '../core/src/tenancy/matterRepository';
+import { getGlobalTenantPostgresPoolManager } from '../core/src/tenancy/postgresPoolManager';
 import {
   getLeftRailVisibility,
   type LeftRailVisibility,
 } from '../src/domain/homeConfig';
+import type { Matter } from '../src/domain/types';
 import { ROLE_SEED_ACTORS, storageStatePathFor } from './global-setup';
 
 /**
@@ -872,6 +876,108 @@ test.describe('S1-02b WP1b picker journeys', () => {
       expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
+    }
+  });
+
+  test('3. Suggestion 4: Fee earner sees redacted Restricted matter conflict hit on /enquiries/new without leaking confidential title or number', async ({
+    browser,
+  }) => {
+    process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
+    process.env.PLATFORM_ENVIRONMENT ??= 'test';
+    process.env.PLATFORM_POSTGRES_HOST ??= '127.0.0.1';
+    process.env.PLATFORM_POSTGRES_PORT ??= '5432';
+    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??= 'onesquared_local_runtime';
+
+    const partnerCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'not-a-law-firm',
+        email: 'rhian.morgan@notalawfirm.example',
+        name: 'Rhian Morgan',
+        roles: ['partner', 'admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'e2e-suggestion4-restricted-conflict',
+    });
+    const matterRepo = new TenantMatterRepository();
+    const restrictedId = 'M-E2E-STAFF-CONFLICT';
+    const existingRestricted = await matterRepo.getMatterById<Matter>(
+      partnerCtx,
+      restrictedId,
+      { includeRestricted: true },
+    );
+    if (!existingRestricted) {
+      const templateMatter = await matterRepo.getMatterById<Matter>(
+        partnerCtx,
+        'M-000011',
+        { includeRestricted: true },
+      );
+      if (!templateMatter) {
+        throw new Error('Expected seeded matter M-000011 in E2E database');
+      }
+      await matterRepo.putMatter(
+        partnerCtx,
+        {
+          ...structuredClone(templateMatter),
+          id: restrictedId,
+          matterNumber: 'STF-E2E-999',
+          title: 'Confidential E2E Staff Disciplinary Matter',
+          shortDescription: 'Confidential internal staff grievance review',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          leadFeeEarnerId: 'P-000001',
+          teamMemberIds: ['P-000001'],
+          isStaffMatter: true,
+          hasEthicalWall: true,
+          restrictedAccessUserIds: ['P-000001'],
+          parties: [
+            {
+              id: 'MP-E2E-STAFF-1',
+              relationshipCode: 'OP',
+              capacityCodes: [],
+              entityType: 'organisation',
+              linkedRecordId: null,
+              name: 'Gower Harbour Logistics Ltd',
+              role: 'Other party',
+              notes: '',
+            },
+          ],
+        },
+        { expectedRowVersion: null },
+      );
+    }
+
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/enquiries/new');
+      await expect(page.locator('#enq-first-name')).toBeVisible({ timeout: 15_000 });
+
+      await page.locator('#enq-first-name').fill('Elen');
+      await page.locator('#enq-last-name').fill('Morris');
+      await page.locator('#enq-other-parties').fill('Gower Harbour Logistics Ltd');
+      await page.locator('#enq-other-parties').blur();
+
+      const mainArea = page.locator('.main-area');
+      await expect(mainArea).toContainText('Possible conflicts', {
+        timeout: 15_000,
+      });
+      await expect(mainArea).toContainText('Restricted matter');
+      await expect(mainArea).not.toContainText(
+        'Confidential E2E Staff Disciplinary Matter',
+      );
+      await expect(mainArea).not.toContainText('STF-E2E-999');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
     }
   });
 });
