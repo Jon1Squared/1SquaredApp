@@ -78,7 +78,7 @@ function assertValidContext(ctx: TenantContext): void {
   }
 }
 
-async function verifyEvidenceArtifacts(
+export async function verifyEvidenceArtifacts(
   ctx: TenantContext,
   storageProvider: DocumentStorageProvider,
   refs: readonly IntakeEvidenceArtifactRef[] | undefined,
@@ -127,6 +127,9 @@ async function verifyEvidenceArtifacts(
       contentType: ref.contentType,
       sizeBytes: bytes.length,
       scanStatus: 'clean',
+      ...(ref.fileName ? { fileName: ref.fileName } : {}),
+      ...(ref.uploadedByActorId ? { uploadedByActorId: ref.uploadedByActorId } : {}),
+      ...(ref.uploadedAt ? { uploadedAt: ref.uploadedAt } : {}),
     });
   }
   return verified;

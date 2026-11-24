@@ -15,7 +15,9 @@ import {
   TenantCatalogueRepository,
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
+  TenantEvidenceArtifactRepository,
   TenantHrAndRbacRepository,
+  TenantIntakeCheckRepository,
   TenantIntakeQuoteRepository,
   TenantKeyDateRepository,
   TenantMatterRepository,
@@ -233,6 +235,8 @@ export async function clearMigratedPostgresModulesForTenant(options: {
   if (modules.includes('registers')) {
     const registerRepo = new TenantRegisterRepository();
     await registerRepo.clearTenantData(ctx);
+    await new TenantEvidenceArtifactRepository().clearTenantData(ctx);
+    await new TenantIntakeCheckRepository().clearTenantData(ctx);
   }
   if (modules.includes('tasks')) {
     const taskRepo = new TenantTaskWorkflowRepository();

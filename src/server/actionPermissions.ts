@@ -18,7 +18,8 @@ export type GapSliceId =
 
 export type PolicyPermissionRequirement =
   | PermissionKey
-  | { readonly anyOf: readonly PermissionKey[] };
+  | { readonly anyOf: readonly PermissionKey[] }
+  | { readonly allOf: readonly PermissionKey[] };
 
 export type ActionPolicy =
   | {
@@ -758,17 +759,17 @@ export const ACTION_PERMISSIONS = {
   },
   listRegistersWorkspaceAction: {
     kind: 'permission',
-    key: { anyOf: ['register:view', 'undertaking:manage'] },
+    key: { anyOf: ['register:view', 'undertaking:manage', 'cdd:view'] },
     enforcedBy: 'action',
   },
   getRegisterRecordDetailAction: {
     kind: 'permission',
-    key: { anyOf: ['register:view', 'undertaking:manage'] },
+    key: { anyOf: ['register:view', 'undertaking:manage', 'cdd:view'] },
     enforcedBy: 'action',
   },
   createRegisterRecordAction: {
     kind: 'permission',
-    key: { anyOf: ['register:create', 'undertaking:manage'] },
+    key: { anyOf: ['register:create', 'undertaking:manage', 'cdd:record'] },
     enforcedBy: 'action',
   },
   transitionRegisterRecordAction: {
@@ -779,18 +780,44 @@ export const ACTION_PERMISSIONS = {
         'register:approve',
         'signoff:approve',
         'undertaking:manage',
+        'cdd:record',
       ],
     },
     enforcedBy: 'action',
   },
   updateRegisterRecordAction: {
     kind: 'permission',
-    key: { anyOf: ['register:edit', 'undertaking:manage'] },
+    key: { anyOf: ['register:edit', 'undertaking:manage', 'cdd:record'] },
     enforcedBy: 'action',
   },
   saveRegistersConfigAction: {
     kind: 'permission',
     key: 'register:configure',
+    enforcedBy: 'action',
+  },
+  startOrLoadClientCddAction: {
+    kind: 'permission',
+    key: { anyOf: ['cdd:view', 'cdd:record'] },
+    enforcedBy: 'action',
+  },
+  recordCddChecklistItemAction: {
+    kind: 'permission',
+    key: 'cdd:record',
+    enforcedBy: 'action',
+  },
+  completeClientCddAction: {
+    kind: 'permission',
+    key: 'cdd:record',
+    enforcedBy: 'action',
+  },
+  recordManualSanctionsPepAction: {
+    kind: 'permission',
+    key: 'cdd:record',
+    enforcedBy: 'action',
+  },
+  saveCddConfigAction: {
+    kind: 'permission',
+    key: { allOf: ['admin:access', 'register:configure'] },
     enforcedBy: 'action',
   },
 } as const satisfies Record<string, ActionPolicy>;
@@ -882,6 +909,16 @@ export const ROUTE_PERMISSIONS = {
   'POST /api/matters/extract': {
     kind: 'permission',
     key: 'matter:create',
+    enforcedBy: 'action',
+  },
+  'POST /api/evidence/upload': {
+    kind: 'permission',
+    key: 'cdd:record',
+    enforcedBy: 'action',
+  },
+  'GET /api/evidence/download': {
+    kind: 'permission',
+    key: 'cdd:view',
     enforcedBy: 'action',
   },
 } as const satisfies Record<string, ActionPolicy>;

@@ -145,6 +145,16 @@ export function requirePermissionForPolicy(
   if (typeof requirement === 'string') {
     return requirePermission(permissions, requirement, actionName);
   }
+  if ('allOf' in requirement) {
+    if (requirement.allOf.length === 0) {
+      throw new Error(`Policy for "${actionName}" has an empty allOf array.`);
+    }
+    let next = permissions;
+    for (const perm of requirement.allOf) {
+      next = requirePermission(next, perm, actionName);
+    }
+    return next;
+  }
   const candidates = requirement.anyOf;
   if (candidates.length === 0) {
     throw new Error(`Policy for "${actionName}" has an empty anyOf array.`);
@@ -241,6 +251,14 @@ async function actorSatisfiesCoarseServicePolicy(
   guardedActor: GuardedActorContext,
   requirement: PolicyPermissionRequirement,
 ): Promise<boolean> {
+  if (typeof requirement !== 'string' && 'allOf' in requirement) {
+    for (const reqPerm of requirement.allOf) {
+      if (!(await actorSatisfiesCoarseServicePolicy(guardedActor, reqPerm))) {
+        return false;
+      }
+    }
+    return requirement.allOf.length > 0;
+  }
   const candidates =
     typeof requirement === 'string' ? [requirement] : requirement.anyOf;
   if (candidates.length === 0) {
@@ -401,7 +419,11 @@ export async function guardedAction<R>(
         );
         if (!allowed) {
           const firstKey =
-            typeof policy.key === 'string' ? policy.key : policy.key.anyOf[0];
+            typeof policy.key === 'string'
+              ? policy.key
+              : 'allOf' in policy.key
+                ? policy.key.allOf[0]
+                : policy.key.anyOf[0];
           const deniedErr = new AuthorisationError({
             code: 'FORBIDDEN',
             message: `Missing required permission "${firstKey}" (${name}).`,
@@ -502,7 +524,9 @@ export function guardedRoute<
               const firstKey =
                 typeof policy.key === 'string'
                   ? policy.key
-                  : policy.key.anyOf[0];
+                  : 'allOf' in policy.key
+                    ? policy.key.allOf[0]
+                    : policy.key.anyOf[0];
               throw new AuthorisationError({
                 code: 'FORBIDDEN',
                 message: `Missing required permission "${firstKey}" (${name}).`,
