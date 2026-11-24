@@ -1,5 +1,6 @@
 import { notFound, redirect } from 'next/navigation';
 import { PersonProfileClient } from '@/components/PersonProfileClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadPersonDetailPageData, withOptionalPageActor } from '@/server/pageLoaders';
 import { recordRecentlyViewed } from '@/server/services';
 
@@ -13,7 +14,8 @@ export default async function PersonProfilePage({
   searchParams: Promise<{ tab?: string; mergedFrom?: string }>;
 }) {
   const { id } = await params;
-  const { tab, mergedFrom } = await searchParams;
+  const resolvedSearch = await searchParams;
+  const { tab, mergedFrom } = resolvedSearch;
   return withOptionalPageActor(async (actor) => {
     const data = await loadPersonDetailPageData(actor.personId, id);
     if (!data) notFound();
@@ -62,5 +64,5 @@ export default async function PersonProfilePage({
         initialNotificationPreferences={data.initialNotificationPreferences}
       />
     );
-  });
+  }, buildRouteReturnTo(`/people/${encodeURIComponent(id)}`, resolvedSearch));
 }

@@ -46,5 +46,5 @@ export default async function EditPersonPage({
         tenantId={shell.tenantId}
       />
     );
-  });
+  }, `/people/${encodeURIComponent(id)}/edit`);
 }

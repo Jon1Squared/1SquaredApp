@@ -26,5 +26,5 @@ export default async function NewOrganisationPage() {
         tenantId={shell.tenantId}
       />
     );
-  });
+  }, '/organisations/new');
 }

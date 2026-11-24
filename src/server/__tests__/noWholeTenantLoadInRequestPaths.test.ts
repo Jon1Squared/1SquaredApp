@@ -55,11 +55,6 @@ const SCOPING_OR_LIMIT_KEYS = new Set([
   'linkedOrganisationIds',
   'convertedMatterId',
   'sourceEnquiryId',
-  'assignedPersonId',
-  'assignedPersonIdOrMulti',
-  'assignedTeamId',
-  'assignedToId',
-  'assignedToOrTeams',
 ]);
 
 const TARGET_PAGE_CALLEES = new Set(['getAppSnapshot', 'getAppSnapshotInScope']);
@@ -443,6 +438,31 @@ function hasEmployeesAndLeaversOnlyOption(node: ts.CallExpression): boolean {
   });
 }
 
+function isPositiveLimitExpression(expr: ts.Expression): boolean {
+  if (ts.isParenthesizedExpression(expr)) {
+    return isPositiveLimitExpression(expr.expression);
+  }
+  if (ts.isNumericLiteral(expr)) {
+    const num = Number(expr.text);
+    return Number.isFinite(num) && num > 0;
+  }
+  if (ts.isIdentifier(expr)) {
+    return (
+      expr.text !== 'undefined' &&
+      expr.text !== 'NaN' &&
+      expr.text !== 'Infinity'
+    );
+  }
+  if (ts.isPropertyAccessExpression(expr)) {
+    return (
+      expr.name.text !== 'undefined' &&
+      expr.name.text !== 'NaN' &&
+      expr.name.text !== 'Infinity'
+    );
+  }
+  return false;
+}
+
 function hasScopingOrLimitOption(node: ts.CallExpression): boolean {
   for (const arg of node.arguments) {
     if (!ts.isObjectLiteralExpression(arg)) continue;
@@ -459,9 +479,14 @@ function hasScopingOrLimitOption(node: ts.CallExpression): boolean {
         : ts.isStringLiteral(prop.name)
           ? prop.name.text
           : null;
-      if (keyName && SCOPING_OR_LIMIT_KEYS.has(keyName)) {
-        return true;
+      if (!keyName || !SCOPING_OR_LIMIT_KEYS.has(keyName)) continue;
+      if (keyName === 'limit') {
+        if (isPositiveLimitExpression(prop.initializer)) {
+          return true;
+        }
+        continue;
       }
+      return true;
     }
   }
   return false;
@@ -858,6 +883,42 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
       `export async function boundedMatterLoad(matterRepo: any, ctx: unknown, viewerId: string) { return matterRepo.listVisibleMatters(ctx, { viewerId, limit: 100 }); }`,
     );
     expect(boundedVisible.unexpected).toEqual([]);
+
+    const boundedNamedConst = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticR702VisibleConst.ts',
+      `const MAX_LIMIT = 250; export async function boundedTaskLoad(taskRepo: any, ctx: unknown, viewerId: string) { return taskRepo.listVisibleTasks(ctx, viewerId, { limit: MAX_LIMIT }); }`,
+    );
+    expect(boundedNamedConst.unexpected).toEqual([]);
+
+    const assigneeOnlyUnbounded = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticSuggestion4Assignee.ts',
+      `export async function assigneeOnly(intakeRepo: any, ctx: unknown, viewerId: string) { return intakeRepo.listVisibleEnquiries(ctx, viewerId, { assignedToId: 'P-1' }); }`,
+    );
+    expect(
+      assigneeOnlyUnbounded.unexpected.some(
+        (f) => f.fn === 'assigneeOnly' && f.callee === 'listVisibleEnquiries',
+      ),
+    ).toBe(true);
+
+    const zeroLimitUnbounded = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticSuggestion4ZeroLimit.ts',
+      `export async function zeroLimit(taskRepo: any, ctx: unknown, viewerId: string) { return taskRepo.listVisibleTasks(ctx, viewerId, { limit: 0 }); }`,
+    );
+    expect(
+      zeroLimitUnbounded.unexpected.some(
+        (f) => f.fn === 'zeroLimit' && f.callee === 'listVisibleTasks',
+      ),
+    ).toBe(true);
+
+    const negativeLimitUnbounded = scanSourceTextForWholeTenantCalls(
+      'src/server/syntheticSuggestion4NegLimit.ts',
+      `export async function negLimit(taskRepo: any, ctx: unknown, viewerId: string) { return taskRepo.listVisibleTasks(ctx, viewerId, { limit: -5 }); }`,
+    );
+    expect(
+      negativeLimitUnbounded.unexpected.some(
+        (f) => f.fn === 'negLimit' && f.callee === 'listVisibleTasks',
+      ),
+    ).toBe(true);
 
     expect(B15_TAIL_ALLOW_LIST.length).toBeLessThanOrEqual(
       MAX_B15_TAIL_ALLOW_LIST_COUNT,

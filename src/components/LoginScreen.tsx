@@ -3,18 +3,42 @@
 import React, { Suspense } from 'react';
 import { usePathname, useSearchParams } from 'next/navigation';
 import { ShieldCheck } from 'lucide-react';
+import { sanitizeReturnToPath } from '@/domain/authReturnTo';
 import type { EntraEnvStatus } from '@/server/entraAuth';
 
-function LoginCard({ entraEnvStatus }: { entraEnvStatus: EntraEnvStatus }) {
+function buildReturnToFromLocation(
+  pathname: string | null,
+  searchParams: ReturnType<typeof useSearchParams>,
+  initialReturnTo?: string,
+): string {
+  if (!pathname || pathname === '/login') {
+    return sanitizeReturnToPath(searchParams.get('returnTo') ?? initialReturnTo);
+  }
+  const filteredParams = new URLSearchParams(searchParams.toString());
+  filteredParams.delete('authError');
+  filteredParams.delete('signedOut');
+  filteredParams.delete('authSuccess');
+  const qs = filteredParams.toString();
+  return sanitizeReturnToPath(qs ? `${pathname}?${qs}` : pathname);
+}
+
+function LoginCard({
+  entraEnvStatus,
+  initialReturnTo,
+}: {
+  entraEnvStatus: EntraEnvStatus;
+  initialReturnTo?: string;
+}) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const authError = searchParams.get('authError');
   const signedOut = searchParams.get('signedOut') === '1';
 
-  const returnTo =
-    pathname && pathname !== '/login' && !pathname.startsWith('/api/auth')
-      ? pathname
-      : '/';
+  const returnTo = buildReturnToFromLocation(
+    pathname,
+    searchParams,
+    initialReturnTo,
+  );
 
   const loginHref = `/api/auth/login?returnTo=${encodeURIComponent(returnTo)}`;
 
@@ -189,10 +213,19 @@ function LoginCard({ entraEnvStatus }: { entraEnvStatus: EntraEnvStatus }) {
   );
 }
 
-export function LoginScreen({ entraEnvStatus }: { entraEnvStatus: EntraEnvStatus }) {
+export function LoginScreen({
+  entraEnvStatus,
+  initialReturnTo,
+}: {
+  entraEnvStatus: EntraEnvStatus;
+  initialReturnTo?: string;
+}) {
   return (
     <Suspense fallback={null}>
-      <LoginCard entraEnvStatus={entraEnvStatus} />
+      <LoginCard
+        entraEnvStatus={entraEnvStatus}
+        initialReturnTo={initialReturnTo}
+      />
     </Suspense>
   );
 }

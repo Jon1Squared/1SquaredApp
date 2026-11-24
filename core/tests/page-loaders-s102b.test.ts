@@ -14,6 +14,8 @@ import {
   TenantMatterRepository,
   TenantMigrationRunner,
   TenantPartyRepository,
+  TenantPmsRepository,
+  TenantRegisterRepository,
   TenantTaskWorkflowRepository,
   type KeyDate,
   type KeyDateReminderState,
@@ -22,7 +24,9 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import { LoginScreen } from '@/components/LoginScreen';
 import DocsLayout from '@/app/docs/layout';
+import DocArticlePage from '@/app/docs/[slug]/page';
 import LoginPage from '@/app/login/page';
+import { ACTION_PERMISSIONS } from '@/server/actionPermissions';
 import {
   getActiveTenantConfiguration,
   setActiveTenantConfigForTesting,
@@ -37,6 +41,7 @@ import { isActionDenied } from '@/domain/actionResult';
 import {
   getEntityRecordForEditRecord,
   getExpiredEnquiriesCountRecord,
+  listClientPriorMattersRecord,
   loadPmsLinksAdminDataRecord,
   previewIntakeDuplicatesAndConflictsRecord,
   resetConflictPreviewRateLimiterForTests,
@@ -482,7 +487,11 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(spec).not.toMatch(/pageLoaders/);
         expect(spec).not.toMatch(/tenancy\//);
         expect(spec).not.toMatch(/@platform\/core/);
-        if (relPath === 'src/app/docs/layout.tsx' && /services/.test(spec)) {
+        if (
+          (relPath === 'src/app/docs/layout.tsx' ||
+            relPath === 'src/app/docs/[slug]/page.tsx') &&
+          /services/.test(spec)
+        ) {
           expect(spec).toBe('@/server/services');
         } else {
           expect(spec).not.toMatch(/services/);
@@ -490,7 +499,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
       }
     }
 
-    // Signed-out DocsLayout returns LoginScreen with zero PostgreSQL pool/query calls
+    // Signed-out DocsLayout and DocArticlePage return LoginScreen with zero PostgreSQL pool/query calls
     const env = await provisionAndSeedTwoTenants();
     setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
     setTestEntraSessionOverride(null);
@@ -500,6 +509,14 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         children: React.createElement('div', null, 'Protected Help Content'),
       });
       expect((signedOutEl as React.ReactElement).type).toBe(LoginScreen);
+
+      const signedOutSlugEl = await DocArticlePage({
+        params: Promise.resolve({ slug: 'matter-opening-and-risk' }),
+      });
+      expect((signedOutSlugEl as React.ReactElement).type).toBe(LoginScreen);
+      expect((signedOutSlugEl as React.ReactElement<{ initialReturnTo?: string }>).props.initialReturnTo).toBe(
+        '/docs/matter-opening-and-risk',
+      );
       expect(poolSpy).not.toHaveBeenCalled();
     } finally {
       poolSpy.mockRestore();
@@ -518,7 +535,7 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
     expect(unmappedHtml).toContain('/api/auth/logout');
     expect(unmappedHtml).not.toContain('Protected Help Content');
 
-    // Seed a leaver (isEmployee: false) in Alpha and prove DocsLayout blocks them too
+    // Seed a leaver (isEmployee: false) in Alpha and prove DocsLayout + /docs/[slug] block them too
     const partyRepo = new TenantPartyRepository();
     const leaverPerson: Person = {
       ...structuredClone(env.alphaRestrictedPerson),
@@ -531,40 +548,61 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
     await partyRepo.putPerson(env.ctxAlpha, leaverPerson);
     const leaverSession = makeActorSession(leaverPerson.id, [], env.tenantAlpha);
     setTestEntraSessionOverride(leaverSession.verifiedSession);
-    const leaverEl = await runWithActiveActorSession(leaverSession, () =>
-      DocsLayout({
-        children: React.createElement('div', null, 'Protected Help Content'),
-      }),
+    const [leaverEl, leaverSlugEl] = await runWithActiveActorSession(leaverSession, () =>
+      Promise.all([
+        DocsLayout({
+          children: React.createElement('div', null, 'Protected Help Content'),
+        }),
+        DocArticlePage({
+          params: Promise.resolve({ slug: 'matter-opening-and-risk' }),
+        }),
+      ]),
     );
     const leaverHtml = renderToStaticMarkup(leaverEl as React.ReactElement);
     expect(leaverHtml).toContain('Access unavailable');
     expect(leaverHtml).not.toContain('Protected Help Content');
+    const leaverSlugHtml = renderToStaticMarkup(leaverSlugEl as React.ReactElement);
+    expect(leaverSlugHtml).toContain('Access unavailable');
+    expect(leaverSlugHtml).not.toContain('Matter opening wizard');
 
-    // Positive control: active employee renders /docs children
+    // Positive control: active employee renders /docs children and /docs/[slug]
     const activeSession = makeActorSession('P-000001', ['partner'], env.tenantAlpha);
     setTestEntraSessionOverride(activeSession.verifiedSession);
-    const activeEl = await runWithActiveActorSession(activeSession, () =>
-      DocsLayout({
-        children: React.createElement('div', null, 'Protected Help Content'),
-      }),
+    const [activeEl, activeSlugEl] = await runWithActiveActorSession(activeSession, () =>
+      Promise.all([
+        DocsLayout({
+          children: React.createElement('div', null, 'Protected Help Content'),
+        }),
+        DocArticlePage({
+          params: Promise.resolve({ slug: 'matter-opening-and-risk' }),
+        }),
+      ]),
     );
     const activeHtml = renderToStaticMarkup(activeEl as React.ReactElement);
     expect(activeHtml).toContain('Protected Help Content');
     expect(activeHtml).not.toContain('Access unavailable');
+    const activeSlugHtml = renderToStaticMarkup(activeSlugEl as React.ReactElement);
+    expect(activeSlugHtml).toContain('Matter opening wizard');
+    expect(activeSlugHtml).not.toContain('Access unavailable');
 
-    // R716: withOptionalPageActor redirects expired/missing sessions to /login; LoginPage renders LoginScreen or redirects to /
+    // R716 & Suggestion 9: withOptionalPageActor redirects expired/missing sessions to /login with validated returnTo; LoginPage preserves safe returnTo and rejects external redirects
     setTestEntraSessionOverride(null);
     let redirectDigest = '';
     try {
-      await withOptionalPageActor(async () => 'never-reached');
+      await withOptionalPageActor(async () => 'never-reached', '/matters/M-000001?tab=costs');
     } catch (err) {
       redirectDigest = String((err as { digest?: unknown })?.digest ?? '');
     }
     expect(redirectDigest).toContain('NEXT_REDIRECT');
-    expect(redirectDigest).toContain('/login');
+    expect(redirectDigest).toContain('/login?returnTo=%2Fmatters%2FM-000001%3Ftab%3Dcosts');
 
-    const loginSignedOutEl = await LoginPage();
+    const loginSignedOutEl = await LoginPage({
+      searchParams: Promise.resolve({ returnTo: '/matters/M-000001' }),
+    });
     expect((loginSignedOutEl as React.ReactElement).type).toBe(LoginScreen);
+    expect((loginSignedOutEl as React.ReactElement<{ initialReturnTo?: string }>).props.initialReturnTo).toBe(
+      '/matters/M-000001',
+    );
 
     setTestEntraSessionOverride(activeSession.verifiedSession);
     let loginRedirectDigest = '';
@@ -575,6 +613,24 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
     }
     expect(loginRedirectDigest).toContain('NEXT_REDIRECT');
     expect(loginRedirectDigest).toContain(';/;');
+
+    let safeReturnRedirectDigest = '';
+    try {
+      await LoginPage({ searchParams: Promise.resolve({ returnTo: '/matters/M-000001' }) });
+    } catch (err) {
+      safeReturnRedirectDigest = String((err as { digest?: unknown })?.digest ?? '');
+    }
+    expect(safeReturnRedirectDigest).toContain('NEXT_REDIRECT');
+    expect(safeReturnRedirectDigest).toContain(';/matters/M-000001;');
+
+    let blockedReturnRedirectDigest = '';
+    try {
+      await LoginPage({ searchParams: Promise.resolve({ returnTo: '//evil.com' }) });
+    } catch (err) {
+      blockedReturnRedirectDigest = String((err as { digest?: unknown })?.digest ?? '');
+    }
+    expect(blockedReturnRedirectDigest).toContain('NEXT_REDIRECT');
+    expect(blockedReturnRedirectDigest).toContain(';/;');
   });
 
   it(
@@ -668,6 +724,23 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         await keyDateRepo.putKeyDate(env.ctxAlpha, publicKd, { expectedVersion: null });
         await keyDateRepo.putKeyDate(env.ctxAlpha, staffKd, { expectedVersion: null });
 
+        // R726: Seed a public undertaking register record in Alpha so /registers and Home register panels have positive controls
+        const regRepo = new TenantRegisterRepository();
+        await regRepo.createRegisterRecord(env.ctxAlpha, {
+          id: 'REG-S102B-PUB-1',
+          registerTypeKey: 'undertaking',
+          reference: 'UND-S102B-1',
+          title: 'R726 Alpha Public Undertaking',
+          status: 'open',
+          matterId: env.alphaPubMatter.id,
+          createdById: 'P-000001',
+          ownerId: 'P-000001',
+          fieldValues: {
+            undertakingTerms: 'Hold completion funds to order',
+            giverPersonId: 'P-000001',
+          },
+        });
+
         setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
         setTestEntraSessionOverride(alphaPartner.verifiedSession);
         const [partnerShell, partnerKeyDates, partnerRegisters] = await runWithActiveActorSession(
@@ -688,7 +761,24 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         ).toBe(true);
         expect(partnerRegisters.data).toMatchObject({ ok: true });
         expect(
-          Array.isArray((partnerRegisters.data as { records?: unknown[] }).records),
+          (partnerRegisters.data as { records: Array<{ id: string }> }).records.some(
+            (r) => r.id === 'REG-S102B-PUB-1',
+          ),
+        ).toBe(true);
+
+        // Positive control for Home registerRecords (risk_compliance renders Home register panels, R726)
+        const riskActor = makeActorSession(
+          'P-000003',
+          ['risk_compliance', 'fee_earner', 'partner'],
+          env.tenantAlpha,
+        );
+        setTestEntraSessionOverride(riskActor.verifiedSession);
+        const riskHome = await runWithActiveActorSession(riskActor, () =>
+          loadHomePageData('P-000003'),
+        );
+        expect(riskHome.registerTypes.length).toBeGreaterThan(0);
+        expect(
+          riskHome.registerRecords.some((r) => r.id === 'REG-S102B-PUB-1'),
         ).toBe(true);
 
         // User without register:view or undertaking:manage is refused on /registers and gets empty registers on Home (R708)
@@ -766,7 +856,12 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         ).toBe(true);
 
         const registersData = await loadRegistersPageData('P-000002');
-        expect(Array.isArray(registersData.shell.currentUserPermissions)).toBe(true);
+        expect(registersData.data).toMatchObject({ ok: true });
+        expect(
+          (registersData.data as { records: Array<{ id: string }> }).records.some(
+            (r) => r.id === 'REG-S102B-PUB-1',
+          ),
+        ).toBe(true);
         expect('snapshot' in (registersData.data as Record<string, unknown>)).toBe(false);
       });
 
@@ -2620,6 +2715,32 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           expect(
             unlinkedPeopleRes.unlinkedPeoplePage.items.map((p) => p.id),
           ).toEqual(['P-R700-UNLINKED']);
+          expect(
+            unlinkedPeopleRes.unlinkedPeoplePage.items.some(
+              (p) => p.id === env.bravoPerson.id,
+            ),
+          ).toBe(false);
+          expect(unlinkedPeopleRes.linkedRecordTitles[env.bravoPerson.id]).toBeUndefined();
+        }
+
+        expect(
+          searchedOrgs &&
+            !isActionDenied(searchedOrgs) &&
+            searchedOrgs.linkedRecordTitles[env.bravoOrg.id],
+        ).toBeUndefined();
+
+        const adminMattersRes = await loadPmsLinksAdminDataRecord(
+          { subTab: 'matters', page: 1, pageSize: 100 },
+          'P-000001',
+        );
+        expect(isActionDenied(adminMattersRes)).toBe(false);
+        if (!isActionDenied(adminMattersRes)) {
+          expect(
+            adminMattersRes.unlinkedMattersPage.items.some(
+              (m) => m.id === env.bravoMatter.id,
+            ),
+          ).toBe(false);
+          expect(adminMattersRes.linkedRecordTitles[env.bravoMatter.id]).toBeUndefined();
         }
 
         const sqlCountRes = await getExpiredEnquiriesCountRecord(
@@ -2629,6 +2750,80 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(isActionDenied(sqlCountRes)).toBe(false);
         if (!isActionDenied(sqlCountRes)) {
           expect(sqlCountRes.count).toBe(expectedRetentionCount);
+        }
+      });
+
+      // R726: finance:manage_links actor WITHOUT matter:restricted:access on matters sub-tab
+      // sees linked/unlinked public matters but zero restricted matters and zero Bravo data.
+      const pmsRepo = new TenantPmsRepository();
+      const linkedPubMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-R700-LINKED-PUB',
+        matterNumber: 'ALPH-R700-PUB',
+        title: 'Alpha R700 Linked Public Matter',
+      };
+      const linkedStaffMatter: Matter = {
+        ...structuredClone(env.alphaStaffMatter),
+        id: 'M-R700-LINKED-STAFF',
+        matterNumber: 'ALPH-R700-STAFF',
+        title: 'Alpha R700 Linked Restricted Staff Matter',
+        isStaffMatter: true,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001'],
+      };
+      await Promise.all([
+        matterRepo.putMatter(env.ctxAlpha, linkedPubMatter),
+        matterRepo.putMatter(env.ctxAlpha, linkedStaffMatter),
+      ]);
+      await Promise.all([
+        pmsRepo.putPmsLink(env.ctxAlpha, {
+          id: 'PMSL-R700-PUB',
+          entityType: 'matter',
+          onesquaredId: linkedPubMatter.id,
+          pmsCode: 'MAT-R700-PUB',
+          matchedBy: 'manual',
+          matchedAt: '2026-11-10T10:00:00.000Z',
+          syncStatus: 'Synced',
+        }),
+        pmsRepo.putPmsLink(env.ctxAlpha, {
+          id: 'PMSL-R700-STAFF',
+          entityType: 'matter',
+          onesquaredId: linkedStaffMatter.id,
+          pmsCode: 'MAT-R700-STAFF',
+          matchedBy: 'manual',
+          matchedAt: '2026-11-10T10:00:00.000Z',
+          syncStatus: 'Synced',
+        }),
+      ]);
+      const baseFinanceEmp = (await partyRepo.getPersonById<Person>(
+        env.ctxAlpha,
+        'P-000009',
+      ))!;
+      await partyRepo.putPerson(env.ctxAlpha, {
+        ...structuredClone(baseFinanceEmp),
+        id: 'P-S102B-PMS-NOMAT',
+        roles: ['finance'],
+        permissionOverrides: {
+          grant: ['finance:manage_links'],
+          revoke: ['matter:restricted:access'],
+        },
+      });
+      const pmsNoMatActor = makeActorSession('P-S102B-PMS-NOMAT', [], env.tenantAlpha);
+      setTestEntraSessionOverride(pmsNoMatActor.verifiedSession);
+      await runWithActiveActorSession(pmsNoMatActor, async () => {
+        const mattersSubTab = await loadPmsLinksAdminDataRecord(
+          { subTab: 'matters', page: 1, pageSize: 100 },
+          'P-S102B-PMS-NOMAT',
+        );
+        expect(isActionDenied(mattersSubTab)).toBe(false);
+        if (!isActionDenied(mattersSubTab)) {
+          const unlinkedIds = mattersSubTab.unlinkedMattersPage.items.map((m) => m.id);
+          expect(unlinkedIds).toContain(env.alphaPubMatter.id);
+          expect(unlinkedIds).not.toContain(env.alphaStaffMatter.id);
+          expect(unlinkedIds).not.toContain(env.bravoMatter.id);
+          expect(mattersSubTab.linkedRecordTitles[linkedPubMatter.id]).toBeDefined();
+          expect(mattersSubTab.linkedRecordTitles[linkedStaffMatter.id]).toBeUndefined();
+          expect(mattersSubTab.linkedRecordTitles[env.bravoMatter.id]).toBeUndefined();
         }
       });
 
@@ -2769,7 +2964,12 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(orgsP1.pagination.totalCount).toBeGreaterThan(2);
         const o1Ids = new Set(orgsP1.organisations.map((o) => o.id));
         expect(orgsP2.organisations.some((o) => o1Ids.has(o.id))).toBe(false);
-        expect(orgsP1.activeMatterCountsByOrgId).toBeDefined();
+        const pubOrgPage = await loadOrganisationsListPageData('P-000001', {
+          page: 1,
+          pageSize: 5,
+          query: env.alphaPubOrg.legalName,
+        });
+        expect(pubOrgPage.activeMatterCountsByOrgId[env.alphaPubOrg.id]).toBeGreaterThanOrEqual(1);
 
         // Matters: server paging + server search + visibility enforcement
         const mattersP1 = await loadMattersListPageData('P-000001', {
@@ -2797,24 +2997,26 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           page: 1,
           pageSize: 1,
           tab: 'all',
+          typeFilter: 'enquiry',
         });
         const enqP2 = await loadEnquiriesListPageData('P-000001', {
           page: 2,
           pageSize: 1,
           tab: 'all',
+          typeFilter: 'enquiry',
         });
-        expect(enqP1.enquiries.length).toBeLessThanOrEqual(1);
+        expect(enqP1.enquiries).toHaveLength(1);
+        expect(enqP2.enquiries).toHaveLength(1);
         expect(enqP1.enquiriesPagination.totalCount).toBeGreaterThanOrEqual(2);
-        if (enqP2.enquiries[0]) {
-          expect(enqP2.enquiries[0].id).not.toBe(enqP1.enquiries[0]?.id);
-          const enqSearched = await loadEnquiriesListPageData('P-000001', {
-            page: 1,
-            pageSize: 1,
-            tab: 'all',
-            query: enqP2.enquiries[0].reference,
-          });
-          expect(enqSearched.enquiries.some((e) => e.id === enqP2.enquiries[0]!.id)).toBe(true);
-        }
+        expect(enqP2.enquiries[0]!.id).not.toBe(enqP1.enquiries[0]!.id);
+        const enqSearched = await loadEnquiriesListPageData('P-000001', {
+          page: 1,
+          pageSize: 1,
+          tab: 'all',
+          typeFilter: 'enquiry',
+          query: enqP2.enquiries[0]!.reference,
+        });
+        expect(enqSearched.enquiries.some((e) => e.id === enqP2.enquiries[0]!.id)).toBe(true);
       });
 
       // Restricted matter stays excluded from counts & server search for excluded fee earner
@@ -2906,6 +3108,38 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           expect(check?.openMatterIds).toContain(env.alphaStaffMatter.id);
           expect(check?.riskNotes).toContain(env.alphaStaffMatter.matterNumber);
         }
+
+        // R726: cross-tenant Bravo person/org requested from Alpha returns null
+        const crossTenantPerson = await getEntityRecordForEditRecord(
+          'person',
+          env.bravoPerson.id,
+          'P-000001',
+        );
+        expect(crossTenantPerson).toEqual({ recordType: 'person', person: null });
+
+        const crossTenantOrg = await getEntityRecordForEditRecord(
+          'organisation',
+          env.bravoOrg.id,
+          'P-000001',
+        );
+        expect(crossTenantOrg).toEqual({
+          recordType: 'organisation',
+          organisation: null,
+        });
+      });
+
+      // R726: forged Bravo tenant claim while active tenant is Alpha is rejected fail closed
+      const forgedBravoClaim = makeActorSession(
+        'P-000001',
+        ['partner'],
+        env.tenantBravo,
+      );
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(forgedBravoClaim.verifiedSession);
+      await runWithActiveActorSession(forgedBravoClaim, async () => {
+        await expect(
+          getEntityRecordForEditRecord('person', targetEmpId, 'P-000001'),
+        ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       });
     },
     45_000,
@@ -3289,6 +3523,112 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         });
         expect(cappedQueryRes.pagination.page).toBe(1);
         expect(cappedQueryRes.filters.query.length).toBe(MAX_LIST_QUERY_LENGTH);
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '23. R726: listClientPriorMattersRecord excludes staff/walled matters for non-participants, returns [] for tampered/cross-tenant IDs, and rejects forged claims',
+    async () => {
+      expect(ACTION_PERMISSIONS.listClientPriorMattersAction).toEqual({
+        kind: 'permission',
+        key: { anyOf: ['matter:create', 'matter:edit'] },
+        enforcedBy: 'action',
+      });
+
+      const env = await provisionAndSeedTwoTenants();
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      const partyRepo = new TenantPartyRepository();
+      const matterRepo = new TenantMatterRepository();
+
+      const clientOrg: Organisation = {
+        ...structuredClone(env.alphaPubOrg),
+        id: 'O-R726-CLIENT',
+        legalName: 'R726 Prior Matter Client Ltd',
+      };
+      await partyRepo.putOrganisation(env.ctxAlpha, clientOrg);
+
+      const pubMatter: Matter = {
+        ...structuredClone(env.alphaPubMatter),
+        id: 'M-R726-PUB',
+        matterNumber: 'R726-0001',
+        title: 'R726 Visible Prior Matter',
+        clientId: clientOrg.id,
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000002',
+        teamMemberIds: ['P-000001', 'P-000002'],
+        isStaffMatter: false,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: [],
+      };
+      const staffMatter: Matter = {
+        ...structuredClone(env.alphaStaffMatter),
+        id: 'M-R726-STAFF',
+        matterNumber: 'R726-STAFF',
+        title: 'R726 Hidden Staff Prior Matter',
+        clientId: clientOrg.id,
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001'],
+        isStaffMatter: true,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: ['P-000001'],
+      };
+      const wallMatter: Matter = {
+        ...structuredClone(env.alphaStaffMatter),
+        id: 'M-R726-WALL',
+        matterNumber: 'R726-WALL',
+        title: 'R726 Hidden Walled Prior Matter',
+        clientId: clientOrg.id,
+        responsiblePartnerId: 'P-000001',
+        leadFeeEarnerId: 'P-000001',
+        teamMemberIds: ['P-000001'],
+        isStaffMatter: false,
+        hasEthicalWall: true,
+        restrictedAccessUserIds: ['P-000001'],
+      };
+      await Promise.all([
+        matterRepo.putMatter(env.ctxAlpha, pubMatter),
+        matterRepo.putMatter(env.ctxAlpha, staffMatter),
+        matterRepo.putMatter(env.ctxAlpha, wallMatter),
+      ]);
+
+      // Non-participant fee earner sees only the public prior matter (positive control + staff/wall exclusion)
+      const feActor = makeActorSession('P-000002', ['fee_earner'], env.tenantAlpha);
+      setTestEntraSessionOverride(feActor.verifiedSession);
+      await runWithActiveActorSession(feActor, async () => {
+        const res = await listClientPriorMattersRecord([clientOrg.id], 'P-000002');
+        expect(isActionDenied(res)).toBe(false);
+        if (!isActionDenied(res)) {
+          const ids = res.matters.map((m) => m.id);
+          expect(ids).toEqual([pubMatter.id]);
+          expect(ids).not.toContain(staffMatter.id);
+          expect(ids).not.toContain(wallMatter.id);
+        }
+
+        // Tampered ID and cross-tenant Bravo client ID both return []
+        const tampered = await listClientPriorMattersRecord(
+          ['O-NONEXISTENT-999'],
+          'P-000002',
+        );
+        expect(tampered).toEqual({ matters: [] });
+
+        const crossTenant = await listClientPriorMattersRecord(
+          [env.bravoOrg.id, env.bravoPerson.id],
+          'P-000002',
+        );
+        expect(crossTenant).toEqual({ matters: [] });
+      });
+
+      // Forged Bravo tenant claim while active tenant is Alpha is rejected
+      const forgedActor = makeActorSession('P-000002', ['fee_earner'], env.tenantBravo);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(forgedActor.verifiedSession);
+      await runWithActiveActorSession(forgedActor, async () => {
+        await expect(
+          listClientPriorMattersRecord([clientOrg.id], 'P-000002'),
+        ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
       });
     },
     45_000,

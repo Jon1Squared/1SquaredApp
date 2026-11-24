@@ -2,6 +2,7 @@ import React from 'react';
 import { notFound } from 'next/navigation';
 import { MatterFormClient } from '@/components/MatterFormClient';
 import { MatterProfileClient } from '@/components/MatterProfileClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadMatterDetailPageData, withOptionalPageActor } from '@/server/pageLoaders';
 import { recordRecentlyViewed } from '@/server/services';
 
@@ -102,5 +103,5 @@ export default async function MatterProfilePage({
         audit={data.audit}
       />
     );
-  });
+  }, buildRouteReturnTo(`/matters/${encodeURIComponent(id)}`, search));
 }

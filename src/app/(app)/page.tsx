@@ -1,4 +1,5 @@
 import { HomeClient } from '@/components/HomeClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadHomePageData, withOptionalPageActor } from '@/server/pageLoaders';
 
 export const dynamic = 'force-dynamic';
@@ -50,5 +51,5 @@ export default async function HomePage({
         pmsClientAccountByMatterCode={matterFinance?.pmsClientAccountByMatterCode}
       />
     );
-  });
+  }, buildRouteReturnTo('/', resolvedParams));
 }

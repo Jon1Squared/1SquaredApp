@@ -136,6 +136,7 @@ import {
   saveOrganisationRecord,
   savePersonRecord,
   saveTaskRecord,
+  searchGlobalRecords,
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
@@ -7289,7 +7290,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           queryKeyDatesTeamDiaryRecord({}, excludedActor.id),
         );
         expect(diary.some((e) => e.matterId === wallMatter.id)).toBe(false);
+
+        const globalSearchRes = await runAsTestActor(excludedActor.id, () =>
+          searchGlobalRecords({ query: wallMatter.title }, excludedActor.id),
+        );
+        expect(
+          globalSearchRes.hits.some((h) => h.id === wallMatter.id),
+        ).toBe(false);
       }
+
+      // Positive control: named participant DOES find the ethical-wall matter in global search
+      const namedSearchRes = await runAsTestActor(namedPartner.id, () =>
+        searchGlobalRecords({ query: wallMatter.title }, namedPartner.id),
+      );
+      expect(
+        namedSearchRes.hits.some((h) => h.id === wallMatter.id),
+      ).toBe(true);
 
       // Reports also exclude the walled matter for an actor without matter:restricted:access
       const partnerExceptions = await runAsTestActor(unnamedPartner.id, () =>

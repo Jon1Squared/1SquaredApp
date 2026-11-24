@@ -31207,7 +31207,7 @@ export async function loadPmsLinksAdminDataRecord(
     );
   }
 
-  const snap = await getPmsAdminSnapshot(actor.id);
+  const snap = await getPmsAdminSnapshot(ctx);
   if (isActionDenied(snap)) return snap;
 
   return buildPmsLinksAdminDataFromSnapshot(

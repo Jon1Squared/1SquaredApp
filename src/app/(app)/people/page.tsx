@@ -1,4 +1,5 @@
 import { PeopleListClient } from '@/components/PeopleListClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import {
   loadPeopleListPageData,
   parseListPageParam,
@@ -64,5 +65,5 @@ export default async function PeoplePage({
         initialFilters={data.filters}
       />
     );
-  });
+  }, buildRouteReturnTo('/people', resolved));
 }

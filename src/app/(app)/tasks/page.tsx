@@ -1,4 +1,5 @@
 import { TasksListClient } from '@/components/TasksListClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import {
   loadTasksListPageData,
   parseListPageParam,
@@ -63,5 +64,5 @@ export default async function TasksPage({
         initialFilters={data.filters}
       />
     );
-  });
+  }, buildRouteReturnTo('/tasks', resolved));
 }

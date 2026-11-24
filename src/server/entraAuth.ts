@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
+import { sanitizeReturnToPath } from '@/domain/authReturnTo';
 import {
   isEntraMfaVerified,
   mapEntraTokenClaimsToVerifiedOidcToken,
@@ -217,26 +218,7 @@ export function resolvePublicAppOrigin(requestUrl: string): string {
   return new URL(requestUrl).origin;
 }
 
-export function sanitizeReturnToPath(
-  returnTo: string | null | undefined,
-  baseOrigin = 'http://localhost',
-): string {
-  if (!returnTo || typeof returnTo !== 'string') return '/';
-  const trimmed = returnTo.trim();
-  if (!trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
-    return '/';
-  }
-  try {
-    const base = new URL(baseOrigin);
-    const resolved = new URL(trimmed, base.origin);
-    if (resolved.origin !== base.origin) {
-      return '/';
-    }
-    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
-  } catch {
-    return '/';
-  }
-}
+export { sanitizeReturnToPath };
 
 function signPayload(payloadJson: string): string {
   const encoded = Buffer.from(payloadJson, 'utf8').toString('base64url');

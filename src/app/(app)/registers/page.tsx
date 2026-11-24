@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { RegistersWorkspaceClient } from '@/components/RegistersWorkspaceClient';
 import { isActionDenied } from '@/domain/actionResult';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadRegistersPageData, withOptionalPageActor } from '@/server/pageLoaders';
 
 export const dynamic = 'force-dynamic';
@@ -10,7 +11,8 @@ export default async function RegistersPage({
 }: {
   searchParams: Promise<{ record?: string; type?: string }>;
 }) {
-  const { record, type } = await searchParams;
+  const resolvedSearch = await searchParams;
+  const { record, type } = resolvedSearch;
   return withOptionalPageActor(async (actor) => {
     const { shell, data } = await loadRegistersPageData(actor.personId);
 
@@ -46,5 +48,5 @@ export default async function RegistersPage({
         initialTypeKey={type}
       />
     );
-  });
+  }, buildRouteReturnTo('/registers', resolvedSearch));
 }

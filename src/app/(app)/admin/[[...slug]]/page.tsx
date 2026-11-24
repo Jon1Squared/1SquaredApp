@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { AdminClient } from '@/components/AdminClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadAdminPageData, withOptionalPageActor } from '@/server/pageLoaders';
 
 export const dynamic = 'force-dynamic';
@@ -19,8 +20,12 @@ export default async function AdminCatchAllPage({
   }>;
 }) {
   const { slug } = await params;
+  const resolvedSearch = await searchParams;
   const { list, section, authError, authSuccess, auditBeforeSeq, beforeSeq } =
-    await searchParams;
+    resolvedSearch;
+  const basePath = slug?.length
+    ? `/admin/${slug.map(encodeURIComponent).join('/')}`
+    : '/admin';
 
   return withOptionalPageActor(async (actor) => {
     const data = await loadAdminPageData(actor.personId, {
@@ -83,5 +88,5 @@ export default async function AdminCatchAllPage({
         authSuccess={authSuccess === '1'}
       />
     );
-  });
+  }, buildRouteReturnTo(basePath, resolvedSearch));
 }

@@ -28,6 +28,7 @@ import {
 } from '@platform/core';
 import { isActionDenied } from '@/domain/actionResult';
 import { attentionList, type AttentionItem } from '@/domain/attention';
+import { buildLoginRedirectPath } from '@/domain/authReturnTo';
 import { addDays, addMonths, toIsoDate } from '@/domain/dates';
 import { findRecordsOwnedByLeavers } from '@/domain/employment';
 import type { EnquiriesQueueTab } from '@/domain/enquiries';
@@ -214,11 +215,12 @@ export async function withCachedPageActor<R>(
  */
 export async function withOptionalPageActor<R>(
   fn: (actor: AuthenticatedActorContext) => Promise<R> | R,
+  returnTo?: string,
 ): Promise<R> {
   if (!getActiveActorSession()) {
     const entraSession = await getEntraSession();
     if (!entraSession) {
-      redirect('/login');
+      redirect(buildLoginRedirectPath(returnTo));
     }
   }
   return withCachedPageActor(fn);
@@ -231,6 +233,7 @@ export interface LoaderOptions {
 export const DEFAULT_LIST_PAGE_SIZE = 100;
 export const MAX_LIST_PAGE_NUMBER = 100_000;
 export const MAX_LIST_QUERY_LENGTH = 200;
+export const LEAVER_HANDOVER_LIMIT = 500;
 
 export interface ListPaginationMeta {
   readonly page: number;
@@ -1613,12 +1616,14 @@ export async function loadPersonFormPageData(
         ? taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
             assignedPersonIdOrMulti: existing.id,
             hasRestrictedMatterAccess,
+            limit: LEAVER_HANDOVER_LIMIT,
           })
         : Promise.resolve<Task[]>([]),
       canViewEmploymentAndHandover
         ? intakeRepo.listVisibleEnquiries<Enquiry>(ctx, currentUserId, {
             assignedToId: existing.id,
             hasRestrictedMatterAccess,
+            limit: LEAVER_HANDOVER_LIMIT,
           })
         : Promise.resolve<Enquiry[]>([]),
     ]);
@@ -3981,7 +3986,7 @@ export async function loadAdminPageData(
       limit: 250,
       ...(Number.isFinite(parsedBeforeSeq) ? { beforeSeq: parsedBeforeSeq } : {}),
     }),
-    getPmsAdminSnapshot(actorId),
+    getPmsAdminSnapshot(ctx),
     getHrAndRbacRepository().getEmployeeMigrationReport<EmployeeMigrationReport>(ctx),
     resolveRegistersSummary(ctx, activeTenantCfg),
     getIntakeQuoteRepository().countEnquiriesReadyForRetention(

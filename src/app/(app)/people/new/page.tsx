@@ -28,5 +28,5 @@ export default async function NewPersonPage() {
         tenantId={shell.tenantId}
       />
     );
-  });
+  }, '/people/new');
 }

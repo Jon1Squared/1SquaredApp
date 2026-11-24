@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { QuoteDetailClient } from '@/components/QuoteDetailClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadQuoteDetailPageData, withOptionalPageActor } from '@/server/pageLoaders';
 import { recordRecentlyViewed } from '@/server/services';
 
@@ -40,5 +41,5 @@ export default async function QuoteDetailPage({
         initialAction={sp.action ?? null}
       />
     );
-  });
+  }, buildRouteReturnTo(`/quotes/${encodeURIComponent(id)}`, sp));
 }

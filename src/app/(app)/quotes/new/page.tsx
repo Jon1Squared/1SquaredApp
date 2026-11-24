@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation';
 import { QuoteFormClient } from '@/components/QuoteFormClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadQuoteFormPageData, withOptionalPageActor } from '@/server/pageLoaders';
 
 export const dynamic = 'force-dynamic';
@@ -34,5 +35,5 @@ export default async function NewQuotePage({
         firmFeeArrangementCaps={shell.store.matterCostsConfig.feeArrangementCaps}
       />
     );
-  });
+  }, buildRouteReturnTo('/quotes/new', sp));
 }

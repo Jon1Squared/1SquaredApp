@@ -816,14 +816,44 @@ test.describe('S1-02b WP1b picker journeys', () => {
         name: 'Search instructing contacts',
       });
       await expect(instructingSearch).toBeVisible();
-      await instructingSearch.fill('Mared Hughes');
-
       const instructingSelect = page.locator('#nm-instructing');
+
+      // Minor client must never appear as an instructing-contact option even when searched
+      await instructingSearch.fill('Bryn-Minor');
+      await page.waitForTimeout(450);
+      await expect(page.getByText('Searching…')).toHaveCount(0, { timeout: 5_000 });
+      await expect(
+        instructingSelect.locator(`option[value="${minorId}"]`),
+      ).toHaveCount(0);
+
+      await instructingSearch.fill('Mared Hughes');
       await expect(
         instructingSelect.locator('option[value="P-000013"]'),
       ).toHaveCount(1, { timeout: 10_000 });
       await instructingSelect.selectOption('P-000013');
       await expect(instructingSelect).toHaveValue('P-000013');
+
+      // Save the draft matter and verify it persists with the chosen instructing contact
+      const draftTitle = 'R699 Minor Client Instructing Draft';
+      await page.locator('#nm-description').fill(draftTitle);
+      await page.locator('#nm-department').selectOption({ index: 1 });
+      await page.locator('#nm-worktype').selectOption({ index: 1 });
+      await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+      await expect(page.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
+      await expect(page.locator('.toast-pill')).toContainText('Draft saved', {
+        timeout: 15_000,
+      });
+
+      await page.goto(`/matters?q=${encodeURIComponent(draftTitle)}`);
+      const savedDraftLink = page
+        .locator('a[href^="/matters/M-"]', { hasText: draftTitle })
+        .first();
+      await expect(savedDraftLink).toBeVisible({ timeout: 15_000 });
+      await savedDraftLink.click();
+      await expect(page).toHaveURL(/\/matters\/M-\d+/, { timeout: 15_000 });
+      await expect(page.locator('#nm-instructing')).toHaveValue('P-000013', {
+        timeout: 15_000,
+      });
       expect(pageErrors).toEqual([]);
     } finally {
       await context.close();

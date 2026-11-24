@@ -1,4 +1,5 @@
 import { OrganisationsListClient } from '@/components/OrganisationsListClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import {
   loadOrganisationsListPageData,
   parseListPageParam,
@@ -66,5 +67,5 @@ export default async function OrganisationsPage({
         initialFilters={data.filters}
       />
     );
-  });
+  }, buildRouteReturnTo('/organisations', resolved));
 }

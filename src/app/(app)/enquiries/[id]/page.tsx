@@ -59,5 +59,5 @@ export default async function EnquiryDetailPage({
         </div>
       </div>
     );
-  });
+  }, `/enquiries/${encodeURIComponent(id)}`);
 }

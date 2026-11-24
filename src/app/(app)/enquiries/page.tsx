@@ -1,4 +1,5 @@
 import { EnquiriesListClient } from '@/components/EnquiriesListClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import type { EnquiriesQueueTab } from '@/domain/enquiries';
 import {
   loadEnquiriesListPageData,
@@ -85,5 +86,5 @@ export default async function EnquiriesPage({
         initialFilters={data.filters}
       />
     );
-  });
+  }, buildRouteReturnTo('/enquiries', resolved));
 }

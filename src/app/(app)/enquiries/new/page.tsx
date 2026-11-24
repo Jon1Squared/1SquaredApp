@@ -24,5 +24,5 @@ export default async function NewEnquiryPage() {
         supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
       />
     );
-  });
+  }, '/enquiries/new');
 }

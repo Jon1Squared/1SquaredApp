@@ -24,5 +24,5 @@ export default async function KeyDatesPage() {
         todayIso={todayIso}
       />
     );
-  });
+  }, '/key-dates');
 }

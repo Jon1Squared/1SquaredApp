@@ -37,5 +37,5 @@ export default async function EditOrganisationPage({
         tenantId={shell.tenantId}
       />
     );
-  });
+  }, `/organisations/${encodeURIComponent(id)}/edit`);
 }

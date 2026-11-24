@@ -31,5 +31,5 @@ export default async function TaskDetailPage({
         canReassign={data.canReassign}
       />
     );
-  });
+  }, `/tasks/${encodeURIComponent(id)}`);
 }

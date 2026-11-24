@@ -1,4 +1,5 @@
 import { TaskFormClient } from '@/components/TaskFormClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import type { TaskLinkedRecord, TaskLinkedRecordType } from '@/domain/types';
 import { loadTaskFormPageData, withOptionalPageActor } from '@/server/pageLoaders';
 
@@ -43,5 +44,5 @@ export default async function NewTaskPage({
         supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
       />
     );
-  });
+  }, buildRouteReturnTo('/tasks/new', sp));
 }

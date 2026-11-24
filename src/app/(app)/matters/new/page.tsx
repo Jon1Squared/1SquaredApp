@@ -1,5 +1,6 @@
 import React from 'react';
 import { MatterFormClient } from '@/components/MatterFormClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import { loadMatterFormPageData, withOptionalPageActor } from '@/server/pageLoaders';
 
 export const dynamic = 'force-dynamic';
@@ -73,5 +74,5 @@ export default async function NewMatterPage({
         tenantId={shell.tenantId}
       />
     );
-  });
+  }, buildRouteReturnTo('/matters/new', params));
 }

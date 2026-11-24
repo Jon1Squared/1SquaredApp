@@ -1,5 +1,6 @@
 import React from 'react';
 import { MattersListClient } from '@/components/MattersListClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import {
   loadMattersListPageData,
   parseListPageParam,
@@ -68,5 +69,5 @@ export default async function MattersPage({
         initialFilters={data.filters}
       />
     );
-  });
+  }, buildRouteReturnTo('/matters', resolved));
 }

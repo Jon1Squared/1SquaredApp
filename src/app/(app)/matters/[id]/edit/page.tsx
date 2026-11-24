@@ -58,5 +58,5 @@ export default async function EditMatterPage({
         tenantId={shell.tenantId}
       />
     );
-  });
+  }, `/matters/${encodeURIComponent(id)}/edit`);
 }

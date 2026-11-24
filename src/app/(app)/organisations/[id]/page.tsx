@@ -1,5 +1,6 @@
 import { notFound, redirect } from 'next/navigation';
 import { OrganisationProfileClient } from '@/components/OrganisationProfileClient';
+import { buildRouteReturnTo } from '@/domain/authReturnTo';
 import {
   loadOrganisationDetailPageData,
   withOptionalPageActor,
@@ -16,7 +17,8 @@ export default async function OrganisationProfilePage({
   searchParams: Promise<{ tab?: string; mergedFrom?: string }>;
 }) {
   const { id } = await params;
-  const { tab, mergedFrom } = await searchParams;
+  const resolvedSearch = await searchParams;
+  const { tab, mergedFrom } = resolvedSearch;
   return withOptionalPageActor(async (actor) => {
     const data = await loadOrganisationDetailPageData(actor.personId, id);
     if (!data) notFound();
@@ -58,5 +60,5 @@ export default async function OrganisationProfilePage({
         initialTab={tab}
       />
     );
-  });
+  }, buildRouteReturnTo(`/organisations/${encodeURIComponent(id)}`, resolvedSearch));
 }
