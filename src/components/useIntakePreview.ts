@@ -1,8 +1,22 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import { previewIntakeDuplicatesAndConflictsAction } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import {
+  EMPTY_INTAKE_CONFLICT_SLICE,
+  EMPTY_INTAKE_FAST_SLICE,
+  INITIAL_INTAKE_PREVIEW_HOOK_STATE,
+  meetsConflictSettledGate,
+  reduceIntakePreviewHookState,
+} from '@/domain/intakePreviewState';
 import type {
   IntakePreviewInput,
   IntakePreviewResult,
@@ -13,20 +27,22 @@ export const INTAKE_CONFLICT_PREVIEW_DEBOUNCE_MS = 650;
 export const INTAKE_CONFLICT_MIN_NAME_CHARS = 3;
 
 export const EMPTY_INTAKE_PREVIEW_RESULT: IntakePreviewResult = {
-  duplicatePeople: [],
-  duplicateOrganisations: [],
-  entityMatches: { people: [], organisations: [] },
-  activeLinkedEnquiries: [],
-  possibleConflicts: [],
-  conflictSearch: null,
+  ...EMPTY_INTAKE_FAST_SLICE,
+  ...EMPTY_INTAKE_CONFLICT_SLICE,
 };
 
 export interface UseIntakePreviewResult {
   readonly preview: IntakePreviewResult;
   readonly loadingFast: boolean;
   readonly loadingConflicts: boolean;
+  readonly fastError: string | null;
+  readonly conflictError: string | null;
   /** Runs the conflict check path immediately (e.g. on blur or modal open). */
   readonly triggerConflictCheck: () => void;
+  /** Retries the fast duplicate preview check after an error. */
+  readonly retryFastCheck: () => void;
+  /** Retries the settled conflict check after an error. */
+  readonly retryConflictCheck: () => void;
 }
 
 function buildNameTriggerText(input: IntakePreviewInput): string {
@@ -69,7 +85,8 @@ function hasAnyPreviewSignal(input: IntakePreviewInput): boolean {
  * - Fast channel (`280ms`): SQL duplicate & known-entity checks (`includeConflicts: false`).
  * - Conflict channel (`>= 650ms` when trimmed name fields >= 3 chars, or immediately
  *   via `triggerConflictCheck` on blur / modal open): authoritative conflict preview (`B22`).
- * Stale responses are discarded via monotonic sequence numbers on both channels.
+ * Stale responses are discarded via monotonic sequence numbers on both channels, and errors
+ * are surfaced visibly (`R714`) rather than leaving silent "no matches".
  */
 export function useIntakePreview(
   input: IntakePreviewInput,
@@ -86,23 +103,11 @@ export function useIntakePreview(
     [serializedInput],
   );
 
-  const [fastResult, setFastResult] = useState<Pick<
-    IntakePreviewResult,
-    'duplicatePeople' | 'duplicateOrganisations' | 'entityMatches' | 'activeLinkedEnquiries'
-  >>({
-    duplicatePeople: [],
-    duplicateOrganisations: [],
-    entityMatches: { people: [], organisations: [] },
-    activeLinkedEnquiries: [],
-  });
-  const [conflictResult, setConflictResult] = useState<
-    Pick<IntakePreviewResult, 'possibleConflicts' | 'conflictSearch'>
-  >({
-    possibleConflicts: [],
-    conflictSearch: null,
-  });
-  const [loadingFast, setLoadingFast] = useState(false);
-  const [loadingConflicts, setLoadingConflicts] = useState(false);
+  const [state, dispatch] = useReducer(
+    reduceIntakePreviewHookState,
+    INITIAL_INTAKE_PREVIEW_HOOK_STATE,
+  );
+  const [fastRetryKey, setFastRetryKey] = useState(0);
 
   const fastSeqRef = useRef(0);
   const conflictSeqRef = useRef(0);
@@ -123,13 +128,7 @@ export function useIntakePreview(
     if (!enabled || !hasSignal) {
       fastSeqRef.current += 1;
       const resetTimer = setTimeout(() => {
-        setFastResult({
-          duplicatePeople: [],
-          duplicateOrganisations: [],
-          entityMatches: { people: [], organisations: [] },
-          activeLinkedEnquiries: [],
-        });
-        setLoadingFast(false);
+        dispatch({ type: 'FAST_RESET' });
       }, 0);
       return () => clearTimeout(resetTimer);
     }
@@ -139,26 +138,30 @@ export function useIntakePreview(
 
     const timer = setTimeout(() => {
       if (cancelled) return;
-      setLoadingFast(true);
+      dispatch({ type: 'FAST_START' });
       void previewIntakeDuplicatesAndConflictsAction({
         ...stableInput,
         includeConflicts: false,
       })
         .then((res) => {
           if (cancelled || seq !== fastSeqRef.current) return;
-          if (!isActionDenied(res)) {
-            setFastResult({
-              duplicatePeople: res.duplicatePeople,
-              duplicateOrganisations: res.duplicateOrganisations,
-              entityMatches: res.entityMatches,
-              activeLinkedEnquiries: res.activeLinkedEnquiries,
+          if (isActionDenied(res)) {
+            dispatch({ type: 'FAST_ERROR', message: res.message });
+          } else {
+            dispatch({
+              type: 'FAST_SUCCESS',
+              payload: {
+                duplicatePeople: res.duplicatePeople,
+                duplicateOrganisations: res.duplicateOrganisations,
+                entityMatches: res.entityMatches,
+                activeLinkedEnquiries: res.activeLinkedEnquiries,
+              },
             });
           }
-          setLoadingFast(false);
         })
         .catch(() => {
           if (cancelled || seq !== fastSeqRef.current) return;
-          setLoadingFast(false);
+          dispatch({ type: 'FAST_ERROR' });
         });
     }, INTAKE_FAST_PREVIEW_DEBOUNCE_MS);
 
@@ -166,7 +169,7 @@ export function useIntakePreview(
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [enabled, hasSignal, stableInput]);
+  }, [enabled, hasSignal, stableInput, fastRetryKey]);
 
   const executeConflictPreview = useCallback((payload: IntakePreviewInput) => {
     const payloadKey = JSON.stringify({ ...payload, includeConflicts: true });
@@ -175,45 +178,58 @@ export function useIntakePreview(
     }
     lastConflictPayloadKeyRef.current = payloadKey;
     const seq = ++conflictSeqRef.current;
-    setLoadingConflicts(true);
+    dispatch({ type: 'CONFLICT_START' });
     void previewIntakeDuplicatesAndConflictsAction({
       ...payload,
       includeConflicts: true,
     })
       .then((res) => {
         if (seq !== conflictSeqRef.current) return;
-        if (!isActionDenied(res)) {
-          setConflictResult({
-            possibleConflicts: res.possibleConflicts,
-            conflictSearch: res.conflictSearch,
+        if (isActionDenied(res)) {
+          lastConflictPayloadKeyRef.current = null;
+          dispatch({ type: 'CONFLICT_ERROR', message: res.message });
+        } else {
+          dispatch({
+            type: 'CONFLICT_SUCCESS',
+            payload: {
+              possibleConflicts: res.possibleConflicts,
+              conflictSearch: res.conflictSearch,
+            },
           });
         }
-        setLoadingConflicts(false);
       })
       .catch(() => {
         if (seq !== conflictSeqRef.current) return;
-        setLoadingConflicts(false);
+        lastConflictPayloadKeyRef.current = null;
+        dispatch({ type: 'CONFLICT_ERROR' });
       });
   }, []);
 
   // Conflict channel: settled >= 650ms debounce only when trimmed name text >= 3 chars
-  // (or when a person/org entity link is explicitly attached).
+  // (or when a person/org entity link is explicitly attached). Clears stale hits below threshold.
   useEffect(() => {
     if (!enabled || !enableConflicts || !hasSignal) {
       conflictSeqRef.current += 1;
       lastConflictPayloadKeyRef.current = null;
       const resetTimer = setTimeout(() => {
-        setConflictResult({ possibleConflicts: [], conflictSearch: null });
-        setLoadingConflicts(false);
+        dispatch({ type: 'CONFLICT_RESET' });
       }, 0);
       return () => clearTimeout(resetTimer);
     }
 
-    const meetsSettledNameGate =
-      nameCharCount >= INTAKE_CONFLICT_MIN_NAME_CHARS ||
-      Boolean(stableInput.linkedPersonId || stableInput.linkedOrganisationId);
-    if (!meetsSettledNameGate) {
-      return;
+    if (
+      !meetsConflictSettledGate(
+        nameCharCount,
+        INTAKE_CONFLICT_MIN_NAME_CHARS,
+        stableInput,
+      )
+    ) {
+      conflictSeqRef.current += 1;
+      lastConflictPayloadKeyRef.current = null;
+      const clearTimer = setTimeout(() => {
+        dispatch({ type: 'CLEAR_CONFLICTS_BELOW_THRESHOLD' });
+      }, 0);
+      return () => clearTimeout(clearTimer);
     }
 
     let cancelled = false;
@@ -224,24 +240,30 @@ export function useIntakePreview(
       if (cancelled) return;
       if (lastConflictPayloadKeyRef.current === payloadKey) return;
       lastConflictPayloadKeyRef.current = payloadKey;
-      setLoadingConflicts(true);
+      dispatch({ type: 'CONFLICT_START' });
       void previewIntakeDuplicatesAndConflictsAction({
         ...stableInput,
         includeConflicts: true,
       })
         .then((res) => {
           if (cancelled || seq !== conflictSeqRef.current) return;
-          if (!isActionDenied(res)) {
-            setConflictResult({
-              possibleConflicts: res.possibleConflicts,
-              conflictSearch: res.conflictSearch,
+          if (isActionDenied(res)) {
+            lastConflictPayloadKeyRef.current = null;
+            dispatch({ type: 'CONFLICT_ERROR', message: res.message });
+          } else {
+            dispatch({
+              type: 'CONFLICT_SUCCESS',
+              payload: {
+                possibleConflicts: res.possibleConflicts,
+                conflictSearch: res.conflictSearch,
+              },
             });
           }
-          setLoadingConflicts(false);
         })
         .catch(() => {
           if (cancelled || seq !== conflictSeqRef.current) return;
-          setLoadingConflicts(false);
+          lastConflictPayloadKeyRef.current = null;
+          dispatch({ type: 'CONFLICT_ERROR' });
         });
     }, INTAKE_CONFLICT_PREVIEW_DEBOUNCE_MS);
 
@@ -259,22 +281,31 @@ export function useIntakePreview(
     executeConflictPreview(payload);
   }, [enabled, enableConflicts, executeConflictPreview]);
 
+  const retryFastCheck = useCallback(() => {
+    if (!enabled) return;
+    setFastRetryKey((k) => k + 1);
+  }, [enabled]);
+
   const preview = useMemo<IntakePreviewResult>(
     () => ({
-      duplicatePeople: fastResult.duplicatePeople,
-      duplicateOrganisations: fastResult.duplicateOrganisations,
-      entityMatches: fastResult.entityMatches,
-      activeLinkedEnquiries: fastResult.activeLinkedEnquiries,
-      possibleConflicts: conflictResult.possibleConflicts,
-      conflictSearch: conflictResult.conflictSearch,
+      duplicatePeople: state.fastResult.duplicatePeople,
+      duplicateOrganisations: state.fastResult.duplicateOrganisations,
+      entityMatches: state.fastResult.entityMatches,
+      activeLinkedEnquiries: state.fastResult.activeLinkedEnquiries,
+      possibleConflicts: state.conflictResult.possibleConflicts,
+      conflictSearch: state.conflictResult.conflictSearch,
     }),
-    [fastResult, conflictResult],
+    [state.fastResult, state.conflictResult],
   );
 
   return {
     preview,
-    loadingFast,
-    loadingConflicts,
+    loadingFast: state.loadingFast,
+    loadingConflicts: state.loadingConflicts,
+    fastError: state.fastError,
+    conflictError: state.conflictError,
     triggerConflictCheck,
+    retryFastCheck,
+    retryConflictCheck: triggerConflictCheck,
   };
 }

@@ -93,6 +93,7 @@ import {
 import { InfoPopover } from './InfoPopover';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { resolveConvertConflictModalState } from '@/domain/intakePreviewState';
 import { EntitySearchSelect } from './useEntityPicker';
 import { useIntakePreview } from './useIntakePreview';
 
@@ -619,7 +620,14 @@ export function EnquiryFormClient({
   const useRecordedSnapshot =
     isSavedEnquiry && !watchedFieldsChangedSinceSave && Boolean(savedSnapshot);
 
-  const { preview: liveIntakePreview, triggerConflictCheck } = useIntakePreview(
+  const {
+    preview: liveIntakePreview,
+    fastError: liveFastError,
+    conflictError: liveConflictError,
+    triggerConflictCheck,
+    retryFastCheck: retryLiveFastCheck,
+    retryConflictCheck: retryLiveConflictCheck,
+  } = useIntakePreview(
     {
       kind: 'enquiry',
       excludeEnquiryId: enquiry?.id ?? null,
@@ -1111,7 +1119,9 @@ export function EnquiryFormClient({
   const {
     preview: convertIntakePreview,
     loadingConflicts: loadingConvertConflicts,
+    conflictError: convertConflictError,
     triggerConflictCheck: triggerConvertConflictCheck,
+    retryConflictCheck: retryConvertConflictCheck,
   } = useIntakePreview(
     {
       kind: 'enquiry',
@@ -1144,6 +1154,11 @@ export function EnquiryFormClient({
     allConflicts: [],
     hasBlockingConflict: false,
   };
+  const convertModalState = resolveConvertConflictModalState({
+    loadingConflicts: loadingConvertConflicts,
+    conflictError: convertConflictError,
+    conflictSearch: convertIntakePreview.conflictSearch,
+  });
 
   const open = enquiry ? isEnquiryOpen(enquiry) : true;
   const routed = enquiry ? isEnquiryRouted(enquiry) : false;
@@ -3064,6 +3079,26 @@ export function EnquiryFormClient({
                   overflowY: 'auto',
                 }}
               >
+                {liveFastError || liveConflictError ? (
+                  <div className="banner banner--warning" role="alert">
+                    <div style={{ flex: 1 }}>
+                      <span>{liveConflictError ?? liveFastError}</span>
+                    </div>
+                    <div className="banner__actions">
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        onClick={() => {
+                          if (liveFastError) retryLiveFastCheck();
+                          if (liveConflictError) retryLiveConflictCheck();
+                        }}
+                      >
+                        Try again
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 {linkedPersonId ? (
                   <div
                     style={{
@@ -3984,13 +4019,28 @@ export function EnquiryFormClient({
                   <div className="section-label" style={{ marginBottom: 6 }}>
                     Step 2 — Pre-conversion conflict check
                   </div>
-                  {loadingConvertConflicts ? (
+                  {convertModalState.status === 'loading' ? (
                     <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
                       <span className="muted" style={{ fontSize: 13 }}>
-                        Checking client and other parties against firm records…
+                        Checking for conflicts…
                       </span>
                     </div>
-                  ) : conflictCheck.hasBlockingConflict ? (
+                  ) : convertModalState.status === 'error' ? (
+                    <div className="banner banner--warning" role="alert">
+                      <div>
+                        <strong>{convertModalState.errorMessage}</strong>
+                      </div>
+                      <div className="banner__actions">
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          onClick={retryConvertConflictCheck}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    </div>
+                  ) : convertModalState.status === 'blocking_conflict' ? (
                     <div className="banner banner--warning">
                       <div>
                         <strong>Conflict identified — conversion blocked:</strong>
@@ -4036,7 +4086,7 @@ export function EnquiryFormClient({
                 >
                   Cancel
                 </button>
-                {conflictCheck.hasBlockingConflict ? (
+                {convertModalState.status === 'blocking_conflict' ? (
                   <button
                     type="button"
                     className="btn btn--primary"
@@ -4045,7 +4095,11 @@ export function EnquiryFormClient({
                     Decline enquiry (Conflict)
                   </button>
                 ) : (
-                  <button type="submit" className="btn btn--primary" disabled={pending}>
+                  <button
+                    type="submit"
+                    className="btn btn--primary"
+                    disabled={pending || !convertModalState.canContinue}
+                  >
                     Continue to pre-filled New Matter form →
                   </button>
                 )}

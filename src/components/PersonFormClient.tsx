@@ -1061,7 +1061,12 @@ export function PersonFormClient({
     [preferredName, firstName, surname, otherNames],
   );
 
-  const { preview: intakePreview, triggerConflictCheck } = useIntakePreview({
+  const {
+    preview: intakePreview,
+    fastError: duplicatePreviewError,
+    triggerConflictCheck,
+    retryFastCheck: retryDuplicatePreview,
+  } = useIntakePreview({
     kind: 'person',
     excludeId: existing?.id ?? null,
     dismissedDuplicateIds: existing?.notDuplicateOf,
@@ -1645,6 +1650,23 @@ export function PersonFormClient({
                 </div>
               </div>
             </div>
+
+            {duplicatePreviewError ? (
+              <div className="banner banner--warning" role="alert">
+                <div>
+                  <strong>{duplicatePreviewError}</strong>
+                </div>
+                <div className="banner__actions">
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    onClick={retryDuplicatePreview}
+                  >
+                    Try again
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             {liveDuplicates.length > 0 ? (
               <div className="banner banner--warning" role="alert">

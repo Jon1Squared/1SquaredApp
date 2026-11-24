@@ -14,6 +14,7 @@ export const ENTITY_PICKER_DEBOUNCE_MS = 280;
 export interface UseEntityPickerOptions {
   readonly enabled?: boolean;
   readonly debounceMs?: number;
+  readonly reloadKey?: number;
 }
 
 export interface UseEntityPickerResult {
@@ -32,6 +33,7 @@ export function useEntityPicker(
 ): UseEntityPickerResult {
   const enabled = options?.enabled ?? true;
   const debounceMs = options?.debounceMs ?? ENTITY_PICKER_DEBOUNCE_MS;
+  const reloadKey = options?.reloadKey ?? 0;
   const serialized = useMemo(() => JSON.stringify(input), [input]);
   const stableInput = useMemo<EntityPickerSearchInput>(
     () => JSON.parse(serialized) as EntityPickerSearchInput,
@@ -65,7 +67,11 @@ export function useEntityPicker(
           if (cancelled || seq !== seqRef.current) return;
           if (isActionDenied(res)) {
             setItems([]);
-            setError(res.message);
+            setError(
+              res.message
+                ? `Couldn't search directory (${res.message}). Try again.`
+                : "Couldn't search directory. Try again.",
+            );
           } else {
             setItems(res.items);
             setError(null);
@@ -74,7 +80,7 @@ export function useEntityPicker(
         })
         .catch(() => {
           if (cancelled || seq !== seqRef.current) return;
-          setError('Unable to search records.');
+          setError("Couldn't search directory. Try again.");
           setLoading(false);
         });
     }, debounceMs);
@@ -83,7 +89,7 @@ export function useEntityPicker(
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [enabled, debounceMs, stableInput]);
+  }, [enabled, debounceMs, stableInput, reloadKey]);
 
   return { items, loading, error };
 }
@@ -129,11 +135,15 @@ export function EntitySearchSelect({
   required = false,
   searchPlaceholder = 'Filter records from directory…',
   searchAriaLabel = 'Search directory options',
-  autoload = true,
+  autoload = false,
   limit = 25,
 }: EntitySearchSelectProps) {
   const [query, setQuery] = useState('');
   const [activated, setActivated] = useState(autoload);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [selectedCache, setSelectedCache] = useState<
+    Record<string, EntityPickerOption>
+  >({});
 
   const pickerInput = useMemo<EntityPickerSearchInput>(
     () => ({
@@ -156,9 +166,14 @@ export function EntitySearchSelect({
     ],
   );
 
-  const { items: remoteItems, loading } = useEntityPicker(pickerInput, {
+  const {
+    items: remoteItems,
+    loading,
+    error,
+  } = useEntityPicker(pickerInput, {
     enabled: !disabled && (activated || query.trim().length > 0),
     debounceMs: query.trim().length > 0 ? ENTITY_PICKER_DEBOUNCE_MS : 0,
+    reloadKey,
   });
 
   const mergedOptions = useMemo(() => {
@@ -166,13 +181,16 @@ export function EntitySearchSelect({
     for (const opt of initialOptions) {
       byId.set(opt.id, opt);
     }
+    if (value && !byId.has(value) && selectedCache[value]) {
+      byId.set(value, selectedCache[value]);
+    }
     for (const opt of remoteItems) {
       if (!byId.has(opt.id)) {
         byId.set(opt.id, opt);
       }
     }
     return Array.from(byId.values());
-  }, [initialOptions, remoteItems]);
+  }, [initialOptions, remoteItems, selectedCache, value]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -200,6 +218,12 @@ export function EntitySearchSelect({
         onChange={(e) => {
           const nextId = e.target.value;
           const picked = mergedOptions.find((o) => o.id === nextId);
+          if (picked) {
+            setSelectedCache((prev) => ({
+              ...prev,
+              [picked.id]: picked,
+            }));
+          }
           onChange(nextId, picked);
         }}
       >
@@ -214,6 +238,31 @@ export function EntitySearchSelect({
         <span className="muted" style={{ fontSize: 11.5 }}>
           Searching…
         </span>
+      ) : null}
+      {error ? (
+        <div
+          role="alert"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 12,
+            color: '#b91c1c',
+          }}
+        >
+          <span>{error}</span>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            style={{ padding: '0 6px', height: 22, fontSize: 11.5 }}
+            onClick={() => {
+              setActivated(true);
+              setReloadKey((k) => k + 1);
+            }}
+          >
+            Try again
+          </button>
+        </div>
       ) : null}
     </div>
   );

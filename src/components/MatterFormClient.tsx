@@ -50,6 +50,7 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import type {
+  EntityPickerOption,
   EntityPickerOrganisationSummary,
   EntityPickerPersonSummary,
 } from '@/domain/intakePreviewTypes';
@@ -176,7 +177,7 @@ import { OrganisationFormClient } from './OrganisationFormClient';
 import { PersonFormClient } from './PersonFormClient';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
-import { useEntityPicker } from './useEntityPicker';
+import { EntitySearchSelect, useEntityPicker } from './useEntityPicker';
 
 interface MatterFormClientProps {
   existing?: Matter | null;
@@ -1023,7 +1024,9 @@ export function MatterFormClient({
   const [newPartyMoreDetailsOpen, setNewPartyMoreDetailsOpen] = useState<boolean>(false);
   const [newPartyIdentifiers, setNewPartyIdentifiers] = useState<MatterPartyIdentifiers>({});
   const [newPartyLinkedId, setNewPartyLinkedId] = useState<string | null>(null);
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedExistingPartyOption, setSelectedExistingPartyOption] =
+    useState<EntityPickerOption | null>(null);
+  const [hydratingExistingParty, setHydratingExistingParty] = useState<boolean>(false);
   const [capacityDropdownOpen, setCapacityDropdownOpen] = useState(false);
 
   // 3 · CONFLICT SEARCH state
@@ -3009,6 +3012,16 @@ export function MatterFormClient({
     [instructingPerson],
   );
 
+  const billingPerson = useMemo(
+    () =>
+      billingContactId
+        ? people.find((p) => p.id === billingContactId) ??
+          pickedClientPeopleById[billingContactId] ??
+          null
+        : null,
+    [people, pickedClientPeopleById, billingContactId],
+  );
+
   // Contacts linked to the selected client orgs (or person clients)
   const clientContacts = useMemo(() => {
     const allKnownPeople: Array<Person | EntityPickerPersonSummary> = [
@@ -3034,6 +3047,72 @@ export function MatterFormClient({
       (p) => !p.isEmployee && !p.mergedIntoId && !clientIds.includes(p.id),
     );
   }, [clientIds, links, people, pickedClientPeopleById]);
+
+  const minorClientPersonIds = useMemo(() => {
+    const ids: string[] = [];
+    const ref = new Date(today.length === 10 ? `${today}T00:00:00` : today);
+    if (Number.isNaN(ref.getTime())) return ids;
+    for (const c of selectedClients) {
+      if (c.entityType !== 'person' || !c.person?.dateOfBirth) continue;
+      const dobStr = c.person.dateOfBirth;
+      const birth = new Date(dobStr.length === 10 ? `${dobStr}T00:00:00` : dobStr);
+      if (Number.isNaN(birth.getTime())) continue;
+      let age = ref.getFullYear() - birth.getFullYear();
+      const m = ref.getMonth() - birth.getMonth();
+      if (m < 0 || (m === 0 && ref.getDate() < birth.getDate())) {
+        age--;
+      }
+      if (age < 18) ids.push(c.id);
+    }
+    return ids;
+  }, [selectedClients, today]);
+
+  const instructingContactInitialOptions = useMemo<EntityPickerOption[]>(() => {
+    const map = new Map<string, EntityPickerOption>();
+    const toOpt = (p: Person | EntityPickerPersonSummary): EntityPickerOption => ({
+      id: p.id,
+      recordType: 'person',
+      label: `${personDisplayName(p)}${p.jobTitle ? ` — ${p.jobTitle}` : ''}`,
+      subtitle: p.jobTitle ?? '',
+      reference: p.id,
+      href: `/people/${p.id}`,
+      person: p,
+    });
+    for (const p of clientContacts) {
+      map.set(p.id, toOpt(p));
+    }
+    if (instructingPerson && !map.has(instructingPerson.id)) {
+      map.set(instructingPerson.id, toOpt(instructingPerson));
+    }
+    return Array.from(map.values());
+  }, [clientContacts, instructingPerson]);
+
+  const billingContactInitialOptions = useMemo<EntityPickerOption[]>(() => {
+    const map = new Map<string, EntityPickerOption>();
+    for (const p of clientContacts) {
+      map.set(p.id, {
+        id: p.id,
+        recordType: 'person',
+        label: personDisplayName(p),
+        subtitle: p.jobTitle ?? '',
+        reference: p.id,
+        href: `/people/${p.id}`,
+        person: p,
+      });
+    }
+    if (billingPerson && !map.has(billingPerson.id)) {
+      map.set(billingPerson.id, {
+        id: billingPerson.id,
+        recordType: 'person',
+        label: personDisplayName(billingPerson),
+        subtitle: billingPerson.jobTitle ?? '',
+        reference: billingPerson.id,
+        href: `/people/${billingPerson.id}`,
+        person: billingPerson,
+      });
+    }
+    return Array.from(map.values());
+  }, [clientContacts, billingPerson]);
 
   // Only show Instructing contact if client(s) are under 18 or are an organisation
   const showInstructingContact = useMemo(() => {
@@ -3250,7 +3329,7 @@ export function MatterFormClient({
           }
           return added.length > 0 ? [...prev, ...added] : prev;
         });
-        if (!instructingContactId && contactPeople[0]) {
+        if (contactPeople[0]) {
           setInstructingContactId((curr) => curr ?? contactPeople[0].id);
         }
       });
@@ -3265,15 +3344,13 @@ export function MatterFormClient({
       return merged;
     });
     // Auto-populate instructing contact if an organisation client is added and instructing contact is not yet set
-    if (!instructingContactId) {
-      const firstOrgClient = idsToAdd.find((id) => id.startsWith('O-'));
-      if (firstOrgClient) {
-        const linkedContact = links.find(
-          (l) => l.organisationId === firstOrgClient && l.isCurrent,
-        );
-        if (linkedContact) {
-          setInstructingContactId(linkedContact.personId);
-        }
+    const firstOrgClient = idsToAdd.find((id) => id.startsWith('O-'));
+    if (firstOrgClient) {
+      const linkedContact = links.find(
+        (l) => l.organisationId === firstOrgClient && l.isCurrent,
+      );
+      if (linkedContact) {
+        setInstructingContactId((curr) => curr ?? linkedContact.personId);
       }
     }
     if (hasRunSearch) {
@@ -3643,122 +3720,6 @@ export function MatterFormClient({
     taxonomy.relationships,
   ]);
 
-  // Typeahead suggestions when typing in "+ Add party"
-  const partySuggestions = useMemo(() => {
-    const q = newPartyName.trim().toLowerCase();
-    const results: {
-      id: string;
-      name: string;
-      entityType: ConflictPartyEntityType;
-      subtitle: string;
-      identifiers: MatterPartyIdentifiers;
-    }[] = [];
-
-    if (q.length >= 1) {
-      for (const o of organisations) {
-        if (o.mergedIntoId) continue;
-        if (results.some((r) => r.id === o.id)) continue;
-        if (
-          o.legalName.toLowerCase().includes(q) ||
-          o.otherNames.some((n) => n.name.toLowerCase().includes(q)) ||
-          (o.companyNumber && o.companyNumber.toLowerCase().includes(q))
-        ) {
-          results.push({
-            id: o.id,
-            name: o.legalName,
-            entityType: 'organisation',
-            subtitle: [
-              'Organisation',
-              o.companyNumber ? `Co. no. ${o.companyNumber}` : null,
-              o.registeredAddress?.town || 'UK',
-            ]
-              .filter(Boolean)
-              .join(' · '),
-            identifiers: {
-              companyNumber: o.companyNumber || undefined,
-              registeredTown: o.registeredAddress?.town || undefined,
-            },
-          });
-        }
-      }
-      for (const p of people) {
-        if (p.mergedIntoId || p.demo || p.isEmployee) continue;
-        const pName = personDisplayName(p);
-        if (results.some((r) => r.id === p.id)) continue;
-        if (
-          pName.toLowerCase().includes(q) ||
-          p.otherNames.some((n) => n.name.toLowerCase().includes(q))
-        ) {
-          results.push({
-            id: p.id,
-            name: pName,
-            entityType: 'person',
-            subtitle: [
-              'Person',
-              p.jobTitle || 'Contact',
-              p.addresses?.[0]?.town || null,
-            ]
-              .filter(Boolean)
-              .join(' · '),
-            identifiers: {
-              dateOfBirth: p.dateOfBirth || undefined,
-              previousNames: p.otherNames?.map((n) => n.name).join(', ') || undefined,
-              town: p.addresses?.[0]?.town || undefined,
-            },
-          });
-        }
-      }
-      for (const enq of enquiries) {
-        if (enq.anonymisedAt) continue;
-        const behalf = (enq.callingOnBehalfOf ?? '').trim();
-        if (
-          behalf &&
-          behalf.toLowerCase().includes(q) &&
-          !results.some((r) => r.name.toLowerCase() === behalf.toLowerCase())
-        ) {
-          results.push({
-            id: enq.linkedOrganisationId || enq.id,
-            name: behalf,
-            entityType: 'organisation',
-            subtitle: ['Enquiry organisation', enq.reference, enq.address?.town || null]
-              .filter(Boolean)
-              .join(' · '),
-            identifiers: {
-              registeredTown: enq.address?.town || undefined,
-            },
-          });
-        }
-        const otherNames = (enq.otherPartiesNamed ?? '')
-          .split(/[,;/\n]+/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        for (const otherName of otherNames) {
-          if (
-            otherName.toLowerCase().includes(q) &&
-            !results.some((r) => r.name.toLowerCase() === otherName.toLowerCase())
-          ) {
-            const isLikelyPerson =
-              !/\b(ltd|limited|llp|plc|inc|corp|company|association|council|partners|solicitors|group|holdings|estates|solutions|investments|auctioneers|commercial|bank|trust)\b/i.test(
-                otherName,
-              ) && otherName.split(/\s+/).length <= 3;
-            results.push({
-              id: `${enq.id}-other-${otherName}`,
-              name: otherName,
-              entityType: isLikelyPerson ? 'person' : 'organisation',
-              subtitle: [
-                isLikelyPerson ? 'Person (from enquiry)' : 'Organisation (from enquiry)',
-                `Named on ${enq.reference}`,
-              ].join(' · '),
-              identifiers: {},
-            });
-          }
-        }
-      }
-    }
-
-    return results.slice(0, 6);
-  }, [newPartyName, organisations, people, enquiries]);
-
   // Run conflict search handler (executes server-side across all tenant matters, including restricted matters)
   async function handleRunConflictSearch() {
     try {
@@ -3830,7 +3791,8 @@ export function MatterFormClient({
     setNewPartyMoreDetailsOpen(false);
     setNewPartyIdentifiers({});
     setNewPartyLinkedId(null);
-    setShowSuggestions(false);
+    setSelectedExistingPartyOption(null);
+    setHydratingExistingParty(false);
     setCapacityDropdownOpen(false);
   }
 
@@ -3845,9 +3807,151 @@ export function MatterFormClient({
     setNewPartyMoreDetailsOpen(false);
     setNewPartyIdentifiers({});
     setNewPartyLinkedId(null);
-    setShowSuggestions(false);
+    setSelectedExistingPartyOption(null);
+    setHydratingExistingParty(false);
     setCapacityDropdownOpen(false);
     setPartyModalOpen(true);
+  }
+
+  function addPersonRecordToMatter(
+    personRec: Person | EntityPickerPersonSummary,
+    toastText: string,
+  ) {
+    handleAddParty({
+      id: editingPartyId ?? undefined,
+      name: personDisplayName(personRec),
+      entityType: 'person',
+      relationshipCode: newPartyRelationshipCode,
+      capacityCodes: newPartyCapacityCodes,
+      connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
+        ? newPartyConnectedToId ||
+          getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+          null
+        : null,
+      identifiers: {
+        dateOfBirth: personRec.dateOfBirth || undefined,
+        previousNames:
+          'otherNames' in personRec
+            ? personRec.otherNames?.map((n) => n.name).join(', ') || undefined
+            : undefined,
+        town: personRec.addresses?.[0]?.town || undefined,
+      },
+      linkedRecordId: personRec.id,
+    });
+    showToast(toastText);
+  }
+
+  function addOrgRecordToMatter(
+    orgRec: Organisation | EntityPickerOrganisationSummary,
+    toastText: string,
+  ) {
+    handleAddParty({
+      id: editingPartyId ?? undefined,
+      name: orgRec.legalName,
+      entityType: 'organisation',
+      relationshipCode: newPartyRelationshipCode,
+      capacityCodes: newPartyCapacityCodes,
+      connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
+        ? newPartyConnectedToId ||
+          getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+          null
+        : null,
+      identifiers: {
+        companyNumber: orgRec.companyNumber || undefined,
+        previousNames:
+          'otherNames' in orgRec
+            ? orgRec.otherNames?.map((n) => n.name).join(', ') || undefined
+            : undefined,
+        registeredTown: orgRec.registeredAddress?.town || undefined,
+      },
+      linkedRecordId: orgRec.id,
+    });
+    showToast(toastText);
+  }
+
+  async function handleConfirmAddSelectedExistingParty() {
+    if (!selectedExistingPartyOption) return;
+    const picked = selectedExistingPartyOption;
+    setHydratingExistingParty(true);
+    try {
+      const res = await getEntityRecordForEditAction(newPartyType, picked.id);
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
+      if (newPartyType === 'organisation') {
+        const hydratedOrg = res.organisation ?? picked.organisation ?? null;
+        if (res.organisation) {
+          const fullOrg = res.organisation;
+          setOrganisations((prev) =>
+            prev.some((o) => o.id === fullOrg.id)
+              ? prev.map((o) => (o.id === fullOrg.id ? fullOrg : o))
+              : [...prev, fullOrg],
+          );
+        }
+        if (hydratedOrg) {
+          addOrgRecordToMatter(
+            hydratedOrg,
+            `Added ${hydratedOrg.legalName} to matter parties`,
+          );
+        } else {
+          handleAddParty({
+            id: editingPartyId ?? undefined,
+            name: picked.label,
+            entityType: 'organisation',
+            relationshipCode: newPartyRelationshipCode,
+            capacityCodes: newPartyCapacityCodes,
+            connectedToPartyId: ['CC', 'CO', 'TP'].includes(
+              newPartyRelationshipCode,
+            )
+              ? newPartyConnectedToId ||
+                getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+                null
+              : null,
+            linkedRecordId: picked.id,
+          });
+          showToast(`Added ${picked.label} to matter parties`);
+        }
+        return;
+      }
+
+      const hydratedPerson = res.person ?? picked.person ?? null;
+      if (res.person) {
+        const fullPerson = res.person;
+        setPeople((prev) =>
+          prev.some((p) => p.id === fullPerson.id)
+            ? prev.map((p) => (p.id === fullPerson.id ? fullPerson : p))
+            : [...prev, fullPerson],
+        );
+      }
+      if (hydratedPerson) {
+        addPersonRecordToMatter(
+          hydratedPerson,
+          `Added ${personDisplayName(hydratedPerson)} to matter parties`,
+        );
+      } else {
+        handleAddParty({
+          id: editingPartyId ?? undefined,
+          name: picked.label,
+          entityType: 'person',
+          relationshipCode: newPartyRelationshipCode,
+          capacityCodes: newPartyCapacityCodes,
+          connectedToPartyId: ['CC', 'CO', 'TP'].includes(
+            newPartyRelationshipCode,
+          )
+            ? newPartyConnectedToId ||
+              getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+              null
+            : null,
+          linkedRecordId: picked.id,
+        });
+        showToast(`Added ${picked.label} to matter parties`);
+      }
+    } catch {
+      showToast('Could not load selected record. Try again.');
+    } finally {
+      setHydratingExistingParty(false);
+    }
   }
 
   function handleStartEditParty(party: ConflictCheckParty) {
@@ -3868,6 +3972,8 @@ export function MatterFormClient({
       ),
     );
     setNewPartyLinkedId(party.linkedRecordId ?? null);
+    setSelectedExistingPartyOption(null);
+    setHydratingExistingParty(false);
     setPartyModalOpen(true);
   }
 
@@ -6725,24 +6831,31 @@ export function MatterFormClient({
                   <label className="field-label" htmlFor="nm-instructing">
                     Instructing contact <span className="field-required">*</span>
                   </label>
-                  <select
+                  <EntitySearchSelect
                     id="nm-instructing"
-                    className="field-select"
+                    entityTypes={['person']}
+                    nonEmployeesOnly
+                    excludeDemo
+                    autoload={false}
+                    excludeIds={minorClientPersonIds}
                     value={instructingContactId ?? ''}
                     disabled={isReadOnlyFeeEarner}
-                    onChange={(e) => {
-                      setInstructingContactId(e.target.value || null);
+                    emptyLabel="Select instructing contact…"
+                    searchPlaceholder="Search people in directory…"
+                    searchAriaLabel="Search instructing contacts"
+                    initialOptions={instructingContactInitialOptions}
+                    onChange={(nextId, opt) => {
+                      if (nextId && opt?.person) {
+                        const pickedPerson = opt.person;
+                        setPickedClientPeopleById((prev) => ({
+                          ...prev,
+                          [nextId]: pickedPerson,
+                        }));
+                      }
+                      setInstructingContactId(nextId || null);
                       if (hasRunSearch) setPartiesChangedSinceSearch(true);
                     }}
-                  >
-                    <option value="">Select instructing contact…</option>
-                    {clientContacts.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {personDisplayName(p)}
-                        {p.jobTitle ? ` — ${p.jobTitle}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
               ) : null}
 
@@ -11677,19 +11790,31 @@ export function MatterFormClient({
                       </select>
                     </div>
                     <div className="field-group">
-                      <label className="field-label">Billing contact</label>
-                      <select
-                        className="field-select"
+                      <label className="field-label" htmlFor="nm-billing">
+                        Billing contact
+                      </label>
+                      <EntitySearchSelect
+                        id="nm-billing"
+                        entityTypes={['person']}
+                        nonEmployeesOnly
+                        excludeDemo
+                        autoload={false}
                         value={billingContactId ?? ''}
-                        onChange={(e) => setBillingContactId(e.target.value || null)}
-                      >
-                        <option value="">Unknown value</option>
-                        {clientContacts.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {personDisplayName(p)}
-                          </option>
-                        ))}
-                      </select>
+                        emptyLabel="Unknown value"
+                        searchPlaceholder="Search people in directory…"
+                        searchAriaLabel="Search billing contacts"
+                        initialOptions={billingContactInitialOptions}
+                        onChange={(nextId, opt) => {
+                          if (nextId && opt?.person) {
+                            const pickedPerson = opt.person;
+                            setPickedClientPeopleById((prev) => ({
+                              ...prev,
+                              [nextId]: pickedPerson,
+                            }));
+                          }
+                          setBillingContactId(nextId || null);
+                        }}
+                      />
                     </div>
                     <div className="field-group">
                       <label className="field-label">Fee estimate (£)</label>
@@ -12747,6 +12872,13 @@ export function MatterFormClient({
                   orgStructure={orgStructure}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingPerson={(existingPerson) => {
+                    setPeople((prev) =>
+                      prev.some((p) => p.id === existingPerson.id)
+                        ? prev.map((p) =>
+                            p.id === existingPerson.id ? existingPerson : p,
+                          )
+                        : [...prev, existingPerson],
+                    );
                     handleAddClientsToMatter(
                       [existingPerson.id],
                       `Added existing contact ${personDisplayName(existingPerson)} as client`,
@@ -12831,6 +12963,13 @@ export function MatterFormClient({
                   tenantId={tenantId}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingOrganisation={(existingOrg) => {
+                    setOrganisations((prev) =>
+                      prev.some((o) => o.id === existingOrg.id)
+                        ? prev.map((o) =>
+                            o.id === existingOrg.id ? existingOrg : o,
+                          )
+                        : [...prev, existingOrg],
+                    );
                     handleAddClientsToMatter(
                       [existingOrg.id],
                       `Added existing organisation ${existingOrg.legalName} as client`,
@@ -12926,7 +13065,10 @@ export function MatterFormClient({
                     className={`conflict-seg-btn ${
                       newPartyType === 'organisation' ? 'conflict-seg-btn--active' : ''
                     }`}
-                    onClick={() => setNewPartyType('organisation')}
+                    onClick={() => {
+                      setNewPartyType('organisation');
+                      setSelectedExistingPartyOption(null);
+                    }}
                   >
                     <Building2 size={14} style={{ marginRight: 5 }} />
                     Organisation
@@ -12936,7 +13078,10 @@ export function MatterFormClient({
                     className={`conflict-seg-btn ${
                       newPartyType === 'person' ? 'conflict-seg-btn--active' : ''
                     }`}
-                    onClick={() => setNewPartyType('person')}
+                    onClick={() => {
+                      setNewPartyType('person');
+                      setSelectedExistingPartyOption(null);
+                    }}
                   >
                     <User size={14} style={{ marginRight: 5 }} />
                     Person
@@ -13163,6 +13308,76 @@ export function MatterFormClient({
                         </div>
                       ) : null}
                     </div>
+
+                    {!editingPartyId ? (
+                      <div
+                        style={{
+                          marginTop: 14,
+                          paddingTop: 12,
+                          borderTop: '1px solid var(--border-subtle)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <label
+                          className="field-label"
+                          htmlFor="nm-party-existing-search"
+                        >
+                          {newPartyType === 'organisation'
+                            ? 'Link an existing organisation from directory'
+                            : 'Link an existing person from directory'}
+                        </label>
+                        <EntitySearchSelect
+                          key={`party-existing-${newPartyType}`}
+                          id="nm-party-existing-search"
+                          entityTypes={[newPartyType]}
+                          nonEmployeesOnly={newPartyType === 'person'}
+                          excludeDemo
+                          autoload={false}
+                          value={selectedExistingPartyOption?.id ?? ''}
+                          emptyLabel={
+                            newPartyType === 'organisation'
+                              ? 'Select an existing organisation…'
+                              : 'Select an existing person…'
+                          }
+                          searchPlaceholder={
+                            newPartyType === 'organisation'
+                              ? 'Search existing organisations…'
+                              : 'Search existing people…'
+                          }
+                          searchAriaLabel={
+                            newPartyType === 'organisation'
+                              ? 'Search existing organisations'
+                              : 'Search existing people'
+                          }
+                          onChange={(nextId, opt) => {
+                            if (!nextId) {
+                              setSelectedExistingPartyOption(null);
+                              return;
+                            }
+                            setSelectedExistingPartyOption(opt ?? null);
+                          }}
+                        />
+                        {selectedExistingPartyOption ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <button
+                              type="button"
+                              className="btn btn--primary btn--sm"
+                              disabled={hydratingExistingParty}
+                              onClick={() => void handleConfirmAddSelectedExistingParty()}
+                            >
+                              {hydratingExistingParty
+                                ? 'Adding…'
+                                : `Add ${selectedExistingPartyOption.label} as party`}
+                            </button>
+                            <span className="muted" style={{ fontSize: 12 }}>
+                              Or create a new record below
+                            </span>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </section>
                 );
 
@@ -13173,29 +13388,6 @@ export function MatterFormClient({
                   const nameParts = newPartyName.trim().split(/\s+/).filter(Boolean);
                   const initFirstName = nameParts[0] ?? '';
                   const initSurname = nameParts.slice(1).join(' ');
-
-                  const addPersonRecordToMatter = (personRec: Person, toastText: string) => {
-                    handleAddParty({
-                      id: editingPartyId ?? undefined,
-                      name: personDisplayName(personRec),
-                      entityType: 'person',
-                      relationshipCode: newPartyRelationshipCode,
-                      capacityCodes: newPartyCapacityCodes,
-                      connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
-                        ? newPartyConnectedToId ||
-                          getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
-                          null
-                        : null,
-                      identifiers: {
-                        dateOfBirth: personRec.dateOfBirth || undefined,
-                        previousNames:
-                          personRec.otherNames?.map((n) => n.name).join(', ') || undefined,
-                        town: personRec.addresses?.[0]?.town || undefined,
-                      },
-                      linkedRecordId: personRec.id,
-                    });
-                    showToast(toastText);
-                  };
 
                   return (
                     <PersonFormClient
@@ -13233,6 +13425,13 @@ export function MatterFormClient({
                       orgStructure={orgStructure}
                       onCancelModal={resetAddPartyForm}
                       onSelectExistingPerson={(existingPerson) => {
+                        setPeople((prev) =>
+                          prev.some((p) => p.id === existingPerson.id)
+                            ? prev.map((p) =>
+                                p.id === existingPerson.id ? existingPerson : p,
+                              )
+                            : [...prev, existingPerson],
+                        );
                         addPersonRecordToMatter(
                           existingPerson,
                           `Added ${personDisplayName(existingPerson)} to matter parties`,
@@ -13282,29 +13481,6 @@ export function MatterFormClient({
                   ? organisations.find((o) => o.id === newPartyLinkedId) ?? null
                   : null;
 
-                const addOrgRecordToMatter = (orgRec: Organisation, toastText: string) => {
-                  handleAddParty({
-                    id: editingPartyId ?? undefined,
-                    name: orgRec.legalName,
-                    entityType: 'organisation',
-                    relationshipCode: newPartyRelationshipCode,
-                    capacityCodes: newPartyCapacityCodes,
-                    connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
-                      ? newPartyConnectedToId ||
-                        getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
-                        null
-                      : null,
-                    identifiers: {
-                      companyNumber: orgRec.companyNumber || undefined,
-                      previousNames:
-                        orgRec.otherNames?.map((n) => n.name).join(', ') || undefined,
-                      registeredTown: orgRec.registeredAddress?.town || undefined,
-                    },
-                    linkedRecordId: orgRec.id,
-                  });
-                  showToast(toastText);
-                };
-
                 return (
                   <OrganisationFormClient
                     key={`party-org-${editingPartyId ?? 'new'}-${newPartyLinkedId ?? 'unlinked'}`}
@@ -13338,6 +13514,13 @@ export function MatterFormClient({
                     tenantId={tenantId}
                     onCancelModal={resetAddPartyForm}
                     onSelectExistingOrganisation={(existingOrg) => {
+                      setOrganisations((prev) =>
+                        prev.some((o) => o.id === existingOrg.id)
+                          ? prev.map((o) =>
+                              o.id === existingOrg.id ? existingOrg : o,
+                            )
+                          : [...prev, existingOrg],
+                      );
                       addOrgRecordToMatter(
                         existingOrg,
                         `Added ${existingOrg.legalName} to matter parties`,

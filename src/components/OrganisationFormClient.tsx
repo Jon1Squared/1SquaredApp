@@ -417,7 +417,12 @@ export function OrganisationFormClient({
     [cleanFormerNames, cleanPscs, cleanDirectors],
   );
 
-  const { preview: intakePreview, triggerConflictCheck } = useIntakePreview({
+  const {
+    preview: intakePreview,
+    fastError: duplicatePreviewError,
+    triggerConflictCheck,
+    retryFastCheck: retryDuplicatePreview,
+  } = useIntakePreview({
     kind: 'organisation',
     excludeId: existing?.id ?? null,
     dismissedDuplicateIds: existing?.notDuplicateOf,
@@ -650,6 +655,23 @@ export function OrganisationFormClient({
                 </div>
               </div>
             </div>
+
+            {duplicatePreviewError ? (
+              <div className="banner banner--warning" role="alert" style={{ marginBottom: 0 }}>
+                <div>
+                  <strong>{duplicatePreviewError}</strong>
+                </div>
+                <div className="banner__actions">
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    onClick={retryDuplicatePreview}
+                  >
+                    Try again
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             {liveDuplicates.length > 0 ? (
               <div className="banner banner--warning" role="alert" style={{ marginBottom: 0 }}>

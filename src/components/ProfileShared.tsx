@@ -527,6 +527,7 @@ export function LinkModal({
                 id="link-org-select"
                 className="select"
                 entityTypes={['organisation']}
+                autoload
                 value={organisationId}
                 required
                 emptyLabel="Select an organisation…"
@@ -556,6 +557,7 @@ export function LinkModal({
                 id="link-person-select"
                 className="select"
                 entityTypes={['person']}
+                autoload
                 value={personId}
                 required
                 emptyLabel="Select a person…"

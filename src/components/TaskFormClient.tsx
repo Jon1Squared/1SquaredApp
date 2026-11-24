@@ -8,6 +8,7 @@ import { saveTaskAction } from '@/app/actions';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { personDisplayName, primaryEmail, primaryPhone, recordHref } from '@/domain/names';
 import { quoteClientDisplayName, quoteWorkTypeSummary } from '@/domain/quotes';
+import type { EntityPickerMatterSummary } from '@/domain/intakePreviewTypes';
 import type {
   ChoiceValue,
   Enquiry,
@@ -49,7 +50,18 @@ interface SearchableRecordItem {
   subtitle: string;
   href: string;
   searchText: string;
+  matterSummary?: EntityPickerMatterSummary;
 }
+
+const TASK_RECORD_TYPE_LABELS: Readonly<
+  Record<TaskLinkedRecordType, SearchableRecordItem['typeLabel']>
+> = {
+  matter: 'Matter',
+  enquiry: 'Enquiry',
+  quote: 'Quote',
+  organisation: 'Organisation',
+  person: 'Person',
+};
 
 export function TaskFormClient({
   people,
@@ -82,6 +94,13 @@ export function TaskFormClient({
   const [pickedSearchRecords, setPickedSearchRecords] = useState<
     Record<string, SearchableRecordItem>
   >({});
+  const [pickedMattersById, setPickedMattersById] = useState<
+    Record<string, EntityPickerMatterSummary>
+  >({});
+  const memoisedInitialSelectedPersonIds = useMemo(
+    () => [currentUserId],
+    [currentUserId],
+  );
 
   // Build suggested people based on linked matter/enquiry or current user's team
   const suggestedPeople = useMemo<SuggestedTaskAssignee[]>(() => {
@@ -97,7 +116,9 @@ export function TaskFormClient({
 
     const linkedMatterRec = linkedRecords.find((lr) => lr.recordType === 'matter');
     const linkedMatter = linkedMatterRec
-      ? matters.find((m) => m.id === linkedMatterRec.recordId)
+      ? matters.find((m) => m.id === linkedMatterRec.recordId) ??
+        pickedMattersById[linkedMatterRec.recordId] ??
+        null
       : null;
 
     if (linkedMatter) {
@@ -137,7 +158,7 @@ export function TaskFormClient({
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [linkedRecords, matters, employees, people, currentUserId]);
+  }, [linkedRecords, matters, pickedMattersById, employees, people, currentUserId]);
 
   const searchableRecords = useMemo<SearchableRecordItem[]>(() => {
     const items: SearchableRecordItem[] = [];
@@ -229,22 +250,15 @@ export function TaskFormClient({
     return items;
   }, [matters, enquiries, quotes, organisations, people, values]);
 
-  const typeLabels: Record<TaskLinkedRecordType, SearchableRecordItem['typeLabel']> = {
-    matter: 'Matter',
-    enquiry: 'Enquiry',
-    quote: 'Quote',
-    organisation: 'Organisation',
-    person: 'Person',
-  };
-
-  const { items: pickerSearchResults } = useEntityPicker(
-    {
-      entityTypes: ['matter', 'enquiry', 'quote', 'organisation', 'person'],
-      query: recordSearchQuery,
-      limit: 15,
-    },
-    { enabled: Boolean(recordSearchQuery.trim()) },
-  );
+  const { items: pickerSearchResults, error: recordSearchError } =
+    useEntityPicker(
+      {
+        entityTypes: ['matter', 'enquiry', 'quote', 'organisation', 'person'],
+        query: recordSearchQuery,
+        limit: 15,
+      },
+      { enabled: Boolean(recordSearchQuery.trim()) },
+    );
 
   const matchingSearchRecords = useMemo<SearchableRecordItem[]>(() => {
     if (!recordSearchQuery.trim()) return [];
@@ -264,12 +278,13 @@ export function TaskFormClient({
       results.push({
         recordType: item.recordType,
         recordId: item.id,
-        typeLabel: typeLabels[item.recordType],
+        typeLabel: TASK_RECORD_TYPE_LABELS[item.recordType],
         reference: item.reference ?? item.id,
         title: item.label,
         subtitle: item.subtitle,
         href: item.href,
         searchText: '',
+        matterSummary: item.matterSummary,
       });
     }
     return results.slice(0, 12);
@@ -302,6 +317,13 @@ export function TaskFormClient({
       ...prev,
       [`${item.recordType}:${item.recordId}`]: item,
     }));
+    if (item.recordType === 'matter' && item.matterSummary) {
+      const pickedMatterSummary = item.matterSummary;
+      setPickedMattersById((prev) => ({
+        ...prev,
+        [item.recordId]: pickedMatterSummary,
+      }));
+    }
     setLinkedRecords((prev) => {
       if (
         prev.some(
@@ -356,7 +378,7 @@ export function TaskFormClient({
         initialTaskName=""
         taskNamePlaceholder="e.g. New matter submission for [MATTER NAME]"
         suggestedPeople={suggestedPeople}
-        initialSelectedPersonIds={[currentUserId]}
+        initialSelectedPersonIds={memoisedInitialSelectedPersonIds}
         employees={employees}
         values={values}
         defaultDueHoursFromNow={48}
@@ -476,7 +498,18 @@ export function TaskFormClient({
                     overflowY: 'auto',
                   }}
                 >
-                  {matchingSearchRecords.length === 0 ? (
+                  {recordSearchError ? (
+                    <div
+                      role="alert"
+                      style={{
+                        padding: '10px 12px',
+                        fontSize: 12.5,
+                        color: '#b91c1c',
+                      }}
+                    >
+                      {recordSearchError}
+                    </div>
+                  ) : matchingSearchRecords.length === 0 ? (
                     <div
                       className="muted"
                       style={{ padding: '10px 12px', fontSize: 12.5 }}

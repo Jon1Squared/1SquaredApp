@@ -782,3 +782,96 @@ test.describe('S1-02b C2: Server-backed duplicate and conflict previews during i
     }
   });
 });
+
+test.describe('S1-02b WP1b picker journeys', () => {
+  test('1. R699 minor person client can pick unlinked adult instructing contact on /matters/new', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/people/new');
+      await expect(page.locator('#p-first')).toBeVisible();
+      await page.locator('#p-first').fill('Alys');
+      await page.locator('#p-surname').fill('Bryn-Minor');
+      await page.locator('#p-dob').fill('2015-01-01');
+      await page.locator('#p-email').fill('alys.minor@example.test');
+      await page.getByRole('button', { name: 'Create person', exact: true }).click();
+      await page.waitForURL(/\/people\/P-/, { timeout: 15_000 });
+      const minorId = new URL(page.url()).pathname.split('/').pop();
+      expect(minorId).toMatch(/^P-/);
+
+      await page.goto(`/matters/new?clientId=${minorId}`);
+      await expect(page.locator('#nm-instructing')).toBeVisible({ timeout: 15_000 });
+
+      const instructingSearch = page.getByRole('searchbox', {
+        name: 'Search instructing contacts',
+      });
+      await expect(instructingSearch).toBeVisible();
+      await instructingSearch.fill('Mared Hughes');
+
+      const instructingSelect = page.locator('#nm-instructing');
+      await expect(
+        instructingSelect.locator('option[value="P-000013"]'),
+      ).toHaveCount(1, { timeout: 10_000 });
+      await instructingSelect.selectOption('P-000013');
+      await expect(instructingSelect).toHaveValue('P-000013');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('2. R701 + Add party modal searches directory and links existing organisation O-000015', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/matters/new');
+      const partiesCardHeading = page.locator('#card-2-heading');
+      await expect(partiesCardHeading).toBeVisible({ timeout: 15_000 });
+
+      const addPartyBtn = page.getByRole('button', { name: 'Add party' });
+      if (!(await addPartyBtn.isVisible())) {
+        await partiesCardHeading.click();
+      }
+      await expect(addPartyBtn).toBeVisible();
+      await addPartyBtn.click();
+
+      const orgSearch = page.getByRole('searchbox', {
+        name: 'Search existing organisations',
+      });
+      await expect(orgSearch).toBeVisible();
+      await orgSearch.fill('Coastline Outdoor');
+
+      const existingOrgSelect = page.locator('#nm-party-existing-search');
+      await expect(
+        existingOrgSelect.locator('option[value="O-000015"]'),
+      ).toHaveCount(1, { timeout: 10_000 });
+      await existingOrgSelect.selectOption('O-000015');
+
+      await page.locator('#nm-party-relationship').selectOption('OP');
+      await page
+        .getByRole('button', { name: /Add Coastline Outdoor Ltd as party/i })
+        .click();
+
+      const partiesCard = page.locator('section[aria-labelledby="card-2-heading"]');
+      await expect(partiesCard).toContainText('Coastline Outdoor Ltd');
+      await expect(
+        partiesCard.getByRole('button', { name: /Include related entities/i }),
+      ).toBeVisible();
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+});

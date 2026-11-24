@@ -35,6 +35,7 @@ import {
   resetConflictPreviewRateLimiterForTests,
   runMatterConflictSearchRecord,
   saveEnquiryRecord,
+  saveOrganisationRecord,
   savePersonRecord,
   searchEntityPickerRecord,
 } from '@/server/services';
@@ -1929,6 +1930,123 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
         expect(byId.get(sisterOrg.id)?.corporateRelation).toBe('group');
         expect(byId.get(directorPerson.id)?.corporateRelation).toBe('director');
         expect(byId.get(contactPerson.id)?.corporateRelation).toBe('contact');
+      });
+    },
+    45_000,
+  );
+
+  it(
+    '14. R714: savePersonRecord and saveOrganisationRecord auto-flag server-detected duplicates even when client flags/matchedDuplicateIds are omitted',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const partyRepo = new TenantPartyRepository();
+
+      const feActor = makeActorSession(
+        'P-000002',
+        ['fee_earner'],
+        env.tenantAlpha,
+      );
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(feActor.verifiedSession);
+
+      await runWithActiveActorSession(feActor, async () => {
+        const basePersonRes = await savePersonRecord(
+          {
+            firstName: 'Sioned',
+            surname: 'Pryce',
+            emails: [
+              {
+                id: 'em-sioned-1',
+                address: 'sioned.pryce@alpha-test.example',
+                typeId: null,
+                isPrimary: true,
+              },
+            ],
+            phones: [],
+          },
+          { byId: 'P-000002' },
+        );
+        expect(basePersonRes.errors).toBeUndefined();
+        const existingPersonId = basePersonRes.person.id;
+
+        // Save second matching Person with client flags omitted (simulating pending preview)
+        const secondPersonRes = await savePersonRecord(
+          {
+            firstName: 'Sioned',
+            surname: 'Pryce',
+            emails: [
+              {
+                id: 'em-sioned-2',
+                address: 'sioned.pryce.alt@alpha-test.example',
+                typeId: null,
+                isPrimary: true,
+              },
+            ],
+            phones: [],
+          },
+          {
+            byId: 'P-000002',
+            flagPossibleDuplicate: false,
+            matchedDuplicateIds: [],
+          },
+        );
+        expect(secondPersonRes.errors).toBeUndefined();
+        expect(secondPersonRes.person.duplicateStatusId).toBe(
+          'duplicate_status.possible_match',
+        );
+        expect(secondPersonRes.person.possibleMatchIds).toContain(existingPersonId);
+
+        const reloadedBasePerson = await partyRepo.getPersonById<Person>(
+          env.ctxAlpha,
+          existingPersonId,
+        );
+        expect(reloadedBasePerson?.duplicateStatusId).toBe(
+          'duplicate_status.possible_match',
+        );
+        expect(reloadedBasePerson?.possibleMatchIds).toContain(
+          secondPersonRes.person.id,
+        );
+
+        const baseOrgRes = await saveOrganisationRecord(
+          {
+            legalName: 'Cymru Quarry Services Ltd',
+            companyNumber: '09988776',
+          },
+          { byId: 'P-000002' },
+        );
+        expect(baseOrgRes.errors).toBeUndefined();
+        const existingOrgId = baseOrgRes.organisation.id;
+
+        // Save second matching Organisation without client flag/IDs
+        const secondOrgRes = await saveOrganisationRecord(
+          {
+            legalName: 'Cymru Quarry Services Limited',
+            companyNumber: '',
+          },
+          {
+            byId: 'P-000002',
+            flagPossibleDuplicate: false,
+            matchedDuplicateIds: [],
+          },
+        );
+        expect(secondOrgRes.errors).toBeUndefined();
+        expect(secondOrgRes.organisation.duplicateStatusId).toBe(
+          'duplicate_status.possible_match',
+        );
+        expect(secondOrgRes.organisation.possibleMatchIds).toContain(
+          existingOrgId,
+        );
+
+        const reloadedBaseOrg = await partyRepo.getOrganisationById<Organisation>(
+          env.ctxAlpha,
+          existingOrgId,
+        );
+        expect(reloadedBaseOrg?.duplicateStatusId).toBe(
+          'duplicate_status.possible_match',
+        );
+        expect(reloadedBaseOrg?.possibleMatchIds).toContain(
+          secondOrgRes.organisation.id,
+        );
       });
     },
     45_000,

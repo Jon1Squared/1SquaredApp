@@ -3954,6 +3954,67 @@ export async function savePersonRecord(
           ? Array.from(new Set([...nextActiveEmails, nextFirmWorkEmail])).sort()
           : nextActiveEmails;
 
+      const combinedPersonDupIds = new Set<string>(
+        opts.flagPossibleDuplicate
+          ? [...(person.possibleMatchIds ?? []), ...(opts.matchedDuplicateIds ?? [])]
+          : person.possibleMatchIds ?? [],
+      );
+      let sqlPersonCandidates: Person[] = [];
+      if (!opts.internalSystemStep && !person.mergedIntoId) {
+        const activeEmails = person.emails
+          .filter((e) => e.active !== false && e.address.trim().length > 0)
+          .map((e) => e.address.trim());
+        const activePhones = person.phones
+          .filter((p) => p.active !== false && p.number.trim().length > 0)
+          .map((p) => p.number.trim());
+        const activePostcodes = person.addresses
+          .map((a) => a.postcode.trim())
+          .filter(Boolean);
+        sqlPersonCandidates = await partyRepo.findSqlDuplicateCandidates<Person>(
+          personCtx,
+          {
+            kind: 'person',
+            id: person.id,
+            firstName: person.firstName,
+            preferredName: person.preferredName ?? undefined,
+            surname: person.surname,
+            otherNames: person.otherNames.map((n) => n.name),
+            emails: activeEmails,
+            phones: activePhones,
+            postcodes: activePostcodes,
+            fuzzy: true,
+            limit: 200,
+          },
+        );
+        const serverPersonDups = findPersonDuplicates(
+          {
+            id: person.id,
+            firstName: person.firstName,
+            surname: person.surname,
+            preferredName: person.preferredName ?? undefined,
+            emails: activeEmails,
+            phones: activePhones,
+            addresses: person.addresses,
+          },
+          sqlPersonCandidates,
+          person.notDuplicateOf,
+          { fuzzy: true },
+        ).filter((m) =>
+          m.reasons.some((r) => r !== 'address' && r !== 'postcode'),
+        );
+        for (const match of serverPersonDups) {
+          combinedPersonDupIds.add(match.record.id);
+        }
+      }
+      const dismissedPersonSet = new Set(person.notDuplicateOf);
+      const effectivePersonDupIds = Array.from(combinedPersonDupIds).filter(
+        (id) => id !== person.id && !dismissedPersonSet.has(id),
+      );
+      if (effectivePersonDupIds.length > 0 || opts.flagPossibleDuplicate) {
+        person.duplicateStatusId = dupPossible;
+        person.possibleMatchIds = effectivePersonDupIds;
+      }
+
       const fmtCtx = formatContext({
         people,
         organisations,
@@ -4020,15 +4081,21 @@ export async function savePersonRecord(
         }
       }
 
-      if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
-        for (const otherId of opts.matchedDuplicateIds) {
-          const other = people.find((p) => p.id === otherId);
-          if (other && !other.possibleMatchIds.includes(person.id)) {
-            const prevPerson = structuredClone(other);
-            other.possibleMatchIds.push(person.id);
-            other.duplicateStatusId = dupPossible;
-            changedDuplicatePeople.push({ person: other, prevPerson });
-          }
+      for (const otherId of effectivePersonDupIds) {
+        const other =
+          people.find((p) => p.id === otherId) ??
+          sqlPersonCandidates.find((p) => p.id === otherId) ??
+          (await partyRepo.getPersonById<Person>(personCtx, otherId));
+        if (
+          other &&
+          !other.mergedIntoId &&
+          !other.notDuplicateOf.includes(person.id) &&
+          !other.possibleMatchIds.includes(person.id)
+        ) {
+          const prevPerson = structuredClone(other);
+          other.possibleMatchIds.push(person.id);
+          other.duplicateStatusId = dupPossible;
+          changedDuplicatePeople.push({ person: other, prevPerson });
         }
       }
 
@@ -4447,6 +4514,75 @@ export async function saveOrganisationRecord(
       reviewerId: input.reviewerId !== undefined ? input.reviewerId : existing?.reviewerId ?? null,
     };
 
+    const combinedOrgDupIds = new Set<string>(
+      opts.flagPossibleDuplicate
+        ? [...(organisation.possibleMatchIds ?? []), ...(opts.matchedDuplicateIds ?? [])]
+        : organisation.possibleMatchIds ?? [],
+    );
+    let sqlOrgCandidates: Organisation[] = [];
+    if (!opts.internalSystemStep && !organisation.mergedIntoId) {
+      const orgOtherNames = organisation.otherNames.map((n) => n.name);
+      const orgEmails = organisation.generalEmail?.trim()
+        ? [organisation.generalEmail.trim()]
+        : [];
+      const orgPhones = organisation.mainPhone?.trim()
+        ? [organisation.mainPhone.trim()]
+        : [];
+      const orgAddresses = [
+        organisation.registeredAddress,
+        organisation.correspondenceAddress,
+        organisation.billingAddress,
+      ].filter((a): a is Address => Boolean(a));
+      const orgPostcodes = orgAddresses
+        .map((a) => a.postcode.trim())
+        .filter(Boolean);
+      const companyNumbers = organisation.companyNumber?.trim()
+        ? [organisation.companyNumber.trim()]
+        : [];
+      sqlOrgCandidates = await partyRepo.findSqlDuplicateCandidates<Organisation>(
+        orgCtx,
+        {
+          kind: 'organisation',
+          id: organisation.id,
+          legalName: organisation.legalName,
+          otherNames: orgOtherNames,
+          companyNumbers,
+          emails: orgEmails,
+          phones: orgPhones,
+          postcodes: orgPostcodes,
+          fuzzy: true,
+          limit: 200,
+        },
+      );
+      const serverOrgDups = findOrganisationDuplicates(
+        {
+          id: organisation.id,
+          legalName: organisation.legalName,
+          otherNames: orgOtherNames,
+          companyNumber: organisation.companyNumber,
+          emails: orgEmails,
+          phones: orgPhones,
+          addresses: orgAddresses,
+        },
+        sqlOrgCandidates,
+        organisation.notDuplicateOf,
+        { fuzzy: true },
+      ).filter((m) =>
+        m.reasons.some((r) => r !== 'address' && r !== 'postcode'),
+      );
+      for (const match of serverOrgDups) {
+        combinedOrgDupIds.add(match.record.id);
+      }
+    }
+    const dismissedOrgSet = new Set(organisation.notDuplicateOf);
+    const effectiveOrgDupIds = Array.from(combinedOrgDupIds).filter(
+      (id) => id !== organisation.id && !dismissedOrgSet.has(id),
+    );
+    if (effectiveOrgDupIds.length > 0 || opts.flagPossibleDuplicate) {
+      organisation.duplicateStatusId = dupPossible;
+      organisation.possibleMatchIds = effectiveOrgDupIds;
+    }
+
     const fmtCtx = formatContext({
       people,
       organisations,
@@ -4491,14 +4627,20 @@ export async function saveOrganisationRecord(
 
     await partyRepo.putOrganisation(orgCtx, organisation);
 
-    if (opts.flagPossibleDuplicate && opts.matchedDuplicateIds?.length) {
-      for (const otherId of opts.matchedDuplicateIds) {
-        const other = organisations.find((o) => o.id === otherId);
-        if (other && !other.possibleMatchIds.includes(organisation.id)) {
-          other.possibleMatchIds.push(organisation.id);
-          other.duplicateStatusId = dupPossible;
-          await partyRepo.putOrganisation(orgCtx, other);
-        }
+    for (const otherId of effectiveOrgDupIds) {
+      const other =
+        organisations.find((o) => o.id === otherId) ??
+        sqlOrgCandidates.find((o) => o.id === otherId) ??
+        (await partyRepo.getOrganisationById<Organisation>(orgCtx, otherId));
+      if (
+        other &&
+        !other.mergedIntoId &&
+        !other.notDuplicateOf.includes(organisation.id) &&
+        !other.possibleMatchIds.includes(organisation.id)
+      ) {
+        other.possibleMatchIds.push(organisation.id);
+        other.duplicateStatusId = dupPossible;
+        await partyRepo.putOrganisation(orgCtx, other);
       }
     }
 
