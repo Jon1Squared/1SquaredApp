@@ -6,9 +6,9 @@ export const financeDataAndPermissionsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Which roles can view matter-level and firm-wide Practice Management System (PMS) finance figures, how unlinked and restricted matters are handled, how credit-control actions are gated, and how quotes and matter cost VAT snapshots are calculated.',
-  updated: '2026-11-23',
+  updated: '2026-11-24',
   body: `
-1Squared delivers Practice Management System (PMS) financial figures through dedicated, permission-checked views backed by your firm’s isolated database. Each firm’s database stores its own PMS extract datasets, credit-control history, and record links separately from every other firm; administrators can review the import tool and technical notes in the platform documentation. Financial figures are never loaded on unrelated pages or in the shared navigation bar, which checks only whether you hold permission to view firm finance, matter finance, or credit-control features.
+1Squared delivers Practice Management System (PMS) financial figures through dedicated, permission-checked views backed by your firm’s isolated database. Each firm’s database stores its own PMS extract datasets, credit-control history, and record links separately from every other firm; administrators can review the import tool and technical notes in the Platform Technical Notes guide in the platform documentation. Financial figures are never loaded on unrelated pages or in the shared navigation bar, which checks only whether you hold permission to view firm finance, matter finance, or credit-control features.
 
 ## 1. Who sees which finance figures
 

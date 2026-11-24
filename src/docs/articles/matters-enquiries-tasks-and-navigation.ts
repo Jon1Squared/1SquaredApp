@@ -6,9 +6,20 @@ export const mattersEnquiriesTasksNavigationArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the Key Dates & Limitation module connects with Enquiries, Quotes, Tasks, Matter opening and closure gates, the single-task reminder model, and left-rail navigation.',
-  updated: '2026-11-23',
+  updated: '2026-11-24',
   body: `
 This guide explains how **Matters**, **Enquiries**, **Quotes**, **Tasks**, and **Navigation** work together across 1Squared, including how the [Key Dates & Limitation](/docs/key-dates-overview) module, per-tenant matter, intake, quote, and task/workflow storage, conflict review routing, and record-action permissions integrate into each screen.
+
+## List screens, paging, sorting and searching
+
+- **Page-by-page loading, sorting and counts**: The **People**, **Organisations**, **Matters**, **Enquiries**, and **Tasks** workspaces load one page at a time, showing **"Showing X–Y of Z"** with **Previous** and **Next** controls at the bottom of the list. Column sorting reorders results across the entire matching list on the server rather than only the rows currently on screen; where a column shows live calculated financial figures that cannot be sorted across pages once a list exceeds one page, sorting on that column is automatically disabled. Tab badges show the count for the currently active tab. On the **People** screen's **All** tab, enquiry-stage callers appear on page 1 alongside directory people and are not counted in the directory total — switch to the **Enquiry stage** tab to view and count enquiry-stage callers on their own.
+- **Tasks opens to open tasks by default**: When you open **Tasks**, the list shows open tasks by default so older urgent or active tasks are never hidden behind completed items. Use the **Status** filter (or choose **All statuses**) to view completed or cancelled tasks.
+- **What each list search covers**:
+  - **People**: name (including preferred and other names), email address, phone number, linked organisation name, town, postcode, and reference.
+  - **Organisations**: legal, trading and other names, company number, email address, main phone number, registered or trading town and postcode, linked contact names, and reference.
+  - **Matters**: matter number, title, description, client name, practice area, work type, and other-party names.
+  - **Enquiries & Quotes**: reference, caller or prospect name, organisation name, summary or title, email address, phone number, town, postcode, linked client name, and linked enquiry or quote references.
+  - **Tasks**: reference, title, description, assignee name, assigned team name, and linked matter, client, enquiry, quote, person or organisation details.
 
 ## Enquiries, quotes, and conversion to a matter
 

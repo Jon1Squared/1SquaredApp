@@ -6,9 +6,14 @@ export const duplicateChecks: DocArticle = {
   section: 'people-organisations',
   summary:
     'How the People and Organisation forms warn you about records that may already exist, and how merging duplicate records repoints every reference.',
-  updated: '2026-11-20',
+  updated: '2026-11-24',
   body: `
 When you add or edit a person or organisation, 1Squared checks for existing records in the per-tenant directory (\`TenantPartyRepository\`, \`S0-16\`) that might be the same. Matches appear in a warning above the form, so you can open the existing record instead of creating a duplicate.
+
+## Live checks, saving and error messages
+
+- **Automatic duplicate check when you save:** Even if you save quickly before the live warning appears, or if the live lookup was unavailable while you typed, 1Squared checks the firm directory on the server when you save a new or edited person or organisation. If a likely match is found, the record is flagged as a possible duplicate automatically so it can be reviewed and merged cleanly.
+- **What "Couldn't check for duplicates. Try again." means:** This banner appears if the live background check could not complete while you were typing (for example because your session expired or the server was temporarily unreachable). Select **Try again** to re-run the live check. Saving the form will still run the full server-side duplicate check.
 
 ## What is compared
 
