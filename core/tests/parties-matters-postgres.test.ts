@@ -32,7 +32,6 @@ import {
   createOrUpdateLink,
   executeMerge,
   generateMatterNumber,
-  getAppSnapshot,
   liftMatterRestriction,
   listFirmAuditEntriesPage,
   markEngagementLetterDrafted,
@@ -45,6 +44,7 @@ import {
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import {
   getActiveTenantConfiguration,
   setActiveTenantConfigForTesting,
@@ -1099,6 +1099,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       const freshEntra = await import('@/server/entraAuth');
       const freshRbac = await import('@/server/rbacRuntime');
       const freshServices = await import('@/server/services');
+      const freshSnapshot = await import('@/server/__tests__/testAppSnapshot');
       const freshSignedCookie = freshEntra.createSignedEntraSessionCookie(
         carysSession.verifiedSession,
       );
@@ -1111,7 +1112,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
 
       const snapshotAfterColdStart = await freshRbac.runWithActiveActorSession(
         freshCarysSession,
-        () => freshServices.getAppSnapshot('P-000001'),
+        () => freshSnapshot.getAppSnapshot('P-000001'),
       );
 
       // 4. Assert both person and matter are unchanged and no clearTenantData ran
@@ -1168,6 +1169,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const replicaAEntra = await import('@/server/entraAuth');
     const replicaARbac = await import('@/server/rbacRuntime');
     const replicaAServices = await import('@/server/services');
+    const replicaASnapshot = await import('@/server/__tests__/testAppSnapshot');
     const replicaACore = await import('@platform/core');
     const replicaASession = {
       ...carysSession,
@@ -1185,6 +1187,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     const replicaBEntra = await import('@/server/entraAuth');
     const replicaBRbac = await import('@/server/rbacRuntime');
     const replicaBServices = await import('@/server/services');
+    const replicaBSnapshot = await import('@/server/__tests__/testAppSnapshot');
     const replicaBCore = await import('@platform/core');
     const replicaBSession = {
       ...carysSession,
@@ -1197,7 +1200,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       // 1. Replica B reads initial snapshot before Replica A writes
       const snapBInitial = await replicaBRbac.runWithActiveActorSession(
         replicaBSession,
-        () => replicaBServices.getAppSnapshot('P-000001'),
+        () => replicaBSnapshot.getAppSnapshot('P-000001'),
       );
       const matterM11InitialInB = snapBInitial.matters.find(
         (m) => m.id === 'M-000011',
@@ -1274,7 +1277,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
       // 3. Replica B immediately sees Replica A's new person, new matter, updated matter, and updated person
       const snapBAfterA = await replicaBRbac.runWithActiveActorSession(
         replicaBSession,
-        () => replicaBServices.getAppSnapshot('P-000001'),
+        () => replicaBSnapshot.getAppSnapshot('P-000001'),
       );
       expect(
         snapBAfterA.people.some((p) => p.id === newPersonFromA.person.id),
@@ -1326,7 +1329,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
 
       const snapAVerify = await replicaARbac.runWithActiveActorSession(
         replicaASession,
-        () => replicaAServices.getAppSnapshot('P-000001'),
+        () => replicaASnapshot.getAppSnapshot('P-000001'),
       );
       expect(
         snapAVerify.matters.find((m) => m.id === 'M-000011')?.title,
@@ -1739,6 +1742,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     vi.resetModules();
     const replicaAEntra = await import('@/server/entraAuth');
     const replicaA = await import('@/server/services');
+    const replicaASnapshot2 = await import('@/server/__tests__/testAppSnapshot');
     const { runWithActiveActorSession: runInReplicaA } = await import(
       '@/server/rbacRuntime'
     );
@@ -1992,6 +1996,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     vi.resetModules();
     const replicaAEntra = await import('@/server/entraAuth');
     const replicaA = await import('@/server/services');
+    const replicaASnapshot2 = await import('@/server/__tests__/testAppSnapshot');
     const { runWithActiveActorSession: runInReplicaA } = await import(
       '@/server/rbacRuntime'
     );
@@ -2061,7 +2066,7 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
     try {
       // Step 3: Replica A completes getAppSnapshot (which loaded stale people & matters before B committed)
       await runInReplicaA(adminSessionA, () =>
-        replicaA.getAppSnapshot(positiveControlUserId),
+        replicaASnapshot2.getAppSnapshot(positiveControlUserId),
       );
       expect(bRemovedDuringARead).toBe(true);
 

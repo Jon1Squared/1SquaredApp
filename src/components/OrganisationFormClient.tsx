@@ -10,13 +10,9 @@ import {
   lookupCompaniesHouse,
   type CompaniesHouseCompanyRecord,
 } from '@/domain/companiesHouse';
-import { findOrganisationDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
-import {
-  detectPreliminaryConflicts,
-  findEnquiryEntityMatches,
-  hasQuickConflictCheckInputs,
-  mergePeopleWithEnquiries,
-} from '@/domain/enquiries';
+import { formatDuplicateReasons } from '@/domain/duplicates';
+import { hasQuickConflictCheckInputs } from '@/domain/enquiries';
+import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
 import { InfoPopover } from './InfoPopover';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
@@ -40,10 +36,12 @@ import {
 } from './FormControls';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { EntitySearchSelect, useEntityPicker } from './useEntityPicker';
+import { useIntakePreview } from './useIntakePreview';
 
 interface Props {
   existing?: Organisation | null;
-  allOrganisations: Organisation[];
+  allOrganisations?: Organisation[];
   allPeople?: Person[];
   matters?: Matter[];
   enquiries?: Enquiry[];
@@ -72,16 +70,16 @@ type OrgTabKey = 'most_used' | 'identity' | 'commercial' | 'compliance' | 'custo
 
 export function OrganisationFormClient({
   existing,
-  allOrganisations,
-  allPeople = [],
-  matters = [],
-  enquiries = [],
+  allOrganisations = [],
+  allPeople: _allPeople = [],
+  matters: _matters = [],
+  enquiries: _enquiries = [],
   employees,
   lists,
   values,
   customFields,
   currentUserId,
-  tenantId,
+  tenantId: _tenantId,
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,
@@ -404,51 +402,15 @@ export function OrganisationFormClient({
     return [...fromFormer, ...fromTrading];
   }, [cleanFormerNames, formerNameTypeId, tradingNames]);
 
-  // Live duplicate check while typing
-  const liveDuplicates = useMemo(
-    () =>
-      findOrganisationDuplicates(
-        {
-          id: existing?.id,
-          legalName,
-          otherNames: combinedOtherNames.map((n) => n.name),
-          companyNumber,
-          emails: generalEmail.trim() ? [generalEmail] : [],
-          phones: mainPhone.trim() ? [mainPhone] : [],
-          addresses: [registeredAddress, correspondenceAddress].filter(
-            (a): a is Address => Boolean(a && a.line1.trim() && a.postcode.trim()),
-          ),
-        },
-        allOrganisations,
-        existing?.notDuplicateOf,
-        { fuzzy: true },
-      ).filter((m) => m.reasons.some((r) => r !== 'address' && r !== 'postcode')),
-    [
-      existing?.id,
-      existing?.notDuplicateOf,
-      legalName,
-      combinedOtherNames,
-      companyNumber,
-      generalEmail,
-      mainPhone,
-      registeredAddress,
-      correspondenceAddress,
-      allOrganisations,
-    ],
-  );
-
-  const mergedAllPeople = useMemo(
-    () => mergePeopleWithEnquiries(allPeople, enquiries, values),
-    [allPeople, enquiries, values],
-  );
-
-  // Quick Conflict Check (right-hand panel, working in the exact same way as Enquiry & Person screens)
-  const otherOrganisations = useMemo(
-    () =>
-      existing
-        ? allOrganisations.filter((o) => o.id !== existing.id)
-        : allOrganisations,
-    [allOrganisations, existing],
+  const [pscDirQuery, setPscDirQuery] = useState('');
+  const { items: pscDirSuggestions } = useEntityPicker(
+    {
+      entityTypes: ['person'],
+      query: pscDirQuery,
+      nonEmployeesOnly: true,
+      limit: 15,
+    },
+    { enabled: Boolean(pscDirQuery.trim()) },
   );
 
   const otherPartiesQuery = useMemo(
@@ -456,68 +418,39 @@ export function OrganisationFormClient({
     [cleanFormerNames, cleanPscs, cleanDirectors],
   );
 
-  const entityMatches = useMemo(
+  const {
+    preview: intakePreview,
+    loadingFast: duplicatePreviewLoading,
+    fastError: duplicatePreviewError,
+    triggerConflictCheck,
+    retryFastCheck: retryDuplicatePreview,
+  } = useIntakePreview({
+    kind: 'organisation',
+    excludeId: existing?.id ?? null,
+    dismissedDuplicateIds: existing?.notDuplicateOf,
+    legalName,
+    callingOnBehalfOf: legalName,
+    otherNames: combinedOtherNames.map((n) => n.name),
+    companyNumber,
+    otherPartiesNamed: otherPartiesQuery,
+    emails: generalEmail.trim() ? [generalEmail] : [],
+    phones: mainPhone.trim() ? [mainPhone] : [],
+    addresses: [registeredAddress, correspondenceAddress].filter(
+      (a): a is Address => Boolean(a && (a.postcode.trim() || a.line1.trim())),
+    ),
+  }, { enableConflicts: false });
+
+  // Live duplicate check while typing
+  const liveDuplicates = useMemo(
     () =>
-      findEnquiryEntityMatches(
-        {
-          firstName: '',
-          lastName: '',
-          callingOnBehalfOf: legalName,
-          email: generalEmail,
-          phone: mainPhone,
-          postcode: registeredAddress?.postcode ?? '',
-          addressLine1: registeredAddress?.line1 ?? '',
-          addressLine2: registeredAddress?.line2 ?? '',
-        },
-        mergedAllPeople,
-        otherOrganisations,
-        enquiries,
+      intakePreview.duplicateOrganisations.filter((m) =>
+        m.reasons.some((r) => r !== 'address' && r !== 'postcode'),
       ),
-    [legalName, generalEmail, mainPhone, registeredAddress, mergedAllPeople, otherOrganisations, enquiries],
+    [intakePreview.duplicateOrganisations],
   );
 
-  const possibleConflicts = useMemo(
-    () =>
-      detectPreliminaryConflicts(
-        {
-          firstName: '',
-          lastName: '',
-          callingOnBehalfOf: legalName,
-          otherPartiesNamed: otherPartiesQuery,
-          email: generalEmail,
-          phone: mainPhone,
-          address: {
-            line1: registeredAddress?.line1 ?? '',
-            line2: registeredAddress?.line2 ?? '',
-            postcode: registeredAddress?.postcode ?? '',
-          },
-          linkedPersonId: null,
-          linkedOrganisationId: null,
-        },
-        mergedAllPeople,
-        otherOrganisations,
-        matters,
-        values,
-        enquiries,
-        null,
-        undefined,
-        undefined,
-        tenantId,
-      ),
-    [
-      legalName,
-      otherPartiesQuery,
-      generalEmail,
-      mainPhone,
-      registeredAddress,
-      mergedAllPeople,
-      otherOrganisations,
-      matters,
-      values,
-      enquiries,
-      tenantId,
-    ],
-  );
+  const entityMatches = intakePreview.entityMatches;
+  const possibleConflicts = intakePreview.possibleConflicts;
 
   const conflictKeys = useMemo(
     () => new Set(possibleConflicts.map((h) => `${h.recordType}:${h.recordId}`)),
@@ -679,11 +612,14 @@ export function OrganisationFormClient({
   return (
     <div className="new-enquiry-page" style={embeddedInModal ? { padding: 0, maxWidth: 'none' } : undefined}>
       <datalist id="org-known-people-list">
-        {mergedAllPeople
-          .filter((p) => !p.mergedIntoId && !p.isEmployee)
-          .map((p) => (
-            <option key={p.id} value={personDisplayName(p)} />
-          ))}
+        {Array.from(
+          new Set([
+            ...entityMatches.people.map((m) => personDisplayName(m.person)),
+            ...pscDirSuggestions.map((s) => s.label),
+          ]),
+        ).map((name) => (
+          <option key={name} value={name} />
+        ))}
       </datalist>
 
       <form onSubmit={(e) => handleSubmit(e, liveDuplicates.length > 0)}>
@@ -721,6 +657,23 @@ export function OrganisationFormClient({
                 </div>
               </div>
             </div>
+
+            {duplicatePreviewError ? (
+              <div className="banner banner--warning" role="alert" style={{ marginBottom: 0 }}>
+                <div>
+                  <strong>{duplicatePreviewError}</strong>
+                </div>
+                <div className="banner__actions">
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    onClick={retryDuplicatePreview}
+                  >
+                    Try again
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             {liveDuplicates.length > 0 ? (
               <div className="banner banner--warning" role="alert" style={{ marginBottom: 0 }}>
@@ -833,6 +786,7 @@ export function OrganisationFormClient({
                           setLegalName(val);
                           setChDropdownOpen(val.trim().length >= 2);
                         }}
+                        onBlur={triggerConflictCheck}
                       />
                       <button
                         type="button"
@@ -1153,7 +1107,9 @@ export function OrganisationFormClient({
                           const next = [...pscList];
                           next[idx] = e.target.value;
                           setPscList(next);
+                          setPscDirQuery(e.target.value);
                         }}
+                        onBlur={triggerConflictCheck}
                       />
                       {pscList.length > 1 ? (
                         <button
@@ -1201,7 +1157,9 @@ export function OrganisationFormClient({
                           const next = [...directorsList];
                           next[idx] = e.target.value;
                           setDirectorsList(next);
+                          setPscDirQuery(e.target.value);
                         }}
+                        onBlur={triggerConflictCheck}
                       />
                       {directorsList.length > 1 ? (
                         <button
@@ -1304,20 +1262,26 @@ export function OrganisationFormClient({
                     </div>
                     <div className="field-group">
                       <label className="field-label">Parent organisation</label>
-                      <select
-                        className="field-select"
+                      <EntitySearchSelect
+                        entityTypes={['organisation']}
                         value={parentOrganisationId ?? ''}
-                        onChange={(e) => setParentOrganisationId(e.target.value || null)}
-                      >
-                        <option value="">None (top-level organisation)</option>
-                        {allOrganisations
+                        excludeIds={existing ? [existing.id] : []}
+                        emptyLabel="None (top-level organisation)"
+                        searchPlaceholder="Search organisations…"
+                        searchAriaLabel="Search parent organisation"
+                        initialOptions={allOrganisations
                           .filter((o) => !o.mergedIntoId && o.id !== existing?.id)
-                          .map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.legalName} ({o.id})
-                            </option>
-                          ))}
-                      </select>
+                          .map((o) => ({
+                            id: o.id,
+                            recordType: 'organisation' as const,
+                            label: `${o.legalName} (${o.id})`,
+                            subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+                            reference: o.id,
+                            href: `/organisations/${o.id}`,
+                            organisation: o,
+                          }))}
+                        onChange={(nextId) => setParentOrganisationId(nextId || null)}
+                      />
                     </div>
                   </div>
                 </div>
@@ -1374,20 +1338,26 @@ export function OrganisationFormClient({
                     </div>
                     <div className="field-group">
                       <label className="field-label">Parent organisation</label>
-                      <select
-                        className="field-select"
+                      <EntitySearchSelect
+                        entityTypes={['organisation']}
                         value={parentOrganisationId ?? ''}
-                        onChange={(e) => setParentOrganisationId(e.target.value || null)}
-                      >
-                        <option value="">None (top-level organisation)</option>
-                        {allOrganisations
+                        excludeIds={existing ? [existing.id] : []}
+                        emptyLabel="None (top-level organisation)"
+                        searchPlaceholder="Search organisations…"
+                        searchAriaLabel="Search parent organisation"
+                        initialOptions={allOrganisations
                           .filter((o) => !o.mergedIntoId && o.id !== existing?.id)
-                          .map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.legalName} ({o.id})
-                            </option>
-                          ))}
-                      </select>
+                          .map((o) => ({
+                            id: o.id,
+                            recordType: 'organisation' as const,
+                            label: `${o.legalName} (${o.id})`,
+                            subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+                            reference: o.id,
+                            href: `/organisations/${o.id}`,
+                            organisation: o,
+                          }))}
+                        onChange={(nextId) => setParentOrganisationId(nextId || null)}
+                      />
                     </div>
                   </div>
 
@@ -1868,6 +1838,12 @@ export function OrganisationFormClient({
                 </div>
                 {!hasConflictInputs ? (
                   <span className="new-enquiry-badge">Waiting</span>
+                ) : duplicatePreviewError ? (
+                  <span className="new-enquiry-badge new-enquiry-badge--warn">
+                    Check failed
+                  </span>
+                ) : duplicatePreviewLoading ? (
+                  <span className="new-enquiry-badge">Checking…</span>
                 ) : hasHighSeverityConflict ? (
                   <span className="new-enquiry-badge new-enquiry-badge--alert">
                     Possible conflict
@@ -1897,7 +1873,14 @@ export function OrganisationFormClient({
                   overflowY: 'auto',
                 }}
               >
-                {hasConflictInputs && distinctMatchedCount === 0 ? (
+                {shouldShowNoMatchesMessage({
+                  hasSearchInputs: hasConflictInputs,
+                  loadingFast: duplicatePreviewLoading,
+                  loadingConflicts: false,
+                  fastError: duplicatePreviewError,
+                  conflictError: null,
+                  matchCount: distinctMatchedCount,
+                }) ? (
                   <div
                     style={{
                       padding: '8px 10px',

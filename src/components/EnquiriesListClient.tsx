@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Calendar, MoreHorizontal } from 'lucide-react';
@@ -18,6 +18,7 @@ import {
   urgencyRank,
   type EnquiriesQueueTab,
 } from '@/domain/enquiries';
+import type { SortDirection } from '@/domain/listNavigationState';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName } from '@/domain/names';
 import {
@@ -36,6 +37,10 @@ import {
 } from '@/domain/quotes';
 import { isTaskOpen, userTeams } from '@/domain/tasks';
 import type {
+  EnquiriesListSortColumn,
+  ListPaginationMeta,
+} from '@/server/pageLoaders';
+import type {
   ChoiceValue,
   Enquiry,
   Matter,
@@ -48,9 +53,11 @@ import type {
 import {
   DataList,
   DataListFilterBar,
+  DataListPagination,
   PersonChip,
   RelativeTime,
   useListDensity,
+  useServerListNavigation,
   type ActiveFilterChipItem,
   type DataListColumn,
   type DataListSortState,
@@ -60,14 +67,56 @@ import { StatusPill } from './SearchBox';
 interface Props {
   enquiries: Enquiry[];
   quotes?: Quote[];
+  orderedQueueItems?: ReadonlyArray<{
+    readonly kind: 'enquiry' | 'quote';
+    readonly id: string;
+  }>;
   tasks: Task[];
   teams: Team[];
   people: Person[];
+  employees?: Person[];
   organisations?: Organisation[];
   matters?: Matter[];
   values: ChoiceValue[];
   currentUserId: string;
+  pagination?: ListPaginationMeta;
+  initialFilters?: {
+    tab: EnquiriesQueueTab;
+    query: string;
+    typeFilter: 'all' | 'enquiry' | 'quote';
+    urgencyFilter: string;
+    statusFilter: string;
+    practiceAreaFilter: string;
+    teamFilter: string;
+    channelFilter: string;
+    feeBasisFilter: string;
+    feeEarnerFilter: string;
+    validUntilFrom: string;
+    validUntilTo: string;
+    followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week';
+    sortBy?: EnquiriesListSortColumn | null;
+    sortDir?: SortDirection | null;
+  };
 }
+
+const ENQUIRIES_PARAM_DEFAULTS = {
+  tab: 'team',
+  q: '',
+  type: 'all',
+  urgency: 'all',
+  status: 'all',
+  practiceArea: 'all',
+  team: 'all',
+  channel: 'all',
+  feeBasis: 'all',
+  feeEarner: 'all',
+  validFrom: '',
+  validTo: '',
+  followUp: 'all',
+  sort: '',
+  dir: '',
+  page: 1,
+};
 
 const STATUS_SORT_ORDER: Record<string, number> = {
   New: 1,
@@ -88,36 +137,234 @@ const STATUS_SORT_ORDER: Record<string, number> = {
 export function EnquiriesListClient({
   enquiries,
   quotes = [],
+  orderedQueueItems,
   tasks,
   teams,
   people,
+  employees: employeesProp,
   organisations = [],
   values,
   currentUserId,
+  pagination,
+  initialFilters,
 }: Props) {
   const router = useRouter();
   const now = useMemo(() => new Date(), []);
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
+    basePath: '/enquiries',
+    router,
+    defaults: ENQUIRIES_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
+  });
 
   const myTeams = useMemo(() => userTeams(currentUserId, teams), [currentUserId, teams]);
   const myTeamIds = useMemo(() => new Set(myTeams.map((t) => t.id)), [myTeams]);
 
-  const [tab, setTab] = useState<EnquiriesQueueTab>('team');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'enquiry' | 'quote'>('all');
-  const [urgencyFilter, setUrgencyFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [practiceAreaFilter, setPracticeAreaFilter] = useState('all');
-  const [teamFilter, setTeamFilter] = useState('all');
-  const [channelFilter, setChannelFilter] = useState('all');
-  const [feeBasisFilter, setFeeBasisFilter] = useState('all');
-  const [feeEarnerFilter, setFeeEarnerFilter] = useState('all');
-  const [validUntilFrom, setValidUntilFrom] = useState('');
-  const [validUntilTo, setValidUntilTo] = useState('');
+  const [tab, setTab] = useState<EnquiriesQueueTab>(initialFilters?.tab ?? 'team');
+  const [searchQuery, setSearchQuery] = useState(initialFilters?.query ?? '');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'enquiry' | 'quote'>(
+    initialFilters?.typeFilter ?? 'all',
+  );
+  const [urgencyFilter, setUrgencyFilter] = useState(
+    initialFilters?.urgencyFilter ?? 'all',
+  );
+  const [statusFilter, setStatusFilter] = useState(
+    initialFilters?.statusFilter ?? 'all',
+  );
+  const [practiceAreaFilter, setPracticeAreaFilter] = useState(
+    initialFilters?.practiceAreaFilter ?? 'all',
+  );
+  const [teamFilter, setTeamFilter] = useState(initialFilters?.teamFilter ?? 'all');
+  const [channelFilter, setChannelFilter] = useState(
+    initialFilters?.channelFilter ?? 'all',
+  );
+  const [feeBasisFilter, setFeeBasisFilter] = useState(
+    initialFilters?.feeBasisFilter ?? 'all',
+  );
+  const [feeEarnerFilter, setFeeEarnerFilter] = useState(
+    initialFilters?.feeEarnerFilter ?? 'all',
+  );
+  const [validUntilFrom, setValidUntilFrom] = useState(
+    initialFilters?.validUntilFrom ?? '',
+  );
+  const [validUntilTo, setValidUntilTo] = useState(
+    initialFilters?.validUntilTo ?? '',
+  );
   const [followUpDueFilter, setFollowUpDueFilter] = useState<
     'all' | 'overdue' | 'today' | 'this_week'
-  >('all');
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  >(initialFilters?.followUpDueFilter ?? 'all');
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
+
+  const initialKey = JSON.stringify(initialFilters ?? null);
+  const prevInitialKeyRef = useRef(initialKey);
+  useEffect(() => {
+    if (prevInitialKeyRef.current === initialKey) return;
+    prevInitialKeyRef.current = initialKey;
+    if (!initialFilters) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setTab(initialFilters.tab);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setSearchQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
+      setTypeFilter(initialFilters.typeFilter);
+      setUrgencyFilter(initialFilters.urgencyFilter);
+      setStatusFilter(initialFilters.statusFilter);
+      setPracticeAreaFilter(initialFilters.practiceAreaFilter);
+      setTeamFilter(initialFilters.teamFilter);
+      setChannelFilter(initialFilters.channelFilter);
+      setFeeBasisFilter(initialFilters.feeBasisFilter);
+      setFeeEarnerFilter(initialFilters.feeEarnerFilter);
+      setValidUntilFrom(initialFilters.validUntilFrom);
+      setValidUntilTo(initialFilters.validUntilTo);
+      setFollowUpDueFilter(initialFilters.followUpDueFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
+    });
+    return () => {
+      active = false;
+    };
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
+
+  const toQueryMap = (overrides?: Partial<{
+    tab: EnquiriesQueueTab;
+    query: string;
+    typeFilter: 'all' | 'enquiry' | 'quote';
+    urgencyFilter: string;
+    statusFilter: string;
+    practiceAreaFilter: string;
+    teamFilter: string;
+    channelFilter: string;
+    feeBasisFilter: string;
+    feeEarnerFilter: string;
+    validUntilFrom: string;
+    validUntilTo: string;
+    followUpDueFilter: 'all' | 'overdue' | 'today' | 'this_week';
+    sort: DataListSortState | null;
+    page: number;
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? searchQuery,
+      type: overrides?.typeFilter ?? typeFilter,
+      urgency: overrides?.urgencyFilter ?? urgencyFilter,
+      status: overrides?.statusFilter ?? statusFilter,
+      practiceArea: overrides?.practiceAreaFilter ?? practiceAreaFilter,
+      team: overrides?.teamFilter ?? teamFilter,
+      channel: overrides?.channelFilter ?? channelFilter,
+      feeBasis: overrides?.feeBasisFilter ?? feeBasisFilter,
+      feeEarner: overrides?.feeEarnerFilter ?? feeEarnerFilter,
+      validFrom: overrides?.validUntilFrom ?? validUntilFrom,
+      validTo: overrides?.validUntilTo ?? validUntilTo,
+      followUp: overrides?.followUpDueFilter ?? followUpDueFilter,
+      sort: nextSort?.columnId ?? '',
+      dir: nextSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination) navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+  };
+
+  const handleTabChange = (next: EnquiriesQueueTab) => {
+    setTab(next);
+    if (pagination) navigateNow(toQueryMap({ tab: next, page: 1 }), 'replace');
+  };
+  const handleSearchChange = (next: string) => {
+    setSearchQuery(next);
+    if (pagination) navigateDebounced(toQueryMap({ query: next, page: 1 }));
+  };
+  const handleFilter = (
+    key:
+      | 'typeFilter'
+      | 'urgencyFilter'
+      | 'statusFilter'
+      | 'practiceAreaFilter'
+      | 'teamFilter'
+      | 'channelFilter'
+      | 'feeBasisFilter'
+      | 'feeEarnerFilter'
+      | 'validUntilFrom'
+      | 'validUntilTo'
+      | 'followUpDueFilter',
+    val: string,
+  ) => {
+    if (key === 'typeFilter') setTypeFilter(val as 'all' | 'enquiry' | 'quote');
+    if (key === 'urgencyFilter') setUrgencyFilter(val);
+    if (key === 'statusFilter') setStatusFilter(val);
+    if (key === 'practiceAreaFilter') setPracticeAreaFilter(val);
+    if (key === 'teamFilter') setTeamFilter(val);
+    if (key === 'channelFilter') setChannelFilter(val);
+    if (key === 'feeBasisFilter') setFeeBasisFilter(val);
+    if (key === 'feeEarnerFilter') setFeeEarnerFilter(val);
+    if (key === 'validUntilFrom') setValidUntilFrom(val);
+    if (key === 'validUntilTo') setValidUntilTo(val);
+    if (key === 'followUpDueFilter') {
+      setFollowUpDueFilter(val as 'all' | 'overdue' | 'today' | 'this_week');
+    }
+    if (pagination) navigateNow(toQueryMap({ [key]: val, page: 1 }), 'replace');
+  };
+  const handleClearAll = () => {
+    setTypeFilter('all');
+    setUrgencyFilter('all');
+    setStatusFilter('all');
+    setPracticeAreaFilter('all');
+    setTeamFilter('all');
+    setChannelFilter('all');
+    setFeeBasisFilter('all');
+    setFeeEarnerFilter('all');
+    setValidUntilFrom('');
+    setValidUntilTo('');
+    setFollowUpDueFilter('all');
+    setSearchQuery('');
+    if (pagination) {
+      navigateNow(
+        toQueryMap({
+          typeFilter: 'all',
+          urgencyFilter: 'all',
+          statusFilter: 'all',
+          practiceAreaFilter: 'all',
+          teamFilter: 'all',
+          channelFilter: 'all',
+          feeBasisFilter: 'all',
+          feeEarnerFilter: 'all',
+          validUntilFrom: '',
+          validUntilTo: '',
+          followUpDueFilter: 'all',
+          query: '',
+          page: 1,
+        }),
+        'replace',
+      );
+    }
+  };
+  const handlePageChange = (nextPage: number) => {
+    navigateNow(toQueryMap({ page: nextPage }), 'push');
+  };
 
   // Per-row actions menu state
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
@@ -150,10 +397,10 @@ export function EnquiriesListClient({
   );
   const feeEarners = useMemo(
     () =>
-      people
+      (employeesProp && employeesProp.length > 0 ? employeesProp : people)
         .filter((p) => p.isEmployee && !p.mergedIntoId && !p.demo)
         .sort((a, b) => personDisplayName(a).localeCompare(personDisplayName(b))),
-    [people],
+    [employeesProp, people],
   );
 
   // Map linked quotes per enquiry id
@@ -175,6 +422,14 @@ export function EnquiriesListClient({
     }
     return map;
   }, [enquiries]);
+
+  const quoteById = useMemo(() => {
+    const map = new Map<string, Quote>();
+    for (const q of quotes) {
+      map.set(q.id, q);
+    }
+    return map;
+  }, [quotes]);
 
   const nameOfPerson = (id: string | null | undefined) => {
     if (!id) return '';
@@ -350,6 +605,29 @@ export function EnquiriesListClient({
   };
 
   const filtered = useMemo<IntakeQueueRow[]>(() => {
+    if (pagination) {
+      if (orderedQueueItems) {
+        return orderedQueueItems
+          .map((item): IntakeQueueRow | null => {
+            if (item.kind === 'enquiry') {
+              const e = enquiryById.get(item.id);
+              return e ? { kind: 'enquiry', id: e.id, enquiry: e } : null;
+            }
+            const qt = quoteById.get(item.id);
+            return qt ? { kind: 'quote', id: qt.id, quote: qt } : null;
+          })
+          .filter((row): row is IntakeQueueRow => Boolean(row));
+      }
+      return sortIntakeQueue(
+        [
+          ...enquiries.map((e): IntakeQueueRow => ({ kind: 'enquiry', id: e.id, enquiry: e })),
+          ...quotes.map((qt): IntakeQueueRow => ({ kind: 'quote', id: qt.id, quote: qt })),
+        ],
+        values,
+        now,
+      );
+    }
+
     const rows: IntakeQueueRow[] = [];
 
     if (typeFilter === 'all' || typeFilter === 'enquiry') {
@@ -463,6 +741,9 @@ export function EnquiriesListClient({
       return timeA - timeB;
     });
   }, [
+    pagination,
+    orderedQueueItems,
+    enquiries,
     tabEnquiries,
     tabQuotes,
     quotes,
@@ -480,6 +761,7 @@ export function EnquiriesListClient({
     searchQuery,
     quotesByEnquiryId,
     enquiryById,
+    quoteById,
     people,
     organisations,
     values,
@@ -1043,54 +1325,54 @@ export function EnquiriesListClient({
           role="tab"
           aria-selected={tab === 'team'}
           className={`tab-btn ${tab === 'team' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('team')}
+          onClick={() => handleTabChange('team')}
         >
-          Team queue ({teamQueueCount})
+          Team queue{tab === 'team' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${teamQueueCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'mine'}
           className={`tab-btn ${tab === 'mine' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('mine')}
+          onClick={() => handleTabChange('mine')}
         >
-          Mine ({mineCount})
+          Mine{tab === 'mine' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${mineCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'drafts'}
           className={`tab-btn ${tab === 'drafts' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('drafts')}
+          onClick={() => handleTabChange('drafts')}
         >
-          My drafts ({draftsCount})
+          My drafts{tab === 'drafts' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${draftsCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'open'}
           className={`tab-btn ${tab === 'open' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('open')}
+          onClick={() => handleTabChange('open')}
         >
-          All open ({allOpenCount})
+          All open{tab === 'open' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${allOpenCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'open_quotes'}
           className={`tab-btn ${tab === 'open_quotes' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('open_quotes')}
+          onClick={() => handleTabChange('open_quotes')}
         >
-          Open quotes ({openQuotesCount})
+          Open quotes{tab === 'open_quotes' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${openQuotesCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'closed'}
           className={`tab-btn ${tab === 'closed' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('closed')}
+          onClick={() => handleTabChange('closed')}
         >
-          Closed ({closedCount})
+          Closed{tab === 'closed' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${closedCount})` : ''}
         </button>
         </div>
         <div
@@ -1114,7 +1396,7 @@ export function EnquiriesListClient({
 
       <DataListFilterBar
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchChange}
         searchPlaceholder="Search reference, linked enquiry, name, summary…"
         searchAriaLabel="Search enquiries and quotes"
         primaryFilters={
@@ -1125,7 +1407,7 @@ export function EnquiriesListClient({
               aria-label="Filter by type"
               className="field-select list-filter-row__select"
               value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as 'all' | 'enquiry' | 'quote')}
+              onChange={(e) => handleFilter('typeFilter', e.target.value)}
             >
               <option value="all">All types</option>
               <option value="enquiry">Enquiries</option>
@@ -1137,7 +1419,7 @@ export function EnquiriesListClient({
               aria-label="Filter by urgency"
               className="field-select list-filter-row__select"
               value={urgencyFilter}
-              onChange={(e) => setUrgencyFilter(e.target.value)}
+              onChange={(e) => handleFilter('urgencyFilter', e.target.value)}
             >
               <option value="all">All urgencies</option>
               {urgencies.map((u) => (
@@ -1152,7 +1434,7 @@ export function EnquiriesListClient({
               aria-label="Filter by status"
               className="field-select list-filter-row__select"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => handleFilter('statusFilter', e.target.value)}
             >
               <option value="all">All statuses</option>
               <optgroup label="Enquiry">
@@ -1200,7 +1482,7 @@ export function EnquiriesListClient({
                 aria-label="Filter by practice area"
                 className="field-select"
                 value={practiceAreaFilter}
-                onChange={(e) => setPracticeAreaFilter(e.target.value)}
+                onChange={(e) => handleFilter('practiceAreaFilter', e.target.value)}
               >
                 <option value="all">All practice areas</option>
                 {practiceAreas.map((pa) => (
@@ -1220,7 +1502,7 @@ export function EnquiriesListClient({
                 aria-label="Filter by team"
                 className="field-select"
                 value={teamFilter}
-                onChange={(e) => setTeamFilter(e.target.value)}
+                onChange={(e) => handleFilter('teamFilter', e.target.value)}
               >
                 <option value="all">All teams</option>
                 {teams
@@ -1242,7 +1524,7 @@ export function EnquiriesListClient({
                 aria-label="Filter by channel"
                 className="field-select"
                 value={channelFilter}
-                onChange={(e) => setChannelFilter(e.target.value)}
+                onChange={(e) => handleFilter('channelFilter', e.target.value)}
               >
                 <option value="all">All channels</option>
                 {channels.map((ch) => (
@@ -1262,7 +1544,7 @@ export function EnquiriesListClient({
                 aria-label="Filter by fee basis"
                 className="field-select"
                 value={feeBasisFilter}
-                onChange={(e) => setFeeBasisFilter(e.target.value)}
+                onChange={(e) => handleFilter('feeBasisFilter', e.target.value)}
               >
                 <option value="all">All fee bases</option>
                 {QUOTE_FEE_BASES.map((fb) => (
@@ -1282,7 +1564,7 @@ export function EnquiriesListClient({
                 aria-label="Filter by fee earner"
                 className="field-select"
                 value={feeEarnerFilter}
-                onChange={(e) => setFeeEarnerFilter(e.target.value)}
+                onChange={(e) => handleFilter('feeEarnerFilter', e.target.value)}
               >
                 <option value="all">All fee earners</option>
                 {feeEarners.map((fe) => (
@@ -1303,7 +1585,7 @@ export function EnquiriesListClient({
                   aria-label="Valid until from date"
                   className="field-input"
                   value={validUntilFrom}
-                  onChange={(e) => setValidUntilFrom(e.target.value)}
+                  onChange={(e) => handleFilter('validUntilFrom', e.target.value)}
                 />
                 <span className="muted">–</span>
                 <input
@@ -1312,7 +1594,7 @@ export function EnquiriesListClient({
                   aria-label="Valid until to date"
                   className="field-input"
                   value={validUntilTo}
-                  onChange={(e) => setValidUntilTo(e.target.value)}
+                  onChange={(e) => handleFilter('validUntilTo', e.target.value)}
                 />
               </div>
             </div>
@@ -1326,11 +1608,7 @@ export function EnquiriesListClient({
                 aria-label="Filter by follow-up due"
                 className="field-select"
                 value={followUpDueFilter}
-                onChange={(e) =>
-                  setFollowUpDueFilter(
-                    e.target.value as 'all' | 'overdue' | 'today' | 'this_week',
-                  )
-                }
+                onChange={(e) => handleFilter('followUpDueFilter', e.target.value)}
               >
                 <option value="all">All</option>
                 <option value="overdue">Overdue</option>
@@ -1347,7 +1625,7 @@ export function EnquiriesListClient({
                   key: 'type',
                   label: 'Type',
                   valueLabel: typeFilter === 'enquiry' ? 'Enquiries' : 'Quotes',
-                  onRemove: () => setTypeFilter('all'),
+                  onRemove: () => handleFilter('typeFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1357,7 +1635,7 @@ export function EnquiriesListClient({
                   key: 'urgency',
                   label: 'Urgency',
                   valueLabel: resolveLabel(values, urgencyFilter),
-                  onRemove: () => setUrgencyFilter('all'),
+                  onRemove: () => handleFilter('urgencyFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1367,7 +1645,7 @@ export function EnquiriesListClient({
                   key: 'status',
                   label: 'Status',
                   valueLabel: statusChipLabel(statusFilter),
-                  onRemove: () => setStatusFilter('all'),
+                  onRemove: () => handleFilter('statusFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1377,7 +1655,7 @@ export function EnquiriesListClient({
                   key: 'practiceArea',
                   label: 'Practice area',
                   valueLabel: resolveLabel(values, practiceAreaFilter),
-                  onRemove: () => setPracticeAreaFilter('all'),
+                  onRemove: () => handleFilter('practiceAreaFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1387,7 +1665,7 @@ export function EnquiriesListClient({
                   key: 'team',
                   label: 'Team',
                   valueLabel: teams.find((t) => t.id === teamFilter)?.name ?? teamFilter,
-                  onRemove: () => setTeamFilter('all'),
+                  onRemove: () => handleFilter('teamFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1397,7 +1675,7 @@ export function EnquiriesListClient({
                   key: 'channel',
                   label: 'Channel',
                   valueLabel: resolveLabel(values, channelFilter),
-                  onRemove: () => setChannelFilter('all'),
+                  onRemove: () => handleFilter('channelFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1407,7 +1685,7 @@ export function EnquiriesListClient({
                   key: 'feeBasis',
                   label: 'Fee basis',
                   valueLabel: feeBasisFilter,
-                  onRemove: () => setFeeBasisFilter('all'),
+                  onRemove: () => handleFilter('feeBasisFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1417,7 +1695,7 @@ export function EnquiriesListClient({
                   key: 'feeEarner',
                   label: 'Fee earner',
                   valueLabel: nameOfPerson(feeEarnerFilter),
-                  onRemove: () => setFeeEarnerFilter('all'),
+                  onRemove: () => handleFilter('feeEarnerFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -1430,6 +1708,12 @@ export function EnquiriesListClient({
                   onRemove: () => {
                     setValidUntilFrom('');
                     setValidUntilTo('');
+                    if (pagination) {
+                      navigateNow(
+                        toQueryMap({ validUntilFrom: '', validUntilTo: '', page: 1 }),
+                        'replace',
+                      );
+                    }
                   },
                 } satisfies ActiveFilterChipItem,
               ]
@@ -1445,25 +1729,12 @@ export function EnquiriesListClient({
                       : followUpDueFilter === 'today'
                         ? 'Today'
                         : 'This week',
-                  onRemove: () => setFollowUpDueFilter('all'),
+                  onRemove: () => handleFilter('followUpDueFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
         ]}
-        onClearAll={() => {
-          setTypeFilter('all');
-          setUrgencyFilter('all');
-          setStatusFilter('all');
-          setPracticeAreaFilter('all');
-          setTeamFilter('all');
-          setChannelFilter('all');
-          setFeeBasisFilter('all');
-          setFeeEarnerFilter('all');
-          setValidUntilFrom('');
-          setValidUntilTo('');
-          setFollowUpDueFilter('all');
-          setSearchQuery('');
-        }}
+        onClearAll={handleClearAll}
         density={density}
         onDensityChange={setDensity}
       />
@@ -1489,7 +1760,7 @@ export function EnquiriesListClient({
           )
         }
         sort={sort}
-        onSortChange={setSort}
+        onSortChange={handleSortChange}
         defaultSortLabel="Default order"
         density={density}
         emptyMessage="No enquiries or quotes match the selected queue and filters."
@@ -1561,6 +1832,15 @@ export function EnquiriesListClient({
           );
         }}
       />
+      {pagination ? (
+        <DataListPagination
+          page={pagination.page}
+          pageSize={pagination.pageSize}
+          totalCount={pagination.totalCount}
+          onPageChange={handlePageChange}
+          itemLabel="enquiries & quotes"
+        />
+      ) : null}
     </div>
   );
 }

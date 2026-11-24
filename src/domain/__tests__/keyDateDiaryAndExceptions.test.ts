@@ -19,10 +19,10 @@ import { canViewerAccessMatterKeyDates as domainCanViewerAccessMatterKeyDates } 
 import { setActiveTenantConfigForTesting } from '@/platform/tenantRuntime';
 import {
   exportKeyDateExceptionsReportRecord,
-  getAppSnapshot,
   getKeyDateExceptionsReportRecord,
   verifyProposedKeyDateRecord,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { loadCommittedSeedStore } from '@/seed/seedSnapshot';
 import {
   auditEntriesForRecord,

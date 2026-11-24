@@ -41,6 +41,7 @@ interface Props {
   currentUserId: string;
   canClaimAnyTask?: boolean;
   canTakeByTaskId?: Record<string, boolean>;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
 }
 
 export function RecordTasksSection({
@@ -56,6 +57,7 @@ export function RecordTasksSection({
   currentUserId,
   canClaimAnyTask = false,
   canTakeByTaskId,
+  supervisingPartnerByEmployeeId,
 }: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
@@ -128,8 +130,11 @@ export function RecordTasksSection({
 
     addPerson(defaultPersonId ?? currentUserId, 'Fee earner');
     const leadEmp = employees.find((e) => e.id === (defaultPersonId ?? currentUserId));
-    if (leadEmp?.employment?.supervisingPartnerId) {
-      addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
+    const supId =
+      leadEmp?.employment?.supervisingPartnerId ??
+      supervisingPartnerByEmployeeId?.[defaultPersonId ?? currentUserId];
+    if (supId) {
+      addPerson(supId, 'Supervising partner');
     }
     const colpEmp =
       employees.find((e) => e.employeeRoleId === 'employee_role.risk_and_compliance') ??
@@ -144,7 +149,7 @@ export function RecordTasksSection({
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [employees, defaultPersonId, currentUserId]);
+  }, [employees, defaultPersonId, currentUserId, supervisingPartnerByEmployeeId]);
 
   const handleCreateTask = (payload: CreateTaskSubmitPayload) => {
     startTransition(async () => {

@@ -522,16 +522,19 @@ export class TenantRegisterRepository extends TenantScopedRepository {
       matterId?: string;
       enquiryId?: string;
       includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
       limit?: number;
     },
   ): Promise<RegisterRecord[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const includeRestricted = Boolean(options?.includeRestricted);
-      const params: unknown[] = includeRestricted
+      const bypassMatterRestriction =
+        Boolean(options?.includeRestricted) ||
+        Boolean(options?.hasRestrictedMatterAccess);
+      const params: unknown[] = bypassMatterRestriction
         ? [ctx.tenantId]
         : [ctx.tenantId, viewerId];
       const clauses: string[] = ['r.tenant_id = $1'];
-      if (!includeRestricted) {
+      if (!bypassMatterRestriction) {
         clauses.push(REGISTER_RECORD_VISIBLE_SQL_PREDICATE);
       }
       if (options?.registerTypeKey) {

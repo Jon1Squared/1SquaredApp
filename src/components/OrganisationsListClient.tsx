@@ -1,13 +1,19 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { isInactiveStatus } from '@/domain/attention';
 import type { PillTone, UrgencyEdgeKind } from '@/domain/badges';
 import { isBefore } from '@/domain/dates';
+import type { SortDirection } from '@/domain/listNavigationState';
 import { optionsFor, resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
+import type {
+  ListPaginationMeta,
+  OrganisationsListSortColumn,
+  OrganisationsListTabFilter,
+} from '@/server/pageLoaders';
 import type {
   ChoiceValue,
   Matter,
@@ -18,8 +24,10 @@ import type {
 import {
   DataList,
   DataListFilterBar,
+  DataListPagination,
   PersonChip,
   useListDensity,
+  useServerListNavigation,
   type ActiveFilterChipItem,
   type DataListColumn,
   type DataListSortState,
@@ -31,12 +39,38 @@ interface Props {
   people?: Person[];
   links?: PersonOrganisationLink[];
   matters?: Matter[];
+  activeMatterCountsByOrgId?: Record<string, number>;
   values: ChoiceValue[];
   employees: Person[];
   currentUserId?: string;
+  pagination?: ListPaginationMeta;
+  initialFilters?: {
+    tab: OrganisationsListTabFilter;
+    query: string;
+    typeFilter: string;
+    statusFilter: string;
+    orgTypeFilter: string;
+    sectorFilter: string;
+    ownerFilter: string;
+    sortBy?: OrganisationsListSortColumn | null;
+    sortDir?: SortDirection | null;
+  };
 }
 
-type OrganisationsTab = 'all' | 'clients' | 'prospects' | 'referrers' | 'archived';
+type OrganisationsTab = OrganisationsListTabFilter;
+
+const ORGS_PARAM_DEFAULTS = {
+  tab: 'all',
+  q: '',
+  type: 'all',
+  status: 'all',
+  orgType: 'all',
+  sector: 'all',
+  owner: 'all',
+  sort: '',
+  dir: '',
+  page: 1,
+};
 
 function orgStatusTone(label: string): PillTone {
   const l = label.toLowerCase();
@@ -54,21 +88,151 @@ export function OrganisationsListClient({
   people = [],
   links = [],
   matters = [],
+  activeMatterCountsByOrgId,
   values,
   employees,
   currentUserId = '',
+  pagination,
+  initialFilters,
 }: Props) {
   const router = useRouter();
+  const {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  } = useServerListNavigation({
+    basePath: '/organisations',
+    router,
+    defaults: ORGS_PARAM_DEFAULTS,
+    initialQuery: initialFilters?.query,
+  });
 
-  const [tab, setTab] = useState<OrganisationsTab>('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [orgTypeFilter, setOrgTypeFilter] = useState('all');
-  const [sectorFilter, setSectorFilter] = useState('all');
-  const [ownerFilter, setOwnerFilter] = useState('all');
-  const [sort, setSort] = useState<DataListSortState | null>(null);
+  const [tab, setTab] = useState<OrganisationsTab>(initialFilters?.tab ?? 'all');
+  const [searchQuery, setSearchQuery] = useState(initialFilters?.query ?? '');
+  const [typeFilter, setTypeFilter] = useState(initialFilters?.typeFilter ?? 'all');
+  const [statusFilter, setStatusFilter] = useState(initialFilters?.statusFilter ?? 'all');
+  const [orgTypeFilter, setOrgTypeFilter] = useState(initialFilters?.orgTypeFilter ?? 'all');
+  const [sectorFilter, setSectorFilter] = useState(initialFilters?.sectorFilter ?? 'all');
+  const [ownerFilter, setOwnerFilter] = useState(initialFilters?.ownerFilter ?? 'all');
+  const [sort, setSort] = useState<DataListSortState | null>(
+    initialFilters?.sortBy
+      ? {
+          columnId: initialFilters.sortBy,
+          direction: initialFilters.sortDir ?? 'asc',
+        }
+      : null,
+  );
   const [density, setDensity] = useListDensity(currentUserId, 'comfortable');
+
+  const initialKey = JSON.stringify(initialFilters ?? null);
+  const prevInitialKeyRef = useRef(initialKey);
+  useEffect(() => {
+    if (prevInitialKeyRef.current === initialKey) return;
+    prevInitialKeyRef.current = initialKey;
+    if (!initialFilters) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setTab(initialFilters.tab);
+      if (canSyncServerQuery(initialFilters.query)) {
+        setSearchQuery(initialFilters.query);
+        acknowledgeServerQuery(initialFilters.query);
+      }
+      setTypeFilter(initialFilters.typeFilter);
+      setStatusFilter(initialFilters.statusFilter);
+      setOrgTypeFilter(initialFilters.orgTypeFilter);
+      setSectorFilter(initialFilters.sectorFilter);
+      setOwnerFilter(initialFilters.ownerFilter);
+      setSort(
+        initialFilters.sortBy
+          ? {
+              columnId: initialFilters.sortBy,
+              direction: initialFilters.sortDir ?? 'asc',
+            }
+          : null,
+      );
+    });
+    return () => {
+      active = false;
+    };
+  }, [acknowledgeServerQuery, canSyncServerQuery, initialKey, initialFilters]);
+
+  const toQueryMap = (overrides?: Partial<{
+    tab: OrganisationsTab;
+    query: string;
+    typeFilter: string;
+    statusFilter: string;
+    orgTypeFilter: string;
+    sectorFilter: string;
+    ownerFilter: string;
+    sort: DataListSortState | null;
+    page: number;
+  }>) => {
+    const nextSort = overrides && 'sort' in overrides ? overrides.sort : sort;
+    return {
+      tab: overrides?.tab ?? tab,
+      q: overrides?.query ?? searchQuery,
+      type: overrides?.typeFilter ?? typeFilter,
+      status: overrides?.statusFilter ?? statusFilter,
+      orgType: overrides?.orgTypeFilter ?? orgTypeFilter,
+      sector: overrides?.sectorFilter ?? sectorFilter,
+      owner: overrides?.ownerFilter ?? ownerFilter,
+      sort: nextSort?.columnId ?? '',
+      dir: nextSort?.direction ?? '',
+      page: overrides?.page ?? 1,
+    };
+  };
+
+  const handleSortChange = (next: DataListSortState | null) => {
+    setSort(next);
+    if (pagination) navigateNow(toQueryMap({ sort: next, page: 1 }), 'replace');
+  };
+
+  const handleTabChange = (next: OrganisationsTab) => {
+    setTab(next);
+    if (pagination) navigateNow(toQueryMap({ tab: next, page: 1 }), 'replace');
+  };
+  const handleSearchChange = (next: string) => {
+    setSearchQuery(next);
+    if (pagination) navigateDebounced(toQueryMap({ query: next, page: 1 }));
+  };
+  const handleFilter = (
+    key: 'typeFilter' | 'statusFilter' | 'orgTypeFilter' | 'sectorFilter' | 'ownerFilter',
+    val: string,
+  ) => {
+    if (key === 'typeFilter') setTypeFilter(val);
+    if (key === 'statusFilter') setStatusFilter(val);
+    if (key === 'orgTypeFilter') setOrgTypeFilter(val);
+    if (key === 'sectorFilter') setSectorFilter(val);
+    if (key === 'ownerFilter') setOwnerFilter(val);
+    if (pagination) navigateNow(toQueryMap({ [key]: val, page: 1 }), 'replace');
+  };
+  const handleClearAll = () => {
+    setTypeFilter('all');
+    setStatusFilter('all');
+    setOrgTypeFilter('all');
+    setSectorFilter('all');
+    setOwnerFilter('all');
+    setSearchQuery('');
+    if (pagination) {
+      navigateNow(
+        toQueryMap({
+          typeFilter: 'all',
+          statusFilter: 'all',
+          orgTypeFilter: 'all',
+          sectorFilter: 'all',
+          ownerFilter: 'all',
+          query: '',
+          page: 1,
+        }),
+        'replace',
+      );
+    }
+  };
+  const handlePageChange = (nextPage: number) => {
+    navigateNow(toQueryMap({ page: nextPage }), 'push');
+  };
 
   const empById = useMemo(
     () => new Map(employees.map((e) => [e.id, personDisplayName(e)])),
@@ -119,36 +283,31 @@ export function OrganisationsListClient({
 
   const activeMatterCountByOrg = useMemo(() => {
     const map = new Map<string, number>();
+    if (activeMatterCountsByOrgId) {
+      for (const [orgId, cnt] of Object.entries(activeMatterCountsByOrgId)) {
+        map.set(orgId, cnt);
+      }
+      return map;
+    }
     for (const m of matters) {
-      const statusLabel = resolveLabel(values, m.matterStatusId).toLowerCase();
-      if (statusLabel === 'closed' || statusLabel === 'archived') continue;
+      const statusKey = systemKeyOf(values, m.matterStatusId);
+      if (statusKey === 'closed' || statusKey === 'archived') continue;
       if (m.clientId.startsWith('O-')) {
         map.set(m.clientId, (map.get(m.clientId) ?? 0) + 1);
       }
     }
     return map;
-  }, [matters, values]);
+  }, [activeMatterCountsByOrgId, matters, values]);
 
   const isClientOrg = (o: Organisation): boolean => {
-    const relLabels = resolveLabels(values, o.relationshipTypeIds).map((s) =>
-      s.toLowerCase(),
-    );
-    const statusLabel = resolveLabel(values, o.relationshipStatusId).toLowerCase();
-    return (
-      relLabels.some((r) => r.includes('client')) ||
-      statusLabel.includes('active client')
-    );
+    const relKeys = o.relationshipTypeIds.map((id) => systemKeyOf(values, id));
+    return relKeys.some((k) => k === 'client' || k === 'former_client');
   };
 
   const isProspectOrg = (o: Organisation): boolean => {
-    const relLabels = resolveLabels(values, o.relationshipTypeIds).map((s) =>
-      s.toLowerCase(),
-    );
-    const statusLabel = resolveLabel(values, o.relationshipStatusId).toLowerCase();
-    return (
-      relLabels.some((r) => r.includes('prospect')) ||
-      statusLabel.includes('prospect')
-    );
+    const relKeys = o.relationshipTypeIds.map((id) => systemKeyOf(values, id));
+    const statusKey = systemKeyOf(values, o.relationshipStatusId);
+    return relKeys.some((k) => k === 'prospect') || statusKey === 'prospective';
   };
 
   const activeOrganisations = useMemo(
@@ -186,6 +345,8 @@ export function OrganisationsListClient({
   const today = useMemo(() => new Date(), []);
 
   const filtered = useMemo(() => {
+    if (pagination) return organisations;
+
     const q = searchQuery.trim().toLowerCase();
 
     const source =
@@ -253,6 +414,8 @@ export function OrganisationsListClient({
       return a.legalName.localeCompare(b.legalName);
     });
   }, [
+    pagination,
+    organisations,
     tab,
     activeOrganisations,
     archivedOrganisations,
@@ -457,45 +620,45 @@ export function OrganisationsListClient({
           role="tab"
           aria-selected={tab === 'all'}
           className={`tab-btn ${tab === 'all' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('all')}
+          onClick={() => handleTabChange('all')}
         >
-          All active ({allActiveCount})
+          All active{tab === 'all' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${allActiveCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'clients'}
           className={`tab-btn ${tab === 'clients' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('clients')}
+          onClick={() => handleTabChange('clients')}
         >
-          Clients ({clientsCount})
+          Clients{tab === 'clients' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${clientsCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'prospects'}
           className={`tab-btn ${tab === 'prospects' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('prospects')}
+          onClick={() => handleTabChange('prospects')}
         >
-          Prospects ({prospectsCount})
+          Prospects{tab === 'prospects' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${prospectsCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'referrers'}
           className={`tab-btn ${tab === 'referrers' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('referrers')}
+          onClick={() => handleTabChange('referrers')}
         >
-          Referrers &amp; others ({referrersCount})
+          Referrers &amp; others{tab === 'referrers' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${referrersCount})` : ''}
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'archived'}
           className={`tab-btn ${tab === 'archived' ? 'tab-btn--active' : ''}`}
-          onClick={() => setTab('archived')}
+          onClick={() => handleTabChange('archived')}
         >
-          Archived ({archivedCount})
+          Archived{tab === 'archived' && pagination ? ` (${pagination.totalCount})` : !pagination ? ` (${archivedCount})` : ''}
         </button>
         </div>
         <div
@@ -516,7 +679,7 @@ export function OrganisationsListClient({
 
       <DataListFilterBar
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchChange}
         searchPlaceholder="Search legal name, trading name, company number, contact, town…"
         searchAriaLabel="Search organisations"
         primaryFilters={
@@ -527,7 +690,7 @@ export function OrganisationsListClient({
               aria-label="Filter by relationship type"
               className="field-select list-filter-row__select"
               value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
+              onChange={(e) => handleFilter('typeFilter', e.target.value)}
             >
               <option value="all">All relationship types</option>
               {relTypeOptions.map((r) => (
@@ -542,7 +705,7 @@ export function OrganisationsListClient({
               aria-label="Filter by relationship status"
               className="field-select list-filter-row__select"
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => handleFilter('statusFilter', e.target.value)}
             >
               <option value="all">All statuses</option>
               {statusOptions.map((s) => (
@@ -572,7 +735,7 @@ export function OrganisationsListClient({
                 aria-label="Filter by organisation type"
                 className="field-select"
                 value={orgTypeFilter}
-                onChange={(e) => setOrgTypeFilter(e.target.value)}
+                onChange={(e) => handleFilter('orgTypeFilter', e.target.value)}
               >
                 <option value="all">All organisation types</option>
                 {orgTypeOptions.map((t) => (
@@ -592,7 +755,7 @@ export function OrganisationsListClient({
                 aria-label="Filter by sector"
                 className="field-select"
                 value={sectorFilter}
-                onChange={(e) => setSectorFilter(e.target.value)}
+                onChange={(e) => handleFilter('sectorFilter', e.target.value)}
               >
                 <option value="all">All sectors</option>
                 {sectorOptions.map((s) => (
@@ -612,7 +775,7 @@ export function OrganisationsListClient({
                 aria-label="Filter by relationship partner"
                 className="field-select"
                 value={ownerFilter}
-                onChange={(e) => setOwnerFilter(e.target.value)}
+                onChange={(e) => handleFilter('ownerFilter', e.target.value)}
               >
                 <option value="all">All relationship partners</option>
                 {employees.map((e) => (
@@ -631,7 +794,7 @@ export function OrganisationsListClient({
                   key: 'relType',
                   label: 'Relationship type',
                   valueLabel: resolveLabel(values, typeFilter),
-                  onRemove: () => setTypeFilter('all'),
+                  onRemove: () => handleFilter('typeFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -641,7 +804,7 @@ export function OrganisationsListClient({
                   key: 'status',
                   label: 'Status',
                   valueLabel: resolveLabel(values, statusFilter),
-                  onRemove: () => setStatusFilter('all'),
+                  onRemove: () => handleFilter('statusFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -651,7 +814,7 @@ export function OrganisationsListClient({
                   key: 'orgType',
                   label: 'Organisation type',
                   valueLabel: resolveLabel(values, orgTypeFilter),
-                  onRemove: () => setOrgTypeFilter('all'),
+                  onRemove: () => handleFilter('orgTypeFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -661,7 +824,7 @@ export function OrganisationsListClient({
                   key: 'sector',
                   label: 'Sector',
                   valueLabel: resolveLabel(values, sectorFilter),
-                  onRemove: () => setSectorFilter('all'),
+                  onRemove: () => handleFilter('sectorFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
@@ -671,19 +834,12 @@ export function OrganisationsListClient({
                   key: 'partner',
                   label: 'Partner',
                   valueLabel: empById.get(ownerFilter) ?? ownerFilter,
-                  onRemove: () => setOwnerFilter('all'),
+                  onRemove: () => handleFilter('ownerFilter', 'all'),
                 } satisfies ActiveFilterChipItem,
               ]
             : []),
         ]}
-        onClearAll={() => {
-          setTypeFilter('all');
-          setStatusFilter('all');
-          setOrgTypeFilter('all');
-          setSectorFilter('all');
-          setOwnerFilter('all');
-          setSearchQuery('');
-        }}
+        onClearAll={handleClearAll}
         density={density}
         onDensityChange={setDensity}
       />
@@ -695,7 +851,7 @@ export function OrganisationsListClient({
         getRowUrgency={getRowUrgency}
         onRowClick={(o) => router.push(`/organisations/${o.id}`)}
         sort={sort}
-        onSortChange={setSort}
+        onSortChange={handleSortChange}
         defaultSortLabel="Alphabetical (legal name)"
         density={density}
         emptyMessage="No organisations match the selected view and filters."
@@ -729,6 +885,15 @@ export function OrganisationsListClient({
           );
         }}
       />
+      {pagination ? (
+        <DataListPagination
+          page={pagination.page}
+          pageSize={pagination.pageSize}
+          totalCount={pagination.totalCount}
+          onPageChange={handlePageChange}
+          itemLabel="organisations"
+        />
+      ) : null}
     </div>
   );
 }

@@ -698,7 +698,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     const { isActionDenied } = await import('@/domain/actionResult');
     const { canUserViewFinance } = await import('@/domain/pms');
     const { getMatterFinanceRows } = await import('@/server/financeServices');
-    const { getAppSnapshot } = await import('@/server/services');
+    const { getAppSnapshot } = await import('@/server/__tests__/testAppSnapshot');
     const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
 
     const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
@@ -745,7 +745,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       reconcilePmsInboundMatterCommercials,
     } = await import('@/domain/pms');
     const { getMatterFinanceRows } = await import('@/server/financeServices');
-    const { getAppSnapshot } = await import('@/server/services');
+    const { getAppSnapshot } = await import('@/server/__tests__/testAppSnapshot');
     const { getActiveTenantConfiguration } = await import('@/platform/tenantRuntime');
     const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
 
@@ -837,7 +837,7 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       expect(fe.email.trim()).toMatch(allowedDomainRegex);
     }
 
-    const { getAppSnapshot } = await import('@/server/services');
+    const { getAppSnapshot } = await import('@/server/__tests__/testAppSnapshot');
     const { runAsTestActor } = await import('@/server/testSupport/auditTestSupport');
     const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
     for (const p of snap.people) {

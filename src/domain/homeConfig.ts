@@ -929,3 +929,64 @@ export function getLeftRailVisibility(
     admin: canSeeAdmin,
   };
 }
+
+export interface HomeRoleDataNeeds {
+  readonly needsFullMatterFinance: boolean;
+  readonly needsRegisters: boolean;
+}
+
+const HOME_FULL_FINANCE_CARD_IDS: ReadonlySet<RoleHomeConfig['headlineCardIds'][number]> =
+  new Set([
+    'pt_overdue_debt',
+    'ls_unbilled_disb',
+    'fin_total_debt',
+    'fin_overdue_debt',
+    'fin_unbilled_disb',
+    'mp_total_debt',
+  ]);
+
+const HOME_FULL_FINANCE_PANEL_IDS: ReadonlySet<PanelId> = new Set([
+  'disbursements_and_invoices_to_log',
+  'matters_needing_partner_attention',
+  'wip_ready_to_bill_and_aged_debt',
+  'aged_debt_by_age_band',
+  'overdue_invoices_worklist',
+  'disbursements_awaiting_billing',
+  'cash_collection_vs_target',
+  'firm_financial_pulse',
+]);
+
+const HOME_REGISTER_PANEL_IDS: ReadonlySet<PanelId> = new Set([
+  'undertakings_and_file_reviews',
+  'complaints_incidents_and_breaches',
+]);
+
+/**
+ * Derive Home loader data requirements strictly from the resolved Home role's
+ * configured headline cards and panels (mirroring `HomeClient` selection).
+ * Supports built-in, custom client, and `legal_secretary` role layouts alike.
+ */
+export function resolveHomeRoleDataNeeds(
+  homePagesConfig: HomePagesConfig,
+  activeRoleKey: string,
+): HomeRoleDataNeeds {
+  const roleConfig =
+    homePagesConfig.roles.find((r) => r.key === activeRoleKey) ??
+    homePagesConfig.roles.find((r) => r.key === 'fee_earner') ??
+    homePagesConfig.roles[0];
+  if (!roleConfig) {
+    return {
+      needsFullMatterFinance: false,
+      needsRegisters: false,
+    };
+  }
+  const activeCards = roleConfig.headlineCardIds.slice(0, 5);
+  const activePanels = [...roleConfig.primaryPanels, ...roleConfig.summaryPanels];
+
+  return {
+    needsFullMatterFinance:
+      activeCards.some((cid) => HOME_FULL_FINANCE_CARD_IDS.has(cid)) ||
+      activePanels.some((pid) => HOME_FULL_FINANCE_PANEL_IDS.has(pid)),
+    needsRegisters: activePanels.some((pid) => HOME_REGISTER_PANEL_IDS.has(pid)),
+  };
+}

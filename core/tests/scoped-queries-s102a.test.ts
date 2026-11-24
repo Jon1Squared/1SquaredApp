@@ -25,7 +25,6 @@ import {
 } from '@/server/visibility';
 import {
   extractConflictSignalsFromParties,
-  getAppSnapshot,
   getClientPmsViewBundle,
   loadFullConflictSearchGraph,
   loadScopedConflictSearchGraphForParity,
@@ -33,6 +32,7 @@ import {
   runMatterConflictSearchRecord,
   findCandidateDuplicatesForRecord,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { searchMatterConflicts } from '@/domain/matterConflicts';
 import { runEnquiryConflictSearch } from '@/domain/enquiries';
 import { verifyFinanceActorAndPermission } from '@/server/financeServices';

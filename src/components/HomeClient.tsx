@@ -21,7 +21,6 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate } from '@/domain/dates';
-import { findOrganisationDuplicates, findPersonDuplicates } from '@/domain/duplicates';
 import {
   computeEnquiryDashboardMetrics,
   enquiryDisplayName,
@@ -85,13 +84,13 @@ import type {
 } from '@/pms/types';
 import { HeroHomeSearch, StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { useIntakePreview } from './useIntakePreview';
 
 export type HomeSnapshotBaseProps = Pick<
   AppSnapshot,
   | 'currentUser'
   | 'effectiveWorkPerson'
   | 'homePagesConfig'
-  | 'searchIndex'
   | 'signOffs'
   | 'people'
   | 'organisations'
@@ -170,7 +169,6 @@ export function HomeClient({
   effectiveWorkPerson,
   activeRoleKey,
   homePagesConfig,
-  searchIndex,
   signOffs,
   people,
   organisations,
@@ -215,7 +213,7 @@ export function HomeClient({
 
   useEffect(() => {
     let active = true;
-    void getDocumentGenerationSnapshotAction()
+    void getDocumentGenerationSnapshotAction({ includeDocuments: false })
       .then((snap) => {
         if (!active || isActionDenied(snap)) return;
         setPendingTemplateApprovalsCount(snap.pendingApprovalsCount);
@@ -469,22 +467,31 @@ export function HomeClient({
     [allMatterFins],
   );
 
-  // Live duplicate check for Quick Enquiry Capture (Panel 13)
-  const quickDuplicateHits = useMemo(() => {
-    const personHits = findPersonDuplicates(
-      {
-        firstName: qFirstName,
-        surname: qLastName,
-        emails: qEmail ? [qEmail] : [],
-        phones: qPhone ? [qPhone] : [],
-      },
-      people,
-    );
-    const orgHits = qOnBehalf
-      ? findOrganisationDuplicates({ legalName: qOnBehalf }, organisations)
-      : [];
-    return { personHits, orgHits };
-  }, [qFirstName, qLastName, qEmail, qPhone, qOnBehalf, people, organisations]);
+  // Live duplicate check for Quick Enquiry Capture (Panel 13) via debounced C2 server action
+  const {
+    preview: quickIntakePreview,
+    fastError: quickFastError,
+    conflictError: quickConflictError,
+    retryFastCheck: retryQuickFastCheck,
+    retryConflictCheck: retryQuickConflictCheck,
+  } = useIntakePreview(
+    {
+      kind: 'quick_enquiry',
+      firstName: qFirstName,
+      surname: qLastName,
+      callingOnBehalfOf: qOnBehalf,
+      emails: qEmail ? [qEmail] : [],
+      phones: qPhone ? [qPhone] : [],
+    },
+    { enableConflicts: false },
+  );
+  const quickDuplicateHits = useMemo(
+    () => ({
+      personHits: quickIntakePreview.duplicatePeople,
+      orgHits: quickIntakePreview.duplicateOrganisations,
+    }),
+    [quickIntakePreview.duplicatePeople, quickIntakePreview.duplicateOrganisations],
+  );
 
   // ------------------------------------------------------------------ Actions
   async function handleCompleteTask(task: Task) {
@@ -2805,6 +2812,26 @@ export function HomeClient({
                       />
                     </div>
                   </div>
+
+                  {quickFastError || quickConflictError ? (
+                    <div className="banner banner--warning full" role="alert">
+                      <div style={{ flex: 1 }}>
+                        <span>{quickConflictError ?? quickFastError}</span>
+                      </div>
+                      <div className="banner__actions">
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          onClick={() => {
+                            if (quickFastError) retryQuickFastCheck();
+                            if (quickConflictError) retryQuickConflictCheck();
+                          }}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {quickDuplicateHits.personHits.length > 0 ||
                   quickDuplicateHits.orgHits.length > 0 ? (
@@ -5190,7 +5217,7 @@ export function HomeClient({
         <h1 className="hero-greeting" suppressHydrationWarning>
           {greetingPrefix}, {greetingName}
         </h1>
-        <HeroHomeSearch searchIndex={searchIndex} />
+        <HeroHomeSearch />
         {canApproveTemplates && pendingTemplateApprovalsCount > 0 ? (
           <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}>
             <Link

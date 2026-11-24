@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   addNoteAction,
   deleteLinkAction,
   dismissDuplicateAction,
+  getEntityRecordForEditAction,
   mergeRecordsAction,
   saveLinkAction,
 } from '@/app/actions';
@@ -27,6 +28,7 @@ import type {
   RecordType,
 } from '@/domain/types';
 import { useToast } from './Toast';
+import { EntitySearchSelect, useEntityPicker } from './useEntityPicker';
 
 export function KeyValue({
   label,
@@ -62,26 +64,115 @@ export function PossibleDuplicateBanner({
     () => candidates.filter((c) => !isEmployeeOrLeaverRecord(c)),
     [candidates],
   );
-  const selectableTargets = useMemo(
-    () =>
-      allSameType.filter(
-        (r) =>
-          r.id !== record.id && !r.mergedIntoId && !isEmployeeOrLeaverRecord(r),
-      ),
-    [allSameType, record.id],
+  const [mergeSearchQuery, setMergeSearchQuery] = useState('');
+  const { items: remoteMergePickerItems } = useEntityPicker(
+    {
+      entityTypes: [record.recordType === 'organisation' ? 'organisation' : 'person'],
+      query: mergeSearchQuery,
+      excludeIds: [record.id],
+      excludeDemo: true,
+      nonEmployeesOnly: record.recordType === 'person',
+      limit: 25,
+    },
+    { enabled: mergeOpen && !recordIsEmployeeOrLeaver },
   );
+
+  const [hydratedSurvivorsById, setHydratedSurvivorsById] = useState<
+    Record<string, AnyRecord>
+  >({});
+  const [hydratingSurvivor, setHydratingSurvivor] = useState(false);
+  const hydrateSeqRef = useRef(0);
+
+  const selectableTargetOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; displayLabel: string; full?: AnyRecord }>();
+    for (const r of allSameType) {
+      if (r.id !== record.id && !r.mergedIntoId && !isEmployeeOrLeaverRecord(r)) {
+        byId.set(r.id, {
+          id: r.id,
+          displayLabel: `${recordDisplayName(r)} (${r.id})`,
+          full: r,
+        });
+      }
+    }
+    for (const item of remoteMergePickerItems) {
+      if (item.id === record.id || byId.has(item.id)) continue;
+      if (item.recordType === 'person' && item.person?.isEmployee) continue;
+      byId.set(item.id, {
+        id: item.id,
+        displayLabel: `${item.label} (${item.id})`,
+        full: hydratedSurvivorsById[item.id],
+      });
+    }
+    return Array.from(byId.values());
+  }, [allSameType, remoteMergePickerItems, hydratedSurvivorsById, record.id]);
   const [survivorId, setSurvivorId] = useState<string>(
-    mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
+    mergeableCandidates[0]?.id ?? selectableTargetOptions[0]?.id ?? '',
   );
   const [busy, setBusy] = useState(false);
 
+  const fullRecordsById = useMemo(() => {
+    const map = new Map<string, AnyRecord>();
+    for (const c of mergeableCandidates) map.set(c.id, c);
+    for (const r of allSameType) {
+      if (!r.mergedIntoId && !isEmployeeOrLeaverRecord(r)) map.set(r.id, r);
+    }
+    for (const [id, rec] of Object.entries(hydratedSurvivorsById)) {
+      map.set(id, rec);
+    }
+    return map;
+  }, [mergeableCandidates, allSameType, hydratedSurvivorsById]);
+
+  const effectiveSurvivorId =
+    survivorId || mergeableCandidates[0]?.id || selectableTargetOptions[0]?.id || '';
   const selectedSurvivor = useMemo(
     () =>
-      selectableTargets.find((r) => r.id === survivorId) ??
+      (effectiveSurvivorId ? fullRecordsById.get(effectiveSurvivorId) : null) ??
       mergeableCandidates[0] ??
       null,
-    [selectableTargets, mergeableCandidates, survivorId],
+    [effectiveSurvivorId, fullRecordsById, mergeableCandidates],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!mergeOpen || !effectiveSurvivorId || fullRecordsById.has(effectiveSurvivorId)) {
+      queueMicrotask(() => {
+        if (!cancelled) setHydratingSurvivor(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const seq = ++hydrateSeqRef.current;
+    queueMicrotask(() => {
+      if (!cancelled) setHydratingSurvivor(true);
+    });
+    const entityKind =
+      record.recordType === 'organisation' ? 'organisation' : 'person';
+    void getEntityRecordForEditAction(entityKind, effectiveSurvivorId)
+      .then((res) => {
+        if (cancelled || seq !== hydrateSeqRef.current) return;
+        setHydratingSurvivor(false);
+        if (isActionDenied(res)) {
+          showToast(res.message);
+          return;
+        }
+        const hydrated: AnyRecord | null =
+          res.recordType === 'organisation' ? res.organisation : res.person;
+        if (hydrated && !hydrated.mergedIntoId && !isEmployeeOrLeaverRecord(hydrated)) {
+          setHydratedSurvivorsById((prev) => ({ ...prev, [hydrated.id]: hydrated }));
+        }
+      })
+      .catch(() => {
+        if (cancelled || seq !== hydrateSeqRef.current) return;
+        setHydratingSurvivor(false);
+        showToast('Could not load surviving record details for merge preview.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mergeOpen, effectiveSurvivorId, fullRecordsById, record.recordType, showToast]);
 
   const preview = useMemo(() => {
     if (!selectedSurvivor) return null;
@@ -162,10 +253,10 @@ export function PossibleDuplicateBanner({
               onClick={() => {
                 if (
                   !survivorId &&
-                  (mergeableCandidates[0]?.id || selectableTargets[0]?.id)
+                  (mergeableCandidates[0]?.id || selectableTargetOptions[0]?.id)
                 ) {
                   setSurvivorId(
-                    mergeableCandidates[0]?.id ?? selectableTargets[0]?.id ?? '',
+                    mergeableCandidates[0]?.id ?? selectableTargetOptions[0]?.id ?? '',
                   );
                 }
                 setMergeOpen(true);
@@ -189,6 +280,15 @@ export function PossibleDuplicateBanner({
               <label className="field-label" htmlFor="merge-survivor-select">
                 Surviving record
               </label>
+              <input
+                type="search"
+                className="input"
+                style={{ marginBottom: 8 }}
+                placeholder="Search surviving records…"
+                aria-label="Search surviving record"
+                value={mergeSearchQuery}
+                onChange={(e) => setMergeSearchQuery(e.target.value)}
+              />
               <select
                 id="merge-survivor-select"
                 className="select"
@@ -205,16 +305,22 @@ export function PossibleDuplicateBanner({
                   </optgroup>
                 ) : null}
                 <optgroup label="All records">
-                  {selectableTargets.map((t) => (
+                  {selectableTargetOptions.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {recordDisplayName(t)} ({t.id})
+                      {t.displayLabel}
                     </option>
                   ))}
                 </optgroup>
               </select>
             </div>
 
-            {preview ? (
+            {hydratingSurvivor ? (
+              <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: 'var(--color-input-bg)' }}>
+                <div className="muted" style={{ fontSize: '0.92rem' }}>
+                  Loading surviving record preview…
+                </div>
+              </div>
+            ) : preview ? (
               <div style={{ marginTop: 16, padding: 14, borderRadius: 10, background: 'var(--color-input-bg)' }}>
                 <div className="section-label">Fields to copy across</div>
                 <div style={{ marginTop: 6, fontSize: '0.92rem' }}>
@@ -236,7 +342,7 @@ export function PossibleDuplicateBanner({
               <button
                 type="button"
                 className="btn btn--primary"
-                disabled={!selectedSurvivor || busy}
+                disabled={!selectedSurvivor || busy || hydratingSurvivor}
                 onClick={onConfirmMerge}
               >
                 Confirm merge
@@ -417,44 +523,60 @@ export function LinkModal({
               <label className="field-label" htmlFor="link-org-select">
                 Organisation
               </label>
-              <select
+              <EntitySearchSelect
                 id="link-org-select"
                 className="select"
+                entityTypes={['organisation']}
+                autoload
                 value={organisationId}
-                onChange={(e) => setOrganisationId(e.target.value)}
                 required
-              >
-                {organisations
+                emptyLabel="Select an organisation…"
+                searchPlaceholder="Search organisations…"
+                searchAriaLabel="Search organisation to link"
+                initialOptions={organisations
                   .filter((o) => !o.mergedIntoId)
                   .sort((a, b) => a.legalName.localeCompare(b.legalName))
-                  .map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.legalName}
-                    </option>
-                  ))}
-              </select>
+                  .map((o) => ({
+                    id: o.id,
+                    recordType: 'organisation' as const,
+                    label: o.legalName,
+                    subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+                    reference: o.id,
+                    href: `/organisations/${o.id}`,
+                    organisation: o,
+                  }))}
+                onChange={(nextId) => setOrganisationId(nextId)}
+              />
             </div>
           ) : (
             <div className="field field--full">
               <label className="field-label" htmlFor="link-person-select">
                 Person
               </label>
-              <select
+              <EntitySearchSelect
                 id="link-person-select"
                 className="select"
+                entityTypes={['person']}
+                autoload
                 value={personId}
-                onChange={(e) => setPersonId(e.target.value)}
                 required
-              >
-                {people
+                emptyLabel="Select a person…"
+                searchPlaceholder="Search people…"
+                searchAriaLabel="Search person to link"
+                initialOptions={people
                   .filter((p) => !p.mergedIntoId)
                   .sort((a, b) => a.surname.localeCompare(b.surname))
-                  .map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {personDisplayName(p)} {p.jobTitle ? `(${p.jobTitle})` : ''}
-                    </option>
-                  ))}
-              </select>
+                  .map((p) => ({
+                    id: p.id,
+                    recordType: 'person' as const,
+                    label: `${personDisplayName(p)} ${p.jobTitle ? `(${p.jobTitle})` : ''}`,
+                    subtitle: p.jobTitle ?? '',
+                    reference: p.id,
+                    href: `/people/${p.id}`,
+                    person: p,
+                  }))}
+                onChange={(nextId) => setPersonId(nextId)}
+              />
             </div>
           )}
 

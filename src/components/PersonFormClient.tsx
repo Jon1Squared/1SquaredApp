@@ -16,7 +16,7 @@ import {
   searchAddressSuggestions,
   type AddressSuggestion,
 } from '@/domain/addressLookup';
-import { findPersonDuplicates, formatDuplicateReasons } from '@/domain/duplicates';
+import { formatDuplicateReasons } from '@/domain/duplicates';
 import {
   buildSensitiveSubmissionPayload,
   calculateHrRetentionDate,
@@ -33,17 +33,13 @@ import {
   getRightToWorkEvidenceOnFile,
   isFeeEarnerRoleType,
   isWorkingAtFirm,
-   type LeaverOwnedRecordItem,
+  type LeaverOwnedRecordItem,
   maskBankDetails,
   maskNationalInsuranceNumber,
   validateNationalInsuranceNumber,
 } from '@/domain/employment';
-import {
-  detectPreliminaryConflicts,
-  findEnquiryEntityMatches,
-  hasQuickConflictCheckInputs,
-  mergePeopleWithEnquiries,
-} from '@/domain/enquiries';
+import { hasQuickConflictCheckInputs } from '@/domain/enquiries';
+import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
 import { InfoPopover } from './InfoPopover';
 import { resolveLabel, valueBySystemKey, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
@@ -54,6 +50,8 @@ import {
   resolveOrgDepartment,
   resolveOrgOffice,
 } from '@/domain/orgStructure';
+import { toEntityPickerOrganisationSummary } from '@/domain/intakePreview';
+import type { EntityPickerOrganisationSummary } from '@/domain/intakePreviewTypes';
 import type {
   Address,
   ChoiceList,
@@ -89,11 +87,13 @@ import {
 } from './FormControls';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { EntitySearchSelect } from './useEntityPicker';
+import { useIntakePreview } from './useIntakePreview';
 
 interface Props {
   existing?: Person | null;
-  allPeople: Person[];
-  organisations: Organisation[];
+  allPeople?: Person[];
+  organisations?: Organisation[];
   matters?: Matter[];
   enquiries?: Enquiry[];
   employees: Person[];
@@ -145,8 +145,8 @@ type EmployeeSubTabKey =
 
 export function PersonFormClient({
   existing,
-  allPeople,
-  organisations,
+  allPeople = [],
+  organisations = [],
   matters = [],
   enquiries = [],
   employees,
@@ -160,7 +160,7 @@ export function PersonFormClient({
   leaverOwnedRecords: leaverOwnedRecordsProp,
   firmPrimaryDomain,
   firmName = 'Firm',
-  tenantId,
+  tenantId: _tenantId,
   embeddedInModal = false,
   nameOnlyMandatory = false,
   modalTitle,
@@ -183,8 +183,11 @@ export function PersonFormClient({
   const [continueAnyway, setContinueAnyway] = useState(false);
 
   const currentUser = useMemo(
-    () => allPeople.find((p) => p.id === currentUserId) ?? null,
-    [allPeople, currentUserId],
+    () =>
+      employees.find((p) => p.id === currentUserId) ??
+      allPeople.find((p) => p.id === currentUserId) ??
+      null,
+    [employees, allPeople, currentUserId],
   );
 
   const userPerms = useMemo<Set<EmployeePermission>>(
@@ -197,6 +200,10 @@ export function PersonFormClient({
   const canHrRestricted = userPerms.has('employee:hr_restricted');
   const canPayroll = userPerms.has('employee:payroll');
   const canSensitive = userPerms.has('employee:sensitive');
+  const isDobHiddenForActor = Boolean(
+    (existing?.isEmployee || existing?.employment) &&
+      (existing.dateOfBirth === undefined || !canHrRestricted),
+  );
 
   // Active tab in "2 · MORE DETAILS"
   const [activeTab, setActiveTab] = useState<SectionKey>('most_used');
@@ -403,7 +410,9 @@ export function PersonFormClient({
     existingEmp?.status ?? (existing?.isEmployee ? 'Active' : 'Pre-start'),
   );
   const [empNumber, setEmpNumber] = useState<string>(
-    () => existingEmp?.employeeNumber ?? generateNextEmployeeNumber(allPeople),
+    () =>
+      existingEmp?.employeeNumber ??
+      generateNextEmployeeNumber(employees.length > 0 ? employees : allPeople),
   );
   const [empEntityId, setEmpEntityId] = useState<string>(
     existingEmp?.employingEntityId ??
@@ -733,12 +742,14 @@ export function PersonFormClient({
   // Records owned by this person if they are a leaver (or being marked as a leaver)
   const leaverRecordsForPerson = useMemo(() => {
     if (!existing) return [];
-    if (leaverOwnedRecordsProp) {
-      const fromProp = leaverOwnedRecordsProp.filter((r) => r.leaverId === existing.id);
-      if (fromProp.length > 0) return fromProp;
+    if (leaverOwnedRecordsProp !== undefined) {
+      return empStatus === 'Leaver'
+        ? leaverOwnedRecordsProp.filter((r) => r.leaverId === existing.id)
+        : [];
     }
     if (empStatus === 'Leaver') {
-      const simulatedPeople = allPeople.map((p) =>
+      const sourcePeople = allPeople.length > 0 ? allPeople : [existing, ...employees];
+      const simulatedPeople = sourcePeople.map((p) =>
         p.id === existing.id
           ? {
               ...p,
@@ -749,10 +760,17 @@ export function PersonFormClient({
             }
           : p,
       );
-      return findRecordsOwnedByLeavers(simulatedPeople, organisations, matters, [], [], existing.id);
+      return findRecordsOwnedByLeavers(
+        simulatedPeople,
+        organisations,
+        matters,
+        [],
+        enquiries,
+        existing.id,
+      );
     }
     return [];
-  }, [existing, leaverOwnedRecordsProp, empStatus, allPeople, organisations, matters]);
+  }, [existing, leaverOwnedRecordsProp, empStatus, allPeople, employees, organisations, matters, enquiries]);
 
   // Right-to-work evidence on file (shown in Compliance tab without altering Client ID verification status)
   const rightToWorkEvidence = useMemo(() => {
@@ -890,6 +908,14 @@ export function PersonFormClient({
 
   // Optional initial organisation link (when creating a new person)
   const [linkOrgId, setLinkOrgId] = useState(initialLinkOrgId ?? '');
+  const [selectedLinkedOrg, setSelectedLinkedOrg] = useState<
+    Organisation | EntityPickerOrganisationSummary | null
+  >(
+    () =>
+      initialLinkOrgId
+        ? (organisations.find((o) => o.id === initialLinkOrgId) ?? null)
+        : null,
+  );
   const [linkJobTitle, setLinkJobTitle] = useState('');
   const [linkDepartment, setLinkDepartment] = useState('');
   const [linkRoleWithinOrg, setLinkRoleWithinOrg] = useState('');
@@ -979,58 +1005,56 @@ export function PersonFormClient({
   const mandatoryMissingCount = nameOnlyMandatory
     ? (!firstName.trim() ? 1 : 0) +
       (!surname.trim() ? 1 : 0) +
-      (isEmployee && !dateOfBirth.trim() ? 1 : 0)
+      (isEmployee && !isDobHiddenForActor && !dateOfBirth.trim() ? 1 : 0)
     : (!firstName.trim() ? 1 : 0) +
       (!surname.trim() ? 1 : 0) +
       (!hasContactInfo ? 1 : 0) +
-      ((embeddedInModal || isEmployee) && !dateOfBirth.trim() ? 1 : 0);
+      (((embeddedInModal || isEmployee) && !isDobHiddenForActor) && !dateOfBirth.trim()
+        ? 1
+        : 0);
 
-  const mergedAllPeople = useMemo(
-    () => mergePeopleWithEnquiries(allPeople, enquiries, values),
-    [allPeople, enquiries, values],
-  );
-
-  // Exclude the record being edited from duplicate / conflict self-matches
-  const otherPeople = useMemo(
-    () => (existing ? mergedAllPeople.filter((p) => p.id !== existing.id) : mergedAllPeople),
-    [mergedAllPeople, existing],
-  );
-
-  // Live duplicate check while typing
-  const liveDuplicates = useMemo(
+  // Live duplicate & conflict check via debounced C2 server action
+  const resolvedLinkedOrg = useMemo(
     () =>
-      findPersonDuplicates(
-        {
-          id: existing?.id,
-          firstName,
-          surname,
-          preferredName,
-          emails: cleanEmails.map((e) => e.address),
-          phones: cleanPhones.map((p) => p.number),
-          addresses: addresses.filter((a) => a.line1.trim() && a.postcode.trim()),
-        },
-        mergedAllPeople,
-        existing?.notDuplicateOf,
-        { fuzzy: true },
-      ).filter((m) => m.reasons.some((r) => r !== 'address' && r !== 'postcode')),
-    [
-      existing?.id,
-      existing?.notDuplicateOf,
-      firstName,
-      surname,
-      preferredName,
-      cleanEmails,
-      cleanPhones,
-      addresses,
-      mergedAllPeople,
+      linkOrgId
+        ? (selectedLinkedOrg?.id === linkOrgId
+            ? selectedLinkedOrg
+            : organisations.find((o) => o.id === linkOrgId) ?? null)
+        : null,
+    [linkOrgId, selectedLinkedOrg, organisations],
+  );
+  const linkedOrgInitialOptions = useMemo(
+    () => [
+      ...(resolvedLinkedOrg
+        ? [
+            {
+              id: resolvedLinkedOrg.id,
+              recordType: 'organisation' as const,
+              label: `${resolvedLinkedOrg.legalName} (${resolvedLinkedOrg.id})`,
+              subtitle: resolvedLinkedOrg.companyNumber
+                ? `Co. ${resolvedLinkedOrg.companyNumber}`
+                : '',
+              reference: resolvedLinkedOrg.id,
+              href: `/organisations/${resolvedLinkedOrg.id}`,
+              organisation: toEntityPickerOrganisationSummary(resolvedLinkedOrg),
+            },
+          ]
+        : []),
+      ...organisations
+        .filter((o) => !o.mergedIntoId && o.id !== resolvedLinkedOrg?.id)
+        .map((o) => ({
+          id: o.id,
+          recordType: 'organisation' as const,
+          label: `${o.legalName} (${o.id})`,
+          subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+          reference: o.id,
+          href: `/organisations/${o.id}`,
+          organisation: toEntityPickerOrganisationSummary(o),
+        })),
     ],
+    [resolvedLinkedOrg, organisations],
   );
-
-  // Quick Conflict Check (identical to the Enquiry screen)
-  const linkedOrgName = useMemo(
-    () => (linkOrgId ? organisations.find((o) => o.id === linkOrgId)?.legalName ?? '' : ''),
-    [linkOrgId, organisations],
-  );
+  const linkedOrgName = resolvedLinkedOrg?.legalName ?? '';
   const otherNamesJoined = useMemo(
     () =>
       [
@@ -1044,87 +1068,38 @@ export function PersonFormClient({
     [preferredName, firstName, surname, otherNames],
   );
 
-  const liveEntityMatches = useMemo(
+  const {
+    preview: intakePreview,
+    loadingFast: duplicatePreviewLoading,
+    fastError: duplicatePreviewError,
+    triggerConflictCheck,
+    retryFastCheck: retryDuplicatePreview,
+  } = useIntakePreview({
+    kind: 'person',
+    excludeId: existing?.id ?? null,
+    dismissedDuplicateIds: existing?.notDuplicateOf,
+    firstName,
+    surname,
+    preferredName,
+    otherNames: otherNames.map((n) => n.name),
+    callingOnBehalfOf: linkedOrgName,
+    otherPartiesNamed: otherNamesJoined,
+    emails: cleanEmails.map((e) => e.address),
+    phones: cleanPhones.map((p) => p.number),
+    addresses: addresses.filter((a) => a.postcode.trim() || a.line1.trim()),
+    linkedOrganisationId: linkOrgId || null,
+  }, { enableConflicts: false });
+
+  const liveDuplicates = useMemo(
     () =>
-      findEnquiryEntityMatches(
-        {
-          firstName,
-          lastName: surname,
-          email: primaryEmailValue,
-          phone: primaryPhoneValue,
-          callingOnBehalfOf: linkedOrgName,
-          postcode: primaryAddr.postcode,
-          addressLine1: primaryAddr.line1,
-          addressLine2: primaryAddr.line2,
-          otherPartiesNamed: otherNamesJoined,
-        },
-        otherPeople,
-        organisations,
-        enquiries,
+      intakePreview.duplicatePeople.filter((m) =>
+        m.reasons.some((r) => r !== 'address' && r !== 'postcode'),
       ),
-    [
-      firstName,
-      surname,
-      primaryEmailValue,
-      primaryPhoneValue,
-      linkedOrgName,
-      primaryAddr.postcode,
-      primaryAddr.line1,
-      primaryAddr.line2,
-      otherNamesJoined,
-      otherPeople,
-      organisations,
-      enquiries,
-    ],
+    [intakePreview.duplicatePeople],
   );
 
-  const possibleConflicts = useMemo(
-    () =>
-      detectPreliminaryConflicts(
-        {
-          firstName,
-          lastName: surname,
-          callingOnBehalfOf: linkedOrgName,
-          otherPartiesNamed: otherNamesJoined,
-          email: primaryEmailValue,
-          phone: primaryPhoneValue,
-          address: {
-            line1: primaryAddr.line1,
-            line2: primaryAddr.line2,
-            postcode: primaryAddr.postcode,
-          },
-          linkedPersonId: null,
-          linkedOrganisationId: linkOrgId || null,
-        },
-        otherPeople,
-        organisations,
-        matters,
-        values,
-        enquiries,
-        null,
-        undefined,
-        undefined,
-        tenantId,
-      ),
-    [
-      firstName,
-      surname,
-      linkedOrgName,
-      otherNamesJoined,
-      primaryEmailValue,
-      primaryPhoneValue,
-      primaryAddr.line1,
-      primaryAddr.line2,
-      primaryAddr.postcode,
-      linkOrgId,
-      otherPeople,
-      organisations,
-      matters,
-      values,
-      enquiries,
-      tenantId,
-    ],
-  );
+  const liveEntityMatches = intakePreview.entityMatches;
+  const possibleConflicts = intakePreview.possibleConflicts;
 
   const conflictKeys = useMemo(
     () => new Set(possibleConflicts.map((h) => `${h.recordType}:${h.recordId}`)),
@@ -1185,6 +1160,7 @@ export function PersonFormClient({
 
   const linkExistingOrg = (o: Organisation) => {
     setLinkOrgId(o.id);
+    setSelectedLinkedOrg(o);
     if (!primaryAddr.line1.trim() && o.registeredAddress) {
       updatePrimaryAddress({
         line1: o.registeredAddress.line1,
@@ -1255,7 +1231,11 @@ export function PersonFormClient({
       setErrorMsg('First name and surname are required.');
       return;
     }
-    if ((highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()) {
+    if (
+      !isDobHiddenForActor &&
+      (highlightMissingClientFields || isEmployee) &&
+      !dateOfBirth.trim()
+    ) {
       setErrorMsg(
         isEmployee
           ? 'Date of birth is required when a person works at the firm.'
@@ -1506,7 +1486,7 @@ export function PersonFormClient({
           middleNames: middleNames.trim(),
           surname: surname.trim(),
           preferredName: preferredName.trim(),
-          dateOfBirth: dateOfBirth || null,
+          ...(isDobHiddenForActor ? {} : { dateOfBirth: dateOfBirth || null }),
           otherNames: otherNames.filter((n) => n.name.trim()),
           jobTitle: jobTitle.trim(),
           emails: cleanEmails,
@@ -1683,6 +1663,23 @@ export function PersonFormClient({
               </div>
             </div>
 
+            {duplicatePreviewError ? (
+              <div className="banner banner--warning" role="alert">
+                <div>
+                  <strong>{duplicatePreviewError}</strong>
+                </div>
+                <div className="banner__actions">
+                  <button
+                    type="button"
+                    className="btn btn--secondary btn--sm"
+                    onClick={retryDuplicatePreview}
+                  >
+                    Try again
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             {liveDuplicates.length > 0 ? (
               <div className="banner banner--warning" role="alert">
                 <div>
@@ -1830,6 +1827,7 @@ export function PersonFormClient({
                     }
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                 </div>
 
@@ -1874,6 +1872,7 @@ export function PersonFormClient({
                     }
                     value={surname}
                     onChange={(e) => setSurname(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                 </div>
 
@@ -1893,48 +1892,50 @@ export function PersonFormClient({
                   />
                 </div>
 
-                <div className="field-group">
-                  <label
-                    className="field-label"
-                    htmlFor="p-dob"
-                    style={
-                      (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
-                        ? { color: '#d93025', fontWeight: 700 }
-                        : undefined
-                    }
-                  >
-                    Date of birth{' '}
-                    {(!nameOnlyMandatory && embeddedInModal) || isEmployee ? (
-                      <span style={{ color: 'var(--coral, #d94a27)' }}>*</span>
+                {!isDobHiddenForActor ? (
+                  <div className="field-group">
+                    <label
+                      className="field-label"
+                      htmlFor="p-dob"
+                      style={
+                        (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
+                          ? { color: '#d93025', fontWeight: 700 }
+                          : undefined
+                      }
+                    >
+                      Date of birth{' '}
+                      {(!nameOnlyMandatory && embeddedInModal) || isEmployee ? (
+                        <span style={{ color: 'var(--coral, #d94a27)' }}>*</span>
+                      ) : null}
+                    </label>
+                    <input
+                      id="p-dob"
+                      type="date"
+                      required={highlightMissingClientFields || isEmployee}
+                      className="field-input"
+                      style={
+                        (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
+                          ? {
+                              borderColor: '#d93025',
+                              boxShadow: '0 0 0 2px rgba(217, 48, 37, 0.16)',
+                              background: 'rgba(217, 48, 37, 0.04)',
+                            }
+                          : undefined
+                      }
+                      value={dateOfBirth}
+                      onChange={(e) => setDateOfBirth(e.target.value)}
+                    />
+                    {highlightMissingClientFields && !dateOfBirth.trim() ? (
+                      <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
+                        Required to convert contact to a client
+                      </span>
+                    ) : isEmployee && !dateOfBirth.trim() ? (
+                      <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
+                        Date of birth is mandatory when a person works at the firm
+                      </span>
                     ) : null}
-                  </label>
-                  <input
-                    id="p-dob"
-                    type="date"
-                    required={highlightMissingClientFields || isEmployee}
-                    className="field-input"
-                    style={
-                      (highlightMissingClientFields || isEmployee) && !dateOfBirth.trim()
-                        ? {
-                            borderColor: '#d93025',
-                            boxShadow: '0 0 0 2px rgba(217, 48, 37, 0.16)',
-                            background: 'rgba(217, 48, 37, 0.04)',
-                          }
-                        : undefined
-                    }
-                    value={dateOfBirth}
-                    onChange={(e) => setDateOfBirth(e.target.value)}
-                  />
-                  {highlightMissingClientFields && !dateOfBirth.trim() ? (
-                    <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
-                      Required to convert contact to a client
-                    </span>
-                  ) : isEmployee && !dateOfBirth.trim() ? (
-                    <span style={{ fontSize: 12, color: '#d93025', fontWeight: 600, marginTop: 2 }}>
-                      Date of birth is mandatory when a person works at the firm
-                    </span>
-                  ) : null}
-                </div>
+                  </div>
+                ) : null}
 
                 <div className="field-group">
                   <label className="field-label" htmlFor="p-origin">
@@ -1990,6 +1991,7 @@ export function PersonFormClient({
                     }
                     value={primaryEmailValue}
                     onChange={(e) => setPrimaryEmailValue(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                 </div>
 
@@ -2023,6 +2025,7 @@ export function PersonFormClient({
                     }
                     value={primaryPhoneValue}
                     onChange={(e) => setPrimaryPhoneValue(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                 </div>
 
@@ -2147,21 +2150,19 @@ export function PersonFormClient({
                         Link to an organisation
                       </label>
                       {!existing && !isEmployee ? (
-                        <select
+                        <EntitySearchSelect
                           id="p-most-org"
-                          className="field-select"
+                          entityTypes={['organisation']}
                           value={linkOrgId}
-                          onChange={(e) => setLinkOrgId(e.target.value)}
-                        >
-                          <option value="">Not linked right now…</option>
-                          {organisations
-                            .filter((o) => !o.mergedIntoId)
-                            .map((o) => (
-                              <option key={o.id} value={o.id}>
-                                {o.legalName} ({o.id})
-                              </option>
-                            ))}
-                        </select>
+                          emptyLabel="Not linked right now…"
+                          searchPlaceholder="Search organisations…"
+                          searchAriaLabel="Search organisations to link"
+                          initialOptions={linkedOrgInitialOptions}
+                          onChange={(nextId, opt) => {
+                            setLinkOrgId(nextId);
+                            setSelectedLinkedOrg(opt?.organisation ?? null);
+                          }}
+                        />
                       ) : (
                         <input
                           id="p-most-org"
@@ -2451,20 +2452,18 @@ export function PersonFormClient({
                     <div className="form-grid-3">
                       <div className="field-group field-group--full">
                         <label className="field-label">Link to an existing organisation</label>
-                        <select
-                          className="field-select"
+                        <EntitySearchSelect
+                          entityTypes={['organisation']}
                           value={linkOrgId}
-                          onChange={(e) => setLinkOrgId(e.target.value)}
-                        >
-                          <option value="">Not linked right now…</option>
-                          {organisations
-                            .filter((o) => !o.mergedIntoId)
-                            .map((o) => (
-                              <option key={o.id} value={o.id}>
-                                {o.legalName} ({o.id})
-                              </option>
-                            ))}
-                        </select>
+                          emptyLabel="Not linked right now…"
+                          searchPlaceholder="Search organisations…"
+                          searchAriaLabel="Search organisations to link"
+                          initialOptions={linkedOrgInitialOptions}
+                          onChange={(nextId, opt) => {
+                            setLinkOrgId(nextId);
+                            setSelectedLinkedOrg(opt?.organisation ?? null);
+                          }}
+                        />
                       </div>
                       {linkOrgId ? (
                         <>
@@ -4975,6 +4974,12 @@ export function PersonFormClient({
                 </div>
                 {!hasSearchInputs ? (
                   <span className="new-enquiry-badge">Waiting</span>
+                ) : duplicatePreviewError ? (
+                  <span className="new-enquiry-badge new-enquiry-badge--warn">
+                    Check failed
+                  </span>
+                ) : duplicatePreviewLoading ? (
+                  <span className="new-enquiry-badge">Checking…</span>
                 ) : hasHighSeverityConflict ? (
                   <span className="new-enquiry-badge new-enquiry-badge--alert">
                     Possible conflict
@@ -5016,20 +5021,30 @@ export function PersonFormClient({
                     }}
                   >
                     <StatusPill
-                      label={`Linked: ${organisations.find((o) => o.id === linkOrgId)?.legalName ?? linkOrgId}`}
+                      label={`Linked: ${resolvedLinkedOrg?.legalName ?? linkOrgId}`}
                       tone="positive"
                     />
                     <button
                       type="button"
                       className="btn btn--ghost btn--sm"
-                      onClick={() => setLinkOrgId('')}
+                      onClick={() => {
+                        setLinkOrgId('');
+                        setSelectedLinkedOrg(null);
+                      }}
                     >
                       Unlink
                     </button>
                   </div>
                 ) : null}
 
-                {hasSearchInputs && distinctMatchedCount === 0 ? (
+                {shouldShowNoMatchesMessage({
+                  hasSearchInputs,
+                  loadingFast: duplicatePreviewLoading,
+                  loadingConflicts: false,
+                  fastError: duplicatePreviewError,
+                  conflictError: null,
+                  matchCount: distinctMatchedCount,
+                }) ? (
                   <div
                     style={{
                       padding: '8px 10px',
@@ -5071,11 +5086,15 @@ export function PersonFormClient({
                       ).join(', ');
                       const person =
                         hit.recordType === 'person'
-                          ? otherPeople.find((p) => p.id === hit.recordId)
+                          ? (liveEntityMatches.people.find((m) => m.person.id === hit.recordId)
+                              ?.person ?? allPeople.find((p) => p.id === hit.recordId))
                           : undefined;
                       const org =
                         hit.recordType === 'organisation'
-                          ? organisations.find((o) => o.id === hit.recordId)
+                          ? (liveEntityMatches.organisations.find(
+                              (m) => m.organisation.id === hit.recordId,
+                            )?.organisation ??
+                            organisations.find((o) => o.id === hit.recordId))
                           : undefined;
                       const isLinked = Boolean(org && linkOrgId === org.id);
                       return (

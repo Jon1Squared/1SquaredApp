@@ -2653,30 +2653,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
-  public async getAgedDebt(
+  private async loadAgedDebtWhere(
     ctx: TenantContext,
-    clientCode?: string,
+    whereClauseSql: string,
+    params: readonly unknown[],
   ): Promise<TenantPmsInvoiceBalance[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const extractInfo = await this.getExtractInfoInTx(tx, ctx);
-      const invRes = clientCode
-        ? await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1 AND client_code = $2',
-            [ctx.tenantId, clientCode],
-          )
-        : await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_invoices WHERE tenant_id = $1',
-            [ctx.tenantId],
-          );
-      const payRes = clientCode
-        ? await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 AND client_code = $2 ORDER BY payment_date ASC, receipt_id ASC',
-            [ctx.tenantId, clientCode],
-          )
-        : await tx.query<DbGenericPayloadRow>(
-            'SELECT * FROM public.pms_payments WHERE tenant_id = $1 ORDER BY payment_date ASC, receipt_id ASC',
-            [ctx.tenantId],
-          );
+      const [extractInfo, invRes, payRes] = await Promise.all([
+        this.getExtractInfoInTx(tx, ctx),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_invoices WHERE ${whereClauseSql}`,
+          params,
+        ),
+        tx.query<DbGenericPayloadRow>(
+          `SELECT * FROM public.pms_payments WHERE ${whereClauseSql} ORDER BY payment_date ASC, receipt_id ASC`,
+          params,
+        ),
+      ]);
       const balances = computeDerivedInvoiceBalances({
         asAtDate: extractInfo.asAtDate,
         invoices: this.mapInvoiceRows(ctx, invRes.rows),
@@ -2688,16 +2681,71 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async getAgedDebt(
+    ctx: TenantContext,
+    clientCode?: string,
+  ): Promise<TenantPmsInvoiceBalance[]> {
+    return clientCode
+      ? this.loadAgedDebtWhere(ctx, 'tenant_id = $1 AND client_code = $2', [
+          ctx.tenantId,
+          clientCode,
+        ])
+      : this.loadAgedDebtWhere(ctx, 'tenant_id = $1', [ctx.tenantId]);
+  }
+
+  public async listAgedDebtByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsInvoiceBalance[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.loadAgedDebtWhere(
+      ctx,
+      'tenant_id = $1 AND matter_code = ANY($2::text[])',
+      [ctx.tenantId, cleanCodes],
+    );
+  }
+
+  public async listAgedDebtByClientCodes(
+    ctx: TenantContext,
+    clientCodes: readonly string[],
+  ): Promise<TenantPmsInvoiceBalance[]> {
+    const cleanCodes = Array.from(
+      new Set(clientCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.loadAgedDebtWhere(
+      ctx,
+      'tenant_id = $1 AND client_code = ANY($2::text[])',
+      [ctx.tenantId, cleanCodes],
+    );
+  }
+
   public async getInvoices(
     ctx: TenantContext,
-    filter?: { matterCode?: string; clientCode?: string },
+    filter?: {
+      matterCode?: string;
+      matterCodes?: readonly string[];
+      clientCode?: string;
+    },
   ): Promise<TenantPmsInvoiceDetail[]> {
+    const cleanMatterCodes = Array.from(
+      new Set((filter?.matterCodes ?? []).map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (filter?.matterCodes !== undefined && cleanMatterCodes.length === 0) {
+      return [];
+    }
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const invClauses = ['tenant_id = $1'];
       const invParams: unknown[] = [ctx.tenantId];
       if (filter?.matterCode) {
         invParams.push(filter.matterCode);
         invClauses.push(`matter_code = $${invParams.length}`);
+      } else if (cleanMatterCodes.length > 0) {
+        invParams.push(cleanMatterCodes);
+        invClauses.push(`matter_code = ANY($${invParams.length}::text[])`);
       }
       if (filter?.clientCode) {
         invParams.push(filter.clientCode);
@@ -2769,6 +2817,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async listInvoicesByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsInvoiceDetail[]> {
+    return this.getInvoices(ctx, { matterCodes });
+  }
+
   public async getDisbursements(
     ctx: TenantContext,
     matterCode: string,
@@ -2782,6 +2837,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
     });
   }
 
+  public async listDisbursementsByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsDisbursement[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_disbursements WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date DESC, disbursement_id DESC',
+        [ctx.tenantId, cleanCodes],
+      );
+      return this.mapDisbursementRows(ctx, res.rows);
+    });
+  }
+
   public async getClientAccountLedger(
     ctx: TenantContext,
     matterCode: string,
@@ -2790,6 +2862,23 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const res = await tx.query<DbGenericPayloadRow>(
         'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = $2 ORDER BY entry_date ASC, transaction_id ASC',
         [ctx.tenantId, matterCode],
+      );
+      return this.mapClientAccountRows(ctx, res.rows);
+    });
+  }
+
+  public async listClientAccountEntriesByMatterCodes(
+    ctx: TenantContext,
+    matterCodes: readonly string[],
+  ): Promise<TenantPmsClientAccountEntry[]> {
+    const cleanCodes = Array.from(
+      new Set(matterCodes.map((c) => c?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanCodes.length === 0) return [];
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbGenericPayloadRow>(
+        'SELECT * FROM public.pms_client_account_entries WHERE tenant_id = $1 AND matter_code = ANY($2::text[]) ORDER BY entry_date ASC, transaction_id ASC',
+        [ctx.tenantId, cleanCodes],
       );
       return this.mapClientAccountRows(ctx, res.rows);
     });

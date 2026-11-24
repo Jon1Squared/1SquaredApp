@@ -46,7 +46,6 @@ import {
 } from '@/seed/seedStoreBuilder';
 import {
   clearAllDataToCleanDeployment,
-  getAppSnapshot,
   getCatalogueRepository,
   getKeyDateRepository,
   getMatterRepository,
@@ -56,6 +55,7 @@ import {
   isDemoModeEnabled,
   resetAllDemoData,
 } from '@/server/services';
+import { getAppSnapshot } from './testAppSnapshot';
 import { getMyFinanceFigures } from '@/server/financeServices';
 import { isActionDenied } from '@/domain/actionResult';
 import { getDocumentGenerationSnapshotForUser } from '@/server/documentGenerationServices';

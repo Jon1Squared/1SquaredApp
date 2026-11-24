@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computeClientRelationshipCdd,
   HIGH_RISK_RATING_IDS,
   isHighOrCriticalRiskRating,
   isMatterConflictCheckAwaitingDecision,
   resolveRiskRatingIdForLevel,
+  toClientPriorMatterSummary,
 } from '../matterOpeningRecord';
-import type { ChoiceValue } from '../types';
+import type { ChoiceValue, Organisation, Person } from '../types';
 
 describe('matterOpeningRecord domain helpers (R345, R365, R367, R372)', () => {
   it('isHighOrCriticalRiskRating matches High and Critical by canonical ID or systemKey and rejects decoy IDs containing "high" (R345, R372)', () => {
@@ -154,5 +156,142 @@ describe('matterOpeningRecord domain helpers (R345, R365, R367, R372)', () => {
     expect(resolveRiskRatingIdForLevel(renamedValues, 'High')).toBe(
       'risk_rating.custom_high_id',
     );
+  });
+
+  it('R698: computeClientRelationshipCdd derives CDD status from visible prior client matters and client verification', () => {
+    const values: ChoiceValue[] = [
+      {
+        id: 'ver_verified',
+        listKey: 'verification_status',
+        label: 'Verified',
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: 'ver_pending',
+        listKey: 'verification_status',
+        label: 'Pending',
+        sortOrder: 2,
+        active: true,
+      },
+      {
+        id: 'rel_prospect',
+        listKey: 'relationship_status',
+        label: 'Prospect',
+        sortOrder: 1,
+        active: true,
+      },
+    ];
+    const orgUnverifiedStatus = {
+      id: 'O-R698-1',
+      legalName: 'Cambria Logistics Ltd',
+      verificationStatusId: 'ver_pending',
+      relationshipStatusId: 'rel_prospect',
+      reviewDate: '2028-01-01',
+    } as unknown as Organisation;
+    const personProspect = {
+      id: 'P-R698-1',
+      firstName: 'Carys',
+      lastName: 'Morgan',
+      verificationStatusId: 'ver_pending',
+      relationshipStatusId: 'rel_prospect',
+    } as unknown as Person;
+
+    // 1. No prior non-Draft matters -> New client
+    expect(
+      computeClientRelationshipCdd({
+        clientIds: [orgUnverifiedStatus.id],
+        priorMatters: [
+          toClientPriorMatterSummary({
+            id: 'M-DRAFT',
+            clientId: orgUnverifiedStatus.id,
+            conflictCheckStatus: 'Draft',
+            amlStatus: 'Verified',
+          }),
+          toClientPriorMatterSummary({
+            id: 'M-SELF',
+            clientId: orgUnverifiedStatus.id,
+            conflictCheckStatus: 'Clear',
+            amlStatus: 'Verified',
+          }),
+        ],
+        excludeMatterId: 'M-SELF',
+        organisations: [orgUnverifiedStatus],
+        people: [],
+        values,
+        today: '2026-11-24',
+      }).option,
+    ).toBe('New client');
+
+    // 2. Prior matter with Verified AML (even when org verificationStatusId is Pending
+    // and verLabel !== Pending? Wait: if org verificationStatusId was not set/verified, check both cases)
+    const orgUnsetStatus = {
+      id: 'O-R698-2',
+      legalName: 'Severn Metals PLC',
+      verificationStatusId: '',
+      relationshipStatusId: 'rel_prospect',
+      reviewDate: '2028-01-01',
+    } as unknown as Organisation;
+    const verifiedPriorRes = computeClientRelationshipCdd({
+      clientIds: [orgUnsetStatus.id],
+      priorMatters: [
+        toClientPriorMatterSummary({
+          id: 'M-PRIOR-VERIFIED',
+          clientId: orgUnsetStatus.id,
+          conflictCheckStatus: 'Clear',
+          amlStatus: 'Verified',
+        }),
+      ],
+      organisations: [orgUnsetStatus],
+      people: [],
+      values,
+      today: '2026-11-24',
+    });
+    expect(verifiedPriorRes.option).toBe('Existing, CDD current');
+    expect(verifiedPriorRes.summary).toContain('CDD verified');
+
+    // 3. Prior matter with Pending AML -> Existing, CDD needs refresh
+    const incompletePriorRes = computeClientRelationshipCdd({
+      clientIds: [orgUnsetStatus.id],
+      priorMatters: [
+        toClientPriorMatterSummary({
+          id: 'M-PRIOR-INCOMPLETE',
+          clientId: 'O-OTHER',
+          additionalClientIds: [orgUnsetStatus.id],
+          conflictCheckStatus: 'Clear',
+          amlStatus: 'Pending',
+        }),
+      ],
+      organisations: [orgUnsetStatus],
+      people: [],
+      values,
+      today: '2026-11-24',
+    });
+    expect(incompletePriorRes.option).toBe('Existing, CDD needs refresh');
+
+    // 4. Verified person client with prior matter -> Existing, CDD current
+    const personVerified = {
+      ...personProspect,
+      id: 'P-R698-2',
+      verificationStatusId: 'ver_verified',
+      verifiedAt: '2026-10-01',
+    } as unknown as Person;
+    expect(
+      computeClientRelationshipCdd({
+        clientIds: [personVerified.id],
+        priorMatters: [
+          toClientPriorMatterSummary({
+            id: 'M-P-PRIOR',
+            clientId: personVerified.id,
+            conflictCheckStatus: 'Clear',
+            amlStatus: 'Verified',
+          }),
+        ],
+        organisations: [],
+        people: [personVerified],
+        values,
+        today: '2026-11-24',
+      }).option,
+    ).toBe('Existing, CDD current');
   });
 });

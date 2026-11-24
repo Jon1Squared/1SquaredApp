@@ -25,6 +25,10 @@ import type {
   TenantContext,
 } from '../api/index';
 import {
+  buildEnquiryDraftOnlySqlPredicate,
+  buildEnquiryVisibleSqlPredicate,
+} from './intakeQuoteRepository';
+import {
   hasActiveTenantTransaction,
   TenantScopedRepository,
   toIsoString,
@@ -1189,6 +1193,73 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
     });
   }
 
+  public async listNotApplicableForMatterIds(
+    ctx: TenantContext,
+    matterIds: readonly string[],
+    viewerOrOptions:
+      | string
+      | {
+          readonly viewerId?: string;
+          readonly includeRestricted?: boolean;
+          readonly hasRestrictedMatterAccess?: boolean;
+        } = ctx.actorId,
+  ): Promise<KeyDateNotApplicable[]> {
+    const cleanIds = Array.from(
+      new Set(matterIds.map((id) => id?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    const includeRestricted =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.includeRestricted);
+    const hasRestrictedMatterAccess =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.hasRestrictedMatterAccess);
+    const viewerId =
+      typeof viewerOrOptions === 'string'
+        ? viewerOrOptions
+        : viewerOrOptions?.viewerId ?? ctx.actorId;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res =
+        includeRestricted || hasRestrictedMatterAccess
+          ? await tx.query<DbNotApplicableRow>(
+              `SELECT * FROM key_date_not_applicable
+               WHERE tenant_id = $1 AND matter_id = ANY($2::text[])
+               ORDER BY matter_id ASC, key_date_type_id ASC`,
+              [ctx.tenantId, cleanIds],
+            )
+          : await tx.query<DbNotApplicableRow>(
+              `SELECT na.*
+               FROM key_date_not_applicable na
+               INNER JOIN matters m
+                 ON m.tenant_id = na.tenant_id AND m.id = na.matter_id
+               WHERE na.tenant_id = $1
+                 AND na.matter_id = ANY($2::text[])
+                 AND (
+                   (
+                     m.is_staff_matter = FALSE
+                     AND m.has_ethical_wall = FALSE
+                     AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+                   )
+                   OR m.restricted_access_user_ids_json ? $3
+                 )
+               ORDER BY na.matter_id ASC, na.key_date_type_id ASC`,
+              [ctx.tenantId, cleanIds, viewerId],
+            );
+      return res.rows.map((r) => {
+        this.assertRowTenant(ctx, r.tenant_id, 'KeyDateNotApplicable');
+        return {
+          matterId: r.matter_id,
+          keyDateTypeId: r.key_date_type_id,
+          reason: r.reason,
+          recordedById: r.recorded_by_id,
+          recordedAt: toIsoString(r.recorded_at),
+        };
+      });
+    });
+  }
+
   public async listAllVisibleNotApplicable(
     ctx: TenantContext,
     viewerId: string = ctx.actorId,
@@ -1422,6 +1493,117 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
         }
       }
       return out;
+    });
+  }
+
+  private resolveKeyDateVisibilitySql(
+    alias: string,
+    viewerParamIndex: number,
+  ): string {
+    return `EXISTS (
+      SELECT 1
+      FROM key_dates kd
+      LEFT JOIN matters m
+        ON m.tenant_id = kd.tenant_id AND m.id = kd.matter_id
+      LEFT JOIN enquiries e
+        ON e.tenant_id = kd.tenant_id AND e.id = kd.enquiry_id
+      WHERE kd.tenant_id = ${alias}.tenant_id
+        AND kd.id = ${alias}.key_date_id
+        AND (
+          (
+            kd.matter_id IS NULL
+            AND (e.id IS NULL OR ${buildEnquiryVisibleSqlPredicate(viewerParamIndex)})
+          )
+          OR (
+            m.id IS NOT NULL
+            AND (
+              (
+                m.is_staff_matter = FALSE
+                AND m.has_ethical_wall = FALSE
+                AND jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) = 0
+              )
+              OR m.restricted_access_user_ids_json ? $${viewerParamIndex}
+            )
+          )
+        )
+    )`;
+  }
+
+  private resolveKeyDateDraftOnlyVisibilitySql(
+    alias: string,
+    viewerParamIndex: number,
+  ): string {
+    return `EXISTS (
+      SELECT 1
+      FROM key_dates kd
+      LEFT JOIN enquiries e
+        ON e.tenant_id = kd.tenant_id AND e.id = kd.enquiry_id
+      WHERE kd.tenant_id = ${alias}.tenant_id
+        AND kd.id = ${alias}.key_date_id
+        AND (
+          kd.matter_id IS NOT NULL
+          OR e.id IS NULL
+          OR ${buildEnquiryDraftOnlySqlPredicate(viewerParamIndex)}
+        )
+    )`;
+  }
+
+  public async listReminderStatesForKeyDateIds(
+    ctx: TenantContext,
+    keyDateIds: readonly string[],
+    viewerOrOptions:
+      | string
+      | {
+          readonly viewerId?: string;
+          readonly includeRestricted?: boolean;
+          readonly hasRestrictedMatterAccess?: boolean;
+        } = ctx.actorId,
+  ): Promise<KeyDateReminderState[]> {
+    const cleanIds = Array.from(
+      new Set(keyDateIds.map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    const includeRestricted =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.includeRestricted);
+    const hasRestrictedMatterAccess =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.hasRestrictedMatterAccess);
+    const viewerId =
+      typeof viewerOrOptions === 'string'
+        ? viewerOrOptions
+        : viewerOrOptions?.viewerId ?? ctx.actorId;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = includeRestricted
+        ? await tx.query<DbReminderStateRow>(
+            `SELECT * FROM key_date_reminder_states rs
+             WHERE rs.tenant_id = $1 AND rs.key_date_id = ANY($2::text[])
+             ORDER BY rs.key_date_id ASC`,
+            [ctx.tenantId, cleanIds],
+          )
+        : hasRestrictedMatterAccess
+          ? await tx.query<DbReminderStateRow>(
+              `SELECT rs.* FROM key_date_reminder_states rs
+               WHERE rs.tenant_id = $1
+                 AND rs.key_date_id = ANY($2::text[])
+                 AND ${this.resolveKeyDateDraftOnlyVisibilitySql('rs', 3)}
+               ORDER BY rs.key_date_id ASC`,
+              [ctx.tenantId, cleanIds, viewerId],
+            )
+          : await tx.query<DbReminderStateRow>(
+              `SELECT rs.* FROM key_date_reminder_states rs
+               WHERE rs.tenant_id = $1
+                 AND rs.key_date_id = ANY($2::text[])
+                 AND ${this.resolveKeyDateVisibilitySql('rs', 3)}
+               ORDER BY rs.key_date_id ASC`,
+              [ctx.tenantId, cleanIds, viewerId],
+            );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'KeyDateReminderState');
+        return mapReminderStateRow(row);
+      });
     });
   }
 
@@ -1671,6 +1853,65 @@ export class TenantKeyDateRepository extends TenantScopedRepository {
       if (!row) return null;
       this.assertRowTenant(ctx, row.tenant_id, 'KeyDateCalendarSync');
       return mapCalendarSyncRow(row);
+    });
+  }
+
+  public async listCalendarSyncsForKeyDateIds(
+    ctx: TenantContext,
+    keyDateIds: readonly string[],
+    viewerOrOptions:
+      | string
+      | {
+          readonly viewerId?: string;
+          readonly includeRestricted?: boolean;
+          readonly hasRestrictedMatterAccess?: boolean;
+        } = ctx.actorId,
+  ): Promise<KeyDateCalendarSync[]> {
+    const cleanIds = Array.from(
+      new Set(keyDateIds.map((x) => x?.trim()).filter(Boolean) as string[]),
+    );
+    if (cleanIds.length === 0) return [];
+    const includeRestricted =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.includeRestricted);
+    const hasRestrictedMatterAccess =
+      typeof viewerOrOptions === 'object' &&
+      viewerOrOptions !== null &&
+      Boolean(viewerOrOptions.hasRestrictedMatterAccess);
+    const viewerId =
+      typeof viewerOrOptions === 'string'
+        ? viewerOrOptions
+        : viewerOrOptions?.viewerId ?? ctx.actorId;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = includeRestricted
+        ? await tx.query<DbCalendarSyncRow>(
+            `SELECT * FROM key_date_calendar_syncs cs
+             WHERE cs.tenant_id = $1 AND cs.key_date_id = ANY($2::text[])
+             ORDER BY cs.key_date_id ASC`,
+            [ctx.tenantId, cleanIds],
+          )
+        : hasRestrictedMatterAccess
+          ? await tx.query<DbCalendarSyncRow>(
+              `SELECT cs.* FROM key_date_calendar_syncs cs
+               WHERE cs.tenant_id = $1
+                 AND cs.key_date_id = ANY($2::text[])
+                 AND ${this.resolveKeyDateDraftOnlyVisibilitySql('cs', 3)}
+               ORDER BY cs.key_date_id ASC`,
+              [ctx.tenantId, cleanIds, viewerId],
+            )
+          : await tx.query<DbCalendarSyncRow>(
+              `SELECT cs.* FROM key_date_calendar_syncs cs
+               WHERE cs.tenant_id = $1
+                 AND cs.key_date_id = ANY($2::text[])
+                 AND ${this.resolveKeyDateVisibilitySql('cs', 3)}
+               ORDER BY cs.key_date_id ASC`,
+              [ctx.tenantId, cleanIds, viewerId],
+            );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'KeyDateCalendarSync');
+        return mapCalendarSyncRow(row);
+      });
     });
   }
 

@@ -55,7 +55,6 @@ import {
   discussSignOff,
   executeRegisterRemindersForTenant,
   flagMatterWriteOff,
-  getAppSnapshot,
   getRegisterRecordDetailRecord,
   listRegistersWorkspaceDataRecord,
   resetAllDemoData,
@@ -67,6 +66,7 @@ import {
   updatePersonPermissionOverrides,
   updateRegisterRecordDetailsService,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
   auditEntriesSince,

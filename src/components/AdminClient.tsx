@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState, useTransition } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import {
@@ -8,6 +8,7 @@ import {
   anonymiseExpiredEnquiriesAction,
   clearAllDataAction,
   createMatterStageGroupAction,
+  getExpiredEnquiriesCountAction,
   reorderChoiceValueAction,
   reorderCustomFieldAction,
   resetDemoDataAction,
@@ -27,10 +28,13 @@ import {
   getDefaultSectionForRecordType,
   getScreenFieldLocations,
 } from '@/domain/customFields';
-import { isReadyForRetentionAnonymisation } from '@/domain/enquiries';
 import { whereUsed } from '@/domain/fieldRegistry';
 import { canDeactivate, resolveLabel, valuesForList } from '@/domain/lists';
-import { buildDefaultMatterPartyTaxonomy } from '@/domain/matterParties';
+import {
+  buildDefaultMatterPartyTaxonomy,
+  type MatterPartyUsageCounts,
+} from '@/domain/matterParties';
+import type { PmsLinksAdminPageData } from '@/domain/pms';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import {
   buildDefaultOrgStructure,
@@ -179,8 +183,11 @@ interface Props {
   teams: Team[];
   enquirySettings: EnquirySettings;
   taskSettings: TaskSettings;
-  enquiries: Enquiry[];
+  enquiries?: Enquiry[];
   pmsAdmin?: PmsAdminSnapshot;
+  initialPmsLinksData?: PmsLinksAdminPageData;
+  expiredUnconvertedEnquiriesCount?: number;
+  matterPartyUsageCounts?: MatterPartyUsageCounts;
   homePagesConfig?: HomePagesConfig;
   defaultRoleConfigs?: import('@/domain/types').RoleHomeConfig[];
   orgStructure?: OrgStructureCatalogue;
@@ -226,8 +233,10 @@ export function AdminClient({
   teams,
   enquirySettings,
   taskSettings,
-  enquiries,
   pmsAdmin,
+  initialPmsLinksData,
+  expiredUnconvertedEnquiriesCount: initialExpiredEnquiriesCount = 0,
+  matterPartyUsageCounts,
   homePagesConfig,
   defaultRoleConfigs,
   orgStructure: orgStructureProp,
@@ -606,13 +615,37 @@ export function AdminClient({
     [people],
   );
 
-  const expiredUnconvertedEnquiriesCount = useMemo(
-    () =>
-      enquiries.filter((e) =>
-        isReadyForRetentionAnonymisation(e, retentionMonths || 12, new Date()),
-      ).length,
-    [enquiries, retentionMonths],
+  const [expiredUnconvertedEnquiriesCount, setExpiredUnconvertedEnquiriesCount] =
+    useState<number>(initialExpiredEnquiriesCount);
+  const [livePmsLinksCount, setLivePmsLinksCount] = useState<number>(
+    pmsAdmin?.pmsLinks.length ?? 0,
   );
+  const retentionCountSeqRef = useRef(0);
+  const lastFetchedRetentionMonthsRef = useRef(enquirySettings.retentionMonths);
+
+  useEffect(() => {
+    const months = Math.max(1, Math.min(120, Math.floor(retentionMonths || 12)));
+    if (months === lastFetchedRetentionMonthsRef.current) return;
+    let cancelled = false;
+    const seq = ++retentionCountSeqRef.current;
+    const timer = setTimeout(() => {
+      void getExpiredEnquiriesCountAction(months)
+        .then((res) => {
+          if (cancelled || seq !== retentionCountSeqRef.current) return;
+          if (!isActionDenied(res)) {
+            lastFetchedRetentionMonthsRef.current = months;
+            setExpiredUnconvertedEnquiriesCount(res.count);
+          }
+        })
+        .catch(() => {
+          // Retain last verified count on transient failure
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [retentionMonths]);
 
   const startEditValue = (v: ChoiceValue) => {
     setEditingValId(v.id);
@@ -1508,7 +1541,7 @@ export function AdminClient({
             className={`tab-btn ${tab === 'pms-links' ? 'tab-btn--active' : ''}`}
             onClick={() => setTab('pms-links')}
           >
-            PMS links ({pmsAdmin.pmsLinks.length})
+            PMS links ({livePmsLinksCount})
           </button>
         ) : null}
         <button
@@ -1689,6 +1722,7 @@ export function AdminClient({
                 migrationReport={matterPartyMigrationReport}
                 values={values}
                 matters={matters}
+                usageCounts={matterPartyUsageCounts}
               />
             ) : (
               <>
@@ -2861,6 +2895,12 @@ export function AdminClient({
                     return;
                   }
                   showToast(`Anonymised ${res.count} expired unconverted enquiries`);
+                  const refreshed = await getExpiredEnquiriesCountAction(
+                    Math.max(1, Math.min(120, Math.floor(retentionMonths || 12))),
+                  );
+                  if (!isActionDenied(refreshed)) {
+                    setExpiredUnconvertedEnquiriesCount(refreshed.count);
+                  }
                 })
               }
             >
@@ -4467,9 +4507,11 @@ export function AdminClient({
       {tab === 'pms-links' && pmsAdmin && (
         <PmsLinksAdminSection
           pmsAdmin={pmsAdmin}
+          initialData={initialPmsLinksData}
           organisations={organisations}
           people={people}
           matters={matters}
+          onPmsLinksCountChange={setLivePmsLinksCount}
         />
       )}
 

@@ -1009,68 +1009,354 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
     });
   }
 
+  private buildTaskOverdueSqlExpr(
+    params: unknown[],
+    options?: {
+      overdueBeforeIso?: string;
+      overdueNowLocalIso?: string;
+      overdueNowUtcIso?: string;
+    },
+  ): string {
+    const fallbackUtc = options?.overdueNowUtcIso?.trim() || new Date().toISOString();
+    let localIso = options?.overdueNowLocalIso?.trim();
+    let utcIso = fallbackUtc;
+    if (!localIso) {
+      if (options?.overdueBeforeIso?.trim()) {
+        const d = options.overdueBeforeIso.trim().slice(0, 10);
+        localIso = `${d}T00:00:00`;
+        utcIso = `${d}T00:00:00Z`;
+      } else {
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        localIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      }
+    }
+    params.push(localIso, utcIso);
+    const localIdx = `$${params.length - 1}`;
+    const utcIdx = `$${params.length}`;
+    return `(
+      t.status IN ('To do', 'In progress', 'Waiting')
+      AND t.due_at IS NOT NULL
+      AND t.due_at <> ''
+      AND (
+        CASE
+          WHEN t.due_at ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN (t.due_at || 'T17:30:00') < ${localIdx}
+          WHEN t.due_at ~ '^\\d{4}-\\d{2}-\\d{2}T.*(Z|[+-]\\d{2}:?\\d{2})$' THEN (t.due_at::timestamptz < ${utcIdx}::timestamptz)
+          WHEN t.due_at ~ '^\\d{4}-\\d{2}-\\d{2}T' THEN t.due_at < ${localIdx}
+          ELSE FALSE
+        END
+      )
+    )`;
+  }
+
+  private buildVisibleTasksWhereSql(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      status?: string;
+      statusFilter?: 'open' | 'overdue' | 'done' | 'all' | string;
+      overdueBeforeIso?: string;
+      overdueNowLocalIso?: string;
+      overdueNowUtcIso?: string;
+      openOnly?: boolean;
+      assignedTeamId?: string;
+      assignedPersonId?: string;
+      assignedPersonIdOrMulti?: string;
+      linkedRecordType?: string;
+      linkedRecordId?: string;
+      linkedRecordIds?: readonly string[];
+      tabFilter?: {
+        readonly mode: 'my' | 'team' | 'created' | 'all';
+        readonly actorId?: string;
+        readonly teamIds?: readonly string[];
+      };
+      priorityId?: string;
+      taskTypeId?: string;
+      recordType?: string;
+      query?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeRestricted = Boolean(options?.includeRestricted);
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const params: unknown[] = includeRestricted
+      ? [ctx.tenantId]
+      : [ctx.tenantId, viewerId];
+    const clauses: string[] = ['t.tenant_id = $1'];
+    if (!includeRestricted) {
+      clauses.push(
+        hasRestrictedMatterAccess
+          ? TASK_DRAFT_ONLY_SQL_PREDICATE
+          : TASK_VISIBLE_SQL_PREDICATE,
+      );
+    }
+    if (options?.status) {
+      params.push(options.status);
+      clauses.push(`t.status = $${params.length}`);
+    } else if (options?.statusFilter && options.statusFilter !== 'all') {
+      if (options.statusFilter === 'open') {
+        clauses.push(`t.status IN ('To do', 'In progress', 'Waiting')`);
+      } else if (options.statusFilter === 'done') {
+        clauses.push(`t.status IN ('Done', 'Cancelled')`);
+      } else if (options.statusFilter === 'overdue') {
+        clauses.push(this.buildTaskOverdueSqlExpr(params, options));
+      } else {
+        params.push(options.statusFilter);
+        clauses.push(`t.status = $${params.length}`);
+      }
+    }
+    if (options?.openOnly) {
+      clauses.push(`t.status IN ('To do', 'In progress', 'Waiting')`);
+    }
+    if (options?.overdueBeforeIso && options?.statusFilter === undefined) {
+      params.push(options.overdueBeforeIso.slice(0, 10));
+      clauses.push(
+        `t.due_at IS NOT NULL AND t.due_at <> '' AND substring(t.due_at from 1 for 10) < $${params.length}`,
+      );
+    }
+    if (options?.tabFilter && options.tabFilter.mode !== 'all') {
+      const tabActorId = options.tabFilter.actorId?.trim() || viewerId;
+      if (options.tabFilter.mode === 'my') {
+        params.push(tabActorId);
+        const aIdx = params.length;
+        clauses.push(
+          `(t.assigned_person_id = $${aIdx} OR t.assigned_person_ids_json ? $${aIdx})`,
+        );
+      } else if (options.tabFilter.mode === 'created') {
+        params.push(tabActorId);
+        clauses.push(`t.created_by_id = $${params.length}`);
+      } else if (options.tabFilter.mode === 'team') {
+        const teamIds = Array.from(
+          new Set((options.tabFilter.teamIds ?? []).map((x) => x.trim()).filter(Boolean)),
+        );
+        if (teamIds.length > 0 && !options.assignedTeamId) {
+          params.push(teamIds);
+          clauses.push(`t.assigned_team_id = ANY($${params.length}::text[])`);
+        } else {
+          clauses.push(`t.assigned_team_id IS NOT NULL AND t.assigned_team_id <> ''`);
+        }
+      }
+    }
+    if (options?.priorityId) {
+      params.push(options.priorityId);
+      clauses.push(`t.priority_id = $${params.length}`);
+    }
+    if (options?.taskTypeId) {
+      params.push(options.taskTypeId);
+      clauses.push(`t.task_type_id = $${params.length}`);
+    }
+    if (options?.assignedTeamId) {
+      params.push(options.assignedTeamId);
+      clauses.push(`t.assigned_team_id = $${params.length}`);
+    }
+    const assigneeId = options?.assignedPersonIdOrMulti ?? options?.assignedPersonId;
+    if (assigneeId) {
+      params.push(assigneeId);
+      clauses.push(
+        `(t.assigned_person_id = $${params.length} OR t.assigned_person_ids_json ? $${params.length})`,
+      );
+    }
+    if (options?.recordType) {
+      params.push(options.recordType);
+      clauses.push(
+        `EXISTS (
+           SELECT 1 FROM task_linked_records tlr
+           WHERE tlr.tenant_id = t.tenant_id
+             AND tlr.task_id = t.id
+             AND tlr.record_type = $${params.length}
+         )`,
+      );
+    }
+    if (options?.linkedRecordType && options?.linkedRecordId) {
+      params.push(options.linkedRecordType, options.linkedRecordId);
+      const typeIdx = params.length - 1;
+      const idIdx = params.length;
+      clauses.push(
+        `EXISTS (
+           SELECT 1 FROM task_linked_records tlr
+           WHERE tlr.tenant_id = t.tenant_id
+             AND tlr.task_id = t.id
+             AND tlr.record_type = $${typeIdx}
+             AND tlr.record_id = $${idIdx}
+         )`,
+      );
+    }
+    const linkedRecordIds = Array.from(
+      new Set((options?.linkedRecordIds ?? []).map((x) => x.trim()).filter(Boolean)),
+    );
+    if (linkedRecordIds.length > 0) {
+      params.push(linkedRecordIds);
+      clauses.push(
+        `EXISTS (
+           SELECT 1 FROM task_linked_records tlr
+           WHERE tlr.tenant_id = t.tenant_id
+             AND tlr.task_id = t.id
+             AND tlr.record_id = ANY($${params.length}::text[])
+         )`,
+      );
+    }
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+    if (cleanQuery) {
+      const patVal = `%${cleanQuery.replace(/[\\%_]/g, '\\$&')}%`;
+      params.push(patVal);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(t.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(t.reference, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(t.title, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(t.description, '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM public.people ap
+             WHERE ap.tenant_id = t.tenant_id
+               AND (
+                 ap.id = t.assigned_person_id
+                 OR (
+                   jsonb_typeof(COALESCE(t.assigned_person_ids_json, '[]'::jsonb)) = 'array'
+                   AND t.assigned_person_ids_json ? ap.id
+                 )
+               )
+               AND (
+                 lower(COALESCE(ap.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(ap.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(ap.surname, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(trim(concat_ws(' ', NULLIF(ap.first_name, ''), NULLIF(ap.surname, '')))) LIKE ${pat} ESCAPE '\\'
+               )
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.teams tm
+             WHERE tm.tenant_id = t.tenant_id
+               AND tm.id = t.assigned_team_id
+               AND lower(COALESCE(tm.name, '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.task_linked_records tlr
+             WHERE tlr.tenant_id = t.tenant_id
+               AND tlr.task_id = t.id
+               AND (
+                 lower(COALESCE(tlr.record_id, '')) LIKE ${pat} ESCAPE '\\'
+                 OR (
+                   tlr.record_type = 'matter'
+                   AND EXISTS (
+                     SELECT 1 FROM public.matters m
+                     WHERE m.tenant_id = tlr.tenant_id
+                       AND m.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(m.matter_number, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(m.title, '')) LIKE ${pat} ESCAPE '\\'
+                         OR EXISTS (
+                           SELECT 1 FROM public.people cp
+                           WHERE cp.tenant_id = m.tenant_id AND cp.id = m.client_id
+                             AND lower(trim(concat_ws(' ', NULLIF(cp.first_name, ''), NULLIF(cp.surname, '')))) LIKE ${pat} ESCAPE '\\'
+                         )
+                         OR EXISTS (
+                           SELECT 1 FROM public.organisations co
+                           WHERE co.tenant_id = m.tenant_id AND co.id = m.client_id
+                             AND lower(COALESCE(co.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                         )
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'enquiry'
+                   AND EXISTS (
+                     SELECT 1 FROM public.enquiries e
+                     WHERE e.tenant_id = tlr.tenant_id
+                       AND e.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(e.reference, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.last_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(trim(concat_ws(' ', NULLIF(e.first_name, ''), NULLIF(e.last_name, '')))) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.calling_on_behalf_of, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(e.summary_and_notes_json->>'summary', '')) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'quote'
+                   AND EXISTS (
+                     SELECT 1 FROM public.quotes q
+                     WHERE q.tenant_id = tlr.tenant_id
+                       AND q.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(q.quote_reference, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(q.prospect_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(q.profile_json->>'prospectOrganisationName', '')) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'person'
+                   AND EXISTS (
+                     SELECT 1 FROM public.people lp
+                     WHERE lp.tenant_id = tlr.tenant_id
+                       AND lp.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(lp.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(lp.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(lp.surname, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(trim(concat_ws(' ', NULLIF(lp.first_name, ''), NULLIF(lp.surname, '')))) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+                 OR (
+                   tlr.record_type = 'organisation'
+                   AND EXISTS (
+                     SELECT 1 FROM public.organisations lo
+                     WHERE lo.tenant_id = tlr.tenant_id
+                       AND lo.id = tlr.record_id
+                       AND (
+                         lower(COALESCE(lo.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                         OR lower(COALESCE(lo.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+                       )
+                   )
+                 )
+               )
+           )
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
   public async listVisibleTasks<T = TenantTaskRecord>(
     ctx: TenantContext,
     viewerId: string,
     options?: {
       status?: string;
+      openOnly?: boolean;
+      overdueBeforeIso?: string;
       assignedTeamId?: string;
       assignedPersonId?: string;
+      assignedPersonIdOrMulti?: string;
       linkedRecordType?: string;
       linkedRecordId?: string;
+      linkedRecordIds?: readonly string[];
       includeRestricted?: boolean;
       hasRestrictedMatterAccess?: boolean;
+      limit?: number;
     },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
-      const includeRestricted = Boolean(options?.includeRestricted);
-      const hasRestrictedMatterAccess = Boolean(
-        options?.hasRestrictedMatterAccess,
+      const { whereSql, params } = this.buildVisibleTasksWhereSql(
+        ctx,
+        viewerId,
+        options,
       );
-      const params: unknown[] = includeRestricted
-        ? [ctx.tenantId]
-        : [ctx.tenantId, viewerId];
-      const clauses: string[] = ['t.tenant_id = $1'];
-      if (!includeRestricted) {
-        clauses.push(
-          hasRestrictedMatterAccess
-            ? TASK_DRAFT_ONLY_SQL_PREDICATE
-            : TASK_VISIBLE_SQL_PREDICATE,
-        );
-      }
-      if (options?.status) {
-        params.push(options.status);
-        clauses.push(`t.status = $${params.length}`);
-      }
-      if (options?.assignedTeamId) {
-        params.push(options.assignedTeamId);
-        clauses.push(`t.assigned_team_id = $${params.length}`);
-      }
-      if (options?.assignedPersonId) {
-        params.push(options.assignedPersonId);
-        clauses.push(
-          `(t.assigned_person_id = $${params.length} OR t.assigned_person_ids_json ? $${params.length})`,
-        );
-      }
-      if (options?.linkedRecordType && options?.linkedRecordId) {
-        params.push(options.linkedRecordType, options.linkedRecordId);
-        const typeIdx = params.length - 1;
-        const idIdx = params.length;
-        clauses.push(
-          `EXISTS (
-             SELECT 1 FROM task_linked_records tlr
-             WHERE tlr.tenant_id = t.tenant_id
-               AND tlr.task_id = t.id
-               AND tlr.record_type = $${typeIdx}
-               AND tlr.record_id = $${idIdx}
-           )`,
-        );
+      let limitClause = '';
+      if (options?.limit && options.limit > 0) {
+        params.push(Math.floor(options.limit));
+        limitClause = ` LIMIT $${params.length}`;
       }
 
       const res = await tx.query<TaskRow>(
         `SELECT * FROM tasks t
-         WHERE ${clauses.join(' AND ')}
-         ORDER BY t.created_at DESC, t.id ASC`,
+         WHERE ${whereSql}
+         ORDER BY t.created_at DESC, t.id ASC${limitClause}`,
         params,
       );
       for (const row of res.rows) {
@@ -1084,6 +1370,184 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
       return res.rows.map(
         (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
       );
+    });
+  }
+
+  /**
+   * Loads a bounded page of visible tasks plus total match count (`R702`, `R719`, `R722`, `R729`).
+   * Always orders open tasks before completed/cancelled tasks by default so newer done tasks
+   * can never push older open tasks off page 1.
+   */
+  public async listVisibleTasksPageWithCount<T = TenantTaskRecord>(
+    ctx: TenantContext,
+    viewerId: string,
+    options?: {
+      statusFilter?: 'open' | 'overdue' | 'done' | 'all' | string;
+      overdueBeforeIso?: string;
+      overdueNowLocalIso?: string;
+      overdueNowUtcIso?: string;
+      tabFilter?: {
+        readonly mode: 'my' | 'team' | 'created' | 'all';
+        readonly actorId?: string;
+        readonly teamIds?: readonly string[];
+      };
+      priorityId?: string;
+      taskTypeId?: string;
+      assignedTeamId?: string;
+      recordType?: string;
+      query?: string;
+      sortBy?: 'priority' | 'status' | 'dueAt';
+      sortDir?: 'asc' | 'desc';
+      urgentPriorityIds?: readonly string[];
+      highPriorityIds?: readonly string[];
+      lowPriorityIds?: readonly string[];
+      hasRestrictedMatterAccess?: boolean;
+      limit?: number;
+      offset?: number;
+    },
+  ): Promise<{
+    readonly items: T[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 100;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const dirSql = options?.sortDir === 'desc' ? 'DESC' : 'ASC';
+    const { whereSql, params } = this.buildVisibleTasksWhereSql(ctx, viewerId, {
+      statusFilter: options?.statusFilter,
+      overdueBeforeIso: options?.overdueBeforeIso,
+      overdueNowLocalIso: options?.overdueNowLocalIso,
+      overdueNowUtcIso: options?.overdueNowUtcIso,
+      tabFilter: options?.tabFilter,
+      priorityId: options?.priorityId,
+      taskTypeId: options?.taskTypeId,
+      assignedTeamId: options?.assignedTeamId,
+      recordType: options?.recordType,
+      query: options?.query,
+      hasRestrictedMatterAccess: options?.hasRestrictedMatterAccess,
+    });
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM tasks t WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams: unknown[] = [...params];
+      let orderBySql = `
+        CASE WHEN t.status IN ('To do', 'In progress', 'Waiting') THEN 0 ELSE 1 END ASC,
+        NULLIF(t.due_at, '') ASC NULLS LAST,
+        t.created_at DESC,
+        t.id ASC`;
+      if (options?.sortBy === 'priority') {
+        const urgentIds = Array.from(new Set((options.urgentPriorityIds ?? []).filter(Boolean)));
+        const highIds = Array.from(new Set((options.highPriorityIds ?? []).filter(Boolean)));
+        const lowIds = Array.from(new Set((options.lowPriorityIds ?? []).filter(Boolean)));
+        pageParams.push(urgentIds, highIds, lowIds);
+        const uIdx = `$${pageParams.length - 2}`;
+        const hIdx = `$${pageParams.length - 1}`;
+        const lIdx = `$${pageParams.length}`;
+        orderBySql = `
+          CASE
+            WHEN t.priority_id = ANY(${uIdx}::text[]) THEN 1
+            WHEN t.priority_id = ANY(${hIdx}::text[]) THEN 2
+            WHEN t.priority_id = ANY(${lIdx}::text[]) THEN 4
+            ELSE 3
+          END ${dirSql},
+          NULLIF(t.due_at, '') ASC NULLS LAST,
+          t.id ASC`;
+      } else if (options?.sortBy === 'status') {
+        const overdueExpr = this.buildTaskOverdueSqlExpr(pageParams, options);
+        orderBySql = `
+          CASE
+            WHEN ${overdueExpr} THEN 0
+            WHEN t.status = 'In progress' THEN 1
+            WHEN t.status = 'To do' THEN 2
+            WHEN t.status = 'Waiting' THEN 3
+            WHEN t.status = 'Done' THEN 4
+            ELSE 5
+          END ${dirSql},
+          NULLIF(t.due_at, '') ASC NULLS LAST,
+          t.id ASC`;
+      } else if (options?.sortBy === 'dueAt') {
+        orderBySql = `
+          NULLIF(t.due_at, '') ${dirSql} NULLS LAST,
+          t.id ASC`;
+      }
+
+      pageParams.push(limit, effectiveOffset);
+      const res = await tx.query<TaskRow>(
+        `SELECT * FROM tasks t
+         WHERE ${whereSql}
+         ORDER BY ${orderBySql}
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      for (const row of res.rows) {
+        this.assertRowTenant(ctx, row.tenant_id, 'tasks.listVisibleTasksPageWithCount');
+      }
+      const linkedMap = await this.loadTaskLinkedRecordsInTx(
+        tx,
+        ctx,
+        res.rows.map((r) => r.id),
+      );
+      return {
+        items: res.rows.map(
+          (row) => mapRowToTask(row, linkedMap.get(row.id)) as unknown as T,
+        ),
+        totalCount,
+        effectivePage,
+      };
+    });
+  }
+
+  public async countUrgentBadgeTasksForUser(
+    ctx: TenantContext,
+    userId: string,
+    options?: {
+      viewerId?: string;
+      hasRestrictedMatterAccess?: boolean;
+      todayIso?: string;
+    },
+  ): Promise<number> {
+    const cleanAssigneeId = userId?.trim();
+    if (!cleanAssigneeId) return 0;
+    const viewerId = options?.viewerId?.trim() || cleanAssigneeId;
+    const now = new Date();
+    const fallbackTodayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const todayIso = options?.todayIso?.trim().slice(0, 10) || fallbackTodayIso;
+    const predicate = options?.hasRestrictedMatterAccess
+      ? TASK_DRAFT_ONLY_SQL_PREDICATE
+      : TASK_VISIBLE_SQL_PREDICATE;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt
+         FROM public.tasks t
+         WHERE t.tenant_id = $1
+           AND t.status IN ('To do', 'In progress', 'Waiting')
+           AND (t.assigned_person_id = $3 OR t.assigned_person_ids_json ? $3)
+           AND t.due_at IS NOT NULL
+           AND t.due_at <> ''
+           AND substring(t.due_at from 1 for 10) <= $4
+           AND ${predicate}`,
+        [ctx.tenantId, viewerId, cleanAssigneeId, todayIso],
+      );
+      return Number(res.rows[0]?.cnt ?? 0);
     });
   }
 
@@ -1219,100 +1683,148 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   public async listNotificationsForUser<T = TenantNotificationRecord>(
     ctx: TenantContext,
     userId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+      limit?: number;
+    },
   ): Promise<T[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
+      const hasRestrictedMatterAccess = Boolean(options?.hasRestrictedMatterAccess);
       const viewerId = options?.viewerId ?? userId;
+      const hasLimit = Boolean(options?.limit && options.limit > 0);
+      const limitValue = hasLimit ? Math.floor(options!.limit!) : 0;
+
       const res = includeRestricted
         ? await tx.query<NotificationRow>(
             `SELECT * FROM notifications n
              WHERE n.tenant_id = $1 AND n.user_id = $2
-             ORDER BY n.created_at DESC, n.id ASC`,
-            [ctx.tenantId, userId],
+             ORDER BY n.created_at DESC, n.id ASC${hasLimit ? ' LIMIT $3' : ''}`,
+            hasLimit ? [ctx.tenantId, userId, limitValue] : [ctx.tenantId, userId],
           )
-        : await tx.query<NotificationRow>(
-            `SELECT * FROM notifications n
-             WHERE n.tenant_id = $1
-               AND n.user_id = $3
-               AND NOT EXISTS (
-                 SELECT 1 FROM matters m
-                 WHERE m.tenant_id = n.tenant_id
-                   AND (m.id = n.record_id OR m.id = n.matter_id)
-                   AND (
-                     m.is_staff_matter = TRUE
-                     OR m.has_ethical_wall = TRUE
-                     OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-                   )
-                   AND NOT (m.restricted_access_user_ids_json ? $2)
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM key_dates kd
-                 LEFT JOIN matters km
-                   ON km.tenant_id = kd.tenant_id AND km.id = kd.matter_id
-                 LEFT JOIN enquiries ke
-                   ON ke.tenant_id = kd.tenant_id AND ke.id = kd.enquiry_id
-                 WHERE kd.tenant_id = n.tenant_id
-                   AND kd.id = n.record_id
-                   AND (
-                     (
-                       km.id IS NOT NULL
-                       AND (
-                         km.is_staff_matter = TRUE
-                         OR km.has_ethical_wall = TRUE
-                         OR jsonb_array_length(COALESCE(km.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-                       )
-                       AND NOT (km.restricted_access_user_ids_json ? $2)
+        : hasRestrictedMatterAccess
+          ? await tx.query<NotificationRow>(
+              `SELECT * FROM notifications n
+               WHERE n.tenant_id = $1
+                 AND n.user_id = $3
+                 AND NOT EXISTS (
+                   SELECT 1 FROM key_dates kd
+                   JOIN enquiries ke
+                     ON ke.tenant_id = kd.tenant_id AND ke.id = kd.enquiry_id
+                   WHERE kd.tenant_id = n.tenant_id
+                     AND kd.id = n.record_id
+                     AND ke.status = 'Draft'
+                     AND ke.created_by_id <> $2
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM enquiries e
+                   WHERE e.tenant_id = n.tenant_id
+                     AND e.id = n.record_id
+                     AND NOT ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM quotes q
+                   WHERE q.tenant_id = n.tenant_id
+                     AND q.id = n.record_id
+                     AND NOT ${QUOTE_DRAFT_ONLY_SQL_PREDICATE}
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM tasks t
+                   WHERE t.tenant_id = n.tenant_id
+                     AND t.id = n.record_id
+                     AND NOT ${TASK_DRAFT_ONLY_SQL_PREDICATE}
+                 )
+               ORDER BY n.created_at DESC, n.id ASC${hasLimit ? ' LIMIT $4' : ''}`,
+              hasLimit
+                ? [ctx.tenantId, viewerId, userId, limitValue]
+                : [ctx.tenantId, viewerId, userId],
+            )
+          : await tx.query<NotificationRow>(
+              `SELECT * FROM notifications n
+               WHERE n.tenant_id = $1
+                 AND n.user_id = $3
+                 AND NOT EXISTS (
+                   SELECT 1 FROM matters m
+                   WHERE m.tenant_id = n.tenant_id
+                     AND (m.id = n.record_id OR m.id = n.matter_id)
+                     AND (
+                       m.is_staff_matter = TRUE
+                       OR m.has_ethical_wall = TRUE
+                       OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
                      )
-                     OR (
-                       ke.id IS NOT NULL
-                       AND NOT (
-                         (ke.status <> 'Draft' OR ke.created_by_id = $2)
+                     AND NOT (m.restricted_access_user_ids_json ? $2)
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM key_dates kd
+                   LEFT JOIN matters km
+                     ON km.tenant_id = kd.tenant_id AND km.id = kd.matter_id
+                   LEFT JOIN enquiries ke
+                     ON ke.tenant_id = kd.tenant_id AND ke.id = kd.enquiry_id
+                   WHERE kd.tenant_id = n.tenant_id
+                     AND kd.id = n.record_id
+                     AND (
+                       (
+                         km.id IS NOT NULL
                          AND (
-                           ke.converted_matter_id IS NULL
-                           OR NOT EXISTS (
-                             SELECT 1 FROM matters kem
-                             WHERE kem.tenant_id = ke.tenant_id
-                               AND kem.id = ke.converted_matter_id
-                               AND (
-                                 kem.is_staff_matter = TRUE
-                                 OR kem.has_ethical_wall = TRUE
-                                 OR jsonb_array_length(COALESCE(kem.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-                               )
-                               AND NOT (kem.restricted_access_user_ids_json ? $2)
+                           km.is_staff_matter = TRUE
+                           OR km.has_ethical_wall = TRUE
+                           OR jsonb_array_length(COALESCE(km.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                         )
+                         AND NOT (km.restricted_access_user_ids_json ? $2)
+                       )
+                       OR (
+                         ke.id IS NOT NULL
+                         AND NOT (
+                           (ke.status <> 'Draft' OR ke.created_by_id = $2)
+                           AND (
+                             ke.converted_matter_id IS NULL
+                             OR NOT EXISTS (
+                               SELECT 1 FROM matters kem
+                               WHERE kem.tenant_id = ke.tenant_id
+                                 AND kem.id = ke.converted_matter_id
+                                 AND (
+                                   kem.is_staff_matter = TRUE
+                                   OR kem.has_ethical_wall = TRUE
+                                   OR jsonb_array_length(COALESCE(kem.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+                                 )
+                                 AND NOT (kem.restricted_access_user_ids_json ? $2)
+                             )
                            )
                          )
                        )
                      )
-                   )
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM enquiries e
-                 WHERE e.tenant_id = n.tenant_id
-                   AND e.id = n.record_id
-                   AND NOT ${ENQUIRY_VISIBLE_SQL_PREDICATE}
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM quotes q
-                 WHERE q.tenant_id = n.tenant_id
-                   AND q.id = n.record_id
-                   AND NOT ${QUOTE_VISIBLE_SQL_PREDICATE}
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM tasks t
-                 WHERE t.tenant_id = n.tenant_id
-                   AND t.id = n.record_id
-                   AND NOT ${TASK_VISIBLE_SQL_PREDICATE}
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM public.register_records r
-                 WHERE r.tenant_id = n.tenant_id
-                   AND r.id = n.record_id
-                   AND NOT ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE}
-               )
-             ORDER BY n.created_at DESC, n.id ASC`,
-            [ctx.tenantId, viewerId, userId],
-          );
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM enquiries e
+                   WHERE e.tenant_id = n.tenant_id
+                     AND e.id = n.record_id
+                     AND NOT ${ENQUIRY_VISIBLE_SQL_PREDICATE}
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM quotes q
+                   WHERE q.tenant_id = n.tenant_id
+                     AND q.id = n.record_id
+                     AND NOT ${QUOTE_VISIBLE_SQL_PREDICATE}
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM tasks t
+                   WHERE t.tenant_id = n.tenant_id
+                     AND t.id = n.record_id
+                     AND NOT ${TASK_VISIBLE_SQL_PREDICATE}
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM public.register_records r
+                   WHERE r.tenant_id = n.tenant_id
+                     AND r.id = n.record_id
+                     AND NOT ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE}
+                 )
+               ORDER BY n.created_at DESC, n.id ASC${hasLimit ? ' LIMIT $4' : ''}`,
+              hasLimit
+                ? [ctx.tenantId, viewerId, userId, limitValue]
+                : [ctx.tenantId, viewerId, userId],
+            );
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'notifications.listNotificationsForUser');
         return mapRowToNotification(row) as unknown as T;
@@ -1998,7 +2510,11 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
   public async getRecentlyViewedForUser(
     ctx: TenantContext,
     userId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
   ): Promise<string[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<RecentlyViewedRow>(
@@ -2015,29 +2531,44 @@ export class TenantTaskWorkflowRepository extends TenantScopedRepository {
         return items;
       }
       const viewerId = options?.viewerId ?? userId;
-      const hiddenRes = await tx.query<{ id: string }>(
-        `SELECT m.id FROM matters m
-         WHERE m.tenant_id = $1 AND m.id = ANY($3::text[])
-           AND (
-             m.is_staff_matter = TRUE
-             OR m.has_ethical_wall = TRUE
-             OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-           )
-           AND NOT (m.restricted_access_user_ids_json ? $2)
-         UNION ALL
-         SELECT e.id FROM enquiries e
-         WHERE e.tenant_id = $1 AND e.id = ANY($3::text[])
-           AND NOT ${ENQUIRY_VISIBLE_SQL_PREDICATE}
-         UNION ALL
-         SELECT q.id FROM quotes q
-         WHERE q.tenant_id = $1 AND q.id = ANY($3::text[])
-           AND NOT ${QUOTE_VISIBLE_SQL_PREDICATE}
-         UNION ALL
-         SELECT t.id FROM tasks t
-         WHERE t.tenant_id = $1 AND t.id = ANY($3::text[])
-           AND NOT ${TASK_VISIBLE_SQL_PREDICATE}`,
-        [ctx.tenantId, viewerId, items],
-      );
+      const hiddenRes = options?.hasRestrictedMatterAccess
+        ? await tx.query<{ id: string }>(
+            `SELECT e.id FROM enquiries e
+             WHERE e.tenant_id = $1 AND e.id = ANY($3::text[])
+               AND NOT ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
+             UNION ALL
+             SELECT q.id FROM quotes q
+             WHERE q.tenant_id = $1 AND q.id = ANY($3::text[])
+               AND NOT ${QUOTE_DRAFT_ONLY_SQL_PREDICATE}
+             UNION ALL
+             SELECT t.id FROM tasks t
+             WHERE t.tenant_id = $1 AND t.id = ANY($3::text[])
+               AND NOT ${TASK_DRAFT_ONLY_SQL_PREDICATE}`,
+            [ctx.tenantId, viewerId, items],
+          )
+        : await tx.query<{ id: string }>(
+            `SELECT m.id FROM matters m
+             WHERE m.tenant_id = $1 AND m.id = ANY($3::text[])
+               AND (
+                 m.is_staff_matter = TRUE
+                 OR m.has_ethical_wall = TRUE
+                 OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
+               )
+               AND NOT (m.restricted_access_user_ids_json ? $2)
+             UNION ALL
+             SELECT e.id FROM enquiries e
+             WHERE e.tenant_id = $1 AND e.id = ANY($3::text[])
+               AND NOT ${ENQUIRY_VISIBLE_SQL_PREDICATE}
+             UNION ALL
+             SELECT q.id FROM quotes q
+             WHERE q.tenant_id = $1 AND q.id = ANY($3::text[])
+               AND NOT ${QUOTE_VISIBLE_SQL_PREDICATE}
+             UNION ALL
+             SELECT t.id FROM tasks t
+             WHERE t.tenant_id = $1 AND t.id = ANY($3::text[])
+               AND NOT ${TASK_VISIBLE_SQL_PREDICATE}`,
+            [ctx.tenantId, viewerId, items],
+          );
       const hiddenIds = new Set(hiddenRes.rows.map((r) => r.id));
       return items.filter((id) => !hiddenIds.has(id));
     });

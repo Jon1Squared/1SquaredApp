@@ -38,9 +38,7 @@ import {
   type LeftRailVisibility,
 } from '@/domain/homeConfig';
 import { initials, personDisplayName } from '@/domain/names';
-import type { SearchDoc } from '@/domain/search';
-import { countMyUrgentBadgeTasks } from '@/domain/tasks';
-import type { HomePagesConfig, NotificationItem, Person, Task } from '@/domain/types';
+import type { HomePagesConfig, NotificationItem, Person } from '@/domain/types';
 import type { EntraSessionPayload } from '@/server/entraAuth';
 import { CompactHeaderSearch, StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -116,11 +114,11 @@ interface AppShellProps {
   leftRailVisibility: LeftRailVisibility;
   homePagesConfig: HomePagesConfig;
   employees: Person[];
-  searchIndex: SearchDoc[];
   attention: AttentionItem[];
-  tasks: Task[];
+  urgentTaskBadgeCount: number;
   notifications: NotificationItem[];
   firmName?: string;
+  demoShowsWorkOfName?: string | null;
   entraSession?: Pick<
     EntraSessionPayload,
     'email' | 'displayName' | 'oid' | 'mfaVerified'
@@ -136,11 +134,11 @@ export function AppShell({
   leftRailVisibility,
   homePagesConfig,
   employees,
-  searchIndex,
   attention,
-  tasks,
+  urgentTaskBadgeCount,
   notifications,
   firmName = 'Firm',
+  demoShowsWorkOfName = null,
   entraSession = null,
   children,
 }: AppShellProps) {
@@ -191,10 +189,6 @@ export function AppShell({
   const userInitials = initials(userName);
   const effectiveName = personDisplayName(effectiveWorkPerson);
 
-  const urgentTaskBadgeCount = useMemo(
-    () => countMyUrgentBadgeTasks(tasks, effectiveWorkPerson.id),
-    [tasks, effectiveWorkPerson.id],
-  );
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !n.read).length,
     [notifications],
@@ -429,7 +423,7 @@ export function AppShell({
       <div className="main-area">
         <header className="top-bar">
           <div className="top-bar__left" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            {pathname !== '/' ? <CompactHeaderSearch searchIndex={searchIndex} /> : null}
+            {pathname !== '/' ? <CompactHeaderSearch /> : null}
           </div>
 
           <div className="top-bar__right">
@@ -879,7 +873,7 @@ export function AppShell({
           </div>
         </header>
 
-        {demoMode && currentUser.demo && currentUser.showsWorkOfId ? (
+        {demoMode && currentUser.demo && Boolean(demoShowsWorkOfName ?? currentUser.showsWorkOfId) ? (
           <div
             role="status"
             data-testid="demo-user-banner"
@@ -897,7 +891,7 @@ export function AppShell({
             }}
           >
             <span>
-              Demo user: showing <strong>{effectiveName}’s</strong> work ({userName})
+              Demo user: showing <strong>{demoShowsWorkOfName ?? effectiveName}’s</strong> work ({userName})
             </span>
             <Link
               href="/admin/lists?section=homePages"

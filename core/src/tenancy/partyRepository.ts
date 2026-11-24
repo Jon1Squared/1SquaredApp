@@ -3956,9 +3956,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
            WHERE parent.merged_into_id IS NULL AND a.depth < 10
          ),
          descendants(id, depth) AS (
-           SELECT id, 0
-           FROM public.organisations
-           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND merged_into_id IS NULL
+           SELECT DISTINCT id, 0 FROM ancestors
            UNION ALL
            SELECT child.id, d.depth + 1
            FROM descendants d
@@ -4004,6 +4002,7 @@ export class TenantPartyRepository extends TenantScopedRepository {
           readonly postcodes?: readonly string[];
           readonly fuzzy?: boolean;
           readonly includeMerged?: boolean;
+          readonly limit?: number;
         }
       | {
           readonly kind: 'organisation';
@@ -4017,8 +4016,13 @@ export class TenantPartyRepository extends TenantScopedRepository {
           readonly postcodes?: readonly string[];
           readonly fuzzy?: boolean;
           readonly includeMerged?: boolean;
+          readonly limit?: number;
         },
   ): Promise<TRecord[]> {
+    const candidateLimit =
+      typeof query.limit === 'number' && Number.isFinite(query.limit)
+        ? Math.max(1, Math.min(1000, Math.floor(query.limit)))
+        : 1000;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       if (query.kind === 'person') {
         const emails = Array.from(
@@ -4066,26 +4070,37 @@ export class TenantPartyRepository extends TenantScopedRepository {
         );
 
         const orClauses: string[] = [];
+        const scoreParts: string[] = [];
         const params: unknown[] = [ctx.tenantId];
 
         if (query.id?.trim()) {
           params.push(query.id.trim());
-          orClauses.push(`p.id = $${params.length}`);
+          const idx = params.length;
+          orClauses.push(`p.id = $${idx}`);
+          scoreParts.push(`(CASE WHEN p.id = $${idx} THEN 100 ELSE 0 END)`);
         }
         if (emails.length > 0) {
           params.push(emails);
           const idx = params.length;
-          orClauses.push(
-            `(p.primary_email_lower = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.person_emails pe WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower = ANY($${idx}::text[])))`,
-          );
+          const emailMatchExpr = `(p.primary_email_lower = ANY($${idx}::text[]) OR EXISTS (SELECT 1 FROM public.person_emails pe WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower = ANY($${idx}::text[])))`;
+          orClauses.push(emailMatchExpr);
+          scoreParts.push(`(CASE WHEN ${emailMatchExpr} THEN 80 ELSE 0 END)`);
         }
         if (phoneLast9s.length > 0) {
           params.push(phoneLast9s);
-          orClauses.push(`p.phone_last9_keys && $${params.length}::text[]`);
+          const idx = params.length;
+          orClauses.push(`p.phone_last9_keys && $${idx}::text[]`);
+          scoreParts.push(
+            `(CASE WHEN p.phone_last9_keys && $${idx}::text[] THEN 70 ELSE 0 END)`,
+          );
         }
         if (postcodes.length > 0) {
           params.push(postcodes);
-          orClauses.push(`p.postcode_keys && $${params.length}::text[]`);
+          const idx = params.length;
+          orClauses.push(`p.postcode_keys && $${idx}::text[]`);
+          scoreParts.push(
+            `(CASE WHEN p.postcode_keys && $${idx}::text[] THEN 50 ELSE 0 END)`,
+          );
         }
         if (phoneticOnly.length > 0 && surnameTokens.length > 0) {
           const surnameKeys = extractTokenPhoneticKeys(surnameTokens).filter(
@@ -4093,11 +4108,19 @@ export class TenantPartyRepository extends TenantScopedRepository {
           );
           if (surnameKeys.length > 0) {
             params.push(surnameKeys);
-            orClauses.push(`p.phonetic_keys && $${params.length}::text[]`);
+            const idx = params.length;
+            orClauses.push(`p.phonetic_keys && $${idx}::text[]`);
+            scoreParts.push(
+              `(CASE WHEN p.phonetic_keys && $${idx}::text[] THEN 15 ELSE 0 END)`,
+            );
           }
         } else if (phoneticOnly.length > 0 && fullTerms.length > 0) {
           params.push(phoneticOnly);
-          orClauses.push(`p.phonetic_keys && $${params.length}::text[]`);
+          const idx = params.length;
+          orClauses.push(`p.phonetic_keys && $${idx}::text[]`);
+          scoreParts.push(
+            `(CASE WHEN p.phonetic_keys && $${idx}::text[] THEN 15 ELSE 0 END)`,
+          );
         }
         // Initial + surname or first-token matches when both exist (e.g. "J. Smith" vs "John Smith")
         if (firstTokens.length > 0 && surnameTokens.length > 0) {
@@ -4109,8 +4132,13 @@ export class TenantPartyRepository extends TenantScopedRepository {
           );
           if (firstInitials.length > 0 && surnameKeys.length > 0) {
             params.push(firstInitials, surnameKeys);
+            const initIdx = params.length - 1;
+            const surIdx = params.length;
             orClauses.push(
-              `(p.phonetic_keys && $${params.length - 1}::text[] AND p.phonetic_keys && $${params.length}::text[])`,
+              `(p.phonetic_keys && $${initIdx}::text[] AND p.phonetic_keys && $${surIdx}::text[])`,
+            );
+            scoreParts.push(
+              `(CASE WHEN p.phonetic_keys && $${initIdx}::text[] AND p.phonetic_keys && $${surIdx}::text[] THEN 20 ELSE 0 END)`,
             );
           }
         }
@@ -4126,18 +4154,25 @@ export class TenantPartyRepository extends TenantScopedRepository {
           orClauses.push(
             `(COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} OR word_similarity($${termIdx}, ${pConcat}) >= 0.28 OR word_similarity(${pConcat}, $${termIdx}) >= 0.28 OR (length(${pFull}) >= 3 AND strpos(lower($${termIdx}), ${pFull}) > 0) OR (length(${pPref}) >= 3 AND strpos(lower($${termIdx}), ${pPref}) > 0) OR (length(${pOther}) >= 3 AND strpos(lower($${termIdx}), ${pOther}) > 0))`,
           );
+          scoreParts.push(
+            `(CASE WHEN ${pFull} = lower($${termIdx}) OR ${pPref} = lower($${termIdx}) THEN 60 WHEN COALESCE(p.first_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.preferred_name, '') || ' ' || COALESCE(p.surname, '') ILIKE $${likeIdx} OR COALESCE(p.other_names, '') ILIKE $${likeIdx} THEN 30 ELSE 10 END)`,
+          );
         }
 
         if (orClauses.length === 0) return [];
         const mergedClause = query.includeMerged
           ? ''
           : ' AND p.merged_into_id IS NULL';
+        const scoreExpr = scoreParts.length > 0 ? scoreParts.join(' + ') : '0';
+        params.push(candidateLimit);
+        const limitIdx = params.length;
         const res = await tx.query<DbPersonRow>(
           `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
            ${PEOPLE_LEFT_JOIN_HR}
            WHERE p.tenant_id = $1${mergedClause}
              AND (${orClauses.join(' OR ')})
-           ORDER BY p.id ASC`,
+           ORDER BY (${scoreExpr}) DESC, p.id ASC
+           LIMIT $${limitIdx}`,
           params,
         );
         const mapped = res.rows.map((row) => {
@@ -4197,35 +4232,62 @@ export class TenantPartyRepository extends TenantScopedRepository {
       );
 
       const orClauses: string[] = [];
+      const scoreParts: string[] = [];
       const params: unknown[] = [ctx.tenantId];
 
       if (query.id?.trim()) {
         params.push(query.id.trim());
-        orClauses.push(`id = $${params.length}`);
+        const idx = params.length;
+        orClauses.push(`id = $${idx}`);
+        scoreParts.push(`(CASE WHEN id = $${idx} THEN 100 ELSE 0 END)`);
       }
       if (companyNos.length > 0) {
         params.push(companyNos);
-        orClauses.push(`norm_company_number = ANY($${params.length}::text[])`);
+        const idx = params.length;
+        orClauses.push(`norm_company_number = ANY($${idx}::text[])`);
+        scoreParts.push(
+          `(CASE WHEN norm_company_number = ANY($${idx}::text[]) THEN 90 ELSE 0 END)`,
+        );
       }
       if (emails.length > 0) {
         params.push(emails);
-        orClauses.push(`lower(general_email) = ANY($${params.length}::text[])`);
+        const idx = params.length;
+        orClauses.push(`lower(general_email) = ANY($${idx}::text[])`);
+        scoreParts.push(
+          `(CASE WHEN lower(general_email) = ANY($${idx}::text[]) THEN 80 ELSE 0 END)`,
+        );
       }
       if (emailDomains.length > 0) {
         params.push(emailDomains);
-        orClauses.push(`email_domains && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`email_domains && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN email_domains && $${idx}::text[] THEN 45 ELSE 0 END)`,
+        );
       }
       if (phoneLast9s.length > 0) {
         params.push(phoneLast9s);
-        orClauses.push(`phone_last9_keys && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`phone_last9_keys && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN phone_last9_keys && $${idx}::text[] THEN 70 ELSE 0 END)`,
+        );
       }
       if (postcodes.length > 0) {
         params.push(postcodes);
-        orClauses.push(`postcode_keys && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`postcode_keys && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN postcode_keys && $${idx}::text[] THEN 50 ELSE 0 END)`,
+        );
       }
       if (phoneticKeys.length > 0) {
         params.push(phoneticKeys);
-        orClauses.push(`phonetic_keys && $${params.length}::text[]`);
+        const idx = params.length;
+        orClauses.push(`phonetic_keys && $${idx}::text[]`);
+        scoreParts.push(
+          `(CASE WHEN phonetic_keys && $${idx}::text[] THEN 15 ELSE 0 END)`,
+        );
       }
       for (const name of orgNames) {
         const comp = normaliseComparableNameKey(name);
@@ -4238,17 +4300,24 @@ export class TenantPartyRepository extends TenantScopedRepository {
         orClauses.push(
           `(legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, ${orgConcat}) >= 0.28 OR word_similarity(${orgConcat}, $${trgmIdx}) >= 0.28 OR similarity(lower(legal_name), $${trgmIdx}) >= 0.25 OR (length(trim(legal_name)) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(legal_name))) > 0) OR (length(trim(trading_name)) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(trading_name))) > 0) OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(profile_json->'otherNames') = 'array' THEN profile_json->'otherNames' ELSE '[]'::jsonb END) AS elem WHERE ${otherNameValueSql} ILIKE $${likeIdx} OR word_similarity($${trgmIdx}, lower(${otherNameValueSql})) >= 0.28 OR word_similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.28 OR similarity(lower(${otherNameValueSql}), $${trgmIdx}) >= 0.25 OR (length(trim(${otherNameValueSql})) >= 3 AND strpos(lower($${trgmIdx}), lower(trim(${otherNameValueSql}))) > 0)))`,
         );
+        scoreParts.push(
+          `(CASE WHEN lower(trim(COALESCE(legal_name, ''))) = lower($${trgmIdx}) OR lower(trim(COALESCE(trading_name, ''))) = lower($${trgmIdx}) THEN 60 WHEN legal_name ILIKE $${likeIdx} OR trading_name ILIKE $${likeIdx} THEN 30 ELSE 10 END)`,
+        );
       }
 
       if (orClauses.length === 0) return [];
       const mergedClause = query.includeMerged
         ? ''
         : ' AND merged_into_id IS NULL';
+      const scoreExpr = scoreParts.length > 0 ? scoreParts.join(' + ') : '0';
+      params.push(candidateLimit);
+      const limitIdx = params.length;
       const res = await tx.query<DbOrganisationRow>(
         `SELECT * FROM public.organisations
          WHERE tenant_id = $1${mergedClause}
            AND (${orClauses.join(' OR ')})
-         ORDER BY id ASC`,
+         ORDER BY (${scoreExpr}) DESC, id ASC
+         LIMIT $${limitIdx}`,
         params,
       );
       const mappedOrgs = res.rows.map((row) => {
@@ -4712,6 +4781,835 @@ export class TenantPartyRepository extends TenantScopedRepository {
          ORDER BY id ASC`,
         [ctx.tenantId, cleanId],
       );
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
+      });
+    });
+  }
+
+  private buildPeoplePageWhereSql(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly employeesOnly?: boolean;
+      readonly nonEmployeesOnly?: boolean;
+      readonly employeesAndLeaversOnly?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipRoleId?: string;
+      readonly relationshipStatusId?: string;
+      readonly relationshipOwnerId?: string;
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeMerged = options?.includeMerged ?? true;
+    const employeesOnly = options?.employeesOnly ?? false;
+    const nonEmployeesOnly = options?.nonEmployeesOnly ?? false;
+    const employeesAndLeaversOnly = options?.employeesAndLeaversOnly ?? false;
+    const excludeInactiveStatusIds = Array.from(
+      new Set(
+        (options?.excludeInactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const inactiveStatusIds = Array.from(
+      new Set(
+        (options?.inactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const archivedOnly = options?.archivedOnly ?? false;
+    const relationshipRoleId = options?.relationshipRoleId?.trim() || undefined;
+    const relationshipStatusId = options?.relationshipStatusId?.trim() || undefined;
+    const relationshipOwnerId = options?.relationshipOwnerId?.trim() || undefined;
+    const excludeIds = Array.from(
+      new Set(
+        (options?.excludeIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+
+    const clauses = ['p.tenant_id = $1'];
+    const params: unknown[] = [ctx.tenantId];
+    if (!includeMerged) {
+      clauses.push('p.merged_into_id IS NULL');
+    }
+    if (employeesOnly) {
+      clauses.push('p.is_employee = TRUE');
+    } else if (nonEmployeesOnly) {
+      clauses.push('p.is_employee = FALSE');
+    } else if (employeesAndLeaversOnly) {
+      clauses.push(
+        `(p.is_employee = TRUE OR EXISTS (SELECT 1 FROM public.employee_employment_records eer_chk WHERE eer_chk.tenant_id = p.tenant_id AND eer_chk.person_id = p.id))`,
+      );
+    }
+    if (archivedOnly) {
+      if (inactiveStatusIds.length > 0) {
+        params.push(inactiveStatusIds);
+        clauses.push(
+          `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') = ANY($${params.length}::text[])`,
+        );
+      } else {
+        clauses.push('FALSE');
+      }
+    } else if (excludeInactiveStatusIds.length > 0) {
+      params.push(excludeInactiveStatusIds);
+      clauses.push(
+        `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
+      );
+    }
+    if (relationshipRoleId) {
+      params.push(relationshipRoleId);
+      clauses.push(`p.relationship_role_ids_json ? $${params.length}`);
+    }
+    if (relationshipStatusId) {
+      params.push(relationshipStatusId);
+      clauses.push(
+        `COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId') = $${params.length}`,
+      );
+    }
+    if (relationshipOwnerId) {
+      params.push(relationshipOwnerId);
+      clauses.push(`p.profile_json->>'relationshipOwnerId' = $${params.length}`);
+    }
+    if (excludeIds.length > 0) {
+      params.push(excludeIds);
+      clauses.push(`p.id <> ALL($${params.length}::text[])`);
+    }
+    if (cleanQuery) {
+      params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(p.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.other_names, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
+           OR lower(trim(concat_ws(' ', NULLIF(p.preferred_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.job_title, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(p.primary_email_lower, '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM public.person_emails pe
+             WHERE pe.tenant_id = p.tenant_id AND pe.person_id = p.id AND pe.active = TRUE AND pe.email_lower LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(p.phones_json) = 'array' THEN p.phones_json ELSE '[]'::jsonb END
+             ) ph
+             WHERE lower(COALESCE(ph->>'number', '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(p.addresses_json) = 'array' THEN p.addresses_json ELSE '[]'::jsonb END
+             ) addr
+             WHERE lower(COALESCE(addr->>'town', '')) LIKE ${pat} ESCAPE '\\'
+               OR lower(COALESCE(addr->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.person_organisation_links pol
+             JOIN public.organisations o
+               ON o.tenant_id = pol.tenant_id AND o.id = pol.organisation_id
+             WHERE pol.tenant_id = p.tenant_id
+               AND pol.person_id = p.id
+               AND (
+                 lower(COALESCE(o.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(o.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+               )
+           )
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
+  /**
+   * Loads a bounded page of tenant people plus the total SQL match count (`R700`, `R702`, `R722`, `R729`).
+   */
+  public async listPeoplePageWithCount<
+    TPerson extends TenantPersonRecord = TenantPersonRecord,
+  >(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly employeesOnly?: boolean;
+      readonly nonEmployeesOnly?: boolean;
+      readonly employeesAndLeaversOnly?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipRoleId?: string;
+      readonly relationshipStatusId?: string;
+      readonly relationshipOwnerId?: string;
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+      readonly sortBy?: 'person' | 'status';
+      readonly sortDir?: 'asc' | 'desc';
+      readonly statusSortIds?: readonly string[];
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<{
+    readonly items: TPerson[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 50;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const dirSql = options?.sortDir === 'desc' ? 'DESC' : 'ASC';
+    const statusSortIds = Array.from(
+      new Set((options?.statusSortIds ?? []).filter(Boolean)),
+    );
+    const { whereSql, params } = this.buildPeoplePageWhereSql(ctx, options);
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM public.people p WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams: unknown[] = [...params];
+      let sortSql = `lower(COALESCE(p.surname, '')) ${dirSql}, lower(COALESCE(p.first_name, '')) ${dirSql}, p.id ASC`;
+      if (options?.sortBy === 'status') {
+        if (statusSortIds.length > 0) {
+          pageParams.push(statusSortIds);
+          sortSql = `CASE WHEN COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId', '') = '' THEN 0 ELSE COALESCE(NULLIF(array_position($${pageParams.length}::text[], COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId')), 0), 9999) END ${dirSql}, lower(COALESCE(p.surname, '')) ASC, lower(COALESCE(p.first_name, '')) ASC, p.id ASC`;
+        } else {
+          sortSql = `lower(COALESCE(p.client_status_id, p.profile_json->>'relationshipStatusId', '')) ${dirSql}, lower(COALESCE(p.surname, '')) ASC, p.id ASC`;
+        }
+      }
+
+      pageParams.push(limit, effectiveOffset);
+      const res = await tx.query<DbPersonRow>(
+        `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE ${whereSql}
+         ORDER BY ${sortSql}
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const items = res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Person');
+        return mapPersonRow<TPerson>(row);
+      });
+      return { items, totalCount, effectivePage };
+    });
+  }
+
+  /**
+   * Loads a bounded page of tenant people directly from SQL (`S1-02b`).
+   */
+  public async listPeoplePage<TPerson extends TenantPersonRecord = TenantPersonRecord>(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly employeesOnly?: boolean;
+      readonly nonEmployeesOnly?: boolean;
+      readonly employeesAndLeaversOnly?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<TPerson[]> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : null;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : null;
+    const { whereSql, params } = this.buildPeoplePageWhereSql(ctx, options);
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pageParams = [...params];
+      let sql = `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE ${whereSql}
+         ORDER BY lower(COALESCE(p.surname, '')), lower(COALESCE(p.first_name, '')), p.id ASC`;
+      if (limit !== null) {
+        pageParams.push(limit);
+        sql += ` LIMIT $${pageParams.length}`;
+      }
+      if (offset !== null) {
+        pageParams.push(offset);
+        sql += ` OFFSET $${pageParams.length}`;
+      }
+      const res = await tx.query<DbPersonRow>(sql, pageParams);
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Person');
+        return mapPersonRow<TPerson>(row);
+      });
+    });
+  }
+
+  /**
+   * Searches people within the tenant using SQL predicates and an explicit limit (`S1-02b`).
+   */
+  public async searchPeople<TPerson extends TenantPersonRecord = TenantPersonRecord>(
+    ctx: TenantContext,
+    query: string,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly employeesOnly?: boolean;
+      readonly employeesAndLeaversOnly?: boolean;
+      readonly excludeIds?: readonly string[];
+      readonly limit?: number;
+    },
+  ): Promise<TPerson[]> {
+    const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 25)));
+    return this.listPeoplePage<TPerson>(ctx, {
+      includeMerged: options?.includeMerged ?? false,
+      employeesOnly: options?.employeesOnly,
+      employeesAndLeaversOnly: options?.employeesAndLeaversOnly,
+      excludeIds: options?.excludeIds,
+      query,
+      limit,
+    });
+  }
+
+  private buildOrganisationsPageWhereSql(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipTypeId?: string;
+      readonly relationshipStatusId?: string;
+      readonly organisationTypeId?: string;
+      readonly sectorId?: string;
+      readonly relationshipPartnerId?: string;
+      readonly tabFilter?: {
+        readonly mode: 'clients' | 'prospects' | 'referrers';
+        readonly clientRelTypeIds: readonly string[];
+        readonly clientStatusIds: readonly string[];
+        readonly prospectRelTypeIds: readonly string[];
+        readonly prospectStatusIds: readonly string[];
+      };
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+    },
+  ): { readonly whereSql: string; readonly params: unknown[] } {
+    const includeMerged = options?.includeMerged ?? true;
+    const excludeInactiveStatusIds = Array.from(
+      new Set(
+        (options?.excludeInactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const inactiveStatusIds = Array.from(
+      new Set(
+        (options?.inactiveStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const archivedOnly = options?.archivedOnly ?? false;
+    const relationshipTypeId = options?.relationshipTypeId?.trim() || undefined;
+    const relationshipStatusId = options?.relationshipStatusId?.trim() || undefined;
+    const organisationTypeId = options?.organisationTypeId?.trim() || undefined;
+    const sectorId = options?.sectorId?.trim() || undefined;
+    const relationshipPartnerId = options?.relationshipPartnerId?.trim() || undefined;
+    const excludeIds = Array.from(
+      new Set(
+        (options?.excludeIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const cleanQuery = options?.query?.trim().toLowerCase() ?? '';
+
+    const clauses = ['tenant_id = $1'];
+    const params: unknown[] = [ctx.tenantId];
+    if (!includeMerged) {
+      clauses.push('merged_into_id IS NULL');
+    }
+    if (archivedOnly) {
+      if (inactiveStatusIds.length > 0) {
+        params.push(inactiveStatusIds);
+        clauses.push(
+          `COALESCE(profile_json->>'recordStatusId', 'record_status.active') = ANY($${params.length}::text[])`,
+        );
+      } else {
+        clauses.push('FALSE');
+      }
+    } else if (excludeInactiveStatusIds.length > 0) {
+      params.push(excludeInactiveStatusIds);
+      clauses.push(
+        `COALESCE(profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
+      );
+    }
+    if (relationshipTypeId) {
+      params.push(relationshipTypeId);
+      clauses.push(`relationship_type_ids_json ? $${params.length}`);
+    }
+    if (relationshipStatusId) {
+      params.push(relationshipStatusId);
+      clauses.push(
+        `COALESCE(client_status_id, profile_json->>'relationshipStatusId') = $${params.length}`,
+      );
+    }
+    if (organisationTypeId) {
+      params.push(organisationTypeId);
+      clauses.push(`organisation_type_id = $${params.length}`);
+    }
+    if (sectorId) {
+      params.push(sectorId);
+      const sIdx = params.length;
+      clauses.push(
+        `(sector_ids_json ? $${sIdx} OR profile_json->>'sectorId' = $${sIdx})`,
+      );
+    }
+    if (relationshipPartnerId) {
+      params.push(relationshipPartnerId);
+      clauses.push(`relationship_partner_id = $${params.length}`);
+    }
+    if (options?.tabFilter) {
+      const buildGroupMatchSql = (
+        relIds: readonly string[],
+        statIds: readonly string[],
+      ): string => {
+        const parts: string[] = [];
+        if (relIds.length > 0) {
+          params.push([...relIds]);
+          parts.push(`relationship_type_ids_json ?| $${params.length}::text[]`);
+        }
+        if (statIds.length > 0) {
+          params.push([...statIds]);
+          parts.push(
+            `COALESCE(client_status_id, profile_json->>'relationshipStatusId') = ANY($${params.length}::text[])`,
+          );
+        }
+        return parts.length > 0 ? `(${parts.join(' OR ')})` : 'FALSE';
+      };
+      if (options.tabFilter.mode === 'clients') {
+        const isClientSql = buildGroupMatchSql(
+          options.tabFilter.clientRelTypeIds,
+          options.tabFilter.clientStatusIds,
+        );
+        clauses.push(isClientSql);
+      } else if (options.tabFilter.mode === 'prospects') {
+        const isProspectSql = buildGroupMatchSql(
+          options.tabFilter.prospectRelTypeIds,
+          options.tabFilter.prospectStatusIds,
+        );
+        clauses.push(isProspectSql);
+      } else if (options.tabFilter.mode === 'referrers') {
+        const isClientSql = buildGroupMatchSql(
+          options.tabFilter.clientRelTypeIds,
+          options.tabFilter.clientStatusIds,
+        );
+        const isProspectSql = buildGroupMatchSql(
+          options.tabFilter.prospectRelTypeIds,
+          options.tabFilter.prospectStatusIds,
+        );
+        clauses.push(`NOT (${isClientSql}) AND NOT (${isProspectSql})`);
+      }
+    }
+    if (excludeIds.length > 0) {
+      params.push(excludeIds);
+      clauses.push(`id <> ALL($${params.length}::text[])`);
+    }
+    if (cleanQuery) {
+      params.push(`%${escapeSqlLikePattern(cleanQuery)}%`);
+      const pat = `$${params.length}`;
+      clauses.push(
+        `(
+           lower(COALESCE(organisations.id, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.legal_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.trading_name, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.company_number, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.general_email, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.main_phone, '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.registered_address_json->>'town', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.registered_address_json->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.trading_address_json->>'town', '')) LIKE ${pat} ESCAPE '\\'
+           OR lower(COALESCE(organisations.trading_address_json->>'postcode', '')) LIKE ${pat} ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(organisations.profile_json->'otherNames') = 'array' THEN organisations.profile_json->'otherNames' ELSE '[]'::jsonb END
+             ) onm
+             WHERE lower(COALESCE(onm->>'name', '')) LIKE ${pat} ESCAPE '\\'
+           )
+           OR EXISTS (
+             SELECT 1 FROM public.person_organisation_links pol
+             JOIN public.people p
+               ON p.tenant_id = pol.tenant_id AND p.id = pol.person_id
+             WHERE pol.tenant_id = organisations.tenant_id
+               AND pol.organisation_id = organisations.id
+               AND (
+                 lower(COALESCE(p.first_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(p.preferred_name, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(COALESCE(p.surname, '')) LIKE ${pat} ESCAPE '\\'
+                 OR lower(trim(concat_ws(' ', NULLIF(p.first_name, ''), NULLIF(p.surname, '')))) LIKE ${pat} ESCAPE '\\'
+               )
+           )
+         )`,
+      );
+    }
+    return { whereSql: clauses.join(' AND '), params };
+  }
+
+  /**
+   * Loads a bounded page of tenant organisations plus total SQL match count (`R700`, `R702`, `R722`, `R729`).
+   */
+  public async listOrganisationsPageWithCount<
+    TOrg extends TenantOrganisationRecord = TenantOrganisationRecord,
+  >(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly archivedOnly?: boolean;
+      readonly inactiveStatusIds?: readonly string[];
+      readonly relationshipTypeId?: string;
+      readonly relationshipStatusId?: string;
+      readonly organisationTypeId?: string;
+      readonly sectorId?: string;
+      readonly relationshipPartnerId?: string;
+      readonly tabFilter?: {
+        readonly mode: 'clients' | 'prospects' | 'referrers';
+        readonly clientRelTypeIds: readonly string[];
+        readonly clientStatusIds: readonly string[];
+        readonly prospectRelTypeIds: readonly string[];
+        readonly prospectStatusIds: readonly string[];
+      };
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+      readonly sortBy?: 'organisation' | 'status';
+      readonly sortDir?: 'asc' | 'desc';
+      readonly statusSortIds?: readonly string[];
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<{
+    readonly items: TOrg[];
+    readonly totalCount: number;
+    readonly effectivePage: number;
+  }> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : 50;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : 0;
+    const dirSql = options?.sortDir === 'desc' ? 'DESC' : 'ASC';
+    const statusSortIds = Array.from(
+      new Set((options?.statusSortIds ?? []).filter(Boolean)),
+    );
+    const { whereSql, params } = this.buildOrganisationsPageWhereSql(ctx, options);
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const countRes = await tx.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM public.organisations WHERE ${whereSql}`,
+        params,
+      );
+      const totalCount = Number(countRes.rows[0]?.cnt ?? 0);
+      const totalPages = totalCount > 0 ? Math.ceil(totalCount / limit) : 1;
+      const effectivePage =
+        totalCount === 0
+          ? 1
+          : Math.min(Math.floor(offset / limit) + 1, totalPages);
+      const effectiveOffset =
+        totalCount > 0 && offset >= totalCount
+          ? (totalPages - 1) * limit
+          : offset;
+
+      const pageParams: unknown[] = [...params];
+      let sortSql = `lower(COALESCE(organisations.legal_name, '')) ${dirSql}, organisations.id ASC`;
+      if (options?.sortBy === 'status') {
+        if (statusSortIds.length > 0) {
+          pageParams.push(statusSortIds);
+          sortSql = `CASE WHEN COALESCE(organisations.client_status_id, organisations.profile_json->>'relationshipStatusId', '') = '' THEN 0 ELSE COALESCE(NULLIF(array_position($${pageParams.length}::text[], COALESCE(organisations.client_status_id, organisations.profile_json->>'relationshipStatusId')), 0), 9999) END ${dirSql}, lower(COALESCE(organisations.legal_name, '')) ASC, organisations.id ASC`;
+        } else {
+          sortSql = `lower(COALESCE(organisations.client_status_id, organisations.profile_json->>'relationshipStatusId', '')) ${dirSql}, lower(COALESCE(organisations.legal_name, '')) ASC, organisations.id ASC`;
+        }
+      }
+
+      pageParams.push(limit, effectiveOffset);
+      const res = await tx.query<DbOrganisationRow>(
+        `SELECT * FROM public.organisations
+         WHERE ${whereSql}
+         ORDER BY ${sortSql}
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams,
+      );
+      const items = res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
+      });
+      return { items, totalCount, effectivePage };
+    });
+  }
+
+  /**
+   * Loads a bounded page of tenant organisations directly from SQL (`S1-02b`).
+   */
+  public async listOrganisationsPage<TOrg extends TenantOrganisationRecord = TenantOrganisationRecord>(
+    ctx: TenantContext,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly excludeInactiveStatusIds?: readonly string[];
+      readonly excludeIds?: readonly string[];
+      readonly query?: string;
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<TOrg[]> {
+    const limit =
+      typeof options?.limit === 'number' && Number.isFinite(options.limit)
+        ? Math.max(1, Math.min(500, Math.floor(options.limit)))
+        : null;
+    const offset =
+      typeof options?.offset === 'number' && Number.isFinite(options.offset)
+        ? Math.max(0, Math.floor(options.offset))
+        : null;
+    const { whereSql, params } = this.buildOrganisationsPageWhereSql(ctx, options);
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const pageParams = [...params];
+      let sql = `SELECT * FROM public.organisations
+         WHERE ${whereSql}
+         ORDER BY lower(COALESCE(legal_name, '')), id ASC`;
+      if (limit !== null) {
+        pageParams.push(limit);
+        sql += ` LIMIT $${pageParams.length}`;
+      }
+      if (offset !== null) {
+        pageParams.push(offset);
+        sql += ` OFFSET $${pageParams.length}`;
+      }
+      const res = await tx.query<DbOrganisationRow>(sql, pageParams);
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
+        return mapOrganisationRow<TOrg>(row);
+      });
+    });
+  }
+
+  /**
+   * Searches organisations within the tenant using SQL predicates and an explicit limit (`S1-02b`).
+   */
+  public async searchOrganisations<TOrg extends TenantOrganisationRecord = TenantOrganisationRecord>(
+    ctx: TenantContext,
+    query: string,
+    options?: {
+      readonly includeMerged?: boolean;
+      readonly excludeIds?: readonly string[];
+      readonly limit?: number;
+    },
+  ): Promise<TOrg[]> {
+    const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 25)));
+    return this.listOrganisationsPage<TOrg>(ctx, {
+      includeMerged: options?.includeMerged ?? false,
+      excludeIds: options?.excludeIds,
+      query,
+      limit,
+    });
+  }
+
+  /**
+   * Returns active, non-merged people likely needing attention (possible duplicate, expired
+   * verification, or stale verification date) so dashboards avoid loading all people (`S1-02b`).
+   */
+  public async listPeopleRequiringAttention<TPerson extends TenantPersonRecord = TenantPersonRecord>(
+    ctx: TenantContext,
+    criteria: {
+      readonly inactiveRecordStatusIds?: readonly string[];
+      readonly possibleDuplicateStatusIds?: readonly string[];
+      readonly expiredVerificationStatusIds?: readonly string[];
+      readonly staleBeforeIso?: string;
+      readonly ownerPersonId?: string;
+      readonly limit?: number;
+    },
+  ): Promise<TPerson[]> {
+    const inactiveIds = Array.from(new Set((criteria.inactiveRecordStatusIds ?? []).filter(Boolean)));
+    const duplicateIds = Array.from(new Set((criteria.possibleDuplicateStatusIds ?? []).filter(Boolean)));
+    const expiredIds = Array.from(new Set((criteria.expiredVerificationStatusIds ?? []).filter(Boolean)));
+    const staleDate = criteria.staleBeforeIso?.trim().slice(0, 10) || '';
+    const ownerPersonId = criteria.ownerPersonId?.trim() || '';
+    const limit =
+      typeof criteria.limit === 'number' && Number.isFinite(criteria.limit)
+        ? Math.max(1, Math.min(500, Math.floor(criteria.limit)))
+        : null;
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const clauses = ['p.tenant_id = $1', 'p.merged_into_id IS NULL'];
+      const params: unknown[] = [ctx.tenantId];
+      if (inactiveIds.length > 0) {
+        params.push(inactiveIds);
+        clauses.push(
+          `COALESCE(p.profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
+        );
+      }
+      if (ownerPersonId) {
+        params.push(ownerPersonId);
+        const oIdx = params.length;
+        clauses.push(
+          `(
+             p.profile_json->>'recordOwnerId' = $${oIdx}
+             OR p.profile_json->>'relationshipOwnerId' = $${oIdx}
+             OR p.profile_json->>'verificationReviewerId' = $${oIdx}
+           )`,
+        );
+      }
+      const attentionOr: string[] = [];
+      if (duplicateIds.length > 0) {
+        params.push(duplicateIds);
+        attentionOr.push(`p.profile_json->>'duplicateStatusId' = ANY($${params.length}::text[])`);
+      }
+      if (expiredIds.length > 0) {
+        params.push(expiredIds);
+        attentionOr.push(
+          `COALESCE(p.aml_status_id, p.profile_json->>'verificationStatusId') = ANY($${params.length}::text[])`,
+        );
+      }
+      if (staleDate) {
+        params.push(staleDate);
+        attentionOr.push(
+          `(p.is_employee = FALSE AND NULLIF(p.profile_json->>'lastVerifiedAt', '') IS NOT NULL AND LEFT(p.profile_json->>'lastVerifiedAt', 10) <= $${params.length})`,
+        );
+      }
+      if (attentionOr.length === 0) return [];
+      clauses.push(`(${attentionOr.join(' OR ')})`);
+
+      let sql = `SELECT ${PEOPLE_JOINED_SELECT_COLUMNS}
+         ${PEOPLE_LEFT_JOIN_HR}
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY p.id ASC`;
+      if (limit !== null) {
+        params.push(limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      const res = await tx.query<DbPersonRow>(sql, params);
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'Person');
+        return mapPersonRow<TPerson>(row);
+      });
+    });
+  }
+
+  /**
+   * Returns active, non-merged organisations likely needing attention (possible duplicate, expired
+   * verification, potential conflict, overdue review, or stale verification) (`S1-02b`).
+   */
+  public async listOrganisationsRequiringAttention<
+    TOrg extends TenantOrganisationRecord = TenantOrganisationRecord,
+  >(
+    ctx: TenantContext,
+    criteria: {
+      readonly inactiveRecordStatusIds?: readonly string[];
+      readonly possibleDuplicateStatusIds?: readonly string[];
+      readonly expiredVerificationStatusIds?: readonly string[];
+      readonly potentialConflictStatusIds?: readonly string[];
+      readonly reviewBeforeIso?: string;
+      readonly staleBeforeIso?: string;
+      readonly ownerPersonId?: string;
+      readonly limit?: number;
+    },
+  ): Promise<TOrg[]> {
+    const inactiveIds = Array.from(new Set((criteria.inactiveRecordStatusIds ?? []).filter(Boolean)));
+    const duplicateIds = Array.from(new Set((criteria.possibleDuplicateStatusIds ?? []).filter(Boolean)));
+    const expiredIds = Array.from(new Set((criteria.expiredVerificationStatusIds ?? []).filter(Boolean)));
+    const conflictIds = Array.from(new Set((criteria.potentialConflictStatusIds ?? []).filter(Boolean)));
+    const reviewDate = criteria.reviewBeforeIso?.trim().slice(0, 10) || '';
+    const staleDate = criteria.staleBeforeIso?.trim().slice(0, 10) || '';
+    const ownerPersonId = criteria.ownerPersonId?.trim() || '';
+    const limit =
+      typeof criteria.limit === 'number' && Number.isFinite(criteria.limit)
+        ? Math.max(1, Math.min(500, Math.floor(criteria.limit)))
+        : null;
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const clauses = ['tenant_id = $1', 'merged_into_id IS NULL'];
+      const params: unknown[] = [ctx.tenantId];
+      if (inactiveIds.length > 0) {
+        params.push(inactiveIds);
+        clauses.push(
+          `COALESCE(profile_json->>'recordStatusId', 'record_status.active') <> ALL($${params.length}::text[])`,
+        );
+      }
+      if (ownerPersonId) {
+        params.push(ownerPersonId);
+        const oIdx = params.length;
+        clauses.push(
+          `(
+             relationship_partner_id = $${oIdx}
+             OR profile_json->>'recordOwnerId' = $${oIdx}
+             OR profile_json->>'reviewerId' = $${oIdx}
+           )`,
+        );
+      }
+      const attentionOr: string[] = [];
+      if (duplicateIds.length > 0) {
+        params.push(duplicateIds);
+        attentionOr.push(`profile_json->>'duplicateStatusId' = ANY($${params.length}::text[])`);
+      }
+      if (expiredIds.length > 0) {
+        params.push(expiredIds);
+        attentionOr.push(
+          `COALESCE(aml_status_id, profile_json->>'verificationStatusId') = ANY($${params.length}::text[])`,
+        );
+      }
+      if (conflictIds.length > 0) {
+        params.push(conflictIds);
+        attentionOr.push(
+          `COALESCE(conflict_status, profile_json->>'conflictStatusId') = ANY($${params.length}::text[])`,
+        );
+      }
+      if (reviewDate) {
+        params.push(reviewDate);
+        attentionOr.push(
+          `(NULLIF(profile_json->>'reviewDate', '') IS NOT NULL AND LEFT(profile_json->>'reviewDate', 10) <= $${params.length})`,
+        );
+      }
+      if (staleDate) {
+        params.push(staleDate);
+        attentionOr.push(
+          `(NULLIF(profile_json->>'lastVerifiedAt', '') IS NOT NULL AND LEFT(profile_json->>'lastVerifiedAt', 10) <= $${params.length})`,
+        );
+      }
+      if (attentionOr.length === 0) return [];
+      clauses.push(`(${attentionOr.join(' OR ')})`);
+
+      let sql = `SELECT * FROM public.organisations
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY id ASC`;
+      if (limit !== null) {
+        params.push(limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      const res = await tx.query<DbOrganisationRow>(sql, params);
       return res.rows.map((row) => {
         this.assertRowTenant(ctx, row.tenant_id, 'Organisation');
         return mapOrganisationRow<TOrg>(row);

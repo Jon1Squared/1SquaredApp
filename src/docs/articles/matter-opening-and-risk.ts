@@ -6,7 +6,7 @@ export const matterOpeningAndRiskArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the five-step Matter Opening wizard works, how the seven-section risk questionnaire is scored, and how the server validates answers and derives the matter risk rating.',
-  updated: '2026-11-22',
+  updated: '2026-11-24',
   body: `
 This guide explains the **Matter Opening wizard** (\`/matters/new\` and \`/matters/[id]/edit\`), how the **Matter Risk Assessment** questionnaire is structured and completed, how the server validates answers, calculates the risk snapshot, and sets the matter's risk rating, and how monotonic matter numbering and optimistic concurrency (\`rowVersion\`) are enforced (\`S0-16\`).
 
@@ -72,5 +72,14 @@ The questionnaire is defined in \`MATTER_RISK_SECTIONS\` (\`src/domain/matterOpe
 - **Server-side weighting and validation**: On matter submission, the server enforces any question flagged \`required\`, ignores any client-submitted scores or section summaries, multiplies each option score by its configured weight, derives the overall risk rating (\`Low\`, \`Medium\`, or \`High\`), and stores the immutable snapshot on the persisted matter record.
 - **Automatic opening tasks**: Once a matter opens — either directly on \`submit_cleared\`, upon Risk & Compliance approval of a referred conflict review, through enquiry/quote conversion, or upon high-value partner costs sign-off — the server idempotently creates each configured \`matter_open\` task template in PostgreSQL inside the opening transaction (resolving \`workTypeId\` → \`practiceAreaId\` → firm \`defaults\`, mapping \`ownerRoleKey\` to the matter's team, and inheriting restricted/staff-matter visibility rules).
 - **PDF opening, conflict check & risk assessment exports**: Immutable opening snapshots capture the tenant’s configured firm name (\`firmProfile.firm.name\`) when the snapshot is taken, and PDF exports (\`buildMatterOpeningPdfLines\`, \`buildConflictCheckPdfLines\`, \`buildRiskAssessmentPdfLines\`) head each document with the tenant’s firm name or a neutral title with no firm name when unconfigured or rendering legacy snapshots captured without a firm name.
+
+## Searching contacts, adding related entities, and converting an enquiry
+
+- **Searching the directory for instructing contacts and parties**: Both the **Instructing contact** picker (for organisation clients or clients under 18) and the **+ Add party** search box search the whole firm directory as you type. Start typing a name, email address or organisation name to find and pick any existing record without needing the entire directory pre-loaded in the browser.
+- **Including related entities on organisation parties**: After you add an organisation as a matter party, choosing **+ Include related entities** looks up linked contacts, parent organisations and subsidiaries from the directory and adds them to your conflict search party list so connected individuals and group companies are checked together.
+- **Pre-conversion conflict check when converting an enquiry**: When you choose **Convert to matter**, the confirmation window runs a server-side pre-conversion conflict check first:
+  - While the check is running, the window shows *"Checking for conflicts…"* and **Continue** stays disabled until the result comes back.
+  - If the check cannot complete (including if many checks were run in a short time), an alert banner explains the problem and offers **Try again**, keeping **Continue** disabled until a clean check succeeds.
+  - If an enquiry does not yet hold enough searchable name, contact or organisation detail, the window shows *"Not enough detail to run a conflict check"* so you can either go back and add more details or continue to the Matter Opening screen to run the full conflict check before opening.
 `,
 };

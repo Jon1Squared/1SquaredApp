@@ -149,13 +149,27 @@ import {
   listClientRateOverridesRecord,
   saveClientRateOverrideRecord,
   deleteClientRateOverrideRecord,
+  getEntityRecordForEditRecord,
+  getExpiredEnquiriesCountRecord,
+  listClientPriorMattersRecord,
+  loadPmsLinksAdminDataRecord,
   listMatterRateOverridesRecord,
   saveMatterRateOverrideRecord,
   deleteMatterRateOverrideRecord,
   resolveApplicableRatesRecord,
+  previewIntakeDuplicatesAndConflictsRecord,
+  searchEntityPickerRecord,
   updateMyNotificationPreferences,
   type NotificationPreferenceUpdateEntry,
 } from '@/server/services';
+import type {
+  EntityPickerSearchInput,
+  EntityPickerSearchResult,
+  IntakePreviewInput,
+  IntakePreviewResult,
+} from '@/domain/intakePreviewTypes';
+import type { ClientPriorMatterSummary } from '@/domain/matterOpeningRecord';
+import type { PmsLinksAdminPageData, PmsLinksSubTab } from '@/domain/pms';
 import type {
   KeyDateCalculation,
   KeyDateExceptionKind,
@@ -163,7 +177,7 @@ import type {
   StandstillPeriod,
   TeamDiaryQuery,
 } from '@/domain/keyDates.types';
-import { buildActionDenied, isActionDenied } from '@/domain/actionResult';
+import { buildActionDenied, isActionDenied, type ActionDenied } from '@/domain/actionResult';
 import { maskPayrollDetails } from '@/domain/employment';
 import {
   getActiveTenantConfiguration,
@@ -1274,9 +1288,15 @@ import type {
   TemplateUsageReportFilter,
 } from '@platform/core';
 
-export async function getDocumentGenerationSnapshotAction() {
+export async function getDocumentGenerationSnapshotAction(input?: {
+  readonly includeDocuments?: boolean;
+  readonly entityScope?: {
+    readonly entityType: 'matter' | 'organisation' | 'person';
+    readonly entityId: string;
+  };
+}) {
   return guardedAction('getDocumentGenerationSnapshotAction', (actor) =>
-    getDocumentGenerationSnapshotForUser(actor.personId, actor.session),
+    getDocumentGenerationSnapshotForUser(actor.personId, actor.session, input),
   );
 }
 
@@ -1923,6 +1943,49 @@ export async function searchGlobalRecordsAction(input: {
   );
 }
 
+export async function previewIntakeDuplicatesAndConflictsAction(
+  input: IntakePreviewInput,
+): Promise<IntakePreviewResult | ActionDenied> {
+  return guardedAction(
+    'previewIntakeDuplicatesAndConflictsAction',
+    async (actor) =>
+      previewIntakeDuplicatesAndConflictsRecord(input, actor.personId, {
+        tenantCtx: actor.tenantContext,
+      }),
+  );
+}
+
+export async function searchEntityPickerAction(
+  input: EntityPickerSearchInput,
+): Promise<EntityPickerSearchResult | ActionDenied> {
+  return guardedAction('searchEntityPickerAction', async (actor) =>
+    searchEntityPickerRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function getEntityRecordForEditAction(
+  recordType: 'person' | 'organisation',
+  recordId: string,
+) {
+  return guardedAction('getEntityRecordForEditAction', async (actor) =>
+    getEntityRecordForEditRecord(recordType, recordId, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function listClientPriorMattersAction(
+  clientIds: readonly string[],
+): Promise<{ matters: ClientPriorMatterSummary[] } | ActionDenied> {
+  return guardedAction('listClientPriorMattersAction', async (actor) =>
+    listClientPriorMattersRecord(clientIds, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
 export async function getMyNotificationPreferencesAction(
   targetPersonId?: string,
 ): Promise<{
@@ -2003,6 +2066,29 @@ export async function updateMyNotificationPreferencesAction(input: {
         };
       }
     },
+  );
+}
+
+export async function loadPmsLinksAdminDataAction(input: {
+  readonly subTab?: PmsLinksSubTab;
+  readonly query?: string;
+  readonly page?: number;
+  readonly pageSize?: number;
+}): Promise<PmsLinksAdminPageData | ActionDenied> {
+  return guardedAction('loadPmsLinksAdminDataAction', async (actor) =>
+    loadPmsLinksAdminDataRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function getExpiredEnquiriesCountAction(
+  retentionMonths: number,
+): Promise<{ readonly count: number } | ActionDenied> {
+  return guardedAction('getExpiredEnquiriesCountAction', async (actor) =>
+    getExpiredEnquiriesCountRecord(retentionMonths, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    }),
   );
 }
 

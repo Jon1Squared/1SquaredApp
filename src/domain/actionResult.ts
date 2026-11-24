@@ -3,7 +3,12 @@
  * denies a server action (`src/domain/actionResult.ts`, ADR 0025).
  */
 
-export type ActionDenialCode = 'UNAUTHENTICATED' | 'FORBIDDEN' | 'MFA_REQUIRED';
+export type ActionDenialCode =
+  | 'UNAUTHENTICATED'
+  | 'FORBIDDEN'
+  | 'MFA_REQUIRED'
+  | 'VALIDATION_ERROR'
+  | 'RATE_LIMITED';
 
 export interface ActionDenied {
   ok: false;
@@ -34,7 +39,9 @@ export function isActionDenied(value: unknown): value is ActionDenied {
     candidate.denied === true &&
     (candidate.code === 'UNAUTHENTICATED' ||
       candidate.code === 'FORBIDDEN' ||
-      candidate.code === 'MFA_REQUIRED') &&
+      candidate.code === 'MFA_REQUIRED' ||
+      candidate.code === 'VALIDATION_ERROR' ||
+      candidate.code === 'RATE_LIMITED') &&
     typeof candidate.message === 'string' &&
     typeof candidate.error === 'string'
   );

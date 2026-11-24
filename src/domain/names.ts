@@ -1,7 +1,9 @@
-import type { AnyRecord, Organisation, Person } from './types';
+import type { AnyRecord, Email, Organisation, Person, Phone } from './types';
 
 export function personDisplayName(
-  p?: Pick<Person, 'firstName' | 'surname' | 'preferredName'> | null,
+  p?:
+    | (Pick<Person, 'firstName' | 'surname'> & { preferredName?: string | null })
+    | null,
 ): string {
   if (!p) return '';
   const first = p.preferredName?.trim() || p.firstName?.trim() || '';
@@ -26,11 +28,15 @@ export function initials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export function primaryEmail(p: Person): string {
+export function primaryEmail(p: {
+  readonly emails: readonly Pick<Email, 'address' | 'isPrimary'>[];
+}): string {
   return (p.emails.find((e) => e.isPrimary) ?? p.emails[0])?.address ?? '';
 }
 
-export function primaryPhone(p: Person): string {
+export function primaryPhone(p: {
+  readonly phones: readonly Pick<Phone, 'number'>[];
+}): string {
   return p.phones[0]?.number ?? '';
 }
 

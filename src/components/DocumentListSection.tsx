@@ -80,7 +80,9 @@ export function DocumentListSection({
 
   const loadSnapshot = useCallback(async () => {
     try {
-      const snap = await getDocumentGenerationSnapshotAction();
+      const snap = await getDocumentGenerationSnapshotAction({
+        entityScope: { entityType, entityId },
+      });
       if (isActionDenied(snap)) {
         setErrorMsg(snap.message);
         return;
@@ -91,7 +93,7 @@ export function DocumentListSection({
         err instanceof Error ? err.message : 'Failed to load documents.',
       );
     }
-  }, []);
+  }, [entityType, entityId]);
 
   useEffect(() => {
     queueMicrotask(() => {

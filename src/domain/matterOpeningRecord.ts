@@ -3,6 +3,10 @@ import { formatDate, formatDateTime } from './dates';
 import { resolveLabel, valueBySystemKey } from './lists';
 import { personDisplayName } from './names';
 import type {
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from './intakePreviewTypes';
+import type {
   ChoiceValue,
   ConflictCheckRecord,
   ConflictCheckStatusPill,
@@ -2348,4 +2352,177 @@ export function downloadRiskAssessmentPdf(
   const bytes = generatePdfBytesFromLines(`Risk Assessment — ${matterNumber}`, lines);
   const safeRef = (matterNumber || 'Matter').replace(/[^A-Za-z0-9_-]/g, '_');
   triggerPdfDownload(`Matter-Risk-Assessment-${safeRef}.pdf`, bytes);
+}
+
+/**
+ * Minimal matter fields required to derive Risk Assessment Q2.1
+ * (`clientRelationshipStatus`) without shipping full prior `Matter` payloads.
+ */
+export interface ClientPriorMatterSummary {
+  readonly id: string;
+  readonly clientId: string;
+  readonly additionalClientIds?: readonly string[];
+  readonly conflictCheckStatus?: Matter['conflictCheckStatus'];
+  readonly amlStatus?: Matter['amlStatus'];
+}
+
+export type ClientRelationshipCddOption =
+  | 'New client'
+  | 'Existing, CDD current'
+  | 'Existing, CDD needs refresh'
+  | '';
+
+export interface ClientRelationshipCddResult {
+  readonly option: ClientRelationshipCddOption;
+  readonly summary: string;
+}
+
+export function toClientPriorMatterSummary(
+  matter: Pick<Matter, 'id' | 'clientId' | 'conflictCheckStatus' | 'amlStatus'> & {
+    readonly additionalClientIds?: readonly string[];
+  },
+): ClientPriorMatterSummary {
+  return {
+    id: matter.id,
+    clientId: matter.clientId,
+    ...(matter.additionalClientIds && matter.additionalClientIds.length > 0
+      ? { additionalClientIds: [...matter.additionalClientIds] }
+      : {}),
+    ...(matter.conflictCheckStatus ? { conflictCheckStatus: matter.conflictCheckStatus } : {}),
+    ...(matter.amlStatus ? { amlStatus: matter.amlStatus } : {}),
+  };
+}
+
+/**
+ * Derive Q2.1 (`clientRelationshipStatus`) option & helper caption from the
+ * selected client records and their visible non-Draft prior matters (`R698`).
+ */
+export function computeClientRelationshipCdd(params: {
+  readonly clientIds: readonly string[];
+  readonly priorMatters: readonly ClientPriorMatterSummary[];
+  readonly excludeMatterId?: string | null;
+  readonly organisations: readonly (Organisation | EntityPickerOrganisationSummary)[];
+  readonly people: readonly (Person | EntityPickerPersonSummary)[];
+  readonly values: ChoiceValue[];
+  readonly today: string;
+}): ClientRelationshipCddResult {
+  const {
+    clientIds,
+    priorMatters,
+    excludeMatterId,
+    organisations,
+    people,
+    values,
+    today,
+  } = params;
+  if (clientIds.length === 0) {
+    return { option: '', summary: '' };
+  }
+
+  let anyHasPriorMatters = false;
+  let allCddCurrent = true;
+  const details: string[] = [];
+
+  for (const cid of clientIds) {
+    const clientPriorMatters = priorMatters.filter(
+      (m) =>
+        m.id !== excludeMatterId &&
+        m.conflictCheckStatus !== 'Draft' &&
+        (m.clientId === cid || Boolean(m.additionalClientIds?.includes(cid))),
+    );
+    if (clientPriorMatters.length > 0) {
+      anyHasPriorMatters = true;
+    }
+
+    if (cid.startsWith('O-')) {
+      const org = organisations.find((o) => o.id === cid);
+      if (!org) continue;
+      const verLabel = resolveLabel(values, org.verificationStatusId).toLowerCase();
+      const relLabel = resolveLabel(values, org.relationshipStatusId).toLowerCase();
+      if (relLabel.includes('active') || relLabel.includes('existing')) {
+        anyHasPriorMatters = true;
+      }
+      const reviewExpired = Boolean(org.reviewDate && org.reviewDate < today);
+      const hasVerifiedMatter = clientPriorMatters.some((m) => m.amlStatus === 'Verified');
+      const hasIncompleteMatter = clientPriorMatters.some(
+        (m) => m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete',
+      );
+      const isCurrent =
+        (verLabel.includes('verified') || verLabel.includes('complete') || hasVerifiedMatter) &&
+        !verLabel.includes('expired') &&
+        !verLabel.includes('pending') &&
+        !verLabel.includes('refresh') &&
+        !reviewExpired &&
+        !hasIncompleteMatter;
+      if (!isCurrent) {
+        allCddCurrent = false;
+        details.push(
+          `${org.legalName}: ${
+            reviewExpired
+              ? `CDD review date expired (${org.reviewDate})`
+              : verLabel
+                ? `CDD ${resolveLabel(values, org.verificationStatusId)}`
+                : 'CDD verification not current'
+          }`,
+        );
+      } else {
+        details.push(
+          `${org.legalName}: CDD verified${
+            org.reviewDate ? ` (review due ${org.reviewDate})` : ''
+          }`,
+        );
+      }
+    } else {
+      const person = people.find((p) => p.id === cid);
+      if (!person) continue;
+      const verLabel = resolveLabel(values, person.verificationStatusId).toLowerCase();
+      const relLabel = resolveLabel(values, person.relationshipStatusId).toLowerCase();
+      if (relLabel.includes('active') || relLabel.includes('existing')) {
+        anyHasPriorMatters = true;
+      }
+      const hasVerifiedMatter = clientPriorMatters.some((m) => m.amlStatus === 'Verified');
+      const hasIncompleteMatter = clientPriorMatters.some(
+        (m) => m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete',
+      );
+      const isCurrent =
+        (verLabel.includes('verified') || verLabel.includes('complete') || hasVerifiedMatter) &&
+        !verLabel.includes('expired') &&
+        !verLabel.includes('pending') &&
+        !verLabel.includes('refresh') &&
+        !hasIncompleteMatter;
+      if (!isCurrent) {
+        allCddCurrent = false;
+        details.push(
+          `${personDisplayName(person)}: ${
+            verLabel
+              ? `CDD ${resolveLabel(values, person.verificationStatusId)}`
+              : 'CDD verification not current'
+          }`,
+        );
+      } else {
+        details.push(
+          `${personDisplayName(person)}: CDD verified${
+            person.verifiedAt ? ` (${person.verifiedAt})` : ''
+          }`,
+        );
+      }
+    }
+  }
+
+  if (!anyHasPriorMatters) {
+    return {
+      option: 'New client',
+      summary: 'Pre-filled from client record (no prior matters)',
+    };
+  }
+  if (allCddCurrent) {
+    return {
+      option: 'Existing, CDD current',
+      summary: `Pre-filled from client record (${details.join('; ')})`,
+    };
+  }
+  return {
+    option: 'Existing, CDD needs refresh',
+    summary: `Pre-filled from client record (${details.join('; ')})`,
+  };
 }

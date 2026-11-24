@@ -939,9 +939,18 @@ export async function getInitializedDocGenContext(
   return { store, ctx, user, people, organisations, matters, teams, config, repo, storage };
 }
 
+export interface DocumentGenerationSnapshotScopeOptions {
+  readonly includeDocuments?: boolean;
+  readonly entityScope?: {
+    readonly entityType: 'matter' | 'organisation' | 'person';
+    readonly entityId: string;
+  };
+}
+
 export async function getDocumentGenerationSnapshotForUser(
   userId: string,
   session?: VerifiedEntraSessionPayload,
+  options?: DocumentGenerationSnapshotScopeOptions,
 ): Promise<DocumentGenerationClientSnapshot | ActionDenied> {
   const { store, ctx, user, config, repo } =
     await getInitializedDocGenContext(userId, session);
@@ -982,19 +991,36 @@ export async function getDocumentGenerationSnapshotForUser(
     }));
   }
 
-  const [templates, versions, allDocs, allLinks] = await Promise.all([
+  const shouldLoadDocs =
+    canViewDocuments && options?.includeDocuments !== false;
+  const scopedEntityId = options?.entityScope?.entityId?.trim() ?? '';
+  const [templates, versions, allDocs] = await Promise.all([
     canViewTemplates ? repo.listTemplates(ctx) : Promise.resolve([]),
     canViewTemplates ? repo.listAllTemplateVersions(ctx) : Promise.resolve([]),
-    canViewDocuments ? repo.listDocuments(ctx) : Promise.resolve([]),
-    canViewDocuments ? repo.listAllDocumentLinks(ctx) : Promise.resolve([]),
+    shouldLoadDocs
+      ? options?.entityScope && scopedEntityId
+        ? repo.listDocumentsForEntity(
+            ctx,
+            options.entityScope.entityType,
+            scopedEntityId,
+          )
+        : repo.listDocuments(ctx)
+      : Promise.resolve([]),
   ]);
+  const allLinks =
+    shouldLoadDocs && allDocs.length > 0
+      ? await repo.listLinksForDocumentIds(
+          ctx,
+          allDocs.map((d) => d.id),
+        )
+      : [];
   const pendingApprovalsCount = canViewTemplates
     ? versions.filter((v) => v.status === 'Submitted').length
     : 0;
 
   let accessibleDocs: GeneratedDocumentRecord[] = [];
   let documentLinks: DocumentLinkRecord[] = [];
-  if (canViewDocuments) {
+  if (shouldLoadDocs) {
     const referencedMatterIds = Array.from(
       new Set([
         ...allDocs

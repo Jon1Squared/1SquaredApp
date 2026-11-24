@@ -1,9 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 import { createDefaultRbacConfig } from '../core/src/domain/rbac/registry';
+import { resolveTenantFromVerifiedToken } from '../core/src/tenancy/index';
+import { TenantMatterRepository } from '../core/src/tenancy/matterRepository';
+import { getGlobalTenantPostgresPoolManager } from '../core/src/tenancy/postgresPoolManager';
 import {
   getLeftRailVisibility,
   type LeftRailVisibility,
 } from '../src/domain/homeConfig';
+import type { Matter } from '../src/domain/types';
 import { ROLE_SEED_ACTORS, storageStatePathFor } from './global-setup';
 
 /**
@@ -720,6 +724,290 @@ test.describe.serial('R657: Core intake-to-matter journeys (seeded demo dataset)
       expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
+    }
+  });
+});
+
+test.describe('S1-02b C2: Server-backed duplicate and conflict previews during intake', () => {
+  test('1. Enquiries coordinator (Lowri) sees duplicate warning on /people/new', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/people/new');
+      await expect(page.locator('#p-first')).toBeVisible();
+
+      await page.locator('#p-first').fill('Gareth');
+      await page.locator('#p-surname').fill('Hughes');
+      await page.locator('#p-postcode').fill('CF10 3BX');
+
+      const dupBanner = page.locator('[role="alert"]', {
+        hasText: 'Possible duplicate detected',
+      });
+      await expect(dupBanner).toBeVisible({ timeout: 10_000 });
+      await expect(dupBanner).toContainText('Gareth Hughes');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('2. Enquiries coordinator sees preliminary conflict hit on /enquiries/new', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/enquiries/new');
+      await expect(page.locator('#enq-first-name')).toBeVisible();
+
+      await page.locator('#enq-first-name').fill('Iwan');
+      await page.locator('#enq-last-name').fill('Phillips');
+      await page.locator('#enq-other-parties').fill('Coastline Outdoor Ltd');
+      await page.locator('#enq-other-parties').blur();
+
+      const mainArea = page.locator('.main-area');
+      await expect(mainArea).toContainText('Possible conflicts', {
+        timeout: 15_000,
+      });
+      await expect(mainArea).toContainText('PEN001-0004');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+test.describe('S1-02b WP1b picker journeys', () => {
+  test('1. R699 minor person client can pick unlinked adult instructing contact on /matters/new', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/people/new');
+      await expect(page.locator('#p-first')).toBeVisible();
+      await page.locator('#p-first').fill('Alys');
+      await page.locator('#p-surname').fill('Bryn-Minor');
+      await page.locator('#p-dob').fill('2015-01-01');
+      await page.locator('#p-email').fill('alys.minor@example.test');
+      await page.getByRole('button', { name: 'Create person', exact: true }).click();
+      await page.waitForURL(/\/people\/P-/, { timeout: 15_000 });
+      const minorId = new URL(page.url()).pathname.split('/').pop();
+      expect(minorId).toMatch(/^P-/);
+
+      await page.goto(`/matters/new?clientId=${minorId}`);
+      await expect(page.locator('#nm-instructing')).toBeVisible({ timeout: 15_000 });
+
+      const instructingSearch = page.getByRole('searchbox', {
+        name: 'Search instructing contacts',
+      });
+      await expect(instructingSearch).toBeVisible();
+      const instructingSelect = page.locator('#nm-instructing');
+
+      // Minor client must never appear as an instructing-contact option even when searched
+      await instructingSearch.fill('Bryn-Minor');
+      await page.waitForTimeout(450);
+      await expect(page.getByText('Searching…')).toHaveCount(0, { timeout: 5_000 });
+      await expect(
+        instructingSelect.locator(`option[value="${minorId}"]`),
+      ).toHaveCount(0);
+
+      await instructingSearch.fill('Mared Hughes');
+      await expect(
+        instructingSelect.locator('option[value="P-000013"]'),
+      ).toHaveCount(1, { timeout: 10_000 });
+      await instructingSelect.selectOption('P-000013');
+      await expect(instructingSelect).toHaveValue('P-000013');
+
+      // Save the draft matter and verify it persists with the chosen instructing contact
+      const draftTitle = 'R699 Minor Client Instructing Draft';
+      await page.locator('#nm-description').fill(draftTitle);
+      await page.locator('#nm-department').selectOption({ index: 1 });
+      await page.locator('#nm-worktype').selectOption({ index: 1 });
+      await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+      await expect(page.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
+      await expect(page.locator('.toast-pill')).toContainText('Draft saved', {
+        timeout: 15_000,
+      });
+
+      await page.goto(`/matters?q=${encodeURIComponent(draftTitle)}`);
+      const savedDraftLink = page
+        .locator('a[href^="/matters/M-"]', { hasText: draftTitle })
+        .first();
+      await expect(savedDraftLink).toBeVisible({ timeout: 15_000 });
+      await savedDraftLink.click();
+      await expect(page).toHaveURL(/\/matters\/M-\d+/, { timeout: 15_000 });
+      await expect(page.locator('#nm-instructing')).toHaveValue('P-000013', {
+        timeout: 15_000,
+      });
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('2. R701 + Add party modal searches directory and links existing organisation O-000015', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/matters/new');
+      const partiesCardHeading = page.locator('#card-2-heading');
+      await expect(partiesCardHeading).toBeVisible({ timeout: 15_000 });
+
+      const addPartyBtn = page.getByRole('button', { name: 'Add party' });
+      if (!(await addPartyBtn.isVisible())) {
+        await partiesCardHeading.click();
+      }
+      await expect(addPartyBtn).toBeVisible();
+      await addPartyBtn.click();
+
+      const orgSearch = page.getByRole('searchbox', {
+        name: 'Search existing organisations',
+      });
+      await expect(orgSearch).toBeVisible();
+      await orgSearch.fill('Coastline Outdoor');
+
+      const existingOrgSelect = page.locator('#nm-party-existing-search');
+      await expect(
+        existingOrgSelect.locator('option[value="O-000015"]'),
+      ).toHaveCount(1, { timeout: 10_000 });
+      await existingOrgSelect.selectOption('O-000015');
+
+      await page.locator('#nm-party-relationship').selectOption('OP');
+      await page
+        .getByRole('button', { name: /Add Coastline Outdoor Ltd as party/i })
+        .click();
+
+      const partiesCard = page.locator('section[aria-labelledby="card-2-heading"]');
+      await expect(partiesCard).toContainText('Coastline Outdoor Ltd');
+      await expect(
+        partiesCard.getByRole('button', { name: /Include related entities/i }),
+      ).toBeVisible();
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('3. Suggestion 4: Fee earner sees redacted Restricted matter conflict hit on /enquiries/new without leaking confidential title or number', async ({
+    browser,
+  }) => {
+    process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
+    process.env.PLATFORM_ENVIRONMENT ??= 'test';
+    process.env.PLATFORM_POSTGRES_HOST ??= '127.0.0.1';
+    process.env.PLATFORM_POSTGRES_PORT ??= '5432';
+    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??= 'onesquared_local_runtime';
+
+    const partnerCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'not-a-law-firm',
+        email: 'rhian.morgan@notalawfirm.example',
+        name: 'Rhian Morgan',
+        roles: ['partner', 'admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'e2e-suggestion4-restricted-conflict',
+    });
+    const matterRepo = new TenantMatterRepository();
+    const restrictedId = 'M-E2E-STAFF-CONFLICT';
+    const existingRestricted = await matterRepo.getMatterById<Matter>(
+      partnerCtx,
+      restrictedId,
+      { includeRestricted: true },
+    );
+    if (!existingRestricted) {
+      const templateMatter = await matterRepo.getMatterById<Matter>(
+        partnerCtx,
+        'M-000011',
+        { includeRestricted: true },
+      );
+      if (!templateMatter) {
+        throw new Error('Expected seeded matter M-000011 in E2E database');
+      }
+      await matterRepo.putMatter(
+        partnerCtx,
+        {
+          ...structuredClone(templateMatter),
+          id: restrictedId,
+          matterNumber: 'STF-E2E-999',
+          title: 'Confidential E2E Staff Disciplinary Matter',
+          shortDescription: 'Confidential internal staff grievance review',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          leadFeeEarnerId: 'P-000001',
+          teamMemberIds: ['P-000001'],
+          isStaffMatter: true,
+          hasEthicalWall: true,
+          restrictedAccessUserIds: ['P-000001'],
+          parties: [
+            {
+              id: 'MP-E2E-STAFF-1',
+              relationshipCode: 'OP',
+              capacityCodes: [],
+              entityType: 'organisation',
+              linkedRecordId: null,
+              name: 'Gower Harbour Logistics Ltd',
+              role: 'Other party',
+              notes: '',
+            },
+          ],
+        },
+        { expectedRowVersion: null },
+      );
+    }
+
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/enquiries/new');
+      await expect(page.locator('#enq-first-name')).toBeVisible({ timeout: 15_000 });
+
+      await page.locator('#enq-first-name').fill('Elen');
+      await page.locator('#enq-last-name').fill('Morris');
+      await page.locator('#enq-other-parties').fill('Gower Harbour Logistics Ltd');
+      await page.locator('#enq-other-parties').blur();
+
+      const mainArea = page.locator('.main-area');
+      await expect(mainArea).toContainText('Possible conflicts', {
+        timeout: 15_000,
+      });
+      await expect(mainArea).toContainText('Restricted matter');
+      await expect(mainArea).not.toContainText(
+        'Confidential E2E Staff Disciplinary Matter',
+      );
+      await expect(mainArea).not.toContainText('STF-E2E-999');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
     }
   });
 });

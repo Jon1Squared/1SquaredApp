@@ -25,6 +25,7 @@ import type {
 } from '@/domain/types';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { EntitySearchSelect } from './useEntityPicker';
 
 interface Props {
   task: Task;
@@ -70,6 +71,7 @@ export function TaskDetailClient({
   const [linkedRecords, setLinkedRecords] = useState<TaskLinkedRecord[]>(task.linkedRecords);
   const [linkRecordType, setLinkRecordType] = useState<TaskLinkedRecordType>('enquiry');
   const [linkRecordId, setLinkRecordId] = useState('');
+  const [pickedLinkedTitles, setPickedLinkedTitles] = useState<Record<string, string>>({});
 
   const [commentText, setCommentText] = useState('');
 
@@ -102,6 +104,17 @@ export function TaskDetailClient({
   };
 
   const resolveLinkedRecordTitle = (lr: TaskLinkedRecord) => {
+    const picked = pickedLinkedTitles[`${lr.recordType}:${lr.recordId}`];
+    if (picked) {
+      const prefixMap: Record<TaskLinkedRecordType, string> = {
+        enquiry: 'Enquiry',
+        quote: 'Quote',
+        matter: 'Matter',
+        person: 'Person',
+        organisation: 'Organisation',
+      };
+      return `${prefixMap[lr.recordType]}: ${picked}`;
+    }
     if (lr.recordType === 'enquiry') {
       const e = enquiries.find((x) => x.id === lr.recordId);
       return e
@@ -494,7 +507,7 @@ export function TaskDetailClient({
                   ))}
                 </div>
               ) : null}
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                 <select
                   className="field-select"
                   style={{ maxWidth: 160 }}
@@ -510,18 +523,31 @@ export function TaskDetailClient({
                   <option value="person">Person</option>
                   <option value="organisation">Organisation</option>
                 </select>
-                <select
-                  className="field-select"
-                  value={linkRecordId}
-                  onChange={(e) => setLinkRecordId(e.target.value)}
-                >
-                  <option value="">Select record…</option>
-                  {availableRecordsForType.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.label}
-                    </option>
-                  ))}
-                </select>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <EntitySearchSelect
+                    entityTypes={[linkRecordType]}
+                    value={linkRecordId}
+                    emptyLabel="Select record…"
+                    searchPlaceholder={`Search ${linkRecordType}s…`}
+                    searchAriaLabel={`Search ${linkRecordType} records`}
+                    initialOptions={availableRecordsForType.map((r) => ({
+                      id: r.id,
+                      recordType: linkRecordType,
+                      label: r.label,
+                      subtitle: '',
+                      href: hrefForId(r.id),
+                    }))}
+                    onChange={(nextId, opt) => {
+                      setLinkRecordId(nextId);
+                      if (opt) {
+                        setPickedLinkedTitles((prev) => ({
+                          ...prev,
+                          [`${linkRecordType}:${opt.id}`]: opt.label,
+                        }));
+                      }
+                    }}
+                  />
+                </div>
                 <button
                   type="button"
                   className="btn btn--secondary btn--sm"

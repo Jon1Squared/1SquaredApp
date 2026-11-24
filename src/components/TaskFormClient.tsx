@@ -8,6 +8,7 @@ import { saveTaskAction } from '@/app/actions';
 import { enquiryDisplayName } from '@/domain/enquiries';
 import { personDisplayName, primaryEmail, primaryPhone, recordHref } from '@/domain/names';
 import { quoteClientDisplayName, quoteWorkTypeSummary } from '@/domain/quotes';
+import type { EntityPickerMatterSummary } from '@/domain/intakePreviewTypes';
 import type {
   ChoiceValue,
   Enquiry,
@@ -25,6 +26,7 @@ import {
   type SuggestedTaskAssignee,
 } from './CreateTaskModal';
 import { useToast } from './Toast';
+import { useEntityPicker } from './useEntityPicker';
 
 interface Props {
   teams: Team[];
@@ -37,6 +39,7 @@ interface Props {
   currentUserId: string;
   initialLinkedRecord?: TaskLinkedRecord | null;
   initialTeamId?: string | null;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
 }
 
 interface SearchableRecordItem {
@@ -48,7 +51,18 @@ interface SearchableRecordItem {
   subtitle: string;
   href: string;
   searchText: string;
+  matterSummary?: EntityPickerMatterSummary;
 }
+
+const TASK_RECORD_TYPE_LABELS: Readonly<
+  Record<TaskLinkedRecordType, SearchableRecordItem['typeLabel']>
+> = {
+  matter: 'Matter',
+  enquiry: 'Enquiry',
+  quote: 'Quote',
+  organisation: 'Organisation',
+  person: 'Person',
+};
 
 export function TaskFormClient({
   people,
@@ -60,6 +74,7 @@ export function TaskFormClient({
   currentUserId,
   initialLinkedRecord,
   initialTeamId,
+  supervisingPartnerByEmployeeId,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -78,6 +93,16 @@ export function TaskFormClient({
   );
   const [recordSearchQuery, setRecordSearchQuery] = useState('');
   const [recordSearchFocused, setRecordSearchFocused] = useState(false);
+  const [pickedSearchRecords, setPickedSearchRecords] = useState<
+    Record<string, SearchableRecordItem>
+  >({});
+  const [pickedMattersById, setPickedMattersById] = useState<
+    Record<string, EntityPickerMatterSummary>
+  >({});
+  const memoisedInitialSelectedPersonIds = useMemo(
+    () => [currentUserId],
+    [currentUserId],
+  );
 
   // Build suggested people based on linked matter/enquiry or current user's team
   const suggestedPeople = useMemo<SuggestedTaskAssignee[]>(() => {
@@ -93,7 +118,9 @@ export function TaskFormClient({
 
     const linkedMatterRec = linkedRecords.find((lr) => lr.recordType === 'matter');
     const linkedMatter = linkedMatterRec
-      ? matters.find((m) => m.id === linkedMatterRec.recordId)
+      ? matters.find((m) => m.id === linkedMatterRec.recordId) ??
+        pickedMattersById[linkedMatterRec.recordId] ??
+        null
       : null;
 
     if (linkedMatter) {
@@ -115,8 +142,11 @@ export function TaskFormClient({
     } else {
       addPerson(currentUserId, 'Fee earner');
       const currentEmp = employees.find((e) => e.id === currentUserId);
-      if (currentEmp?.employment?.supervisingPartnerId) {
-        addPerson(currentEmp.employment.supervisingPartnerId, 'Supervising partner');
+      const supId =
+        currentEmp?.employment?.supervisingPartnerId ??
+        supervisingPartnerByEmployeeId?.[currentUserId];
+      if (supId) {
+        addPerson(supId, 'Supervising partner');
       }
     }
 
@@ -133,7 +163,15 @@ export function TaskFormClient({
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [linkedRecords, matters, employees, people, currentUserId]);
+  }, [
+    linkedRecords,
+    matters,
+    pickedMattersById,
+    employees,
+    people,
+    currentUserId,
+    supervisingPartnerByEmployeeId,
+  ]);
 
   const searchableRecords = useMemo<SearchableRecordItem[]>(() => {
     const items: SearchableRecordItem[] = [];
@@ -225,32 +263,52 @@ export function TaskFormClient({
     return items;
   }, [matters, enquiries, quotes, organisations, people, values]);
 
-  const matchingSearchRecords = useMemo(() => {
-    const tokens = recordSearchQuery
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean);
-    if (tokens.length === 0) return [];
+  const { items: pickerSearchResults, error: recordSearchError } =
+    useEntityPicker(
+      {
+        entityTypes: ['matter', 'enquiry', 'quote', 'organisation', 'person'],
+        query: recordSearchQuery,
+        limit: 15,
+      },
+      { enabled: Boolean(recordSearchQuery.trim()) },
+    );
 
-    return searchableRecords
-      .filter((item) => {
-        if (
-          linkedRecords.some(
-            (lr) => lr.recordType === item.recordType && lr.recordId === item.recordId,
-          )
-        ) {
-          return false;
-        }
-        return tokens.every((tok) => item.searchText.includes(tok));
-      })
-      .slice(0, 12);
-  }, [recordSearchQuery, searchableRecords, linkedRecords]);
+  const matchingSearchRecords = useMemo<SearchableRecordItem[]>(() => {
+    if (!recordSearchQuery.trim()) return [];
+    const seen = new Set<string>();
+    const results: SearchableRecordItem[] = [];
+    for (const item of pickerSearchResults) {
+      if (
+        linkedRecords.some(
+          (lr) => lr.recordType === item.recordType && lr.recordId === item.id,
+        )
+      ) {
+        continue;
+      }
+      const key = `${item.recordType}:${item.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      results.push({
+        recordType: item.recordType,
+        recordId: item.id,
+        typeLabel: TASK_RECORD_TYPE_LABELS[item.recordType],
+        reference: item.reference ?? item.id,
+        title: item.label,
+        subtitle: item.subtitle,
+        href: item.href,
+        searchText: '',
+        matterSummary: item.matterSummary,
+      });
+    }
+    return results.slice(0, 12);
+  }, [recordSearchQuery, pickerSearchResults, linkedRecords]);
 
   const resolveLinkedItem = (lr: TaskLinkedRecord) => {
-    const found = searchableRecords.find(
-      (item) => item.recordType === lr.recordType && item.recordId === lr.recordId,
-    );
+    const found =
+      pickedSearchRecords[`${lr.recordType}:${lr.recordId}`] ??
+      searchableRecords.find(
+        (item) => item.recordType === lr.recordType && item.recordId === lr.recordId,
+      );
     if (found) {
       return {
         typeLabel: found.typeLabel,
@@ -267,7 +325,18 @@ export function TaskFormClient({
     };
   };
 
-  const handleSelectRecord = (item: Pick<SearchableRecordItem, 'recordType' | 'recordId'>) => {
+  const handleSelectRecord = (item: SearchableRecordItem) => {
+    setPickedSearchRecords((prev) => ({
+      ...prev,
+      [`${item.recordType}:${item.recordId}`]: item,
+    }));
+    if (item.recordType === 'matter' && item.matterSummary) {
+      const pickedMatterSummary = item.matterSummary;
+      setPickedMattersById((prev) => ({
+        ...prev,
+        [item.recordId]: pickedMatterSummary,
+      }));
+    }
     setLinkedRecords((prev) => {
       if (
         prev.some(
@@ -322,7 +391,7 @@ export function TaskFormClient({
         initialTaskName=""
         taskNamePlaceholder="e.g. New matter submission for [MATTER NAME]"
         suggestedPeople={suggestedPeople}
-        initialSelectedPersonIds={[currentUserId]}
+        initialSelectedPersonIds={memoisedInitialSelectedPersonIds}
         employees={employees}
         values={values}
         defaultDueHoursFromNow={48}
@@ -442,7 +511,18 @@ export function TaskFormClient({
                     overflowY: 'auto',
                   }}
                 >
-                  {matchingSearchRecords.length === 0 ? (
+                  {recordSearchError ? (
+                    <div
+                      role="alert"
+                      style={{
+                        padding: '10px 12px',
+                        fontSize: 12.5,
+                        color: '#b91c1c',
+                      }}
+                    >
+                      {recordSearchError}
+                    </div>
+                  ) : matchingSearchRecords.length === 0 ? (
                     <div
                       className="muted"
                       style={{ padding: '10px 12px', fontSize: 12.5 }}

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { formatDateTime, formatRelativeAge } from '@/domain/dates';
+import { shouldSyncServerQuery } from '@/domain/listNavigationState';
 import { initials } from '@/domain/names';
 
 export type DataListDensity = 'comfortable' | 'compact';
@@ -865,6 +866,177 @@ export function DataListFilterBar({
       ) : null}
     </div>
   );
+}
+
+export interface DataListPaginationProps {
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  onPageChange: (nextPage: number) => void;
+  itemLabel?: string;
+}
+
+/**
+ * Shared server-paging summary ("Showing X-Y of Z") and Previous/Next navigation bar (`R702`).
+ */
+export function DataListPagination({
+  page,
+  pageSize,
+  totalCount,
+  onPageChange,
+  itemLabel = 'records',
+}: DataListPaginationProps) {
+  const safeTotal = Math.max(0, Math.floor(totalCount));
+  const safeSize = Math.max(1, Math.floor(pageSize));
+  const totalPages = Math.max(1, Math.ceil(safeTotal / safeSize));
+  const safePage = Math.max(1, Math.min(totalPages, Math.floor(page)));
+  const start = safeTotal === 0 ? 0 : (safePage - 1) * safeSize + 1;
+  const end = safeTotal === 0 ? 0 : Math.min(safeTotal, safePage * safeSize);
+
+  const summary =
+    safeTotal === 0
+      ? `Showing 0 of 0 ${itemLabel}`
+      : `Showing ${start.toLocaleString('en-GB')}–${end.toLocaleString('en-GB')} of ${safeTotal.toLocaleString('en-GB')} ${itemLabel}`;
+
+  return (
+    <nav
+      aria-label="List pagination"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        padding: '12px 4px',
+        fontSize: 13,
+      }}
+    >
+      <span className="muted" data-testid="list-pagination-summary">
+        {summary}
+      </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span className="muted">
+          Page {safePage.toLocaleString('en-GB')} of {totalPages.toLocaleString('en-GB')}
+        </span>
+        <button
+          type="button"
+          className="btn btn--secondary btn--sm"
+          disabled={safePage <= 1}
+          onClick={() => onPageChange(safePage - 1)}
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          className="btn btn--secondary btn--sm"
+          disabled={safePage >= totalPages}
+          onClick={() => onPageChange(safePage + 1)}
+        >
+          Next
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+export function buildServerListUrl(
+  basePath: string,
+  values: Record<string, string | number | undefined>,
+  defaults: Record<string, string | number>,
+): string {
+  const sp = new URLSearchParams();
+  for (const [k, rawVal] of Object.entries(values)) {
+    if (rawVal === undefined) continue;
+    const strVal = String(rawVal).trim();
+    if (!strVal) continue;
+    const defVal = defaults[k];
+    if (defVal !== undefined && strVal === String(defVal)) continue;
+    sp.set(k, strVal);
+  }
+  const qs = sp.toString();
+  return qs ? `${basePath}?${qs}` : basePath;
+}
+
+/**
+ * Synchronises debounced text search and immediate filter/page transitions with URL query params
+ * without triggering redundant router updates on initial render or clobbering active typing (`R721`).
+ */
+export function useServerListNavigation(options: {
+  basePath: string;
+  router: { push: (href: string) => void; replace: (href: string) => void };
+  defaults: Record<string, string | number>;
+  initialQuery?: string;
+}) {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncePendingRef = useRef(false);
+  const lastSentQueryRef = useRef<string | null>(
+    options.initialQuery !== undefined ? options.initialQuery.trim() : null,
+  );
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      debouncePendingRef.current = false;
+    };
+  }, []);
+
+  const readQueryFromValues = (
+    values: Record<string, string | number | undefined>,
+  ): string => String(values.q ?? '').trim();
+
+  const navigateNow = (
+    nextValues: Record<string, string | number | undefined>,
+    mode: 'push' | 'replace' = 'replace',
+  ) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    debouncePendingRef.current = false;
+    lastSentQueryRef.current = readQueryFromValues(nextValues);
+    const href = buildServerListUrl(options.basePath, nextValues, options.defaults);
+    if (mode === 'push') {
+      options.router.push(href);
+    } else {
+      options.router.replace(href);
+    }
+  };
+
+  const navigateDebounced = (
+    nextValues: Record<string, string | number | undefined>,
+    delayMs = 250,
+  ) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    debouncePendingRef.current = true;
+    const sentQuery = readQueryFromValues(nextValues);
+    const href = buildServerListUrl(options.basePath, nextValues, options.defaults);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      debouncePendingRef.current = false;
+      lastSentQueryRef.current = sentQuery;
+      options.router.replace(href);
+    }, delayMs);
+  };
+
+  const canSyncServerQuery = useCallback(
+    (serverQuery: string): boolean =>
+      shouldSyncServerQuery({
+        serverQuery: serverQuery.trim(),
+        lastSentQuery: lastSentQueryRef.current,
+        debouncePending: debouncePendingRef.current,
+      }),
+    [],
+  );
+
+  const acknowledgeServerQuery = useCallback((serverQuery: string): void => {
+    lastSentQueryRef.current = serverQuery.trim();
+  }, []);
+
+  return {
+    navigateNow,
+    navigateDebounced,
+    canSyncServerQuery,
+    acknowledgeServerQuery,
+  };
 }
 
 

@@ -84,7 +84,6 @@ import {
   discussSignOff,
   dismissDuplicateMatch,
   executeMerge,
-  getAppSnapshot,
   getClientPmsViewBundle,
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
@@ -128,6 +127,17 @@ import {
   withPageActor,
   listAuditEntriesForRecord,
 } from '../../src/server/services';
+import {
+  loadAdminPageData,
+  loadEnquiriesListPageData,
+  loadEnquiryDetailPageData,
+  loadHomePageData,
+  loadPeopleListPageData,
+  loadQuoteDetailPageData,
+  loadShellContext,
+  loadTaskDetailPageData,
+  loadTasksListPageData,
+} from '../../src/server/pageLoaders';
 import {
   flushDocumentLifecycleSyncForTesting,
   getRepositorySingleton,
@@ -217,10 +227,10 @@ import {
 } from '../../src/domain/matterConflicts';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import { resolveMatterDefaultResponsiblePersonIds } from '../../src/domain/keyDates';
-import PersonProfilePage from '../../src/app/people/[id]/page';
-import EditPersonPage from '../../src/app/people/[id]/edit/page';
-import OrganisationProfilePage from '../../src/app/organisations/[id]/page';
-import EditOrganisationPage from '../../src/app/organisations/[id]/edit/page';
+import PersonProfilePage from '../../src/app/(app)/people/[id]/page';
+import EditPersonPage from '../../src/app/(app)/people/[id]/edit/page';
+import OrganisationProfilePage from '../../src/app/(app)/organisations/[id]/page';
+import EditOrganisationPage from '../../src/app/(app)/organisations/[id]/edit/page';
 import {
   computeEnquiryConflictSnapshot,
   detectPreliminaryConflicts,
@@ -1249,8 +1259,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
   describe('10. Server Services: Audited Per-Person Overrides & Tenant RBAC Config Updates', () => {
     it('enforces self-modification & unheld-grant blocks and logs before/after audit entries', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const snap0 = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
-      const adamAdmin = snap0.people.find((p) => p.roles?.includes('admin'))!;
+      const shell0 = await runAsTestActor('P-000001', () => loadShellContext('P-000001'));
+      const adamAdmin = shell0.employees.find((p) => p.roles?.includes('admin'))!;
       expect(adamAdmin).toBeDefined();
 
       // 1. Self-modification is blocked on the server service
@@ -1303,14 +1313,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       );
       expect(validOverride.ok).toBe(true);
 
-      const dafyddSnap = await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'));
-      expect(dafyddSnap.currentUserPermissions).toContain('risk:view');
-      expect(dafyddSnap.currentUserPermissions).not.toContain(
+      const dafyddShell = await runAsTestActor('P-000002', () =>
+        loadShellContext('P-000002'),
+      );
+      expect(dafyddShell.currentUserPermissions).toContain('risk:view');
+      expect(dafyddShell.currentUserPermissions).not.toContain(
         'finance:view_matter',
       );
-      expect(dafyddSnap.currentUser.entraObjectId).toBe(
+      expect(dafyddShell.currentUser.entraObjectId).toBeUndefined();
+      expect(validOverride.person?.entraObjectId).toBe(
         '8f2e91c0-4a12-4b9e-9c01-dafydd000002',
       );
+      expect(
+        dafyddShell.staffPeopleRaw.find((p) => p.id === 'P-000002')?.entraObjectId,
+      ).toBe('8f2e91c0-4a12-4b9e-9c01-dafydd000002');
 
       // Audit entry recorded with before/after JSON
       const auditEntry = (await auditSinceTestStart()).find(
@@ -1357,9 +1373,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         updateTenantRbacConfig(
           {
             identityMapping: {
-              ...dafyddSnap.rbacConfig.identityMapping,
+              ...dafyddShell.rbacConfig.identityMapping,
               entraGroupToRoleKey: {
-                ...dafyddSnap.rbacConfig.identityMapping.entraGroupToRoleKey,
+                ...dafyddShell.rbacConfig.identityMapping.entraGroupToRoleKey,
                 '11111111-2222-3333-4444-555555555555': ['partner'],
               },
             },
@@ -1393,10 +1409,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       expect(unmappedProvision.person.roles).toEqual([]);
       expect(unmappedProvision.person.roles).not.toContain('admin');
       expect(unmappedProvision.person.departmentId).toBeNull();
-      const unmappedSnap = await runAsTestActor(unmappedProvision.person.id, () =>
-        getAppSnapshot(unmappedProvision.person.id),
+      const unmappedShell = await runAsTestActor(unmappedProvision.person.id, () =>
+        loadShellContext(unmappedProvision.person.id),
       );
-      expect(unmappedSnap.currentUserPermissions).not.toContain('admin:access');
+      expect(unmappedShell.currentUserPermissions).not.toContain('admin:access');
 
       // R53: updateTenantRbacConfigAction with mfaVerified: false returns MFA_REQUIRED
       setTestEntraSessionOverride({
@@ -1546,10 +1562,10 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(secondTokenSignIn.person.roles).toEqual([]);
       expect(secondTokenSignIn.person.roles).not.toContain('admin');
-      const tokenOnlySnap = await runAsTestActor(secondTokenSignIn.person.id, () =>
-        getAppSnapshot(secondTokenSignIn.person.id),
+      const tokenOnlyShell = await runAsTestActor(secondTokenSignIn.person.id, () =>
+        loadShellContext(secondTokenSignIn.person.id),
       );
-      expect(tokenOnlySnap.currentUserPermissions).not.toContain('admin:access');
+      expect(tokenOnlyShell.currentUserPermissions).not.toContain('admin:access');
 
       // R61 (hybrid mode): Under hybrid authorityMode, token-derived roles apply for the current session
       // without mutating the stored person.roles on the employee record.
@@ -1587,7 +1603,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           // Stored employee roles remain ['fee_earner'] and do not permanently gain 'risk_compliance'
           expect(hybridSignIn.person.roles).toEqual(['fee_earner']);
           // Yet the active session permission set includes risk_compliance permissions (e.g. 'risk:view')
-          const hybridSnap = await runWithActiveActorSession(
+          const hybridShell = await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
@@ -1597,9 +1613,9 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
                 roles: hybridSignIn.verifiedToken.roles,
               }),
             },
-            async () => getAppSnapshot('P-000002'),
+            async () => loadShellContext('P-000002'),
           );
-          expect(hybridSnap.currentUserPermissions).toContain('risk:view');
+          expect(hybridShell.currentUserPermissions).toContain('risk:view');
           // When the subsequent session has no token roles, the user falls back to stored ['fee_earner'] roles only
           const subsequentSignIn = await resolveOrProvisionEntraEmployee({
             oid: '00000000-0000-4000-8000-000000000002',
@@ -1610,7 +1626,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
             roles: [],
             amr: ['pwd', 'mfa'],
           });
-          const hybridAfterSnap = await runWithActiveActorSession(
+          const hybridAfterShell = await runWithActiveActorSession(
             {
               tenantId: 'not-a-law-firm',
               personId: 'P-000002',
@@ -1620,17 +1636,25 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
                 roles: subsequentSignIn.verifiedToken.roles,
               }),
             },
-            async () => getAppSnapshot('P-000002'),
+            async () => loadShellContext('P-000002'),
           );
-          expect(hybridAfterSnap.currentUserPermissions).not.toContain(
+          expect(hybridAfterShell.currentUserPermissions).not.toContain(
             'risk:view',
           );
         },
       );
 
-      // R63: getAppSnapshot(riskUser).employeeSensitiveRecords is empty; per-person read writes a view-sensitive audit entry
-      const riskSnap = await runAsTestActor('P-000003', () => getAppSnapshot('P-000003'));
-      expect(riskSnap.employeeSensitiveRecords).toEqual({});
+      // R63: production shell/people loaders omit employeeSensitiveRecords & sensitive data; per-person read writes a view-sensitive audit entry
+      const [riskShell, riskPeople] = await runAsTestActor('P-000003', () =>
+        Promise.all([
+          loadShellContext('P-000003'),
+          loadPeopleListPageData('P-000003', { pageSize: 200 }),
+        ]),
+      );
+      expect('employeeSensitiveRecords' in riskShell).toBe(false);
+      for (const p of riskPeople.people) {
+        expect((p as { sensitive?: unknown }).sensitive).toBeUndefined();
+      }
       await runAsTestActor('P-000004', () =>
         logEmployeeRestrictedAccess('P-000002', 'sensitive', 'P-000004', 'Viewed sensitive HR tab'),
       );
@@ -1655,11 +1679,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         hasEthicalWall: false,
         restrictedAccessUserIds: ['P-000001'],
       } as unknown as Matter;
-      const personY = riskSnap.people.find((p) => p.id === 'P-000002')!;
+      const personY = riskPeople.people.find((p) => p.id === 'P-000002')!;
       expect(
         canPersonAccessMatter(restrictedNonStaffMatter, personY.id, personY, {
-          allPeople: riskSnap.people,
-          teams: riskSnap.teams,
+          allPeople: riskShell.filteredStaffPeople,
+          teams: riskShell.teams,
         }),
       ).toBe(false);
 
@@ -1686,7 +1710,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       });
       expect(feeEarnerSaveHomeRes.ok).toBe(false);
       expect(feeEarnerSaveHomeRes.code).toBe('FORBIDDEN');
-      expect((await getAppSnapshot('P-000002')).homePagesConfig.firmSettings.demoMode).toBe(
+      expect((await loadShellContext('P-000002')).homePagesConfig.firmSettings.demoMode).toBe(
         false,
       );
       const feeEarnerResetHomeRes = await resetHomePagesConfigAction();
@@ -1756,11 +1780,11 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       // 1. Two-tenant isolation: P-000002 with ['admin'] token roles in tenant-a does NOT get admin permissions in tenant-b
       const baseTenantCfg = getActiveTenantRawBaseConfig();
       const dafydd = (
-        await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'))
-      ).people.find((p) => p.id === 'P-000002')!;
+        await runAsTestActor('P-000002', () => loadShellContext('P-000002'))
+      ).currentUser;
       const carys = (
-        await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'))
-      ).people.find((p) => p.id === 'P-000001')!;
+        await runAsTestActor('P-000001', () => loadShellContext('P-000001'))
+      ).currentUser;
       expect(dafydd.roles).toEqual(['fee_earner']);
 
       // 1a. Outside runWithActiveActorSession, resolvePersonPermissions(person) returns stored roles only
@@ -2190,17 +2214,37 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         };
         await getTaskWorkflowRepository().putTask(r123Ctx, unassignedCorpTask);
 
-        // R123: Partner P-000001 holds task:claim_any and sees canTakeByTaskId['TSK-R123-CLAIM-ANY'] === true even though not in corpTeam; Fee Earner P-000002 does not hold task:claim_any and sees false
-        const partnerSnap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
-        const feeEarnerSnap = await runAsTestActor('P-000002', () => getAppSnapshot('P-000002'));
-        expect(partnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(true);
-        expect(feeEarnerSnap.canTakeByTaskId['TSK-R123-CLAIM-ANY']).toBe(false);
+        // R123: Partner P-000001 holds task:claim_any and sees canTake === true on TSK-R123-CLAIM-ANY even though not in corpTeam; Fee Earner P-000002 does not hold task:claim_any and sees false
+        const [partnerShell, partnerTaskDetail, feeEarnerTaskDetail, adminPage] =
+          await Promise.all([
+            runAsTestActor('P-000001', () => loadShellContext('P-000001')),
+            runAsTestActor('P-000001', () =>
+              loadTaskDetailPageData('P-000001', 'TSK-R123-CLAIM-ANY'),
+            ),
+            runAsTestActor('P-000002', () =>
+              loadTaskDetailPageData('P-000002', 'TSK-R123-CLAIM-ANY'),
+            ),
+            runAsTestActor(
+              'P-000004',
+              () =>
+                loadAdminPageData('P-000004', {
+                  slug: ['rbac-and-entra'],
+                  mfaVerified: true,
+                }),
+              { roles: ['admin'], mfaVerified: true },
+            ),
+          ]);
+        expect(partnerTaskDetail?.canTake).toBe(true);
+        expect(feeEarnerTaskDetail?.canTake).toBe(false);
 
-        // R106: getAppSnapshot returns server-computed appRoleByPersonId, rolesByPersonId, permissionsByPersonId, canReopenByEnquiryId, and firmPrimaryDomain
-        expect(partnerSnap.firmPrimaryDomain).toBe('notalawfirm.example');
-        expect(partnerSnap.appRoleByPersonId['P-000004']).toBe('admin');
-        expect(partnerSnap.rolesByPersonId['P-000002']).toContain('fee_earner');
-        expect(partnerSnap.permissionsByPersonId['P-000004']).toContain(
+        // R106: production shell & admin loaders return server-computed firmPrimaryDomain, appRoleByPersonId, rolesByPersonId, and permissionsByPersonId
+        expect(partnerShell.firmPrimaryDomain).toBe('notalawfirm.example');
+        if ('redirectTo' in adminPage) {
+          throw new Error('Expected P-000004 to load Admin RBAC page data');
+        }
+        expect(adminPage.appRoleByPersonId['P-000004']).toBe('admin');
+        expect(adminPage.rolesByPersonId['P-000002']).toContain('fee_earner');
+        expect(adminPage.permissionsByPersonId['P-000004']).toContain(
           'admin:access',
         );
 
@@ -3281,11 +3325,15 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         expect(createRes.task).toBeDefined();
         const wallTask = createRes.task!;
 
-        // Fee earner P-000002 (not on allowlist) cannot see the task in getAppSnapshot
-        const snapFeeEarner = await runAsTestActor('P-000002', () =>
-          getAppSnapshot('P-000002'),
+        // Fee earner P-000002 (not on allowlist) cannot see the task in task loaders
+        const [tasksFeeEarner, taskDetailFeeEarner] = await runAsTestActor('P-000002', () =>
+          Promise.all([
+            loadTasksListPageData('P-000002', { statusFilter: 'all', pageSize: 200 }),
+            loadTaskDetailPageData('P-000002', wallTask.id),
+          ]),
         );
-        expect(snapFeeEarner.tasks.some((t) => t.id === wallTask.id)).toBe(false);
+        expect(tasksFeeEarner.tasks.some((t) => t.id === wallTask.id)).toBe(false);
+        expect(taskDetailFeeEarner).toBeNull();
 
         // B9: P-000002 cannot comment on a task linked to a restricted matter
         const initialCommentCount = wallTask.comments?.length ?? 0;
@@ -3477,13 +3525,18 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         )!;
         expect(financeUser).toBeDefined();
 
-        // Finance user does not hold quote:view -> getAppSnapshot returns empty quotes
-        const snap = await runAsTestActor(financeUser.id, () =>
-          getAppSnapshot(financeUser.id),
+        // Finance user does not hold quote:view -> loadEnquiriesListPageData returns empty quotes and loadShellContext lacks quote perms
+        const [financeShell, financeEnquiries] = await runAsTestActor(
+          financeUser.id,
+          () =>
+            Promise.all([
+              loadShellContext(financeUser.id),
+              loadEnquiriesListPageData(financeUser.id, { pageSize: 200 }),
+            ]),
         );
-        expect(snap.currentUserPermissions).not.toContain('quote:view');
-        expect(snap.currentUserPermissions).not.toContain('quote:edit');
-        expect(snap.quotes).toEqual([]);
+        expect(financeShell.currentUserPermissions).not.toContain('quote:view');
+        expect(financeShell.currentUserPermissions).not.toContain('quote:edit');
+        expect(financeEnquiries.quotes).toEqual([]);
 
         // R267: Fee earner P-000002 holds quote:view, but quotes linked to a restricted matter or hidden enquiry are hidden
         const ctx = testDataResetContext();
@@ -3514,16 +3567,26 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         quoteOnHiddenEnquiry.convertedMatterId = null;
         await getIntakeQuoteRepository().putQuote(ctx, quoteOnHiddenEnquiry);
 
-        const feeEarnerSnap = await runAsTestActor('P-000002', () =>
-          getAppSnapshot('P-000002'),
+        const [
+          feeEarnerEnquiries,
+          restrictedMatterQuoteDetail,
+          hiddenEnquiryQuoteDetail,
+        ] = await runAsTestActor('P-000002', () =>
+          Promise.all([
+            loadEnquiriesListPageData('P-000002', { pageSize: 200 }),
+            loadQuoteDetailPageData('P-000002', quoteOnRestrictedMatter.id),
+            loadQuoteDetailPageData('P-000002', quoteOnHiddenEnquiry.id),
+          ]),
         );
-        expect(feeEarnerSnap.currentUserPermissions).toContain('quote:view');
+        expect(feeEarnerEnquiries.shell.currentUserPermissions).toContain('quote:view');
         expect(
-          feeEarnerSnap.quotes.some((q) => q.id === quoteOnRestrictedMatter.id),
+          feeEarnerEnquiries.quotes.some((q) => q.id === quoteOnRestrictedMatter.id),
         ).toBe(false);
         expect(
-          feeEarnerSnap.quotes.some((q) => q.id === quoteOnHiddenEnquiry.id),
+          feeEarnerEnquiries.quotes.some((q) => q.id === quoteOnHiddenEnquiry.id),
         ).toBe(false);
+        expect(restrictedMatterQuoteDetail).toBeNull();
+        expect(hiddenEnquiryQuoteDetail).toBeNull();
 
         const existingQuote = allQuotes[0]!;
         await runAsTestActor(financeUser.id, async () => {
@@ -4709,13 +4772,19 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
           unlinkedDeclinedNameEnq.convertedMatterId = restrictedMatter.id;
           await getIntakeQuoteRepository().putEnquiry(ctx, unlinkedDeclinedNameEnq);
           try {
-            const nonParticipantSnap = await runAsTestActor('P-000002', () =>
-              getAppSnapshot('P-000002'),
-            );
-            const resolvedEnquiryForNonParticipant = nonParticipantSnap.enquiries.find(
-              (e) => e.id === unlinkedDeclinedNameEnq.id,
-            );
+            const [nonParticipantEnquiries, nonParticipantEnquiryDetail] =
+              await runAsTestActor('P-000002', () =>
+                Promise.all([
+                  loadEnquiriesListPageData('P-000002', { pageSize: 200 }),
+                  loadEnquiryDetailPageData('P-000002', unlinkedDeclinedNameEnq.id),
+                ]),
+              );
+            const resolvedEnquiryForNonParticipant =
+              nonParticipantEnquiries.enquiries.find(
+                (e) => e.id === unlinkedDeclinedNameEnq.id,
+              );
             expect(resolvedEnquiryForNonParticipant).toBeUndefined();
+            expect(nonParticipantEnquiryDetail).toBeNull();
             expect(
               normaliseConversionConflictWarnings(
                 resolvedEnquiryForNonParticipant?.conflictDecision?.warnings,
@@ -6604,7 +6673,7 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       'pmsClientAccountByMatterCode',
     ] as const;
 
-    it('1. getAppSnapshot for any role contains none of the removed finance fields and exposes capabilities only', async () => {
+    it('1. loadShellContext & loadHomePageData for any role contain none of the removed finance fields and expose capabilities only', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
       const roleTestUsers = [
         {
@@ -6634,14 +6703,20 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
       ];
 
       for (const { id, expected } of roleTestUsers) {
-        const snap = await runAsTestActor(id, () => getAppSnapshot(id));
+        const [shell, home] = await runAsTestActor(id, () =>
+          Promise.all([loadShellContext(id), loadHomePageData(id)]),
+        );
         for (const removedKey of REMOVED_SNAPSHOT_FINANCE_KEYS) {
           expect(
-            removedKey in (snap as unknown as Record<string, unknown>),
-            `Expected ${removedKey} to be absent from getAppSnapshot(${id})`,
+            removedKey in (shell as unknown as Record<string, unknown>),
+            `Expected ${removedKey} to be absent from loadShellContext(${id})`,
+          ).toBe(false);
+          expect(
+            removedKey in (home as unknown as Record<string, unknown>),
+            `Expected ${removedKey} to be absent from loadHomePageData(${id})`,
           ).toBe(false);
         }
-        expect(snap.finance).toEqual(expected);
+        expect(shell.finance).toEqual(expected);
       }
 
       // Verify leftRailVisibility does not widen finance capabilities for a risk/compliance user without finance permissions
@@ -6652,8 +6727,8 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
         revoke: ['finance:view', 'finance:view_matter', 'finance:credit_control'],
       };
       await getPartyRepository().putPerson(ctx, riskPerson);
-      const riskSnap = await runAsTestActor('P-000003', () => getAppSnapshot('P-000003'));
-      expect(riskSnap.finance).toEqual({
+      const riskShell = await runAsTestActor('P-000003', () => loadShellContext('P-000003'));
+      expect(riskShell.finance).toEqual({
         canViewFirm: false,
         canViewMatter: false,
         canCreditControl: false,
@@ -6662,29 +6737,29 @@ describe('Central Configuration-Driven RBAC (ADR-0010 .. ADR-0016)', () => {
 
     it('2. canUserViewFinance(null) is false and attentionList hides PMS financial alerts by default or without capability', async () => {
       await resetAllDemoData('P-000001', testDataResetContext());
-      const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
-      expect(canUserViewFinance(null, snap.teams, snap.values)).toBe(false);
-      expect(canUserViewFinance(undefined, snap.teams, snap.values)).toBe(false);
+      const home = await runAsTestActor('P-000001', () => loadHomePageData('P-000001'));
+      expect(canUserViewFinance(null, home.shell.teams, home.shell.values)).toBe(false);
+      expect(canUserViewFinance(undefined, home.shell.teams, home.shell.values)).toBe(false);
 
       const rowsRes = await getMatterFinanceRows('P-000001');
       expect(isActionDenied(rowsRes)).toBe(false);
       if (isActionDenied(rowsRes)) return;
 
-      const allRecords = [...snap.people, ...snap.organisations];
+      const allRecords = [...home.people, ...home.organisations];
       const today = new Date('2026-10-16T10:00:00Z');
-      const itemsDefault = attentionList(allRecords, snap.values, today, {
-        tasks: snap.tasks,
-        enquiries: snap.enquiries,
-        teams: snap.teams,
-        matters: snap.matters,
+      const itemsDefault = attentionList(allRecords, home.shell.values, today, {
+        tasks: home.tasks,
+        enquiries: home.enquiries,
+        teams: home.shell.teams,
+        matters: home.matters,
         pmsSummaryByMatterId: rowsRes.pmsSummaryByMatterId,
       });
       expect(itemsDefault.some((i) => i.kind.startsWith('pms_'))).toBe(false);
 
-      // Support staff / enquiries coordinator snapshot attention list has no PMS financial alerts
-      const supportSnap = await runAsTestActor('P-000010', () => getAppSnapshot('P-000010'));
+      // Support staff / enquiries coordinator shell attention list has no PMS financial alerts
+      const supportShell = await runAsTestActor('P-000010', () => loadShellContext('P-000010'));
       expect(
-        supportSnap.attention.some((i) => i.kind.startsWith('pms_')),
+        supportShell.attention.some((i) => i.kind.startsWith('pms_')),
       ).toBe(false);
     });
 

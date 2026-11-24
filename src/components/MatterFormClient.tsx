@@ -35,17 +35,25 @@ import {
 } from '@/domain/matterAiExtract';
 import {
   deleteMatterRateOverrideAction,
+  getEntityRecordForEditAction,
+  listClientPriorMattersAction,
   listMatterRateOverridesAction,
   resolveApplicableRatesAction,
   runMatterConflictSearchAction,
   saveMatterAction,
   saveMatterRateOverrideAction,
   saveTaskAction,
+  searchEntityPickerAction,
   signOffMatterCostsAction,
   switchViewingRoleAction,
   updateMatterConflictRecordAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import type {
+  EntityPickerOption,
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from '@/domain/intakePreviewTypes';
 import type { PartnerCostSignOffRecord } from '@/domain/matterFieldValues';
 import { formatDate, formatDateTime, toIsoDate } from '@/domain/dates';
 import {
@@ -117,19 +125,13 @@ import {
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
+  computeClientRelationshipCdd,
   resolveMatterRiskSections,
   summarizeMatterRiskAssessment,
+  type ClientPriorMatterSummary,
   type CustomKeyDateEntry,
 } from '@/domain/matterOpeningRecord';
 import { formatGbp, quoteWorkTypeSummary } from '@/domain/quotes';
-import {
-  allowedNameEdits,
-  editDistance,
-  normaliseComparableName,
-  organisationNameLooseMatch,
-  personNameLooseMatch,
-  tokensSoundAlike,
-} from '@/domain/normalise';
 import type {
   ChoiceList,
   ChoiceValue,
@@ -175,6 +177,7 @@ import { OrganisationFormClient } from './OrganisationFormClient';
 import { PersonFormClient } from './PersonFormClient';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { EntitySearchSelect, useEntityPicker } from './useEntityPicker';
 
 interface MatterFormClientProps {
   existing?: Matter | null;
@@ -191,13 +194,15 @@ interface MatterFormClientProps {
   people: Person[];
   organisations: Organisation[];
   links: PersonOrganisationLink[];
-  matters: Matter[];
+  matters?: ClientPriorMatterSummary[];
   enquiries?: Enquiry[];
   lists?: ChoiceList[];
   values: ChoiceValue[];
   customFields?: CustomFieldDefinition[];
   employees: Person[];
   currentUser: Person;
+  effectiveWorkPerson?: Person;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
   orgStructure: OrgStructureCatalogue;
   workTypesConfig?: WorkTypesConfiguration;
   matterPartyTaxonomy?: MatterPartyTaxonomy;
@@ -283,6 +288,8 @@ function nextClientItemId(prefix: string): string {
   return `${prefix}-${++nextClientItemSeq}`;
 }
 
+const EMPTY_FULL_MATTERS: Matter[] = [];
+
 export function MatterFormClient({
   existing,
   isReopenedDraft = false,
@@ -298,13 +305,15 @@ export function MatterFormClient({
   people: initialPeople,
   organisations: initialOrganisations,
   links: initialLinks,
-  matters,
+  matters: initialClientMatters = [],
   enquiries = [],
   lists = [],
   values,
   customFields = [],
   employees: initialEmployees,
   currentUser,
+  effectiveWorkPerson,
+  supervisingPartnerByEmployeeId,
   orgStructure,
   workTypesConfig,
   matterPartyTaxonomy,
@@ -360,19 +369,38 @@ export function MatterFormClient({
 
   useEffect(() => {
     queueMicrotask(() => {
-      setPeople(mergePeopleWithEnquiries(initialPeople, enquiries, values));
+      const mergedInitial = mergePeopleWithEnquiries(initialPeople, enquiries, values);
+      setPeople((prev) => {
+        const byId = new Map(mergedInitial.map((p) => [p.id, p]));
+        for (const p of prev) {
+          if (!byId.has(p.id)) byId.set(p.id, p);
+        }
+        return Array.from(byId.values());
+      });
     });
   }, [initialPeople, enquiries, values]);
 
   useEffect(() => {
     queueMicrotask(() => {
-      setOrganisations(initialOrganisations);
+      setOrganisations((prev) => {
+        const byId = new Map(initialOrganisations.map((o) => [o.id, o]));
+        for (const o of prev) {
+          if (!byId.has(o.id)) byId.set(o.id, o);
+        }
+        return Array.from(byId.values());
+      });
     });
   }, [initialOrganisations]);
 
   useEffect(() => {
     queueMicrotask(() => {
-      setLinks(initialLinks);
+      setLinks((prev) => {
+        const byId = new Map(initialLinks.map((l) => [l.id, l]));
+        for (const l of prev) {
+          if (!byId.has(l.id)) byId.set(l.id, l);
+        }
+        return Array.from(byId.values());
+      });
     });
   }, [initialLinks]);
 
@@ -458,6 +486,14 @@ export function MatterFormClient({
     'search' | 'new_person' | 'new_org' | 'edit_person' | 'edit_org'
   >('search');
   const [editingClientRecordId, setEditingClientRecordId] = useState<string | null>(null);
+  const [hydratingClientEdit, setHydratingClientEdit] = useState<boolean>(false);
+  const hydratingClientEditSeqRef = useRef<number>(0);
+  const [pickedClientPeopleById, setPickedClientPeopleById] = useState<
+    Record<string, EntityPickerPersonSummary>
+  >({});
+  const [pickedClientOrgsById, setPickedClientOrgsById] = useState<
+    Record<string, EntityPickerOrganisationSummary>
+  >({});
   const [clientSearchFirstName, setClientSearchFirstName] = useState<string>('');
   const [clientSearchSurname, setClientSearchSurname] = useState<string>('');
   const [clientSearchOrg, setClientSearchOrg] = useState<string>('');
@@ -506,12 +542,12 @@ export function MatterFormClient({
   const userMatterDefaults = useMemo(
     () =>
       resolveNewMatterDepartmentDefaults({
-        currentUser,
+        currentUser: effectiveWorkPerson ?? currentUser,
         allPeople: people,
         employees,
         practiceAreas,
       }),
-    [currentUser, people, employees, practiceAreas],
+    [effectiveWorkPerson, currentUser, people, employees, practiceAreas],
   );
 
   const initialSubcatVal = useMemo(() => {
@@ -584,16 +620,24 @@ export function MatterFormClient({
       initialQuote?.practiceAreaId ?? initialEnquiry?.practiceAreaId ?? null;
     if (!sourceFeeEarnerId && !sourcePracticeAreaId) return null;
     const partnerRoleId = valueBySystemKey(values, 'employee_role', 'partner')?.id;
+    const managingPartnerRoleId = valueBySystemKey(
+      values,
+      'employee_role',
+      'managing_partner',
+    )?.id;
+    const isPartnerEmployee = (emp: Person) =>
+      (partnerRoleId !== undefined && emp.employeeRoleId === partnerRoleId) ||
+      (managingPartnerRoleId !== undefined &&
+        emp.employeeRoleId === managingPartnerRoleId);
     if (sourceFeeEarnerId) {
       const assignedEmp = employees.find((e) => e.id === sourceFeeEarnerId);
-      if (assignedEmp?.employment?.supervisingPartnerId) {
-        return assignedEmp.employment.supervisingPartnerId;
+      const assignedSupId =
+        assignedEmp?.employment?.supervisingPartnerId ??
+        supervisingPartnerByEmployeeId?.[sourceFeeEarnerId];
+      if (assignedSupId) {
+        return assignedSupId;
       }
-      if (
-        assignedEmp &&
-        (assignedEmp.employment?.roleType === 'Partner/Member' ||
-          (partnerRoleId !== undefined && assignedEmp.employeeRoleId === partnerRoleId))
-      ) {
+      if (assignedEmp && isPartnerEmployee(assignedEmp)) {
         return assignedEmp.id;
       }
     }
@@ -603,16 +647,20 @@ export function MatterFormClient({
         practiceAreaId: sourcePracticeAreaId,
         practiceAreas,
         includeSupervisingPartners: true,
+        supervisingPartnerByEmployeeId,
       });
-      const partner = deptPartners.find(
-        (e) =>
-          e.employment?.roleType === 'Partner/Member' ||
-          (partnerRoleId !== undefined && e.employeeRoleId === partnerRoleId),
-      );
+      const partner = deptPartners.find(isPartnerEmployee);
       if (partner) return partner.id;
     }
     return null;
-  }, [initialQuote, initialEnquiry, employees, practiceAreas, values]);
+  }, [
+    initialQuote,
+    initialEnquiry,
+    employees,
+    practiceAreas,
+    values,
+    supervisingPartnerByEmployeeId,
+  ]);
 
   const [responsiblePartnerId, setResponsiblePartnerId] = useState<string | null>(
     () =>
@@ -677,8 +725,15 @@ export function MatterFormClient({
         practiceAreas,
         includeSupervisingPartners: true,
         preserveSelectedId: responsiblePartnerId,
+        supervisingPartnerByEmployeeId,
       }),
-    [employees, practiceAreaId, practiceAreas, responsiblePartnerId],
+    [
+      employees,
+      practiceAreaId,
+      practiceAreas,
+      responsiblePartnerId,
+      supervisingPartnerByEmployeeId,
+    ],
   );
 
   const feeEarnerOptions = useMemo(
@@ -992,7 +1047,9 @@ export function MatterFormClient({
   const [newPartyMoreDetailsOpen, setNewPartyMoreDetailsOpen] = useState<boolean>(false);
   const [newPartyIdentifiers, setNewPartyIdentifiers] = useState<MatterPartyIdentifiers>({});
   const [newPartyLinkedId, setNewPartyLinkedId] = useState<string | null>(null);
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedExistingPartyOption, setSelectedExistingPartyOption] =
+    useState<EntityPickerOption | null>(null);
+  const [hydratingExistingParty, setHydratingExistingParty] = useState<boolean>(false);
   const [capacityDropdownOpen, setCapacityDropdownOpen] = useState(false);
 
   // 3 · CONFLICT SEARCH state
@@ -1779,130 +1836,119 @@ export function MatterFormClient({
   ]);
 
   // Lookup client relationship & CDD status for Q2.1 (Is this a new or existing client?)
-  const derivedClientRelationshipCdd = useMemo<{
-    option: 'New client' | 'Existing, CDD current' | 'Existing, CDD needs refresh' | '';
-    summary: string;
-  }>(() => {
-    if (clientIds.length === 0) {
-      return { option: '', summary: '' };
-    }
+  const [clientMatters, setClientMatters] = useState<ClientPriorMatterSummary[]>(
+    initialClientMatters,
+  );
+  const [loadedClientMattersKey, setLoadedClientMattersKey] = useState<string>(() =>
+    clientIds.join(','),
+  );
+  const lastRequestedClientMattersKeyRef = useRef<string>(clientIds.join(','));
+  const clientMattersSeqRef = useRef<number>(0);
 
-    let anyHasPriorMatters = false;
-    let allCddCurrent = true;
-    const details: string[] = [];
-
-    for (const cid of clientIds) {
-      const priorMatters = matters.filter(
-        (m) =>
-          m.id !== existing?.id &&
-          m.conflictCheckStatus !== 'Draft' &&
-          (m.clientId === cid || m.additionalClientIds?.includes(cid)),
-      );
-      if (priorMatters.length > 0) {
-        anyHasPriorMatters = true;
-      }
-
-      if (cid.startsWith('O-')) {
-        const org = organisations.find((o) => o.id === cid);
-        if (!org) continue;
-        const verLabel = resolveLabel(values, org.verificationStatusId).toLowerCase();
-        const relLabel = resolveLabel(values, org.relationshipStatusId).toLowerCase();
-        if (relLabel.includes('active') || relLabel.includes('existing')) {
-          anyHasPriorMatters = true;
-        }
-        const reviewExpired = Boolean(org.reviewDate && org.reviewDate < today);
-        const hasVerifiedMatter = priorMatters.some((m) => m.amlStatus === 'Verified');
-        const hasIncompleteMatter = priorMatters.some(
-          (m) => m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete',
-        );
-        const isCurrent =
-          (verLabel.includes('verified') || verLabel.includes('complete') || hasVerifiedMatter) &&
-          !verLabel.includes('expired') &&
-          !verLabel.includes('pending') &&
-          !verLabel.includes('refresh') &&
-          !reviewExpired &&
-          !hasIncompleteMatter;
-        if (!isCurrent) {
-          allCddCurrent = false;
-          details.push(
-            `${org.legalName}: ${
-              reviewExpired
-                ? `CDD review date expired (${org.reviewDate})`
-                : verLabel
-                  ? `CDD ${resolveLabel(values, org.verificationStatusId)}`
-                  : 'CDD verification not current'
-            }`,
-          );
-        } else {
-          details.push(
-            `${org.legalName}: CDD verified${
-              org.reviewDate ? ` (review due ${org.reviewDate})` : ''
-            }`,
-          );
-        }
-      } else {
-        const person = people.find((p) => p.id === cid);
-        if (!person) continue;
-        const verLabel = resolveLabel(values, person.verificationStatusId).toLowerCase();
-        const relLabel = resolveLabel(values, person.relationshipStatusId).toLowerCase();
-        if (relLabel.includes('active') || relLabel.includes('existing')) {
-          anyHasPriorMatters = true;
-        }
-        const hasVerifiedMatter = priorMatters.some((m) => m.amlStatus === 'Verified');
-        const hasIncompleteMatter = priorMatters.some(
-          (m) => m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete',
-        );
-        const isCurrent =
-          (verLabel.includes('verified') || verLabel.includes('complete') || hasVerifiedMatter) &&
-          !verLabel.includes('expired') &&
-          !verLabel.includes('pending') &&
-          !verLabel.includes('refresh') &&
-          !hasIncompleteMatter;
-        if (!isCurrent) {
-          allCddCurrent = false;
-          details.push(
-            `${personDisplayName(person)}: ${
-              verLabel
-                ? `CDD ${resolveLabel(values, person.verificationStatusId)}`
-                : 'CDD verification not current'
-            }`,
-          );
-        } else {
-          details.push(
-            `${personDisplayName(person)}: CDD verified${
-              person.verifiedAt ? ` (${person.verifiedAt})` : ''
-            }`,
-          );
-        }
-      }
-    }
-
-    if (!anyHasPriorMatters) {
-      return {
-        option: 'New client',
-        summary: 'Pre-filled from client record (no prior matters)',
-      };
-    }
-    if (allCddCurrent) {
-      return {
-        option: 'Existing, CDD current',
-        summary: `Pre-filled from client record (${details.join('; ')})`,
-      };
-    }
-    return {
-      option: 'Existing, CDD needs refresh',
-      summary: `Pre-filled from client record (${details.join('; ')})`,
-    };
-  }, [clientIds, matters, existing?.id, organisations, people, values, today]);
-
-  // Pre-fill Q2.1 when clientIds change
-  const prevClientsKeyRef = useRef<string>(clientIds.join(','));
   useEffect(() => {
-    const nextKey = clientIds.join(',');
-    const changed = prevClientsKeyRef.current !== nextKey;
-    prevClientsKeyRef.current = nextKey;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setClientMatters(initialClientMatters);
+    });
+    return () => {
+      active = false;
+    };
+  }, [initialClientMatters]);
+
+  const clientIdsKey = clientIds.join(',');
+  useEffect(() => {
+    let cancelled = false;
+    if (clientIds.length === 0) {
+      lastRequestedClientMattersKeyRef.current = '';
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setClientMatters([]);
+        setLoadedClientMattersKey('');
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (
+      clientIdsKey === loadedClientMattersKey &&
+      lastRequestedClientMattersKeyRef.current === clientIdsKey
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    lastRequestedClientMattersKeyRef.current = clientIdsKey;
+    const seq = ++clientMattersSeqRef.current;
+    void listClientPriorMattersAction(clientIds)
+      .then((res) => {
+        if (cancelled || seq !== clientMattersSeqRef.current) return;
+        if (isActionDenied(res)) {
+          setClientMatters([]);
+          setLoadedClientMattersKey(clientIdsKey);
+          showToast(
+            res.message || 'Could not load prior client matters for CDD check.',
+          );
+          return;
+        }
+        setClientMatters(res.matters);
+        setLoadedClientMattersKey(clientIdsKey);
+      })
+      .catch(() => {
+        if (cancelled || seq !== clientMattersSeqRef.current) return;
+        setClientMatters([]);
+        setLoadedClientMattersKey(clientIdsKey);
+        showToast('Could not load prior client matters for CDD check.');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clientIds, clientIdsKey, loadedClientMattersKey, showToast]);
+
+  const derivedClientRelationshipCdd = useMemo(
+    () =>
+      computeClientRelationshipCdd({
+        clientIds,
+        priorMatters: clientMatters,
+        excludeMatterId: existing?.id,
+        organisations: [...organisations, ...Object.values(pickedClientOrgsById)],
+        people: [...people, ...Object.values(pickedClientPeopleById)],
+        values,
+        today,
+      }),
+    [
+      clientIds,
+      clientMatters,
+      existing?.id,
+      organisations,
+      pickedClientOrgsById,
+      people,
+      pickedClientPeopleById,
+      values,
+      today,
+    ],
+  );
+
+  // Pre-fill Q2.1 when clientIds change, waiting until prior matters finish loading
+  const prevClientsKeyRef = useRef<string>(clientIdsKey);
+  const lastSeenClientIdsKeyRef = useRef<string>(clientIdsKey);
+  const userEditedCddRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastSeenClientIdsKeyRef.current !== clientIdsKey) {
+      lastSeenClientIdsKeyRef.current = clientIdsKey;
+      userEditedCddRef.current = false;
+    }
 
     if (!derivedClientRelationshipCdd.option) return;
+    if (clientIds.length > 0 && loadedClientMattersKey !== clientIdsKey) return;
+
+    const changed = prevClientsKeyRef.current !== clientIdsKey;
+    prevClientsKeyRef.current = clientIdsKey;
+    if (userEditedCddRef.current) return;
+
     setRiskAnswers((prev) => {
       if (!changed && prev.clientRelationshipStatus) return prev;
       if (prev.clientRelationshipStatus === derivedClientRelationshipCdd.option) return prev;
@@ -1911,7 +1957,12 @@ export function MatterFormClient({
         clientRelationshipStatus: derivedClientRelationshipCdd.option,
       };
     });
-  }, [clientIds, derivedClientRelationshipCdd.option]);
+  }, [
+    clientIds.length,
+    clientIdsKey,
+    derivedClientRelationshipCdd.option,
+    loadedClientMattersKey,
+  ]);
 
   const workTypeRiskQuestions = useMemo(
     () =>
@@ -2866,7 +2917,9 @@ export function MatterFormClient({
   }
 
   // Helper to check what fields are missing to convert a Person or Organisation to a Client
-  function getMissingClientFieldsForPerson(p: Person): string[] {
+  function getMissingClientFieldsForPerson(
+    p: Person | EntityPickerPersonSummary,
+  ): string[] {
     const missing: string[] = [];
     if (!p.firstName?.trim()) missing.push('First name');
     if (!p.surname?.trim()) missing.push('Surname');
@@ -2877,7 +2930,9 @@ export function MatterFormClient({
     return missing;
   }
 
-  function getMissingClientFieldsForOrg(o: Organisation): string[] {
+  function getMissingClientFieldsForOrg(
+    o: Organisation | EntityPickerOrganisationSummary,
+  ): string[] {
     const missing: string[] = [];
     if (!o.legalName?.trim()) missing.push('Legal name');
     if (!o.organisationTypeId) missing.push('Organisation type');
@@ -2893,7 +2948,7 @@ export function MatterFormClient({
     return clientIds
       .map((cid) => {
         if (cid.startsWith('O-')) {
-          const org = organisations.find((o) => o.id === cid);
+          const org = organisations.find((o) => o.id === cid) ?? pickedClientOrgsById[cid];
           if (!org) return null;
           const missingClientFields = getMissingClientFieldsForOrg(org);
           return {
@@ -2913,11 +2968,12 @@ export function MatterFormClient({
             person: null,
           };
         }
-        const person = people.find((p) => p.id === cid);
+        const person = people.find((p) => p.id === cid) ?? pickedClientPeopleById[cid];
         if (!person) return null;
         const primaryLink = links.find((l) => l.personId === person.id && l.isCurrent);
         const linkedOrg = primaryLink
-          ? organisations.find((o) => o.id === primaryLink.organisationId)
+          ? organisations.find((o) => o.id === primaryLink.organisationId) ??
+            pickedClientOrgsById[primaryLink.organisationId]
           : null;
         const email =
           person.emails.find((e) => e.isPrimary)?.address ?? person.emails[0]?.address ?? null;
@@ -2930,7 +2986,7 @@ export function MatterFormClient({
           details: [
             person.jobTitle || null,
             email,
-            person.addresses[0]?.town ?? null,
+            person.addresses?.[0]?.town ?? null,
           ]
             .filter(Boolean)
             .join(' · '),
@@ -2940,15 +2996,21 @@ export function MatterFormClient({
         };
       })
       .filter((x): x is NonNullable<typeof x> => Boolean(x));
-  }, [clientIds, organisations, people, links]);
+  }, [clientIds, organisations, pickedClientOrgsById, people, pickedClientPeopleById, links]);
 
   const selectedClientOrg = useMemo(
-    () => organisations.find((o) => o.id === clientId) ?? null,
-    [organisations, clientId],
+    () =>
+      organisations.find((o) => o.id === clientId) ??
+      (clientId ? pickedClientOrgsById[clientId] : undefined) ??
+      null,
+    [organisations, pickedClientOrgsById, clientId],
   );
   const selectedClientPerson = useMemo(
-    () => people.find((p) => p.id === clientId) ?? null,
-    [people, clientId],
+    () =>
+      people.find((p) => p.id === clientId) ??
+      (clientId ? pickedClientPeopleById[clientId] : undefined) ??
+      null,
+    [people, pickedClientPeopleById, clientId],
   );
   const clientDisplayName = useMemo(() => {
     if (selectedClients.length > 1) {
@@ -2960,16 +3022,37 @@ export function MatterFormClient({
   }, [selectedClients, selectedClientOrg, selectedClientPerson]);
 
   const instructingPerson = useMemo(
-    () => (instructingContactId ? people.find((p) => p.id === instructingContactId) ?? null : null),
-    [people, instructingContactId],
+    () =>
+      instructingContactId
+        ? people.find((p) => p.id === instructingContactId) ??
+          pickedClientPeopleById[instructingContactId] ??
+          null
+        : null,
+    [people, pickedClientPeopleById, instructingContactId],
   );
   const instructingDisplayName = useMemo(
     () => (instructingPerson ? personDisplayName(instructingPerson) : ''),
     [instructingPerson],
   );
 
+  const billingPerson = useMemo(
+    () =>
+      billingContactId
+        ? people.find((p) => p.id === billingContactId) ??
+          pickedClientPeopleById[billingContactId] ??
+          null
+        : null,
+    [people, pickedClientPeopleById, billingContactId],
+  );
+
   // Contacts linked to the selected client orgs (or person clients)
   const clientContacts = useMemo(() => {
+    const allKnownPeople: Array<Person | EntityPickerPersonSummary> = [
+      ...people,
+      ...Object.values(pickedClientPeopleById).filter(
+        (sp) => !people.some((fp) => fp.id === sp.id),
+      ),
+    ];
     const orgIds = clientIds.filter((id) => id.startsWith('O-'));
     if (orgIds.length > 0) {
       const candidatePersonIds = new Set<string>();
@@ -2980,11 +3063,79 @@ export function MatterFormClient({
           }
         }
       }
-      const linked = people.filter((p) => candidatePersonIds.has(p.id));
+      const linked = allKnownPeople.filter((p) => candidatePersonIds.has(p.id));
       if (linked.length > 0) return linked;
     }
-    return people.filter((p) => !p.isEmployee && !p.mergedIntoId && !clientIds.includes(p.id));
-  }, [clientIds, links, people]);
+    return allKnownPeople.filter(
+      (p) => !p.isEmployee && !p.mergedIntoId && !clientIds.includes(p.id),
+    );
+  }, [clientIds, links, people, pickedClientPeopleById]);
+
+  const minorClientPersonIds = useMemo(() => {
+    const ids: string[] = [];
+    const ref = new Date(today.length === 10 ? `${today}T00:00:00` : today);
+    if (Number.isNaN(ref.getTime())) return ids;
+    for (const c of selectedClients) {
+      if (c.entityType !== 'person' || !c.person?.dateOfBirth) continue;
+      const dobStr = c.person.dateOfBirth;
+      const birth = new Date(dobStr.length === 10 ? `${dobStr}T00:00:00` : dobStr);
+      if (Number.isNaN(birth.getTime())) continue;
+      let age = ref.getFullYear() - birth.getFullYear();
+      const m = ref.getMonth() - birth.getMonth();
+      if (m < 0 || (m === 0 && ref.getDate() < birth.getDate())) {
+        age--;
+      }
+      if (age < 18) ids.push(c.id);
+    }
+    return ids;
+  }, [selectedClients, today]);
+
+  const instructingContactInitialOptions = useMemo<EntityPickerOption[]>(() => {
+    const map = new Map<string, EntityPickerOption>();
+    const toOpt = (p: Person | EntityPickerPersonSummary): EntityPickerOption => ({
+      id: p.id,
+      recordType: 'person',
+      label: `${personDisplayName(p)}${p.jobTitle ? ` — ${p.jobTitle}` : ''}`,
+      subtitle: p.jobTitle ?? '',
+      reference: p.id,
+      href: `/people/${p.id}`,
+      person: p,
+    });
+    for (const p of clientContacts) {
+      map.set(p.id, toOpt(p));
+    }
+    if (instructingPerson && !map.has(instructingPerson.id)) {
+      map.set(instructingPerson.id, toOpt(instructingPerson));
+    }
+    return Array.from(map.values());
+  }, [clientContacts, instructingPerson]);
+
+  const billingContactInitialOptions = useMemo<EntityPickerOption[]>(() => {
+    const map = new Map<string, EntityPickerOption>();
+    for (const p of clientContacts) {
+      map.set(p.id, {
+        id: p.id,
+        recordType: 'person',
+        label: personDisplayName(p),
+        subtitle: p.jobTitle ?? '',
+        reference: p.id,
+        href: `/people/${p.id}`,
+        person: p,
+      });
+    }
+    if (billingPerson && !map.has(billingPerson.id)) {
+      map.set(billingPerson.id, {
+        id: billingPerson.id,
+        recordType: 'person',
+        label: personDisplayName(billingPerson),
+        subtitle: billingPerson.jobTitle ?? '',
+        reference: billingPerson.id,
+        href: `/people/${billingPerson.id}`,
+        person: billingPerson,
+      });
+    }
+    return Array.from(map.values());
+  }, [clientContacts, billingPerson]);
 
   // Only show Instructing contact if client(s) are under 18 or are an organisation
   const showInstructingContact = useMemo(() => {
@@ -3018,27 +3169,211 @@ export function MatterFormClient({
   }
 
   function openEditClientModal(recordId: string) {
+    const isOrg = recordId.startsWith('O-');
+    const alreadyHydrated = isOrg
+      ? organisations.some((o) => o.id === recordId)
+      : people.some((p) => p.id === recordId);
     setEditingClientRecordId(recordId);
-    setClientModalView(recordId.startsWith('O-') ? 'edit_org' : 'edit_person');
+    setClientModalView(isOrg ? 'edit_org' : 'edit_person');
     setClientModalOpen(true);
+
+    if (alreadyHydrated) {
+      setHydratingClientEdit(false);
+      return;
+    }
+
+    const seq = ++hydratingClientEditSeqRef.current;
+    setHydratingClientEdit(true);
+    void getEntityRecordForEditAction(isOrg ? 'organisation' : 'person', recordId)
+      .then((res) => {
+        if (seq !== hydratingClientEditSeqRef.current) return;
+        setHydratingClientEdit(false);
+        if (isActionDenied(res)) {
+          showToast(res.message || 'Could not load client record for editing.');
+          setClientModalOpen(false);
+          return;
+        }
+        if (res.recordType === 'organisation' && res.organisation) {
+          const fullOrg = res.organisation;
+          setOrganisations((prev) =>
+            prev.some((o) => o.id === fullOrg.id)
+              ? prev.map((o) => (o.id === fullOrg.id ? fullOrg : o))
+              : [...prev, fullOrg],
+          );
+          return;
+        }
+        if (res.recordType === 'person' && res.person) {
+          const fullPerson = res.person;
+          setPeople((prev) =>
+            prev.some((p) => p.id === fullPerson.id)
+              ? prev.map((p) => (p.id === fullPerson.id ? fullPerson : p))
+              : [...prev, fullPerson],
+          );
+          return;
+        }
+        showToast('Client record could not be loaded.');
+        setClientModalOpen(false);
+      })
+      .catch(() => {
+        if (seq !== hydratingClientEditSeqRef.current) return;
+        setHydratingClientEdit(false);
+        showToast('Could not load client record for editing.');
+        setClientModalOpen(false);
+      });
+  }
+
+  const hasClientSearchQuery = Boolean(
+    clientSearchFirstName.trim() || clientSearchSurname.trim() || clientSearchOrg.trim(),
+  );
+
+  // Live SQL search results in the Client Lookup pop-up via debounced C2 picker action
+  const { items: clientPickerItems } = useEntityPicker(
+    {
+      entityTypes: ['person', 'organisation'],
+      query: '',
+      personQuery: {
+        firstName: clientSearchFirstName,
+        surname: clientSearchSurname,
+        organisationName: clientSearchOrg,
+      },
+      excludeDemo: true,
+      includeLinkedOrgs: true,
+      limit: 25,
+    },
+    { enabled: clientModalOpen && hasClientSearchQuery },
+  );
+
+  function hydratePickedClients(idsToAdd: string[]) {
+    const newPeople: EntityPickerPersonSummary[] = [];
+    const newOrgs: EntityPickerOrganisationSummary[] = [];
+    const newLinks: PersonOrganisationLink[] = [];
+    const todayIso = toIsoDate(new Date());
+
+    for (const id of idsToAdd) {
+      const picked = clientPickerItems.find((item) => item.id === id);
+      if (!picked) continue;
+      if (picked.person) {
+        newPeople.push(picked.person);
+      }
+      if (picked.organisation) {
+        newOrgs.push(picked.organisation);
+      }
+      if (picked.linkedOrgs && picked.linkedOrgs.length > 0 && picked.person) {
+        for (const org of picked.linkedOrgs) {
+          newOrgs.push(org);
+          newLinks.push({
+            id: `picker-${picked.person.id}-${org.id}`,
+            personId: picked.person.id,
+            organisationId: org.id,
+            jobTitle: picked.person.jobTitle || '',
+            department: '',
+            roleWithinOrganisation: '',
+            contactRoleIds: [],
+            isPrimaryContact: true,
+            isCurrent: true,
+            startDate: todayIso,
+            endDate: null,
+            contactStatusId: null,
+            createdById: currentUser.id,
+            createdAt: todayIso,
+            updatedById: currentUser.id,
+            updatedAt: todayIso,
+          });
+        }
+      }
+    }
+
+    if (newPeople.length > 0) {
+      setPickedClientPeopleById((prev) => {
+        const next = { ...prev };
+        for (const p of newPeople) next[p.id] = p;
+        return next;
+      });
+    }
+    if (newOrgs.length > 0) {
+      setPickedClientOrgsById((prev) => {
+        const next = { ...prev };
+        for (const o of newOrgs) next[o.id] = o;
+        return next;
+      });
+    }
+    if (newLinks.length > 0) {
+      setLinks((prev) => {
+        const byPair = new Set(prev.map((l) => `${l.personId}:${l.organisationId}`));
+        const extra = newLinks.filter(
+          (l) => !byPair.has(`${l.personId}:${l.organisationId}`),
+        );
+        return extra.length > 0 ? [...prev, ...extra] : prev;
+      });
+    }
+
+    const orgIdsAdded = idsToAdd.filter((id) => id.startsWith('O-'));
+    for (const orgId of orgIdsAdded) {
+      void searchEntityPickerAction({
+        entityTypes: ['person'],
+        query: '',
+        corporateGroupOfOrgId: orgId,
+        limit: 50,
+      }).then((res) => {
+        if (isActionDenied(res) || res.items.length === 0) return;
+        const contactPeople = res.items
+          .map((item) => item.person)
+          .filter((p): p is EntityPickerPersonSummary => Boolean(p));
+        if (contactPeople.length === 0) return;
+        setPickedClientPeopleById((prev) => {
+          const next = { ...prev };
+          for (const cp of contactPeople) next[cp.id] = cp;
+          return next;
+        });
+        setLinks((prev) => {
+          const byPair = new Set(prev.map((l) => `${l.personId}:${l.organisationId}`));
+          const added: PersonOrganisationLink[] = [];
+          for (const cp of contactPeople) {
+            if (!byPair.has(`${cp.id}:${orgId}`)) {
+              added.push({
+                id: `picker-${cp.id}-${orgId}`,
+                personId: cp.id,
+                organisationId: orgId,
+                jobTitle: cp.jobTitle || '',
+                department: '',
+                roleWithinOrganisation: '',
+                contactRoleIds: [],
+                isPrimaryContact: false,
+                isCurrent: true,
+                startDate: todayIso,
+                endDate: null,
+                contactStatusId: null,
+                createdById: currentUser.id,
+                createdAt: todayIso,
+                updatedById: currentUser.id,
+                updatedAt: todayIso,
+              });
+            }
+          }
+          return added.length > 0 ? [...prev, ...added] : prev;
+        });
+        if (contactPeople[0]) {
+          setInstructingContactId((curr) => curr ?? contactPeople[0].id);
+        }
+      });
+    }
   }
 
   function handleAddClientsToMatter(idsToAdd: string[], toastMsg?: string) {
     if (idsToAdd.length === 0) return;
+    hydratePickedClients(idsToAdd);
     setClientIds((prev) => {
       const merged = Array.from(new Set([...prev, ...idsToAdd]));
       return merged;
     });
     // Auto-populate instructing contact if an organisation client is added and instructing contact is not yet set
-    if (!instructingContactId) {
-      const firstOrgClient = idsToAdd.find((id) => id.startsWith('O-'));
-      if (firstOrgClient) {
-        const linkedContact = links.find(
-          (l) => l.organisationId === firstOrgClient && l.isCurrent,
-        );
-        if (linkedContact) {
-          setInstructingContactId(linkedContact.personId);
-        }
+    const firstOrgClient = idsToAdd.find((id) => id.startsWith('O-'));
+    if (firstOrgClient) {
+      const linkedContact = links.find(
+        (l) => l.organisationId === firstOrgClient && l.isCurrent,
+      );
+      if (linkedContact) {
+        setInstructingContactId((curr) => curr ?? linkedContact.personId);
       }
     }
     if (hasRunSearch) {
@@ -3068,220 +3403,47 @@ export function MatterFormClient({
     );
   }
 
-  const hasClientSearchQuery = Boolean(
-    clientSearchFirstName.trim() || clientSearchSurname.trim() || clientSearchOrg.trim(),
-  );
-
-  // Live search results in the Client Lookup pop-up (blank until details entered, includes fuzzy & phonetic matches)
   const clientLookupResults = useMemo(() => {
-    const fnRaw = clientSearchFirstName.trim();
-    const snRaw = clientSearchSurname.trim();
-    const orgRaw = clientSearchOrg.trim();
-    if (!fnRaw && !snRaw && !orgRaw) {
-      return [];
-    }
-
-    const fn = normaliseComparableName(fnRaw);
-    const sn = normaliseComparableName(snRaw);
-    const orgQ = normaliseComparableName(orgRaw);
-
-    const checkTokenMatch = (
-      queryVal: string,
-      candidates: string[],
-    ): 'exact' | 'similar spelling' | 'sounds like' | null => {
-      const qTokens = normaliseComparableName(queryVal).split(' ').filter(Boolean);
-      if (qTokens.length === 0) return null;
-
-      let best: 'exact' | 'similar spelling' | 'sounds like' | null = null;
-      for (const cand of candidates) {
-        const cNorm = normaliseComparableName(cand);
-        if (!cNorm) continue;
-        if (cNorm.includes(normaliseComparableName(queryVal))) {
-          return 'exact';
-        }
-        const cTokens = cNorm.split(' ').filter(Boolean);
-        // Check if every query token matches a candidate token (exact, fuzzy edit distance, or phonetic)
-        let allMatched = true;
-        let usedFuzzy: 'similar spelling' | 'sounds like' | null = null;
-        for (const qt of qTokens) {
-          let tokenMatched = false;
-          for (const ct of cTokens) {
-            if (ct.includes(qt)) {
-              tokenMatched = true;
-              break;
-            }
-            const minLen = Math.min(qt.length, ct.length);
-            const maxEdits = minLen >= 4 ? allowedNameEdits(minLen) : minLen === 3 ? 1 : 0;
-            if (maxEdits > 0 && editDistance(qt, ct) <= maxEdits) {
-              tokenMatched = true;
-              if (!usedFuzzy) usedFuzzy = 'similar spelling';
-              break;
-            }
-            if (qt.length >= 3 && ct.length >= 3 && tokensSoundAlike(qt, ct)) {
-              tokenMatched = true;
-              if (!usedFuzzy) usedFuzzy = 'sounds like';
-              break;
-            }
-          }
-          if (!tokenMatched) {
-            allMatched = false;
-            break;
-          }
-        }
-        if (allMatched) {
-          if (!usedFuzzy) return 'exact';
-          if (best !== 'similar spelling') best = usedFuzzy;
-        }
-      }
-      return best;
-    };
-
-    const results: {
-      id: string;
-      entityType: 'person' | 'organisation';
-      name: string;
-      firstName: string;
-      surname: string;
-      organisationName: string;
-      details: string;
-      alreadyAdded: boolean;
-      missingClientFields: string[];
-      matchNote: 'similar spelling' | 'sounds like' | null;
-      rank: number;
-    }[] = [];
-
-    // 1. Search People (including employees who may also be clients/contacts — single record rule)
-    for (const p of people) {
-      if (p.mergedIntoId || p.demo) continue;
-      const personLinks = links.filter((l) => l.personId === p.id && l.isCurrent);
-      const linkedOrgs = personLinks
-        .map((l) => organisations.find((o) => o.id === l.organisationId))
-        .filter((o): o is Organisation => Boolean(o));
-      const orgNames = linkedOrgs.map((o) => o.legalName).join(', ');
-
-      let matchNote: 'similar spelling' | 'sounds like' | null = null;
-
-      if (fn) {
-        const fnRes = checkTokenMatch(fn, [
-          p.firstName,
-          p.preferredName ?? '',
-          ...p.otherNames.map((n) => n.name),
-        ]);
-        if (!fnRes) continue;
-        if (fnRes !== 'exact') matchNote = fnRes;
-      }
-
-      if (sn) {
-        const snRes = checkTokenMatch(sn, [
-          p.surname,
-          ...p.otherNames.map((n) => n.name),
-        ]);
-        if (!snRes) continue;
-        if (snRes !== 'exact' && !matchNote) matchNote = snRes;
-      }
-
-      if (!matchNote && fn && sn) {
-        const loose = personNameLooseMatch(
-          `${fnRaw} ${snRaw}`,
-          `${p.firstName} ${p.surname}`,
-        );
-        if (loose) matchNote = loose;
-      }
-
-      if (orgQ) {
-        const orgCandidates = linkedOrgs.flatMap((o) => [
-          o.legalName,
-          ...o.otherNames.map((n) => n.name),
-        ]);
-        const orgRes = checkTokenMatch(orgQ, orgCandidates);
-        const looseOrg = linkedOrgs
-          .map((o) => organisationNameLooseMatch(orgRaw, o.legalName))
-          .find(Boolean);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact' && !matchNote) matchNote = orgRes;
-        else if (!orgRes && looseOrg && !matchNote) matchNote = looseOrg;
-      }
-
-      const email =
-        p.emails.find((e) => e.isPrimary)?.address ?? p.emails[0]?.address ?? null;
-      results.push({
-        id: p.id,
-        entityType: 'person',
-        name: personDisplayName(p),
-        firstName: p.firstName,
-        surname: p.surname,
-        organisationName: orgNames || '—',
-        details: [p.jobTitle || null, email, p.addresses[0]?.town ?? null]
-          .filter(Boolean)
-          .join(' · '),
-        alreadyAdded: clientIds.includes(p.id),
-        missingClientFields: getMissingClientFieldsForPerson(p),
-        matchNote,
-        rank: matchNote ? 2 : 1,
-      });
-    }
-
-    // 2. Search Organisations
-    for (const o of organisations) {
-      if (o.mergedIntoId) continue;
-      const orgCandidates = [o.legalName, ...o.otherNames.map((n) => n.name)];
-      let matchNote: 'similar spelling' | 'sounds like' | null = null;
-
-      if (orgQ) {
-        const orgRes = checkTokenMatch(orgQ, orgCandidates);
-        const looseOrg = organisationNameLooseMatch(orgRaw, o.legalName);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact') matchNote = orgRes;
-        else if (!orgRes && looseOrg) matchNote = looseOrg;
-      } else if (fn || sn) {
-        const combinedQuery = [fnRaw, snRaw].filter(Boolean).join(' ');
-        const orgRes = checkTokenMatch(combinedQuery, orgCandidates);
-        const looseOrg = organisationNameLooseMatch(combinedQuery, o.legalName);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact') matchNote = orgRes;
-        else if (!orgRes && looseOrg) matchNote = looseOrg;
-      }
-
-      results.push({
-        id: o.id,
-        entityType: 'organisation',
-        name: o.legalName,
-        firstName: '—',
-        surname: '—',
-        organisationName: o.legalName,
-        details: [
-          o.companyNumber ? `Co. no. ${o.companyNumber}` : null,
-          o.registeredAddress?.town ?? null,
-          o.generalEmail || null,
-        ]
-          .filter(Boolean)
-          .join(' · '),
-        alreadyAdded: clientIds.includes(o.id),
-        missingClientFields: getMissingClientFieldsForOrg(o),
-        matchNote,
-        rank: matchNote ? 2 : 1,
-      });
-    }
-
-    return results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-  }, [
-    clientSearchFirstName,
-    clientSearchSurname,
-    clientSearchOrg,
-    people,
-    organisations,
-    links,
-    clientIds,
-  ]);
+    if (!hasClientSearchQuery) return [];
+    return clientPickerItems.map((item) => {
+      const isOrg = item.recordType === 'organisation';
+      return {
+        id: item.id,
+        entityType: isOrg ? ('organisation' as const) : ('person' as const),
+        name: item.label,
+        firstName: item.person?.firstName ?? '—',
+        surname: item.person?.surname ?? '—',
+        organisationName: isOrg
+          ? item.label
+          : (item.linkedOrgs ?? []).map((o) => o.legalName).join(', ') || '—',
+        details: item.subtitle,
+        alreadyAdded: clientIds.includes(item.id),
+        missingClientFields:
+          isOrg && item.organisation
+            ? getMissingClientFieldsForOrg(item.organisation)
+            : !isOrg && item.person
+              ? getMissingClientFieldsForPerson(item.person)
+              : [],
+        matchNote: item.matchNote ?? null,
+        rank: item.rank ?? 1,
+      };
+    });
+  }, [hasClientSearchQuery, clientPickerItems, clientIds]);
 
   const matchedOrgForNewPerson = useMemo(() => {
     const q = clientSearchOrg.trim().toLowerCase();
     if (!q) return '';
+    const fromPicker = clientPickerItems.find(
+      (item) =>
+        item.recordType === 'organisation' &&
+        item.label.toLowerCase().includes(q),
+    );
+    if (fromPicker) return fromPicker.id;
     const found = organisations.find(
       (o) => !o.mergedIntoId && o.legalName.toLowerCase().includes(q),
     );
     return found?.id ?? '';
-  }, [clientSearchOrg, organisations]);
+  }, [clientSearchOrg, clientPickerItems, organisations]);
 
   const subcategoriesForPractice = useMemo(
     () =>
@@ -3328,7 +3490,9 @@ export function MatterFormClient({
             ? {
                 dateOfBirth: c.person.dateOfBirth || undefined,
                 previousNames:
-                  c.person.otherNames?.map((n) => n.name).join(', ') || undefined,
+                  'otherNames' in c.person && Array.isArray(c.person.otherNames)
+                    ? c.person.otherNames.map((n) => n.name).join(', ') || undefined
+                    : undefined,
                 town: c.person.addresses?.[0]?.town || undefined,
               }
             : {};
@@ -3367,7 +3531,10 @@ export function MatterFormClient({
           ? {
               dateOfBirth: instructingPerson.dateOfBirth || undefined,
               previousNames:
-                instructingPerson.otherNames?.map((n) => n.name).join(', ') || undefined,
+                'otherNames' in instructingPerson &&
+                Array.isArray(instructingPerson.otherNames)
+                  ? instructingPerson.otherNames.map((n) => n.name).join(', ') || undefined
+                  : undefined,
               town: instructingPerson.addresses?.[0]?.town || undefined,
             }
           : undefined,
@@ -3576,122 +3743,6 @@ export function MatterFormClient({
     taxonomy.relationships,
   ]);
 
-  // Typeahead suggestions when typing in "+ Add party"
-  const partySuggestions = useMemo(() => {
-    const q = newPartyName.trim().toLowerCase();
-    const results: {
-      id: string;
-      name: string;
-      entityType: ConflictPartyEntityType;
-      subtitle: string;
-      identifiers: MatterPartyIdentifiers;
-    }[] = [];
-
-    if (q.length >= 1) {
-      for (const o of organisations) {
-        if (o.mergedIntoId) continue;
-        if (results.some((r) => r.id === o.id)) continue;
-        if (
-          o.legalName.toLowerCase().includes(q) ||
-          o.otherNames.some((n) => n.name.toLowerCase().includes(q)) ||
-          (o.companyNumber && o.companyNumber.toLowerCase().includes(q))
-        ) {
-          results.push({
-            id: o.id,
-            name: o.legalName,
-            entityType: 'organisation',
-            subtitle: [
-              'Organisation',
-              o.companyNumber ? `Co. no. ${o.companyNumber}` : null,
-              o.registeredAddress?.town || 'UK',
-            ]
-              .filter(Boolean)
-              .join(' · '),
-            identifiers: {
-              companyNumber: o.companyNumber || undefined,
-              registeredTown: o.registeredAddress?.town || undefined,
-            },
-          });
-        }
-      }
-      for (const p of people) {
-        if (p.mergedIntoId || p.demo || p.isEmployee) continue;
-        const pName = personDisplayName(p);
-        if (results.some((r) => r.id === p.id)) continue;
-        if (
-          pName.toLowerCase().includes(q) ||
-          p.otherNames.some((n) => n.name.toLowerCase().includes(q))
-        ) {
-          results.push({
-            id: p.id,
-            name: pName,
-            entityType: 'person',
-            subtitle: [
-              'Person',
-              p.jobTitle || 'Contact',
-              p.addresses?.[0]?.town || null,
-            ]
-              .filter(Boolean)
-              .join(' · '),
-            identifiers: {
-              dateOfBirth: p.dateOfBirth || undefined,
-              previousNames: p.otherNames?.map((n) => n.name).join(', ') || undefined,
-              town: p.addresses?.[0]?.town || undefined,
-            },
-          });
-        }
-      }
-      for (const enq of enquiries) {
-        if (enq.anonymisedAt) continue;
-        const behalf = (enq.callingOnBehalfOf ?? '').trim();
-        if (
-          behalf &&
-          behalf.toLowerCase().includes(q) &&
-          !results.some((r) => r.name.toLowerCase() === behalf.toLowerCase())
-        ) {
-          results.push({
-            id: enq.linkedOrganisationId || enq.id,
-            name: behalf,
-            entityType: 'organisation',
-            subtitle: ['Enquiry organisation', enq.reference, enq.address?.town || null]
-              .filter(Boolean)
-              .join(' · '),
-            identifiers: {
-              registeredTown: enq.address?.town || undefined,
-            },
-          });
-        }
-        const otherNames = (enq.otherPartiesNamed ?? '')
-          .split(/[,;/\n]+/)
-          .map((s) => s.trim())
-          .filter(Boolean);
-        for (const otherName of otherNames) {
-          if (
-            otherName.toLowerCase().includes(q) &&
-            !results.some((r) => r.name.toLowerCase() === otherName.toLowerCase())
-          ) {
-            const isLikelyPerson =
-              !/\b(ltd|limited|llp|plc|inc|corp|company|association|council|partners|solicitors|group|holdings|estates|solutions|investments|auctioneers|commercial|bank|trust)\b/i.test(
-                otherName,
-              ) && otherName.split(/\s+/).length <= 3;
-            results.push({
-              id: `${enq.id}-other-${otherName}`,
-              name: otherName,
-              entityType: isLikelyPerson ? 'person' : 'organisation',
-              subtitle: [
-                isLikelyPerson ? 'Person (from enquiry)' : 'Organisation (from enquiry)',
-                `Named on ${enq.reference}`,
-              ].join(' · '),
-              identifiers: {},
-            });
-          }
-        }
-      }
-    }
-
-    return results.slice(0, 6);
-  }, [newPartyName, organisations, people, enquiries]);
-
   // Run conflict search handler (executes server-side across all tenant matters, including restricted matters)
   async function handleRunConflictSearch() {
     try {
@@ -3763,7 +3814,8 @@ export function MatterFormClient({
     setNewPartyMoreDetailsOpen(false);
     setNewPartyIdentifiers({});
     setNewPartyLinkedId(null);
-    setShowSuggestions(false);
+    setSelectedExistingPartyOption(null);
+    setHydratingExistingParty(false);
     setCapacityDropdownOpen(false);
   }
 
@@ -3778,9 +3830,151 @@ export function MatterFormClient({
     setNewPartyMoreDetailsOpen(false);
     setNewPartyIdentifiers({});
     setNewPartyLinkedId(null);
-    setShowSuggestions(false);
+    setSelectedExistingPartyOption(null);
+    setHydratingExistingParty(false);
     setCapacityDropdownOpen(false);
     setPartyModalOpen(true);
+  }
+
+  function addPersonRecordToMatter(
+    personRec: Person | EntityPickerPersonSummary,
+    toastText: string,
+  ) {
+    handleAddParty({
+      id: editingPartyId ?? undefined,
+      name: personDisplayName(personRec),
+      entityType: 'person',
+      relationshipCode: newPartyRelationshipCode,
+      capacityCodes: newPartyCapacityCodes,
+      connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
+        ? newPartyConnectedToId ||
+          getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+          null
+        : null,
+      identifiers: {
+        dateOfBirth: personRec.dateOfBirth || undefined,
+        previousNames:
+          'otherNames' in personRec
+            ? personRec.otherNames?.map((n) => n.name).join(', ') || undefined
+            : undefined,
+        town: personRec.addresses?.[0]?.town || undefined,
+      },
+      linkedRecordId: personRec.id,
+    });
+    showToast(toastText);
+  }
+
+  function addOrgRecordToMatter(
+    orgRec: Organisation | EntityPickerOrganisationSummary,
+    toastText: string,
+  ) {
+    handleAddParty({
+      id: editingPartyId ?? undefined,
+      name: orgRec.legalName,
+      entityType: 'organisation',
+      relationshipCode: newPartyRelationshipCode,
+      capacityCodes: newPartyCapacityCodes,
+      connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
+        ? newPartyConnectedToId ||
+          getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+          null
+        : null,
+      identifiers: {
+        companyNumber: orgRec.companyNumber || undefined,
+        previousNames:
+          'otherNames' in orgRec
+            ? orgRec.otherNames?.map((n) => n.name).join(', ') || undefined
+            : undefined,
+        registeredTown: orgRec.registeredAddress?.town || undefined,
+      },
+      linkedRecordId: orgRec.id,
+    });
+    showToast(toastText);
+  }
+
+  async function handleConfirmAddSelectedExistingParty() {
+    if (!selectedExistingPartyOption) return;
+    const picked = selectedExistingPartyOption;
+    setHydratingExistingParty(true);
+    try {
+      const res = await getEntityRecordForEditAction(newPartyType, picked.id);
+      if (isActionDenied(res)) {
+        showToast(res.message);
+        return;
+      }
+      if (newPartyType === 'organisation') {
+        const hydratedOrg = res.organisation ?? picked.organisation ?? null;
+        if (res.organisation) {
+          const fullOrg = res.organisation;
+          setOrganisations((prev) =>
+            prev.some((o) => o.id === fullOrg.id)
+              ? prev.map((o) => (o.id === fullOrg.id ? fullOrg : o))
+              : [...prev, fullOrg],
+          );
+        }
+        if (hydratedOrg) {
+          addOrgRecordToMatter(
+            hydratedOrg,
+            `Added ${hydratedOrg.legalName} to matter parties`,
+          );
+        } else {
+          handleAddParty({
+            id: editingPartyId ?? undefined,
+            name: picked.label,
+            entityType: 'organisation',
+            relationshipCode: newPartyRelationshipCode,
+            capacityCodes: newPartyCapacityCodes,
+            connectedToPartyId: ['CC', 'CO', 'TP'].includes(
+              newPartyRelationshipCode,
+            )
+              ? newPartyConnectedToId ||
+                getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+                null
+              : null,
+            linkedRecordId: picked.id,
+          });
+          showToast(`Added ${picked.label} to matter parties`);
+        }
+        return;
+      }
+
+      const hydratedPerson = res.person ?? picked.person ?? null;
+      if (res.person) {
+        const fullPerson = res.person;
+        setPeople((prev) =>
+          prev.some((p) => p.id === fullPerson.id)
+            ? prev.map((p) => (p.id === fullPerson.id ? fullPerson : p))
+            : [...prev, fullPerson],
+        );
+      }
+      if (hydratedPerson) {
+        addPersonRecordToMatter(
+          hydratedPerson,
+          `Added ${personDisplayName(hydratedPerson)} to matter parties`,
+        );
+      } else {
+        handleAddParty({
+          id: editingPartyId ?? undefined,
+          name: picked.label,
+          entityType: 'person',
+          relationshipCode: newPartyRelationshipCode,
+          capacityCodes: newPartyCapacityCodes,
+          connectedToPartyId: ['CC', 'CO', 'TP'].includes(
+            newPartyRelationshipCode,
+          )
+            ? newPartyConnectedToId ||
+              getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
+              null
+            : null,
+          linkedRecordId: picked.id,
+        });
+        showToast(`Added ${picked.label} to matter parties`);
+      }
+    } catch {
+      showToast('Could not load selected record. Try again.');
+    } finally {
+      setHydratingExistingParty(false);
+    }
   }
 
   function handleStartEditParty(party: ConflictCheckParty) {
@@ -3801,6 +3995,8 @@ export function MatterFormClient({
       ),
     );
     setNewPartyLinkedId(party.linkedRecordId ?? null);
+    setSelectedExistingPartyOption(null);
+    setHydratingExistingParty(false);
     setPartyModalOpen(true);
   }
 
@@ -3942,9 +4138,9 @@ export function MatterFormClient({
     }
   }
 
-  // "Include related entities" per organisation
-  function handleIncludeRelatedEntities(orgParty: ConflictCheckParty) {
-    if (orgParty.relatedEntitiesIncluded) return;
+  // "Include related entities" per organisation via SQL corporate-group + linked-contacts lookup
+  async function handleIncludeRelatedEntities(orgParty: ConflictCheckParty) {
+    if (orgParty.relatedEntitiesIncluded || !orgParty.linkedRecordId) return;
     const relatedToAdd: ConflictCheckParty[] = [];
     const connectedRelCode =
       orgParty.relationshipCode === 'OP' ||
@@ -3958,89 +4154,96 @@ export function MatterFormClient({
           : 'TP';
     const connectedAlignment = getRelationshipAlignment(connectedRelCode);
 
-    // Check links in store for people linked to this organisation
-    const linkedPeople = links
-      .filter((l) => l.organisationId === orgParty.linkedRecordId && l.isCurrent)
-      .map((l) => people.find((p) => p.id === l.personId))
-      .filter((p): p is Person => Boolean(p && !p.demo && !p.mergedIntoId));
-
-    for (const lp of linkedPeople) {
-      const isDir = (lp.jobTitle || '').toLowerCase().includes('director');
-      relatedToAdd.push({
-        id: nextClientItemId(`rel-${lp.id}`),
-        name: personDisplayName(lp),
-        entityType: 'person',
-        role: 'Related party',
-        relationshipCode: connectedRelCode,
-        capacityCodes: [isDir ? 'CAP_DIRECTOR' : 'CAP_REPRESENTATIVE'],
-        connectedToPartyId: orgParty.id,
-        alignment: connectedAlignment,
-        linkedRecordId: lp.id,
-        subtitle: `${lp.jobTitle || 'Contact'} · Connected to ${orgParty.name}`,
-        parentPartyId: orgParty.id,
+    try {
+      const res = await searchEntityPickerAction({
+        entityTypes: ['person', 'organisation'],
+        query: '',
+        corporateGroupOfOrgId: orgParty.linkedRecordId,
+        limit: 50,
       });
-    }
-
-    // Check parent/subsidiary organisations in store
-    if (orgParty.linkedRecordId) {
-      const orgRecord = organisations.find((o) => o.id === orgParty.linkedRecordId);
-      if (orgRecord?.parentOrganisationId) {
-        const parentOrg = organisations.find(
-          (o) => o.id === orgRecord.parentOrganisationId && !o.mergedIntoId,
+      if (isActionDenied(res)) {
+        showToast(
+          res.message || `Could not load related entities for ${orgParty.name}.`,
         );
-        if (parentOrg) {
+        return;
+      }
+
+      for (const item of res.items) {
+        if (item.recordType === 'person' && item.person) {
+          const lp = item.person;
+          const capacityCode =
+            item.corporateRelation === 'director'
+              ? 'CAP_DIRECTOR_OFFICER'
+              : 'CAP_REPRESENTATIVE';
           relatedToAdd.push({
-            id: nextClientItemId(`rel-org-${parentOrg.id}`),
-            name: parentOrg.legalName,
+            id: nextClientItemId(`rel-${lp.id}`),
+            name: personDisplayName(lp),
+            entityType: 'person',
+            role: 'Related party',
+            relationshipCode: connectedRelCode,
+            capacityCodes: [capacityCode],
+            connectedToPartyId: orgParty.id,
+            alignment: connectedAlignment,
+            linkedRecordId: lp.id,
+            subtitle: `${lp.jobTitle || (item.corporateRelation === 'director' ? 'Director' : 'Contact')} · Connected to ${orgParty.name}`,
+            parentPartyId: orgParty.id,
+          });
+        } else if (item.recordType === 'organisation' && item.organisation) {
+          const groupOrg = item.organisation;
+          const capacityCode =
+            item.corporateRelation === 'parent'
+              ? 'CAP_PARENT_COMPANY'
+              : 'CAP_SUBSIDIARY_GROUP_COMPANY';
+          relatedToAdd.push({
+            id: nextClientItemId(`rel-org-${groupOrg.id}`),
+            name: groupOrg.legalName,
             entityType: 'organisation',
             role: 'Related party',
             relationshipCode: connectedRelCode,
-            capacityCodes: ['CAP_PARENT_COMPANY'],
+            capacityCodes: [capacityCode],
             connectedToPartyId: orgParty.id,
             alignment: connectedAlignment,
-            linkedRecordId: parentOrg.id,
-            subtitle: `Parent company · Connected to ${orgParty.name}`,
+            linkedRecordId: groupOrg.id,
+            subtitle: `${item.subtitle || 'Group company'} · Connected to ${orgParty.name}`,
             parentPartyId: orgParty.id,
           });
         }
       }
-      const childOrgs = organisations.filter(
-        (o) => o.parentOrganisationId === orgParty.linkedRecordId && !o.mergedIntoId,
-      );
-      for (const child of childOrgs) {
-        relatedToAdd.push({
-          id: nextClientItemId(`rel-org-${child.id}`),
-          name: child.legalName,
-          entityType: 'organisation',
-          role: 'Related party',
-          relationshipCode: connectedRelCode,
-          capacityCodes: ['CAP_SUBSIDIARY'],
-          connectedToPartyId: orgParty.id,
-          alignment: connectedAlignment,
-          linkedRecordId: child.id,
-          subtitle: `Subsidiary / group company · Connected to ${orgParty.name}`,
-          parentPartyId: orgParty.id,
-        });
-      }
+    } catch {
+      showToast(`Could not load related entities for ${orgParty.name}.`);
+      return;
     }
 
-    setOtherParties((prev) => {
-      const updated = prev.map((p) =>
-        p.id === orgParty.id ? { ...p, relatedEntitiesIncluded: true } : p,
-      );
-      const existingNames = new Set(updated.map((p) => p.name.toLowerCase()));
-      const filteredNew = relatedToAdd.filter(
-        (r) => !existingNames.has(r.name.toLowerCase()),
-      );
-      return [...updated, ...filteredNew];
+    const existingParties = [...fixedClientParties, ...otherParties];
+    const existingRecordIds = new Set(
+      existingParties
+        .map((p) => p.linkedRecordId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    const existingNames = new Set(
+      existingParties.map((p) => p.name.trim().toLowerCase()).filter(Boolean),
+    );
+    const filteredNew = relatedToAdd.filter((r) => {
+      if (r.linkedRecordId && existingRecordIds.has(r.linkedRecordId)) return false;
+      if (existingNames.has(r.name.trim().toLowerCase())) return false;
+      existingNames.add(r.name.trim().toLowerCase());
+      if (r.linkedRecordId) existingRecordIds.add(r.linkedRecordId);
+      return true;
     });
+
+    setOtherParties((prev) => [
+      ...prev.map((p) =>
+        p.id === orgParty.id ? { ...p, relatedEntitiesIncluded: true } : p,
+      ),
+      ...filteredNew,
+    ]);
 
     if (hasRunSearch) {
       setPartiesChangedSinceSearch(true);
     }
     showToast(
-      `Added ${relatedToAdd.length} related ${
-        relatedToAdd.length === 1 ? 'entity' : 'entities'
+      `Added ${filteredNew.length} related ${
+        filteredNew.length === 1 ? 'entity' : 'entities'
       } for ${orgParty.name}`,
     );
   }
@@ -6651,24 +6854,31 @@ export function MatterFormClient({
                   <label className="field-label" htmlFor="nm-instructing">
                     Instructing contact <span className="field-required">*</span>
                   </label>
-                  <select
+                  <EntitySearchSelect
                     id="nm-instructing"
-                    className="field-select"
+                    entityTypes={['person']}
+                    nonEmployeesOnly
+                    excludeDemo
+                    autoload={false}
+                    excludeIds={minorClientPersonIds}
                     value={instructingContactId ?? ''}
                     disabled={isReadOnlyFeeEarner}
-                    onChange={(e) => {
-                      setInstructingContactId(e.target.value || null);
+                    emptyLabel="Select instructing contact…"
+                    searchPlaceholder="Search people in directory…"
+                    searchAriaLabel="Search instructing contacts"
+                    initialOptions={instructingContactInitialOptions}
+                    onChange={(nextId, opt) => {
+                      if (nextId && opt?.person) {
+                        const pickedPerson = opt.person;
+                        setPickedClientPeopleById((prev) => ({
+                          ...prev,
+                          [nextId]: pickedPerson,
+                        }));
+                      }
+                      setInstructingContactId(nextId || null);
                       if (hasRunSearch) setPartiesChangedSinceSearch(true);
                     }}
-                  >
-                    <option value="">Select instructing contact…</option>
-                    {clientContacts.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {personDisplayName(p)}
-                        {p.jobTitle ? ` — ${p.jobTitle}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
               ) : null}
 
@@ -6730,6 +6940,7 @@ export function MatterFormClient({
                       practiceAreaId: nextPa,
                       practiceAreas,
                       includeSupervisingPartners: true,
+                      supervisingPartnerByEmployeeId,
                     });
                     const nextFeOpts = filterEmployeesForMatterDepartment({
                       employees,
@@ -9369,12 +9580,15 @@ export function MatterFormClient({
                                       role="radio"
                                       aria-checked={isSelected}
                                       disabled={isReadOnlyFeeEarner}
-                                      onClick={() =>
+                                      onClick={() => {
+                                        if (q.id === 'clientRelationshipStatus') {
+                                          userEditedCddRef.current = true;
+                                        }
                                         setRiskAnswers((prev) => ({
                                           ...prev,
                                           [q.id]: opt.label,
-                                        }))
-                                      }
+                                        }));
+                                      }}
                                       style={{
                                         padding: '6px 14px',
                                         borderRadius: 999,
@@ -9811,12 +10025,15 @@ export function MatterFormClient({
                                       role="radio"
                                       aria-checked={isSelected}
                                       disabled={isReadOnlyFeeEarner}
-                                      onClick={() =>
+                                      onClick={() => {
+                                        if (q.id === 'clientRelationshipStatus') {
+                                          userEditedCddRef.current = true;
+                                        }
                                         setRiskAnswers((prev) => ({
                                           ...prev,
                                           [q.id]: opt.label,
-                                        }))
-                                      }
+                                        }));
+                                      }}
                                       style={{
                                         padding: '6px 14px',
                                         borderRadius: 999,
@@ -10244,7 +10461,8 @@ export function MatterFormClient({
 
                                 {pt.entityType === 'organisation' &&
                                 !pt.isClientFixed &&
-                                !pt.parentPartyId ? (
+                                !pt.parentPartyId &&
+                                Boolean(pt.linkedRecordId) ? (
                                   pt.relatedEntitiesIncluded ? (
                                     <span
                                       style={{
@@ -11596,19 +11814,31 @@ export function MatterFormClient({
                       </select>
                     </div>
                     <div className="field-group">
-                      <label className="field-label">Billing contact</label>
-                      <select
-                        className="field-select"
+                      <label className="field-label" htmlFor="nm-billing">
+                        Billing contact
+                      </label>
+                      <EntitySearchSelect
+                        id="nm-billing"
+                        entityTypes={['person']}
+                        nonEmployeesOnly
+                        excludeDemo
+                        autoload={false}
                         value={billingContactId ?? ''}
-                        onChange={(e) => setBillingContactId(e.target.value || null)}
-                      >
-                        <option value="">Unknown value</option>
-                        {clientContacts.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {personDisplayName(p)}
-                          </option>
-                        ))}
-                      </select>
+                        emptyLabel="Unknown value"
+                        searchPlaceholder="Search people in directory…"
+                        searchAriaLabel="Search billing contacts"
+                        initialOptions={billingContactInitialOptions}
+                        onChange={(nextId, opt) => {
+                          if (nextId && opt?.person) {
+                            const pickedPerson = opt.person;
+                            setPickedClientPeopleById((prev) => ({
+                              ...prev,
+                              [nextId]: pickedPerson,
+                            }));
+                          }
+                          setBillingContactId(nextId || null);
+                        }}
+                      />
                     </div>
                     <div className="field-group">
                       <label className="field-label">Fee estimate (£)</label>
@@ -12637,6 +12867,11 @@ export function MatterFormClient({
               </div>
             ) : clientModalView === 'new_person' || clientModalView === 'edit_person' ? (
               <div style={{ padding: '20px 24px', maxHeight: '80vh', overflowY: 'auto' }}>
+                {hydratingClientEdit && clientModalView === 'edit_person' ? (
+                  <div className="muted" style={{ padding: '24px 0' }}>
+                    Loading full client record…
+                  </div>
+                ) : (
                 <PersonFormClient
                   embeddedInModal
                   highlightMissingClientFields={clientModalView === 'edit_person'}
@@ -12650,7 +12885,7 @@ export function MatterFormClient({
                   initialLinkOrgId={matchedOrgForNewPerson}
                   allPeople={people}
                   organisations={organisations}
-                  matters={matters}
+                  matters={EMPTY_FULL_MATTERS}
                   enquiries={enquiries}
                   employees={employees}
                   lists={lists}
@@ -12661,6 +12896,13 @@ export function MatterFormClient({
                   orgStructure={orgStructure}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingPerson={(existingPerson) => {
+                    setPeople((prev) =>
+                      prev.some((p) => p.id === existingPerson.id)
+                        ? prev.map((p) =>
+                            p.id === existingPerson.id ? existingPerson : p,
+                          )
+                        : [...prev, existingPerson],
+                    );
                     handleAddClientsToMatter(
                       [existingPerson.id],
                       `Added existing contact ${personDisplayName(existingPerson)} as client`,
@@ -12712,9 +12954,15 @@ export function MatterFormClient({
                     );
                   }}
                 />
+                )}
               </div>
             ) : (
               <div style={{ padding: '20px 24px', maxHeight: '80vh', overflowY: 'auto' }}>
+                {hydratingClientEdit && clientModalView === 'edit_org' ? (
+                  <div className="muted" style={{ padding: '24px 0' }}>
+                    Loading full client record…
+                  </div>
+                ) : (
                 <OrganisationFormClient
                   embeddedInModal
                   highlightMissingClientFields={clientModalView === 'edit_org'}
@@ -12729,7 +12977,7 @@ export function MatterFormClient({
                   }
                   allOrganisations={organisations}
                   allPeople={people}
-                  matters={matters}
+                  matters={EMPTY_FULL_MATTERS}
                   enquiries={enquiries}
                   employees={employees}
                   lists={lists}
@@ -12739,6 +12987,13 @@ export function MatterFormClient({
                   tenantId={tenantId}
                   onCancelModal={() => setClientModalOpen(false)}
                   onSelectExistingOrganisation={(existingOrg) => {
+                    setOrganisations((prev) =>
+                      prev.some((o) => o.id === existingOrg.id)
+                        ? prev.map((o) =>
+                            o.id === existingOrg.id ? existingOrg : o,
+                          )
+                        : [...prev, existingOrg],
+                    );
                     handleAddClientsToMatter(
                       [existingOrg.id],
                       `Added existing organisation ${existingOrg.legalName} as client`,
@@ -12758,6 +13013,7 @@ export function MatterFormClient({
                     );
                   }}
                 />
+                )}
               </div>
             )}
           </div>
@@ -12833,7 +13089,10 @@ export function MatterFormClient({
                     className={`conflict-seg-btn ${
                       newPartyType === 'organisation' ? 'conflict-seg-btn--active' : ''
                     }`}
-                    onClick={() => setNewPartyType('organisation')}
+                    onClick={() => {
+                      setNewPartyType('organisation');
+                      setSelectedExistingPartyOption(null);
+                    }}
                   >
                     <Building2 size={14} style={{ marginRight: 5 }} />
                     Organisation
@@ -12843,7 +13102,10 @@ export function MatterFormClient({
                     className={`conflict-seg-btn ${
                       newPartyType === 'person' ? 'conflict-seg-btn--active' : ''
                     }`}
-                    onClick={() => setNewPartyType('person')}
+                    onClick={() => {
+                      setNewPartyType('person');
+                      setSelectedExistingPartyOption(null);
+                    }}
                   >
                     <User size={14} style={{ marginRight: 5 }} />
                     Person
@@ -13070,6 +13332,76 @@ export function MatterFormClient({
                         </div>
                       ) : null}
                     </div>
+
+                    {!editingPartyId ? (
+                      <div
+                        style={{
+                          marginTop: 14,
+                          paddingTop: 12,
+                          borderTop: '1px solid var(--border-subtle)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <label
+                          className="field-label"
+                          htmlFor="nm-party-existing-search"
+                        >
+                          {newPartyType === 'organisation'
+                            ? 'Link an existing organisation from directory'
+                            : 'Link an existing person from directory'}
+                        </label>
+                        <EntitySearchSelect
+                          key={`party-existing-${newPartyType}`}
+                          id="nm-party-existing-search"
+                          entityTypes={[newPartyType]}
+                          nonEmployeesOnly={newPartyType === 'person'}
+                          excludeDemo
+                          autoload={false}
+                          value={selectedExistingPartyOption?.id ?? ''}
+                          emptyLabel={
+                            newPartyType === 'organisation'
+                              ? 'Select an existing organisation…'
+                              : 'Select an existing person…'
+                          }
+                          searchPlaceholder={
+                            newPartyType === 'organisation'
+                              ? 'Search existing organisations…'
+                              : 'Search existing people…'
+                          }
+                          searchAriaLabel={
+                            newPartyType === 'organisation'
+                              ? 'Search existing organisations'
+                              : 'Search existing people'
+                          }
+                          onChange={(nextId, opt) => {
+                            if (!nextId) {
+                              setSelectedExistingPartyOption(null);
+                              return;
+                            }
+                            setSelectedExistingPartyOption(opt ?? null);
+                          }}
+                        />
+                        {selectedExistingPartyOption ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <button
+                              type="button"
+                              className="btn btn--primary btn--sm"
+                              disabled={hydratingExistingParty}
+                              onClick={() => void handleConfirmAddSelectedExistingParty()}
+                            >
+                              {hydratingExistingParty
+                                ? 'Adding…'
+                                : `Add ${selectedExistingPartyOption.label} as party`}
+                            </button>
+                            <span className="muted" style={{ fontSize: 12 }}>
+                              Or create a new record below
+                            </span>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </section>
                 );
 
@@ -13080,29 +13412,6 @@ export function MatterFormClient({
                   const nameParts = newPartyName.trim().split(/\s+/).filter(Boolean);
                   const initFirstName = nameParts[0] ?? '';
                   const initSurname = nameParts.slice(1).join(' ');
-
-                  const addPersonRecordToMatter = (personRec: Person, toastText: string) => {
-                    handleAddParty({
-                      id: editingPartyId ?? undefined,
-                      name: personDisplayName(personRec),
-                      entityType: 'person',
-                      relationshipCode: newPartyRelationshipCode,
-                      capacityCodes: newPartyCapacityCodes,
-                      connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
-                        ? newPartyConnectedToId ||
-                          getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
-                          null
-                        : null,
-                      identifiers: {
-                        dateOfBirth: personRec.dateOfBirth || undefined,
-                        previousNames:
-                          personRec.otherNames?.map((n) => n.name).join(', ') || undefined,
-                        town: personRec.addresses?.[0]?.town || undefined,
-                      },
-                      linkedRecordId: personRec.id,
-                    });
-                    showToast(toastText);
-                  };
 
                   return (
                     <PersonFormClient
@@ -13129,7 +13438,7 @@ export function MatterFormClient({
                       initialSurname={initSurname}
                       allPeople={people}
                       organisations={organisations}
-                      matters={matters}
+                      matters={EMPTY_FULL_MATTERS}
                       enquiries={enquiries}
                       employees={employees}
                       lists={lists}
@@ -13140,6 +13449,13 @@ export function MatterFormClient({
                       orgStructure={orgStructure}
                       onCancelModal={resetAddPartyForm}
                       onSelectExistingPerson={(existingPerson) => {
+                        setPeople((prev) =>
+                          prev.some((p) => p.id === existingPerson.id)
+                            ? prev.map((p) =>
+                                p.id === existingPerson.id ? existingPerson : p,
+                              )
+                            : [...prev, existingPerson],
+                        );
                         addPersonRecordToMatter(
                           existingPerson,
                           `Added ${personDisplayName(existingPerson)} to matter parties`,
@@ -13189,29 +13505,6 @@ export function MatterFormClient({
                   ? organisations.find((o) => o.id === newPartyLinkedId) ?? null
                   : null;
 
-                const addOrgRecordToMatter = (orgRec: Organisation, toastText: string) => {
-                  handleAddParty({
-                    id: editingPartyId ?? undefined,
-                    name: orgRec.legalName,
-                    entityType: 'organisation',
-                    relationshipCode: newPartyRelationshipCode,
-                    capacityCodes: newPartyCapacityCodes,
-                    connectedToPartyId: ['CC', 'CO', 'TP'].includes(newPartyRelationshipCode)
-                      ? newPartyConnectedToId ||
-                        getDefaultConnectedToForRelationship(newPartyRelationshipCode) ||
-                        null
-                      : null,
-                    identifiers: {
-                      companyNumber: orgRec.companyNumber || undefined,
-                      previousNames:
-                        orgRec.otherNames?.map((n) => n.name).join(', ') || undefined,
-                      registeredTown: orgRec.registeredAddress?.town || undefined,
-                    },
-                    linkedRecordId: orgRec.id,
-                  });
-                  showToast(toastText);
-                };
-
                 return (
                   <OrganisationFormClient
                     key={`party-org-${editingPartyId ?? 'new'}-${newPartyLinkedId ?? 'unlinked'}`}
@@ -13235,7 +13528,7 @@ export function MatterFormClient({
                     initialCompanyNumber={newPartyIdentifiers.companyNumber}
                     allOrganisations={organisations}
                     allPeople={people}
-                    matters={matters}
+                    matters={EMPTY_FULL_MATTERS}
                     enquiries={enquiries}
                     employees={employees}
                     lists={lists}
@@ -13245,6 +13538,13 @@ export function MatterFormClient({
                     tenantId={tenantId}
                     onCancelModal={resetAddPartyForm}
                     onSelectExistingOrganisation={(existingOrg) => {
+                      setOrganisations((prev) =>
+                        prev.some((o) => o.id === existingOrg.id)
+                          ? prev.map((o) =>
+                              o.id === existingOrg.id ? existingOrg : o,
+                            )
+                          : [...prev, existingOrg],
+                      );
                       addOrgRecordToMatter(
                         existingOrg,
                         `Added ${existingOrg.legalName} to matter parties`,

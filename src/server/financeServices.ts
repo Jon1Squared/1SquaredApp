@@ -350,6 +350,7 @@ export async function verifyFinanceActorAndPermission(
 export async function getMatterFinanceRows(
   actorInput: FinanceActorInput,
   matterIds?: readonly string[],
+  options?: { readonly summaryOnly?: boolean },
 ): Promise<MatterFinanceRowsResult | ActionDenied> {
   const auth = await verifyFinanceActorAndPermission(actorInput, 'finance:view_matter');
   if (!auth.ok) return auth;
@@ -502,31 +503,53 @@ export async function getMatterFinanceRows(
     }
   }
 
-  const pmsAgedDebt: PmsInvoiceBalance[] =
-    targetMatterCodes.length > 0
-      ? (await pmsRepo.getAgedDebt(ctx)).filter((inv) =>
-          isCodeAllowed(inv.matter_code),
-        )
-      : [];
-  const invoiceBatches = await Promise.all(
-    targetMatterCodes.map((code) => pmsRepo.getInvoices(ctx, { matterCode: code })),
-  );
-  const pmsInvoices: PmsInvoiceDetail[] = invoiceBatches.flat();
+  if (options?.summaryOnly || targetMatterCodes.length === 0) {
+    return {
+      pmsExtractInfo,
+      pmsLinks: scopedVisiblePmsLinks,
+      pmsSummaryByMatterId,
+      allMatterFins,
+      pmsAgedDebt: [],
+      pmsInvoices: [],
+      pmsAllDisbursements: [],
+      pmsClientAccountByMatterCode: {},
+    };
+  }
 
-  const pmsAllDisbursements: PmsDisbursement[] = [];
+  const disbMatterCodes = allMatterFins
+    .filter((mf) => mf.unbilled_disbursements > 0)
+    .map((mf) => mf.matter_code);
+
+  const [agedDebtRows, pmsInvoices, pmsAllDisbursements, allClientAccountEntries] =
+    await Promise.all([
+      targetMatterCodes.length > 0
+        ? pmsRepo.listAgedDebtByMatterCodes(ctx, targetMatterCodes)
+        : Promise.resolve([]),
+      pmsRepo.listInvoicesByMatterCodes(ctx, targetMatterCodes),
+      disbMatterCodes.length > 0
+        ? pmsRepo.listDisbursementsByMatterCodes(ctx, disbMatterCodes)
+        : Promise.resolve([]),
+      pmsRepo.listClientAccountEntriesByMatterCodes(ctx, targetMatterCodes),
+    ]);
+
+  const pmsAgedDebt: PmsInvoiceBalance[] = agedDebtRows.filter((inv) =>
+    isCodeAllowed(inv.matter_code),
+  );
   const pmsClientAccountByMatterCode: Record<string, PmsClientAccountEntry[]> = {};
-  for (const mf of allMatterFins) {
-    if (mf.unbilled_disbursements > 0) {
-      pmsAllDisbursements.push(
-        ...(await pmsRepo.getDisbursements(ctx, mf.matter_code)),
-      );
+  for (const entry of allClientAccountEntries) {
+    const existing = pmsClientAccountByMatterCode[entry.matter_code];
+    if (existing) {
+      existing.push(entry);
+    } else {
+      pmsClientAccountByMatterCode[entry.matter_code] = [entry];
     }
-    const ledgerEntries = await pmsRepo.getClientAccountLedger(
-      ctx,
-      mf.matter_code,
-    );
-    if (mf.client_account_balance > 0 || ledgerEntries.length > 0) {
-      pmsClientAccountByMatterCode[mf.matter_code] = ledgerEntries;
+  }
+  for (const mf of allMatterFins) {
+    if (
+      mf.client_account_balance > 0 &&
+      !pmsClientAccountByMatterCode[mf.matter_code]
+    ) {
+      pmsClientAccountByMatterCode[mf.matter_code] = [];
     }
   }
 

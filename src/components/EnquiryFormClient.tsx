@@ -30,19 +30,15 @@ import {
 } from '@/domain/dates';
 import {
   computeDraftSaveBarState,
-  detectPreliminaryConflicts,
   enquiryDisplayName,
   extractEnquiryFormInitialState,
   failedContactAttemptsCount,
-  findEnquiryEntityMatches,
   getAvailableEnquiryActions,
   getMissingRoutingFields,
   hasQuickConflictCheckInputs,
   isEnquiryFormDirty,
   isEnquiryOpen,
   isEnquiryRouted,
-  mergePeopleWithEnquiries,
-  runEnquiryConflictSearch,
   shouldSuggestNoResponse,
   type EnquiryFormState,
 } from '@/domain/enquiries';
@@ -61,6 +57,10 @@ import { personDisplayName, primaryEmail, primaryPhone } from '@/domain/names';
 import { hasMinThreeCharToken } from '@/domain/normalise';
 import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
 import { isTaskOpen, resolveRoutedTeam } from '@/domain/tasks';
+import type {
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from '@/domain/intakePreviewTypes';
 import type {
   Address,
   AuditEntry,
@@ -93,6 +93,12 @@ import {
 import { InfoPopover } from './InfoPopover';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import {
+  resolveConvertConflictModalState,
+  shouldShowNoMatchesMessage,
+} from '@/domain/intakePreviewState';
+import { EntitySearchSelect } from './useEntityPicker';
+import { useIntakePreview } from './useIntakePreview';
 
 const CONTACT_OUTCOMES_BY_METHOD: Record<
   'Phone' | 'In person' | 'Video call',
@@ -109,9 +115,9 @@ interface Props {
   quotes?: Quote[];
   tasks?: Task[];
   audit?: AuditEntry[];
-  people: Person[];
-  organisations: Organisation[];
-  matters: Matter[];
+  people?: Person[];
+  organisations?: Organisation[];
+  matters?: Matter[];
   enquiries?: Enquiry[];
   teams: Team[];
   values: ChoiceValue[];
@@ -124,6 +130,7 @@ interface Props {
   firmName?: string;
   tenantId: string;
   initialErrors?: Record<string, string>;
+  supervisingPartnerByEmployeeId?: Record<string, string>;
 }
 
 export function EnquiryFormClient({
@@ -132,9 +139,9 @@ export function EnquiryFormClient({
   quotes = [],
   tasks = [],
   audit = [],
-  people,
-  organisations,
-  matters,
+  people = [],
+  organisations = [],
+  matters = [],
   enquiries = [],
   teams,
   values,
@@ -145,8 +152,9 @@ export function EnquiryFormClient({
   canReopen: canReopenProp = false,
   canAnonymise = false,
   firmName = 'the firm',
-  tenantId,
+  tenantId: _tenantId,
   initialErrors = {},
+  supervisingPartnerByEmployeeId,
 }: Props) {
   const isSavedEnquiry = Boolean(enquiry) && mode !== 'new';
   const isDraftMode = isSavedEnquiry && enquiry?.status === 'Draft';
@@ -605,99 +613,65 @@ export function EnquiryFormClient({
     return resolveRoutedTeam(practiceAreaId, teams, enquirySettings?.fallbackTeamId);
   }, [practiceAreaId, teams, enquirySettings?.fallbackTeamId]);
 
-  const combinedPeople = useMemo(
-    () => mergePeopleWithEnquiries(people, enquiries, values, enquiry?.id ?? null),
-    [people, enquiries, values, enquiry?.id],
-  );
+  // Cache records linked or selected during editing so badges stay hydrated
+  const [selectedPeopleById, setSelectedPeopleById] = useState<
+    Record<string, Person | EntityPickerPersonSummary>
+  >({});
+  const [selectedOrgsById, setSelectedOrgsById] = useState<
+    Record<string, Organisation | EntityPickerOrganisationSummary>
+  >({});
 
-  // Live duplicate/entity matching against People & Organisations across all 6 watched fields
-  const liveEntityMatches = useMemo(
-    () =>
-      findEnquiryEntityMatches(
-        {
-          firstName,
-          lastName,
-          email,
-          phone,
-          callingOnBehalfOf,
-          postcode,
-          addressLine1: line1,
-          addressLine2: line2,
-          otherPartiesNamed,
-        },
-        people,
-        organisations,
-        enquiries,
-        enquiry?.id ?? null,
-      ),
-    [
-      firstName,
-      lastName,
-      email,
-      phone,
-      callingOnBehalfOf,
-      postcode,
-      line1,
-      line2,
-      otherPartiesNamed,
-      people,
-      organisations,
-      enquiries,
-      enquiry?.id,
-    ],
-  );
-
-  // Live preliminary conflict check on caller (name, email, phone, address), organisation, and other parties
-  const livePossibleConflicts = useMemo(
-    () =>
-      detectPreliminaryConflicts(
-        {
-          firstName,
-          lastName,
-          callingOnBehalfOf,
-          otherPartiesNamed,
-          email,
-          phone,
-          address: { line1, line2, postcode },
-          linkedPersonId,
-          linkedOrganisationId,
-        },
-        people,
-        organisations,
-        matters,
-        values,
-        enquiries,
-        enquiry?.id ?? null,
-        undefined,
-        undefined,
-        tenantId,
-      ),
-    [
-      firstName,
-      lastName,
-      callingOnBehalfOf,
-      otherPartiesNamed,
-      email,
-      phone,
-      line1,
-      line2,
-      postcode,
-      linkedPersonId,
-      linkedOrganisationId,
-      people,
-      organisations,
-      matters,
-      values,
-      enquiries,
-      enquiry?.id,
-      tenantId,
-    ],
-  );
-
-  // On initial load of a saved enquiry (before any watched field changes), use the recorded snapshot if present;
-  // as soon as any watched field changes, use the live calculation.
+  // Live preview of matching entities and preliminary conflicts via debounced C2 server action
   const useRecordedSnapshot =
     isSavedEnquiry && !watchedFieldsChangedSinceSave && Boolean(savedSnapshot);
+
+  const {
+    preview: liveIntakePreview,
+    loadingFast: liveLoadingFast,
+    loadingConflicts: liveLoadingConflicts,
+    fastError: liveFastError,
+    conflictError: liveConflictError,
+    triggerConflictCheck,
+    retryFastCheck: retryLiveFastCheck,
+    retryConflictCheck: retryLiveConflictCheck,
+  } = useIntakePreview(
+    {
+      kind: 'enquiry',
+      excludeEnquiryId: enquiry?.id ?? null,
+      firstName,
+      lastName,
+      callingOnBehalfOf,
+      otherPartiesNamed,
+      emails: email.trim() ? [email] : [],
+      phones: phone.trim() ? [phone] : [],
+      addresses:
+        postcode.trim() || line1.trim() ? [{ line1, line2, postcode }] : [],
+      linkedPersonId,
+      linkedOrganisationId,
+    },
+    { enabled: !useRecordedSnapshot },
+  );
+
+  const liveEntityMatches = liveIntakePreview.entityMatches;
+  const livePossibleConflicts = liveIntakePreview.possibleConflicts;
+
+  const peopleById = useMemo(() => {
+    const map = new Map<string, Person | EntityPickerPersonSummary>();
+    for (const p of people) map.set(p.id, p);
+    for (const m of liveEntityMatches.people) map.set(m.person.id, m.person);
+    for (const p of Object.values(selectedPeopleById)) map.set(p.id, p);
+    return map;
+  }, [people, liveEntityMatches.people, selectedPeopleById]);
+
+  const orgsById = useMemo(() => {
+    const map = new Map<string, Organisation | EntityPickerOrganisationSummary>();
+    for (const o of organisations) map.set(o.id, o);
+    for (const m of liveEntityMatches.organisations) {
+      map.set(m.organisation.id, m.organisation);
+    }
+    for (const o of Object.values(selectedOrgsById)) map.set(o.id, o);
+    return map;
+  }, [organisations, liveEntityMatches.organisations, selectedOrgsById]);
 
   const possibleConflicts = useMemo(
     () => (useRecordedSnapshot && savedSnapshot ? savedSnapshot.conflicts : livePossibleConflicts),
@@ -731,20 +705,20 @@ export function EnquiryFormClient({
       return savedSnapshot.knownPeople
         .filter((kp) => !conflictKeys.has(`person:${kp.id}`))
         .map((kp) => {
-          const person = combinedPeople.find((p) => p.id === kp.id);
+          const person = peopleById.get(kp.id);
           return person ? { person, formattedReasons: kp.formattedReasons } : null;
         })
         .filter((x): x is { person: Person; formattedReasons: string } => Boolean(x));
     }
     return liveEntityMatches.people.filter((m) => !conflictKeys.has(`person:${m.person.id}`));
-  }, [useRecordedSnapshot, savedSnapshot, liveEntityMatches, conflictKeys, combinedPeople]);
+  }, [useRecordedSnapshot, savedSnapshot, liveEntityMatches, conflictKeys, peopleById]);
 
   const knownOrganisations = useMemo(() => {
     if (useRecordedSnapshot && savedSnapshot) {
       return savedSnapshot.knownOrganisations
         .filter((ko) => !conflictKeys.has(`organisation:${ko.id}`))
         .map((ko) => {
-          const organisation = organisations.find((o) => o.id === ko.id);
+          const organisation = orgsById.get(ko.id);
           return organisation ? { organisation, formattedReasons: ko.formattedReasons } : null;
         })
         .filter((x): x is { organisation: Organisation; formattedReasons: string } => Boolean(x));
@@ -752,7 +726,7 @@ export function EnquiryFormClient({
     return liveEntityMatches.organisations.filter(
       (m) => !conflictKeys.has(`organisation:${m.organisation.id}`),
     );
-  }, [useRecordedSnapshot, savedSnapshot, liveEntityMatches, conflictKeys, organisations]);
+  }, [useRecordedSnapshot, savedSnapshot, liveEntityMatches, conflictKeys, orgsById]);
 
   const callerMissingCount =
     (!firstName.trim() ? 1 : 0) +
@@ -896,7 +870,8 @@ export function EnquiryFormClient({
     showToast(`Filled address: ${formatted}`);
   };
 
-  const linkExistingPerson = (p: Person) => {
+  const linkExistingPerson = (p: Person | EntityPickerPersonSummary) => {
+    setSelectedPeopleById((prev) => ({ ...prev, [p.id]: p }));
     if (!p.id.startsWith('ENQ-')) {
       setLinkedPersonId(p.id);
     }
@@ -906,15 +881,16 @@ export function EnquiryFormClient({
     const pPhone = primaryPhone(p);
     if (!email.trim() && pEmail) setEmail(pEmail);
     if (!phone.trim() && pPhone) setPhone(pPhone);
-    if (!line1.trim() && p.addresses[0]) {
-      setLine1(p.addresses[0].line1);
-      setLine2(p.addresses[0].line2);
-      setTown(p.addresses[0].town);
-      setCounty(p.addresses[0].county);
-      setPostcode(p.addresses[0].postcode);
-      setCountryId(p.addresses[0].countryId);
+    const firstAddr = p.addresses?.[0];
+    if (!line1.trim() && firstAddr && 'line1' in firstAddr) {
+      setLine1(firstAddr.line1);
+      setLine2(firstAddr.line2);
+      setTown(firstAddr.town);
+      setCounty(firstAddr.county);
+      setPostcode(firstAddr.postcode);
+      setCountryId(firstAddr.countryId);
       setAddressUserTyping(false);
-      setAddressLookupQuery(formatSingleLineAddress(p.addresses[0]));
+      setAddressLookupQuery(formatSingleLineAddress(firstAddr));
     }
     showToast(
       p.id.startsWith('ENQ-')
@@ -923,18 +899,28 @@ export function EnquiryFormClient({
     );
   };
 
-  const linkExistingOrg = (o: Organisation) => {
+  const linkExistingOrg = (o: Organisation | EntityPickerOrganisationSummary) => {
+    setSelectedOrgsById((prev) => ({ ...prev, [o.id]: o }));
     setLinkedOrganisationId(o.id);
     if (!callingOnBehalfOf.trim()) setCallingOnBehalfOf(o.legalName);
-    if (!line1.trim() && o.registeredAddress) {
-      setLine1(o.registeredAddress.line1);
-      setLine2(o.registeredAddress.line2);
-      setTown(o.registeredAddress.town);
-      setCounty(o.registeredAddress.county);
-      setPostcode(o.registeredAddress.postcode);
-      setCountryId(o.registeredAddress.countryId);
+    const regAddr = o.registeredAddress;
+    if (!line1.trim() && regAddr) {
+      if ('line1' in regAddr && regAddr.line1) setLine1(regAddr.line1);
+      if ('line2' in regAddr) setLine2(regAddr.line2);
+      if ('town' in regAddr && regAddr.town) setTown(regAddr.town);
+      if ('county' in regAddr) setCounty(regAddr.county);
+      if ('postcode' in regAddr && regAddr.postcode) setPostcode(regAddr.postcode);
+      if ('countryId' in regAddr) setCountryId(regAddr.countryId);
       setAddressUserTyping(false);
-      setAddressLookupQuery(formatSingleLineAddress(o.registeredAddress));
+      setAddressLookupQuery(
+        formatSingleLineAddress({
+          line1: regAddr.line1 ?? '',
+          line2: 'line2' in regAddr ? regAddr.line2 : '',
+          town: regAddr.town ?? '',
+          county: 'county' in regAddr ? regAddr.county : '',
+          postcode: regAddr.postcode ?? '',
+        }),
+      );
     }
     showToast(`Linked enquiry to ${o.legalName} (${o.id})`);
   };
@@ -1136,58 +1122,52 @@ export function EnquiryFormClient({
     });
   };
 
-  // Pre-conversion conflict check for the Convert to Matter modal
-  const conflictCheck = useMemo(
-    () =>
-      runEnquiryConflictSearch(
-        {
-          firstName,
-          lastName,
-          callingOnBehalfOf,
-          otherPartiesNamed,
-          email,
-          phone,
-          address: {
-            line1,
-            line2,
-            postcode,
-          },
-          linkedPersonId: convertUsePersonId || linkedPersonId,
-          linkedOrganisationId: convertUseOrgId || linkedOrganisationId,
-        },
-        people,
-        organisations,
-        matters,
-        values,
-        enquiries,
-        enquiry?.id ?? null,
-        undefined,
-        undefined,
-        tenantId,
-      ),
-    [
+  // Pre-conversion conflict check for the Convert to Matter modal via C2 server action
+  const {
+    preview: convertIntakePreview,
+    loadingConflicts: loadingConvertConflicts,
+    conflictError: convertConflictError,
+    conflictChecked: convertConflictChecked,
+    triggerConflictCheck: triggerConvertConflictCheck,
+    retryConflictCheck: retryConvertConflictCheck,
+  } = useIntakePreview(
+    {
+      kind: 'enquiry',
+      excludeEnquiryId: enquiry?.id ?? null,
       firstName,
       lastName,
       callingOnBehalfOf,
       otherPartiesNamed,
-      email,
-      phone,
-      line1,
-      line2,
-      postcode,
-      convertUsePersonId,
-      linkedPersonId,
-      convertUseOrgId,
-      linkedOrganisationId,
-      people,
-      organisations,
-      matters,
-      values,
-      enquiries,
-      enquiry?.id,
-      tenantId,
-    ],
+      emails: email.trim() ? [email] : [],
+      phones: phone.trim() ? [phone] : [],
+      addresses:
+        postcode.trim() || line1.trim() ? [{ line1, line2, postcode }] : [],
+      linkedPersonId: convertUsePersonId || linkedPersonId,
+      linkedOrganisationId: convertUseOrgId || linkedOrganisationId,
+    },
+    { enabled: Boolean(convertModalOpen && enquiry) },
   );
+
+  useEffect(() => {
+    if (!convertModalOpen || !enquiry) return;
+    const t = setTimeout(() => {
+      triggerConvertConflictCheck();
+    }, 0);
+    return () => clearTimeout(t);
+  }, [convertModalOpen, enquiry, convertUsePersonId, convertUseOrgId, triggerConvertConflictCheck]);
+
+  const conflictCheck = convertIntakePreview.conflictSearch ?? {
+    otherPartyClientMatches: [],
+    clientAgainstPartyMatches: [],
+    allConflicts: [],
+    hasBlockingConflict: false,
+  };
+  const convertModalState = resolveConvertConflictModalState({
+    loadingConflicts: loadingConvertConflicts,
+    conflictError: convertConflictError,
+    conflictSearch: convertIntakePreview.conflictSearch,
+    conflictChecked: convertConflictChecked,
+  });
 
   const open = enquiry ? isEnquiryOpen(enquiry) : true;
   const routed = enquiry ? isEnquiryRouted(enquiry) : false;
@@ -1358,16 +1338,16 @@ export function EnquiryFormClient({
     const direct = email.trim() || enquiry?.email?.trim() || '';
     if (direct) return direct;
     if (linkedPersonId) {
-      const lp = people.find((p) => p.id === linkedPersonId);
+      const lp = peopleById.get(linkedPersonId);
       const pe = lp ? primaryEmail(lp) : '';
       if (pe) return pe;
     }
     if (linkedOrganisationId) {
-      const lo = organisations.find((o) => o.id === linkedOrganisationId);
+      const lo = orgsById.get(linkedOrganisationId);
       if (lo?.generalEmail?.trim()) return lo.generalEmail.trim();
     }
     return '';
-  }, [email, enquiry?.email, linkedPersonId, linkedOrganisationId, people, organisations]);
+  }, [email, enquiry?.email, linkedPersonId, linkedOrganisationId, peopleById, orgsById]);
 
   const openSendEmailModal = () => {
     setEmailTo(resolvedEmail);
@@ -1445,8 +1425,11 @@ export function EnquiryFormClient({
 
     addPerson(enquiry?.assignedToId ?? currentUserId, 'Fee earner');
     const leadEmp = employees.find((e) => e.id === (enquiry?.assignedToId ?? currentUserId));
-    if (leadEmp?.employment?.supervisingPartnerId) {
-      addPerson(leadEmp.employment.supervisingPartnerId, 'Supervising partner');
+    const supId =
+      leadEmp?.employment?.supervisingPartnerId ??
+      supervisingPartnerByEmployeeId?.[enquiry?.assignedToId ?? currentUserId];
+    if (supId) {
+      addPerson(supId, 'Supervising partner');
     }
     const riskRoleId = valueBySystemKey(values, 'employee_role', 'risk_and_compliance')?.id;
     const colpEmp = riskRoleId
@@ -1461,7 +1444,13 @@ export function EnquiryFormClient({
     if (practiceMgrEmp) addPerson(practiceMgrEmp.id, 'Practice manager');
 
     return list;
-  }, [employees, enquiry?.assignedToId, currentUserId, values]);
+  }, [
+    employees,
+    enquiry?.assignedToId,
+    currentUserId,
+    values,
+    supervisingPartnerByEmployeeId,
+  ]);
 
   const handleCreateTask = (payload: CreateTaskSubmitPayload) => {
     if (!enquiry) return;
@@ -2340,6 +2329,7 @@ export function EnquiryFormClient({
                     placeholder="Caller's first name"
                     value={firstName}
                     onChange={(e) => setFirstName(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                   {!errors.name && errors.firstName ? (
                     <span className="field-error">{errors.firstName}</span>
@@ -2357,6 +2347,7 @@ export function EnquiryFormClient({
                     placeholder="Caller's surname"
                     value={lastName}
                     onChange={(e) => setLastName(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                   {!errors.name && errors.lastName ? (
                     <span className="field-error">{errors.lastName}</span>
@@ -2377,6 +2368,7 @@ export function EnquiryFormClient({
                     placeholder="e.g. Castell Homes Ltd"
                     value={callingOnBehalfOf}
                     onChange={(e) => setCallingOnBehalfOf(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                 </div>
 
@@ -2453,6 +2445,7 @@ export function EnquiryFormClient({
                     placeholder="e.g. 07700 900412 or 029 2010 4400"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                 </div>
 
@@ -2470,6 +2463,7 @@ export function EnquiryFormClient({
                     placeholder="name@example.co.uk"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    onBlur={triggerConflictCheck}
                   />
                   {errors.email ? <span className="field-error">{errors.email}</span> : null}
                 </div>
@@ -2831,6 +2825,7 @@ export function EnquiryFormClient({
                 placeholder="e.g. landlord Bay Retail Group Ltd, neighbour Mrs Patel"
                 value={otherPartiesNamed}
                 onChange={(e) => setOtherPartiesNamed(e.target.value)}
+                onBlur={triggerConflictCheck}
               />
             </div>
 
@@ -3073,6 +3068,12 @@ export function EnquiryFormClient({
                 </div>
                 {!hasSearchInputs ? (
                   <span className="new-enquiry-badge">Waiting</span>
+                ) : liveFastError || liveConflictError ? (
+                  <span className="new-enquiry-badge new-enquiry-badge--warn">
+                    Check failed
+                  </span>
+                ) : liveLoadingFast || liveLoadingConflicts ? (
+                  <span className="new-enquiry-badge">Checking…</span>
                 ) : hasHighSeverityConflict ? (
                   <span className="new-enquiry-badge new-enquiry-badge--alert">
                     Possible conflict
@@ -3102,6 +3103,26 @@ export function EnquiryFormClient({
                   overflowY: 'auto',
                 }}
               >
+                {liveFastError || liveConflictError ? (
+                  <div className="banner banner--warning" role="alert">
+                    <div style={{ flex: 1 }}>
+                      <span>{liveConflictError ?? liveFastError}</span>
+                    </div>
+                    <div className="banner__actions">
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        onClick={() => {
+                          if (liveFastError) retryLiveFastCheck();
+                          if (liveConflictError) retryLiveConflictCheck();
+                        }}
+                      >
+                        Try again
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 {linkedPersonId ? (
                   <div
                     style={{
@@ -3115,7 +3136,7 @@ export function EnquiryFormClient({
                     }}
                   >
                     <StatusPill
-                      label={`Linked: ${personDisplayName(people.find((p) => p.id === linkedPersonId)!) || linkedPersonId}`}
+                      label={`Linked: ${(peopleById.get(linkedPersonId) ? personDisplayName(peopleById.get(linkedPersonId)!) : '') || linkedPersonId}`}
                       tone="positive"
                     />
                     <button
@@ -3141,7 +3162,7 @@ export function EnquiryFormClient({
                     }}
                   >
                     <StatusPill
-                      label={`Linked: ${organisations.find((o) => o.id === linkedOrganisationId)?.legalName ?? linkedOrganisationId}`}
+                      label={`Linked: ${orgsById.get(linkedOrganisationId)?.legalName ?? linkedOrganisationId}`}
                       tone="positive"
                     />
                     <button
@@ -3154,7 +3175,14 @@ export function EnquiryFormClient({
                   </div>
                 ) : null}
 
-                {hasSearchInputs && distinctMatchedCount === 0 ? (
+                {shouldShowNoMatchesMessage({
+                  hasSearchInputs,
+                  loadingFast: liveLoadingFast,
+                  loadingConflicts: liveLoadingConflicts,
+                  fastError: liveFastError,
+                  conflictError: liveConflictError,
+                  matchCount: distinctMatchedCount,
+                }) ? (
                   <div
                     style={{
                       padding: '8px 10px',
@@ -3197,12 +3225,10 @@ export function EnquiryFormClient({
                         ]),
                       ).join(', ');
                       const person =
-                        hit.recordType === 'person'
-                          ? people.find((p) => p.id === hit.recordId)
-                          : undefined;
+                        hit.recordType === 'person' ? peopleById.get(hit.recordId) : undefined;
                       const org =
                         hit.recordType === 'organisation'
-                          ? organisations.find((o) => o.id === hit.recordId)
+                          ? orgsById.get(hit.recordId)
                           : undefined;
                       const isLinked =
                         (person && linkedPersonId === person.id) ||
@@ -3813,25 +3839,30 @@ export function EnquiryFormClient({
                       <label className="field-label" htmlFor="refer-org-select">
                         Referred to organisation in directory (optional)
                       </label>
-                      <select
+                      <EntitySearchSelect
                         id="refer-org-select"
-                        className="field-select"
+                        entityTypes={['organisation']}
                         value={referredToOrganisationId}
-                        onChange={(e) => {
-                          setReferredToOrganisationId(e.target.value);
-                          const o = organisations.find((x) => x.id === e.target.value);
+                        emptyLabel="— Or type firm/service name below —"
+                        searchPlaceholder="Search directory organisations…"
+                        searchAriaLabel="Search referred-to organisation"
+                        initialOptions={Array.from(orgsById.values())
+                          .filter((o) => !o.mergedIntoId)
+                          .map((o) => ({
+                            id: o.id,
+                            recordType: 'organisation' as const,
+                            label: `${o.legalName} (${o.id})`,
+                            subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+                            reference: o.id,
+                            href: `/organisations/${o.id}`,
+                            organisation: o,
+                          }))}
+                        onChange={(nextId, opt) => {
+                          setReferredToOrganisationId(nextId);
+                          const o = opt?.organisation ?? orgsById.get(nextId);
                           if (o && !referredToName) setReferredToName(o.legalName);
                         }}
-                      >
-                        <option value="">— Or type firm/service name below —</option>
-                        {organisations
-                          .filter((o) => !o.mergedIntoId)
-                          .map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.legalName} ({o.id})
-                            </option>
-                          ))}
-                      </select>
+                      />
                     </div>
                     <div className="field-group">
                       <label className="field-label" htmlFor="refer-name-input">
@@ -3915,27 +3946,39 @@ export function EnquiryFormClient({
                         Person record for {firstName || enquiry.firstName}{' '}
                         {lastName || enquiry.lastName}
                       </label>
-                      <select
+                      <EntitySearchSelect
                         id="conv-person-select"
-                        className="field-select"
+                        entityTypes={['person']}
+                        nonEmployeesOnly
                         value={convertUsePersonId}
-                        onChange={(e) => setConvertUsePersonId(e.target.value)}
-                      >
-                        <option value="">
-                          + Create new Person ({firstName || enquiry.firstName}{' '}
-                          {lastName || enquiry.lastName})
-                        </option>
-                        {people
+                        emptyLabel={`+ Create new Person (${firstName || enquiry.firstName} ${lastName || enquiry.lastName})`}
+                        searchPlaceholder="Search existing people…"
+                        searchAriaLabel="Search existing person to convert"
+                        initialOptions={Array.from(peopleById.values())
                           .filter((p) => !p.mergedIntoId && !p.isEmployee)
-                          .map((p) => (
-                            <option key={p.id} value={p.id}>
-                              Use existing: {personDisplayName(p)} ({p.id})
-                              {liveEntityMatches.people.some((m) => m.person.id === p.id)
+                          .map((p) => ({
+                            id: p.id,
+                            recordType: 'person' as const,
+                            label: `Use existing: ${personDisplayName(p)} (${p.id})${
+                              liveEntityMatches.people.some((m) => m.person.id === p.id)
                                 ? ' ★ Suggested match'
-                                : ''}
-                            </option>
-                          ))}
-                      </select>
+                                : ''
+                            }`,
+                            subtitle: p.jobTitle ?? '',
+                            reference: p.id,
+                            href: `/people/${p.id}`,
+                            person: p,
+                          }))}
+                        onChange={(nextId, opt) => {
+                          setConvertUsePersonId(nextId);
+                          if (opt?.person) {
+                            setSelectedPeopleById((prev) => ({
+                              ...prev,
+                              [opt.person!.id]: opt.person!,
+                            }));
+                          }
+                        }}
+                      />
                     </div>
 
                     <div className="field-group">
@@ -3960,32 +4003,44 @@ export function EnquiryFormClient({
                         <label className="field-label" htmlFor="conv-org-select">
                           Organisation client record
                         </label>
-                        <select
+                        <EntitySearchSelect
                           id="conv-org-select"
-                          className="field-select"
+                          entityTypes={['organisation']}
                           value={convertUseOrgId}
-                          onChange={(e) => setConvertUseOrgId(e.target.value)}
-                        >
-                          <option value="">
-                            + Create new Organisation (
-                            {callingOnBehalfOf ||
-                              enquiry.callingOnBehalfOf ||
-                              `${firstName || enquiry.firstName} ${lastName || enquiry.lastName} Business`}
-                            )
-                          </option>
-                          {organisations
+                          emptyLabel={`+ Create new Organisation (${
+                            callingOnBehalfOf ||
+                            enquiry.callingOnBehalfOf ||
+                            `${firstName || enquiry.firstName} ${lastName || enquiry.lastName} Business`
+                          })`}
+                          searchPlaceholder="Search existing organisations…"
+                          searchAriaLabel="Search existing organisation to convert"
+                          initialOptions={Array.from(orgsById.values())
                             .filter((o) => !o.mergedIntoId)
-                            .map((o) => (
-                              <option key={o.id} value={o.id}>
-                                Use existing: {o.legalName} ({o.id})
-                                {liveEntityMatches.organisations.some(
+                            .map((o) => ({
+                              id: o.id,
+                              recordType: 'organisation' as const,
+                              label: `Use existing: ${o.legalName} (${o.id})${
+                                liveEntityMatches.organisations.some(
                                   (m) => m.organisation.id === o.id,
                                 )
                                   ? ' ★ Suggested match'
-                                  : ''}
-                              </option>
-                            ))}
-                        </select>
+                                  : ''
+                              }`,
+                              subtitle: o.companyNumber ? `Co. ${o.companyNumber}` : '',
+                              reference: o.id,
+                              href: `/organisations/${o.id}`,
+                              organisation: o,
+                            }))}
+                          onChange={(nextId, opt) => {
+                            setConvertUseOrgId(nextId);
+                            if (opt?.organisation) {
+                              setSelectedOrgsById((prev) => ({
+                                ...prev,
+                                [opt.organisation!.id]: opt.organisation!,
+                              }));
+                            }
+                          }}
+                        />
                       </div>
                     ) : null}
                   </div>
@@ -3995,7 +4050,40 @@ export function EnquiryFormClient({
                   <div className="section-label" style={{ marginBottom: 6 }}>
                     Step 2 — Pre-conversion conflict check
                   </div>
-                  {conflictCheck.hasBlockingConflict ? (
+                  {convertModalState.status === 'loading' ? (
+                    <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
+                      <span className="muted" style={{ fontSize: 13 }}>
+                        Checking for conflicts…
+                      </span>
+                    </div>
+                  ) : convertModalState.status === 'error' ? (
+                    <div className="banner banner--warning" role="alert">
+                      <div>
+                        <strong>{convertModalState.errorMessage}</strong>
+                      </div>
+                      <div className="banner__actions">
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          onClick={retryConvertConflictCheck}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    </div>
+                  ) : convertModalState.status === 'not_enough_detail' ? (
+                    <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
+                      <StatusPill
+                        label="Not enough detail to run a conflict check"
+                        tone="neutral"
+                      />
+                      <p className="muted" style={{ fontSize: 12.5, margin: '8px 0 0' }}>
+                        Add a caller name, organisation or other party if you want to check before
+                        converting, or continue to the Matter Opening screen to run the full
+                        conflict check.
+                      </p>
+                    </div>
+                  ) : convertModalState.status === 'blocking_conflict' ? (
                     <div className="banner banner--warning">
                       <div>
                         <strong>Conflict identified — conversion blocked:</strong>
@@ -4041,7 +4129,7 @@ export function EnquiryFormClient({
                 >
                   Cancel
                 </button>
-                {conflictCheck.hasBlockingConflict ? (
+                {convertModalState.status === 'blocking_conflict' ? (
                   <button
                     type="button"
                     className="btn btn--primary"
@@ -4050,7 +4138,11 @@ export function EnquiryFormClient({
                     Decline enquiry (Conflict)
                   </button>
                 ) : (
-                  <button type="submit" className="btn btn--primary" disabled={pending}>
+                  <button
+                    type="submit"
+                    className="btn btn--primary"
+                    disabled={pending || !convertModalState.canContinue}
+                  >
                     Continue to pre-filled New Matter form →
                   </button>
                 )}

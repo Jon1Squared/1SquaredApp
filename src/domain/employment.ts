@@ -1820,6 +1820,7 @@ export function filterEmployeesForMatterDepartment(opts: {
   orgStructure?: Pick<OrgStructureCatalogue, 'departments'>;
   includeSupervisingPartners?: boolean;
   preserveSelectedId?: string | null;
+  supervisingPartnerByEmployeeId?: Readonly<Record<string, string | null | undefined>>;
 }): Person[] {
   const orgStructure = opts.orgStructure;
   const baseEmployees = opts.employees.filter(
@@ -1854,7 +1855,9 @@ export function filterEmployeesForMatterDepartment(opts: {
   // who sits across departments, include them
   if (opts.includeSupervisingPartners) {
     for (const member of inDept) {
-      const supId = member.employment?.supervisingPartnerId;
+      const supId =
+        member.employment?.supervisingPartnerId ??
+        opts.supervisingPartnerByEmployeeId?.[member.id];
       if (supId && !resultIds.has(supId)) {
         const supEmp = baseEmployees.find((e) => e.id === supId);
         if (supEmp) {

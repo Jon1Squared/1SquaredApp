@@ -41,7 +41,6 @@ import {
 import { runWithActiveActorSession } from '@/server/rbacRuntime';
 import {
   addChoiceValue,
-  getAppSnapshot,
   getCatalogueRepository,
   getTaskWorkflowRepository,
   reorderChoiceValue,
@@ -58,6 +57,7 @@ import {
   saveTeamRecord,
   updateWorkTypeProfiles,
 } from '@/server/services';
+import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { DEFAULT_ORG_TEAMS_OR_PRACTICE_GROUPS } from '@/domain/orgStructure';
 import { resolveRoutedTeam } from '@/domain/tasks';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
@@ -719,6 +719,7 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
         delete process.env.ONESQUARED_RUNTIME_STORE_PATH;
 
         const replicaBServices = await import('@/server/services');
+        const replicaBSnapshot = await import('@/server/__tests__/testAppSnapshot');
         const replicaBRbac = await import('@/server/rbacRuntime');
         const replicaBEntra = await import('@/server/entraAuth');
 
@@ -759,7 +760,7 @@ describe('S0-17c: PostgreSQL Catalogues & Tenant Module Configs Repository, Decl
           },
           async () => {
             const snapAfterRestart =
-              await replicaBServices.getAppSnapshot('P-000001');
+              await replicaBSnapshot.getAppSnapshot('P-000001');
             expect(
               snapAfterRestart.values.some(
                 (v) =>

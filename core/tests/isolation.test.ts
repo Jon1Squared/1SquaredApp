@@ -103,7 +103,6 @@ import {
   executeKeyDateRemindersForTenant,
   executeMerge,
   flagMatterWriteOff,
-  getAppSnapshot,
   getClientPmsViewBundle,
   getEmployeeDetailsForUser,
   getHrAndRbacRepository,
@@ -137,11 +136,22 @@ import {
   saveOrganisationRecord,
   savePersonRecord,
   saveTaskRecord,
+  searchGlobalRecords,
   signOffMatterCostsRecord,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
   updatePersonPermissionOverrides,
 } from '../../src/server/services';
+import {
+  loadHomePageData,
+  loadKeyDatesPageData,
+  loadMatterDetailPageData,
+  loadMatterFormPageData,
+  loadMattersListPageData,
+  loadPeopleListPageData,
+  loadShellContext,
+  loadTasksListPageData,
+} from '../../src/server/pageLoaders';
 import { guardedJob } from '../../src/server/authorize';
 import { getDocumentRepository } from '../../src/server/documentGenerationServices';
 import {
@@ -1846,7 +1856,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('R152: getAppSnapshot and server endpoints filter out staff and ethical-wall matters, linked tasks, links, notes, audit, and PMS rows for non-participants and block tampered matter IDs', async () => {
+  it('R152: production loaders and server endpoints filter out staff and ethical-wall matters, linked tasks, links, notes, audit, and PMS rows for non-participants and block tampered matter IDs', async () => {
     try {
       const store = loadCommittedSeedStore();
       const carys = store.people.find((p) => p.id === 'P-000001')!;
@@ -1994,12 +2004,23 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       expect(wallRes.matter?.hasEthicalWall).toBe(true);
       const wallMatterId = wallRes.matter!.id;
 
-      // Participant (Carys) sees both matters in getAppSnapshot
-      const carysSnap = await runWithActiveActorSession(carysSession, async () =>
-        getAppSnapshot(carys.id),
+      // Participant (Carys) sees both matters in Home and Matters loaders
+      const [carysHome, carysMattersList] = await runWithActiveActorSession(
+        carysSession,
+        async () =>
+          Promise.all([
+            loadHomePageData(carys.id),
+            loadMattersListPageData(carys.id, { pageSize: 200 }),
+          ]),
       );
-      expect(carysSnap.matters.some((m) => m.id === staffMatterId)).toBe(true);
-      expect(carysSnap.matters.some((m) => m.id === wallMatterId)).toBe(true);
+      expect(carysHome.matters.some((m) => m.id === staffMatterId)).toBe(true);
+      expect(carysHome.matters.some((m) => m.id === wallMatterId)).toBe(true);
+      expect(carysMattersList.matters.some((m) => m.id === staffMatterId)).toBe(
+        true,
+      );
+      expect(carysMattersList.matters.some((m) => m.id === wallMatterId)).toBe(
+        true,
+      );
 
       // Non-participant fee earner does NOT see either matter, nor linked tasks, links, notes, audit, or PMS summary rows
       const outsiderCookie = createSignedEntraSessionCookie({
@@ -2031,17 +2052,47 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession: outsiderVerified,
       };
 
-      const outsiderSnap = await runWithActiveActorSession(outsiderSession, async () =>
-        getAppSnapshot(outsiderFeeEarner.id),
+      const [
+        outsiderHome,
+        outsiderMattersList,
+        outsiderTasksList,
+        outsiderStaffDetail,
+        outsiderWallDetail,
+      ] = await runWithActiveActorSession(outsiderSession, async () =>
+        Promise.all([
+          loadHomePageData(outsiderFeeEarner.id),
+          loadMattersListPageData(outsiderFeeEarner.id, { pageSize: 200 }),
+          loadTasksListPageData(outsiderFeeEarner.id, {
+            statusFilter: 'all',
+            pageSize: 200,
+          }),
+          loadMatterDetailPageData(outsiderFeeEarner.id, staffMatterId),
+          loadMatterDetailPageData(outsiderFeeEarner.id, wallMatterId),
+        ]),
       );
-      expect(outsiderSnap.matters.some((m) => m.id === staffMatterId)).toBe(
+      expect(outsiderHome.matters.some((m) => m.id === staffMatterId)).toBe(
         false,
       );
-      expect(outsiderSnap.matters.some((m) => m.id === wallMatterId)).toBe(
+      expect(outsiderHome.matters.some((m) => m.id === wallMatterId)).toBe(
         false,
       );
       expect(
-        outsiderSnap.tasks.some((t) =>
+        outsiderMattersList.matters.some((m) => m.id === staffMatterId),
+      ).toBe(false);
+      expect(
+        outsiderMattersList.matters.some((m) => m.id === wallMatterId),
+      ).toBe(false);
+      expect(outsiderStaffDetail).toBeNull();
+      expect(outsiderWallDetail).toBeNull();
+      expect(
+        outsiderHome.tasks.some((t) =>
+          t.linkedRecords.some(
+            (r) => r.recordId === staffMatterId || r.recordId === wallMatterId,
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        outsiderTasksList.tasks.some((t) =>
           t.linkedRecords.some(
             (r) => r.recordId === staffMatterId || r.recordId === wallMatterId,
           ),
@@ -3603,11 +3654,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     expect(fromShortCode.legalEntities[1]?.code).toBe('ACMSRV');
 
     const store = loadCommittedSeedStore();
-    const snap = await runAsTestActor('P-000001', () => getAppSnapshot('P-000001'));
-    expect(snap.suggestedMatterGovernanceAssignees).toBeDefined();
-    expect(snap.suggestedMatterGovernanceAssignees.riskReviewerId).toBeTruthy();
+    const matterForm = await runAsTestActor('P-000001', () =>
+      loadMatterFormPageData('P-000001', {}),
+    );
+    expect(matterForm?.suggestedMatterGovernanceAssignees).toBeDefined();
     expect(
-      snap.suggestedMatterGovernanceAssignees.practiceManagerId,
+      matterForm?.suggestedMatterGovernanceAssignees.riskReviewerId,
+    ).toBeTruthy();
+    expect(
+      matterForm?.suggestedMatterGovernanceAssignees.practiceManagerId,
     ).toBeTruthy();
 
     const defaultEmp = createDefaultEmploymentRecord({
@@ -4331,7 +4386,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     }
   });
 
-  it('R174: getAppSnapshot conflict reviewer resolution uses stable team id/code and configured assigneeRoleKey without matching team display names or hard-coding risk_compliance', async () => {
+  it('R174: loadMatterFormPageData conflict reviewer resolution uses stable team id/code and configured assigneeRoleKey without matching team display names or hard-coding risk_compliance', async () => {
     await resetAllDemoData('P-000001', testDataResetContext());
     const originalRawBase = getActiveTenantRawBaseConfig();
     try {
@@ -4372,11 +4427,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeTeamKey: 'custom-team-key-by-name',
         },
       });
-      const snapByName = await runAsTestActor(partner.id, () =>
-        getAppSnapshot(partner.id),
+      const formByName = await runAsTestActor(partner.id, () =>
+        loadMatterFormPageData(partner.id, {}),
       );
       expect(
-        snapByName.suggestedMatterGovernanceAssignees.riskReviewerId,
+        formByName?.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
 
       // 2. Custom assigneeRoleKey selects a holder of that role, not a holder of risk_compliance (and R180d: scopes to assigneeTeamKey when configured)
@@ -4412,11 +4467,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
         },
       });
-      const snapRoleOutsideTeam = await runAsTestActor(partner.id, () =>
-        getAppSnapshot(partner.id),
+      const formRoleOutsideTeam = await runAsTestActor(partner.id, () =>
+        loadMatterFormPageData(partner.id, {}),
       );
       expect(
-        snapRoleOutsideTeam.suggestedMatterGovernanceAssignees.riskReviewerId,
+        formRoleOutsideTeam?.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBeNull();
 
       setActiveTenantConfigForTesting({
@@ -4425,11 +4480,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           assigneeRoleKey: 'employee_role.custom_conflict_reviewer',
         },
       });
-      const snapCustomRole = await runAsTestActor(partner.id, () =>
-        getAppSnapshot(partner.id),
+      const formCustomRole = await runAsTestActor(partner.id, () =>
+        loadMatterFormPageData(partner.id, {}),
       );
       expect(
-        snapCustomRole.suggestedMatterGovernanceAssignees.riskReviewerId,
+        formCustomRole?.suggestedMatterGovernanceAssignees.riskReviewerId,
       ).toBe(nonRiskEmployee.id);
     } finally {
       setActiveTenantConfigForTesting(null);
@@ -7213,25 +7268,44 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       );
 
       for (const excludedActor of [unnamedPartner, unnamedFeeEarner, adminPerson]) {
-        const snap = await runAsTestActor(excludedActor.id, () =>
-          getAppSnapshot(excludedActor.id),
+        const [mattersList, homeData, keyDatesData] = await runAsTestActor(
+          excludedActor.id,
+          () =>
+            Promise.all([
+              loadMattersListPageData(excludedActor.id, { pageSize: 200 }),
+              loadHomePageData(excludedActor.id),
+              loadKeyDatesPageData(excludedActor.id),
+            ]),
         );
-        expect(snap.matters.some((m) => m.id === wallMatter.id)).toBe(false);
-        expect(snap.searchIndex).toEqual([]);
+        expect(mattersList.matters.some((m) => m.id === wallMatter.id)).toBe(false);
+        expect(homeData.matters.some((m) => m.id === wallMatter.id)).toBe(false);
+        expect(keyDatesData.matters.some((m) => m.id === wallMatter.id)).toBe(
+          false,
+        );
         expect(
-          snap.searchIndex.some(
-            (doc) =>
-              doc.id === wallMatter.id ||
-              doc.title.includes('Empty Allowlist Ethical Wall'),
-          ),
+          keyDatesData.initialDiaryEntries.some((kd) => kd.matterId === wallMatter.id),
         ).toBe(false);
-        expect(snap.keyDates.some((kd) => kd.matterId === wallMatter.id)).toBe(false);
 
         const diary = await runAsTestActor(excludedActor.id, () =>
           queryKeyDatesTeamDiaryRecord({}, excludedActor.id),
         );
         expect(diary.some((e) => e.matterId === wallMatter.id)).toBe(false);
+
+        const globalSearchRes = await runAsTestActor(excludedActor.id, () =>
+          searchGlobalRecords({ query: wallMatter.title }, excludedActor.id),
+        );
+        expect(
+          globalSearchRes.hits.some((h) => h.id === wallMatter.id),
+        ).toBe(false);
       }
+
+      // Positive control: named participant DOES find the ethical-wall matter in global search
+      const namedSearchRes = await runAsTestActor(namedPartner.id, () =>
+        searchGlobalRecords({ query: wallMatter.title }, namedPartner.id),
+      );
+      expect(
+        namedSearchRes.hits.some((h) => h.id === wallMatter.id),
+      ).toBe(true);
 
       // Reports also exclude the walled matter for an actor without matter:restricted:access
       const partnerExceptions = await runAsTestActor(unnamedPartner.id, () =>
@@ -10563,14 +10637,19 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const alphaSession = signSession('tenant-a', alphaAdminId);
 
       await runWithActiveActorSession(alphaSession, async () => {
-        const snapA = await getAppSnapshot(alphaAdminId);
-        // R538: snapshot must never include payroll on currentUser, effectiveWorkPerson, or employees
-        expect(snapA.currentUser.employment?.payroll).toBeUndefined();
-        expect(snapA.effectiveWorkPerson.employment?.payroll).toBeUndefined();
-        for (const e of snapA.employees) {
+        const [shellA, peopleListA, homeA] = await Promise.all([
+          loadShellContext(alphaAdminId),
+          loadPeopleListPageData(alphaAdminId, { pageSize: 200 }),
+          loadHomePageData(alphaAdminId),
+        ]);
+        // R538: production loaders never include payroll on currentUser, effectiveWorkPerson, employees, people, or Home people
+        expect(shellA.currentUser.employment?.payroll).toBeUndefined();
+        expect(shellA.effectiveWorkPerson.employment?.payroll).toBeUndefined();
+        for (const e of shellA.employees) {
           expect(e.employment?.payroll).toBeUndefined();
+          expect(e.id).not.toBe(bravoEmpId);
         }
-        for (const p of snapA.people) {
+        for (const p of [...peopleListA.people, ...homeA.people]) {
           expect(p.employment?.payroll).toBeUndefined();
           expect(p.id).not.toBe(bravoEmpId);
         }

@@ -6,7 +6,7 @@ export const developmentProcessArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How 1Squared designs, tests, audits (including independent Claude Code verification on develop), and releases software safely across isolated branches and deployment rings.',
-  updated: '2026-11-22',
+  updated: '2026-11-23',
   body: `
 For a law firm, a software update cannot be a leap of faith. 1Squared is engineered around a **Zero-Trust, Architecture-First Software Development Lifecycle (SDLC)** where every change passes through **six independent quality and security gates** before reaching live production.
 
@@ -46,7 +46,7 @@ Before a single line of production code is written, every change is classified u
 - **Branch Isolation**: All development takes place on isolated branches (\`feat/*\`, \`fix/*\` and \`chore/*\`), with roadmap slices on \`s0-NN-short-name\` branches as set out in \`docs/roadmap/stage-0-plan.md\`. Each slice is one Pull Request to \`develop\` and updates the backlog (\`docs/roadmap/feature-list.md\`) in the same Pull Request. Direct pushes to \`develop\` or \`main\` are blocked.
 - **11 Immutable Architecture Rules**: Enforced via \`AGENTS.md\` and \`CLAUDE.md\`—prohibiting client-specific code in the core, requiring all data access to use a token-derived \`TenantContext\`, banning secrets in code or config, and requiring every change to create or update the relevant pages in **Help & documentation** in the same Pull Request (Rule 11).
 - **Zero Real Client Data in Dev/Test**: Engineers never develop or test with real client PII. All development uses purpose-built synthetic law firm fixtures (*Not A Law Firm LLP* and *Pembroke Vaughan*) confined to \`data/\` and \`src/seed/\`. In Platform CI, \`scripts/verify-invented-fixtures.mjs\` verifies that seed fixtures use only RFC 2606 domains and Ofcom drama telephone numbers, while \`scripts/verify-no-demo-literals.mjs\` scans git-tracked product code under \`src/components/\` and \`src/domain/\` to ensure no demo firm names, seed person/organisation names, matter numbers, record IDs, or fake \`"Sanctions & PEP: Clear"\` statuses appear in product code.
-- **Per-Tenant PostgreSQL 16 & Deterministic Seeding (\`docker-compose.postgres.yml\`, \`npm run db:setup-test\`, \`npm run seed:demo\`, and \`src/seed/seedStoreBuilder.ts\`)**: Local development and CI run 100% of application state against real PostgreSQL 16 and PgBouncer transaction pooling (\`docker-compose.postgres.yml\`, provisioned with least-privilege runtime and migrate database identities and schema migrations by \`npm run db:setup-test\`). The transitional runtime JSON store and SQLite PMS cache have been permanently retired (\`S0-20\`), and ESLint (\`eslint.config.mjs\`) plus \`core/tests/no-runtime-json-store.test.ts\` forbid runtime code from importing seed builders. Server request paths load only record-scoped SQL queries and candidate subgraphs rather than whole-tenant tables (\`S1-02a\`, migration \`0024_scoped_lookup_and_candidate_indexes_expand\` backfilled via \`compute*LookupKeys\`, \`employeesAndLeaversOnly\` staff filtering, separated \`hasRestrictedMatterAccess\` vs personal-\`Draft\` SQL privacy, per-ID \`EXISTS\` hidden checks, read-only \`applyQuoteEffectiveLifecycle\` in \`getAppSnapshotInScope\` paired with the unattended \`quote-expiry\` scheduled job, and the monotonically shrinking TypeScript AST guard \`src/server/__tests__/noWholeTenantLoadInRequestPaths.test.ts\` catching direct, element-access, and aliased calls). Product code never auto-seeds demo records on startup; a fresh tenant database starts clean until seeded explicitly. In local development (\`PLATFORM_ENVIRONMENT=dev\`), \`client-not-a-law-firm/config/environments/dev.json\` sets \`featureFlags.enableDemoMode: true\`. Engineers populate their local per-tenant database either by running \`PLATFORM_TENANT_PACKAGE_DIR=client-not-a-law-firm PLATFORM_ENVIRONMENT=dev npm run seed:demo\` (passing \`--force\` to overwrite an existing non-empty tenant database via \`src/seed/seedStoreBuilder.ts\` and \`src/server/storePostgresImport.ts\`) or from **Administration → Demo data** (**Load demo dataset**).
+- **Per-Tenant PostgreSQL 16 & Deterministic Seeding**: Every workspace screen loads only the records that the signed-in user is permitted to see, while duplicate and conflict previews run on the server as details are typed and Help pages load without querying firm data, so large firms stay fast. Overdue quotes are evaluated safely without modifying data when viewed and are marked expired automatically each day by the scheduled background task; technical implementation details live in the platform developer documentation. A fresh tenant database always starts clean until seeded explicitly from **Administration → Demo data**.
 
 ### Gate 3: Automated Platform CI & adversarial two-tenant isolation tests
 Every push and Pull Request triggers the automated **Platform CI** workflow (\`.github/workflows/ci.yml\`):
@@ -74,11 +74,12 @@ The suite covers the eight roles with seeded holders in *Not A Law Firm LLP*:
 
 *(Note: \`supervisor\` and \`intake\` have no dedicated seeded holder in \`data/seed-not-a-law-firm.json\` and are covered by the unit RBAC suite.)*
 
-Each role journey verifies four things:
+Each role journey verifies:
 1. Home loads without runtime errors and displays the expected active Home role.
-2. The left navigation rail matches \`getLeftRailVisibility\` for that role.
+2. The navigation menu shows only the areas allowed for that role.
 3. One primary end-to-end journey for that role succeeds (such as opening a matter workspace, saving a draft enquiry, or opening the Finance, Risk, or Admin workspaces).
-4. An unauthorised page or navigation item is hidden or refused (including \`/admin\` redirecting away when \`admin:access\` or \`mfaVerified\` is missing).
+4. An unauthorised page or navigation item is hidden or refused (including redirecting away from Administration unless signed-in multifactor verification is present).
+5. Creating a new contact or enquiry displays live duplicate warnings and preliminary conflict hits checked on the server.
 
 ### Gate 4 & Gate 5: Staging on \`develop\` & independent Claude Code audit
 To eliminate single-perspective blind spots, 1Squared enforces an adversarial **Builder vs. Auditor** model combining distinct AI systems with human principal oversight:

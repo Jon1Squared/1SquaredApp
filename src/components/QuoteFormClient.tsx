@@ -11,6 +11,7 @@ import {
   type WorkTypesConfiguration,
 } from '@platform/core-api';
 import {
+  previewIntakeDuplicatesAndConflictsAction,
   resolveApplicableRatesAction,
   reviseQuoteAction,
   saveQuoteAction,
@@ -19,24 +20,12 @@ import { isActionDenied } from '@/domain/actionResult';
 import { formatRateTierBadgeLabel } from '@/domain/matterCosts';
 import { addDays, toIsoDate } from '@/domain/dates';
 import {
-  detectPreliminaryConflicts,
   enquiryDisplayName,
-  findEnquiryEntityMatches,
   hasQuickConflictCheckInputs,
-  isEnquiryOpen,
-  mergePeopleWithEnquiries,
 } from '@/domain/enquiries';
 import { resolveLabel, valuesForList } from '@/domain/lists';
 import { personDisplayName, primaryEmail, primaryPhone } from '@/domain/names';
 import { isWorkTypeChoiceActive } from '@/domain/orgStructure';
-import {
-  allowedNameEdits,
-  editDistance,
-  normaliseComparableName,
-  organisationNameLooseMatch,
-  personNameLooseMatch,
-  tokensSoundAlike,
-} from '@/domain/normalise';
 import {
   calculateQuoteTotals,
   formatGbp,
@@ -48,6 +37,12 @@ import {
   DEFAULT_WORK_TYPES_CONFIG,
   resolveWorkTypeFeeArrangementSettings,
 } from '@/domain/workTypeConfig';
+import { shouldShowNoMatchesMessage } from '@/domain/intakePreviewState';
+import type {
+  EntityPickerEnquirySummary,
+  EntityPickerOrganisationSummary,
+  EntityPickerPersonSummary,
+} from '@/domain/intakePreviewTypes';
 import type {
   ChoiceValue,
   Enquiry,
@@ -63,16 +58,18 @@ import type {
 import { InfoPopover } from './InfoPopover';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
+import { useEntityPicker } from './useEntityPicker';
+import { useIntakePreview } from './useIntakePreview';
 
 interface Props {
   mode: 'new' | 'edit' | 'revise';
   existing?: Quote | null;
   initialEnquiry?: Enquiry | null;
   initialResolvedRates?: ResolvedApplicableRatesResult | null;
-  enquiries: Enquiry[];
+  enquiries?: Enquiry[];
   matters?: Matter[];
-  people: Person[];
-  organisations: Organisation[];
+  people?: Person[];
+  organisations?: Organisation[];
   links?: PersonOrganisationLink[];
   values: ChoiceValue[];
   orgStructure?: OrgStructureCatalogue;
@@ -101,15 +98,15 @@ export function QuoteFormClient({
   existing = null,
   initialEnquiry = null,
   initialResolvedRates = null,
-  enquiries,
-  matters = [],
-  people,
-  organisations,
+  enquiries = [],
+  matters: _matters = [],
+  people = [],
+  organisations = [],
   links = [],
   values,
   orgStructure,
   currentUserId,
-  tenantId,
+  tenantId: _tenantId,
   tenantVatRatePercent = 20,
   workTypesConfig,
   firmFeeArrangementCaps,
@@ -479,304 +476,128 @@ export function QuoteFormClient({
     [people],
   );
 
-  const mergedPeople = useMemo(
-    () => mergePeopleWithEnquiries(people, enquiries, values),
-    [people, enquiries, values],
-  );
+  // Local hydrated cache for records picked via C2 actions
+  const [selectedPeopleById, setSelectedPeopleById] = useState<
+    Record<string, Person | EntityPickerPersonSummary>
+  >({});
+  const [selectedOrgsById, setSelectedOrgsById] = useState<
+    Record<string, Organisation | EntityPickerOrganisationSummary>
+  >({});
+  const [selectedEnquiriesById, setSelectedEnquiriesById] = useState<
+    Record<string, Enquiry | EntityPickerEnquirySummary>
+  >({});
 
-  // Same contact search as "Add client" on the New Matter screen (First name, Surname, Organisation)
+  // Same contact search as "Add client" on the New Matter screen via debounced C2 SQL picker
   const hasContactSearchQuery = Boolean(
     firstName.trim() || surname.trim() || prospectOrganisationName.trim(),
   );
 
-  const contactLookupResults = useMemo(() => {
-    const fnRaw = firstName.trim();
-    const snRaw = surname.trim();
-    const orgRaw = prospectOrganisationName.trim();
-    if (!fnRaw && !snRaw && !orgRaw) {
-      return [];
-    }
-
-    const fn = normaliseComparableName(fnRaw);
-    const sn = normaliseComparableName(snRaw);
-    const orgQ = normaliseComparableName(orgRaw);
-
-    const checkTokenMatch = (
-      queryVal: string,
-      candidates: string[],
-    ): 'exact' | 'similar spelling' | 'sounds like' | null => {
-      const qTokens = normaliseComparableName(queryVal).split(' ').filter(Boolean);
-      if (qTokens.length === 0) return null;
-
-      let best: 'exact' | 'similar spelling' | 'sounds like' | null = null;
-      for (const cand of candidates) {
-        const cNorm = normaliseComparableName(cand);
-        if (!cNorm) continue;
-        if (cNorm.includes(normaliseComparableName(queryVal))) {
-          return 'exact';
-        }
-        const cTokens = cNorm.split(' ').filter(Boolean);
-        let allMatched = true;
-        let usedFuzzy: 'similar spelling' | 'sounds like' | null = null;
-        for (const qt of qTokens) {
-          let tokenMatched = false;
-          for (const ct of cTokens) {
-            if (ct.includes(qt)) {
-              tokenMatched = true;
-              break;
-            }
-            const minLen = Math.min(qt.length, ct.length);
-            const maxEdits = minLen >= 4 ? allowedNameEdits(minLen) : minLen === 3 ? 1 : 0;
-            if (maxEdits > 0 && editDistance(qt, ct) <= maxEdits) {
-              tokenMatched = true;
-              if (!usedFuzzy) usedFuzzy = 'similar spelling';
-              break;
-            }
-            if (qt.length >= 3 && ct.length >= 3 && tokensSoundAlike(qt, ct)) {
-              tokenMatched = true;
-              if (!usedFuzzy) usedFuzzy = 'sounds like';
-              break;
-            }
-          }
-          if (!tokenMatched) {
-            allMatched = false;
-            break;
-          }
-        }
-        if (allMatched) {
-          if (!usedFuzzy) return 'exact';
-          if (best !== 'similar spelling') best = usedFuzzy;
-        }
-      }
-      return best;
-    };
-
-    const results: {
-      id: string;
-      entityType: 'person' | 'organisation';
-      name: string;
-      organisationName: string;
-      details: string;
-      matchNote: 'similar spelling' | 'sounds like' | null;
-      rank: number;
-      person?: Person;
-      organisation?: Organisation;
-      linkedOrgs?: Organisation[];
-    }[] = [];
-
-    // 1. Search People (including people saved in enquiries)
-    for (const p of mergedPeople) {
-      if (p.mergedIntoId || p.demo) continue;
-      const personLinks = links.filter((l) => l.personId === p.id && l.isCurrent);
-      const linkedOrgs = personLinks
-        .map((l) => organisations.find((o) => o.id === l.organisationId))
-        .filter((o): o is Organisation => Boolean(o));
-      const orgNames = linkedOrgs.map((o) => o.legalName).join(', ');
-
-      let matchNote: 'similar spelling' | 'sounds like' | null = null;
-
-      if (fn) {
-        const fnRes = checkTokenMatch(fn, [
-          p.firstName,
-          p.preferredName ?? '',
-          ...p.otherNames.map((n) => n.name),
-        ]);
-        if (!fnRes) continue;
-        if (fnRes !== 'exact') matchNote = fnRes;
-      }
-
-      if (sn) {
-        const snRes = checkTokenMatch(sn, [
-          p.surname,
-          ...p.otherNames.map((n) => n.name),
-        ]);
-        if (!snRes) continue;
-        if (snRes !== 'exact' && !matchNote) matchNote = snRes;
-      }
-
-      if (!matchNote && fn && sn) {
-        const loose = personNameLooseMatch(
-          `${fnRaw} ${snRaw}`,
-          `${p.firstName} ${p.surname}`,
-        );
-        if (loose) matchNote = loose;
-      }
-
-      if (orgQ) {
-        const orgCandidates = linkedOrgs.flatMap((o) => [
-          o.legalName,
-          ...o.otherNames.map((n) => n.name),
-        ]);
-        const orgRes = checkTokenMatch(orgQ, orgCandidates);
-        const looseOrg = linkedOrgs
-          .map((o) => organisationNameLooseMatch(orgRaw, o.legalName))
-          .find(Boolean);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact' && !matchNote) matchNote = orgRes;
-        else if (!orgRes && looseOrg && !matchNote) matchNote = looseOrg;
-      }
-
-      const email =
-        p.emails.find((e) => e.isPrimary)?.address ?? p.emails[0]?.address ?? null;
-      results.push({
-        id: p.id,
-        entityType: 'person',
-        name: personDisplayName(p),
-        organisationName: orgNames || '—',
-        details: [p.jobTitle || null, email, p.addresses[0]?.town ?? null]
-          .filter(Boolean)
-          .join(' · '),
-        matchNote,
-        rank: matchNote ? 2 : 1,
-        person: p,
-        linkedOrgs,
-      });
-    }
-
-    // 2. Search Organisations
-    for (const o of organisations) {
-      if (o.mergedIntoId) continue;
-      const orgCandidates = [o.legalName, ...o.otherNames.map((n) => n.name)];
-      let matchNote: 'similar spelling' | 'sounds like' | null = null;
-
-      if (orgQ) {
-        const orgRes = checkTokenMatch(orgQ, orgCandidates);
-        const looseOrg = organisationNameLooseMatch(orgRaw, o.legalName);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact') matchNote = orgRes;
-        else if (!orgRes && looseOrg) matchNote = looseOrg;
-      } else if (fn || sn) {
-        const combinedQuery = [fnRaw, snRaw].filter(Boolean).join(' ');
-        const orgRes = checkTokenMatch(combinedQuery, orgCandidates);
-        const looseOrg = organisationNameLooseMatch(combinedQuery, o.legalName);
-        if (!orgRes && !looseOrg) continue;
-        if (orgRes && orgRes !== 'exact') matchNote = orgRes;
-        else if (!orgRes && looseOrg) matchNote = looseOrg;
-      }
-
-      results.push({
-        id: o.id,
-        entityType: 'organisation',
-        name: o.legalName,
-        organisationName: o.legalName,
-        details: [
-          o.companyNumber ? `Co. no. ${o.companyNumber}` : null,
-          o.registeredAddress?.town ?? null,
-          o.generalEmail || null,
-        ]
-          .filter(Boolean)
-          .join(' · '),
-        matchNote,
-        rank: matchNote ? 2 : 1,
-        organisation: o,
-      });
-    }
-
-    return results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-  }, [firstName, surname, prospectOrganisationName, mergedPeople, organisations, links]);
-
-  // Helper to find active (open) enquiries linked to a given person and/or organisation
-  const getActiveEnquiriesForContact = (
-    pId: string | null,
-    oId: string | null,
-    personObj?: Person | null,
-    orgObj?: Organisation | null,
-  ): Enquiry[] => {
-    const pNorm = personObj
-      ? normaliseComparableName(`${personObj.firstName} ${personObj.surname}`)
-      : '';
-    const oNorm = orgObj ? normaliseComparableName(orgObj.legalName) : '';
-
-    return enquiries.filter((e) => {
-      if (!isEnquiryOpen(e)) return false;
-      if (pId && (e.linkedPersonId === pId || e.id === pId)) return true;
-      if (oId && e.linkedOrganisationId === oId) return true;
-      if (pNorm) {
-        const enqName = normaliseComparableName(`${e.firstName} ${e.lastName}`);
-        if (enqName && enqName === pNorm) return true;
-      }
-      if (oNorm && e.callingOnBehalfOf) {
-        const enqOrg = normaliseComparableName(e.callingOnBehalfOf);
-        if (enqOrg && enqOrg === oNorm) return true;
-      }
-      return false;
-    });
-  };
-
-  // Active enquiries for currently linked person / organisation
-  const activeEnquiriesForLinkedContact = useMemo(() => {
-    if (!linkedPersonId && !linkedOrganisationId) return [];
-    const pObj = linkedPersonId ? mergedPeople.find((p) => p.id === linkedPersonId) : null;
-    const oObj = linkedOrganisationId
-      ? organisations.find((o) => o.id === linkedOrganisationId)
-      : null;
-    return getActiveEnquiriesForContact(linkedPersonId, linkedOrganisationId, pObj, oObj);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkedPersonId, linkedOrganisationId, mergedPeople, organisations, enquiries]);
-
-  // Live Quick Conflict Check & Entity Matching (matching Enquiry & Person screens)
-  const liveEntityMatches = useMemo(
-    () =>
-      findEnquiryEntityMatches(
-        {
-          firstName,
-          lastName: surname,
-          email: prospectEmail,
-          phone: prospectPhone,
-          callingOnBehalfOf: prospectOrganisationName,
-          postcode: '',
-          addressLine1: '',
-          addressLine2: '',
-          otherPartiesNamed: '',
-        },
-        mergedPeople,
-        organisations,
-        enquiries,
-      ),
-    [firstName, surname, prospectEmail, prospectPhone, prospectOrganisationName, mergedPeople, organisations, enquiries],
+  const { items: rawContactPickerItems } = useEntityPicker(
+    {
+      entityTypes: ['person', 'organisation'],
+      query: '',
+      personQuery: {
+        firstName,
+        surname,
+        organisationName: prospectOrganisationName,
+      },
+      excludeDemo: true,
+      includeLinkedOrgs: true,
+      includeEnquiryProspects: true,
+      limit: 25,
+    },
+    { enabled: !contactSearchDismissed && hasContactSearchQuery },
   );
 
-  const possibleConflicts = useMemo(
+  const contactLookupResults = useMemo(
     () =>
-      detectPreliminaryConflicts(
-        {
-          firstName,
-          lastName: surname,
-          callingOnBehalfOf: prospectOrganisationName,
-          otherPartiesNamed: '',
-          email: prospectEmail,
-          phone: prospectPhone,
-          address: { line1: '', line2: '', postcode: '' },
-          linkedPersonId,
-          linkedOrganisationId,
-        },
-        mergedPeople,
-        organisations,
-        matters,
-        values,
-        enquiries,
-        null,
-        links,
-        undefined,
-        tenantId,
-      ),
-    [
-      firstName,
-      surname,
-      prospectOrganisationName,
-      prospectEmail,
-      prospectPhone,
-      linkedPersonId,
-      linkedOrganisationId,
-      mergedPeople,
-      organisations,
-      matters,
-      values,
-      enquiries,
-      links,
-      tenantId,
-    ],
+      rawContactPickerItems.map((item) => ({
+        id: item.id,
+        entityType: item.recordType === 'organisation' ? ('organisation' as const) : ('person' as const),
+        name: item.label,
+        organisationName:
+          item.recordType === 'organisation'
+            ? item.label
+            : (item.linkedOrgs ?? []).map((o) => o.legalName).join(', ') || '—',
+        details: item.subtitle,
+        matchNote: item.matchNote ?? null,
+        rank: item.rank ?? 1,
+        person: item.person,
+        organisation: item.organisation,
+        linkedOrgs: item.linkedOrgs,
+      })),
+    [rawContactPickerItems],
   );
+
+  // Live Quick Conflict Check, Entity Matching, and Linked Active Enquiries via C2 server action
+  const {
+    preview: quoteIntakePreview,
+    loadingFast,
+    loadingConflicts,
+    fastError,
+    conflictError,
+    triggerConflictCheck,
+    retryFastCheck,
+    retryConflictCheck,
+  } = useIntakePreview({
+    kind: 'quote',
+    firstName,
+    surname,
+    callingOnBehalfOf: prospectOrganisationName,
+    emails: prospectEmail.trim() ? [prospectEmail] : [],
+    phones: prospectPhone.trim() ? [prospectPhone] : [],
+    linkedPersonId,
+    linkedOrganisationId,
+  });
+
+  const activeEnquiriesForLinkedContact = quoteIntakePreview.activeLinkedEnquiries;
+  const liveEntityMatches = quoteIntakePreview.entityMatches;
+  const possibleConflicts = quoteIntakePreview.possibleConflicts;
+
+  const peopleById = useMemo(() => {
+    const map = new Map<string, Person | EntityPickerPersonSummary>();
+    for (const p of people) map.set(p.id, p);
+    for (const m of liveEntityMatches.people) map.set(m.person.id, m.person);
+    for (const p of Object.values(selectedPeopleById)) map.set(p.id, p);
+    return map;
+  }, [people, liveEntityMatches.people, selectedPeopleById]);
+
+  const orgsById = useMemo(() => {
+    const map = new Map<string, Organisation | EntityPickerOrganisationSummary>();
+    for (const o of organisations) map.set(o.id, o);
+    for (const m of liveEntityMatches.organisations) {
+      map.set(m.organisation.id, m.organisation);
+    }
+    for (const o of Object.values(selectedOrgsById)) map.set(o.id, o);
+    return map;
+  }, [organisations, liveEntityMatches.organisations, selectedOrgsById]);
+
+  const { items: enquiryPickerItems } = useEntityPicker(
+    {
+      entityTypes: ['enquiry'],
+      query: enquirySearch,
+      limit: 25,
+    },
+    { enabled: showLinkedEnquiry },
+  );
+
+  const enquiriesById = useMemo(() => {
+    const map = new Map<string, Enquiry | EntityPickerEnquirySummary>();
+    if (initialEnquiry) map.set(initialEnquiry.id, initialEnquiry);
+    for (const e of enquiries) map.set(e.id, e);
+    for (const e of activeEnquiriesForLinkedContact) map.set(e.id, e);
+    for (const item of enquiryPickerItems) {
+      if (item.enquiry) map.set(item.enquiry.id, item.enquiry);
+    }
+    for (const e of Object.values(selectedEnquiriesById)) map.set(e.id, e);
+    return map;
+  }, [
+    initialEnquiry,
+    enquiries,
+    activeEnquiriesForLinkedContact,
+    enquiryPickerItems,
+    selectedEnquiriesById,
+  ]);
 
   const conflictKeys = useMemo(
     () => new Set(possibleConflicts.map((h) => `${h.recordType}:${h.recordId}`)),
@@ -830,8 +651,9 @@ export function QuoteFormClient({
     const nextId = enqId || null;
     setLinkedEnquiryId(nextId);
     if (!nextId) return;
-    const enq = enquiries.find((e) => e.id === nextId);
+    const enq = enquiriesById.get(nextId);
     if (!enq) return;
+    setSelectedEnquiriesById((prev) => ({ ...prev, [enq.id]: enq }));
 
     if (!skipContactFill) {
       if (!firstName.trim() && enq.firstName) {
@@ -860,7 +682,7 @@ export function QuoteFormClient({
       setWorkTypeSubcategoryId(enq.workTypeSubcategoryId);
     }
     if (!scope.trim() && enq.summary) {
-      setScope([enq.summary, enq.notes].filter(Boolean).join('\n\n'));
+      setScope(enq.summary);
     }
     if (enq.assignedToId) {
       setFeeEarnerId(enq.assignedToId);
@@ -870,21 +692,39 @@ export function QuoteFormClient({
   const applyAutoEnquirySelectionForContact = (
     pId: string | null,
     oId: string | null,
-    personObj?: Person | null,
-    orgObj?: Organisation | null,
+    personObj?: Person | EntityPickerPersonSummary | null,
+    orgObj?: Organisation | EntityPickerOrganisationSummary | null,
   ) => {
-    const activeEnqs = getActiveEnquiriesForContact(pId, oId, personObj, orgObj);
-    if (activeEnqs.length === 1) {
-      setShowLinkedEnquiry(true);
-      setShowAllEnquiriesInDropdown(false);
-      handleSelectEnquiry(activeEnqs[0].id, true);
-    } else if (activeEnqs.length > 1) {
-      setShowLinkedEnquiry(true);
-      setShowAllEnquiriesInDropdown(false);
-    }
+    void previewIntakeDuplicatesAndConflictsAction({
+      kind: 'quote',
+      firstName: personObj?.firstName ?? firstName,
+      surname: personObj?.surname ?? surname,
+      callingOnBehalfOf: orgObj?.legalName ?? prospectOrganisationName,
+      linkedPersonId: pId,
+      linkedOrganisationId: oId,
+      includeConflicts: false,
+    }).then((res) => {
+      if (isActionDenied(res)) return;
+      const activeEnqs = res.activeLinkedEnquiries;
+      for (const e of activeEnqs) {
+        setSelectedEnquiriesById((prev) => ({ ...prev, [e.id]: e }));
+      }
+      if (activeEnqs.length === 1) {
+        setShowLinkedEnquiry(true);
+        setShowAllEnquiriesInDropdown(false);
+        handleSelectEnquiry(activeEnqs[0].id, true);
+      } else if (activeEnqs.length > 1) {
+        setShowLinkedEnquiry(true);
+        setShowAllEnquiriesInDropdown(false);
+      }
+    });
   };
 
-  const linkExistingPerson = (p: Person, linkedOrgsForPerson?: Organisation[]) => {
+  const linkExistingPerson = (
+    p: Person | EntityPickerPersonSummary,
+    linkedOrgsForPerson?: EntityPickerOrganisationSummary[] | Organisation[],
+  ) => {
+    setSelectedPeopleById((prev) => ({ ...prev, [p.id]: p }));
     setLinkedPersonId(p.id);
     setFirstName(p.firstName);
     setSurname(p.surname);
@@ -893,17 +733,23 @@ export function QuoteFormClient({
     if (pEmail) setProspectEmail(pEmail);
     if (pPhone) setProspectPhone(pPhone);
 
-    const orgsList =
+    const orgsList: Array<Organisation | EntityPickerOrganisationSummary> =
       linkedOrgsForPerson ??
       links
         .filter((l) => l.personId === p.id && l.isCurrent)
-        .map((l) => organisations.find((o) => o.id === l.organisationId))
-        .filter((o): o is Organisation => Boolean(o));
+        .map((l) => orgsById.get(l.organisationId))
+        .filter((o): o is Organisation | EntityPickerOrganisationSummary => Boolean(o));
+    if (orgsList.length > 0) {
+      setSelectedOrgsById((prev) => {
+        const next = { ...prev };
+        for (const o of orgsList) next[o.id] = o;
+        return next;
+      });
+    }
 
     let nextOrgId = linkedOrganisationId;
-    let nextOrgObj: Organisation | null = linkedOrganisationId
-      ? organisations.find((o) => o.id === linkedOrganisationId) ?? null
-      : null;
+    let nextOrgObj: Organisation | EntityPickerOrganisationSummary | null =
+      linkedOrganisationId ? orgsById.get(linkedOrganisationId) ?? null : null;
 
     if (orgsList.length > 0 && !prospectOrganisationName.trim()) {
       setProspectOrganisationName(orgsList[0].legalName);
@@ -911,14 +757,13 @@ export function QuoteFormClient({
       nextOrgId = orgsList[0].id;
       nextOrgObj = orgsList[0];
     } else if (p.id.startsWith('ENQ-') && !prospectOrganisationName.trim()) {
-      const matchedEnq = enquiries.find((e) => e.id === p.id);
+      const matchedEnq = enquiriesById.get(p.id);
       if (matchedEnq?.callingOnBehalfOf.trim()) {
         setProspectOrganisationName(matchedEnq.callingOnBehalfOf.trim());
         if (matchedEnq.linkedOrganisationId) {
           setLinkedOrganisationId(matchedEnq.linkedOrganisationId);
           nextOrgId = matchedEnq.linkedOrganisationId;
-          nextOrgObj =
-            organisations.find((o) => o.id === matchedEnq.linkedOrganisationId) ?? null;
+          nextOrgObj = orgsById.get(matchedEnq.linkedOrganisationId) ?? null;
         }
       }
     }
@@ -928,39 +773,50 @@ export function QuoteFormClient({
     showToast(`Linked quote to ${personDisplayName(p)} (${p.id})`);
   };
 
-  const linkExistingOrg = (o: Organisation) => {
+  const linkExistingOrg = (o: Organisation | EntityPickerOrganisationSummary) => {
+    setSelectedOrgsById((prev) => ({ ...prev, [o.id]: o }));
     setLinkedOrganisationId(o.id);
     setProspectOrganisationName(o.legalName);
     if (!prospectEmail.trim() && o.generalEmail) setProspectEmail(o.generalEmail);
     if (!prospectPhone.trim() && o.mainPhone) setProspectPhone(o.mainPhone);
     setContactSearchDismissed(true);
-    const pObj = linkedPersonId ? mergedPeople.find((p) => p.id === linkedPersonId) ?? null : null;
+    const pObj = linkedPersonId ? peopleById.get(linkedPersonId) ?? null : null;
     applyAutoEnquirySelectionForContact(linkedPersonId, o.id, pObj, o);
     showToast(`Linked quote to ${o.legalName} (${o.id})`);
   };
 
   const filteredEnquiries = useMemo(() => {
     const q = enquirySearch.trim().toLowerCase();
-    const basePool =
+    const remoteEnquiries = enquiryPickerItems
+      .map((item) => item.enquiry)
+      .filter((e): e is EntityPickerEnquirySummary => Boolean(e));
+    const pool =
       activeEnquiriesForLinkedContact.length > 0 && !showAllEnquiriesInDropdown && !q
         ? activeEnquiriesForLinkedContact
-        : enquiries;
-    const list = basePool.filter((e) => {
+        : Array.from(enquiriesById.values());
+    const mergedPool = q
+      ? Array.from(
+          new Map<string, Enquiry | EntityPickerEnquirySummary>(
+            [...remoteEnquiries, ...pool].map((e) => [e.id, e]),
+          ).values(),
+        )
+      : pool;
+    const list = mergedPool.filter((e) => {
       if (!q) return true;
       const hay = `${e.reference} ${e.firstName} ${e.lastName} ${e.callingOnBehalfOf} ${e.summary}`.toLowerCase();
       return hay.includes(q);
     });
-    // Ensure currently selected linkedEnquiryId is always present in options
     if (linkedEnquiryId && !list.some((e) => e.id === linkedEnquiryId)) {
-      const sel = enquiries.find((e) => e.id === linkedEnquiryId);
+      const sel = enquiriesById.get(linkedEnquiryId);
       if (sel) return [sel, ...list];
     }
     return list;
   }, [
-    enquiries,
     enquirySearch,
+    enquiryPickerItems,
     activeEnquiriesForLinkedContact,
     showAllEnquiriesInDropdown,
+    enquiriesById,
     linkedEnquiryId,
   ]);
 
@@ -1216,6 +1072,7 @@ export function QuoteFormClient({
                     setFirstName(e.target.value);
                     setContactSearchDismissed(false);
                   }}
+                  onBlur={triggerConflictCheck}
                 />
               </div>
 
@@ -1233,6 +1090,7 @@ export function QuoteFormClient({
                     setSurname(e.target.value);
                     setContactSearchDismissed(false);
                   }}
+                  onBlur={triggerConflictCheck}
                 />
               </div>
 
@@ -1250,6 +1108,7 @@ export function QuoteFormClient({
                     setProspectOrganisationName(e.target.value);
                     setContactSearchDismissed(false);
                   }}
+                  onBlur={triggerConflictCheck}
                 />
               </div>
             </div>
@@ -1431,6 +1290,7 @@ export function QuoteFormClient({
                   placeholder="name@example.com"
                   value={prospectEmail}
                   onChange={(e) => setProspectEmail(e.target.value)}
+                  onBlur={triggerConflictCheck}
                 />
               </div>
 
@@ -1445,6 +1305,7 @@ export function QuoteFormClient({
                   placeholder="029 2018 0000"
                   value={prospectPhone}
                   onChange={(e) => setProspectPhone(e.target.value)}
+                  onBlur={triggerConflictCheck}
                 />
               </div>
             </div>
@@ -2296,6 +2157,12 @@ export function QuoteFormClient({
               </div>
               {!hasSearchInputs ? (
                 <span className="new-enquiry-badge">Waiting</span>
+              ) : fastError || conflictError ? (
+                <span className="new-enquiry-badge new-enquiry-badge--warn">
+                  Check failed
+                </span>
+              ) : loadingFast || loadingConflicts ? (
+                <span className="new-enquiry-badge">Checking…</span>
               ) : hasHighSeverityConflict ? (
                 <span className="new-enquiry-badge new-enquiry-badge--alert">
                   Possible conflict
@@ -2323,6 +2190,26 @@ export function QuoteFormClient({
                 overflowY: 'auto',
               }}
             >
+              {fastError || conflictError ? (
+                <div className="banner banner--warning" role="alert">
+                  <div style={{ flex: 1 }}>
+                    <span>{conflictError ?? fastError}</span>
+                  </div>
+                  <div className="banner__actions">
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      onClick={() => {
+                        if (fastError) retryFastCheck();
+                        if (conflictError) retryConflictCheck();
+                      }}
+                    >
+                      Try again
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               {linkedPersonId ? (
                 <div
                   style={{
@@ -2336,7 +2223,7 @@ export function QuoteFormClient({
                   }}
                 >
                   <StatusPill
-                    label={`Linked: ${personDisplayName(mergedPeople.find((p) => p.id === linkedPersonId)) || linkedPersonId}`}
+                    label={`Linked: ${(peopleById.get(linkedPersonId) ? personDisplayName(peopleById.get(linkedPersonId)!) : '') || linkedPersonId}`}
                     tone="positive"
                   />
                   <button
@@ -2362,7 +2249,7 @@ export function QuoteFormClient({
                   }}
                 >
                   <StatusPill
-                    label={`Linked: ${organisations.find((o) => o.id === linkedOrganisationId)?.legalName ?? linkedOrganisationId}`}
+                    label={`Linked: ${orgsById.get(linkedOrganisationId)?.legalName ?? linkedOrganisationId}`}
                     tone="positive"
                   />
                   <button
@@ -2375,7 +2262,14 @@ export function QuoteFormClient({
                 </div>
               ) : null}
 
-              {hasSearchInputs && distinctMatchedCount === 0 ? (
+              {shouldShowNoMatchesMessage({
+                hasSearchInputs,
+                loadingFast,
+                loadingConflicts,
+                fastError,
+                conflictError,
+                matchCount: distinctMatchedCount,
+              }) ? (
                 <div
                   style={{
                     padding: '8px 10px',
@@ -2416,12 +2310,10 @@ export function QuoteFormClient({
                       ]),
                     ).join(', ');
                     const person =
-                      hit.recordType === 'person'
-                        ? people.find((p) => p.id === hit.recordId)
-                        : undefined;
+                      hit.recordType === 'person' ? peopleById.get(hit.recordId) : undefined;
                     const org =
                       hit.recordType === 'organisation'
-                        ? organisations.find((o) => o.id === hit.recordId)
+                        ? orgsById.get(hit.recordId)
                         : undefined;
                     const isLinked =
                       (person && linkedPersonId === person.id) ||
