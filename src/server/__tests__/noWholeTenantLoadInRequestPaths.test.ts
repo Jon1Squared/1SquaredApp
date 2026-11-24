@@ -34,6 +34,8 @@ const TARGET_CLIENT_SCAN_CALLEES = new Set([
   'findCandidateDuplicates',
   'searchMatterConflicts',
   'runEnquiryConflictSearch',
+  'detectPreliminaryConflicts',
+  'findEnquiryEntityMatches',
 ]);
 
 interface AllowListEntry {
@@ -223,31 +225,10 @@ export const MAX_TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST_COUNT = 8;
  * Snapshot & client-form baseline deferred strictly to WP1b (S1-02b)
  * (ratchets down to 0 in S1-02b; must never grow or include matters/enquiries/quotes/tasks/signOffs/pms).
  */
-export const DEFERRED_S1_02B_ALLOW_LIST: readonly AllowListEntry[] = [
-  {
-    file: 'src/server/services.ts',
-    fn: 'getAppSnapshot',
-    callees: ['getAppSnapshotInScope'],
-    reason: 'Legacy whole-shell loader deferred to WP1b (S1-02b).',
-  },
-  {
-    file: 'src/server/services.ts',
-    fn: 'getAppSnapshotInScope',
-    callees: [
-      'listAllPeople',
-      'listAllOrganisations',
-      'listAllLinks',
-      'listAllNotes',
-      'listAllMergeHistory',
-      'listAllVisibleKeyDates',
-    ],
-    reason:
-      'Temporary people/org/links/notes/mergeHistory/visibleKeyDates hydration inside getAppSnapshotInScope deferred to WP1b (matters/enquiries/quotes/tasks/signOffs/PMS converted in S1-02a).',
-  },
-];
+export const DEFERRED_S1_02B_ALLOW_LIST: readonly AllowListEntry[] = [];
 
-// Exact S1-02b baseline: 25 app layout/page getAppSnapshot calls + 6 component client-scan calls + 7 getAppSnapshot/InScope calls = 38
-export const MAX_DEFERRED_S1_02B_BASELINE_COUNT = 38;
+// Exact S1-02b baseline ratcheted to zero
+export const MAX_DEFERRED_S1_02B_BASELINE_COUNT = 0;
 
 interface AstCallFinding {
   readonly file: string;
@@ -433,7 +414,6 @@ export function scanSourceTextForWholeTenantCalls(
     if (ts.isCallExpression(node)) {
       const callee = getCalleeName(node.expression, aliasMap);
       if (callee) {
-        const isPageFile = relPath.startsWith('src/app/');
         const isComponentFile = relPath.startsWith('src/components/');
         let flagged = false;
 
@@ -469,11 +449,7 @@ export function scanSourceTextForWholeTenantCalls(
             matchesAllowList(finding, TEMPORARY_CONFLICT_GRAPH_ALLOW_LIST)
           ) {
             temporaryConflictMatched.push(finding);
-          } else if (
-            matchesAllowList(finding, DEFERRED_S1_02B_ALLOW_LIST) ||
-            (isPageFile && callee === 'getAppSnapshot') ||
-            (isComponentFile && TARGET_CLIENT_SCAN_CALLEES.has(callee))
-          ) {
+          } else if (matchesAllowList(finding, DEFERRED_S1_02B_ALLOW_LIST)) {
             deferred.push(finding);
           } else {
             unexpected.push(finding);
@@ -546,6 +522,78 @@ describe('S1-02a B15 AST guard: no whole-tenant loads in server request paths', 
     expect(deferred.length).toBeLessThanOrEqual(
       MAX_DEFERRED_S1_02B_BASELINE_COUNT,
     );
+    expect(MAX_DEFERRED_S1_02B_BASELINE_COUNT).toBe(0);
+    expect(DEFERRED_S1_02B_ALLOW_LIST).toEqual([]);
+  });
+
+  it('S1-02b: ensures getAppSnapshot and getAppSnapshotInScope are unreachable from src/app, src/components, src/pms, and non-test src/server, and catches reintroduced client scans', () => {
+    const runtimeDirs = [
+      path.join(REPO_ROOT, 'src', 'app'),
+      path.join(REPO_ROOT, 'src', 'components'),
+      path.join(REPO_ROOT, 'src', 'pms'),
+      path.join(REPO_ROOT, 'src', 'server'),
+    ];
+    const runtimeFiles = runtimeDirs.flatMap((d) => walkSourceFiles(d));
+    const hits: string[] = [];
+
+    for (const absPath of runtimeFiles) {
+      const relPath = path.relative(REPO_ROOT, absPath).replace(/\\/g, '/');
+      const sourceText = fs.readFileSync(absPath, 'utf8');
+      const sourceFile = ts.createSourceFile(
+        relPath,
+        sourceText,
+        ts.ScriptTarget.Latest,
+        true,
+        relPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+      );
+      const visitIds = (node: ts.Node): void => {
+        if (
+          ts.isIdentifier(node) &&
+          (node.text === 'getAppSnapshot' ||
+            node.text === 'getAppSnapshotInScope')
+        ) {
+          const line =
+            sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+              .line + 1;
+          hits.push(`${relPath}:${line} (${node.text})`);
+        }
+        ts.forEachChild(node, visitIds);
+      };
+      visitIds(sourceFile);
+    }
+
+    expect(hits).toEqual([]);
+
+    const pageSnapSynthetic = scanSourceTextForWholeTenantCalls(
+      'src/app/syntheticPage.tsx',
+      `import { getAppSnapshot } from '@/server/services'; export default async function Page() { return getAppSnapshot('P-000001'); }`,
+    );
+    expect(pageSnapSynthetic.deferred).toEqual([]);
+    expect(
+      pageSnapSynthetic.unexpected.some((f) => f.callee === 'getAppSnapshot'),
+    ).toBe(true);
+
+    const prelimConflictSynthetic = scanSourceTextForWholeTenantCalls(
+      'src/components/SyntheticForm.tsx',
+      `export function Form() { return detectPreliminaryConflicts([], [], [], {} as any); }`,
+    );
+    expect(prelimConflictSynthetic.deferred).toEqual([]);
+    expect(
+      prelimConflictSynthetic.unexpected.some(
+        (f) => f.callee === 'detectPreliminaryConflicts',
+      ),
+    ).toBe(true);
+
+    const entityMatchSynthetic = scanSourceTextForWholeTenantCalls(
+      'src/components/SyntheticForm.tsx',
+      `export function Form() { return findEnquiryEntityMatches({} as any, [], []); }`,
+    );
+    expect(entityMatchSynthetic.deferred).toEqual([]);
+    expect(
+      entityMatchSynthetic.unexpected.some(
+        (f) => f.callee === 'findEnquiryEntityMatches',
+      ),
+    ).toBe(true);
   });
 
   it('R671: requires callees + ratchet on PERMANENT_ALLOW_LIST, monitors PMS/rollup/keydate loaders, and catches element-access and alias calls', () => {

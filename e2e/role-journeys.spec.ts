@@ -723,3 +723,62 @@ test.describe.serial('R657: Core intake-to-matter journeys (seeded demo dataset)
     }
   });
 });
+
+test.describe('S1-02b C2: Server-backed duplicate and conflict previews during intake', () => {
+  test('1. Enquiries coordinator (Lowri) sees duplicate warning on /people/new', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/people/new');
+      await expect(page.locator('#p-first')).toBeVisible();
+
+      await page.locator('#p-first').fill('Gareth');
+      await page.locator('#p-surname').fill('Hughes');
+      await page.locator('#p-postcode').fill('CF10 3BX');
+
+      const dupBanner = page.locator('[role="alert"]', {
+        hasText: 'Possible duplicate detected',
+      });
+      await expect(dupBanner).toBeVisible({ timeout: 10_000 });
+      await expect(dupBanner).toContainText('Gareth Hughes');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('2. Enquiries coordinator sees preliminary conflict hit on /enquiries/new', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const page = await context.newPage();
+    const pageErrors = attachPageErrorCollector(page);
+
+    try {
+      await page.goto('/enquiries/new');
+      await expect(page.locator('#enq-first-name')).toBeVisible();
+
+      await page.locator('#enq-first-name').fill('Iwan');
+      await page.locator('#enq-last-name').fill('Phillips');
+      await page.locator('#enq-other-parties').fill('Coastline Outdoor Ltd');
+      await page.locator('#enq-other-parties').blur();
+
+      const mainArea = page.locator('.main-area');
+      await expect(mainArea).toContainText('Possible conflicts', {
+        timeout: 15_000,
+      });
+      await expect(mainArea).toContainText('PEN001-0004');
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+});

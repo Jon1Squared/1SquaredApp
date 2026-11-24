@@ -1747,7 +1747,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
     const orClauses: string[] = [];
     const andClauses: string[] = [];
     if (filters.includeMerged === false) {
-      andClauses.push('m.merged_into_id IS NULL');
+      andClauses.push("NULLIF(COALESCE(m.fields_json->>'mergedIntoId', ''), '') IS NULL");
     }
     if (ids.length > 0) {
       params.push(ids);
@@ -2170,7 +2170,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
         )`);
       }
       if (optsObj?.includeMerged === false) {
-        clauses.push('m.merged_into_id IS NULL');
+        clauses.push("NULLIF(COALESCE(m.fields_json->>'mergedIntoId', ''), '') IS NULL");
       }
       if (excludeIds.length > 0) {
         params.push(excludeIds);

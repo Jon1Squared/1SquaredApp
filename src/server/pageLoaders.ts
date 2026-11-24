@@ -31,7 +31,6 @@ import { addMonths, toIsoDate } from '@/domain/dates';
 import { findRecordsOwnedByLeavers } from '@/domain/employment';
 import {
   createDefaultRoleConfigs,
-  getLeftRailVisibility,
   resolveActiveViewingRole,
   resolveEmployeeRoles,
   type LeftRailVisibility,
@@ -60,6 +59,7 @@ import {
   canUserVerifyKeyDate,
   filterEmploymentForUser,
   getActiveActorSession,
+  getLeftRailVisibility,
   hasPersonPermission,
   resolveConfiguredFirmPrimaryDomain,
   resolveEmployeePermissions,
