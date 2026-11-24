@@ -11,6 +11,11 @@
  */
 
 import type {
+  CddChecklistItemTemplate,
+  CddChecklistTemplateSet,
+  CddClientCategoryKey,
+  CddConfiguration,
+  CddRiskTierKey,
   IntakeEvidenceArtifactRef,
   PermissionKey,
   RegisterApprovalRules,
@@ -24,6 +29,7 @@ import type {
   RegisterTransitionDefinition,
   RegisterTypeDefinition,
   RegisterTypeOverride,
+  TenantConfiguration,
 } from '../../api/index';
 
 export const REGISTER_DOMAIN_ERROR_CODES = {
@@ -1449,4 +1455,284 @@ export function isRegisterPermission(key: string): key is RegisterPermission {
     key === 'cdd:view' ||
     key === 'cdd:record'
   );
+}
+
+// ============================================================================
+// Client Due Diligence (CDD) Configuration & Checklist Helpers (ADR 0039, S1-04)
+// ============================================================================
+
+export const DEFAULT_CDD_RECHECK_MONTHS_STANDARD = 36;
+export const DEFAULT_CDD_RECHECK_MONTHS_HIGH = 12;
+export const DEFAULT_CDD_REMINDER_DAYS_BEFORE: readonly number[] = Object.freeze([
+  14, 7, 0,
+]);
+export const DEFAULT_CDD_MAX_EVIDENCE_BYTES = 10_485_760;
+
+export interface ResolvedCddConfiguration {
+  readonly enabled: boolean;
+  readonly clientTypeMapping: Readonly<Record<string, CddClientCategoryKey>>;
+  readonly riskTierMapping: Readonly<Record<string, CddRiskTierKey>>;
+  readonly checklists: Readonly<Partial<Record<CddClientCategoryKey, CddChecklistTemplateSet>>>;
+  readonly recheckIntervalsMonths: {
+    readonly standard: number;
+    readonly high: number;
+  };
+  readonly reminderScheduleDaysBefore: readonly number[];
+  readonly maxEvidenceFileSizeBytes: number;
+}
+
+export function mergeCddConfigurations(
+  baseConfig?: CddConfiguration | null,
+  overrideConfig?: CddConfiguration | null,
+): CddConfiguration {
+  const baseChecklists = baseConfig?.checklists ?? {};
+  const overrideChecklists = overrideConfig?.checklists ?? {};
+  const mergedChecklists: Partial<Record<CddClientCategoryKey, CddChecklistTemplateSet>> = {};
+  const categoryKeys: CddClientCategoryKey[] = [
+    'individual',
+    'company_or_llp',
+    'trust_charity_or_partnership',
+  ];
+  for (const key of categoryKeys) {
+    const b = baseChecklists[key];
+    const o = overrideChecklists[key];
+    if (b || o) {
+      mergedChecklists[key] = {
+        standard: [...(o?.standard ?? b?.standard ?? [])],
+        highAdditional: [...(o?.highAdditional ?? b?.highAdditional ?? [])],
+      };
+    }
+  }
+  const baseIntervals = baseConfig?.recheckIntervalsMonths;
+  const overrideIntervals = overrideConfig?.recheckIntervalsMonths;
+  return {
+    enabled: overrideConfig?.enabled ?? baseConfig?.enabled ?? true,
+    clientTypeMapping: {
+      ...(baseConfig?.clientTypeMapping ?? {}),
+      ...(overrideConfig?.clientTypeMapping ?? {}),
+    },
+    riskTierMapping: {
+      ...(baseConfig?.riskTierMapping ?? {}),
+      ...(overrideConfig?.riskTierMapping ?? {}),
+    },
+    checklists: mergedChecklists,
+    recheckIntervalsMonths: {
+      standard:
+        overrideIntervals?.standard ??
+        baseIntervals?.standard ??
+        DEFAULT_CDD_RECHECK_MONTHS_STANDARD,
+      high:
+        overrideIntervals?.high ??
+        baseIntervals?.high ??
+        DEFAULT_CDD_RECHECK_MONTHS_HIGH,
+    },
+    reminderScheduleDaysBefore: [
+      ...(overrideConfig?.reminderScheduleDaysBefore ??
+        baseConfig?.reminderScheduleDaysBefore ??
+        DEFAULT_CDD_REMINDER_DAYS_BEFORE),
+    ],
+    maxEvidenceFileSizeBytes:
+      overrideConfig?.maxEvidenceFileSizeBytes ??
+      baseConfig?.maxEvidenceFileSizeBytes ??
+      DEFAULT_CDD_MAX_EVIDENCE_BYTES,
+  };
+}
+
+export function resolveEffectiveCddConfig(
+  config?: Pick<TenantConfiguration, 'cdd'> | null,
+  overrideConfig?: CddConfiguration | null,
+): ResolvedCddConfiguration {
+  const cdd = config?.cdd;
+  const baseRecheck = cdd?.recheckIntervalsMonths;
+  const merged = mergeCddConfigurations(
+    {
+      enabled: cdd?.enabled,
+      clientTypeMapping: cdd?.clientTypeMapping,
+      riskTierMapping: cdd?.riskTierMapping,
+      checklists: cdd?.checklists,
+      recheckIntervalsMonths: baseRecheck
+        ? {
+            standard: baseRecheck.standard,
+            high: baseRecheck.high,
+          }
+        : undefined,
+      reminderScheduleDaysBefore: cdd?.reminderScheduleDaysBefore,
+      maxEvidenceFileSizeBytes: cdd?.maxEvidenceFileSizeBytes,
+    },
+    overrideConfig,
+  );
+  const recheckIntervalsMonths = {
+    standard:
+      merged.recheckIntervalsMonths?.standard ??
+      DEFAULT_CDD_RECHECK_MONTHS_STANDARD,
+    high:
+      merged.recheckIntervalsMonths?.high ?? DEFAULT_CDD_RECHECK_MONTHS_HIGH,
+  };
+  return {
+    enabled: merged.enabled ?? true,
+    clientTypeMapping: merged.clientTypeMapping ?? {},
+    riskTierMapping: merged.riskTierMapping ?? {},
+    checklists: merged.checklists ?? {},
+    recheckIntervalsMonths,
+    reminderScheduleDaysBefore:
+      merged.reminderScheduleDaysBefore ?? [...DEFAULT_CDD_REMINDER_DAYS_BEFORE],
+    maxEvidenceFileSizeBytes:
+      merged.maxEvidenceFileSizeBytes ?? DEFAULT_CDD_MAX_EVIDENCE_BYTES,
+  };
+}
+
+export function resolveCddChecklistTemplatesForClient(
+  config: Pick<TenantConfiguration, 'cdd'> | null | undefined,
+  category: CddClientCategoryKey,
+  tier: CddRiskTierKey,
+  overrideConfig?: CddConfiguration | null,
+): CddChecklistItemTemplate[] {
+  const effective = resolveEffectiveCddConfig(config, overrideConfig);
+  const templateSet = effective.checklists[category];
+  if (!templateSet) {
+    return [];
+  }
+  const standardItems: CddChecklistItemTemplate[] = (templateSet.standard ?? []).map(
+    (item) => ({
+      itemKey: item.itemKey,
+      label: item.label,
+      ...(item.description !== undefined ? { description: item.description } : {}),
+      required: item.required,
+      requiresEvidence: item.requiresEvidence,
+      ...(item.linkedIntakeCheckKind !== undefined
+        ? { linkedIntakeCheckKind: item.linkedIntakeCheckKind }
+        : {}),
+    }),
+  );
+  if (tier !== 'high') {
+    return standardItems;
+  }
+  const highItems: CddChecklistItemTemplate[] = (
+    templateSet.highAdditional ?? []
+  ).map((item) => ({
+    itemKey: item.itemKey,
+    label: item.label,
+    ...(item.description !== undefined ? { description: item.description } : {}),
+    required: item.required,
+    requiresEvidence: item.requiresEvidence,
+    ...(item.linkedIntakeCheckKind !== undefined
+      ? { linkedIntakeCheckKind: item.linkedIntakeCheckKind }
+      : {}),
+  }));
+  return [...standardItems, ...highItems];
+}
+
+export function resolveClientCddCategory(
+  cddConfig: Pick<ResolvedCddConfiguration, 'clientTypeMapping'>,
+  params: {
+    subjectType: 'person' | 'organisation';
+    organisationTypeSystemKey?: string | null;
+    explicitCategory?: CddClientCategoryKey | null;
+  },
+): CddClientCategoryKey | null {
+  if (params.subjectType === 'person') {
+    return 'individual';
+  }
+  const sysKey = params.organisationTypeSystemKey?.trim();
+  if (sysKey && cddConfig.clientTypeMapping[sysKey]) {
+    return cddConfig.clientTypeMapping[sysKey];
+  }
+  return params.explicitCategory ?? null;
+}
+
+export function resolveClientCddRiskTier(
+  cddConfig: Pick<ResolvedCddConfiguration, 'riskTierMapping'>,
+  riskRatingSystemKeys: readonly (string | null | undefined)[],
+): CddRiskTierKey {
+  for (const rawKey of riskRatingSystemKeys) {
+    const key = rawKey?.trim().toLowerCase();
+    if (!key) continue;
+    const mapped = cddConfig.riskTierMapping[key];
+    if (mapped === 'high' || (!mapped && (key === 'high' || key === 'critical' || key === 'sensitive'))) {
+      return 'high';
+    }
+  }
+  return 'standard';
+}
+
+export function calculateCddNextReviewDueIso(
+  completedAtIso: string,
+  tier: CddRiskTierKey,
+  cddConfig: Pick<ResolvedCddConfiguration, 'recheckIntervalsMonths'>,
+): string {
+  const recheckIntervalsMonths = cddConfig.recheckIntervalsMonths;
+  const months =
+    tier === 'high'
+      ? recheckIntervalsMonths.high
+      : recheckIntervalsMonths.standard;
+  const baseDate = new Date(completedAtIso);
+  if (Number.isNaN(baseDate.getTime())) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Invalid completedAt timestamp "${completedAtIso}" when computing CDD re-check due date.`,
+    );
+  }
+  const targetYear = baseDate.getUTCFullYear();
+  const targetMonthIndex = baseDate.getUTCMonth() + months;
+  const targetDay = baseDate.getUTCDate();
+  const endOfTargetMonth = new Date(
+    Date.UTC(targetYear, targetMonthIndex + 1, 0),
+  ).getUTCDate();
+  const clampedDay = Math.min(targetDay, endOfTargetMonth);
+  const due = new Date(
+    Date.UTC(targetYear, targetMonthIndex, clampedDay, 23, 59, 59, 999),
+  );
+  return due.toISOString();
+}
+
+export function buildCddChecklistItemsForTier(params: {
+  config?: Pick<TenantConfiguration, 'cdd'> | null;
+  overrideConfig?: CddConfiguration | null;
+  category: CddClientCategoryKey;
+  tier: CddRiskTierKey;
+  existingItems?: readonly RegisterChecklistItemValue[];
+}): RegisterChecklistItemValue[] {
+  const templates = resolveCddChecklistTemplatesForClient(
+    params.config,
+    params.category,
+    params.tier,
+    params.overrideConfig,
+  );
+  const existingByKey = new Map(
+    (params.existingItems ?? []).map((item) => [item.itemKey, item]),
+  );
+  const result: RegisterChecklistItemValue[] = [];
+  const includedKeys = new Set<string>();
+  for (const tpl of templates) {
+    includedKeys.add(tpl.itemKey);
+    const prev = existingByKey.get(tpl.itemKey);
+    if (prev) {
+      result.push({
+        ...prev,
+        label: tpl.label,
+        required: tpl.required,
+      });
+    } else {
+      result.push({
+        itemKey: tpl.itemKey,
+        label: tpl.label,
+        required: tpl.required,
+        status: 'pending',
+        recordedById: null,
+        recordedAt: null,
+        evidenceRefs: [],
+        intakeCheckRecordId: null,
+      });
+    }
+  }
+  // Preserve any custom/previously recorded items on upgrade
+  for (const prev of params.existingItems ?? []) {
+    if (!includedKeys.has(prev.itemKey)) {
+      result.push({
+        ...prev,
+        evidenceRefs: [...prev.evidenceRefs],
+      });
+    }
+  }
+  return result;
 }

@@ -3,6 +3,7 @@ import {
   loadAndValidateTenantConfig,
   RESERVED_TENANT_CONFIG_SETTINGS,
   TenantConfigurationSchema,
+  validateCddConfig,
   validateTenantConfigWithWarnings,
 } from '../src/config-engine';
 
@@ -216,5 +217,85 @@ describe('S0-18: Tenant Configuration Engine — integrations.pmsSync Deep-Merge
         },
       }),
     ).toThrow(/requireMfaForAdminPermissions.*live/i);
+  });
+
+  it('S1-04: deep-merges cdd configuration overrides without wiping base mappings or checklists and validates standalone validateCddConfig', () => {
+    const withBaseCdd = {
+      ...SAMPLE_BASE_CONFIG,
+      cdd: {
+        enabled: true,
+        clientTypeMapping: {
+          company: 'company_or_llp',
+          sole_trader: 'individual',
+        },
+        riskTierMapping: {
+          low: 'standard',
+          high: 'high',
+          sensitive: 'high',
+        },
+        checklists: {
+          individual: {
+            standard: [
+              {
+                itemKey: 'photo_id',
+                label: 'Photo ID',
+                required: true,
+                requiresEvidence: true,
+                linkedIntakeCheckKind: 'identity_verification',
+              },
+            ],
+            highAdditional: [
+              {
+                itemKey: 'source_of_funds',
+                label: 'Source of funds',
+                required: true,
+                requiresEvidence: true,
+              },
+            ],
+          },
+        },
+        recheckIntervalsMonths: {
+          standard: 36,
+          high: 12,
+        },
+        reminderScheduleDaysBefore: [30, 7, 0],
+        maxEvidenceFileSizeBytes: 10485760,
+      },
+    };
+
+    const merged = loadAndValidateTenantConfig(withBaseCdd, {
+      cdd: {
+        clientTypeMapping: {
+          trust: 'trust_charity_or_partnership',
+        },
+        recheckIntervalsMonths: {
+          high: 6,
+        },
+      },
+    });
+
+    expect(merged.cdd?.enabled).toBe(true);
+    expect(merged.cdd?.clientTypeMapping).toEqual({
+      company: 'company_or_llp',
+      sole_trader: 'individual',
+      trust: 'trust_charity_or_partnership',
+    });
+    expect(merged.cdd?.riskTierMapping?.sensitive).toBe('high');
+    expect(merged.cdd?.checklists?.individual?.standard).toHaveLength(1);
+    expect(merged.cdd?.recheckIntervalsMonths).toEqual({
+      standard: 36,
+      high: 6,
+    });
+    expect(merged.cdd?.reminderScheduleDaysBefore).toEqual([30, 7, 0]);
+    expect(merged.cdd?.maxEvidenceFileSizeBytes).toBe(10485760);
+
+    const validated = validateCddConfig({
+      enabled: true,
+      recheckIntervalsMonths: { standard: 24, high: 12 },
+    });
+    expect(validated.recheckIntervalsMonths?.standard).toBe(24);
+
+    expect(() => validateCddConfig({ unknownCddKey: true })).toThrow();
+    expect(() => validateCddConfig('not-an-object')).toThrow(/CDD_CONFIG_INVALID/);
   });
 });

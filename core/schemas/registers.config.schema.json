@@ -59,7 +59,9 @@
         "register:approve",
         "register:configure",
         "undertaking:manage",
-        "signoff:approve"
+        "signoff:approve",
+        "cdd:view",
+        "cdd:record"
       ]
     },
     "registerFieldDefinition": {
@@ -87,7 +89,9 @@
             "boolean",
             "date",
             "select",
-            "person"
+            "person",
+            "checklist",
+            "evidence"
           ],
           "description": "Input and validation data type for this register field."
         },
@@ -169,6 +173,11 @@
           "$ref": "#/$defs/registerPermission",
           "description": "Minimum RBAC permission required to execute this transition."
         },
+        "allowedRoles": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Optional allow-list of role keys permitted to execute this transition."
+        },
         "requiresComment": {
           "type": "boolean",
           "default": false,
@@ -183,6 +192,16 @@
           "type": "boolean",
           "default": false,
           "description": "When true and assignedApproverId is set, only that assigned approver may execute the transition."
+        },
+        "mustDifferFromPreviousApprover": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the actor executing this transition must differ from previous approval transition actors on the record."
+        },
+        "distinctFromTransitionKeys": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Transition keys whose prior actor(s) on this record must differ from the current actor."
         },
         "setsDecidedAt": {
           "type": "boolean",
@@ -214,6 +233,11 @@
           "type": "boolean",
           "default": false,
           "description": "When true, non-null assignedApproverId restricts approval transitions to that named approver."
+        },
+        "allowAdminBypass": {
+          "type": "boolean",
+          "default": true,
+          "description": "When false, the admin role cannot bypass allowedRoles / allowedApproverRoles restrictions."
         }
       }
     },
@@ -249,7 +273,12 @@
         },
         "recipientMode": {
           "type": "string",
-          "enum": ["owner_and_approver", "owner_only", "matter_team_and_owner"],
+          "enum": [
+            "owner_and_approver",
+            "owner_only",
+            "matter_team_and_owner",
+            "client_owner_or_recent_fee_earner"
+          ],
           "default": "owner_and_approver",
           "description": "Determines which authorised users receive in-app register reminders (always filtered by matter restrictions)."
         }
@@ -315,6 +344,20 @@
           "minLength": 1,
           "description": "Initial workflow status key assigned when creating a new record."
         },
+        "viewPermission": {
+          "type": "string",
+          "enum": [
+            "register:view",
+            "register:create",
+            "register:edit",
+            "register:approve",
+            "register:configure",
+            "undertaking:manage",
+            "cdd:view",
+            "cdd:record"
+          ],
+          "description": "Optional explicit RBAC permission required to read entries in this register."
+        },
         "createPermission": {
           "type": "string",
           "enum": [
@@ -323,7 +366,9 @@
             "register:edit",
             "register:approve",
             "register:configure",
-            "undertaking:manage"
+            "undertaking:manage",
+            "cdd:view",
+            "cdd:record"
           ],
           "description": "RBAC permission required to create entries in this register."
         },
@@ -335,9 +380,17 @@
             "register:edit",
             "register:approve",
             "register:configure",
-            "undertaking:manage"
+            "undertaking:manage",
+            "cdd:view",
+            "cdd:record"
           ],
           "description": "RBAC permission required to update fields on open entries in this register."
+        },
+        "subjectScope": {
+          "type": "string",
+          "enum": ["matter", "client", "any"],
+          "default": "any",
+          "description": "Restricts whether records attach to a matter, a client (person/organisation), or either."
         },
         "requireMatterLink": {
           "type": "boolean",
@@ -428,7 +481,12 @@
             },
             "recipientMode": {
               "type": "string",
-              "enum": ["owner_and_approver", "owner_only", "matter_team_and_owner"],
+              "enum": [
+                "owner_and_approver",
+                "owner_only",
+                "matter_team_and_owner",
+                "client_owner_or_recent_fee_earner"
+              ],
               "description": "Override reminder recipient selection mode."
             }
           }

@@ -1966,6 +1966,172 @@
           "description": "Optional active Team ID used as the fallback enquiry routing target when no practice-area team matches; overrides the systemKey=intake default when set."
         }
       }
+    },
+    "cdd": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Client Due Diligence (CDD) checklist templates, client-type and risk-tier mappings, re-check intervals, reminder schedule, and evidence limits (ADR 0039, S1-04)",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enables CDD checklist templates on client cdd register creation."
+        },
+        "clientTypeMapping": {
+          "type": "object",
+          "default": {},
+          "description": "Maps organisation_type choice systemKeys to CDD checklist categories (individual, company_or_llp, trust_charity_or_partnership).",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["individual", "company_or_llp", "trust_charity_or_partnership"]
+          }
+        },
+        "riskTierMapping": {
+          "type": "object",
+          "default": {},
+          "description": "Maps risk_rating choice systemKeys to CDD risk tiers (standard, high).",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["standard", "high"]
+          }
+        },
+        "checklists": {
+          "type": "object",
+          "default": {},
+          "description": "Checklist templates per client CDD category (standard items plus additive highAdditional items).",
+          "propertyNames": {
+            "enum": ["individual", "company_or_llp", "trust_charity_or_partnership"]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["standard", "highAdditional"],
+            "properties": {
+              "standard": {
+                "type": "array",
+                "default": [],
+                "description": "Checklist items required for Standard tier CDD.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["itemKey", "label", "required", "requiresEvidence"],
+                  "properties": {
+                    "itemKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Stable item key stored on the CDD checklist value."
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Human-readable item label in British English."
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "Optional guidance text displayed under the checklist item."
+                    },
+                    "required": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Whether completing CDD requires this item to be recorded or marked not applicable with a note."
+                    },
+                    "requiresEvidence": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Whether an uploaded evidence file is expected for this item."
+                    },
+                    "linkedIntakeCheckKind": {
+                      "type": "string",
+                      "enum": ["identity_verification", "sanctions_pep"],
+                      "description": "Optional manual intake check adapter kind linked to this checklist item."
+                    }
+                  }
+                }
+              },
+              "highAdditional": {
+                "type": "array",
+                "default": [],
+                "description": "Additive checklist items appended when risk tier is High.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["itemKey", "label", "required", "requiresEvidence"],
+                  "properties": {
+                    "itemKey": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Stable item key stored on the CDD checklist value."
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Human-readable item label in British English."
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "Optional guidance text displayed under the checklist item."
+                    },
+                    "required": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Whether completing High-risk CDD requires this item to be recorded or marked not applicable with a note."
+                    },
+                    "requiresEvidence": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Whether an uploaded evidence file is expected for this item."
+                    },
+                    "linkedIntakeCheckKind": {
+                      "type": "string",
+                      "enum": ["identity_verification", "sanctions_pep"],
+                      "description": "Optional manual intake check adapter kind linked to this checklist item."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "recheckIntervalsMonths": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Periodic re-check intervals in months calculated from CDD completion.",
+          "required": ["standard", "high"],
+          "properties": {
+            "standard": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120,
+              "default": 36,
+              "description": "Months until Standard CDD re-check falls due (36 months = 3 years)."
+            },
+            "high": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120,
+              "default": 12,
+              "description": "Months until High-risk CDD re-check falls due (12 months = 1 year)."
+            }
+          }
+        },
+        "reminderScheduleDaysBefore": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": -365,
+            "maximum": 365
+          },
+          "default": [14, 7, 0],
+          "description": "Day offsets relative to CDD dueAt triggering reminder notifications."
+        },
+        "maxEvidenceFileSizeBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 26214400,
+          "default": 10485760,
+          "description": "Maximum allowed file size in bytes for CDD evidence uploads."
+        }
+      }
     }
   }
 }
