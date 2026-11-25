@@ -135,6 +135,14 @@ export interface OpeningGateEvaluation {
   readonly activeOverrides: readonly OpeningGateOverrideSummary[];
 }
 
+export interface MatterOpeningGateView {
+  readonly evaluation: OpeningGateEvaluation;
+  readonly isProspective: boolean;
+  readonly highRiskRecord: RegisterRecord | null;
+  readonly canOverridePermission: boolean;
+  readonly canEditMatter: boolean;
+}
+
 export const OPENING_GATE_PRECONDITION_LABELS: Record<
   OpeningGatePreconditionKey,
   string

@@ -15,9 +15,11 @@ import {
   DEFAULT_REGISTERS_CONFIG,
   mergeCddConfigurations,
   mergeRegistersConfigurations,
+  resolveEffectiveMatterNumberingConfig,
   resolveEffectiveRegisterTypes,
   type CddConfiguration,
   type ClientRateOverrideRecord,
+  type MatterNumberingConfig,
   type ParentChainNodeSummary,
   type RbacConfiguration,
   type RegistersConfiguration,
@@ -52,7 +54,10 @@ import {
   type SortDirection,
 } from '@/domain/listNavigationState';
 import { systemKeyOf } from '@/domain/lists';
-import { normaliseConversionConflictWarnings } from '@/domain/matterConflicts';
+import {
+  normaliseConversionConflictWarnings,
+} from '@/domain/matterConflicts';
+import type { MatterOpeningGateView } from '@/domain/openingGate';
 import type { MatterPartyUsageCounts } from '@/domain/matterParties';
 import {
   toClientPriorMatterSummary,
@@ -103,6 +108,7 @@ import {
   getKeyDateRepository,
   getKeyDatesConfig,
   getMatterKeyDatesSnapshot,
+  getMatterOpeningGateStateRecord,
   getMatterPmsViewBundle,
   getMatterRepository,
   getMyNotificationPreferences,
@@ -1118,6 +1124,7 @@ export async function loadHomePageData(
     extraPersonIds: [
       ...signOffs.flatMap((s) => [s.requestedById, s.assignedPartnerId, s.approvedById]),
       ...registersBundle.registerRecords.flatMap((r) => [
+        r.ownerId,
         r.assignedApproverId,
         r.createdById,
       ]),
@@ -2406,6 +2413,7 @@ export async function loadMatterDetailPageData(
       registerTypes: RegisterTypeDefinition[];
       matterRegisterRecords: RegisterRecord[];
       matterRegisterTransitions: Record<string, RegisterTransition[]>;
+      openingGateState?: MatterOpeningGateView;
       pmsView?: MatterPmsViewBundle;
       canTakeByTaskId: Record<string, boolean>;
     }
@@ -2589,6 +2597,7 @@ export async function loadMatterDetailPageData(
     matterKeyDates,
     audit,
     matterRegistersRes,
+    openingGateRes,
     tasks,
     notes,
     enquiriesById,
@@ -2603,6 +2612,7 @@ export async function loadMatterDetailPageData(
     getMatterKeyDatesSnapshot(matter.id, currentUserId),
     listAuditEntriesForRecord('matter', matter.id, currentUserId, { limit: 200 }),
     listRegistersWorkspaceDataRecord({ matterId: matter.id }, currentUserId),
+    getMatterOpeningGateStateRecord(matter.id, currentUserId),
     taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
       linkedRecordType: 'matter',
       linkedRecordId: matter.id,
@@ -2634,6 +2644,17 @@ export async function loadMatterDetailPageData(
     resolveRegistersSummary(ctx, shell.activeTenantCfg),
   ]);
 
+  const openingGateState: MatterOpeningGateView | undefined =
+    openingGateRes && !isActionDenied(openingGateRes) && openingGateRes.ok
+      ? {
+          evaluation: openingGateRes.evaluation,
+          isProspective: openingGateRes.isProspective,
+          highRiskRecord: openingGateRes.highRiskRecord,
+          canOverridePermission: openingGateRes.canOverridePermission,
+          canEditMatter: openingGateRes.canEditMatter,
+        }
+      : undefined;
+
   const enquiries = dedupeById([...enquiriesById, ...enquiriesByConverted]);
   const quotes = dedupeById([...quotesById, ...quotesByConverted]);
   for (const q of quotes) {
@@ -2647,7 +2668,12 @@ export async function loadMatterDetailPageData(
     quotes,
     tasks,
     keyDates: matterKeyDates.keyDates,
-    extraPersonIds: notes.map((n) => n.authorId),
+    extraPersonIds: [
+      ...notes.map((n) => n.authorId),
+      openingGateState?.highRiskRecord?.ownerId,
+      openingGateState?.highRiskRecord?.assignedApproverId,
+      openingGateState?.evaluation.highRisk.partnerApproverId,
+    ],
   });
   const canTakeByTaskId: Record<string, boolean> = {};
   for (const t of tasks) {
@@ -2687,6 +2713,7 @@ export async function loadMatterDetailPageData(
       matterRegistersRes && !isActionDenied(matterRegistersRes) && matterRegistersRes.ok
         ? matterRegistersRes.transitionsByRecordId
         : {},
+    openingGateState,
     pmsView:
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined,
     canTakeByTaskId,
@@ -4077,6 +4104,7 @@ export async function loadAdminPageData(
       registerTypes: RegisterTypeDefinition[];
       cddConfig: CddConfiguration;
       workTypesConfig: WorkTypesConfiguration;
+      matterNumberingConfig: MatterNumberingConfig;
       entraEnvStatus: ReturnType<typeof getEntraEnvStatus>;
       firmAuditPage: Awaited<ReturnType<typeof listFirmAuditEntriesPage>>;
     }
@@ -4133,6 +4161,7 @@ export async function loadAdminPageData(
     dbEmployeeMigrationReport,
     registersMeta,
     dbCddOverride,
+    dbMatterNumberingOverride,
     expiredUnconvertedEnquiriesCount,
     matterPartyUsageCounts,
   ] = await Promise.all([
@@ -4144,6 +4173,7 @@ export async function loadAdminPageData(
     getHrAndRbacRepository().getEmployeeMigrationReport<EmployeeMigrationReport>(ctx),
     resolveRegistersSummary(ctx, activeTenantCfg),
     getCatalogueRepository().getModuleConfig<CddConfiguration>(ctx, 'cdd'),
+    getCatalogueRepository().getMatterNumberingConfig<MatterNumberingConfig>(ctx),
     getIntakeQuoteRepository().countEnquiriesReadyForRetention(
       ctx,
       retentionCutoffIso,
@@ -4245,6 +4275,10 @@ export async function loadAdminPageData(
     registerTypes: registersMeta.registerTypes,
     cddConfig: mergeCddConfigurations(activeTenantCfg.cdd, dbCddOverride),
     workTypesConfig: shell.store.workTypesConfig!,
+    matterNumberingConfig: resolveEffectiveMatterNumberingConfig(
+      activeTenantCfg,
+      dbMatterNumberingOverride,
+    ),
     entraEnvStatus: getEntraEnvStatus(),
     firmAuditPage,
   };

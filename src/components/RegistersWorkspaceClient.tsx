@@ -77,6 +77,7 @@ function canExecuteTransitionUi(
   transition: RegisterTransitionDefinition,
   record: RegisterRecord,
   currentUserId: string,
+  priorTransitions: readonly RegisterTransition[] = [],
 ): { allowed: boolean; reason?: string } {
   const hasPerm =
     userPerms.has(transition.requiredPermission) ||
@@ -91,6 +92,15 @@ function canExecuteTransitionUi(
     Boolean(regType.approvalRules && transition.requiredPermission !== regType.editPermission);
   if (mustBlockSelf && (record.ownerId === currentUserId || record.createdById === currentUserId)) {
     return { allowed: false, reason: 'Self-approval is forbidden' };
+  }
+  if (
+    transition.mustDifferFromPreviousApprover &&
+    priorTransitions.some((t) => t.actorId === currentUserId && t.transitionKey !== 'reject_opening')
+  ) {
+    return {
+      allowed: false,
+      reason: 'Requires a different approver from the previous stage',
+    };
   }
   if (
     (transition.requireAssignedApproverMatch || regType.approvalRules?.requireAssignedApproverMatch) &&
@@ -1080,6 +1090,7 @@ export function RegistersWorkspaceClient({
                                 tr,
                                 selectedRecord,
                                 currentUserId,
+                                transitionsByRecordId[selectedRecord.id] ?? [],
                               );
                               return (
                                 <button

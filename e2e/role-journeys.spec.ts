@@ -1151,3 +1151,445 @@ test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R74
     }
   });
 });
+
+test.describe('S1-05: High-risk opening sign-off, opening gate & overrides', () => {
+  function e2eS105TenantContext() {
+    process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
+    process.env.PLATFORM_ENVIRONMENT ??= 'test';
+    process.env.PLATFORM_POSTGRES_HOST ??= '127.0.0.1';
+    process.env.PLATFORM_POSTGRES_PORT ??= '5432';
+    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??= 'onesquared_local_runtime';
+    return resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        tenantId: 'not-a-law-firm',
+        email: 'rhian.morgan@notalawfirm.example',
+        name: 'Rhian Morgan',
+        roles: ['partner', 'admin'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'e2e-s105-opening-gate',
+    });
+  }
+
+  async function submitNewMatterAsFeeEarner(
+    page: Page,
+    opts: {
+      clientId: string;
+      instructingSearch: string;
+      instructingPersonId: string;
+      title: string;
+      practiceAreaId: string;
+      workTypeSubcategoryId: string;
+      highRisk?: boolean;
+    },
+  ): Promise<string> {
+    await page.goto(`/matters/new?clientId=${encodeURIComponent(opts.clientId)}`);
+    await expect(page.locator('#nm-description')).toBeVisible({ timeout: 20_000 });
+
+    const instructingSearch = page.getByRole('searchbox', {
+      name: 'Search instructing contacts',
+    });
+    await expect(instructingSearch).toBeVisible({ timeout: 10_000 });
+    await instructingSearch.fill(opts.instructingSearch);
+    const instructingSelect = page.locator('#nm-instructing');
+    await expect(
+      instructingSelect.locator(`option[value="${opts.instructingPersonId}"]`),
+    ).toHaveCount(1, { timeout: 10_000 });
+    await instructingSelect.selectOption(opts.instructingPersonId);
+
+    await page.locator('#nm-description').fill(opts.title);
+    await page.locator('#nm-department').selectOption(opts.practiceAreaId);
+    await page.locator('#nm-worktype').selectOption(opts.workTypeSubcategoryId);
+
+    if (opts.highRisk) {
+      const riskSection = page.locator('section[aria-labelledby="card-risk-heading"]');
+      const riskMaxBtn = riskSection.getByRole('button', { name: 'Maximise' });
+      if ((await riskMaxBtn.count()) > 0 && (await riskMaxBtn.first().isVisible())) {
+        await riskMaxBtn.first().click();
+      }
+      await riskSection.getByRole('button', { name: 'One long list' }).click();
+      const sanctionGroup = riskSection.getByRole('radiogroup', {
+        name: /high-risk third country/i,
+      });
+      await expect(sanctionGroup).toBeVisible({ timeout: 10_000 });
+      await sanctionGroup.getByRole('radio', { name: 'Yes', exact: true }).click();
+      await riskSection
+        .locator('input[placeholder*="Which country"]')
+        .fill('Jersey escrow holding entity');
+      await expect(riskSection).toContainText('Risk: High', { timeout: 10_000 });
+    }
+
+    const partiesSection = page.locator('section[aria-labelledby="card-2-heading"]');
+    const addPartyBtn = partiesSection.getByRole('button', { name: 'Add party' });
+    if (!(await addPartyBtn.isVisible())) {
+      await page.locator('#card-2-heading').click();
+    }
+    const clientCapSelect = partiesSection.locator(
+      'select[aria-label="Client\'s role in this matter"]',
+    );
+    if ((await clientCapSelect.count()) > 0) {
+      await clientCapSelect.first().selectOption({ index: 1 });
+    }
+
+    await addPartyBtn.click();
+    await expect(page.locator('#nm-party-relationship')).toBeVisible({ timeout: 10_000 });
+    await page.locator('#nm-party-relationship').selectOption('OP');
+    const partyCapSelect = page.locator('#nm-party-capacity-select');
+    await expect(partyCapSelect).toBeEnabled({ timeout: 10_000 });
+    await partyCapSelect.selectOption({ index: 1 });
+
+    const orgSearch = page.getByRole('searchbox', {
+      name: 'Search existing organisations',
+    });
+    await orgSearch.fill('Ty Glas Development Limited');
+    const existingOrgSelect = page.locator('#nm-party-existing-search');
+    await expect(existingOrgSelect.locator('option[value="O-000016"]')).toHaveCount(
+      1,
+      { timeout: 10_000 },
+    );
+    await existingOrgSelect.selectOption('O-000016');
+    await page
+      .getByRole('button', { name: /Add Ty Glas Development Limited as party/i })
+      .click();
+    await expect(partiesSection).toContainText('Ty Glas Development Limited');
+
+    const conflictSearchSection = page.getByRole('region', {
+      name: '5 · CONFLICT SEARCH',
+    });
+    const conflictMaxBtn = conflictSearchSection.getByRole('button', {
+      name: 'Maximise',
+    });
+    if ((await conflictMaxBtn.count()) > 0 && (await conflictMaxBtn.first().isVisible())) {
+      await conflictMaxBtn.first().click();
+    }
+    await page.getByRole('button', { name: 'Run conflict search' }).first().click();
+    await expect(conflictSearchSection).toContainText('Last run', {
+      timeout: 15_000,
+    });
+
+    const sameNoConflictBtns = conflictSearchSection.getByRole('button', {
+      name: 'Same – no conflict',
+    });
+    const matchBtnCount = await sameNoConflictBtns.count();
+    for (let i = 0; i < matchBtnCount; i++) {
+      const btn = sameNoConflictBtns.nth(i);
+      if (await btn.isEnabled()) {
+        await btn.click();
+      }
+    }
+    const noteInputs = conflictSearchSection.locator(
+      'input[placeholder*="Explain why there is no conflict"]',
+    );
+    const noteCount = await noteInputs.count();
+    for (let i = 0; i < noteCount; i++) {
+      await noteInputs.nth(i).fill('Client prior instruction checked and unrelated.');
+    }
+
+    const outcomeSection = page.getByRole('region', {
+      name: '6 · OUTCOME AND DECLARATION',
+    });
+    const outcomeMaxBtn = outcomeSection.getByRole('button', {
+      name: 'Maximise',
+    });
+    if ((await outcomeMaxBtn.count()) > 0 && (await outcomeMaxBtn.first().isVisible())) {
+      await outcomeMaxBtn.first().click();
+    }
+    await expect(outcomeSection).toContainText('Cleared by fee earner', {
+      timeout: 15_000,
+    });
+    await page
+      .getByLabel(/I confirm the parties listed are complete/)
+      .check();
+
+    const submitBtn = page.getByRole('button', { name: 'Submit', exact: true });
+    await expect(submitBtn).toBeEnabled({ timeout: 10_000 });
+    await submitBtn.click();
+
+    await expect(page.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
+    await expect(page).toHaveURL(/\/matters\/(M-\d+)$/, { timeout: 25_000 });
+    const match = /\/matters\/(M-\d+)$/.exec(page.url());
+    expect(match?.[1]).toBeTruthy();
+    return match![1]!;
+  }
+
+  test('1. High-risk matter receives permanent number, stays Prospective through Stage 1 Partner & Stage 2 Risk approvals, then opens Active', async ({
+    browser,
+  }) => {
+    const ctx = e2eS105TenantContext();
+    const matterRepo = new TenantMatterRepository();
+    let matterId = '';
+
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+    try {
+      matterId = await submitNewMatterAsFeeEarner(fePage, {
+        clientId: 'O-000001',
+        instructingSearch: 'Alun Davies',
+        instructingPersonId: 'P-000017',
+        title: `S1-05 High-Risk E2E Opening ${Date.now()}`,
+        practiceAreaId: 'work_type.corporate_and_commercial',
+        workTypeSubcategoryId:
+          'work_type.corporate_and_commercial_company_formations_and_structures',
+        highRisk: true,
+      });
+      const gatePanel = fePage.getByTestId('matter-opening-gate-panel');
+      await expect(gatePanel).toBeVisible({ timeout: 15_000 });
+      await expect(gatePanel).toContainText('Pending Partner approval');
+      const storedAfterSubmit = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(storedAfterSubmit?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      expect(storedAfterSubmit?.matterNumber).toMatch(/^[A-Z0-9_-]+-\d{4}$/);
+      await fePage.getByRole('tab', { name: /^Record/ }).click();
+      await expect(fePage.locator('.main-area')).toContainText(
+        storedAfterSubmit!.matterNumber,
+        { timeout: 10_000 },
+      );
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+
+    // Stage 1: Partner (Rhian Morgan) approves; Stage 2 Risk & Compliance remains required and disabled for same Partner
+    const partnerContext = await browser.newContext({
+      storageState: storageStatePathFor('partner'),
+    });
+    const partnerPage = await partnerContext.newPage();
+    const partnerErrors = attachPageErrorCollector(partnerPage);
+    try {
+      await partnerPage.goto(`/matters/${matterId}`);
+      const partnerApproveBtn = partnerPage.getByTestId('hro-partner-approve-btn');
+      await expect(partnerApproveBtn).toBeVisible({ timeout: 15_000 });
+      await partnerApproveBtn.click();
+
+      const gatePanel = partnerPage.getByTestId('matter-opening-gate-panel');
+      await expect(gatePanel).toContainText('Pending Risk & Compliance approval', {
+        timeout: 15_000,
+      });
+      await expect(gatePanel).toContainText('Stage 1 Partner approved by Rhian Morgan');
+      const midStored = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(midStored?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      expect(partnerErrors).toEqual([]);
+    } finally {
+      await partnerContext.close();
+    }
+
+    // Stage 2: Different Risk & Compliance user (Bethan Rees) approves -> matter opens cleanly
+    const riskContext = await browser.newContext({
+      storageState: storageStatePathFor('risk_compliance'),
+    });
+    const riskPage = await riskContext.newPage();
+    const riskErrors = attachPageErrorCollector(riskPage);
+    try {
+      await riskPage.goto(`/matters/${matterId}`);
+      const complianceApproveBtn = riskPage.getByTestId('hro-compliance-approve-btn');
+      await expect(complianceApproveBtn).toBeVisible({ timeout: 15_000 });
+      await expect(complianceApproveBtn).toBeEnabled();
+      await complianceApproveBtn.click();
+
+      const gatePanel = riskPage.getByTestId('matter-opening-gate-panel');
+      await expect(gatePanel).toContainText('Opened', { timeout: 15_000 });
+      await expect(gatePanel).toContainText('Approved');
+      const finalStored = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(finalStored?.matterStatusId).toBe('matter_status.active');
+      expect(riskErrors).toEqual([]);
+    } finally {
+      await riskContext.close();
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
+  });
+
+  test('2. Conveyancing without CDD stays Prospective (override disabled), completes client CDD, and opens via Open matter (R751)', async ({
+    browser,
+  }) => {
+    const ctx = e2eS105TenantContext();
+    const matterRepo = new TenantMatterRepository();
+    let matterId = '';
+
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+    try {
+      matterId = await submitNewMatterAsFeeEarner(fePage, {
+        clientId: 'O-000002',
+        instructingSearch: 'Mark Bevan',
+        instructingPersonId: 'P-000019',
+        title: `S1-05 Conveyancing Blocked CDD E2E ${Date.now()}`,
+        practiceAreaId: 'work_type.real_estate_and_property',
+        workTypeSubcategoryId:
+          'work_type.real_estate_and_property_residential_conveyancing',
+      });
+      const gatePanel = fePage.getByTestId('matter-opening-gate-panel');
+      await expect(gatePanel).toBeVisible({ timeout: 15_000 });
+      const cddRow = fePage.getByTestId('opening-precondition-cdd_complete');
+      await expect(cddRow).toContainText('Blocked');
+      const storedBlocked = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(storedBlocked?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+
+    // Partner sees zero Override button for Residential Conveyancing CDD (allowCddOverride: false)
+    const partnerContext = await browser.newContext({
+      storageState: storageStatePathFor('partner'),
+    });
+    const partnerPage = await partnerContext.newPage();
+    const partnerErrors = attachPageErrorCollector(partnerPage);
+    try {
+      await partnerPage.goto(`/matters/${matterId}`);
+      await expect(partnerPage.getByTestId('matter-opening-gate-panel')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(
+        partnerPage.getByTestId('override-precondition-cdd_complete-btn'),
+      ).toHaveCount(0);
+      expect(partnerErrors).toEqual([]);
+    } finally {
+      await partnerContext.close();
+    }
+
+    // Fee earner completes CDD on O-000002, then returns and clicks Open matter
+    const fe2Context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fe2Page = await fe2Context.newPage();
+    const fe2Errors = attachPageErrorCollector(fe2Page);
+    try {
+      await fe2Page.goto('/organisations/O-000002?tab=compliance');
+      const card = fe2Page.getByTestId('cdd-checklist-card');
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      const startBtn = card.getByRole('button', { name: 'Start CDD' });
+      if ((await startBtn.count()) > 0) {
+        await startBtn.click();
+        await expect(card.locator('[data-testid^="cdd-item-"]').first()).toBeVisible({
+          timeout: 15_000,
+        });
+      }
+      const items = card.locator('[data-testid^="cdd-item-"]');
+      const itemCount = await items.count();
+      expect(itemCount).toBeGreaterThan(0);
+      for (let i = 0; i < itemCount; i++) {
+        const item = items.nth(i);
+        const noteInput = item.locator('input[type="text"]');
+        await noteInput.fill(`Verified Harbourline CDD item ${i + 1}`);
+        await item.getByRole('button', { name: 'Mark recorded' }).click();
+        await expect(item).toContainText('Recorded', { timeout: 15_000 });
+      }
+      const completeBtn = card.getByRole('button', { name: 'Complete CDD' });
+      await expect(completeBtn).toBeEnabled({ timeout: 10_000 });
+      await completeBtn.click();
+      await expect(card).toContainText('Recorded manually by Dafydd Evans', {
+        timeout: 15_000,
+      });
+
+      await fe2Page.goto(`/matters/${matterId}`);
+      await expect(fe2Page.getByTestId('opening-precondition-cdd_complete')).toContainText(
+        'Met',
+        { timeout: 15_000 },
+      );
+      await fe2Page.getByTestId('open-prospective-matter-btn').click();
+      await expect(fe2Page.getByTestId('matter-opening-gate-panel')).toHaveCount(0, {
+        timeout: 15_000,
+      });
+
+      const storedOpened = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(storedOpened?.matterStatusId).toBe('matter_status.cmi_incomplete');
+      expect(fe2Errors).toEqual([]);
+    } finally {
+      await fe2Context.close();
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
+  });
+
+  test('3. Missing signed engagement stays Prospective, Partner override keeps Prospective until explicit Open matter click (R751)', async ({
+    browser,
+  }) => {
+    const ctx = e2eS105TenantContext();
+    const matterRepo = new TenantMatterRepository();
+    let matterId = '';
+
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+    try {
+      matterId = await submitNewMatterAsFeeEarner(fePage, {
+        clientId: 'O-000001',
+        instructingSearch: 'Alun Davies',
+        instructingPersonId: 'P-000017',
+        title: `S1-05 Tribunal Engagement Override E2E ${Date.now()}`,
+        practiceAreaId: 'work_type.employment_and_hr',
+        workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+      });
+      const engRow = fePage.getByTestId('opening-precondition-engagement_signed');
+      await expect(engRow).toBeVisible({ timeout: 15_000 });
+      await expect(engRow).toContainText('Blocked');
+      const storedInitial = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(storedInitial?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+
+    // Partner records override (matter must remain Prospective per R751), then clicks Open matter
+    const partnerContext = await browser.newContext({
+      storageState: storageStatePathFor('partner'),
+    });
+    const partnerPage = await partnerContext.newPage();
+    const partnerErrors = attachPageErrorCollector(partnerPage);
+    try {
+      await partnerPage.goto(`/matters/${matterId}`);
+      await partnerPage.getByTestId('override-precondition-engagement_signed-btn').click();
+      await partnerPage
+        .getByTestId('opening-override-reason-input')
+        .fill('Urgent ACAS deadline requires immediate filing ahead of signed letter.');
+      await partnerPage.getByTestId('confirm-opening-override-btn').click();
+
+      const engRow = partnerPage.getByTestId('opening-precondition-engagement_signed');
+      await expect(engRow).toContainText('Overridden', { timeout: 15_000 });
+      await expect(partnerPage.getByTestId('matter-opening-gate-panel')).toContainText(
+        'Ready to open',
+      );
+      const storedAfterOverride = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(storedAfterOverride?.matterStatusId).toBe(
+        'matter_status.prospective_enquiry',
+      );
+
+      await partnerPage.getByTestId('open-prospective-matter-btn').click();
+      await expect(partnerPage.getByTestId('matter-opening-gate-panel')).toHaveCount(0, {
+        timeout: 15_000,
+      });
+      const storedOpened = await matterRepo.getMatterById<Matter>(ctx, matterId, {
+        includeRestricted: true,
+      });
+      expect(storedOpened?.matterStatusId).toBe('matter_status.cmi_incomplete');
+      expect(partnerErrors).toEqual([]);
+    } finally {
+      await partnerContext.close();
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
+  });
+});

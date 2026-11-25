@@ -80,6 +80,7 @@ export default async function AdminCatchAllPage({
         registerTypes={data.registerTypes}
         cddConfig={data.cddConfig}
         workTypesConfig={data.workTypesConfig}
+        matterNumberingConfig={data.matterNumberingConfig}
         hasMfaVerified={actor.mfaVerified}
         entraSession={actor.session}
         entraEnvStatus={data.entraEnvStatus}

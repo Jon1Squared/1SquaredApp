@@ -91,6 +91,7 @@ export default async function MatterProfilePage({
         registerTypes={data.registerTypes}
         matterRegisterRecords={data.matterRegisterRecords}
         matterRegisterTransitions={data.matterRegisterTransitions}
+        openingGateState={data.openingGateState}
         canVerifyByKeyDateId={data.canVerifyByKeyDateId}
         canTakeByTaskId={data.canTakeByTaskId}
         canViewFinance={shell.finance.canViewMatter}

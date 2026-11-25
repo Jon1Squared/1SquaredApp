@@ -2020,16 +2020,24 @@ export function MatterFormClient({
     ],
   );
 
-  // Sync calculated overall risk level to riskRatingId
+  // Sync calculated overall risk level to riskRatingId using stable systemKey/ID first
   useEffect(() => {
     if (!riskAssessmentSummary.overallRisk) return;
-    const targetLabel = riskAssessmentSummary.overallRisk.toLowerCase();
-    const matchVal = values.find(
-      (v) =>
-        v.listKey === 'risk_rating' &&
-        v.active &&
-        v.label.toLowerCase().startsWith(targetLabel),
-    );
+    const targetKey = riskAssessmentSummary.overallRisk.toLowerCase();
+    const matchVal =
+      values.find(
+        (v) =>
+          v.listKey === 'risk_rating' &&
+          v.active &&
+          (v.systemKey?.toLowerCase() === targetKey || v.id === `risk_rating.${targetKey}`),
+      ) ??
+      values.find(
+        (v) =>
+          v.listKey === 'risk_rating' &&
+          v.active &&
+          !v.systemKey &&
+          v.label.toLowerCase().startsWith(targetKey),
+      );
     if (matchVal && matchVal.id !== riskRatingId) {
       queueMicrotask(() => {
         setRiskRatingId(matchVal.id);
@@ -5245,13 +5253,19 @@ export function MatterFormClient({
               // ignore
             }
           }
-          showToast(
-            initialQuote
-              ? `Matter opened · Conflict check cleared · Quote ${initialQuote.reference} converted`
-              : initialEnquiry
-                ? `Matter opened · Conflict check cleared · ${initialEnquiry.reference} moved to Closed`
-                : 'Matter opened · Conflict check cleared',
-          );
+          if (res.warnings && res.warnings.length > 0) {
+            showToast(
+              `Saved as Prospective (${res.matter.matterNumber}): ${res.warnings[0]}`,
+            );
+          } else {
+            showToast(
+              initialQuote
+                ? `Matter opened · Conflict check cleared · Quote ${initialQuote.reference} converted`
+                : initialEnquiry
+                  ? `Matter opened · Conflict check cleared · ${initialEnquiry.reference} moved to Closed`
+                  : 'Matter opened · Conflict check cleared',
+            );
+          }
           router.push(`/matters/${res.matter.id}`);
           router.refresh();
         }
@@ -12112,19 +12126,42 @@ export function MatterFormClient({
                     </div>
                     <div className="field-group">
                       <label className="field-label">Engagement letter status</label>
-                      <select
-                        className="field-select"
-                        value={engagementLetterStatus}
-                        onChange={(e) => setEngagementLetterStatus(e.target.value)}
-                      >
-                        <option value="">Unknown value</option>
-                        <option value="Drafting">Drafting</option>
-                        <option value="Drafted">Drafted</option>
-                        <option value="Sent">Sent</option>
-                        <option value="Sent to client">Sent to client</option>
-                        <option value="Signed">Signed</option>
-                        <option value="Signed & returned">Signed &amp; returned</option>
-                      </select>
+                      {existing &&
+                      (existing.engagementLetterStatus === 'Signed' ||
+                        existing.engagementLetterStatus === 'Signed & returned') ? (
+                        <select
+                          className="field-select"
+                          value={engagementLetterStatus}
+                          disabled
+                          aria-label="Engagement letter status"
+                        >
+                          <option value={existing.engagementLetterStatus}>
+                            {existing.engagementLetterStatus}
+                          </option>
+                        </select>
+                      ) : (
+                        <>
+                          <select
+                            className="field-select"
+                            value={
+                              engagementLetterStatus === 'Signed' ||
+                              engagementLetterStatus === 'Signed & returned'
+                                ? 'Sent'
+                                : engagementLetterStatus
+                            }
+                            onChange={(e) => setEngagementLetterStatus(e.target.value)}
+                          >
+                            <option value="">Unknown value</option>
+                            <option value="Drafting">Drafting</option>
+                            <option value="Drafted">Drafted</option>
+                            <option value="Sent">Sent</option>
+                            <option value="Sent to client">Sent to client</option>
+                          </select>
+                          <span className="muted" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
+                            Use &ldquo;Mark engagement signed&rdquo; on the matter profile once a signed letter is returned.
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
                 ) : null}

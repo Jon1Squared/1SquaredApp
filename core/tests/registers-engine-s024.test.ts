@@ -2060,21 +2060,21 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
   });
 
   it('17 (S1-05 B1, ADR 0039/0040): enforces high_risk_opening core type, allowAdminBypass=false, distinct step-1/step-2 approvers, systemOnly withdraw_opening, core-lock & matter:opening_gate:override RBAC', async () => {
-    const regMap = CORE_REGISTER_TYPES as Record<string, any>;
-    const hroType = regMap.high_risk_opening;
+    const hroType = (
+      CORE_REGISTER_TYPES as Record<string, import('../src/api/registers.types').RegisterTypeDefinition>
+    ).high_risk_opening;
     expect(hroType).toBeDefined();
     expect(hroType.key).toBe('high_risk_opening');
     expect(hroType.referencePrefix).toBe('HRO');
     expect(hroType.subjectScope).toBe('matter');
     expect(hroType.requireMatterLink).toBe(true);
     expect(hroType.approvalRules?.allowAdminBypass).toBe(false);
-    expect(hroType.states.find((s: any) => s.key === 'withdrawn')?.isTerminal).toBe(true);
+    expect(hroType.states.find((s) => s.key === 'withdrawn')?.isTerminal).toBe(true);
 
     const errCodes = REGISTER_DOMAIN_ERROR_CODES as Record<string, string>;
     expect(errCodes.DISTINCT_APPROVER_REQUIRED).toBe('REGISTER_DISTINCT_APPROVER_REQUIRED');
 
-    const permMap = PERMISSION_REGISTRY as Record<string, any>;
-    expect(permMap['matter:opening_gate:override']).toBeDefined();
+    expect(PERMISSION_REGISTRY['matter:opening_gate:override']).toBeDefined();
     expect(DEFAULT_RBAC_ROLES.partner.permissions).toContain('matter:opening_gate:override');
     expect(DEFAULT_RBAC_ROLES.managing_partner.permissions).toContain('matter:opening_gate:override');
     expect(DEFAULT_RBAC_ROLES.admin.permissions).not.toContain('matter:opening_gate:override');
@@ -2170,7 +2170,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
             transitionKey: string;
             actorId: string;
           }>;
-          const res = (validateRegisterTransitionExecution as any)({
+          const res = validateRegisterTransitionExecution({
             registerType: hroType,
             record: locked,
             transitionKey: 'compliance_approve',
@@ -2178,7 +2178,9 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
             actorRoles: ['partner', 'risk_compliance'],
             actorPermissionSet: new Set(['register:view', 'register:approve']),
             comment: 'Same person attempting step 2',
-            priorTransitions,
+            priorTransitions: priorTransitions as Parameters<
+              typeof validateRegisterTransitionExecution
+            >[0]['priorTransitions'],
           });
           return {
             nextStatus: res.nextStatus,
@@ -2200,7 +2202,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
           transitionKey: string;
           actorId: string;
         }>;
-        const res = (validateRegisterTransitionExecution as any)({
+        const res = validateRegisterTransitionExecution({
           registerType: hroType,
           record: locked,
           transitionKey: 'compliance_approve',
@@ -2208,7 +2210,9 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
           actorRoles: ['risk_compliance'],
           actorPermissionSet: new Set(['register:view', 'register:approve']),
           comment: 'MLRO approved stage 2',
-          priorTransitions,
+          priorTransitions: priorTransitions as Parameters<
+            typeof validateRegisterTransitionExecution
+          >[0]['priorTransitions'],
         });
         return {
           nextStatus: res.nextStatus,

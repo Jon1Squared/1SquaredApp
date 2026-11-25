@@ -153,6 +153,14 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
   });
 
   it('4. deep-merges workTypes.*.openingGate and matterNumbering in loadAndValidateTenantConfig and resolves hierarchy cleanly', () => {
+    const rawWorkTypes = (
+      notALawFirmBaseConfig as {
+        workTypes?: {
+          defaults?: Record<string, unknown>;
+          items?: Array<Record<string, unknown>>;
+        };
+      }
+    ).workTypes;
     const rawBase: Record<string, unknown> = {
       ...notALawFirmBaseConfig,
       matterNumbering: {
@@ -161,16 +169,16 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
         emptyTokenFallback: 'MAT',
       },
       workTypes: {
-        ...(notALawFirmBaseConfig as any).workTypes,
+        ...rawWorkTypes,
         defaults: {
-          ...(notALawFirmBaseConfig as any).workTypes?.defaults,
+          ...rawWorkTypes?.defaults,
           openingGate: {
             requireConflictCleared: true,
             requireCddComplete: false,
           },
         },
         items: [
-          ...((notALawFirmBaseConfig as any).workTypes?.items ?? []),
+          ...(rawWorkTypes?.items ?? []),
           {
             workTypeId: 'work_type.test_pa',
             openingGate: {
