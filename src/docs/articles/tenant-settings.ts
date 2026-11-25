@@ -133,18 +133,18 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 | \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator work-type configuration (\`admin:access\` + MFA) |
 | \`workTypes.items[].feeArrangementCapCategories\` | Optional | Active | Maps \`conditional_fee_agreement\` and \`damages_based_agreement\` fee bases on a work type to a core statutory cap category key (\`cfa_general_civil\`, \`cfa_personal_injury\`, \`dba_general_civil\`, \`dba_employment\`, \`dba_personal_injury\`); unmapped CFA/DBA matters and quotes fail closed with \`FEE_CAP_CATEGORY_UNMAPPED\` (\`S0-28b\`) |
 | \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Active | Per-work-type CFA/DBA fee cap percentage overrides (\`R486\`, editable up to each category’s core statutory maximum regardless of lower firm defaults; takes precedence over \`matterCosts.feeArrangementCaps\` when present) |
-| \`workTypes.defaults.openingGate\` | All false (CDD override allowed by default) | Active | Additive schema defaults for firm opening preconditions (conflict clearance, Client Due Diligence, whether CDD override is allowed, signed engagement letter, and funds on account); tenant \`base.json\` and **Administration → Work types** enable stricter firm or work-type rules |
-| \`workTypes.items[].openingGate\` | Inherited or overridden | Active | Per-work-type opening gate rules (for example disallowing Client Due Diligence overrides on residential conveyancing or company formations, or requiring signed engagement letters before opening on tribunal and litigation work), edited in **Administration → Work types** |
+| Firm opening gate defaults | Not required (Client Due Diligence overrides allowed by default) | Active | Firm-wide opening checks covering conflict clearance, Client Due Diligence, whether Client Due Diligence overrides are allowed, signed engagement letter, and funds on account; administrators enable or adjust defaults in **Administration → Work types** |
+| Work-type opening gate rules | Inherits firm defaults per setting | Active | Per-work-type and practice-area overrides merged per individual setting (subcategory, then practice area, then firm defaults) so turning on one rule preserves inherited rules; edited in **Administration → Work types** |
 
 ### Matter numbering policy
 
-Every tenant’s **Matter numbering policy** is validated in tenant configuration and summarised read-only in **Administration → Work types → Matter numbering policy**. Permanent numbers are allocated atomically on the server when a matter leaves Draft (ignoring any browser-supplied number) and never recycled if a matter is withdrawn or deleted:
+Every tenant’s **Matter numbering policy** is summarised read-only in **Administration → Work types → Matter numbering policy**. Permanent numbers are generated automatically by the server when a matter leaves Draft and are never reused if a matter is withdrawn or deleted:
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`matterNumbering.pattern\` | \`"{CLIENT_REF}-{SEQ:4}"\` | Active | Supported tokens: \`{CLIENT_REF}\`, \`{SEQ}\` or \`{SEQ:N}\` (width \`1\`–\`8\`, default \`4\`), \`{YYYY}\`, \`{YY}\`, and \`{DEPT}\` |
-| \`matterNumbering.sequenceScope\` | \`"client_ref_prefix"\` | Active | Increments sequences per rendered client reference prefix (\`client_ref_prefix\`), firm-wide (\`firm\`), per calendar year (\`year\`), or per department (\`department\`) |
-| \`matterNumbering.emptyTokenFallback\` | \`"MAT"\` | Active | Fallback token inserted when a referenced token value is empty (for default \`client_ref_prefix\` parity, empty prefixes fall back cleanly to \`"MAT001"\`) |
+| Number format pattern | Client reference prefix plus 4-digit sequence | Active | Combines optional client reference, 4-digit or custom-width sequence number, 4-digit or 2-digit year, and department code placeholders |
+| Sequence counter scope | Per client reference prefix | Active | Controls whether sequence numbers increment per client reference prefix, firm-wide, per calendar year, or per department (requiring the corresponding placeholder in the pattern) |
+| Empty value fallback | Standard fallback prefix | Active | Text inserted when a chosen pattern value is empty (for example when a client has no reference prefix) |
 
 ### Client Due Diligence (CDD)
 

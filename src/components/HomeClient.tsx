@@ -44,6 +44,7 @@ import {
 } from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
+import { formatOpeningGateActionError } from '@/domain/openingGate';
 import {
   findOneSquaredIdForPmsCode,
   formatGbp,
@@ -3632,14 +3633,22 @@ export function HomeClient({
                                 });
                                 if (isActionDenied(res) || !res.ok) {
                                   showToast(
-                                    res.message ||
-                                      ('error' in res ? res.error : undefined) ||
+                                    formatOpeningGateActionError(
+                                      res,
                                       'Could not approve High-risk opening.',
+                                    ),
                                   );
                                   return;
                                 }
+                                const HRO_STATUS_LABELS: Record<string, string> = {
+                                  pending_partner: 'Pending Partner approval',
+                                  pending_compliance: 'Pending Risk & Compliance approval',
+                                  approved: 'Approved',
+                                  rejected: 'Rejected',
+                                  withdrawn: 'Withdrawn',
+                                };
                                 showToast(
-                                  `${rec.reference} updated (${res.record.status.replace(/_/g, ' ')})`,
+                                  `${rec.reference} updated (${HRO_STATUS_LABELS[res.record.status] ?? 'Updated'})`,
                                 );
                                 router.refresh();
                               } finally {
@@ -5662,9 +5671,10 @@ export function HomeClient({
                   });
                   if (isActionDenied(res) || !res.ok) {
                     showToast(
-                      res.message ||
-                        ('error' in res ? res.error : undefined) ||
+                      formatOpeningGateActionError(
+                        res,
                         'Could not reject High-risk opening.',
+                      ),
                     );
                     return;
                   }
@@ -5678,8 +5688,11 @@ export function HomeClient({
               }}
             >
               <div>
-                <label className="field-label">Reason for rejection *</label>
+                <label className="field-label" htmlFor="home-hro-reject-comment-input">
+                  Reason for rejection *
+                </label>
                 <textarea
+                  id="home-hro-reject-comment-input"
                   className="textarea"
                   rows={3}
                   value={rejectHroComment}

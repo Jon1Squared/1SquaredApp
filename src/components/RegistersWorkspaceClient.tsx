@@ -145,7 +145,13 @@ export function RegistersWorkspaceClient({
 
   // Creation form state
   const creatableTypes = useMemo(
-    () => enabledTypes.filter((t) => t.key !== 'cdd' && permSet.has(t.createPermission)),
+    () =>
+      enabledTypes.filter(
+        (t) =>
+          t.key !== 'cdd' &&
+          !t.systemCreatedOnly &&
+          permSet.has(t.createPermission),
+      ),
     [enabledTypes, permSet],
   );
   const resolvedInitialCreateTypeKey =

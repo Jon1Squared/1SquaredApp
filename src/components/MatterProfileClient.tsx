@@ -42,6 +42,7 @@ import {
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime } from '@/domain/dates';
 import {
+  formatOpeningGateActionError,
   isMatterEngagementSignedForGate,
   OPENING_GATE_PRECONDITION_LABELS,
   type MatterOpeningGateView,
@@ -78,6 +79,7 @@ import type {
   ChoiceValue,
   ConflictCheckRecord,
   Enquiry,
+  HomeRoleKey,
   Matter,
   Note,
   Organisation,
@@ -126,6 +128,7 @@ interface MatterProfileClientProps {
   keyDateCalendarSyncs?: KeyDateCalendarSync[];
   userKeyDatePermissions?: KeyDatePermission[];
   userPermissions?: import('@/domain/types').PermissionKey[];
+  userRoles?: HomeRoleKey[];
   registersConfig?: import('@platform/core-api').RegistersConfiguration;
   registerTypes?: import('@platform/core-api').RegisterTypeDefinition[];
   matterRegisterRecords?: import('@platform/core-api').RegisterRecord[];
@@ -329,6 +332,7 @@ export function MatterProfileClient({
   keyDateCalendarSyncs = [],
   userKeyDatePermissions = [],
   userPermissions = [],
+  userRoles = [],
   registersConfig,
   registerTypes = [],
   matterRegisterRecords = [],
@@ -400,8 +404,25 @@ export function MatterProfileClient({
     null,
   );
   const [overrideReason, setOverrideReason] = useState('');
+  const [revokeModalOverride, setRevokeModalOverride] = useState<{
+    preconditionKey: OpeningGatePreconditionKey;
+    overrideId: string;
+  } | null>(null);
+  const [revokeReason, setRevokeReason] = useState('');
   const [hroRejectOpen, setHroRejectOpen] = useState(false);
   const [hroRejectComment, setHroRejectComment] = useState('');
+  const canApproveReg = userPermissions.includes('register:approve');
+  const isPartnerOrMpRole =
+    canApproveReg &&
+    (userRoles.includes('partner') || userRoles.includes('managing_partner'));
+  const isRiskComplianceRole =
+    canApproveReg && userRoles.includes('risk_compliance');
+  const isMatterLeadOrResponsible = Boolean(
+    currentUserId &&
+      (currentUserId === matter.leadFeeEarnerId ||
+        currentUserId === matter.responsiblePartnerId),
+  );
+  const canViewRegisters = userPermissions.includes('register:view');
   const isMatterCurrentlyClosed = isClosedMatterStatus(matter.matterStatusId, values);
 
   const canViewMatterRegisters = Boolean(
@@ -1606,9 +1627,10 @@ export function MatterProfileClient({
                           });
                           if (isActionDenied(res) || !res.ok) {
                             showToast(
-                              res.message ||
-                                ('error' in res ? res.error : undefined) ||
+                              formatOpeningGateActionError(
+                                res,
                                 'Could not mark engagement letter signed.',
+                              ),
                             );
                             return;
                           }
@@ -1634,9 +1656,10 @@ export function MatterProfileClient({
                           const res = await openProspectiveMatterAction(matter.id);
                           if (isActionDenied(res) || !res.ok) {
                             showToast(
-                              res.message ||
-                                ('error' in res ? res.error : undefined) ||
+                              formatOpeningGateActionError(
+                                res,
                                 'Matter cannot open yet.',
+                              ),
                             );
                             return;
                           }
@@ -1692,8 +1715,7 @@ export function MatterProfileClient({
                                 <span>
                                   {' '}
                                   · Override by{' '}
-                                  {pre.activeOverride.overriddenByName ||
-                                    pre.activeOverride.overriddenByPersonId}
+                                  {pre.activeOverride.overriddenByName || 'Unknown'}
                                   : &ldquo;{pre.activeOverride.reason}&rdquo;
                                 </span>
                               ) : null}
@@ -1712,6 +1734,7 @@ export function MatterProfileClient({
                                 onClick={() => {
                                   setOverrideModalKey(pre.key);
                                   setOverrideReason('');
+                                  setRevokeModalOverride(null);
                                 }}
                               >
                                 Override
@@ -1726,26 +1749,13 @@ export function MatterProfileClient({
                                 className="btn btn--secondary btn--sm"
                                 data-testid={`revoke-override-${pre.key}-btn`}
                                 disabled={openingBusy}
-                                onClick={async () => {
-                                  setOpeningBusy(true);
-                                  try {
-                                    const res = await revokeMatterOpeningOverrideAction({
-                                      matterId: matter.id,
-                                      overrideId: pre.activeOverride!.id,
-                                    });
-                                    if (isActionDenied(res) || !res.ok) {
-                                      showToast(
-                                        res.message ||
-                                          ('error' in res ? res.error : undefined) ||
-                                          'Could not revoke override.',
-                                      );
-                                      return;
-                                    }
-                                    showToast('Opening override revoked.');
-                                    router.refresh();
-                                  } finally {
-                                    setOpeningBusy(false);
-                                  }
+                                onClick={() => {
+                                  setRevokeModalOverride({
+                                    preconditionKey: pre.key,
+                                    overrideId: pre.activeOverride!.id,
+                                  });
+                                  setRevokeReason('');
+                                  setOverrideModalKey(null);
                                 }}
                               >
                                 Revoke override
@@ -1780,18 +1790,22 @@ export function MatterProfileClient({
                             <span>
                               Stage 1 Partner approved by{' '}
                               {openingGateState.evaluation.highRisk.partnerApproverName ||
-                                openingGateState.evaluation.highRisk.partnerApproverId}
+                                'Unknown'}
                               {' · '}
                             </span>
                           ) : null}
                           {openingGateState.highRiskRecord ? (
-                            <Link
-                              href={`/registers?record=${encodeURIComponent(
-                                openingGateState.highRiskRecord.id,
-                              )}`}
-                            >
-                              {openingGateState.highRiskRecord.reference} (Registers)
-                            </Link>
+                            canViewRegisters ? (
+                              <Link
+                                href={`/registers?record=${encodeURIComponent(
+                                  openingGateState.highRiskRecord.id,
+                                )}`}
+                              >
+                                {openingGateState.highRiskRecord.reference} (Registers)
+                              </Link>
+                            ) : (
+                              <span>{openingGateState.highRiskRecord.reference}</span>
+                            )
                           ) : (
                             <span>Pending first non-draft submission.</span>
                           )}
@@ -1799,7 +1813,8 @@ export function MatterProfileClient({
                       </div>
                       <div className="worklist-right" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         {openingGateState.highRiskRecord &&
-                        userPermissions.includes('register:approve') &&
+                        isPartnerOrMpRole &&
+                        !isMatterLeadOrResponsible &&
                         openingGateState.highRiskRecord.status === 'pending_partner' ? (
                           <button
                             type="button"
@@ -1816,9 +1831,10 @@ export function MatterProfileClient({
                                 });
                                 if (isActionDenied(res) || !res.ok) {
                                   showToast(
-                                    res.message ||
-                                      ('error' in res ? res.error : undefined) ||
+                                    formatOpeningGateActionError(
+                                      res,
                                       'Could not complete Stage 1 Partner approval.',
+                                    ),
                                   );
                                   return;
                                 }
@@ -1833,7 +1849,7 @@ export function MatterProfileClient({
                           </button>
                         ) : null}
                         {openingGateState.highRiskRecord &&
-                        userPermissions.includes('register:approve') &&
+                        isRiskComplianceRole &&
                         openingGateState.highRiskRecord.status === 'pending_compliance' ? (
                           <button
                             type="button"
@@ -1860,9 +1876,10 @@ export function MatterProfileClient({
                                 });
                                 if (isActionDenied(res) || !res.ok) {
                                   showToast(
-                                    res.message ||
-                                      ('error' in res ? res.error : undefined) ||
+                                    formatOpeningGateActionError(
+                                      res,
                                       'Could not complete Stage 2 Risk & Compliance approval.',
+                                    ),
                                   );
                                   return;
                                 }
@@ -1877,9 +1894,10 @@ export function MatterProfileClient({
                           </button>
                         ) : null}
                         {openingGateState.highRiskRecord &&
-                        userPermissions.includes('register:approve') &&
-                        (openingGateState.highRiskRecord.status === 'pending_partner' ||
-                          openingGateState.highRiskRecord.status === 'pending_compliance') ? (
+                        ((openingGateState.highRiskRecord.status === 'pending_partner' &&
+                          isPartnerOrMpRole) ||
+                          (openingGateState.highRiskRecord.status === 'pending_compliance' &&
+                            isRiskComplianceRole)) ? (
                           <button
                             type="button"
                             className="btn btn--secondary btn--sm"
@@ -1909,7 +1927,11 @@ export function MatterProfileClient({
                     }}
                     data-testid="opening-override-form"
                   >
-                    <label className="field-label" style={{ margin: 0 }}>
+                    <label
+                      className="field-label"
+                      htmlFor="opening-override-reason-input"
+                      style={{ margin: 0 }}
+                    >
                       Override rationale for{' '}
                       {OPENING_GATE_PRECONDITION_LABELS[overrideModalKey]} (minimum 10 characters)
                     </label>
@@ -1918,6 +1940,7 @@ export function MatterProfileClient({
                       matter; click &ldquo;Open matter&rdquo; afterwards to re-evaluate the gate.
                     </p>
                     <textarea
+                      id="opening-override-reason-input"
                       className="field-input"
                       rows={2}
                       data-testid="opening-override-reason-input"
@@ -1948,9 +1971,10 @@ export function MatterProfileClient({
                             });
                             if (isActionDenied(res) || !res.ok) {
                               showToast(
-                                res.message ||
-                                  ('error' in res ? res.error : undefined) ||
+                                formatOpeningGateActionError(
+                                  res,
                                   'Could not record opening override.',
+                                ),
                               );
                               return;
                             }
@@ -1971,6 +1995,80 @@ export function MatterProfileClient({
                   </div>
                 ) : null}
 
+                {revokeModalOverride && openingGateState.isProspective ? (
+                  <div
+                    style={{
+                      padding: 12,
+                      borderTop: '1px solid var(--color-divider)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                    data-testid="opening-revoke-form"
+                  >
+                    <label
+                      className="field-label"
+                      htmlFor="opening-revoke-reason-input"
+                      style={{ margin: 0 }}
+                    >
+                      Revocation rationale for{' '}
+                      {OPENING_GATE_PRECONDITION_LABELS[revokeModalOverride.preconditionKey]}{' '}
+                      (minimum 10 characters)
+                    </label>
+                    <textarea
+                      id="opening-revoke-reason-input"
+                      className="field-input"
+                      rows={2}
+                      data-testid="opening-revoke-reason-input"
+                      value={revokeReason}
+                      onChange={(e) => setRevokeReason(e.target.value)}
+                      placeholder="Enter reason for revoking this override (at least 10 characters)..."
+                    />
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        onClick={() => setRevokeModalOverride(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        data-testid="confirm-opening-revoke-btn"
+                        disabled={openingBusy || revokeReason.trim().length < 10}
+                        onClick={async () => {
+                          setOpeningBusy(true);
+                          try {
+                            const res = await revokeMatterOpeningOverrideAction({
+                              matterId: matter.id,
+                              overrideId: revokeModalOverride.overrideId,
+                              reason: revokeReason.trim(),
+                            });
+                            if (isActionDenied(res) || !res.ok) {
+                              showToast(
+                                formatOpeningGateActionError(
+                                  res,
+                                  'Could not revoke override.',
+                                ),
+                              );
+                              return;
+                            }
+                            setRevokeModalOverride(null);
+                            setRevokeReason('');
+                            showToast('Opening override revoked.');
+                            router.refresh();
+                          } finally {
+                            setOpeningBusy(false);
+                          }
+                        }}
+                      >
+                        Confirm revocation
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
                 {hroRejectOpen && openingGateState.highRiskRecord ? (
                   <div
                     style={{
@@ -1981,10 +2079,15 @@ export function MatterProfileClient({
                       gap: 8,
                     }}
                   >
-                    <label className="field-label" style={{ margin: 0 }}>
+                    <label
+                      className="field-label"
+                      htmlFor="hro-reject-comment-input"
+                      style={{ margin: 0 }}
+                    >
                       Reason for rejecting High-risk opening *
                     </label>
                     <textarea
+                      id="hro-reject-comment-input"
                       className="field-input"
                       rows={2}
                       value={hroRejectComment}
@@ -2015,9 +2118,10 @@ export function MatterProfileClient({
                             });
                             if (isActionDenied(res) || !res.ok) {
                               showToast(
-                                res.message ||
-                                  ('error' in res ? res.error : undefined) ||
+                                formatOpeningGateActionError(
+                                  res,
                                   'Could not reject High-risk opening.',
+                                ),
                               );
                               return;
                             }

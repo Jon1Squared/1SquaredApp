@@ -1152,7 +1152,7 @@ test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R74
   });
 });
 
-test.describe('S1-05: High-risk opening sign-off, opening gate & overrides', () => {
+test.describe.serial('S1-05: High-risk opening sign-off, opening gate & overrides', () => {
   function e2eS105TenantContext() {
     process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
     process.env.PLATFORM_ENVIRONMENT ??= 'test';
@@ -1319,6 +1319,7 @@ test.describe('S1-05: High-risk opening sign-off, opening gate & overrides', () 
   test('1. High-risk matter receives permanent number, stays Prospective through Stage 1 Partner & Stage 2 Risk approvals, then opens Active', async ({
     browser,
   }) => {
+    await resetClientCddForE2e('organisation', 'O-000001');
     const ctx = e2eS105TenantContext();
     const matterRepo = new TenantMatterRepository();
     let matterId = '';
@@ -1357,30 +1358,83 @@ test.describe('S1-05: High-risk opening sign-off, opening gate & overrides', () 
       await feContext.close();
     }
 
-    // Stage 1: Partner (Rhian Morgan) approves; Stage 2 Risk & Compliance remains required and disabled for same Partner
-    const partnerContext = await browser.newContext({
+    // R764: Responsible partner (Rhian Morgan, P-000001) must NOT see Stage 1 Partner approve
+    const respPartnerContext = await browser.newContext({
       storageState: storageStatePathFor('partner'),
     });
-    const partnerPage = await partnerContext.newPage();
-    const partnerErrors = attachPageErrorCollector(partnerPage);
+    const respPartnerPage = await respPartnerContext.newPage();
+    const respPartnerErrors = attachPageErrorCollector(respPartnerPage);
     try {
-      await partnerPage.goto(`/matters/${matterId}`);
-      const partnerApproveBtn = partnerPage.getByTestId('hro-partner-approve-btn');
+      await respPartnerPage.goto(`/matters/${matterId}`);
+      await expect(respPartnerPage.getByTestId('matter-opening-gate-panel')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(respPartnerPage.getByTestId('hro-partner-approve-btn')).toHaveCount(0);
+      expect(respPartnerErrors).toEqual([]);
+    } finally {
+      await respPartnerContext.close();
+    }
+
+    // Stage 1: Independent Managing Partner (Gethin Lloyd, P-000038) approves; Stage 2 Risk & Compliance remains required
+    const mpContext = await browser.newContext({
+      storageState: storageStatePathFor('managing_partner'),
+    });
+    const mpPage = await mpContext.newPage();
+    const mpErrors = attachPageErrorCollector(mpPage);
+    try {
+      await mpPage.goto(`/matters/${matterId}`);
+      const partnerApproveBtn = mpPage.getByTestId('hro-partner-approve-btn');
       await expect(partnerApproveBtn).toBeVisible({ timeout: 15_000 });
       await partnerApproveBtn.click();
 
-      const gatePanel = partnerPage.getByTestId('matter-opening-gate-panel');
+      const gatePanel = mpPage.getByTestId('matter-opening-gate-panel');
       await expect(gatePanel).toContainText('Pending Risk & Compliance approval', {
         timeout: 15_000,
       });
-      await expect(gatePanel).toContainText('Stage 1 Partner approved by Rhian Morgan');
+      await expect(gatePanel).toContainText('Stage 1 Partner approved by Gethin Lloyd');
       const midStored = await matterRepo.getMatterById<Matter>(ctx, matterId, {
         includeRestricted: true,
       });
       expect(midStored?.matterStatusId).toBe('matter_status.prospective_enquiry');
-      expect(partnerErrors).toEqual([]);
+      expect(mpErrors).toEqual([]);
     } finally {
-      await partnerContext.close();
+      await mpContext.close();
+    }
+
+    // R763: High-risk matter requires High-tier CDD on O-000001 before Stage 2 can open the matter
+    const feCddContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const feCddPage = await feCddContext.newPage();
+    const feCddErrors = attachPageErrorCollector(feCddPage);
+    try {
+      await feCddPage.goto('/organisations/O-000001?tab=compliance');
+      const card = feCddPage.getByTestId('cdd-checklist-card');
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      const startBtn = card.getByRole('button', { name: 'Start CDD' });
+      await expect(startBtn).toBeVisible({ timeout: 15_000 });
+      await startBtn.click();
+      await expect(card.locator('[data-testid^="cdd-item-"]').first()).toBeVisible({
+        timeout: 15_000,
+      });
+      const items = card.locator('[data-testid^="cdd-item-"]');
+      const itemCount = await items.count();
+      expect(itemCount).toBeGreaterThan(0);
+      for (let i = 0; i < itemCount; i++) {
+        const item = items.nth(i);
+        await item.locator('input[type="text"]').fill(`Verified High-risk CDD item ${i + 1}`);
+        await item.getByRole('button', { name: 'Mark recorded' }).click();
+        await expect(item).toContainText('Recorded', { timeout: 15_000 });
+      }
+      const completeBtn = card.getByRole('button', { name: 'Complete CDD' });
+      await expect(completeBtn).toBeEnabled({ timeout: 10_000 });
+      await completeBtn.click();
+      await expect(card).toContainText('Recorded manually by Dafydd Evans', {
+        timeout: 15_000,
+      });
+      expect(feCddErrors).toEqual([]);
+    } finally {
+      await feCddContext.close();
     }
 
     // Stage 2: Different Risk & Compliance user (Bethan Rees) approves -> matter opens cleanly
@@ -1413,6 +1467,7 @@ test.describe('S1-05: High-risk opening sign-off, opening gate & overrides', () 
   test('2. Conveyancing without CDD stays Prospective (override disabled), completes client CDD, and opens via Open matter (R751)', async ({
     browser,
   }) => {
+    await resetClientCddForE2e('organisation', 'O-000002');
     const ctx = e2eS105TenantContext();
     const matterRepo = new TenantMatterRepository();
     let matterId = '';
@@ -1475,12 +1530,11 @@ test.describe('S1-05: High-risk opening sign-off, opening gate & overrides', () 
       const card = fe2Page.getByTestId('cdd-checklist-card');
       await expect(card).toBeVisible({ timeout: 15_000 });
       const startBtn = card.getByRole('button', { name: 'Start CDD' });
-      if ((await startBtn.count()) > 0) {
-        await startBtn.click();
-        await expect(card.locator('[data-testid^="cdd-item-"]').first()).toBeVisible({
-          timeout: 15_000,
-        });
-      }
+      await expect(startBtn).toBeVisible({ timeout: 15_000 });
+      await startBtn.click();
+      await expect(card.locator('[data-testid^="cdd-item-"]').first()).toBeVisible({
+        timeout: 15_000,
+      });
       const items = card.locator('[data-testid^="cdd-item-"]');
       const itemCount = await items.count();
       expect(itemCount).toBeGreaterThan(0);

@@ -87,6 +87,7 @@ export default async function MatterProfilePage({
         keyDateCalendarSyncs={data.keyDateCalendarSyncs}
         userKeyDatePermissions={shell.currentUserKeyDatePermissions}
         userPermissions={shell.currentUserPermissions}
+        userRoles={shell.currentUserRoles}
         registersConfig={data.registersConfig}
         registerTypes={data.registerTypes}
         matterRegisterRecords={data.matterRegisterRecords}

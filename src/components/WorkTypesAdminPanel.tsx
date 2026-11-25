@@ -24,8 +24,10 @@ import type {
 } from '@/domain/types';
 import {
   resolveWorkTypeAutoTaskTemplates,
+  resolveWorkTypeOpeningGateWithProvenance,
   resolveWorkTypeRetention,
   resolveWorkTypeRiskQuestions,
+  type WorkTypeOpeningGateSettingKey,
 } from '@/domain/workTypeConfig';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -1072,53 +1074,60 @@ export function WorkTypesAdminPanel({
                 </div>
                 <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
                   {selectedItem?.openingGate
-                    ? 'Custom opening gate rules override firm defaults for this work type.'
-                    : 'Currently inheriting firm default opening gate rules.'}
+                    ? 'Overrides are merged per setting: this work type, then its parent practice area, then firm defaults.'
+                    : 'Currently inheriting opening gate rules per setting from parent practice area and firm defaults.'}
                 </p>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
-                  {(
-                    [
-                      ['requireConflictCleared', 'Conflict check cleared'],
-                      ['requireCddComplete', 'Client Due Diligence (CDD) complete'],
-                      ['allowCddOverride', 'Allow partner CDD override'],
-                      ['requireEngagementSigned', 'Signed engagement letter'],
-                      ['requireFundsOnAccount', 'Funds on account'],
-                    ] as Array<[keyof WorkTypeOpeningGateConfig, string]>
-                  ).map(([fieldKey, label]) => {
-                    const effectiveGate: WorkTypeOpeningGateConfig = {
-                      requireConflictCleared: false,
-                      requireCddComplete: false,
-                      allowCddOverride: true,
-                      requireEngagementSigned: false,
-                      requireFundsOnAccount: false,
-                      ...(draft.defaults.openingGate ?? {}),
-                      ...(selectedItem?.openingGate ?? {}),
-                    };
-                    return (
-                      <label
-                        key={fieldKey}
-                        style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}
-                      >
-                        <input
-                          type="checkbox"
-                          disabled={!canEdit}
-                          checked={Boolean(effectiveGate[fieldKey])}
-                          onChange={(e) =>
-                            updateSelectedItem(selectedChoice, (item) => ({
-                              ...item,
-                              openingGate: {
-                                ...effectiveGate,
-                                ...(item.openingGate ?? {}),
-                                [fieldKey]: e.target.checked,
-                              },
-                            }))
-                          }
-                        />
-                        {label}
-                      </label>
-                    );
-                  })}
-                </div>
+                {(() => {
+                  const resolvedGate = resolveWorkTypeOpeningGateWithProvenance(draft, {
+                    workTypeSubcategoryId: selectedChoice.id,
+                    practiceAreaId: selectedChoice.parentId ?? undefined,
+                  });
+                  const gateFields: Array<[WorkTypeOpeningGateSettingKey, string]> = [
+                    ['requireConflictCleared', 'Conflict check cleared'],
+                    ['requireCddComplete', 'Client Due Diligence (CDD) complete'],
+                    ['allowCddOverride', 'Allow partner CDD override'],
+                    ['requireEngagementSigned', 'Signed engagement letter'],
+                    ['requireFundsOnAccount', 'Funds on account'],
+                  ];
+                  const sourceLabels = {
+                    work_type: 'Work type',
+                    practice_area: 'Practice area',
+                    firm_default: 'Firm default',
+                  } as const;
+                  return (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
+                      {gateFields.map(([fieldKey, label]) => {
+                        const provenance = resolvedGate.settingSources[fieldKey];
+                        return (
+                          <label
+                            key={fieldKey}
+                            style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={!canEdit}
+                              checked={Boolean(resolvedGate[fieldKey])}
+                              onChange={(e) =>
+                                updateSelectedItem(selectedChoice, (item) => ({
+                                  ...item,
+                                  openingGate: {
+                                    ...(item.openingGate ?? {}),
+                                    [fieldKey]: e.target.checked,
+                                  },
+                                }))
+                              }
+                            />
+                            <span>{label}</span>
+                            <StatusPill
+                              label={sourceLabels[provenance]}
+                              tone={provenance === 'work_type' ? 'warning' : 'neutral'}
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>
