@@ -1293,6 +1293,8 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
           saveMatterRecord(
             {
               ...matterTemplate,
+              engagementLetterStatus: 'Sent',
+              engagementLetterSignedAt: null,
               matterNumber: 'DRAFT',
               openedAt: null,
               fieldValues: {},
@@ -1634,6 +1636,8 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
 
       await pmsRepo.clearTenantData(ctxA);
       await pmsRepo.clearTenantData(ctxB);
+      await matterRepo.clearTenantData(ctxA, { resetMatterNumberSequences: true });
+      await matterRepo.clearTenantData(ctxB, { resetMatterNumberSequences: true });
       await pmsRepo.importExtractDataset(ctxA, extendedDatasetA);
       await pmsRepo.importExtractDataset(ctxB, datasetB);
 

@@ -95,6 +95,7 @@ import {
   approveSignOff,
   assignEnquiryRecord,
   closeEnquiryRecord,
+  completeClientCddRecord,
   createOrProposeKeyDateRecord,
   createRecordFromPms,
   deleteMatterRateOverrideRecord,
@@ -120,8 +121,11 @@ import {
   listFirmAuditEntriesPage,
   markEngagementLetterDrafted,
   queryKeyDatesTeamDiaryRecord,
+  recordCddChecklistItemRecord,
+  recordEngagementLetterSignedRecord,
   recordInvoiceCreditControlAction,
   recordKeyDateNotApplicableRecord,
+  recordManualSanctionsPepRecord,
   requestMatterBill,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
@@ -138,6 +142,8 @@ import {
   saveTaskRecord,
   searchGlobalRecords,
   signOffMatterCostsRecord,
+  startOrLoadClientCddRecord,
+  transitionRegisterRecordService,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
   updatePersonPermissionOverrides,
@@ -1813,6 +1819,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...staffMatterTemplate,
+              engagementLetterStatus: 'Sent',
+              engagementLetterSignedAt: null,
               title: 'Confidential Staff Disciplinary Matter',
               clientId: staffEmployeeClient.id,
               agreedFeeCapGbp: 5000,
@@ -1904,6 +1912,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -2213,6 +2223,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             ...matterTemplate,
             matterNumber: 'DRAFT',
             openedAt: null,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             fieldValues: {},
             title: 'R144 Concurrent Client Hire Matter',
             clientId: externalClient.id,
@@ -2514,6 +2526,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             ...matterTemplate,
             matterNumber: 'DRAFT',
             openedAt: null,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             fieldValues: {},
             title: 'R153 Draft Matter',
             clientId: externalClient.id,
@@ -2748,6 +2762,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -3187,6 +3203,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -3485,6 +3503,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         saveMatterRecord(
           {
             ...matterTemplate,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             title: 'Display Name Team Key Rejection Test',
             leadFeeEarnerId: feeEarner.id,
             teamMemberIds: [feeEarner.id],
@@ -3748,14 +3768,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession: verifySignedEntraSessionCookie(partnerCookie)!,
       };
 
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const {
+        id: _omittedId,
+        engagementLetterStatus: _r169Els,
+        engagementLetterSignedAt: _r169Elsa,
+        ...matterTemplate
+      } = baseMatter;
       void _omittedId;
+      void _r169Els;
+      void _r169Elsa;
 
       await runWithActiveActorSession(feSession, async () => {
         // 1. Draft with £75,000 estimate + forged server-owned fieldValues + forged conflictClearedById
         const draftRes = await saveMatterRecord(
           {
             ...matterTemplate,
+            clientId: 'O-000001',
             title: 'R169 High Value Matter',
             leadFeeEarnerId: feeEarner.id,
             responsiblePartnerId: partner.id,
@@ -3904,7 +3932,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           /partner.*sign-off/i,
         );
 
-        // 6. Opening at the signed-off £75,000 estimate succeeds and preserves matterOpeningSnapshot on subsequent edits
+        // 6. Opening at the signed-off £75,000 estimate succeeds (and completes High-risk opening sign-off) and preserves matterOpeningSnapshot on subsequent edits
         const validOpenRes = await saveMatterRecord(
           {
             ...partnerSignOff.matter!,
@@ -3923,8 +3951,58 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               a.recordId === matterId && a.field === 'Partner cost sign-off',
           ),
         ).toBe(true);
+        const hroRecords = await getRegisterRepository().listVisibleRegisterRecords(
+          testTenantCtx(partner.id),
+          partner.id,
+          {
+            registerTypeKey: 'high_risk_opening',
+            matterId,
+            hasRestrictedMatterAccess: true,
+          },
+        );
+        const hroRecord = hroRecords.find((r) => r.status === 'pending_partner')!;
+        expect(hroRecord).toBeDefined();
+        const partnerApproveHro = await runWithActiveActorSession(
+          partnerSession,
+          async () =>
+            transitionRegisterRecordService(
+              {
+                recordId: hroRecord.id,
+                transitionKey: 'partner_approve',
+                expectedRowVersion: hroRecord.rowVersion,
+              },
+              partner.id,
+            ),
+        );
+        expect(partnerApproveHro.ok).toBe(true);
+        const riskOfficer = store.people.find(
+          (p) =>
+            p.isEmployee &&
+            p.id !== partner.id &&
+            (p.roles ?? []).includes('risk_compliance'),
+        )!;
+        const rcApproveHro = await runAsTestActor(
+          riskOfficer.id,
+          () =>
+            transitionRegisterRecordService(
+              {
+                recordId: hroRecord.id,
+                transitionKey: 'compliance_approve',
+                expectedRowVersion: partnerApproveHro.ok
+                  ? partnerApproveHro.record.rowVersion
+                  : undefined,
+              },
+              riskOfficer.id,
+            ),
+          { roles: ['risk_compliance'], mfaVerified: true },
+        );
+        expect(rcApproveHro.ok).toBe(true);
+        const openedMatterAfterHro = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+          testTenantCtx(partner.id),
+          matterId,
+        ))!;
         const capturedAt = (
-          validOpenRes.matter?.fieldValues['matterOpeningSnapshot'] as {
+          openedMatterAfterHro.fieldValues['matterOpeningSnapshot'] as {
             capturedAt?: string;
           }
         )?.capturedAt;
@@ -3932,10 +4010,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         const editOpenMatterRes = await saveMatterRecord(
           {
-            ...validOpenRes.matter!,
+            ...openedMatterAfterHro,
             title: 'R169 High Value Matter (Updated Title)',
             fieldValues: {
-              ...validOpenRes.matter!.fieldValues,
+              ...openedMatterAfterHro.fieldValues,
               matterOpeningSnapshot: { forgedOverwrite: true },
             },
           },
@@ -6289,6 +6367,69 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Approved with conditions',
       );
 
+      const cddSetup = await runAsTestActor(riskOfficer.id, async () => {
+        const started = await startOrLoadClientCddRecord(
+          {
+            subjectType: 'organisation',
+            subjectId: fixtureM6.clientId,
+            createIfMissing: true,
+          },
+          riskOfficer.id,
+        );
+        if (!started.ok) {
+          throw new Error(`Could not start CDD for R185: ${started.message}`);
+        }
+        if (started.summary.status !== 'recorded' && started.summary.recordId) {
+          await recordManualSanctionsPepRecord(
+            {
+              subjectType: 'organisation',
+              subjectId: fixtureM6.clientId,
+              outcome: 'clear',
+              screeningScope: 'Entity and controllers screened (R185 fixture)',
+              referenceCode: 'R185-PEP',
+            },
+            riskOfficer.id,
+          );
+          for (const item of started.summary.checklistItems) {
+            if (item.required && item.status !== 'recorded') {
+              const upd = await recordCddChecklistItemRecord(
+                {
+                  recordId: started.summary.recordId,
+                  itemKey: item.itemKey,
+                  status: 'recorded',
+                  note: 'Completed for R185 test fixture',
+                  ...(item.itemKey === 'identity_verification'
+                    ? {
+                        linkManualIdentityCheck: {
+                          verificationMethod: 'Certificate of incorporation',
+                          outcome: 'verified',
+                          referenceCode: 'R185-ID',
+                        },
+                      }
+                    : {}),
+                },
+                riskOfficer.id,
+              );
+              if (!upd.ok) {
+                throw new Error(`Could not record CDD item ${item.itemKey}: ${upd.message}`);
+              }
+            }
+          }
+          const completed = await completeClientCddRecord(
+            {
+              recordId: started.summary.recordId,
+              manualSummaryNote: 'Completed for R185 fixture',
+            },
+            riskOfficer.id,
+          );
+          if (!completed.ok) {
+            throw new Error(`Could not complete CDD for R185: ${completed.message}`);
+          }
+        }
+        return true;
+      });
+      expect(cddSetup).toBe(true);
+
       const feeEarnerOpenM6Res = await runWithActiveActorSession(
         feeEarnerSession,
         async () =>
@@ -7148,6 +7289,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -13045,8 +13188,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const seed = loadCommittedSeedStore();
       const template = seed.matters.find((m) => m.id === 'M-000004')!;
-      const { id: _id, ...baseMatter } = template;
+      const {
+        id: _id,
+        engagementLetterStatus: _els,
+        engagementLetterSignedAt: _elsa,
+        ...baseMatter
+      } = template;
       void _id;
+      void _els;
+      void _elsa;
 
       await runAsTestActor('P-000004', async () => {
         // 1. Draft save under renamed 'Prospective / Enquiry' must stay prospective, NEVER Active
@@ -13115,6 +13265,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       conflictCheckDate: _ccDate,
       matterStatusId: _msId,
       recordStatusId: _rsId,
+      engagementLetterStatus: _els,
+      engagementLetterSignedAt: _elsa,
       ...baseMatter
     } = template;
     void _id;
@@ -13122,6 +13274,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     void _ccDate;
     void _msId;
     void _rsId;
+    void _els;
+    void _elsa;
     const clearedConflict = {
       status: 'Cleared' as const,
       outcomeLabel: 'Cleared by fee earner' as const,
@@ -13157,6 +13311,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(draftSave.errors).toBeUndefined();
         expect(draftSave.matter?.conflictCheckDate).not.toBe('1999-02-02');
         expect(draftSave.matter?.openedAt).toBeNull();
+
+        await recordEngagementLetterSignedRecord(
+          { matterId: draftSave.matter!.id, status: 'Signed & returned' },
+          'P-000004',
+        );
 
         const openSave = await saveMatterRecord(
           {
@@ -13285,8 +13444,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         // 2. Conflict draft task uses autoTrigger: 'conflict_check_draft' rather than title prefix
         const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-        const { id: _mid, ...matterTemplate } = baseMatter;
+        const {
+          id: _mid,
+          engagementLetterStatus: _r592Els,
+          engagementLetterSignedAt: _r592Elsa,
+          ...matterTemplate
+        } = baseMatter;
         void _mid;
+        void _r592Els;
+        void _r592Elsa;
         const draftMatter = await saveMatterRecord(
           {
             ...matterTemplate,
@@ -13297,6 +13463,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         );
         expect(draftMatter.errors).toBeUndefined();
         const matterId = draftMatter.matter!.id;
+        await recordEngagementLetterSignedRecord(
+          { matterId, status: 'Signed & returned' },
+          'P-000004',
+        );
         const draftTasks = await taskRepo.listAllTasksUnfiltered(ctx);
         const conflictDraftTask = draftTasks.find((t) =>
           t.linkedRecords.some(
@@ -13367,6 +13537,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       conflictCheckDate: _ccDate,
       matterStatusId: _msId,
       recordStatusId: _rsId,
+      engagementLetterStatus: _els,
+      engagementLetterSignedAt: _elsa,
       ...matterTemplate
     } = baseMatter;
     void _id;
@@ -13374,6 +13546,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     void _ccDate;
     void _msId;
     void _rsId;
+    void _els;
+    void _elsa;
 
     try {
       let referredMatterId = '';
@@ -13617,6 +13791,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       conflictCheckDate: _ccDate,
       matterStatusId: _msId,
       recordStatusId: _rsId,
+      engagementLetterStatus: _els,
+      engagementLetterSignedAt: _elsa,
       ...matterTemplate
     } = baseMatter;
     void _id;
@@ -13624,6 +13800,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     void _ccDate;
     void _msId;
     void _rsId;
+    void _els;
+    void _elsa;
 
     try {
       await runAsTestActor('P-000004', async () => {

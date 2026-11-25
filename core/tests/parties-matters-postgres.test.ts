@@ -952,6 +952,8 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
           saveMatterRecord(
             {
               ...newMatterPayload,
+              engagementLetterStatus: 'Sent',
+              engagementLetterSignedAt: null,
               matterNumber: 'DRAFT',
               title: 'RolledBack Draft Matter',
             },
@@ -1058,6 +1060,8 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         saveMatterRecord(
           {
             ...newMatterInput,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             matterNumber: 'DRAFT',
             title: 'R465 Cold Start Replica Matter',
           },
@@ -1234,6 +1238,8 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
           replicaAServices.saveMatterRecord(
             {
               ...m11Template,
+              engagementLetterStatus: 'Sent',
+              engagementLetterSignedAt: null,
               matterNumber: 'DRAFT',
               title: 'Replica A Newly Created Matter',
             },
@@ -1446,6 +1452,8 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         saveMatterRecord(
           {
             ...matterInput,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             clientId: orgARes.organisation.id,
             matterNumber: 'DRAFT',
             title: 'Tenant A Exclusive Matter Deal',
@@ -1482,6 +1490,8 @@ describe('S0-16: People, organisations, links, notes, merge history and matters 
         saveMatterRecord(
           {
             ...matterInput,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             clientId: orgBRes.organisation.id,
             matterNumber: 'DRAFT',
             title: 'Tenant B Exclusive Matter Merger',

@@ -586,9 +586,14 @@ describe('S0-28b: CFA & DBA Fee Arrangements, Core Statutory Caps & Work-Type Ov
     );
     const defaultClientOrg = baseSnap.organisations[0]!;
     const templateMatter = baseSnap.matters.find((m) => m.id === 'M-000011') ?? baseSnap.matters[0]!;
-    const { id: _omitMatterId, rowVersion: _omitRv, ...matterTemplate } = templateMatter;
+    const { id: _omitMatterId, rowVersion: _omitRv, ...rawMatterTemplate } = templateMatter;
     void _omitMatterId;
     void _omitRv;
+    const matterTemplate = {
+      ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
+    };
 
     // Lower firm cfa_general_civil cap to 50% (audited via saveMatterCostsConfigAction)
     const auditMark = await markAuditPosition();

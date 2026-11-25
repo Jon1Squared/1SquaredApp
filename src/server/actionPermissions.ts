@@ -403,12 +403,12 @@ export const ACTION_PERMISSIONS = {
   },
   approveSignOffAction: {
     kind: 'permission',
-    key: 'signoff:approve',
+    key: { anyOf: ['signoff:approve', 'register:approve'] },
     enforcedBy: 'service',
   },
   discussSignOffAction: {
     kind: 'permission',
-    key: 'signoff:approve',
+    key: { anyOf: ['signoff:approve', 'register:approve'] },
     enforcedBy: 'service',
   },
   anonymiseExpiredEnquiriesAction: {
@@ -818,6 +818,31 @@ export const ACTION_PERMISSIONS = {
   saveCddConfigAction: {
     kind: 'permission',
     key: { allOf: ['admin:access', 'register:configure'] },
+    enforcedBy: 'action',
+  },
+  openProspectiveMatterAction: {
+    kind: 'permission',
+    key: 'matter:edit',
+    enforcedBy: 'action',
+  },
+  recordEngagementLetterSignedAction: {
+    kind: 'permission',
+    key: 'matter:edit',
+    enforcedBy: 'action',
+  },
+  overrideMatterOpeningPreconditionAction: {
+    kind: 'permission',
+    key: 'matter:opening_gate:override',
+    enforcedBy: 'action',
+  },
+  revokeMatterOpeningOverrideAction: {
+    kind: 'permission',
+    key: 'matter:opening_gate:override',
+    enforcedBy: 'action',
+  },
+  saveMatterNumberingConfigAction: {
+    kind: 'permission',
+    key: 'admin:access',
     enforcedBy: 'action',
   },
 } as const satisfies Record<string, ActionPolicy>;

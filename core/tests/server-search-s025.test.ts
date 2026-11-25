@@ -376,9 +376,17 @@ describe('S0-25: Server-Side Full-Text & Trigram Search, Pre-Rank SQL RBAC, Pagi
         // 3. Matter
         const seedStore = createSeedStore();
         const baseMatter = seedStore.matters.find((m) => m.id === 'M-000011')!;
-        const { id: _omitM, rowVersion: _omitRv, ...matterTemplate } = baseMatter;
+        const {
+          id: _omitM,
+          rowVersion: _omitRv,
+          engagementLetterStatus: _omitEls,
+          engagementLetterSignedAt: _omitElsa,
+          ...matterTemplate
+        } = baseMatter;
         void _omitM;
         void _omitRv;
+        void _omitEls;
+        void _omitElsa;
         const matterRes = await saveMatterRecord(
           {
             ...matterTemplate,
@@ -591,9 +599,17 @@ describe('S0-25: Server-Side Full-Text & Trigram Search, Pre-Rank SQL RBAC, Pagi
 
         const seedStore = createSeedStore();
         const baseMatter = seedStore.matters.find((m) => m.id === 'M-000011')!;
-        const { id: _omitId, rowVersion: _omitRv, ...matterTemplate } = baseMatter;
+        const {
+          id: _omitId,
+          rowVersion: _omitRv,
+          engagementLetterStatus: _omitEls,
+          engagementLetterSignedAt: _omitElsa,
+          ...matterTemplate
+        } = baseMatter;
         void _omitId;
         void _omitRv;
+        void _omitEls;
+        void _omitElsa;
 
         // Staff matter (employee P-000010 as client -> server derives isStaffMatter: true)
         const staffMatterRes = await saveMatterRecord(

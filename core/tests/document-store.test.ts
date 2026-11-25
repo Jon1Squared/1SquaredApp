@@ -2962,6 +2962,8 @@ describe('External Document Store Integration (Sections 1–14)', () => {
         // R9, R91 & R107: Matter with unset owningTeamId (undefined) stays undefined after store load and after a save by another user, fails provisioning as misconfigured, and succeeds once owningDepartmentId + owningTeamId are saved
         const rawUnsetTeamMatter = {
           ...targetMatterA,
+          engagementLetterStatus: 'Sent' as const,
+          engagementLetterSignedAt: null,
           matterNumber: 'NT001-0001',
           title: 'Matter Without Owning Team',
           owningDepartmentId: 'DEPT-RE',

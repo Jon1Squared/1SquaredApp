@@ -1066,6 +1066,8 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
         void _omittedMatterId;
         const matterTemplate = {
           ...rawMatterTemplate,
+          engagementLetterStatus: 'Sent' as const,
+          engagementLetterSignedAt: null,
           conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
             status: 'Cleared' as const,
             outcomeLabel: 'Cleared by fee earner' as const,

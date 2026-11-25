@@ -3288,6 +3288,75 @@ export class TenantMatterRepository extends TenantScopedRepository {
     id: string,
   ): Promise<boolean> {
     return this.withTenantTransaction(ctx, async (tx) => {
+      // R752: Auto-withdraw any pending High-Risk opening approvals when a prospective matter is deleted/abandoned
+      // (approved records are historical and never withdrawn).
+      const pendingHroRes = await tx.query<{
+        tenant_id: string;
+        id: string;
+        status: string;
+      }>(
+        `SELECT tenant_id, id, status
+           FROM public.register_records
+          WHERE tenant_id = $1
+            AND matter_id = $2
+            AND register_type_key = 'high_risk_opening'
+            AND status IN ('pending_partner', 'pending_compliance')
+            FOR UPDATE`,
+        [ctx.tenantId, id],
+      );
+      if (pendingHroRes.rows.length > 0) {
+        const nowIso = new Date().toISOString();
+        const actorId = ctx.actorId || 'system';
+        for (const hroRow of pendingHroRes.rows) {
+          this.assertRowTenant(ctx, hroRow.tenant_id, 'RegisterRecord');
+          await tx.query(
+            `UPDATE public.register_records
+                SET status = 'withdrawn',
+                    decided_by_id = $3,
+                    decided_at = $4::timestamptz,
+                    updated_by_id = $3,
+                    updated_at = $4::timestamptz,
+                    row_version = row_version + 1
+              WHERE tenant_id = $1 AND id = $2`,
+            [ctx.tenantId, hroRow.id, actorId, nowIso],
+          );
+          const trSeqRes = await tx.query<{ max_num: string | null; next_val: string }>(
+            `SELECT (
+               SELECT MAX(substring(rt.id from '^RT-([0-9]+)$')::bigint)::text
+                 FROM public.register_transitions rt
+                WHERE rt.tenant_id = $1 AND rt.id ~ '^RT-[0-9]+$'
+             ) AS max_num,
+             nextval('public.tenant_register_transition_id_seq')::text AS next_val`,
+            [ctx.tenantId],
+          );
+          const maxNum = Number(trSeqRes.rows[0]?.max_num ?? '0') || 0;
+          const seqNum = Number(trSeqRes.rows[0]?.next_val ?? '1') || 1;
+          const trId = `RT-${String(Math.max(maxNum + 1, seqNum)).padStart(6, '0')}`;
+          await tx.query(
+            `INSERT INTO public.register_transitions (
+               tenant_id, id, register_record_id, register_type_key,
+               transition_key, from_status, to_status, actor_id,
+               comment, payload_json, correlation_id, transitioned_at
+             ) VALUES (
+               $1, $2, $3, 'high_risk_opening',
+               'withdraw_opening', $4, 'withdrawn', $5,
+               $6, $7::jsonb, $8, $9::timestamptz
+             )`,
+            [
+              ctx.tenantId,
+              trId,
+              hroRow.id,
+              hroRow.status,
+              actorId,
+              'Withdrawn automatically when prospective matter was deleted.',
+              JSON.stringify({ systemAction: 'deleteMatterById', matterId: id }),
+              ctx.correlationId,
+              nowIso,
+            ],
+          );
+        }
+      }
+
       await tx.query(
         'DELETE FROM public.matter_parties WHERE tenant_id = $1 AND matter_id = $2',
         [ctx.tenantId, id],

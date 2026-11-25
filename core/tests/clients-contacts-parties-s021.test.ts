@@ -348,6 +348,8 @@ describe('S0-21: Canonical Contact Personas, Conflict Traversal, Merge Execution
           'billingContactId',
           'referrerContactId',
           'parties',
+          'engagementLetterStatus',
+          'engagementLetterSignedAt',
         ]);
 
         // 1c. Link the same canonical Person as direct Client (CL) on Matter A -> unions person_role.private_client in-tx
@@ -740,6 +742,8 @@ describe('S0-21: Canonical Contact Personas, Conflict Traversal, Merge Execution
           'billingContactId',
           'referrerContactId',
           'parties',
+          'engagementLetterStatus',
+          'engagementLetterSignedAt',
         ]);
 
         // Open matter spanning ALL 8 relationship codes + referrerContactId + CAP_EXPERT_WITNESS / CAP_MEDIATOR
@@ -1557,6 +1561,8 @@ describe('S0-21: Canonical Contact Personas, Conflict Traversal, Merge Execution
         const matterBase = stripMatterKeys(templateMatter, [
           'id',
           'rowVersion',
+          'engagementLetterStatus',
+          'engagementLetterSignedAt',
         ]);
 
         const mergeMatterRes = await saveMatterRecord(
@@ -2022,7 +2028,12 @@ describe('S0-21: Canonical Contact Personas, Conflict Traversal, Merge Execution
           viewerUserId: 'P-000001',
           hasRestrictedMatterAccess: true,
         }))!;
-        const mBase = stripMatterKeys(mTmpl, ['id', 'rowVersion']);
+        const mBase = stripMatterKeys(mTmpl, [
+          'id',
+          'rowVersion',
+          'engagementLetterStatus',
+          'engagementLetterSignedAt',
+        ]);
         const mRes = await saveMatterRecord(
           {
             ...mBase,

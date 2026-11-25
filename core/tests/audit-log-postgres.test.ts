@@ -622,6 +622,8 @@ describe('S0-15: firm audit log on PostgreSQL (R405, R406, R413, R418)', () => {
       void _omittedMatterId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,

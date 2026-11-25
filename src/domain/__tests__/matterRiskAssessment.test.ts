@@ -69,8 +69,15 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
   it('1. New matter: stores entered questionnaire answers and sets overallRisk and riskRatingId from server scoring (ignoring client riskRatingId and forged snapshot fields)', async () => {
     const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
-    const { id: _omittedId, ...matterTemplate } = baseMatter;
+    const {
+      id: _omittedId,
+      engagementLetterStatus: _omitEls,
+      engagementLetterSignedAt: _omitElsa,
+      ...matterTemplate
+    } = baseMatter;
     void _omittedId;
+    void _omitEls;
+    void _omitElsa;
     const actorSession = buildVerifiedActorSession('P-000001');
 
     await runWithActiveActorSession(actorSession, async () => {
@@ -135,8 +142,15 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
   it('2. Edit: changing an answer on an existing matter replaces the stored snapshot and updates riskRatingId; saving without answers keeps the existing snapshot', async () => {
     const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
-    const { id: _omittedId, ...matterTemplate } = baseMatter;
+    const {
+      id: _omittedId,
+      engagementLetterStatus: _omitEls,
+      engagementLetterSignedAt: _omitElsa,
+      ...matterTemplate
+    } = baseMatter;
     void _omittedId;
+    void _omitEls;
+    void _omitElsa;
     const actorSession = buildVerifiedActorSession('P-000001');
 
     await runWithActiveActorSession(actorSession, async () => {
@@ -278,8 +292,15 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
     // Service-level enforcement in saveMatterRecord
     const store = loadCommittedSeedStore();
     const baseMatter = store.matters.find((m) => m.id === 'M-000001')!;
-    const { id: _omittedId, ...matterTemplate } = baseMatter;
+    const {
+      id: _omittedId,
+      engagementLetterStatus: _omitEls,
+      engagementLetterSignedAt: _omitElsa,
+      ...matterTemplate
+    } = baseMatter;
     void _omittedId;
+    void _omitEls;
+    void _omitElsa;
     const actorSession = buildVerifiedActorSession('P-000001');
 
     await runWithActiveActorSession(actorSession, async () => {
@@ -450,10 +471,14 @@ describe('S0-08: Matter risk assessment answers kept and scored on the server (B
     const {
       id: _omittedId,
       fieldValues: _omittedFieldValues,
+      engagementLetterStatus: _omitEls,
+      engagementLetterSignedAt: _omitElsa,
       ...matterTemplate
     } = baseMatter;
     void _omittedId;
     void _omittedFieldValues;
+    void _omitEls;
+    void _omitElsa;
     const actorSession = buildVerifiedActorSession('P-000001');
 
     await runWithActiveActorSession(actorSession, async () => {

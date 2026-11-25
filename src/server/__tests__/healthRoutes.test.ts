@@ -273,6 +273,12 @@ describe('Health & readiness endpoints (R580)', () => {
         saveMatterRecord(
           {
             ...baseMatter,
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId:
+              'work_type.corporate_and_commercial_company_formations_and_structures',
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             agreedFeeCapGbp: 5000,
             feeEstimateGbp: 5000,
             conflictCheckRecord: {
@@ -369,6 +375,12 @@ describe('Health & readiness endpoints (R580)', () => {
         saveMatterRecord(
           {
             ...baseMatter,
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId:
+              'work_type.corporate_and_commercial_company_formations_and_structures',
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             agreedFeeCapGbp: 5000,
             feeEstimateGbp: 5000,
             conflictCheckRecord: {

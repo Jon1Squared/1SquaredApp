@@ -1050,6 +1050,10 @@ export interface Matter extends RecordBase {
   owningDepartmentId?: string | null;
   /** Optional explicit owning OrgTeamOrPracticeGroup ID (e.g. 'TPG-RE-RES') for document routing & security. */
   owningTeamId?: string | null;
+  /** Migration 0026: immutable counter sequence key recorded when the matter number was allocated. */
+  numberSequenceKey?: string | null;
+  /** Migration 0026: monotonic counter integer recorded when the matter number was allocated. */
+  numberSequenceValue?: number | null;
 }
 
 // ------------------------------------------------------------------ Teams
