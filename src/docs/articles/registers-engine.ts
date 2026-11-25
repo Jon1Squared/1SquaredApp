@@ -6,17 +6,18 @@ export const registersEngineArticle: DocArticle = {
   section: 'getting-started',
   summary:
     'How the Configurable Registers Engine manages undertakings, complaints, SRA breaches, periodic file reviews, partner sign-offs, tenant custom registers, extension hooks, and automated due/review reminders.',
-  updated: '2026-11-22',
+  updated: '2026-11-25',
   body: `
 The **Registers** workspace (\`/registers\`) provides a single, configurable per-tenant engine for regulatory and practice registers, persisted per tenant (\`0017_registers_engine_expand\`, \`TenantRegisterRepository\`) with full state-transition history across both \`/registers\` and the Home partner sign-off queue (\`approveSignOff\`, \`discussSignOff\`, and \`flagMatterWriteOff\`), single-allocator \`SO-\` reference numbering, reminder deduplication, and same-transaction audit logging.
 
 ## 1. Built-in register types and direct undertaking creation
 
-1Squared ships five built-in register types (alongside any custom registers configured for your practice, such as periodic file reviews):
+1Squared ships six built-in register types (alongside any custom registers configured for your practice, such as periodic file reviews):
 
 | Key | Label | Initial Status | Creation & Governance |
 | --- | --- | --- | --- |
-| \`sign_off\` | Sign-Off | \`pending_approval\` | Supports \`write_off\` (via **Flag write-off**) and schema-defined \`matter_opening\`; transitions through \`pending_approval\` → \`discussing\` → \`approved\` / \`rejected\` via \`transitionRegisterRecordService\` with \`expectedRowVersion\` optimistic concurrency, no-self-approval, and approver notifications |
+| \`sign_off\` | Sign-Off | \`pending_approval\` | Supports \`write_off\` (via **Flag write-off**) and schema-defined \`matter_opening\`; transitions through \`pending_approval\` → \`discussing\` → \`approved\` / \`rejected\` with optimistic concurrency, no-self-approval, approver notifications, and aligned Home / Registers write-off approvals (\`signoff:approve\` or \`register:approve\`) |
+| \`high_risk_opening\` | High-Risk Opening | \`pending_partner\` | Created automatically on prospective submission for matters rated **High**, **Critical**, or **Sensitive** (\`HRO-\` prefix); enforces sequential **Partner** → **different Risk & Compliance officer** two-stage approval with zero administrator bypass, rejecting back to \`rejected\` or moving automatically to \`withdrawn\` if downgraded below High or abandoned |
 | \`undertaking\` | Undertaking | \`open\` | **Direct creation without two-person approval** (\`approvalRules: null\`): any permitted fee earner (\`undertaking:manage\`) records an undertaking directly as \`open\` and can record variations (\`varied\`), mark overdue (\`overdue\`), reopen (\`open\`), discharge (\`discharged\`), or cancel (\`cancelled\`) |
 | \`complaint\` | Client Complaint | \`open\` | Stages from \`open\` → \`investigating\` → \`resolved\` / \`closed\`; supports optional assigned reviewer (\`register_review_assigned\`) |
 | \`breach\` | Compliance Breach | \`logged\` | Stages from \`logged\` → \`remediation\` → \`closed\` (requiring \`register:approve\` with no self-approval) |
