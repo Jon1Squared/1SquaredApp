@@ -53,6 +53,11 @@ import {
   validateWorkTypeFeeArrangementCapCategories,
 } from '../domain/costs/statutoryCaps';
 import { assertTenantOwnsKeyVaultSecretRef } from '../tenancy/keyVaultSecrets';
+import {
+  DEFAULT_MATTER_NUMBERING_CONFIG,
+  DEFAULT_WORK_TYPE_OPENING_GATE,
+  validateMatterNumberPattern,
+} from '../domain/matterNumbering/index';
 
 export const ALL_HOME_ROLE_KEYS: readonly HomeRoleKey[] = ALL_BUILTIN_ROLE_KEYS;
 
@@ -363,6 +368,41 @@ const DEFAULT_WORK_TYPE_RETENTION = {
   statutoryNote: 'Firm standard limitation and file retention policy',
 };
 
+const WorkTypeOpeningGateSchema = z
+  .object({
+    requireConflictCleared: z
+      .boolean()
+      .default(DEFAULT_WORK_TYPE_OPENING_GATE.requireConflictCleared)
+      .describe(
+        'Requires a Cleared or Approved conflict check before matter opening',
+      ),
+    requireCddComplete: z
+      .boolean()
+      .default(DEFAULT_WORK_TYPE_OPENING_GATE.requireCddComplete)
+      .describe(
+        'Requires client-level CDD to be currently recorded (and not expired) before matter opening',
+      ),
+    allowCddOverride: z
+      .boolean()
+      .default(DEFAULT_WORK_TYPE_OPENING_GATE.allowCddOverride)
+      .describe(
+        'Whether a partner/managing partner may record an audited override when client CDD is incomplete',
+      ),
+    requireEngagementSigned: z
+      .boolean()
+      .default(DEFAULT_WORK_TYPE_OPENING_GATE.requireEngagementSigned)
+      .describe(
+        'Requires a recorded signed engagement / client care letter before matter opening',
+      ),
+    requireFundsOnAccount: z
+      .boolean()
+      .default(DEFAULT_WORK_TYPE_OPENING_GATE.requireFundsOnAccount)
+      .describe(
+        'Requires verified cleared funds on account before matter opening',
+      ),
+  })
+  .strict();
+
 const WorkTypeDefaultsSchema = z
   .object({
     autoTaskTemplates: z
@@ -381,6 +421,9 @@ const WorkTypeDefaultsSchema = z
       ...DEFAULT_WORK_TYPE_RETENTION,
     })).describe(
       'Firm-wide fallback retention rule used to calculate destruction_date upon matter closure',
+    ),
+    openingGate: WorkTypeOpeningGateSchema.optional().describe(
+      'Firm-wide fallback pre-conditions evaluated transactionally before opening a prospective matter (ADR 0040, S1-05)',
     ),
   })
   .strict();
@@ -412,6 +455,9 @@ const WorkTypeConfigItemSchema = z
       .describe('Work-type-specific risk assessment questions'),
     retention: WorkTypeRetentionSchema.optional().describe(
       'Retention rule overriding firm defaults for this work type',
+    ),
+    openingGate: WorkTypeOpeningGateSchema.optional().describe(
+      'Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults (ADR 0040, S1-05)',
     ),
     feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesSchema.optional().describe(
       'Explicit mapping from CFA and DBA fee bases to statutory cap categories for this work type',
@@ -2757,6 +2803,47 @@ export const TenantConfigurationSchema = z
       .describe(
         'Client Due Diligence (CDD) checklists, client-type and risk-tier mappings, re-check intervals, reminder schedule, and evidence limits (ADR 0039, S1-04)',
       ),
+    matterNumbering: z
+      .object({
+        pattern: z
+          .string()
+          .min(5)
+          .max(64)
+          .default(DEFAULT_MATTER_NUMBERING_CONFIG.pattern)
+          .superRefine((val, ctx) => {
+            const check = validateMatterNumberPattern(val);
+            if (!check.ok) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: check.error,
+              });
+            }
+          })
+          .describe(
+            'Token template rendered for new matter numbers using {CLIENT_REF}, {SEQ}/{SEQ:N}, {YYYY}, {YY}, and {DEPT} with exactly one sequence token.',
+          ),
+        sequenceScope: z
+          .enum(['client_ref_prefix', 'firm', 'year', 'department'])
+          .default(DEFAULT_MATTER_NUMBERING_CONFIG.sequenceScope)
+          .describe(
+            'Scope key isolating monotonic matter number counters across client_ref_prefix (default R745 parity), firm, year, or department.',
+          ),
+        emptyTokenFallback: z
+          .string()
+          .regex(
+            /^[A-Z0-9_-]{1,12}$/,
+            'matterNumbering.emptyTokenFallback must be 1–12 uppercase A-Z, 0-9, _ or - characters.',
+          )
+          .default(DEFAULT_MATTER_NUMBERING_CONFIG.emptyTokenFallback)
+          .describe(
+            'Uppercase fallback token used when an optional metadata token such as {DEPT} is unavailable.',
+          ),
+      })
+      .strict()
+      .optional()
+      .describe(
+        'Configurable token-based matter reference numbering format and sequence scoping (ADR 0040, S1-05, R745).',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -4023,6 +4110,18 @@ export function loadAndValidateTenantConfig(
       !Array.isArray(overlayDefaults.retention)
         ? (overlayDefaults.retention as Record<string, unknown>)
         : undefined;
+    const baseOpeningGate =
+      baseDefaults?.openingGate &&
+      typeof baseDefaults.openingGate === 'object' &&
+      !Array.isArray(baseDefaults.openingGate)
+        ? (baseDefaults.openingGate as Record<string, unknown>)
+        : undefined;
+    const overlayOpeningGate =
+      overlayDefaults?.openingGate &&
+      typeof overlayDefaults.openingGate === 'object' &&
+      !Array.isArray(overlayDefaults.openingGate)
+        ? (overlayDefaults.openingGate as Record<string, unknown>)
+        : undefined;
 
     const mergedDefaults =
       overlayWorkTypes?.defaults !== undefined && !overlayDefaults
@@ -4038,6 +4137,17 @@ export function loadAndValidateTenantConfig(
                       : {
                           ...(baseRetention ?? {}),
                           ...(overlayRetention ?? {}),
+                        },
+                }
+              : {}),
+            ...(baseOpeningGate || overlayOpeningGate
+              ? {
+                  openingGate:
+                    overlayDefaults?.openingGate !== undefined && !overlayOpeningGate
+                      ? overlayDefaults.openingGate
+                      : {
+                          ...(baseOpeningGate ?? {}),
+                          ...(overlayOpeningGate ?? {}),
                         },
                 }
               : {}),
@@ -4126,6 +4236,18 @@ export function loadAndValidateTenantConfig(
                     unknown
                   >)
                 : undefined;
+            const baseGate =
+              existingObj.openingGate &&
+              typeof existingObj.openingGate === 'object' &&
+              !Array.isArray(existingObj.openingGate)
+                ? (existingObj.openingGate as Record<string, unknown>)
+                : undefined;
+            const overGate =
+              itemObj.openingGate &&
+              typeof itemObj.openingGate === 'object' &&
+              !Array.isArray(itemObj.openingGate)
+                ? (itemObj.openingGate as Record<string, unknown>)
+                : undefined;
             combinedItems[existingIdx] = {
               ...existingObj,
               ...itemObj,
@@ -4135,6 +4257,14 @@ export function loadAndValidateTenantConfig(
                       itemObj.retention !== undefined && !overRet
                         ? itemObj.retention
                         : { ...(baseRet ?? {}), ...(overRet ?? {}) },
+                  }
+                : {}),
+              ...(baseGate || overGate
+                ? {
+                    openingGate:
+                      itemObj.openingGate !== undefined && !overGate
+                        ? itemObj.openingGate
+                        : { ...(baseGate ?? {}), ...(overGate ?? {}) },
                   }
                 : {}),
               ...(baseCapCats || overCapCats
@@ -4171,12 +4301,40 @@ export function loadAndValidateTenantConfig(
     };
   }
 
+  const baseNumbering =
+    baseConfig.matterNumbering &&
+    typeof baseConfig.matterNumbering === 'object' &&
+    !Array.isArray(baseConfig.matterNumbering)
+      ? (baseConfig.matterNumbering as Record<string, unknown>)
+      : undefined;
+  const overlayNumbering =
+    environmentOverlay.matterNumbering &&
+    typeof environmentOverlay.matterNumbering === 'object' &&
+    !Array.isArray(environmentOverlay.matterNumbering)
+      ? (environmentOverlay.matterNumbering as Record<string, unknown>)
+      : undefined;
+  if (
+    baseNumbering ||
+    overlayNumbering ||
+    environmentOverlay.matterNumbering !== undefined
+  ) {
+    merged.matterNumbering =
+      environmentOverlay.matterNumbering !== undefined && !overlayNumbering
+        ? environmentOverlay.matterNumbering
+        : {
+            ...(baseNumbering ?? {}),
+            ...(overlayNumbering ?? {}),
+          };
+  }
+
   return TenantConfigurationSchema.parse(merged);
 }
 
 export const KeyDatesConfigSubSchema = TenantConfigurationSchema.shape.keyDates;
 export const RegistersConfigSubSchema = TenantConfigurationSchema.shape.registers;
 export const CddConfigSubSchema = TenantConfigurationSchema.shape.cdd;
+export const MatterNumberingConfigSubSchema =
+  TenantConfigurationSchema.shape.matterNumbering;
 export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;

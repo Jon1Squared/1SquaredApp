@@ -1673,6 +1673,45 @@
                   "description": "Regulatory or statutory justification for this retention rule"
                 }
               }
+            },
+            "openingGate": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Firm-wide fallback pre-conditions evaluated transactionally before opening a prospective matter (ADR 0040, S1-05)",
+              "default": {
+                "requireConflictCleared": false,
+                "requireCddComplete": false,
+                "allowCddOverride": true,
+                "requireEngagementSigned": false,
+                "requireFundsOnAccount": false
+              },
+              "properties": {
+                "requireConflictCleared": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Requires a Cleared or Approved conflict check before matter opening"
+                },
+                "requireCddComplete": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Requires client-level CDD to be currently recorded (and not expired) before matter opening"
+                },
+                "allowCddOverride": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Whether a partner/managing partner may record an audited override when client CDD is incomplete"
+                },
+                "requireEngagementSigned": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Requires a recorded signed engagement / client care letter before matter opening"
+                },
+                "requireFundsOnAccount": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Requires verified cleared funds on account before matter opening"
+                }
+              }
             }
           }
         },
@@ -1877,6 +1916,38 @@
                     "type": "string",
                     "default": "Firm standard limitation and file retention policy",
                     "description": "Regulatory or statutory justification for this retention rule"
+                  }
+                }
+              },
+              "openingGate": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults (ADR 0040, S1-05)",
+                "properties": {
+                  "requireConflictCleared": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Requires a Cleared or Approved conflict check before matter opening"
+                  },
+                  "requireCddComplete": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Requires client-level CDD to be currently recorded (and not expired) before matter opening"
+                  },
+                  "allowCddOverride": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether a partner/managing partner may record an audited override when client CDD is incomplete"
+                  },
+                  "requireEngagementSigned": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Requires a recorded signed engagement / client care letter before matter opening"
+                  },
+                  "requireFundsOnAccount": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Requires verified cleared funds on account before matter opening"
                   }
                 }
               },
@@ -2128,6 +2199,37 @@
           "maximum": 26214400,
           "default": 10485760,
           "description": "Maximum allowed file size in bytes for CDD evidence uploads."
+        }
+      }
+    },
+    "matterNumbering": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Configurable token-based matter reference numbering format and sequence scoping (ADR 0040, S1-05, R745).",
+      "default": {
+        "pattern": "{CLIENT_REF}-{SEQ:4}",
+        "sequenceScope": "client_ref_prefix",
+        "emptyTokenFallback": "MAT"
+      },
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 64,
+          "default": "{CLIENT_REF}-{SEQ:4}",
+          "description": "Token template rendered for new matter numbers using {CLIENT_REF}, {SEQ}/{SEQ:N}, {YYYY}, {YY}, and {DEPT} with exactly one sequence token."
+        },
+        "sequenceScope": {
+          "type": "string",
+          "enum": ["client_ref_prefix", "firm", "year", "department"],
+          "default": "client_ref_prefix",
+          "description": "Scope key isolating monotonic matter number counters across client_ref_prefix (default R745 parity), firm, year, or department."
+        },
+        "emptyTokenFallback": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_-]{1,12}$",
+          "default": "MAT",
+          "description": "Uppercase fallback token used when an optional metadata token such as {DEPT} is unavailable."
         }
       }
     }

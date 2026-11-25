@@ -5,6 +5,7 @@ import type {
   WorkTypeConfigItem,
   WorkTypeFeeArrangementCapCategoriesConfig,
   WorkTypeFeeCapOverrideConfig,
+  WorkTypeOpeningGateConfig,
   WorkTypeRetentionConfig,
   WorkTypeRiskQuestionConfig,
   WorkTypeRiskQuestionOptionConfig,
@@ -13,6 +14,14 @@ import type {
 import type { ChoiceValue } from './types';
 
 export const DEFAULT_WORK_TYPE_RETENTION_YEARS = 6;
+
+export const DEFAULT_WORK_TYPE_OPENING_GATE: WorkTypeOpeningGateConfig = {
+  requireConflictCleared: false,
+  requireCddComplete: false,
+  allowCddOverride: true,
+  requireEngagementSigned: false,
+  requireFundsOnAccount: false,
+};
 
 export const DEFAULT_WORK_TYPES_CONFIG: WorkTypesConfiguration = {
   defaults: {
@@ -24,6 +33,7 @@ export const DEFAULT_WORK_TYPES_CONFIG: WorkTypesConfiguration = {
       allowMatterOverride: false,
       statutoryNote: 'Firm standard limitation and file retention policy',
     },
+    openingGate: { ...DEFAULT_WORK_TYPE_OPENING_GATE },
   },
   items: [],
 };
@@ -38,12 +48,18 @@ export interface ResolvedWorkTypeRetention extends WorkTypeRetentionConfig {
   matchedWorkTypeId: string | null;
 }
 
+export interface ResolvedWorkTypeOpeningGate extends WorkTypeOpeningGateConfig {
+  source: 'work_type' | 'practice_area' | 'firm_default';
+  matchedWorkTypeId: string | null;
+}
+
 export interface ResolvedWorkTypeBehaviour {
   effectiveConfig: WorkTypesConfiguration;
   autoTaskTemplates: WorkTypeAutoTaskTemplateConfig[];
   autoTaskSource: 'work_type' | 'practice_area' | 'firm_default';
   riskQuestions: WorkTypeRiskQuestionConfig[];
   retention: ResolvedWorkTypeRetention;
+  openingGate: ResolvedWorkTypeOpeningGate;
 }
 
 function cloneAutoTaskTemplate(
@@ -116,6 +132,31 @@ export function resolveEffectiveWorkTypesConfig(
       defaultsRetentionSource?.statutoryNote ??
       baseDefaults?.retention?.statutoryNote ??
       fallbackRetention.statutoryNote,
+  };
+
+  const defaultsGateSource =
+    overrideDefaults?.openingGate ?? baseDefaults?.openingGate;
+  const defaultsOpeningGate: WorkTypeOpeningGateConfig = {
+    requireConflictCleared:
+      defaultsGateSource?.requireConflictCleared ??
+      baseDefaults?.openingGate?.requireConflictCleared ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireConflictCleared,
+    requireCddComplete:
+      defaultsGateSource?.requireCddComplete ??
+      baseDefaults?.openingGate?.requireCddComplete ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireCddComplete,
+    allowCddOverride:
+      defaultsGateSource?.allowCddOverride ??
+      baseDefaults?.openingGate?.allowCddOverride ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.allowCddOverride,
+    requireEngagementSigned:
+      defaultsGateSource?.requireEngagementSigned ??
+      baseDefaults?.openingGate?.requireEngagementSigned ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireEngagementSigned,
+    requireFundsOnAccount:
+      defaultsGateSource?.requireFundsOnAccount ??
+      baseDefaults?.openingGate?.requireFundsOnAccount ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireFundsOnAccount,
   };
 
   const rawDefaultTemplates =
@@ -232,6 +273,26 @@ export function resolveEffectiveWorkTypesConfig(
         });
       }
 
+      const itemOpeningGate: WorkTypeOpeningGateConfig | undefined = item.openingGate
+        ? {
+            requireConflictCleared:
+              item.openingGate.requireConflictCleared ??
+              defaultsOpeningGate.requireConflictCleared,
+            requireCddComplete:
+              item.openingGate.requireCddComplete ??
+              defaultsOpeningGate.requireCddComplete,
+            allowCddOverride:
+              item.openingGate.allowCddOverride ??
+              defaultsOpeningGate.allowCddOverride,
+            requireEngagementSigned:
+              item.openingGate.requireEngagementSigned ??
+              defaultsOpeningGate.requireEngagementSigned,
+            requireFundsOnAccount:
+              item.openingGate.requireFundsOnAccount ??
+              defaultsOpeningGate.requireFundsOnAccount,
+          }
+        : undefined;
+
       mergedItemsMap.set(item.workTypeId, {
         workTypeId: item.workTypeId,
         practiceAreaId: item.practiceAreaId ?? '',
@@ -239,6 +300,7 @@ export function resolveEffectiveWorkTypesConfig(
         autoTaskTemplates: itemAutoTaskTemplates,
         riskQuestions: itemRiskQuestions,
         ...(itemRetention ? { retention: itemRetention } : {}),
+        ...(itemOpeningGate ? { openingGate: itemOpeningGate } : {}),
         ...(itemFeeCapCategories
           ? { feeArrangementCapCategories: itemFeeCapCategories }
           : {}),
@@ -257,6 +319,7 @@ export function resolveEffectiveWorkTypesConfig(
       autoTaskTemplates: defaultAutoTaskTemplates,
       riskQuestions: defaultRiskQuestions,
       retention: defaultsRetention,
+      openingGate: defaultsOpeningGate,
     },
     items: Array.from(mergedItemsMap.values()),
   };
@@ -358,6 +421,37 @@ export function resolveWorkTypeRetention(
   };
 }
 
+export function resolveWorkTypeOpeningGate(
+  config: WorkTypesConfiguration,
+  input: EffectiveWorkTypesResolutionInput,
+): ResolvedWorkTypeOpeningGate {
+  const { subItem, paItem } = findMatchingWorkTypeItems(config, input);
+  if (subItem?.openingGate) {
+    return {
+      ...subItem.openingGate,
+      source: 'work_type',
+      matchedWorkTypeId: subItem.workTypeId,
+    };
+  }
+  if (paItem?.openingGate) {
+    return {
+      ...paItem.openingGate,
+      source: 'practice_area',
+      matchedWorkTypeId: paItem.workTypeId,
+    };
+  }
+  const defaultsGate = config.defaults.openingGate ?? DEFAULT_WORK_TYPE_OPENING_GATE;
+  return {
+    requireConflictCleared: defaultsGate.requireConflictCleared,
+    requireCddComplete: defaultsGate.requireCddComplete,
+    allowCddOverride: defaultsGate.allowCddOverride,
+    requireEngagementSigned: defaultsGate.requireEngagementSigned,
+    requireFundsOnAccount: defaultsGate.requireFundsOnAccount,
+    source: 'firm_default',
+    matchedWorkTypeId: null,
+  };
+}
+
 export interface ResolvedWorkTypeFeeArrangementSettings {
   effectiveWorkTypeId: string;
   feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesConfig;
@@ -427,12 +521,14 @@ export function resolveWorkTypeBehaviour(
   const autoTasks = resolveWorkTypeAutoTaskTemplates(effectiveConfig, input);
   const riskQuestions = resolveWorkTypeRiskQuestions(effectiveConfig, input);
   const retention = resolveWorkTypeRetention(effectiveConfig, input);
+  const openingGate = resolveWorkTypeOpeningGate(effectiveConfig, input);
   return {
     effectiveConfig,
     autoTaskTemplates: autoTasks.templates,
     autoTaskSource: autoTasks.source,
     riskQuestions,
     retention,
+    openingGate,
   };
 }
 
