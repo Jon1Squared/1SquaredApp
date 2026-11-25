@@ -1184,6 +1184,7 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       title: string;
       practiceAreaId: string;
       workTypeSubcategoryId: string;
+      responsiblePartnerId?: string;
       highRisk?: boolean;
     },
   ): Promise<string> {
@@ -1204,6 +1205,13 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
     await page.locator('#nm-description').fill(opts.title);
     await page.locator('#nm-department').selectOption(opts.practiceAreaId);
     await page.locator('#nm-worktype').selectOption(opts.workTypeSubcategoryId);
+    if (opts.responsiblePartnerId) {
+      const partnerSelect = page.locator('#nm-partner');
+      await expect(
+        partnerSelect.locator(`option[value="${opts.responsiblePartnerId}"]`),
+      ).toHaveCount(1, { timeout: 10_000 });
+      await partnerSelect.selectOption(opts.responsiblePartnerId);
+    }
 
     if (opts.highRisk) {
       const riskSection = page.locator('section[aria-labelledby="card-risk-heading"]');
@@ -1338,6 +1346,7 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
         practiceAreaId: 'work_type.corporate_and_commercial',
         workTypeSubcategoryId:
           'work_type.corporate_and_commercial_company_formations_and_structures',
+        responsiblePartnerId: 'P-000038',
         highRisk: true,
       });
       const gatePanel = fePage.getByTestId('matter-opening-gate-panel');
@@ -1346,6 +1355,7 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       const storedAfterSubmit = await matterRepo.getMatterById<Matter>(ctx, matterId, {
         includeRestricted: true,
       });
+      expect(storedAfterSubmit?.responsiblePartnerId).toBe('P-000038');
       expect(storedAfterSubmit?.matterStatusId).toBe('matter_status.prospective_enquiry');
       expect(storedAfterSubmit?.matterNumber).toMatch(/^[A-Z0-9_-]+-\d{4}$/);
       await fePage.getByRole('tab', { name: /^Record/ }).click();
@@ -1358,24 +1368,7 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       await feContext.close();
     }
 
-    // R764: Responsible partner (Rhian Morgan, P-000001) must NOT see Stage 1 Partner approve
-    const respPartnerContext = await browser.newContext({
-      storageState: storageStatePathFor('partner'),
-    });
-    const respPartnerPage = await respPartnerContext.newPage();
-    const respPartnerErrors = attachPageErrorCollector(respPartnerPage);
-    try {
-      await respPartnerPage.goto(`/matters/${matterId}`);
-      await expect(respPartnerPage.getByTestId('matter-opening-gate-panel')).toBeVisible({
-        timeout: 15_000,
-      });
-      await expect(respPartnerPage.getByTestId('hro-partner-approve-btn')).toHaveCount(0);
-      expect(respPartnerErrors).toEqual([]);
-    } finally {
-      await respPartnerContext.close();
-    }
-
-    // Stage 1: Independent Managing Partner (Gethin Lloyd, P-000038) approves; Stage 2 Risk & Compliance remains required
+    // R764: Responsible partner (Gethin Lloyd, P-000038) must NOT see Stage 1 Partner approve
     const mpContext = await browser.newContext({
       storageState: storageStatePathFor('managing_partner'),
     });
@@ -1383,22 +1376,39 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
     const mpErrors = attachPageErrorCollector(mpPage);
     try {
       await mpPage.goto(`/matters/${matterId}`);
-      const partnerApproveBtn = mpPage.getByTestId('hro-partner-approve-btn');
+      await expect(mpPage.getByTestId('matter-opening-gate-panel')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(mpPage.getByTestId('hro-partner-approve-btn')).toHaveCount(0);
+      expect(mpErrors).toEqual([]);
+    } finally {
+      await mpContext.close();
+    }
+
+    // Stage 1: Independent Partner (Rhian Morgan, P-000001) approves; Stage 2 Risk & Compliance remains required
+    const partnerContext = await browser.newContext({
+      storageState: storageStatePathFor('partner'),
+    });
+    const partnerPage = await partnerContext.newPage();
+    const partnerErrors = attachPageErrorCollector(partnerPage);
+    try {
+      await partnerPage.goto(`/matters/${matterId}`);
+      const partnerApproveBtn = partnerPage.getByTestId('hro-partner-approve-btn');
       await expect(partnerApproveBtn).toBeVisible({ timeout: 15_000 });
       await partnerApproveBtn.click();
 
-      const gatePanel = mpPage.getByTestId('matter-opening-gate-panel');
+      const gatePanel = partnerPage.getByTestId('matter-opening-gate-panel');
       await expect(gatePanel).toContainText('Pending Risk & Compliance approval', {
         timeout: 15_000,
       });
-      await expect(gatePanel).toContainText('Stage 1 Partner approved by Gethin Lloyd');
+      await expect(gatePanel).toContainText('Stage 1 Partner approved by Rhian Morgan');
       const midStored = await matterRepo.getMatterById<Matter>(ctx, matterId, {
         includeRestricted: true,
       });
       expect(midStored?.matterStatusId).toBe('matter_status.prospective_enquiry');
-      expect(mpErrors).toEqual([]);
+      expect(partnerErrors).toEqual([]);
     } finally {
-      await mpContext.close();
+      await partnerContext.close();
     }
 
     // R763: High-risk matter requires High-tier CDD on O-000001 before Stage 2 can open the matter
