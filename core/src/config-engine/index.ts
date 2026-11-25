@@ -2551,6 +2551,7 @@ export const TenantConfigurationSchema = z
           requireAssignedApproverMatch: z.boolean().default(false).optional(),
           mustDifferFromPreviousApprover: z.boolean().default(false).optional(),
           distinctFromTransitionKeys: z.array(z.string().min(1)).optional(),
+          systemOnly: z.boolean().default(false).optional(),
           setsDecidedAt: z.boolean().default(false).optional(),
         })
         .strict();

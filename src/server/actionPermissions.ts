@@ -769,7 +769,7 @@ export const ACTION_PERMISSIONS = {
   },
   createRegisterRecordAction: {
     kind: 'permission',
-    key: { anyOf: ['register:create', 'undertaking:manage', 'cdd:record'] },
+    key: { anyOf: ['register:create', 'undertaking:manage'] },
     enforcedBy: 'action',
   },
   transitionRegisterRecordAction: {
@@ -787,7 +787,7 @@ export const ACTION_PERMISSIONS = {
   },
   updateRegisterRecordAction: {
     kind: 'permission',
-    key: { anyOf: ['register:edit', 'undertaking:manage', 'cdd:record'] },
+    key: { anyOf: ['register:edit', 'undertaking:manage'] },
     enforcedBy: 'action',
   },
   saveRegistersConfigAction: {

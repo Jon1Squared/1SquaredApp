@@ -742,7 +742,7 @@ export const PERMISSION_REGISTRY: Readonly<
       'View client due diligence checklists, recorded verification dates, and evidence downloads (excluded from admin and finance; employee-clients additionally gated per ADR 0014).',
     sensitivity: 'standard',
     requiresMfa: false,
-    sinceVersion: '1.2.0',
+    sinceVersion: '1.1.0',
   },
   'cdd:record': {
     key: 'cdd:record',
@@ -752,7 +752,7 @@ export const PERMISSION_REGISTRY: Readonly<
       'Record client due diligence items, upload evidence files, record manual sanctions/PEP outcomes, and complete CDD records (excluded from admin and finance).',
     sensitivity: 'restricted',
     requiresMfa: false,
-    sinceVersion: '1.2.0',
+    sinceVersion: '1.1.0',
   },
   'register:run_reminders': {
     key: 'register:run_reminders',

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import tenantConfigJsonSchema from '../schemas/tenant-config.schema.json';
 import {
   loadAndValidateTenantConfig,
   RESERVED_TENANT_CONFIG_SETTINGS,
@@ -297,5 +298,60 @@ describe('S0-18: Tenant Configuration Engine — integrations.pmsSync Deep-Merge
 
     expect(() => validateCddConfig({ unknownCddKey: true })).toThrow();
     expect(() => validateCddConfig('not-an-object')).toThrow(/CDD_CONFIG_INVALID/);
+  });
+
+  it('R783: JSON schema and Zod agree on optional defaulted cdd checklist and recheckIntervalsMonths fields', () => {
+    const cddSchemaNode = (
+      tenantConfigJsonSchema as unknown as {
+        properties: {
+          cdd: {
+            properties: {
+              checklists: {
+                additionalProperties: {
+                  required?: string[];
+                  properties: {
+                    standard: { items: { required?: string[] } };
+                    highAdditional: { items: { required?: string[] } };
+                  };
+                };
+              };
+              recheckIntervalsMonths: { required?: string[] };
+            };
+          };
+        };
+      }
+    ).properties.cdd.properties;
+
+    expect(cddSchemaNode.checklists.additionalProperties.required).toBeUndefined();
+    expect(cddSchemaNode.checklists.additionalProperties.properties.standard.items.required).toEqual([
+      'itemKey',
+      'label',
+    ]);
+    expect(
+      cddSchemaNode.checklists.additionalProperties.properties.highAdditional.items.required,
+    ).toEqual(['itemKey', 'label']);
+    expect(cddSchemaNode.recheckIntervalsMonths.required).toBeUndefined();
+
+    const minimalMerged = loadAndValidateTenantConfig(SAMPLE_BASE_CONFIG, {
+      cdd: {
+        checklists: {
+          individual: {
+            standard: [{ itemKey: 'id', label: 'ID' }],
+          },
+        },
+        recheckIntervalsMonths: {},
+      },
+    });
+    expect(minimalMerged.cdd?.checklists?.individual?.standard?.[0]).toMatchObject({
+      itemKey: 'id',
+      label: 'ID',
+      required: true,
+      requiresEvidence: false,
+    });
+    expect(minimalMerged.cdd?.checklists?.individual?.highAdditional).toEqual([]);
+    expect(minimalMerged.cdd?.recheckIntervalsMonths).toEqual({
+      standard: 36,
+      high: 12,
+    });
   });
 });

@@ -73,19 +73,12 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     tx: TenantSqlClient,
     ctx: TenantContext,
   ): Promise<string> {
-    const maxRes = await tx.query<{ max_num: string | null }>(
-      `SELECT MAX(substring(id from '^EVD-([0-9]+)$')::bigint)::text AS max_num
-       FROM public.evidence_artifacts
-       WHERE tenant_id = $1 AND id ~ '^EVD-[0-9]+$'`,
-      [ctx.tenantId],
-    );
-    const maxExisting = Number(maxRes.rows[0]?.max_num ?? '0') || 0;
+    void ctx;
     const seqRes = await tx.query<{ next_val: string }>(
       `SELECT nextval('public.tenant_evidence_artifact_id_seq')::text AS next_val`,
     );
     const seqNum = Number(seqRes.rows[0]?.next_val ?? '1') || 1;
-    const num = Math.max(maxExisting + 1, seqNum);
-    return `EVD-${String(num).padStart(6, '0')}`;
+    return `EVD-${String(seqNum).padStart(6, '0')}`;
   }
 
   public async createArtifactInTx(
@@ -106,6 +99,9 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     },
     options?: {
       auditEntries?: readonly FirmAuditEntryInput[];
+      buildAuditEntries?: (
+        artifact: EvidenceArtifactRecord,
+      ) => readonly FirmAuditEntryInput[];
     },
   ): Promise<EvidenceArtifactRecord> {
     if (input.scanStatus !== 'clean') {
@@ -146,12 +142,20 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     );
     const inserted = res.rows[0]!;
     this.assertRowTenant(ctx, inserted.tenant_id, 'evidence_artifacts.create');
+    const artifact = mapEvidenceArtifactRow(inserted);
 
-    if (options?.auditEntries?.length) {
-      await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
+    const dynamicAudits = options?.buildAuditEntries
+      ? options.buildAuditEntries(artifact)
+      : [];
+    const allAudits = [
+      ...(options?.auditEntries ?? []),
+      ...dynamicAudits,
+    ];
+    if (allAudits.length > 0) {
+      await this.auditRepo.appendAuditEntries(ctx, allAudits);
     }
 
-    return mapEvidenceArtifactRow(inserted);
+    return artifact;
   }
 
   public async createArtifact(
@@ -171,6 +175,9 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     },
     options?: {
       auditEntries?: readonly FirmAuditEntryInput[];
+      buildAuditEntries?: (
+        artifact: EvidenceArtifactRecord,
+      ) => readonly FirmAuditEntryInput[];
     },
   ): Promise<EvidenceArtifactRecord> {
     return this.withTenantTransaction(ctx, async (tx) =>

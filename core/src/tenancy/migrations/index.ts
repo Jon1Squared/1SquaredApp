@@ -3460,6 +3460,19 @@ UPDATE public.choice_values cv
         AND cv2.metadata_json->>'systemKey' = ica.written_value
    );
 `.trim(),
+    // WARNING (R788 Option B — Destructive Down Migration):
+    // Rolling back `0025_registers_cdd_and_org_type_keys_expand` drops `public.evidence_artifacts`
+    // and its `public.tenant_evidence_artifact_id_seq` sequence while the uploaded blobs remain in
+    // blob storage (`tenant-<tenantId>-<env>/evidence/...`), orphaning uploaded evidence metadata links.
+    // BEFORE running down migration 0025 in any non-empty environment:
+    //   1. Export `public.evidence_artifacts` (and any `register_records` where `register_type_key = 'cdd'`)
+    //      to the tenant backup bucket, and place the tenant in maintenance mode.
+    // To recover after an accidental rollback:
+    //   1. Re-apply migration 0025 (`upSql`) and restore the `evidence_artifacts` dump from backup
+    //      (plus reset `tenant_evidence_artifact_id_seq` above the restored max EVD number);
+    //   2. Any unreferenced blobs still in `tenant-<tenantId>-<env>/evidence/...` can be matched via
+    //      `register_records.field_values_json` (`checklistItems[].evidenceRefs` & `supportingEvidence`)
+    //      and `audit_entries` (`record_type = 'evidence_artifact'`). See `docs/guides/platform-technical-notes.md`.
     downSql: `
 UPDATE public.choice_values cv
    SET metadata_json = COALESCE(cv.metadata_json, '{}'::jsonb) - 'systemKey'

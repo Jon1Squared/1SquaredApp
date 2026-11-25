@@ -2005,7 +2005,6 @@
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["standard", "highAdditional"],
             "properties": {
               "standard": {
                 "type": "array",
@@ -2014,7 +2013,7 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["itemKey", "label", "required", "requiresEvidence"],
+                  "required": ["itemKey", "label"],
                   "properties": {
                     "itemKey": {
                       "type": "string",
@@ -2055,7 +2054,7 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["itemKey", "label", "required", "requiresEvidence"],
+                  "required": ["itemKey", "label"],
                   "properties": {
                     "itemKey": {
                       "type": "string",
@@ -2096,7 +2095,6 @@
           "type": "object",
           "additionalProperties": false,
           "description": "Periodic re-check intervals in months calculated from CDD completion.",
-          "required": ["standard", "high"],
           "properties": {
             "standard": {
               "type": "integer",

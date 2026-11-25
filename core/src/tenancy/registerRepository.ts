@@ -47,13 +47,51 @@ export const REGISTER_RECORD_VISIBLE_SQL_PREDICATE = `(
   )
 )`;
 
+export const MATTER_ACTIVE_PARTICIPANT_ROLE_KEYS_NOTE =
+  'responsiblePartnerId, supervisingPartnerId, leadFeeEarnerId, relationshipPartnerId, teamMemberIds';
+
+export function buildMatterActiveParticipantSqlPredicate(
+  matterAlias: string,
+  viewerParamIndex = 2,
+): string {
+  const v = `$${viewerParamIndex}::text`;
+  return `(
+    COALESCE(${matterAlias}.responsible_partner_id, '') = ${v}
+    OR COALESCE(${matterAlias}.supervisor_id, '') = ${v}
+    OR COALESCE(${matterAlias}.responsible_fee_earner_id, '') = ${v}
+    OR COALESCE(${matterAlias}.opening_record_json->>'relationshipPartnerId', '') = ${v}
+    OR (
+      jsonb_typeof(${matterAlias}.opening_record_json->'teamMemberIds') = 'array'
+      AND (${matterAlias}.opening_record_json->'teamMemberIds') ? ${v}
+    )
+  )`;
+}
+
+export function isActorActiveParticipantOnMatterRecord(
+  actorId: string,
+  matter: {
+    responsiblePartnerId?: string | null;
+    supervisingPartnerId?: string | null;
+    leadFeeEarnerId?: string | null;
+    relationshipPartnerId?: string | null;
+    teamMemberIds?: readonly string[] | null;
+  },
+): boolean {
+  return (
+    matter.responsiblePartnerId === actorId ||
+    matter.supervisingPartnerId === actorId ||
+    matter.leadFeeEarnerId === actorId ||
+    matter.relationshipPartnerId === actorId ||
+    (Array.isArray(matter.teamMemberIds) && matter.teamMemberIds.includes(actorId))
+  );
+}
+
 export function buildRegisterEmployeeClientVisibleSqlPredicate(params: {
   viewerParamIndex?: number;
   canViewCddParamIndex: number;
   canBypassEmployeeCddParamIndex: number;
 }): string {
   const viewerParamIndex = params.viewerParamIndex ?? 2;
-  const v = `$${viewerParamIndex}::text`;
   const canCdd = `$${params.canViewCddParamIndex}::boolean`;
   const canBypass = `$${params.canBypassEmployeeCddParamIndex}::boolean`;
   return `(
@@ -87,15 +125,7 @@ export function buildRegisterEmployeeClientVisibleSqlPredicate(params: {
               )
             )
             AND NOT ${buildMatterHiddenFromViewerSql('em', viewerParamIndex)}
-            AND (
-              COALESCE(em.responsible_partner_id, '') = ${v}
-              OR COALESCE(em.supervisor_id, '') = ${v}
-              OR COALESCE(em.responsible_fee_earner_id, '') = ${v}
-              OR (
-                jsonb_typeof(em.opening_record_json->'teamMemberIds') = 'array'
-                AND (em.opening_record_json->'teamMemberIds') ? ${v}
-              )
-            )
+            AND ${buildMatterActiveParticipantSqlPredicate('em', viewerParamIndex)}
         )
       )
     )
@@ -106,6 +136,12 @@ export interface ListVisibleRegisterRecordsOptions {
   registerTypeKey?: string;
   registerTypeKeys?: readonly string[];
   status?: string;
+  dueOrInProgressFilter?: {
+    inProgressStatus: string;
+    recordedStatus: string;
+    dueBeforeIso: string;
+  };
+  orderBy?: 'updated_desc' | 'due_asc';
   matterId?: string;
   enquiryId?: string;
   personId?: string;
@@ -641,6 +677,16 @@ export class TenantRegisterRepository extends TenantScopedRepository {
         params.push(options.status);
         clauses.push(`r.status = $${params.length}`);
       }
+      if (options?.dueOrInProgressFilter) {
+        const f = options.dueOrInProgressFilter;
+        params.push(f.inProgressStatus, f.recordedStatus, f.dueBeforeIso);
+        const inProgIdx = params.length - 2;
+        const recIdx = params.length - 1;
+        const dueIdx = params.length;
+        clauses.push(
+          `(r.status = $${inProgIdx} OR (r.status = $${recIdx} AND r.due_at IS NOT NULL AND r.due_at <= $${dueIdx}::timestamptz))`,
+        );
+      }
       if (options?.matterId) {
         params.push(options.matterId);
         clauses.push(`r.matter_id = $${params.length}`);
@@ -670,10 +716,14 @@ export class TenantRegisterRepository extends TenantScopedRepository {
         params.push(Math.floor(options.limit));
         limitClause = ` LIMIT $${params.length}`;
       }
+      const orderByClause =
+        options?.orderBy === 'due_asc'
+          ? `ORDER BY CASE WHEN r.due_at IS NOT NULL THEN 0 ELSE 1 END ASC, r.due_at ASC, r.updated_at DESC, r.id ASC`
+          : `ORDER BY r.updated_at DESC, r.created_at DESC, r.id ASC`;
       const res = await tx.query<DbRegisterRecordRow>(
         `SELECT * FROM public.register_records r
          WHERE ${clauses.join(' AND ')}
-         ORDER BY r.updated_at DESC, r.created_at DESC, r.id ASC${limitClause}`,
+         ${orderByClause}${limitClause}`,
         params,
       );
       return res.rows.map((row) => {
@@ -734,6 +784,23 @@ export class TenantRegisterRepository extends TenantScopedRepository {
         return mapRegisterTransitionRow(row);
       });
     });
+  }
+
+  public async lockRegisterRecordForUpdateInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    recordId: string,
+  ): Promise<RegisterRecord | null> {
+    const lockRes = await tx.query<DbRegisterRecordRow>(
+      `SELECT * FROM public.register_records
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [ctx.tenantId, recordId],
+    );
+    const lockedRow = lockRes.rows[0];
+    if (!lockedRow) return null;
+    this.assertRowTenant(ctx, lockedRow.tenant_id, 'register_records.lockForUpdate');
+    return mapRegisterRecordRow(lockedRow);
   }
 
   public async updateRegisterRecordDetails(

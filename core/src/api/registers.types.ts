@@ -125,6 +125,8 @@ export interface RegisterTransitionDefinition {
   requireAssignedApproverMatch?: boolean;
   mustDifferFromPreviousApprover?: boolean;
   distinctFromTransitionKeys?: readonly string[];
+  /** When true, only dedicated core system workflows may execute this transition directly (R765). */
+  systemOnly?: boolean;
   setsDecidedAt?: boolean;
 }
 

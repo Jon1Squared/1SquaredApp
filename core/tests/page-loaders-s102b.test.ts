@@ -4252,18 +4252,18 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
           expect(ids).not.toContain(wallMatter.id);
         }
 
-        // Tampered ID and cross-tenant Bravo client ID both return []
+        // Tampered ID and cross-tenant Bravo client ID both return empty matters & cddSummaries
         const tampered = await listClientPriorMattersRecord(
           ['O-NONEXISTENT-999'],
           'P-000002',
         );
-        expect(tampered).toEqual({ matters: [] });
+        expect(tampered).toEqual({ matters: [], cddSummaries: {} });
 
         const crossTenant = await listClientPriorMattersRecord(
           [env.bravoOrg.id, env.bravoPerson.id],
           'P-000002',
         );
-        expect(crossTenant).toEqual({ matters: [] });
+        expect(crossTenant).toEqual({ matters: [], cddSummaries: {} });
       });
 
       // Forged Bravo tenant claim while active tenant is Alpha is rejected
@@ -4614,5 +4614,67 @@ describe('S1-02b B15: Per-route SQL page loaders, two-tenant isolation, privacy,
       });
     },
     45_000,
+  );
+
+  it(
+    '19. R776: loadHomePageData queries CDD queue by status/dueAt in SQL so due re-checks with oldest updated_at survive past 100 newer records',
+    async () => {
+      const env = await provisionAndSeedTwoTenants();
+      const regRepo = new TenantRegisterRepository();
+      const dueSoonIso = new Date(Date.now() + 5 * 86_400_000).toISOString();
+      const farFutureIso = new Date(Date.now() + 400 * 86_400_000).toISOString();
+
+      await regRepo.createRegisterRecord(env.ctxAlpha, {
+        id: 'REG-R776-DUE-OLDEST',
+        registerTypeKey: 'cdd',
+        reference: 'CDD-R776-000',
+        title: 'Oldest Updated Soon-Due CDD Record',
+        status: 'recorded',
+        organisationId: env.alphaPubOrg.id,
+        ownerId: 'P-000003',
+        dueAt: dueSoonIso,
+        fieldValues: { clientCategory: 'company_or_llp', riskTier: 'standard', checklistItems: [] },
+        createdById: 'P-000003',
+      });
+      await regRepo.withTenantTransaction(env.ctxAlpha, async (tx) => {
+        await tx.query(
+          `UPDATE public.register_records
+              SET updated_at = '2025-01-01T00:00:00.000Z'
+            WHERE tenant_id = $1 AND id = $2`,
+          [env.tenantAlpha, 'REG-R776-DUE-OLDEST'],
+        );
+      });
+
+      for (let i = 1; i <= 119; i++) {
+        await regRepo.createRegisterRecord(env.ctxAlpha, {
+          id: `REG-R776-FUTURE-${i}`,
+          registerTypeKey: 'cdd',
+          reference: `CDD-R776-${String(i).padStart(3, '0')}`,
+          title: `Newer Far-Future CDD ${i}`,
+          status: 'recorded',
+          organisationId: env.alphaPubOrg.id,
+          ownerId: 'P-000003',
+          dueAt: farFutureIso,
+          fieldValues: { clientCategory: 'company_or_llp', riskTier: 'standard', checklistItems: [] },
+          createdById: 'P-000003',
+        });
+      }
+
+      const riskSession = makeActorSession('P-000003', ['risk_compliance'], env.tenantAlpha);
+      setActiveTenantConfigForTesting(env.rawConfigAlpha, {});
+      setTestEntraSessionOverride(riskSession.verifiedSession);
+      try {
+        await runWithActiveActorSession(riskSession, async () => {
+          const homeData = await loadHomePageData('P-000003');
+          expect(
+            homeData.cddQueueRecords?.some((r) => r.id === 'REG-R776-DUE-OLDEST'),
+          ).toBe(true);
+        });
+      } finally {
+        setTestEntraSessionOverride(null);
+        setActiveTenantConfigForTesting(null);
+      }
+    },
+    60_000,
   );
 });

@@ -35,6 +35,7 @@ import type {
 export const REGISTER_DOMAIN_ERROR_CODES = {
   VALIDATION_ERROR: 'REGISTER_VALIDATION_ERROR',
   INVALID_TRANSITION: 'REGISTER_INVALID_TRANSITION',
+  SYSTEM_ONLY_TRANSITION: 'REGISTER_SYSTEM_ONLY_TRANSITION',
   SELF_APPROVAL_FORBIDDEN: 'REGISTER_SELF_APPROVAL_FORBIDDEN',
   APPROVER_MISMATCH: 'REGISTER_APPROVER_MISMATCH',
   CONCURRENCY_CONFLICT: 'REGISTER_CONCURRENCY_CONFLICT',
@@ -477,6 +478,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         fromStatuses: ['in_progress', 'recorded'],
         toStatus: 'recorded',
         requiredPermission: 'cdd:record',
+        systemOnly: true,
         setsDecidedAt: true,
       },
       {
@@ -485,6 +487,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         fromStatuses: ['in_progress', 'recorded'],
         toStatus: 'in_progress',
         requiredPermission: 'cdd:record',
+        systemOnly: true,
       },
       {
         key: 'archive_cdd',
@@ -587,6 +590,9 @@ function cloneTransitionDefinition(
       : {}),
     ...(transitionDef.distinctFromTransitionKeys
       ? { distinctFromTransitionKeys: [...transitionDef.distinctFromTransitionKeys] }
+      : {}),
+    ...(transitionDef.systemOnly !== undefined
+      ? { systemOnly: Boolean(transitionDef.systemOnly) }
       : {}),
     setsDecidedAt: transitionDef.setsDecidedAt ?? false,
   };
@@ -1205,6 +1211,7 @@ export function validateRegisterTransitionExecution(params: {
   actorPermissionSet: ReadonlySet<PermissionKey>;
   comment: string | null;
   expectedRowVersion?: number;
+  isSystemActor?: boolean;
 }): {
   transition: RegisterTransitionDefinition;
   nextStatus: string;
@@ -1219,6 +1226,7 @@ export function validateRegisterTransitionExecution(params: {
     actorPermissionSet,
     comment,
     expectedRowVersion,
+    isSystemActor = false,
   } = params;
 
   if (!registerType.enabled) {
@@ -1240,6 +1248,20 @@ export function validateRegisterTransitionExecution(params: {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
       `Transition "${transitionKey}" is not defined on register "${registerType.key}".`,
+    );
+  }
+
+  if (transition.systemOnly && !isSystemActor) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.SYSTEM_ONLY_TRANSITION,
+      `Transition "${transition.key}" on register "${registerType.key}" may only be executed through its dedicated workflow.`,
+    );
+  }
+
+  if (isSystemActor && !transition.systemOnly) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
+      `Transition "${transition.key}" on register "${registerType.key}" is not a system-only workflow transition.`,
     );
   }
 

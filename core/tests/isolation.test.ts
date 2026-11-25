@@ -204,7 +204,7 @@ import { isActionDenied } from '../../src/domain/actionResult';
 import { createSeedStore } from '../../src/seed/seedStoreBuilder';
 import { loadCommittedSeedStore } from '../../src/seed/seedSnapshot';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
-import { auditEntriesForRecord, auditEntriesSince, getKeyDateRepository, markAuditPosition, runAsTestActor, testTenantCtx } from '../../src/server/testSupport/auditTestSupport';
+import { auditEntriesForRecord, auditEntriesSince, getKeyDateRepository, markAuditPosition, runAsTestActor, setTestActorSession, testTenantCtx } from '../../src/server/testSupport/auditTestSupport';
 
 describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tests', () => {
   const tenantAToken = {
@@ -13992,4 +13992,214 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await resetAllDemoData('P-000001', testDataResetContext());
     }
   });
+
+  it('S1-04 (R777): isolates CDD register records and /api/evidence tokens across Tenant A and Tenant B, rejecting cross-tenant IDs and forged tenant claims while leaving Tenant A untouched', async () => {
+    const { provisionPostgresClusterRolesAndDatabases } = await import(
+      '../src/tenancy/postgresAdminBootstrap'
+    );
+    const {
+      TenantEvidenceArtifactRepository,
+      TenantRegisterRepository,
+    } = await import('@platform/core');
+    const { importFirmStoreModulesToPostgres } = await import(
+      '../../src/server/storePostgresImport'
+    );
+    const {
+      completeClientCddRecord,
+      getRegisterRecordDetailRecord,
+      recordCddChecklistItemRecord,
+      startOrLoadClientCddRecord,
+    } = await import('../../src/server/services');
+    const uploadRoute = await import('../../src/app/api/evidence/upload/route');
+    const downloadRoute = await import('../../src/app/api/evidence/download/route');
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: 'tenant-alpha', environment: 'test' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      ],
+    });
+    const poolManager = new TenantPostgresPoolManager();
+    const runner = new TenantMigrationRunner();
+    const alphaRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'tenant-alpha',
+    };
+    const bravoRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'tenant-bravo',
+    };
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Partner Alpha',
+        email: 'partner@tenant-alpha.example',
+        tenantId: 'tenant-alpha',
+        roles: ['admin', 'partner', 'fee_earner', 'risk_compliance', 'legal_secretary'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'iso-s104-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Partner Bravo',
+        email: 'partner@tenant-bravo.example',
+        tenantId: 'tenant-bravo',
+        roles: ['admin', 'partner', 'fee_earner', 'risk_compliance', 'legal_secretary'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'iso-s104-bravo',
+    });
+    try {
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+      const alphaCfg = loadAndValidateTenantConfig(alphaRaw, { tenantId: 'tenant-alpha', environment: 'test' }, 'test', 'multi_tenant');
+      const bravoCfg = loadAndValidateTenantConfig(bravoRaw, { tenantId: 'tenant-bravo', environment: 'test' }, 'test', 'multi_tenant');
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxAlpha,
+        tenantConfig: alphaCfg,
+        store: createSeedStore(new Date()),
+        clearFirst: true,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxBravo,
+        tenantConfig: bravoCfg,
+        store: createSeedStore(new Date()),
+        clearFirst: true,
+      });
+
+      const regRepo = new TenantRegisterRepository({ poolManager });
+      const evidenceRepo = new TenantEvidenceArtifactRepository({ poolManager });
+
+      setActiveTenantConfigForTesting(alphaRaw, {});
+      const alphaStart = await runAsTestActor(
+        'P-000002',
+        () =>
+          startOrLoadClientCddRecord(
+            { subjectType: 'organisation', subjectId: 'O-000004', createIfMissing: true },
+            'P-000002',
+            { tenantCtx: ctxAlpha },
+          ),
+        { tenantId: 'tenant-alpha', roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(alphaStart.ok).toBe(true);
+      if (!alphaStart.ok || !alphaStart.summary.record) return;
+      const alphaCddId = alphaStart.summary.record.id;
+      const firstItemKey = alphaStart.summary.checklistItems[0]!.itemKey;
+
+      const cleanPdf = new TextEncoder().encode('%PDF-1.4\n%Alpha Confidential');
+      const form = new FormData();
+      form.set('subjectType', 'organisation');
+      form.set('subjectId', 'O-000004');
+      form.set('file', new File([cleanPdf], 'alpha-cdd.pdf', { type: 'application/pdf' }));
+      const tmp = new Response(form);
+      const rawBytes = await tmp.arrayBuffer();
+      setTestActorSession('P-000002', { tenantId: 'tenant-alpha', roles: ['fee_earner'], mfaVerified: false });
+      const upRes = await runAsTestActor(
+        'P-000002',
+        () =>
+          uploadRoute.POST(
+            new Request('http://localhost/api/evidence/upload', {
+              method: 'POST',
+              headers: {
+                'content-type': tmp.headers.get('content-type')!,
+                'content-length': String(rawBytes.byteLength),
+              },
+              body: rawBytes,
+            }),
+          ),
+        { tenantId: 'tenant-alpha', roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(upRes.status).toBe(200);
+      const upJson = (await upRes.json()) as { downloadUrl: string };
+
+      // Bravo actor cannot inspect, edit, or complete Alpha's CDD record ID, nor use Alpha's download token
+      setActiveTenantConfigForTesting(bravoRaw, {});
+      const crossDetail = await runAsTestActor(
+        'P-000002',
+        () =>
+          getRegisterRecordDetailRecord(alphaCddId, 'P-000002', {
+            tenantCtx: ctxBravo,
+            tenantConfig: bravoCfg,
+          }),
+        { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(crossDetail).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      const crossItem = await runAsTestActor(
+        'P-000002',
+        () =>
+          recordCddChecklistItemRecord(
+            { recordId: alphaCddId, itemKey: firstItemKey, status: 'recorded', note: 'Cross tenant tamper' },
+            'P-000002',
+            { tenantCtx: ctxBravo },
+          ),
+        { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(crossItem).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      const crossComplete = await runAsTestActor(
+        'P-000002',
+        () =>
+          completeClientCddRecord({ recordId: alphaCddId }, 'P-000002', {
+            tenantCtx: ctxBravo,
+            tenantConfig: bravoCfg,
+          }),
+        { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(crossComplete).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      setTestActorSession('P-000002', { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false });
+      const crossDl = await runAsTestActor(
+        'P-000002',
+        () =>
+          downloadRoute.GET(
+            new Request(`http://localhost${upJson.downloadUrl}`, { method: 'GET' }),
+          ),
+        { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(crossDl.status).toBe(403);
+
+      // Forged tenant claim (session claims tenant-bravo while active config is tenant-alpha)
+      setActiveTenantConfigForTesting(alphaRaw, {});
+      setTestActorSession('P-000002', { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false });
+      await expect(
+        runAsTestActor(
+          'P-000002',
+          () =>
+            downloadRoute.GET(
+              new Request(`http://localhost${upJson.downloadUrl}`, { method: 'GET' }),
+            ),
+          { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false },
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      // Verify Alpha rows remain untouched after all cross-tenant attempts
+      const alphaAfter = await regRepo.getRegisterRecordById(ctxAlpha, alphaCddId, {
+        canViewCdd: true,
+      });
+      expect(alphaAfter?.status).toBe('in_progress');
+      const alphaAfterItems = (alphaAfter?.fieldValues.checklistItems ?? []) as Array<{
+        itemKey: string;
+        status: string;
+      }>;
+      expect(alphaAfterItems.find((i) => i.itemKey === firstItemKey)?.status).toBe('pending');
+      const bravoArtifacts = await evidenceRepo.listArtifactsForSubject(ctxBravo, {
+        subjectType: 'organisation',
+        subjectId: 'O-000004',
+      });
+      expect(bravoArtifacts).toHaveLength(0);
+    } finally {
+      setTestActorSession(null);
+      setActiveTenantConfigForTesting(null);
+      await poolManager.closeAllPools();
+    }
+  }, 45_000);
 });

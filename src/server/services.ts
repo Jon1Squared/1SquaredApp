@@ -327,6 +327,7 @@ import {
   getEffectiveReminderHourLocal,
   hasActiveTenantTransaction,
   INVALID_PARENT_ORGANISATION_CODE,
+  isActorActiveParticipantOnMatterRecord,
   isValidEmailAddress,
   loadActiveTenantRegistry,
   ManualIdentityVerificationProvider,
@@ -27075,6 +27076,25 @@ function registerServiceFailure(
   };
 }
 
+const EXPOSED_REGISTER_SERVICE_ERROR_CODES = new Set<string>([
+  'FORBIDDEN',
+  'UNAUTHENTICATED',
+  'VALIDATION_ERROR',
+  'NOT_FOUND',
+  'PAYLOAD_TOO_LARGE',
+  'UNSUPPORTED_MEDIA_TYPE',
+  'EVIDENCE_MALWARE_DETECTED',
+  'REGISTER_TYPE_DISABLED',
+  REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+  REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
+  REGISTER_DOMAIN_ERROR_CODES.SYSTEM_ONLY_TRANSITION,
+  REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
+  REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
+  REGISTER_DOMAIN_ERROR_CODES.CONCURRENCY_CONFLICT,
+  REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND,
+  REGISTER_DOMAIN_ERROR_CODES.TYPE_DISABLED,
+]);
+
 function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
   const rawErr = err as { code?: string; message?: string };
   const rawCode = rawErr?.code ?? '';
@@ -27084,31 +27104,24 @@ function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
   ) {
     throw err;
   }
-  const msg = rawErr?.message || (err instanceof Error ? err.message : 'Register operation failed.');
   if (rawCode === 'MFA_REQUIRED') {
+    const msg =
+      rawErr?.message || 'Multi-factor authentication is required for this action.';
     return registerServiceFailure('MFA_REQUIRED', msg);
   }
-  if (
-    rawCode === 'FORBIDDEN' ||
-    rawCode === 'UNAUTHENTICATED' ||
-    rawCode === REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN ||
-    rawCode === REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH ||
-    rawCode === REGISTER_DOMAIN_ERROR_CODES.CONCURRENCY_CONFLICT ||
-    rawCode === REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND
-  ) {
+  if (EXPOSED_REGISTER_SERVICE_ERROR_CODES.has(rawCode)) {
+    const msg =
+      rawErr?.message || (err instanceof Error ? err.message : 'Register operation failed.');
     return registerServiceFailure(rawCode, msg);
   }
-  return registerServiceFailure(rawCode || 'INTERNAL_ERROR', msg);
+  return registerServiceFailure(
+    'INTERNAL_ERROR',
+    'The requested register operation could not be completed.',
+  );
 }
 
 function isActorActiveParticipantOnMatter(actorId: string, m: Matter): boolean {
-  return (
-    m.responsiblePartnerId === actorId ||
-    m.supervisingPartnerId === actorId ||
-    m.leadFeeEarnerId === actorId ||
-    m.relationshipPartnerId === actorId ||
-    (Array.isArray(m.teamMemberIds) && m.teamMemberIds.includes(actorId))
-  );
+  return isActorActiveParticipantOnMatterRecord(actorId, m);
 }
 
 function isEmployeeSubjectPerson(
@@ -27394,7 +27407,7 @@ export async function getRegisterRecordDetailRecord(
       includeRestricted: true,
     });
     if (!record) {
-      return registerServiceFailure('NOT_FOUND', `Register record "${trimmedId}" was not found.`);
+      return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
     }
     const dbOverride = await getCatalogueRepository().getModuleConfig<RegistersConfiguration>(
       ctx,
@@ -27427,6 +27440,9 @@ export async function getRegisterRecordDetailRecord(
         rbacConfig,
       });
       if (!cddAccess.ok) {
+        if (cddAccess.denial.code === 'FORBIDDEN') {
+          return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
+        }
         return cddAccess.denial;
       }
     }
@@ -27512,6 +27528,14 @@ export async function createRegisterRecordService(
       return registerServiceFailure(
         'VALIDATION_ERROR',
         `Register type "${input.registerTypeKey}" is not configured.`,
+      );
+    }
+    // R765: CDD records MUST be created through the dedicated CDD service (`startOrLoadClientCddRecord`),
+    // which derives client category/risk tier, enforces advisory locking, and populates checklists from config.
+    if (registerTypePre.key === 'cdd') {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Client Due Diligence records must be created from the client profile.',
       );
     }
     const hasCreatePermission =
@@ -27767,31 +27791,53 @@ export async function transitionRegisterRecordService(
       includeRestricted: true,
     });
     if (!existingPre) {
-      return registerServiceFailure(
-        'NOT_FOUND',
-        `Register record "${input.recordId}" was not found.`,
-      );
+      return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
     }
     if (options?.viaHomeSignOffAdapter && existingPre.registerTypeKey !== 'sign_off') {
-      return registerServiceFailure(
-        'NOT_FOUND',
-        `Sign-off record "${input.recordId}" was not found.`,
-      );
+      return registerServiceFailure('NOT_FOUND', 'Sign-off record was not found.');
     }
-    if (existingPre.registerTypeKey === 'cdd' && (existingPre.personId || existingPre.organisationId)) {
-      const cddAccess = await assertActorCanAccessClientCddSubject({
-        ctx,
-        actor,
-        permSet,
-        subjectType: existingPre.organisationId ? 'organisation' : 'person',
-        subjectId: existingPre.organisationId ?? existingPre.personId ?? '',
-        people,
-        teams,
-        rbacConfig,
-        requireRecordPermission: true,
-      });
-      if (!cddAccess.ok) {
-        return cddAccess.denial;
+    if (existingPre.registerTypeKey === 'cdd') {
+      if (existingPre.personId || existingPre.organisationId) {
+        const cddAccess = await assertActorCanAccessClientCddSubject({
+          ctx,
+          actor,
+          permSet,
+          subjectType: existingPre.organisationId ? 'organisation' : 'person',
+          subjectId: existingPre.organisationId ?? existingPre.personId ?? '',
+          people,
+          teams,
+          rbacConfig,
+          requireRecordPermission: true,
+        });
+        if (!cddAccess.ok) {
+          if (!permSet.permissions.has('cdd:record')) {
+            return cddAccess.denial;
+          }
+          // R770: return identical NOT_FOUND for hidden employee-client CDD IDs
+          return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
+        }
+      } else if (!permSet.permissions.has('cdd:record')) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'Missing required permission "cdd:record" to record or update client CDD.',
+        );
+      }
+      // R765: Only archive_cdd and supersede_cdd are exposed through the generic Registers workspace
+      // so compliance officers can close or supersede obsolete CDD records with an audit reason;
+      // record_cdd and upgrade_to_high_risk are systemOnly transitions restricted to dedicated CDD services,
+      // and fieldUpdates are unconditionally blocked here to protect checklists, risk tier, dueAt, and evidence.
+      const cleanTransitionKey = input.transitionKey?.trim() || '';
+      if (cleanTransitionKey !== 'archive_cdd' && cleanTransitionKey !== 'supersede_cdd') {
+        return registerServiceFailure(
+          REGISTER_DOMAIN_ERROR_CODES.SYSTEM_ONLY_TRANSITION,
+          'This Client Due Diligence transition must be executed from the client profile CDD workflow.',
+        );
+      }
+      if (input.fieldUpdates && Object.keys(input.fieldUpdates).length > 0) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Client Due Diligence fields cannot be modified via generic register transitions.',
+        );
       }
     }
     if (existingPre.matterId) {
@@ -28110,26 +28156,39 @@ export async function updateRegisterRecordDetailsService(
       includeRestricted: true,
     });
     if (!existing) {
-      return registerServiceFailure(
-        'NOT_FOUND',
-        `Register record "${input.recordId}" was not found.`,
-      );
+      return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
     }
-    if (existing.registerTypeKey === 'cdd' && (existing.personId || existing.organisationId)) {
-      const cddAccess = await assertActorCanAccessClientCddSubject({
-        ctx,
-        actor,
-        permSet,
-        subjectType: existing.organisationId ? 'organisation' : 'person',
-        subjectId: existing.organisationId ?? existing.personId ?? '',
-        people,
-        teams,
-        rbacConfig,
-        requireRecordPermission: true,
-      });
-      if (!cddAccess.ok) {
-        return cddAccess.denial;
+    if (existing.registerTypeKey === 'cdd') {
+      if (existing.personId || existing.organisationId) {
+        const cddAccess = await assertActorCanAccessClientCddSubject({
+          ctx,
+          actor,
+          permSet,
+          subjectType: existing.organisationId ? 'organisation' : 'person',
+          subjectId: existing.organisationId ?? existing.personId ?? '',
+          people,
+          teams,
+          rbacConfig,
+          requireRecordPermission: true,
+        });
+        if (!cddAccess.ok) {
+          if (!permSet.permissions.has('cdd:record')) {
+            return cddAccess.denial;
+          }
+          // R770: return identical NOT_FOUND for hidden employee-client CDD IDs
+          return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
+        }
+      } else if (!permSet.permissions.has('cdd:record')) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'Missing required permission "cdd:record" to record or update client CDD.',
+        );
       }
+      // R765: Refuse all generic detail/field updates on CDD records (must use dedicated CDD services).
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Client Due Diligence records must be updated through the Client Due Diligence workflow.',
+      );
     }
     if (existing.matterId) {
       const matter = await getMatterRepository().getMatterById<Matter>(ctx, existing.matterId, {
@@ -28378,12 +28437,33 @@ async function resolveCddModuleAndValues(
   };
 }
 
+export async function resolveEffectiveCddMaxEvidenceBytesRecord(
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<number> {
+  const ctx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: options?.tenantCtx,
+  });
+  const tenantCfg = resolveVerifiedTenantConfiguration(ctx, options?.tenantConfig);
+  const cddOverride = await getCatalogueRepository().getModuleConfig<CddConfiguration>(
+    ctx,
+    'cdd',
+  );
+  return resolveEffectiveCddConfig(tenantCfg, cddOverride).maxEvidenceFileSizeBytes;
+}
+
 async function resolveEvidenceRefsDownloadable(params: {
   ctx: TenantContext;
   storage: DocumentStorageProvider;
   refs: readonly IntakeEvidenceArtifactRef[];
+  subjectType: 'person' | 'organisation';
+  subjectId: string;
+  recordId?: string;
 }): Promise<CddEvidenceDownloadableRef[]> {
-  const { ctx, storage, refs } = params;
+  const { ctx, storage, refs, subjectType, subjectId, recordId } = params;
   if (refs.length === 0) return [];
   const evidenceRepo = getEvidenceArtifactRepository();
   const out: CddEvidenceDownloadableRef[] = [];
@@ -28392,24 +28472,51 @@ async function resolveEvidenceRefsDownloadable(params: {
     if (!artifact || artifact.scanStatus !== 'clean') {
       continue;
     }
-    const safeName = artifact.fileName || ref.fileName || 'evidence.bin';
-    const token = await storage.issueScopedDownloadToken(ctx, {
-      blobKey: artifact.blobKey,
-      fileName: safeName,
-      documentId: artifact.id,
-    });
-    out.push({
-      ...ref,
-      fileName: safeName,
-      contentType: artifact.contentType,
-      sizeBytes: artifact.byteSize,
-      sha256: artifact.sha256,
-      scanStatus: artifact.scanStatus,
-      uploadedByActorId: artifact.uploadedByPersonId,
-      uploadedAt: artifact.uploadedAt,
-      artifactId: artifact.id,
-      downloadUrl: `/api/evidence/download?token=${encodeURIComponent(token.token)}`,
-    });
+    if (artifact.subjectType !== subjectType || artifact.subjectId !== subjectId) {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'cdd.evidence.subject_mismatch_skipped',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          artifactId: artifact.id,
+          recordId: recordId ?? null,
+        }),
+      );
+      continue;
+    }
+    try {
+      const safeName = artifact.fileName || ref.fileName || 'evidence.bin';
+      const token = await storage.issueScopedDownloadToken(ctx, {
+        blobKey: artifact.blobKey,
+        fileName: safeName,
+        documentId: artifact.id,
+      });
+      out.push({
+        ...ref,
+        fileName: safeName,
+        contentType: artifact.contentType,
+        sizeBytes: artifact.byteSize,
+        sha256: artifact.sha256,
+        scanStatus: artifact.scanStatus,
+        uploadedByActorId: artifact.uploadedByPersonId,
+        uploadedAt: artifact.uploadedAt,
+        artifactId: artifact.id,
+        downloadUrl: `/api/evidence/download?token=${encodeURIComponent(token.token)}`,
+      });
+    } catch {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'cdd.evidence.token_issue_skipped',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          artifactId: artifact.id,
+          recordId: recordId ?? null,
+        }),
+      );
+      continue;
+    }
   }
   return out;
 }
@@ -28448,6 +28555,61 @@ async function verifyEvidenceRefsOwnedInTx(params: {
       );
     }
   }
+}
+
+async function deriveClientCddRiskTierForSubject(params: {
+  ctx: TenantContext;
+  actorId: string;
+  subjectId: string;
+  targetOrganisation: Organisation | null;
+  effectiveCdd: ResolvedCddConfiguration;
+  riskSystemKeyById: ReadonlyMap<string, string>;
+  includeRestrictedMatters: boolean;
+  preloadedMatters?: readonly Matter[];
+  preloadedMatterStatuses?: readonly ChoiceValue[];
+}): Promise<CddRiskTierKey> {
+  const {
+    ctx,
+    actorId,
+    subjectId,
+    targetOrganisation,
+    effectiveCdd,
+    riskSystemKeyById,
+    includeRestrictedMatters,
+    preloadedMatters,
+    preloadedMatterStatuses,
+  } = params;
+  const [clientMatters, matterStatuses] =
+    preloadedMatters && preloadedMatterStatuses
+      ? [preloadedMatters, preloadedMatterStatuses]
+      : await Promise.all([
+          getMatterRepository().listVisibleMattersForEntity<Matter>(
+            ctx,
+            { clientIds: [subjectId], includeMerged: false },
+            { viewerId: actorId, hasRestrictedMatterAccess: includeRestrictedMatters },
+          ),
+          getCatalogueRepository().listChoiceValuesForList(ctx, 'matter_status'),
+        ]);
+  const riskRatingKeys: string[] = [];
+  if (targetOrganisation?.riskRatingId) {
+    const sk = riskSystemKeyById.get(targetOrganisation.riskRatingId);
+    if (sk) riskRatingKeys.push(sk);
+  }
+  for (const m of clientMatters) {
+    if (
+      isClosedOrArchivedMatterStatus(
+        m.matterStatusId,
+        matterStatuses as unknown as ChoiceValue[],
+      )
+    ) {
+      continue;
+    }
+    if (m.riskRatingId) {
+      const sk = riskSystemKeyById.get(m.riskRatingId);
+      if (sk) riskRatingKeys.push(sk);
+    }
+  }
+  return resolveClientCddRiskTier(effectiveCdd, riskRatingKeys);
 }
 
 async function buildClientCddSummaryInternal(params: {
@@ -28503,19 +28665,17 @@ async function buildClientCddSummaryInternal(params: {
     getCatalogueRepository().listChoiceValuesForList(ctx, 'matter_status'),
   ]);
 
-  const riskRatingKeys: string[] = [];
-  if (targetOrganisation?.riskRatingId) {
-    const sk = riskSystemKeyById.get(targetOrganisation.riskRatingId);
-    if (sk) riskRatingKeys.push(sk);
-  }
-  for (const m of clientMatters) {
-    if (isClosedOrArchivedMatterStatus(m.matterStatusId, matterStatuses as unknown as ChoiceValue[])) continue;
-    if (m.riskRatingId) {
-      const sk = riskSystemKeyById.get(m.riskRatingId);
-      if (sk) riskRatingKeys.push(sk);
-    }
-  }
-  const derivedRiskTier = resolveClientCddRiskTier(effectiveCdd, riskRatingKeys);
+  const derivedRiskTier = await deriveClientCddRiskTierForSubject({
+    ctx,
+    actorId: actor.id,
+    subjectId,
+    targetOrganisation,
+    effectiveCdd,
+    riskSystemKeyById,
+    includeRestrictedMatters: hasRestrictedMatterAccess,
+    preloadedMatters: clientMatters,
+    preloadedMatterStatuses: matterStatuses as unknown as ChoiceValue[],
+  });
 
   const activeRecord =
     cddRecords.find((r) => r.status === 'recorded' || r.status === 'in_progress') ??
@@ -28595,6 +28755,9 @@ async function buildClientCddSummaryInternal(params: {
     ctx,
     storage,
     refs: combinedEvidenceRefs,
+    subjectType,
+    subjectId,
+    recordId: activeRecord.id,
   });
 
   const recordTier: CddRiskTierKey =
@@ -28671,7 +28834,7 @@ export async function startOrLoadClientCddRecord(
   | RegisterServiceDenialOrError
 > {
   try {
-    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+    const { ctx, tenantCfg, actor, actorRoles, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
     const needWrite = Boolean(input.createIfMissing || input.upgradeToHighRisk);
     const access = await assertActorCanAccessClientCddSubject({
@@ -28692,13 +28855,14 @@ export async function startOrLoadClientCddRecord(
     const { effectiveCdd, cddOverride, orgTypeSystemKeyById, riskSystemKeyById, registersOverride } =
       await resolveCddModuleAndValues(ctx, tenantCfg);
 
+    const subjectIdClean = input.subjectId.trim();
     const summaryBefore = await buildClientCddSummaryInternal({
       ctx,
       tenantCfg,
       actor,
       permSet,
       subjectType: input.subjectType,
-      subjectId: input.subjectId.trim(),
+      subjectId: subjectIdClean,
       targetPerson: access.targetPerson,
       targetOrganisation: access.targetOrganisation,
       people,
@@ -28730,28 +28894,55 @@ export async function startOrLoadClientCddRecord(
           'Please select a client CDD category because this organisation legal form is not mapped.',
         );
       }
-      const checklistItems = buildCddChecklistItemsForTier({
-        config: tenantCfg,
-        overrideConfig: cddOverride,
-        category,
-        tier: summaryBefore.derivedRiskTier,
-      });
-      if (checklistItems.length === 0) {
-        return registerServiceFailure(
-          'VALIDATION_ERROR',
-          `No CDD checklist items are configured for client category "${category}".`,
-        );
-      }
       const subjectLabel = access.targetPerson
         ? personDisplayName(access.targetPerson)
-        : access.targetOrganisation?.legalName || input.subjectId;
+        : access.targetOrganisation?.legalName || subjectIdClean;
       const defaultOwnerId =
         (access.targetPerson?.relationshipOwnerId ||
           access.targetOrganisation?.relationshipPartnerId ||
           actor.id) ??
         actor.id;
 
-      await registerRepo.withTenantTransaction(ctx, async () => {
+      await registerRepo.withTenantTransaction(ctx, async (tx) => {
+        // R772: Serialise concurrent createIfMissing calls on the same tenant/subject
+        await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          `cdd:${ctx.tenantId}:${input.subjectType}:${subjectIdClean}`,
+        ]);
+        const existingLiveInTx = await registerRepo.listVisibleRegisterRecords(ctx, actor.id, {
+          registerTypeKey: 'cdd',
+          ...(input.subjectType === 'person'
+            ? { personId: subjectIdClean }
+            : { organisationId: subjectIdClean }),
+          includeRestricted: true,
+        });
+        if (
+          existingLiveInTx.some(
+            (r) => r.status === 'in_progress' || r.status === 'recorded',
+          )
+        ) {
+          return;
+        }
+        const txDerivedTier = await deriveClientCddRiskTierForSubject({
+          ctx,
+          actorId: actor.id,
+          subjectId: subjectIdClean,
+          targetOrganisation: access.targetOrganisation,
+          effectiveCdd,
+          riskSystemKeyById,
+          includeRestrictedMatters: true,
+        });
+        const checklistItems = buildCddChecklistItemsForTier({
+          config: tenantCfg,
+          overrideConfig: cddOverride,
+          category,
+          tier: txDerivedTier,
+        });
+        if (checklistItems.length === 0) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `No CDD checklist items are configured for client category "${category}".`,
+          );
+        }
         const newId = await registerRepo.allocateNextRecordId(ctx, { idPrefix: 'REG' });
         const reference = await registerRepo.allocateNextRecordId(ctx, {
           idPrefix: cddRegisterType.referencePrefix,
@@ -28763,12 +28954,12 @@ export async function startOrLoadClientCddRecord(
           reference,
           title: `Client CDD — ${subjectLabel}`,
           status: 'in_progress',
-          personId: input.subjectType === 'person' ? input.subjectId.trim() : null,
-          organisationId: input.subjectType === 'organisation' ? input.subjectId.trim() : null,
+          personId: input.subjectType === 'person' ? subjectIdClean : null,
+          organisationId: input.subjectType === 'organisation' ? subjectIdClean : null,
           ownerId: defaultOwnerId,
           fieldValues: {
             clientCategory: category,
-            riskTier: summaryBefore.derivedRiskTier,
+            riskTier: txDerivedTier,
             checklistItems,
             supportingEvidence: [],
             manualSummaryNote: input.reason?.trim() || '',
@@ -28782,7 +28973,7 @@ export async function startOrLoadClientCddRecord(
             action: 'create',
             field: 'CDD started',
             oldValue: '',
-            newValue: `${created.reference} (${category}, ${summaryBefore.derivedRiskTier})`,
+            newValue: `${created.reference} (${category}, ${txDerivedTier})`,
             byId: actor.id,
             at: nowIso,
           },
@@ -28795,33 +28986,49 @@ export async function startOrLoadClientCddRecord(
       summaryBefore.riskTier !== 'high'
     ) {
       const existingRec = summaryBefore.record;
-      const category =
-        (summaryBefore.clientCategory ??
-          (existingRec.fieldValues.clientCategory as CddClientCategoryKey | undefined)) ||
-        'individual';
-      const upgradedChecklist = buildCddChecklistItemsForTier({
-        config: tenantCfg,
-        overrideConfig: cddOverride,
-        category,
-        tier: 'high',
-        existingItems: summaryBefore.checklistItems,
-      });
       await registerRepo.withTenantTransaction(ctx, async () => {
         const outcome = await registerRepo.lockAndExecuteTransition(ctx, {
           recordId: existingRec.id,
           transitionKey: 'upgrade_to_high_risk',
           actorId: actor.id,
           comment: input.reason?.trim() || 'Upgraded client CDD tier to High Risk',
-          validateAndCompute: async (locked) => ({
-            nextStatus: 'in_progress',
-            setsDecidedAt: false,
-            dueAt: null,
-            mergedFieldValues: {
-              ...locked.fieldValues,
-              riskTier: 'high',
-              checklistItems: upgradedChecklist,
-            },
-          }),
+          validateAndCompute: async (locked) => {
+            validateRegisterTransitionExecution({
+              registerType: cddRegisterType,
+              record: locked,
+              transitionKey: 'upgrade_to_high_risk',
+              actorId: actor.id,
+              actorRoles,
+              actorPermissionSet: permSet.permissions,
+              comment: input.reason?.trim() || 'Upgraded client CDD tier to High Risk',
+              expectedRowVersion: locked.rowVersion,
+              isSystemActor: true,
+            });
+            const lockedCategory =
+              (typeof locked.fieldValues.clientCategory === 'string'
+                ? (locked.fieldValues.clientCategory as CddClientCategoryKey)
+                : summaryBefore.clientCategory) || 'individual';
+            const lockedExistingItems = Array.isArray(locked.fieldValues.checklistItems)
+              ? (locked.fieldValues.checklistItems as RegisterChecklistItemValue[])
+              : [];
+            const upgradedChecklist = buildCddChecklistItemsForTier({
+              config: tenantCfg,
+              overrideConfig: cddOverride,
+              category: lockedCategory,
+              tier: 'high',
+              existingItems: lockedExistingItems,
+            });
+            return {
+              nextStatus: 'in_progress',
+              setsDecidedAt: false,
+              dueAt: null,
+              mergedFieldValues: {
+                ...locked.fieldValues,
+                riskTier: 'high',
+                checklistItems: upgradedChecklist,
+              },
+            };
+          },
         });
         await appendTenantAuditEntries(ctx, [
           {
@@ -28888,29 +29095,11 @@ export async function recordCddChecklistItemRecord(
   try {
     const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
-    const registerRepo = getRegisterRepository();
-    const recordIdClean = input.recordId?.trim() || '';
-    const existing = await registerRepo.getRegisterRecordById(ctx, recordIdClean, {
-      includeRestricted: true,
-    });
-    if (!existing || existing.registerTypeKey !== 'cdd') {
-      return registerServiceFailure('NOT_FOUND', `CDD register record "${recordIdClean}" was not found.`);
-    }
-    const subjectType: 'person' | 'organisation' = existing.organisationId ? 'organisation' : 'person';
-    const subjectId = existing.organisationId ?? existing.personId ?? '';
-    const access = await assertActorCanAccessClientCddSubject({
-      ctx,
-      actor,
-      permSet,
-      subjectType,
-      subjectId,
-      people,
-      teams,
-      rbacConfig,
-      requireRecordPermission: true,
-    });
-    if (!access.ok) {
-      return access.denial;
+    if (!permSet.permissions.has('cdd:record')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'Missing required permission "cdd:record" to record or update client CDD.',
+      );
     }
 
     const noteClean = input.note?.trim() ?? '';
@@ -28933,6 +29122,11 @@ export async function recordCddChecklistItemRecord(
       );
     }
 
+    const recordIdClean = input.recordId?.trim() || '';
+    if (!recordIdClean) {
+      return registerServiceFailure('NOT_FOUND', 'Client Due Diligence record was not found.');
+    }
+
     const storage = getDocumentStorage(tenantCfg);
     // Run blob-storage verification BEFORE entering PostgreSQL write transaction (`ADR 0039`).
     const verifiedEvidence = await verifyEvidenceArtifacts(
@@ -28949,10 +29143,69 @@ export async function recordCddChecklistItemRecord(
       return registerServiceFailure('VALIDATION_ERROR', 'CDD register definition not found.');
     }
 
+    const registerRepo = getRegisterRepository();
     const actorDisplayName = personDisplayName(actor);
     const nowIso = new Date().toISOString();
 
-    const updatedRecord = await registerRepo.withTenantTransaction(ctx, async () => {
+    const txOutcome = await registerRepo.withTenantTransaction(ctx, async (tx) => {
+      // R772: Acquire FOR UPDATE lock first and read all checklist/evidence state from locked row.
+      const locked = await registerRepo.lockRegisterRecordForUpdateInTx(
+        tx,
+        ctx,
+        recordIdClean,
+      );
+      if (!locked || locked.registerTypeKey !== 'cdd') {
+        return {
+          ok: false as const,
+          denial: registerServiceFailure('NOT_FOUND', 'Client Due Diligence record was not found.'),
+        };
+      }
+      const subjectType: 'person' | 'organisation' = locked.organisationId
+        ? 'organisation'
+        : 'person';
+      const subjectId = locked.organisationId ?? locked.personId ?? '';
+      const access = await assertActorCanAccessClientCddSubject({
+        ctx,
+        actor,
+        permSet,
+        subjectType,
+        subjectId,
+        people,
+        teams,
+        rbacConfig,
+        requireRecordPermission: true,
+      });
+      if (!access.ok) {
+        // R770: return identical NOT_FOUND for hidden employee-client CDD IDs
+        return {
+          ok: false as const,
+          denial: registerServiceFailure('NOT_FOUND', 'Client Due Diligence record was not found.'),
+        };
+      }
+
+      if (locked.status !== 'in_progress' && locked.status !== 'recorded') {
+        return {
+          ok: false as const,
+          denial: registerServiceFailure(
+            'VALIDATION_ERROR',
+            'Cannot update checklist items on an archived or superseded Client Due Diligence record.',
+          ),
+        };
+      }
+
+      if (
+        input.expectedRowVersion !== undefined &&
+        locked.rowVersion !== input.expectedRowVersion
+      ) {
+        return {
+          ok: false as const,
+          denial: registerServiceFailure(
+            REGISTER_DOMAIN_ERROR_CODES.CONCURRENCY_CONFLICT,
+            'Client Due Diligence record was modified concurrently. Refresh and try again.',
+          ),
+        };
+      }
+
       if (verifiedEvidence.length > 0) {
         await verifyEvidenceRefsOwnedInTx({
           ctx,
@@ -28981,8 +29234,8 @@ export async function recordCddChecklistItemRecord(
         recordedIdentityId = idRec.id;
       }
 
-      const items = Array.isArray(existing.fieldValues.checklistItems)
-        ? structuredClone(existing.fieldValues.checklistItems as RegisterChecklistItemValue[])
+      const items = Array.isArray(locked.fieldValues.checklistItems)
+        ? structuredClone(locked.fieldValues.checklistItems as RegisterChecklistItemValue[])
         : [];
       const itemIdx = items.findIndex((i) => i.itemKey === input.itemKey);
       if (itemIdx < 0) {
@@ -29010,8 +29263,8 @@ export async function recordCddChecklistItemRecord(
         intakeCheckRecordId: recordedIdentityId ?? existingItem.intakeCheckRecordId ?? null,
       };
 
-      const existingTopEvidence = Array.isArray(existing.fieldValues.supportingEvidence)
-        ? ([...(existing.fieldValues.supportingEvidence as IntakeEvidenceArtifactRef[])])
+      const existingTopEvidence = Array.isArray(locked.fieldValues.supportingEvidence)
+        ? [...(locked.fieldValues.supportingEvidence as IntakeEvidenceArtifactRef[])]
         : [];
       for (const ref of verifiedEvidence) {
         if (!existingTopEvidence.some((x) => x.blobKey === ref.blobKey)) {
@@ -29022,7 +29275,7 @@ export async function recordCddChecklistItemRecord(
       const validatedFields = validateRegisterFieldValues({
         registerType: cddRegisterType,
         fieldValues: {
-          ...existing.fieldValues,
+          ...locked.fieldValues,
           checklistItems: items,
           supportingEvidence: existingTopEvidence,
         },
@@ -29031,8 +29284,8 @@ export async function recordCddChecklistItemRecord(
       });
 
       const { updatedRecord: updated } = await registerRepo.updateRegisterRecordDetails(ctx, {
-        recordId: existing.id,
-        expectedRowVersion: input.expectedRowVersion,
+        recordId: locked.id,
+        expectedRowVersion: locked.rowVersion,
         fieldValues: validatedFields,
         updatedById: actor.id,
       });
@@ -29040,7 +29293,7 @@ export async function recordCddChecklistItemRecord(
       await appendTenantAuditEntries(ctx, [
         {
           recordType: 'register_record',
-          recordId: existing.id,
+          recordId: locked.id,
           action: 'update',
           field: `CDD item (${input.itemKey})`,
           oldValue: existingItem.status,
@@ -29051,25 +29304,36 @@ export async function recordCddChecklistItemRecord(
         },
       ]);
 
-      return updated;
+      return {
+        ok: true as const,
+        updated,
+        subjectType,
+        subjectId,
+        targetPerson: access.targetPerson,
+        targetOrganisation: access.targetOrganisation,
+      };
     });
+
+    if (!txOutcome.ok) {
+      return txOutcome.denial;
+    }
 
     const summary = await buildClientCddSummaryInternal({
       ctx,
       tenantCfg,
       actor,
       permSet,
-      subjectType,
-      subjectId,
-      targetPerson: access.targetPerson,
-      targetOrganisation: access.targetOrganisation,
+      subjectType: txOutcome.subjectType,
+      subjectId: txOutcome.subjectId,
+      targetPerson: txOutcome.targetPerson,
+      targetOrganisation: txOutcome.targetOrganisation,
       people,
       teams,
       effectiveCdd,
       orgTypeSystemKeyById,
       riskSystemKeyById,
     });
-    return { ok: true, record: updatedRecord, summary };
+    return { ok: true, record: txOutcome.updated, summary };
   } catch (err) {
     return mapRegisterErrorToDenial(err);
   }
@@ -29093,13 +29357,20 @@ export async function completeClientCddRecord(
   try {
     const { ctx, tenantCfg, actor, actorRoles, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('cdd:record')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'Missing required permission "cdd:record" to record or update client CDD.',
+      );
+    }
+
     const registerRepo = getRegisterRepository();
     const recordIdClean = input.recordId?.trim() || '';
     const existing = await registerRepo.getRegisterRecordById(ctx, recordIdClean, {
       includeRestricted: true,
     });
     if (!existing || existing.registerTypeKey !== 'cdd') {
-      return registerServiceFailure('NOT_FOUND', `CDD register record "${recordIdClean}" was not found.`);
+      return registerServiceFailure('NOT_FOUND', 'Client Due Diligence record was not found.');
     }
     const subjectType: 'person' | 'organisation' = existing.organisationId ? 'organisation' : 'person';
     const subjectId = existing.organisationId ?? existing.personId ?? '';
@@ -29115,7 +29386,8 @@ export async function completeClientCddRecord(
       requireRecordPermission: true,
     });
     if (!access.ok) {
-      return access.denial;
+      // R770: return identical NOT_FOUND for hidden employee-client CDD IDs
+      return registerServiceFailure('NOT_FOUND', 'Client Due Diligence record was not found.');
     }
 
     const { effectiveCdd, orgTypeSystemKeyById, riskSystemKeyById, registersOverride } =
@@ -29127,7 +29399,7 @@ export async function completeClientCddRecord(
     }
 
     const txOutcome = await registerRepo.withTenantTransaction(ctx, async () => {
-      return registerRepo.lockAndExecuteTransition(ctx, {
+      const outcome = await registerRepo.lockAndExecuteTransition(ctx, {
         recordId: existing.id,
         transitionKey: 'record_cdd',
         actorId: actor.id,
@@ -29142,7 +29414,26 @@ export async function completeClientCddRecord(
             actorPermissionSet: permSet.permissions,
             comment: input.manualSummaryNote ?? null,
             expectedRowVersion: input.expectedRowVersion ?? locked.rowVersion,
+            isSystemActor: true,
           });
+          const riskTier: CddRiskTierKey =
+            locked.fieldValues.riskTier === 'high' ? 'high' : 'standard';
+          // R773: Re-derive current client risk tier inside TX; refuse Standard completion on High-risk clients
+          const derivedTierInTx = await deriveClientCddRiskTierForSubject({
+            ctx,
+            actorId: actor.id,
+            subjectId,
+            targetOrganisation: access.targetOrganisation,
+            effectiveCdd,
+            riskSystemKeyById,
+            includeRestrictedMatters: true,
+          });
+          if (derivedTierInTx === 'high' && riskTier === 'standard') {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              'This client is rated High risk and requires Enhanced Client Due Diligence. Upgrade the record to High-risk before completing it.',
+            );
+          }
           const items = Array.isArray(locked.fieldValues.checklistItems)
             ? (locked.fieldValues.checklistItems as RegisterChecklistItemValue[])
             : [];
@@ -29155,8 +29446,6 @@ export async function completeClientCddRecord(
               `Cannot mark CDD recorded while ${incomplete.length} required item(s) remain incomplete (${incomplete.map((i) => i.label).join(', ')}).`,
             );
           }
-          const riskTier: CddRiskTierKey =
-            locked.fieldValues.riskTier === 'high' ? 'high' : 'standard';
           const nowIso = new Date().toISOString();
           const nextDueAt = calculateCddNextReviewDueIso(nowIso, riskTier, effectiveCdd);
           const mergedFields = validateRegisterFieldValues({
@@ -29178,20 +29467,23 @@ export async function completeClientCddRecord(
           };
         },
       });
-    });
 
-    await appendTenantAuditEntries(ctx, [
-      {
-        recordType: 'register_record',
-        recordId: txOutcome.updatedRecord.id,
-        action: 'status-change',
-        field: 'CDD completed',
-        oldValue: txOutcome.previousRecord.status,
-        newValue: `${txOutcome.updatedRecord.status} (due ${txOutcome.updatedRecord.dueAt?.slice(0, 10) ?? 'unset'})`,
-        byId: actor.id,
-        at: txOutcome.transition.transitionedAt,
-      },
-    ]);
+      // R774: Write audit entry inside the SAME PostgreSQL transaction so failures roll back atomically
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'register_record',
+          recordId: outcome.updatedRecord.id,
+          action: 'status-change',
+          field: 'CDD completed',
+          oldValue: outcome.previousRecord.status,
+          newValue: `${outcome.updatedRecord.status} (due ${outcome.updatedRecord.dueAt?.slice(0, 10) ?? 'unset'})`,
+          byId: actor.id,
+          at: outcome.transition.transitionedAt,
+        },
+      ]);
+
+      return outcome;
+    });
 
     const summary = await buildClientCddSummaryInternal({
       ctx,
@@ -29424,14 +29716,21 @@ const VALID_EVIDENCE_SUBJECT_TYPES = new Set<EvidenceArtifactSubjectType>([
   'register',
 ]);
 
-const DISALLOWED_ACTIVE_EVIDENCE_MIMES = new Set<string>([
-  'text/html',
-  'image/svg+xml',
-  'application/javascript',
-  'text/javascript',
-  'application/xhtml+xml',
-  'application/x-msdownload',
-  'application/x-sh',
+// R775: Strict MIME allowlist (PDF, JPEG, PNG, HEIC/HEIF, WebP, TIFF, plain text, Word .doc/.docx, Excel .xls/.xlsx).
+// Active content (HTML, SVG, JS, executables) and arbitrary octet-streams are rejected unconditionally.
+const ALLOWED_EVIDENCE_MIMES = new Set<string>([
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/heic',
+  'image/heif',
+  'image/webp',
+  'image/tiff',
+  'text/plain',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
 
 async function assertActorCanAccessEvidenceSubject(params: {
@@ -29742,10 +30041,10 @@ export async function uploadEvidenceArtifactRecord(
     }
     const normalizedMime =
       (input.contentType ?? '').split(';')[0]?.trim().toLowerCase() || 'application/octet-stream';
-    if (DISALLOWED_ACTIVE_EVIDENCE_MIMES.has(normalizedMime)) {
+    if (!ALLOWED_EVIDENCE_MIMES.has(normalizedMime)) {
       return registerServiceFailure(
-        'VALIDATION_ERROR',
-        `Evidence files of content type "${normalizedMime}" are not permitted for security reasons.`,
+        'UNSUPPORTED_MEDIA_TYPE',
+        `Evidence files of content type "${normalizedMime}" are not permitted.`,
       );
     }
 
@@ -29791,11 +30090,11 @@ export async function uploadEvidenceArtifactRecord(
         uploadedAt: nowIso,
       },
       {
-        auditEntries: [
+        buildAuditEntries: (createdArtifact) => [
           {
             recordType: 'evidence_artifact',
-            recordId: stored.blobKey,
-            action: 'create',
+            recordId: createdArtifact.id,
+            action: 'upload',
             field: 'Evidence uploaded',
             oldValue: '',
             newValue: `${input.subjectType}:${cleanSubjectId} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
@@ -32906,16 +33205,31 @@ export async function listClientPriorMattersRecord(
   const hasRestrictedMatterAccess = permSet.permissions.has('matter:restricted:access');
   const canViewCdd = permSet.permissions.has('cdd:view');
   const canBypassEmployeeCddVisibility = permSet.permissions.has('risk:view') || hasRestrictedMatterAccess;
-  const personIds = cleanIds.filter((id) => !id.startsWith('O-'));
-  const organisationIds = cleanIds.filter((id) => id.startsWith('O-'));
   const regRepo = getRegisterRepository();
+  const partyRepo = getPartyRepository();
 
-  const [visible, personCddRows, orgCddRows] = await Promise.all([
+  // Suggestion 5: Resolve subject types from tenant DB tables instead of assuming ID prefixes (`O-`).
+  const [visible, resolvedPeople, resolvedOrganisations] = await Promise.all([
     getMatterRepository().listVisibleMattersForEntity<Matter>(
       ctx,
       { clientIds: cleanIds, includeMerged: false },
       { viewerId: actor.id, hasRestrictedMatterAccess },
     ),
+    partyRepo.listPeopleByIds<Person>(ctx, cleanIds),
+    partyRepo.listOrganisationsByIds<Organisation>(ctx, cleanIds),
+  ]);
+
+  const personById = new Map(
+    resolvedPeople.filter((p) => !p.mergedIntoId).map((p) => [p.id, p] as const),
+  );
+  const orgById = new Map(
+    resolvedOrganisations.filter((o) => !o.mergedIntoId).map((o) => [o.id, o] as const),
+  );
+  const resolvedClientIds = cleanIds.filter((id) => personById.has(id) || orgById.has(id));
+  const personIds = resolvedClientIds.filter((id) => personById.has(id));
+  const organisationIds = resolvedClientIds.filter((id) => !personById.has(id) && orgById.has(id));
+
+  const [personCddRows, orgCddRows] = await Promise.all([
     canViewCdd && personIds.length > 0
       ? regRepo.listVisibleRegisterRecords(ctx, actor.id, {
           registerTypeKey: 'cdd',
@@ -32964,10 +33278,10 @@ export async function listClientPriorMattersRecord(
 
   const cddSummaries: Record<string, ClientCddCompactSummary> = {};
   if (canViewCdd) {
-    for (const cid of cleanIds) {
-      const subjectType: 'person' | 'organisation' = cid.startsWith('O-') ? 'organisation' : 'person';
+    for (const cid of resolvedClientIds) {
+      const subjectType: 'person' | 'organisation' = orgById.has(cid) && !personById.has(cid) ? 'organisation' : 'person';
       if (subjectType === 'person') {
-        const empPerson = staffById.get(cid);
+        const empPerson = personById.get(cid) ?? staffById.get(cid);
         if (empPerson && isEmployeeSubjectPerson(empPerson, staffList) && !canBypassEmployeeCddVisibility) {
           const isParticipant = visible.some(
             (m) =>

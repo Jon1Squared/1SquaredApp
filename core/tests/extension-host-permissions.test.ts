@@ -704,4 +704,119 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
       }),
     ).toThrow(/EXTENSION_COMPATIBILITY_ERROR/);
   });
+
+  it('R782: skips register.beforeCreate, register.beforeTransition, and register.afterTransition for restricted cdd register records', async () => {
+    const spy = vi.fn().mockImplementation(async () => {
+      throw new Error('Blocked non-restricted register operation');
+    });
+    const ext: PlatformExtension = {
+      manifest: {
+        id: 'ext-register-all',
+        name: 'Generic Register Watcher',
+        version: '1.0.0',
+        description: 'Observes standard register records',
+        supportedCoreApiRange: '^2.0.0',
+        permissions: ['register:read', 'register:write'],
+        hooks: [
+          'register.beforeCreate',
+          'register.beforeTransition',
+          'register.afterTransition',
+        ],
+      },
+      hooks: {
+        'register.beforeCreate': spy,
+        'register.beforeTransition': spy,
+        'register.afterTransition': spy,
+      },
+    };
+    const host = new ExtensionHost({ coreApiVersion: CORE_API_VERSION });
+    host.registerExtension(ext);
+    const activeConfig = {
+      ...tenantConfig,
+      enabledExtensions: ['ext-register-all'],
+    };
+
+    const cddCreateRes = await host.executeRegisterBeforeCreateHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-cdd',
+        registerType: { key: 'cdd' },
+        draft: {
+          registerTypeKey: 'cdd',
+          title: 'Employee CDD Secret',
+          matterId: null,
+          enquiryId: null,
+          personId: 'P-000005',
+          organisationId: null,
+          ownerId: 'P-000001',
+          assignedApproverId: null,
+          dueAt: null,
+          reviewAt: null,
+          fieldValues: { secretNote: 'Confidential CDD note' },
+        },
+      } as unknown as Parameters<typeof host.executeRegisterBeforeCreateHook>[2],
+    );
+    expect(cddCreateRes.allowProceed).toBe(true);
+
+    const cddTransBefore = await host.executeRegisterBeforeTransitionHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-cdd-bt',
+        registerType: { key: 'cdd' },
+        record: { id: 'REG-CDD-1', registerTypeKey: 'cdd', status: 'in_progress' },
+        transition: { key: 'archive_cdd', fromStatus: 'in_progress', toStatus: 'archived' },
+        comment: 'Archive',
+      } as unknown as Parameters<typeof host.executeRegisterBeforeTransitionHook>[2],
+    );
+    expect(cddTransBefore.allowProceed).toBe(true);
+
+    const cddTransAfter = await host.executeRegisterAfterTransitionHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-cdd-at',
+        registerType: { key: 'cdd' },
+        previousRecord: { id: 'REG-CDD-1', registerTypeKey: 'cdd', status: 'in_progress' },
+        updatedRecord: { id: 'REG-CDD-1', registerTypeKey: 'cdd', status: 'archived' },
+        transition: { key: 'archive_cdd', fromStatus: 'in_progress', toStatus: 'archived' },
+      } as unknown as Parameters<typeof host.executeRegisterAfterTransitionHook>[2],
+    );
+    expect(cddTransAfter.isolatedErrors).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+
+    // Positive control: standard undertaking register still invokes hook
+    const undCreateRes = await host.executeRegisterBeforeCreateHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-und',
+        registerType: { key: 'undertaking' },
+        draft: {
+          registerTypeKey: 'undertaking',
+          title: 'Undertaking control',
+          matterId: 'M-1',
+          enquiryId: null,
+          personId: null,
+          organisationId: null,
+          ownerId: 'P-000001',
+          assignedApproverId: null,
+          dueAt: '2027-01-01',
+          reviewAt: null,
+          fieldValues: {},
+        },
+      } as unknown as Parameters<typeof host.executeRegisterBeforeCreateHook>[2],
+    );
+    expect(undCreateRes.allowProceed).toBe(false);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
 });

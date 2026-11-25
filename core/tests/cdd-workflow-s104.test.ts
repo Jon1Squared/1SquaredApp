@@ -5,6 +5,7 @@ import {
   CORE_TENANT_MIGRATIONS,
   DEFAULT_RBAC_ROLES,
   PERMISSION_REGISTRY,
+  TenantAuditRepository,
   TenantEvidenceArtifactRepository,
   TenantIntakeCheckRepository,
   TenantMatterRepository,
@@ -30,14 +31,18 @@ import { createSeedStore } from '@/seed/seedStoreBuilder';
 import * as servicesModule from '@/server/services';
 import {
   anonymiseExpiredEnquiries,
+  completeClientCddRecord,
   createRegisterRecordService,
   executeMerge,
   executeRegisterRemindersForTenant,
   getRegisterRecordDetailRecord,
   listRegistersWorkspaceDataRecord,
+  recordCddChecklistItemRecord,
   resetAllDemoData,
   saveMatterRecord,
   searchGlobalRecords,
+  transitionRegisterRecordService,
+  updateRegisterRecordDetailsService,
 } from '@/server/services';
 import {
   runAsTestActor,
@@ -79,6 +84,27 @@ function makeVerifiedTenantCtx(
     hostingMode: 'multi_tenant',
     environment: 'test',
     correlationId: `corr-s104-${tenantId}-${actorId}`,
+  });
+}
+
+async function buildMultipartUploadRequest(
+  form: FormData,
+  opts?: { omitContentLength?: boolean; overrideContentLength?: string },
+): Promise<Request> {
+  const serialized = new Response(form);
+  const contentType = serialized.headers.get('content-type') || 'multipart/form-data';
+  const rawBody = await serialized.arrayBuffer();
+  const headers = new Headers();
+  headers.set('content-type', contentType);
+  if (opts?.overrideContentLength !== undefined) {
+    headers.set('content-length', opts.overrideContentLength);
+  } else if (!opts?.omitContentLength) {
+    headers.set('content-length', String(rawBody.byteLength));
+  }
+  return new Request('http://localhost/api/evidence/upload', {
+    method: 'POST',
+    headers,
+    body: rawBody,
   });
 }
 
@@ -372,12 +398,17 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       expect(outsiderList.records.some((r) => r.id === empCdd.id)).toBe(false);
     }
 
-    const outsiderDetail = await runAsActionActor(
+    const [outsiderDetail, outsiderMissingDetail] = await runAsActionActor(
       'P-000006',
-      () => getRegisterRecordDetailRecord(empCdd.id, 'P-000006'),
+      () =>
+        Promise.all([
+          getRegisterRecordDetailRecord(empCdd.id, 'P-000006'),
+          getRegisterRecordDetailRecord('REG-DOES-NOT-EXIST-S104', 'P-000006'),
+        ]),
       { roles: ['fee_earner'], mfaVerified: false },
     );
-    expect(isActionDenied(outsiderDetail)).toBe(true);
+    expect(outsiderDetail).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(outsiderDetail).toEqual(outsiderMissingDetail);
 
     const startOrLoadClientCddAction = (
       actionsModule as Record<string, (...args: unknown[]) => Promise<unknown>>
@@ -429,6 +460,104 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     );
     expect(complianceDetail.ok).toBe(true);
     expect(await matterRepo.getMatterById(ctx, empMatter.id, { includeRestricted: true })).toBeDefined();
+
+    // R777 (Test 2 evidence upload & download on employee-client P-000005):
+    const uploadRoute = await import('@/app/api/evidence/upload/route');
+    const downloadRoute = await import('@/app/api/evidence/download/route');
+    const empPdf = new TextEncoder().encode('%PDF-1.4\n%Employee Confidential ID');
+    const empUpForm = new FormData();
+    empUpForm.set('subjectType', 'person');
+    empUpForm.set('subjectId', 'P-000005');
+    empUpForm.set('file', new File([empPdf], 'sian-passport.pdf', { type: 'application/pdf' }));
+    const empUpReq = await buildMultipartUploadRequest(empUpForm);
+    const empUpRes = await runAsActionActor(
+      'P-000002',
+      () => uploadRoute.POST(empUpReq),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(empUpRes.status).toBe(200);
+    const empUpJson = (await empUpRes.json()) as { downloadUrl?: string };
+    expect(empUpJson.downloadUrl).toMatch(/^\/api\/evidence\/download\?token=/);
+
+    const outsiderEmpUpForm = new FormData();
+    outsiderEmpUpForm.set('subjectType', 'person');
+    outsiderEmpUpForm.set('subjectId', 'P-000005');
+    outsiderEmpUpForm.set('file', new File([empPdf], 'outsider-attempt.pdf', { type: 'application/pdf' }));
+    const outsiderEmpUpReq = await buildMultipartUploadRequest(outsiderEmpUpForm);
+    const outsiderEmpUpRes = await runAsActionActor(
+      'P-000006',
+      () => uploadRoute.POST(outsiderEmpUpReq),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(outsiderEmpUpRes.status).toBe(403);
+
+    const outsiderEmpDlRes = await runAsActionActor(
+      'P-000006',
+      () =>
+        downloadRoute.GET(
+          new Request(`http://localhost${empUpJson.downloadUrl}`, { method: 'GET' }),
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(outsiderEmpDlRes.status).toBe(403);
+
+    // R771: relationshipPartnerId alone on an unrestricted matter for P-000005 grants aligned SQL list, detail & startOrLoad access (no duplicate record created)
+    await matterRepo.createMatter<Matter>(ctx, {
+      ...baseMatter!,
+      id: 'M-S104-REL-EMP',
+      recordType: 'matter',
+      matterNumber: 'S104-REL-0001',
+      title: 'Unrestricted Matter With Relationship Partner',
+      clientId: 'P-000005',
+      instructingContactId: null,
+      billingContactId: null,
+      matterTypeId: vid('matter_type', 'Commercial'),
+      practiceAreaId: 'work_type.corporate_and_commercial',
+      workTypeSubcategoryId: 'work_type.corporate_and_commercial_acquisitions',
+      responsiblePartnerId: 'P-000001',
+      supervisingPartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000002',
+      relationshipPartnerId: 'P-000008',
+      teamMemberIds: ['P-000002'],
+      additionalClientIds: [],
+      parties: [],
+      isStaffMatter: false,
+      hasEthicalWall: false,
+      restrictedAccessUserIds: [],
+    });
+    const relPartnerList = await runAsActionActor(
+      'P-000008',
+      () => listRegistersWorkspaceDataRecord({ registerTypeKey: 'cdd' }, 'P-000008'),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(relPartnerList.ok).toBe(true);
+    if (relPartnerList.ok) {
+      expect(relPartnerList.records.some((r) => r.id === empCdd.id)).toBe(true);
+    }
+    const relPartnerLoad = (await runAsActionActor(
+      'P-000008',
+      () =>
+        startOrLoadClientCddAction!({
+          subjectType: 'person',
+          subjectId: 'P-000005',
+          createIfMissing: true,
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string } | null } };
+    expect(relPartnerLoad.ok).toBe(true);
+    expect(relPartnerLoad.summary?.record?.id).toBe(empCdd.id);
+    const regRepoCheck = new TenantRegisterRepository();
+    const empRecordsAfterRel = await regRepoCheck.listVisibleRegisterRecords(
+      ctx,
+      'P-000001',
+      {
+        registerTypeKey: 'cdd',
+        personId: 'P-000005',
+        canViewCdd: true,
+        canBypassEmployeeCddVisibility: true,
+      },
+    );
+    expect(empRecordsAfterRel.filter((r) => r.id === empCdd.id || r.status === 'recorded' || r.status === 'in_progress')).toHaveLength(1);
   }, 30_000);
 
   it('3. R746, R748 & Rule 9: /api/evidence/upload pre-scans malware BEFORE storage; /api/evidence/download enforces HMAC, DB ownership & R747 across tenants', async () => {
@@ -452,10 +581,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     badForm.set('subjectType', 'person');
     badForm.set('subjectId', 'P-000015');
     badForm.set('file', new File([eicarBytes], 'eicar-passport.pdf', { type: 'application/pdf' }));
-    const badReq = new Request('http://localhost/api/evidence/upload', {
-      method: 'POST',
-      body: badForm,
-    });
+    const badReq = await buildMultipartUploadRequest(badForm);
     const preArtifacts = await evidenceRepo.listArtifactsForSubject(testTenantCtx('P-000010'), {
       subjectType: 'person',
       subjectId: 'P-000015',
@@ -480,10 +606,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     goodForm.set('subjectType', 'person');
     goodForm.set('subjectId', 'P-000015');
     goodForm.set('file', new File([cleanPdf], 'passport-scan.pdf', { type: 'application/pdf' }));
-    const goodReq = new Request('http://localhost/api/evidence/upload', {
-      method: 'POST',
-      body: goodForm,
-    });
+    const goodReq = await buildMultipartUploadRequest(goodForm);
     const cleanRes = await runAsActionActor(
       'P-000010',
       () => uploadRoute!.POST(goodReq),
@@ -534,7 +657,162 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(tamperedRes.status).toBe(403);
-  }, 30_000);
+
+    // 5. R775 upload hardening:
+    //    (a) Upload audit uses artifact.id (EVD-...), NOT blobKey / filename
+    const auditRepo = new TenantAuditRepository();
+    const uploadAudits = await auditRepo.listAuditEntriesForRecord(
+      testTenantCtx('P-000010'),
+      'evidence_artifact',
+      cleanJson.artifact!.id,
+    );
+    expect(uploadAudits.some((a) => a.action === 'upload' && a.recordId === cleanJson.artifact!.id)).toBe(true);
+    const rawBlobAudits = await auditRepo.listAuditEntriesForRecord(
+      testTenantCtx('P-000010'),
+      'evidence_artifact',
+      cleanJson.evidenceRef!.blobKey,
+    );
+    expect(rawBlobAudits).toHaveLength(0);
+
+    //    (b) Missing Content-Length rejected with 411; oversized Content-Length rejected with 413 BEFORE formData() parses
+    const missingLenReq = await buildMultipartUploadRequest(goodForm, { omitContentLength: true });
+    const missingLenRes = await runAsActionActor(
+      'P-000010',
+      () => uploadRoute!.POST(missingLenReq),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(missingLenRes.status).toBe(411);
+
+    let formDataCalledOnOversize = false;
+    const oversizeReq = new Request('http://localhost/api/evidence/upload', {
+      method: 'POST',
+      headers: {
+        'content-type': 'multipart/form-data; boundary=----testboundary',
+        'content-length': String(30 * 1024 * 1024),
+      },
+      body: 'stub',
+    });
+    Object.defineProperty(oversizeReq, 'formData', {
+      value: async () => {
+        formDataCalledOnOversize = true;
+        return new FormData();
+      },
+    });
+    const oversizeRes = await runAsActionActor(
+      'P-000010',
+      () => uploadRoute!.POST(oversizeReq),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(oversizeRes.status).toBe(413);
+    expect(formDataCalledOnOversize).toBe(false);
+
+    //    (c) Allowlist MIME check: HTML / macro Word refused; HEIC / DOCX accepted
+    const badMimeForm = new FormData();
+    badMimeForm.set('subjectType', 'person');
+    badMimeForm.set('subjectId', 'P-000015');
+    badMimeForm.set('file', new File([new TextEncoder().encode('<script>1</script>')], 'page.html', { type: 'text/html' }));
+    const badMimeReq = await buildMultipartUploadRequest(badMimeForm);
+    const badMimeRes = await runAsActionActor(
+      'P-000010',
+      () => uploadRoute!.POST(badMimeReq),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect([400, 415, 422]).toContain(badMimeRes.status);
+
+    const heicForm = new FormData();
+    heicForm.set('subjectType', 'person');
+    heicForm.set('subjectId', 'P-000015');
+    heicForm.set('file', new File([new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])], 'id.heic', { type: 'image/heic' }));
+    const heicRes = await runAsActionActor(
+      'P-000010',
+      async () => uploadRoute!.POST(await buildMultipartUploadRequest(heicForm)),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(heicRes.status).toBe(200);
+
+    // 6. R777 two-tenant isolation: Alpha evidence token presented in Bravo, forged tenant claim, cross-tenant subjectId
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: 'tenant-alpha', environment: 'test' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      ],
+    });
+    const poolMgr3 = new TenantPostgresPoolManager();
+    openPoolManagers.push(poolMgr3);
+    const runner3 = new TenantMigrationRunner();
+    const ctxAlpha3 = makeVerifiedTenantCtx('tenant-alpha', 'P-000004', ['admin', 'legal_secretary', 'fee_earner']);
+    const ctxBravo3 = makeVerifiedTenantCtx('tenant-bravo', 'P-000004', ['admin', 'legal_secretary', 'fee_earner']);
+    await runner3.applyUp(ctxAlpha3, CORE_TENANT_MIGRATIONS);
+    await runner3.applyUp(ctxBravo3, CORE_TENANT_MIGRATIONS);
+    const alphaRaw3 = { ...(notALawFirmBaseConfig as unknown as Record<string, unknown>), tenantId: 'tenant-alpha' };
+    const bravoRaw3 = { ...(notALawFirmBaseConfig as unknown as Record<string, unknown>), tenantId: 'tenant-bravo' };
+    const alphaCfg3 = loadAndValidateTenantConfig(alphaRaw3, { tenantId: 'tenant-alpha', environment: 'test' }, 'test', 'multi_tenant');
+    const bravoCfg3 = loadAndValidateTenantConfig(bravoRaw3, { tenantId: 'tenant-bravo', environment: 'test' }, 'test', 'multi_tenant');
+    await importFirmStoreModulesToPostgres({ ctx: ctxAlpha3, tenantConfig: alphaCfg3, clearFirst: true, store: createSeedStore(new Date()) });
+    await importFirmStoreModulesToPostgres({ ctx: ctxBravo3, tenantConfig: bravoCfg3, clearFirst: true, store: createSeedStore(new Date()) });
+    const partyAlpha3 = new TenantPartyRepository({ poolManager: poolMgr3 });
+    const seededP15Alpha = (await partyAlpha3.getPersonById<Person>(ctxAlpha3, 'P-000015'))!;
+    await partyAlpha3.putPerson(ctxAlpha3, {
+      ...seededP15Alpha,
+      id: 'P-S104-ALPHA-ONLY',
+      firstName: 'Alpha',
+      surname: 'Exclusive',
+    });
+
+    setActiveTenantConfigForTesting(alphaRaw3, {});
+    const alphaUploadRes = await runAsActionActor(
+      'P-000010',
+      async () => {
+        const f = new FormData();
+        f.set('subjectType', 'person');
+        f.set('subjectId', 'P-000015');
+        f.set('file', new File([cleanPdf], 'alpha-passport.pdf', { type: 'application/pdf' }));
+        return uploadRoute!.POST(await buildMultipartUploadRequest(f));
+      },
+      { tenantId: 'tenant-alpha', roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(alphaUploadRes.status).toBe(200);
+    const alphaUploadJson = (await alphaUploadRes.json()) as { downloadUrl?: string };
+
+    // Alpha download token presented in Bravo -> 403
+    setActiveTenantConfigForTesting(bravoRaw3, {});
+    const crossTenantDlRes = await runAsActionActor(
+      'P-000010',
+      () =>
+        downloadRoute!.GET(
+          new Request(`http://localhost${alphaUploadJson.downloadUrl}`, { method: 'GET' }),
+        ),
+      { tenantId: 'tenant-bravo', roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(crossTenantDlRes.status).toBe(403);
+
+    // Upload with Alpha-only subjectId inside Bravo -> 404 (no cross-tenant write)
+    const crossTenantUpRes = await runAsActionActor(
+      'P-000010',
+      async () => {
+        const f = new FormData();
+        f.set('subjectType', 'person');
+        f.set('subjectId', 'P-S104-ALPHA-ONLY');
+        f.set('file', new File([cleanPdf], 'cross-tenant.pdf', { type: 'application/pdf' }));
+        return uploadRoute!.POST(await buildMultipartUploadRequest(f));
+      },
+      { tenantId: 'tenant-bravo', roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(crossTenantUpRes.status).toBe(404);
+
+    // Forged tenant claim (session claims tenant-bravo while active tenant is tenant-alpha) -> rejected
+    setActiveTenantConfigForTesting(alphaRaw3, {});
+    await expect(
+      runAsActionActor(
+        'P-000010',
+        () =>
+          downloadRoute!.GET(
+            new Request(`http://localhost${alphaUploadJson.downloadUrl}`, { method: 'GET' }),
+          ),
+        { tenantId: 'tenant-bravo', roles: ['legal_secretary'], mfaVerified: false },
+      ),
+    ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+  }, 45_000);
 
   it('4. R749 & R750: completes Standard CDD immediately -> recorded (36m dueAt), upgrades Standard -> High preserving items & setting 12m dueAt, and saveMatterRecord ignores legacy CDD fields', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
@@ -934,13 +1212,13 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     const bravoNotifs = await taskRepo.listNotificationsForUser<NotificationItem>(ctxBravoAdmin, 'P-000003', { includeRestricted: true });
     expect(bravoNotifs.some((n) => n.recordId === 'REG-S104-REM-EMP')).toBe(false);
 
-    // Tampered cross-tenant detail call fails
+    // Tampered cross-tenant detail call fails identically to missing ID
     const crossTenantDetail = await runAsActionActor(
       'P-000003',
       () => getRegisterRecordDetailRecord('REG-S104-REM-EMP', 'P-000003', { tenantCtx: ctxBravoAdmin, tenantConfig: bravoCfg }),
       { tenantId: 'tenant-bravo', roles: ['risk_compliance'], mfaVerified: false },
     );
-    expect(isActionDenied(crossTenantDetail) || crossTenantDetail.ok === false).toBe(true);
+    expect(crossTenantDetail).toMatchObject({ ok: false, code: 'NOT_FOUND' });
 
     // R754 & R758: Create evidence & intake check for P-000015 -> merge P-000015 into P-000011 -> run anonymiseExpiredEnquiries -> assert repointed & preserved
     await intakeRepo.recordCheck(ctxAlphaAdmin, {
@@ -1003,5 +1281,494 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     } finally {
       setActiveTenantConfigForTesting(null);
     }
+  }, 45_000);
+
+  it('7a. R765 (Blocking): generic createRegisterRecordAction refuses cdd', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const createRegisterRecordAction = actionsModule.createRegisterRecordAction;
+
+    // Valid client-supplied payload that SUCCEEDS before the fix (forged checklist + standard tier)
+    const genCreateRes = (await runAsActionActor(
+      'P-000002',
+      () =>
+        createRegisterRecordAction({
+          registerTypeKey: 'cdd',
+          title: 'Forged High-Risk CDD Direct Create',
+          personId: 'P-000014',
+          fieldValues: {
+            clientCategory: 'individual',
+            riskTier: 'standard',
+            checklistItems: [
+              {
+                itemKey: 'photo_id',
+                label: 'Photo ID',
+                required: true,
+                status: 'recorded',
+                evidenceRefs: [],
+              },
+            ],
+          },
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; denied?: boolean; code?: string };
+    expect(isActionDenied(genCreateRes as never) || genCreateRes.ok === false).toBe(true);
+  }, 30_000);
+
+  it('7b. R765 (Blocking): generic updateRegisterRecordAction refuses cdd', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const evidenceRepo = new TenantEvidenceArtifactRepository();
+    const startOrLoadClientCddAction = actionsModule.startOrLoadClientCddAction;
+    const updateRegisterRecordAction = actionsModule.updateRegisterRecordAction;
+
+    const empArtifact = await evidenceRepo.createArtifact(ctx, {
+      blobKey: 'tenant-not-a-law-firm-test/evidence/p5/emp-passport-secret.pdf',
+      subjectType: 'person',
+      subjectId: 'P-000005',
+      fileName: 'sian-llewellyn-secret-passport.pdf',
+      contentType: 'application/pdf',
+      byteSize: 512,
+      sha256: 'a'.repeat(64),
+      scanStatus: 'clean',
+      uploadedByPersonId: 'P-000001',
+    });
+
+    const loadedP15 = (await runAsActionActor(
+      'P-000002',
+      () =>
+        startOrLoadClientCddAction({
+          subjectType: 'person',
+          subjectId: 'P-000015',
+          createIfMissing: true,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string } | null } };
+    expect(loadedP15.ok).toBe(true);
+
+    const genUpdateRes = (await runAsActionActor(
+      'P-000002',
+      () =>
+        updateRegisterRecordAction({
+          recordId: loadedP15.summary!.record!.id,
+          fieldValues: {
+            clientCategory: 'individual',
+            riskTier: 'standard',
+            checklistItems: [
+              {
+                itemKey: 'photo_id',
+                label: 'Photo ID',
+                required: true,
+                status: 'recorded',
+                evidenceRefs: [
+                  {
+                    blobKey: empArtifact.blobKey,
+                    sha256: empArtifact.sha256,
+                    contentType: empArtifact.contentType,
+                    sizeBytes: empArtifact.byteSize,
+                    scanStatus: 'clean',
+                    fileName: empArtifact.fileName,
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; denied?: boolean };
+    expect(isActionDenied(genUpdateRes as never) || genUpdateRes.ok === false).toBe(true);
+  }, 30_000);
+
+  it('7c. R765 (Blocking): generic transitionRegisterRecordAction refuses record_cdd, upgrade_to_high_risk, and fieldUpdates on supersede_cdd', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const startOrLoadClientCddAction = actionsModule.startOrLoadClientCddAction;
+    const transitionRegisterRecordAction = actionsModule.transitionRegisterRecordAction;
+
+    const loadedP15 = (await runAsActionActor(
+      'P-000002',
+      () =>
+        startOrLoadClientCddAction({
+          subjectType: 'person',
+          subjectId: 'P-000015',
+          createIfMissing: true,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string } | null } };
+    expect(loadedP15.ok).toBe(true);
+    const p15RecordId = loadedP15.summary!.record!.id;
+
+    const genTransRecordCdd = (await runAsActionActor(
+      'P-000002',
+      () =>
+        transitionRegisterRecordAction({
+          recordId: p15RecordId,
+          transitionKey: 'record_cdd',
+          comment: 'Bypass checklist completion',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; denied?: boolean };
+    expect(isActionDenied(genTransRecordCdd as never) || genTransRecordCdd.ok === false).toBe(true);
+
+    const genTransUpgrade = (await runAsActionActor(
+      'P-000002',
+      () =>
+        transitionRegisterRecordAction({
+          recordId: p15RecordId,
+          transitionKey: 'upgrade_to_high_risk',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; denied?: boolean };
+    expect(isActionDenied(genTransUpgrade as never) || genTransUpgrade.ok === false).toBe(true);
+
+    const badFieldUpdatesSupersede = (await runAsActionActor(
+      'P-000002',
+      () =>
+        transitionRegisterRecordAction({
+          recordId: p15RecordId,
+          transitionKey: 'supersede_cdd',
+          comment: 'Attempt field injection',
+          fieldUpdates: { riskTier: 'standard' },
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; denied?: boolean };
+    expect(isActionDenied(badFieldUpdatesSupersede as never) || badFieldUpdatesSupersede.ok === false).toBe(true);
+  }, 30_000);
+
+  it('7d1. R766 (Blocking): resolveEvidenceRefsDownloadable strips cross-subject artifacts from summary', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const regRepo = new TenantRegisterRepository();
+    const startOrLoadClientCddAction = actionsModule.startOrLoadClientCddAction;
+    const uploadRoute = await import('@/app/api/evidence/upload/route');
+
+    // Legitimately upload clean evidence for hidden employee client P-000005 as Risk partner P-000001
+    const empForm = new FormData();
+    empForm.set('subjectType', 'person');
+    empForm.set('subjectId', 'P-000005');
+    empForm.set('file', new File([new TextEncoder().encode('%PDF-1.4\n%Emp')], 'sian-llewellyn-secret-passport.pdf', { type: 'application/pdf' }));
+    const empUpRes = await runAsActionActor(
+      'P-000001',
+      async () => uploadRoute.POST(await buildMultipartUploadRequest(empForm)),
+      { roles: ['partner', 'risk_compliance'], mfaVerified: false },
+    );
+    expect(empUpRes.status).toBe(200);
+    const empJson = (await empUpRes.json()) as {
+      evidenceRef: { blobKey: string; sha256: string; contentType: string; sizeBytes: number; scanStatus: 'clean'; fileName?: string };
+    };
+
+    const loadedP15 = (await runAsActionActor(
+      'P-000002',
+      () =>
+        startOrLoadClientCddAction({
+          subjectType: 'person',
+          subjectId: 'P-000015',
+          createIfMissing: true,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string } | null } };
+    expect(loadedP15.ok).toBe(true);
+    const p15RecordId = loadedP15.summary!.record!.id;
+
+    const cleanPdf = new TextEncoder().encode('%PDF-1.4\n%Valid P15 Evidence');
+    const upForm = new FormData();
+    upForm.set('subjectType', 'person');
+    upForm.set('subjectId', 'P-000015');
+    upForm.set('file', new File([cleanPdf], 'p15-id.pdf', { type: 'application/pdf' }));
+    const upRes = await runAsActionActor(
+      'P-000002',
+      async () => uploadRoute.POST(await buildMultipartUploadRequest(upForm)),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(upRes.status).toBe(200);
+    const upJson = (await upRes.json()) as {
+      evidenceRef: { blobKey: string; sha256: string; contentType: string; sizeBytes: number; scanStatus: 'clean'; fileName?: string };
+    };
+
+    const p15RecPre = (await regRepo.getRegisterRecordById(ctx, p15RecordId, { canViewCdd: true }))!;
+    await regRepo.updateRegisterRecordDetails(ctx, {
+      recordId: p15RecordId,
+      updatedById: 'P-000002',
+      fieldValues: {
+        ...p15RecPre.fieldValues,
+        supportingEvidence: [upJson.evidenceRef, empJson.evidenceRef],
+      },
+    });
+    const r766SummaryRes = (await runAsActionActor(
+      'P-000002',
+      () => startOrLoadClientCddAction({ subjectType: 'person', subjectId: 'P-000015' }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { visible: boolean; evidenceRefs: Array<{ blobKey: string; fileName?: string }> } };
+    expect(r766SummaryRes.ok).toBe(true);
+    expect(r766SummaryRes.summary?.visible).toBe(true);
+    expect(r766SummaryRes.summary?.evidenceRefs.some((r) => r.blobKey === upJson.evidenceRef.blobKey)).toBe(true);
+    expect(r766SummaryRes.summary?.evidenceRefs.some((r) => r.blobKey === empJson.evidenceRef.blobKey)).toBe(false);
+  }, 30_000);
+
+  it('7d2. R766 (Blocking): resolveEvidenceRefsDownloadable isolates pending-scan or unstored blobs without breaking CDD card', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const regRepo = new TenantRegisterRepository();
+    const evidenceRepo = new TenantEvidenceArtifactRepository();
+    const startOrLoadClientCddAction = actionsModule.startOrLoadClientCddAction;
+    const uploadRoute = await import('@/app/api/evidence/upload/route');
+
+    const loadedP15 = (await runAsActionActor(
+      'P-000002',
+      () =>
+        startOrLoadClientCddAction({
+          subjectType: 'person',
+          subjectId: 'P-000015',
+          createIfMissing: true,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string } | null } };
+    expect(loadedP15.ok).toBe(true);
+    const p15RecordId = loadedP15.summary!.record!.id;
+
+    const cleanPdf = new TextEncoder().encode('%PDF-1.4\n%Valid P15 Evidence');
+    const upForm = new FormData();
+    upForm.set('subjectType', 'person');
+    upForm.set('subjectId', 'P-000015');
+    upForm.set('file', new File([cleanPdf], 'p15-id.pdf', { type: 'application/pdf' }));
+    const upRes = await runAsActionActor(
+      'P-000002',
+      async () => uploadRoute.POST(await buildMultipartUploadRequest(upForm)),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(upRes.status).toBe(200);
+    const upJson = (await upRes.json()) as {
+      evidenceRef: { blobKey: string; sha256: string; contentType: string; sizeBytes: number; scanStatus: 'clean'; fileName?: string };
+    };
+
+    // DB artifact marked clean whose blob is absent from storage (storage.getMalwareScanStatus returns 'pending' -> throws STORAGE_MALWARE_GATE)
+    const pendingArtifact = await evidenceRepo.createArtifact(ctx, {
+      blobKey: 'tenant-not-a-law-firm-test/evidence/p15/pending-never-stored.pdf',
+      subjectType: 'person',
+      subjectId: 'P-000015',
+      fileName: 'pending-never-stored.pdf',
+      contentType: 'application/pdf',
+      byteSize: 200,
+      sha256: 'b'.repeat(64),
+      scanStatus: 'clean',
+      uploadedByPersonId: 'P-000002',
+    });
+
+    const p15RecPre = (await regRepo.getRegisterRecordById(ctx, p15RecordId, { canViewCdd: true }))!;
+    await regRepo.updateRegisterRecordDetails(ctx, {
+      recordId: p15RecordId,
+      updatedById: 'P-000002',
+      fieldValues: {
+        ...p15RecPre.fieldValues,
+        supportingEvidence: [upJson.evidenceRef, {
+          blobKey: pendingArtifact.blobKey,
+          sha256: pendingArtifact.sha256,
+          contentType: pendingArtifact.contentType,
+          sizeBytes: pendingArtifact.byteSize,
+          scanStatus: 'clean',
+          fileName: pendingArtifact.fileName,
+        }],
+      },
+    });
+    const r766SummaryRes = (await runAsActionActor(
+      'P-000002',
+      () => startOrLoadClientCddAction({ subjectType: 'person', subjectId: 'P-000015' }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { visible: boolean; evidenceRefs: Array<{ blobKey: string }> } };
+    expect(r766SummaryRes.ok).toBe(true);
+    expect(r766SummaryRes.summary?.visible).toBe(true);
+    expect(r766SummaryRes.summary?.evidenceRefs.some((r) => r.blobKey === upJson.evidenceRef.blobKey)).toBe(true);
+  }, 30_000);
+
+  it('7e. R770, R772, R773 & R774: matches NOT_FOUND, prevents lost/duplicate CDD writes, blocks Standard completion on High risk, and writes audit inside TX', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const regRepo = new TenantRegisterRepository();
+    const matterRepo = new TenantMatterRepository();
+
+    const startOrLoadClientCddAction = actionsModule.startOrLoadClientCddAction;
+    const recordCddChecklistItemAction = actionsModule.recordCddChecklistItemAction;
+    const completeClientCddAction = actionsModule.completeClientCddAction;
+    const transitionRegisterRecordAction = actionsModule.transitionRegisterRecordAction;
+
+    // Employee CDD for P-000005 and external client CDD for P-000015
+    const empCdd = await regRepo.createRegisterRecord(ctx, {
+      id: 'REG-S104-T7-EMP',
+      registerTypeKey: 'cdd',
+      reference: 'CDD-S104-T7-EMP',
+      title: 'Employee CDD Hidden Target',
+      status: 'recorded',
+      personId: 'P-000005',
+      ownerId: 'P-000001',
+      fieldValues: { clientCategory: 'individual', riskTier: 'standard', checklistItems: [] },
+      createdById: 'P-000001',
+    });
+
+    const loadedP15 = (await runAsActionActor(
+      'P-000002',
+      () =>
+        startOrLoadClientCddAction({
+          subjectType: 'person',
+          subjectId: 'P-000015',
+          createIfMissing: true,
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string; rowVersion: number } | null; checklistItems: Array<{ itemKey: string; label: string }> } };
+    expect(loadedP15.ok).toBe(true);
+    const p15RecordId = loadedP15.summary!.record!.id;
+
+    // R770: Hidden employee-client CDD ID vs missing ID must return identical NOT_FOUND across all record-by-ID services
+    const missingId = 'REG-S104-DOES-NOT-EXIST';
+    const [hiddenDetail, missingDetail] = await runAsActionActor(
+      'P-000006',
+      () => Promise.all([
+        getRegisterRecordDetailRecord(empCdd.id, 'P-000006'),
+        getRegisterRecordDetailRecord(missingId, 'P-000006'),
+      ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(hiddenDetail).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(hiddenDetail).toEqual(missingDetail);
+
+    const [hiddenRecItem, missingRecItem] = await runAsActionActor(
+      'P-000006',
+      () => Promise.all([
+        recordCddChecklistItemRecord({ recordId: empCdd.id, itemKey: 'photo_id', status: 'recorded' }, 'P-000006'),
+        recordCddChecklistItemRecord({ recordId: missingId, itemKey: 'photo_id', status: 'recorded' }, 'P-000006'),
+      ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(hiddenRecItem).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(hiddenRecItem).toEqual(missingRecItem);
+
+    const [hiddenComplete, missingComplete] = await runAsActionActor(
+      'P-000006',
+      () => Promise.all([
+        completeClientCddRecord({ recordId: empCdd.id }, 'P-000006'),
+        completeClientCddRecord({ recordId: missingId }, 'P-000006'),
+      ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(hiddenComplete).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(hiddenComplete).toEqual(missingComplete);
+
+    const [hiddenTrans, missingTrans] = await runAsActionActor(
+      'P-000006',
+      () => Promise.all([
+        transitionRegisterRecordService({ recordId: empCdd.id, transitionKey: 'archive_cdd', comment: 'Probe' }, 'P-000006'),
+        transitionRegisterRecordService({ recordId: missingId, transitionKey: 'archive_cdd', comment: 'Probe' }, 'P-000006'),
+      ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(hiddenTrans).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(hiddenTrans).toEqual(missingTrans);
+
+    const [hiddenUpd, missingUpd] = await runAsActionActor(
+      'P-000006',
+      () => Promise.all([
+        updateRegisterRecordDetailsService({ recordId: empCdd.id, title: 'Probe' }, 'P-000006'),
+        updateRegisterRecordDetailsService({ recordId: missingId, title: 'Probe' }, 'P-000006'),
+      ]),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(hiddenUpd).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(hiddenUpd).toEqual(missingUpd);
+
+    // R772: Concurrent creates on O-000006 via Promise.all produce 1 live CDD record;
+    // concurrent item updates on O-000006 preserve both items; archived CDD rejects item edits
+    const [concCreateA, concCreateB] = (await Promise.all([
+      runAsActionActor('P-000002', () => startOrLoadClientCddAction({ subjectType: 'organisation', subjectId: 'O-000006', createIfMissing: true }), { roles: ['fee_earner'], mfaVerified: false }),
+      runAsActionActor('P-000002', () => startOrLoadClientCddAction({ subjectType: 'organisation', subjectId: 'O-000006', createIfMissing: true }), { roles: ['fee_earner'], mfaVerified: false }),
+    ])) as Array<{ ok: boolean; summary?: { record?: { id: string } | null; checklistItems: Array<{ itemKey: string }> } }>;
+    expect(concCreateA.ok).toBe(true);
+    expect(concCreateB.ok).toBe(true);
+    expect(concCreateA.summary?.record?.id).toBe(concCreateB.summary?.record?.id);
+    const liveO6 = await regRepo.listVisibleRegisterRecords(ctx, 'P-000001', {
+      registerTypeKey: 'cdd',
+      organisationId: 'O-000006',
+      canViewCdd: true,
+    });
+    expect(liveO6.filter((r) => r.status === 'in_progress' || r.status === 'recorded')).toHaveLength(1);
+
+    const o6Id = concCreateA.summary!.record!.id;
+    const o6Items = concCreateA.summary!.checklistItems;
+    expect(o6Items.length).toBeGreaterThanOrEqual(2);
+    const [concItemA, concItemB] = (await Promise.all([
+      runAsActionActor('P-000002', () => recordCddChecklistItemAction({ recordId: o6Id, itemKey: o6Items[0]!.itemKey, status: 'recorded', note: 'Concurrent A' }), { roles: ['fee_earner'], mfaVerified: false }),
+      runAsActionActor('P-000002', () => recordCddChecklistItemAction({ recordId: o6Id, itemKey: o6Items[1]!.itemKey, status: 'recorded', note: 'Concurrent B' }), { roles: ['fee_earner'], mfaVerified: false }),
+    ])) as Array<{ ok: boolean }>;
+    expect(concItemA.ok).toBe(true);
+    expect(concItemB.ok).toBe(true);
+    const o6AfterItems = (await regRepo.getRegisterRecordById(ctx, o6Id, { canViewCdd: true }))!;
+    const savedO6Items = o6AfterItems.fieldValues.checklistItems as Array<{ itemKey: string; status: string }>;
+    expect(savedO6Items.find((i) => i.itemKey === o6Items[0]!.itemKey)?.status).toBe('recorded');
+    expect(savedO6Items.find((i) => i.itemKey === o6Items[1]!.itemKey)?.status).toBe('recorded');
+
+    // Archive P-000015 CDD cleanly, then assert recordCddChecklistItemAction refuses edits on archived records
+    const archRes = (await runAsActionActor(
+      'P-000002',
+      () => transitionRegisterRecordAction({ recordId: p15RecordId, transitionKey: 'archive_cdd', comment: 'Archived client' }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean };
+    expect(archRes.ok).toBe(true);
+    const editArchivedRes = (await runAsActionActor(
+      'P-000002',
+      () => recordCddChecklistItemAction({ recordId: p15RecordId, itemKey: loadedP15.summary!.checklistItems[0]!.itemKey, status: 'recorded', note: 'Edit after archive' }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; denied?: boolean };
+    expect(isActionDenied(editArchivedRes as never) || editArchivedRes.ok === false).toBe(true);
+
+    // R773: Standard CDD completion refused when client O-000006 has an active High-risk matter
+    for (const item of o6Items) {
+      await runAsActionActor(
+        'P-000002',
+        () => recordCddChecklistItemAction({ recordId: o6Id, itemKey: item.itemKey, status: 'recorded', note: `Recorded ${item.itemKey}` }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+    }
+    const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001'))!;
+    await matterRepo.createMatter<Matter>(ctx, {
+      ...baseMatter,
+      id: 'M-S104-HR-O6',
+      recordType: 'matter',
+      matterNumber: 'S104-HR-0006',
+      title: 'High Risk Matter Requiring Enhanced CDD',
+      clientId: 'O-000006',
+      riskRatingId: 'risk_rating.high',
+      matterStatusId: vid('matter_status', 'Active'),
+    });
+    const completeStdOnHighRes = (await runAsActionActor(
+      'P-000002',
+      () => completeClientCddAction({ recordId: o6Id }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; message?: string; error?: string };
+    expect(completeStdOnHighRes.ok).toBe(false);
+
+    // Upgrade to High risk, complete remaining items, then verify R774 audit failure rolls back completeClientCddAction
+    const upgradedO6 = (await runAsActionActor(
+      'P-000002',
+      () => startOrLoadClientCddAction({ subjectType: 'organisation', subjectId: 'O-000006', upgradeToHighRisk: true }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { checklistItems: Array<{ itemKey: string; status: string }> } };
+    expect(upgradedO6.ok).toBe(true);
+    for (const item of upgradedO6.summary!.checklistItems.filter((i) => i.status === 'pending')) {
+      await runAsActionActor(
+        'P-000002',
+        () => recordCddChecklistItemAction({ recordId: o6Id, itemKey: item.itemKey, status: 'recorded', note: `Enhanced ${item.itemKey}` }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+    }
+
+    setAuditAdapterFailureHookForTesting(() => {
+      throw new Error('Simulated TX audit failure for R774');
+    });
+    const rollbackRes = (await runAsActionActor(
+      'P-000002',
+      () => completeClientCddAction({ recordId: o6Id }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok?: boolean; code?: string };
+    setAuditAdapterFailureHookForTesting(null);
+    expect(rollbackRes.ok).toBe(false);
+
+    const o6RolledBack = await regRepo.getRegisterRecordById(ctx, o6Id, { canViewCdd: true });
+    expect(o6RolledBack?.status).toBe('in_progress');
   }, 45_000);
 });

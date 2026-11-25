@@ -203,6 +203,11 @@
           "items": { "type": "string", "minLength": 1 },
           "description": "Transition keys whose prior actor(s) on this record must differ from the current actor."
         },
+        "systemOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, only dedicated core system workflows may invoke this transition."
+        },
         "setsDecidedAt": {
           "type": "boolean",
           "default": false,

@@ -44,20 +44,25 @@ export const GET = guardedRoute('GET /api/evidence/download', async (request, _c
       );
     }
 
-    const safeFileName = result.artifact.fileName.replace(/["\r\n]/g, '_');
+    const rawName = result.artifact.fileName.replace(/[\r\n]/g, '_').trim() || 'evidence.bin';
+    const asciiFallback =
+      rawName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\;]/g, '_') || 'evidence.bin';
+    const utf8Encoded = encodeURIComponent(rawName).replace(
+      /['()*!]/g,
+      (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+    );
     return new NextResponse(Buffer.from(result.bytes), {
       status: 200,
       headers: {
         'Content-Type': result.artifact.contentType || 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${safeFileName}"`,
+        'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8Encoded}`,
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'no-store, max-age=0',
       },
     });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unable to download evidence file.';
+  } catch {
     return NextResponse.json(
-      { ok: false, code: 'DOWNLOAD_ERROR', error: message },
+      { ok: false, code: 'DOWNLOAD_ERROR', error: 'Unable to download evidence file.' },
       { status: 403 },
     );
   }

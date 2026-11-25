@@ -1088,6 +1088,12 @@ export async function loadHomePageData(
     needsCddQueueOnHome
       ? getRegisterRepository().listVisibleRegisterRecords(ctx, currentUserId, {
           registerTypeKey: 'cdd',
+          dueOrInProgressFilter: {
+            inProgressStatus: 'in_progress',
+            recordedStatus: 'recorded',
+            dueBeforeIso: `${toIsoDate(addDays(new Date(), 30))}T23:59:59.999Z`,
+          },
+          orderBy: 'due_asc',
           hasRestrictedMatterAccess,
           canViewCdd: true,
           canBypassEmployeeCddVisibility,
@@ -1101,13 +1107,7 @@ export async function loadHomePageData(
     shell.finance.canViewFirm ? getFirmFinance(ctx) : Promise.resolve(null),
   ]);
 
-  const cddDueHorizonYmd = toIsoDate(addDays(new Date(), 30));
-  const cddQueueRecords = cddRecordsRaw.filter(
-    (r) =>
-      r.status === 'in_progress' ||
-      (r.status === 'recorded' &&
-        Boolean(r.dueAt && r.dueAt.slice(0, 10) <= cddDueHorizonYmd)),
-  );
+  const cddQueueRecords = cddRecordsRaw;
 
   const { people, organisations } = await collectReferencedParties({
     ctx,
