@@ -10,6 +10,8 @@
 
 import type { RegisterRecord, WorkTypeOpeningGateConfig } from '@platform/core-api';
 import type { CddWorkflowStatus } from './cdd';
+import { hasUnapprovedRestrictedMatches } from './matterConflicts';
+import { DEFAULT_WORK_TYPE_OPENING_GATE, type WorkTypeOpeningGateFields } from './workTypeConfig';
 import type { ChoiceValue, ConflictCheckStatusPill, Matter } from './types';
 
 export type OpeningGatePreconditionKey =
@@ -125,11 +127,21 @@ export interface OpeningGateHighRiskSummary {
   readonly decidedAt: string | null;
 }
 
+export interface OpeningGateHighRiskRecordView {
+  readonly id: string;
+  readonly reference: string;
+  readonly status: string;
+  readonly rowVersion: number;
+  readonly partnerApproverName: string | null;
+  readonly complianceApproverName: string | null;
+  readonly decidedAt: string | null;
+}
+
 export interface OpeningGateEvaluation {
   readonly canOpen: boolean;
   readonly requiresHighRiskApproval: boolean;
   readonly highRisk: OpeningGateHighRiskSummary;
-  readonly gateConfig: WorkTypeOpeningGateConfig;
+  readonly gateConfig: WorkTypeOpeningGateFields;
   readonly preconditions: readonly OpeningGatePreconditionResult[];
   readonly blockingReasons: readonly string[];
   readonly activeOverrides: readonly OpeningGateOverrideSummary[];
@@ -138,7 +150,7 @@ export interface OpeningGateEvaluation {
 export interface MatterOpeningGateView {
   readonly evaluation: OpeningGateEvaluation;
   readonly isProspective: boolean;
-  readonly highRiskRecord: RegisterRecord | null;
+  readonly highRiskRecord: OpeningGateHighRiskRecordView | null;
   readonly canOverridePermission: boolean;
   readonly canEditMatter: boolean;
 }
@@ -187,12 +199,19 @@ export interface EvaluateOpeningPreconditionsInput {
     | 'engagementLetterSignedAt'
     | 'retainerMoniesOnAccountGbp'
     | 'riskRatingId'
-  >;
+  > & {
+    readonly leadFeeEarnerId?: string | null;
+    readonly responsiblePartnerId?: string | null;
+  };
   readonly gateConfig: WorkTypeOpeningGateConfig;
   readonly cddStatus: {
     readonly status: CddWorkflowStatus;
     readonly isExpired: boolean;
+    readonly insufficientTier?: boolean;
     readonly visibleToViewer?: boolean;
+    readonly missingClientNames?: readonly string[];
+    readonly expiredClientNames?: readonly string[];
+    readonly insufficientTierClientNames?: readonly string[];
   };
   readonly activeOverrides: readonly OpeningGateOverrideSummary[];
   readonly highRiskRecord?: Pick<
@@ -208,12 +227,34 @@ export interface EvaluateOpeningPreconditionsInput {
   readonly fundsOnAccountSatisfied?: boolean;
 }
 
+function normaliseGateConfigFields(
+  gateConfig: WorkTypeOpeningGateConfig,
+): WorkTypeOpeningGateFields {
+  return {
+    requireConflictCleared:
+      gateConfig.requireConflictCleared ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireConflictCleared,
+    requireCddComplete:
+      gateConfig.requireCddComplete ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireCddComplete,
+    allowCddOverride:
+      gateConfig.allowCddOverride ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.allowCddOverride,
+    requireEngagementSigned:
+      gateConfig.requireEngagementSigned ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireEngagementSigned,
+    requireFundsOnAccount:
+      gateConfig.requireFundsOnAccount ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.requireFundsOnAccount,
+  };
+}
+
 export function evaluateOpeningPreconditions(
   params: EvaluateOpeningPreconditionsInput,
 ): OpeningGateEvaluation {
   const {
     matter,
-    gateConfig,
+    gateConfig: rawGateConfig,
     cddStatus,
     activeOverrides,
     highRiskRecord,
@@ -221,6 +262,7 @@ export function evaluateOpeningPreconditions(
     requiresHighRiskApproval,
     fundsOnAccountSatisfied = false,
   } = params;
+  const gateConfig = normaliseGateConfigFields(rawGateConfig);
 
   const activeByKey = new Map<OpeningGatePreconditionKey, OpeningGateOverrideSummary>();
   for (const ovr of activeOverrides) {
@@ -230,45 +272,60 @@ export function evaluateOpeningPreconditions(
   }
 
   const conflictPill = normaliseConflictStatusForGate(matter);
+  const hasUnapprovedRestricted = hasUnapprovedRestrictedMatches(
+    matter.conflictCheckRecord?.matches ?? [],
+    matter.conflictCheckRecord?.approvedRestrictedMatchIds,
+  );
   const conflictRawSatisfied =
-    conflictPill === 'Cleared' || conflictPill === 'Approved';
+    (conflictPill === 'Cleared' || conflictPill === 'Approved') &&
+    !hasUnapprovedRestricted;
   const conflictNonOverridable =
-    conflictPill === 'Referred' || conflictPill === 'Declined';
+    conflictPill === 'Referred' ||
+    conflictPill === 'Declined' ||
+    hasUnapprovedRestricted;
   const conflictOverride = !conflictNonOverridable
     ? activeByKey.get('conflict_cleared') ?? null
     : null;
   const conflictCanOverride =
     !conflictRawSatisfied && !conflictNonOverridable;
   const conflictSatisfied =
-    !gateConfig.requireConflictCleared ||
-    conflictRawSatisfied ||
-    Boolean(conflictOverride);
+    conflictRawSatisfied || Boolean(conflictOverride);
+
+  const conflictNonOverridableReason = !conflictNonOverridable
+    ? null
+    : hasUnapprovedRestricted
+      ? 'Conflict check has an unapproved restricted match; it must be reviewed by Risk & Compliance.'
+      : `Conflict status "${conflictPill}" cannot be overridden; it must be reviewed by Risk & Compliance.`;
+
+  const conflictStatusSummary = conflictRawSatisfied
+    ? `${conflictPill}`
+    : conflictOverride
+      ? `${conflictPill} (overridden by partner)`
+      : conflictPill === 'Referred'
+        ? 'Referred to Risk & Compliance — override not permitted'
+        : conflictPill === 'Declined'
+          ? 'Declined by Risk & Compliance — override not permitted'
+          : hasUnapprovedRestricted
+            ? 'Unapproved restricted conflict match — Risk & Compliance review required'
+            : `Not cleared (${conflictPill})`;
 
   const conflictResult: OpeningGatePreconditionResult = {
     key: 'conflict_cleared',
     label: OPENING_GATE_PRECONDITION_LABELS.conflict_cleared,
-    required: gateConfig.requireConflictCleared,
+    required: true,
     rawSatisfied: conflictRawSatisfied,
     overridden: !conflictRawSatisfied && Boolean(conflictOverride),
     satisfied: conflictSatisfied,
     canOverride: conflictCanOverride,
-    nonOverridableReason: conflictNonOverridable
-      ? `Conflict status "${conflictPill}" cannot be overridden; it must be reviewed by Risk & Compliance.`
-      : null,
-    statusSummary: conflictRawSatisfied
-      ? `${conflictPill}`
-      : conflictOverride
-        ? `${conflictPill} (overridden by partner)`
-        : conflictPill === 'Referred'
-          ? 'Referred to Risk & Compliance — override not permitted'
-          : conflictPill === 'Declined'
-            ? 'Declined by Risk & Compliance — override not permitted'
-            : `Not cleared (${conflictPill})`,
+    nonOverridableReason: conflictNonOverridableReason,
+    statusSummary: conflictStatusSummary,
     activeOverride: conflictOverride,
   };
 
   const cddRawSatisfied =
-    cddStatus.status === 'recorded' && !cddStatus.isExpired;
+    cddStatus.status === 'recorded' &&
+    !cddStatus.isExpired &&
+    !cddStatus.insufficientTier;
   const cddAllowOverride = Boolean(gateConfig.allowCddOverride);
   const cddOverride = cddAllowOverride
     ? activeByKey.get('cdd_complete') ?? null
@@ -276,6 +333,37 @@ export function evaluateOpeningPreconditions(
   const cddSatisfied =
     !gateConfig.requireCddComplete || cddRawSatisfied || Boolean(cddOverride);
   const cddMasked = cddStatus.visibleToViewer === false;
+
+  const missingNames = cddStatus.missingClientNames ?? [];
+  const expiredNames = cddStatus.expiredClientNames ?? [];
+  const insufficientNames = cddStatus.insufficientTierClientNames ?? [];
+  const cddDetailClients = [
+    ...(insufficientNames.length > 0
+      ? [`upgrade to High-risk CDD needed for ${insufficientNames.join(', ')}`]
+      : []),
+    ...(expiredNames.length > 0
+      ? [`expired for ${expiredNames.join(', ')}`]
+      : []),
+    ...(missingNames.length > 0
+      ? [`not recorded for ${missingNames.join(', ')}`]
+      : []),
+  ];
+
+  const cddStatusSummary = cddMasked
+    ? 'Not available to you'
+    : cddRawSatisfied
+      ? 'Recorded and valid'
+      : cddOverride
+        ? 'Incomplete (overridden by partner)'
+        : cddDetailClients.length > 0
+          ? cddDetailClients.join('; ')
+          : cddStatus.insufficientTier
+            ? 'High-risk CDD upgrade required'
+            : cddStatus.isExpired
+              ? 'Expired — re-check required'
+              : cddStatus.status === 'in_progress'
+                ? 'In progress'
+                : 'Not started';
 
   const cddResult: OpeningGatePreconditionResult = {
     key: 'cdd_complete',
@@ -287,20 +375,8 @@ export function evaluateOpeningPreconditions(
     canOverride: !cddRawSatisfied && cddAllowOverride,
     nonOverridableReason: cddAllowOverride
       ? null
-      : 'Client Due Diligence is mandatory for this high-ML-risk work type and cannot be overridden.',
-    statusSummary: cddRawSatisfied
-      ? 'Recorded and valid'
-      : cddOverride
-        ? 'Incomplete (overridden by partner)'
-        : cddMasked
-          ? cddAllowOverride
-            ? 'Incomplete (restricted client CDD)'
-            : 'Incomplete — override not permitted (restricted client CDD)'
-          : cddStatus.isExpired
-            ? 'Expired — re-check required'
-            : cddStatus.status === 'in_progress'
-              ? 'In progress'
-              : 'Not started',
+      : 'Client Due Diligence is mandatory for this work type and cannot be overridden.',
+    statusSummary: cddStatusSummary,
     activeOverride: cddOverride,
   };
 
@@ -367,8 +443,22 @@ export function evaluateOpeningPreconditions(
     return 'missing';
   })();
 
-  const highRiskSatisfied = !requiresHighRiskApproval || hroStatus === 'approved';
+  const partnerIsMatterLeadOrResponsible = Boolean(
+    highRiskPartnerApprover?.actorId &&
+      (highRiskPartnerApprover.actorId === matter.leadFeeEarnerId ||
+        highRiskPartnerApprover.actorId === matter.responsiblePartnerId),
+  );
+  const highRiskSatisfied =
+    !requiresHighRiskApproval ||
+    (hroStatus === 'approved' && !partnerIsMatterLeadOrResponsible);
   const highRiskStatusLabel = ((): string => {
+    if (
+      requiresHighRiskApproval &&
+      hroStatus === 'approved' &&
+      partnerIsMatterLeadOrResponsible
+    ) {
+      return 'Independent partner approval required (cannot be lead fee earner or responsible partner)';
+    }
     switch (hroStatus) {
       case 'not_required':
         return 'Not required';
@@ -431,4 +521,52 @@ export function evaluateOpeningPreconditions(
     blockingReasons,
     activeOverrides: Array.from(activeByKey.values()),
   };
+}
+
+/**
+ * Formats action/service error responses from matter opening, engagement,
+ * override, or high-risk approval flows into plain British English without
+ * exposing internal permission keys or engine role diagnostics (R784).
+ */
+export function formatOpeningGateActionError(
+  err: {
+    readonly code?: string;
+    readonly message?: string;
+    readonly error?: string;
+  } | null | undefined,
+  fallback = 'This action could not be completed. Check your permissions and try again.',
+): string {
+  const code = (err?.code ?? '').trim();
+  const raw = (err?.message ?? err?.error ?? '').trim();
+
+  if (code === 'MFA_REQUIRED' || /multi-factor authentication/i.test(raw)) {
+    return 'Please complete multi-factor authentication before performing this action.';
+  }
+  if (code === 'MATTER_CONCURRENCY_CONFLICT') {
+    return 'This matter changed while you were working. Refresh and try again.';
+  }
+  if (code === 'REGISTER_SELF_APPROVAL_FORBIDDEN') {
+    return 'You cannot approve a High-risk matter opening for a matter where you submitted the record, lead the work, or are the responsible partner.';
+  }
+  if (code === 'REGISTER_DISTINCT_APPROVER_REQUIRED') {
+    return 'Risk & Compliance approval must be completed by a different person from the Partner approver.';
+  }
+  if (code === 'REGISTER_APPROVER_MISMATCH' || /allowedRoles|allowedApproverRoles/i.test(raw)) {
+    return 'Your role cannot complete this approval stage.';
+  }
+  if (code === 'FORBIDDEN' || code === 'PERMISSION_DENIED') {
+    if (raw && !/[a-z_]+:[a-z_]+/i.test(raw)) {
+      return raw;
+    }
+    return 'You do not have permission to carry out this action.';
+  }
+  if (raw) {
+    const cleaned = raw
+      .replace(/\s*\([a-z][a-z0-9_]*(?::[a-z0-9_]+)+\)/gi, '')
+      .replace(/\b[a-z][a-z0-9_]*(?::[a-z0-9_]+)+\b/gi, 'required permission')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    if (cleaned) return cleaned;
+  }
+  return fallback;
 }

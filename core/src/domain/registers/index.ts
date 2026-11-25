@@ -86,7 +86,7 @@ export const CORE_REGISTER_TYPES: Readonly<
     label: 'Sign-Off',
     pluralLabel: 'Sign-Offs',
     description:
-      'Partner sign-offs for write-offs and high-risk matter openings requiring two-person approval.',
+      'Partner sign-offs for write-offs requiring two-person approval.',
     isCore: true,
     enabled: true,
     referencePrefix: 'SO',
@@ -463,6 +463,7 @@ export const CORE_REGISTER_TYPES: Readonly<
     editPermission: 'cdd:record',
     subjectScope: 'client',
     requireMatterLink: false,
+    systemCreatedOnly: true,
     approvalRules: null,
     reminderSchedule: {
       enabled: true,
@@ -564,6 +565,7 @@ export const CORE_REGISTER_TYPES: Readonly<
     editPermission: 'register:edit',
     subjectScope: 'matter',
     requireMatterLink: true,
+    systemCreatedOnly: true,
     approvalRules: {
       requireTwoPersonApproval: true,
       forbidSelfApproval: true,
@@ -823,6 +825,9 @@ export function validateRegisterTypeDefinition(
       ? { subjectScope: customRegisterType.subjectScope }
       : {}),
     requireMatterLink: Boolean(customRegisterType.requireMatterLink),
+    ...(customRegisterType.systemCreatedOnly !== undefined
+      ? { systemCreatedOnly: Boolean(customRegisterType.systemCreatedOnly) }
+      : {}),
     approvalRules: cloneApprovalRules(customRegisterType.approvalRules),
     reminderSchedule: cloneReminderSchedule(
       customRegisterType.reminderSchedule,
@@ -875,6 +880,11 @@ function applyRegisterTypeOverride(
     pluralLabel: typeOverride.pluralLabel ?? baseType.pluralLabel,
     description: typeOverride.description ?? baseType.description,
     showInNavigation: typeOverride.showInNavigation ?? baseType.showInNavigation,
+    ...(baseType.key === 'high_risk_opening' || baseType.key === 'cdd'
+      ? { systemCreatedOnly: true }
+      : baseType.systemCreatedOnly !== undefined
+        ? { systemCreatedOnly: baseType.systemCreatedOnly }
+        : {}),
     reminderSchedule: {
       enabled: rsOverride?.enabled ?? baseType.reminderSchedule.enabled,
       dueDaysBefore: rsOverride?.dueDaysBefore
@@ -1473,11 +1483,41 @@ export function validateRegisterTransitionExecution(params: {
       const targetKeySet = transition.distinctFromTransitionKeys?.length
         ? new Set(transition.distinctFromTransitionKeys)
         : null;
-      const sameActorAlreadyApproved = priorTransitions.some(
-        (prior) =>
-          prior.actorId === actorId &&
-          (targetKeySet ? targetKeySet.has(prior.transitionKey) : true),
+      const CYCLE_RESET_TRANSITION_KEYS = new Set([
+        'reopen',
+        'resubmit',
+        'request_changes',
+        'withdraw',
+        'withdraw_opening',
+      ]);
+      const transitionDefByKey = new Map(
+        registerType.transitions.map((t) => [t.key, t] as const),
       );
+      let activeCycleStartIndex = 0;
+      for (let idx = priorTransitions.length - 1; idx >= 0; idx -= 1) {
+        const prior = priorTransitions[idx];
+        const priorDef = transitionDefByKey.get(prior.transitionKey);
+        if (
+          CYCLE_RESET_TRANSITION_KEYS.has(prior.transitionKey) ||
+          priorDef?.toStatus === registerType.initialStatus
+        ) {
+          activeCycleStartIndex = idx + 1;
+          break;
+        }
+      }
+      const activeCycleTransitions = priorTransitions.slice(activeCycleStartIndex);
+      const sameActorAlreadyApproved = activeCycleTransitions.some((prior) => {
+        if (prior.actorId !== actorId) return false;
+        if (targetKeySet) {
+          return targetKeySet.has(prior.transitionKey);
+        }
+        const priorDef = transitionDefByKey.get(prior.transitionKey);
+        return Boolean(
+          priorDef &&
+            (priorDef.forbidSelfAction ||
+              priorDef.requiredPermission !== registerType.editPermission),
+        );
+      });
       if (sameActorAlreadyApproved) {
         throw createRegisterDomainError(
           REGISTER_DOMAIN_ERROR_CODES.DISTINCT_APPROVER_REQUIRED,

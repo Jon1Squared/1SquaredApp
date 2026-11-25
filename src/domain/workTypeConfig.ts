@@ -13,9 +13,23 @@ import type {
 } from '@platform/core-api';
 import type { ChoiceValue } from './types';
 
+export interface WorkTypeOpeningGateFields {
+  requireConflictCleared: boolean;
+  requireCddComplete: boolean;
+  allowCddOverride: boolean;
+  requireEngagementSigned: boolean;
+  requireFundsOnAccount: boolean;
+}
+
+export type WorkTypeOpeningGateSettingKey = keyof WorkTypeOpeningGateFields;
+export type WorkTypeOpeningGateSettingSource =
+  | 'work_type'
+  | 'practice_area'
+  | 'firm_default';
+
 export const DEFAULT_WORK_TYPE_RETENTION_YEARS = 6;
 
-export const DEFAULT_WORK_TYPE_OPENING_GATE: WorkTypeOpeningGateConfig = {
+export const DEFAULT_WORK_TYPE_OPENING_GATE: WorkTypeOpeningGateFields = {
   requireConflictCleared: false,
   requireCddComplete: false,
   allowCddOverride: true,
@@ -48,9 +62,17 @@ export interface ResolvedWorkTypeRetention extends WorkTypeRetentionConfig {
   matchedWorkTypeId: string | null;
 }
 
-export interface ResolvedWorkTypeOpeningGate extends WorkTypeOpeningGateConfig {
-  source: 'work_type' | 'practice_area' | 'firm_default';
+export interface ResolvedWorkTypeOpeningGate extends WorkTypeOpeningGateFields {
+  source: WorkTypeOpeningGateSettingSource;
   matchedWorkTypeId: string | null;
+}
+
+export interface ResolvedWorkTypeOpeningGateWithProvenance
+  extends ResolvedWorkTypeOpeningGate {
+  settingSources: Record<
+    WorkTypeOpeningGateSettingKey,
+    WorkTypeOpeningGateSettingSource
+  >;
 }
 
 export interface ResolvedWorkTypeBehaviour {
@@ -136,7 +158,7 @@ export function resolveEffectiveWorkTypesConfig(
 
   const defaultsGateSource =
     overrideDefaults?.openingGate ?? baseDefaults?.openingGate;
-  const defaultsOpeningGate: WorkTypeOpeningGateConfig = {
+  const defaultsOpeningGate: WorkTypeOpeningGateFields = {
     requireConflictCleared:
       defaultsGateSource?.requireConflictCleared ??
       baseDefaults?.openingGate?.requireConflictCleared ??
@@ -273,25 +295,33 @@ export function resolveEffectiveWorkTypesConfig(
         });
       }
 
-      const itemOpeningGate: WorkTypeOpeningGateConfig | undefined = item.openingGate
-        ? {
-            requireConflictCleared:
-              item.openingGate.requireConflictCleared ??
-              defaultsOpeningGate.requireConflictCleared,
-            requireCddComplete:
-              item.openingGate.requireCddComplete ??
-              defaultsOpeningGate.requireCddComplete,
-            allowCddOverride:
-              item.openingGate.allowCddOverride ??
-              defaultsOpeningGate.allowCddOverride,
-            requireEngagementSigned:
-              item.openingGate.requireEngagementSigned ??
-              defaultsOpeningGate.requireEngagementSigned,
-            requireFundsOnAccount:
-              item.openingGate.requireFundsOnAccount ??
-              defaultsOpeningGate.requireFundsOnAccount,
-          }
-        : undefined;
+      const rawGate = item.openingGate;
+      const partialGate: {
+        requireConflictCleared?: boolean;
+        requireCddComplete?: boolean;
+        allowCddOverride?: boolean;
+        requireEngagementSigned?: boolean;
+        requireFundsOnAccount?: boolean;
+      } = {};
+      if (rawGate) {
+        if (typeof rawGate.requireConflictCleared === 'boolean') {
+          partialGate.requireConflictCleared = rawGate.requireConflictCleared;
+        }
+        if (typeof rawGate.requireCddComplete === 'boolean') {
+          partialGate.requireCddComplete = rawGate.requireCddComplete;
+        }
+        if (typeof rawGate.allowCddOverride === 'boolean') {
+          partialGate.allowCddOverride = rawGate.allowCddOverride;
+        }
+        if (typeof rawGate.requireEngagementSigned === 'boolean') {
+          partialGate.requireEngagementSigned = rawGate.requireEngagementSigned;
+        }
+        if (typeof rawGate.requireFundsOnAccount === 'boolean') {
+          partialGate.requireFundsOnAccount = rawGate.requireFundsOnAccount;
+        }
+      }
+      const itemOpeningGate: WorkTypeOpeningGateConfig | undefined =
+        Object.keys(partialGate).length > 0 ? partialGate : undefined;
 
       mergedItemsMap.set(item.workTypeId, {
         workTypeId: item.workTypeId,
@@ -421,34 +451,99 @@ export function resolveWorkTypeRetention(
   };
 }
 
+export function resolveWorkTypeOpeningGateWithProvenance(
+  config: WorkTypesConfiguration,
+  input: EffectiveWorkTypesResolutionInput,
+): ResolvedWorkTypeOpeningGateWithProvenance {
+  const { subItem, paItem } = findMatchingWorkTypeItems(config, input);
+  const defaultsGate = config.defaults.openingGate ?? DEFAULT_WORK_TYPE_OPENING_GATE;
+
+  const pickSetting = (
+    key: WorkTypeOpeningGateSettingKey,
+  ): { value: boolean; source: WorkTypeOpeningGateSettingSource } => {
+    const subVal = subItem?.openingGate?.[key];
+    if (typeof subVal === 'boolean') {
+      return { value: subVal, source: 'work_type' };
+    }
+    const paVal = paItem?.openingGate?.[key];
+    if (typeof paVal === 'boolean') {
+      return { value: paVal, source: 'practice_area' };
+    }
+    const defVal = defaultsGate[key];
+    return {
+      value:
+        typeof defVal === 'boolean' ? defVal : DEFAULT_WORK_TYPE_OPENING_GATE[key],
+      source: 'firm_default',
+    };
+  };
+
+  const requireConflictCleared = pickSetting('requireConflictCleared');
+  const requireCddComplete = pickSetting('requireCddComplete');
+  const allowCddOverride = pickSetting('allowCddOverride');
+  const requireEngagementSigned = pickSetting('requireEngagementSigned');
+  const requireFundsOnAccount = pickSetting('requireFundsOnAccount');
+
+  const settingSources: Record<
+    WorkTypeOpeningGateSettingKey,
+    WorkTypeOpeningGateSettingSource
+  > = {
+    requireConflictCleared: requireConflictCleared.source,
+    requireCddComplete: requireCddComplete.source,
+    allowCddOverride: allowCddOverride.source,
+    requireEngagementSigned: requireEngagementSigned.source,
+    requireFundsOnAccount: requireFundsOnAccount.source,
+  };
+
+  const hasSubSource = Object.values(settingSources).some(
+    (s) => s === 'work_type',
+  );
+  const hasPaSource = Object.values(settingSources).some(
+    (s) => s === 'practice_area',
+  );
+  const source: WorkTypeOpeningGateSettingSource = hasSubSource
+    ? 'work_type'
+    : hasPaSource
+      ? 'practice_area'
+      : 'firm_default';
+  const matchedWorkTypeId = hasSubSource
+    ? (subItem?.workTypeId ?? null)
+    : hasPaSource
+      ? (paItem?.workTypeId ?? null)
+      : null;
+
+  return {
+    requireConflictCleared: requireConflictCleared.value,
+    requireCddComplete: requireCddComplete.value,
+    allowCddOverride: allowCddOverride.value,
+    requireEngagementSigned: requireEngagementSigned.value,
+    requireFundsOnAccount: requireFundsOnAccount.value,
+    source,
+    matchedWorkTypeId,
+    settingSources,
+  };
+}
+
 export function resolveWorkTypeOpeningGate(
   config: WorkTypesConfiguration,
   input: EffectiveWorkTypesResolutionInput,
 ): ResolvedWorkTypeOpeningGate {
-  const { subItem, paItem } = findMatchingWorkTypeItems(config, input);
-  if (subItem?.openingGate) {
-    return {
-      ...subItem.openingGate,
-      source: 'work_type',
-      matchedWorkTypeId: subItem.workTypeId,
-    };
-  }
-  if (paItem?.openingGate) {
-    return {
-      ...paItem.openingGate,
-      source: 'practice_area',
-      matchedWorkTypeId: paItem.workTypeId,
-    };
-  }
-  const defaultsGate = config.defaults.openingGate ?? DEFAULT_WORK_TYPE_OPENING_GATE;
+  const {
+    requireConflictCleared,
+    requireCddComplete,
+    allowCddOverride,
+    requireEngagementSigned,
+    requireFundsOnAccount,
+    source,
+    matchedWorkTypeId,
+  } = resolveWorkTypeOpeningGateWithProvenance(config, input);
   return {
-    requireConflictCleared: defaultsGate.requireConflictCleared,
-    requireCddComplete: defaultsGate.requireCddComplete,
-    allowCddOverride: defaultsGate.allowCddOverride,
-    requireEngagementSigned: defaultsGate.requireEngagementSigned,
-    requireFundsOnAccount: defaultsGate.requireFundsOnAccount,
-    source: 'firm_default',
-    matchedWorkTypeId: null,
+    requireConflictCleared,
+    requireCddComplete,
+    allowCddOverride,
+    requireEngagementSigned,
+    requireFundsOnAccount,
+    source,
+    matchedWorkTypeId,
   };
 }
 

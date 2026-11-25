@@ -245,10 +245,10 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
     });
     expect(subResolved).toEqual({
       requireConflictCleared: true,
-      requireCddComplete: false,
+      requireCddComplete: true,
       allowCddOverride: false,
       requireEngagementSigned: true,
-      requireFundsOnAccount: false,
+      requireFundsOnAccount: true,
       source: 'work_type',
       matchedWorkTypeId: 'work_type.test_sub',
     });
@@ -258,5 +258,30 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
       source: 'firm_default',
       matchedWorkTypeId: null,
     });
+  });
+
+  it('5. R769: rejects mismatched sequenceScope/pattern tokens and missing {SEQ} in tenant config schema', () => {
+    const cases: Array<{ sequenceScope: string; pattern: string; label: string }> = [
+      { sequenceScope: 'year', pattern: 'MAT-{SEQ:4}', label: 'year without YYYY/YY' },
+      { sequenceScope: 'department', pattern: '{YYYY}-{SEQ:4}', label: 'department without DEPT' },
+      { sequenceScope: 'client_ref_prefix', pattern: '{YYYY}-{SEQ:4}', label: 'client_ref_prefix without CLIENT_REF' },
+      { sequenceScope: 'firm', pattern: 'STATIC-REF', label: 'missing SEQ' },
+    ];
+    for (const c of cases) {
+      expect(() =>
+        loadAndValidateTenantConfig(
+          {
+            ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+            matterNumbering: {
+              sequenceScope: c.sequenceScope,
+              pattern: c.pattern,
+              emptyTokenFallback: 'MAT',
+            },
+          },
+          {},
+          'test',
+        ),
+      ).toThrow();
+    }
   });
 });

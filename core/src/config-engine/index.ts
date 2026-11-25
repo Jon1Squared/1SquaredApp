@@ -56,6 +56,7 @@ import { assertTenantOwnsKeyVaultSecretRef } from '../tenancy/keyVaultSecrets';
 import {
   DEFAULT_MATTER_NUMBERING_CONFIG,
   DEFAULT_WORK_TYPE_OPENING_GATE,
+  validateMatterNumberingConfig,
   validateMatterNumberPattern,
 } from '../domain/matterNumbering/index';
 
@@ -403,6 +404,41 @@ const WorkTypeOpeningGateSchema = z
   })
   .strict();
 
+const WorkTypeOpeningGateOverrideSchema = z
+  .object({
+    requireConflictCleared: z
+      .boolean()
+      .optional()
+      .describe(
+        'Optional override requiring a Cleared or Approved conflict check before matter opening',
+      ),
+    requireCddComplete: z
+      .boolean()
+      .optional()
+      .describe(
+        'Optional override requiring client-level CDD to be currently recorded before matter opening',
+      ),
+    allowCddOverride: z
+      .boolean()
+      .optional()
+      .describe(
+        'Optional override controlling whether a partner/managing partner may record an audited CDD override',
+      ),
+    requireEngagementSigned: z
+      .boolean()
+      .optional()
+      .describe(
+        'Optional override requiring a recorded signed engagement letter before matter opening',
+      ),
+    requireFundsOnAccount: z
+      .boolean()
+      .optional()
+      .describe(
+        'Optional override requiring verified cleared funds on account before matter opening',
+      ),
+  })
+  .strict();
+
 const WorkTypeDefaultsSchema = z
   .object({
     autoTaskTemplates: z
@@ -456,7 +492,7 @@ const WorkTypeConfigItemSchema = z
     retention: WorkTypeRetentionSchema.optional().describe(
       'Retention rule overriding firm defaults for this work type',
     ),
-    openingGate: WorkTypeOpeningGateSchema.optional().describe(
+    openingGate: WorkTypeOpeningGateOverrideSchema.optional().describe(
       'Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults (ADR 0040, S1-05)',
     ),
     feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesSchema.optional().describe(
@@ -2649,6 +2685,7 @@ export const TenantConfigurationSchema = z
           states: z.array(RegisterStateSchema).min(1),
           transitions: z.array(RegisterTransitionSchema),
           fields: z.array(RegisterFieldSchema),
+          systemCreatedOnly: z.boolean().default(false).optional(),
           showInNavigation: z.boolean().default(true).optional(),
         })
         .strict();
@@ -2696,6 +2733,14 @@ export const TenantConfigurationSchema = z
               path: ['typeOverrides', 'cdd', 'additionalFields'],
               message:
                 'System-managed register "cdd" does not allow extra firm-defined fields.',
+            });
+          }
+          if (regs.typeOverrides?.['high_risk_opening']?.enabled === false) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['typeOverrides', 'high_risk_opening', 'enabled'],
+              message:
+                'Core register "high_risk_opening" cannot be disabled (core-locked governance rule).',
             });
           }
         });
@@ -2840,6 +2885,15 @@ export const TenantConfigurationSchema = z
           ),
       })
       .strict()
+      .superRefine((nm, ctx) => {
+        const check = validateMatterNumberingConfig(nm);
+        if (!check.ok) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: check.error,
+          });
+        }
+      })
       .optional()
       .describe(
         'Configurable token-based matter reference numbering format and sequence scoping (ADR 0040, S1-05, R745).',

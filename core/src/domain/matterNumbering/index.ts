@@ -37,7 +37,8 @@ export const DEFAULT_MATTER_NUMBERING_CONFIG: MatterNumberingConfig = Object.fre
   emptyTokenFallback: 'MAT',
 });
 
-export const DEFAULT_WORK_TYPE_OPENING_GATE: WorkTypeOpeningGateConfig = Object.freeze({
+export const DEFAULT_WORK_TYPE_OPENING_GATE: Required<WorkTypeOpeningGateConfig> =
+  Object.freeze({
   requireConflictCleared: false,
   requireCddComplete: false,
   allowCddOverride: true,
@@ -196,6 +197,48 @@ export function validateMatterNumberPattern(
   }
 
   return { ok: true, seqPadWidth };
+}
+
+export function validateMatterNumberingConfig(
+  config: Pick<MatterNumberingConfig, 'pattern' | 'sequenceScope' | 'emptyTokenFallback'>,
+): { ok: true; seqPadWidth: number } | { ok: false; error: string } {
+  const patternCheck = validateMatterNumberPattern(config.pattern);
+  if (!patternCheck.ok) {
+    return patternCheck;
+  }
+  const p = config.pattern.trim();
+  switch (config.sequenceScope) {
+    case 'year':
+      if (!p.includes('{YYYY}') && !p.includes('{YY}')) {
+        return {
+          ok: false,
+          error:
+            'Matter number pattern must include {YYYY} or {YY} when the sequence scope is Per year.',
+        };
+      }
+      break;
+    case 'department':
+      if (!p.includes('{DEPT}')) {
+        return {
+          ok: false,
+          error:
+            'Matter number pattern must include {DEPT} when the sequence scope is Per department.',
+        };
+      }
+      break;
+    case 'client_ref_prefix':
+      if (!p.includes('{CLIENT_REF}')) {
+        return {
+          ok: false,
+          error:
+            'Matter number pattern must include {CLIENT_REF} when the sequence scope is Per client reference.',
+        };
+      }
+      break;
+    case 'firm':
+      break;
+  }
+  return patternCheck;
 }
 
 function resolveTenantYearParts(

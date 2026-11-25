@@ -2670,8 +2670,6 @@ export async function loadMatterDetailPageData(
     keyDates: matterKeyDates.keyDates,
     extraPersonIds: [
       ...notes.map((n) => n.authorId),
-      openingGateState?.highRiskRecord?.ownerId,
-      openingGateState?.highRiskRecord?.assignedApproverId,
       openingGateState?.evaluation.highRisk.partnerApproverId,
     ],
   });

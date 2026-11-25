@@ -20,6 +20,7 @@ import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgr
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import * as actionsModule from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import { formatOpeningGateActionError } from '@/domain/openingGate';
 import type { ConflictCheckRecordInput, Matter, Person } from '@/domain/types';
 import { setActiveTenantConfigForTesting } from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
@@ -27,21 +28,26 @@ import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import * as servicesModule from '@/server/services';
 import {
   approveSignOff,
+  completeClientCddRecord,
   createRecordFromPms,
   createRegisterRecordService,
   discussSignOff,
+  getMatterOpeningGateStateRecord,
   getMatterPmsViewBundle,
   openProspectiveMatterRecord,
   overrideMatterOpeningPreconditionRecord,
+  recordCddChecklistItemRecord,
   resetAllDemoData,
   saveMatterRecord,
   signOffMatterCostsRecord,
+  startOrLoadClientCddRecord,
   transitionRegisterRecordService,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
 } from '@/server/services';
 import {
   auditEntriesForRecord,
+  getMatterRepository,
   runAsTestActor,
   setAuditAdapterFailureHookForTesting,
   setTestActorSession,
@@ -1049,6 +1055,45 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
       { roles: ['risk_compliance', 'partner', 'fee_earner'], mfaVerified: false },
     );
 
+    // R763: High-risk matter elevates O-000001's derived CDD tier to 'high'; upgrade & complete O-000001 CDD at High before Stage 2 opens the matter.
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const o1Upgraded = await startOrLoadClientCddRecord(
+          {
+            subjectType: 'organisation',
+            subjectId: 'O-000001',
+            upgradeToHighRisk: true,
+            reason: 'High-risk jurisdictional matter requires High-tier CDD',
+          },
+          'P-000001',
+        );
+        expect(o1Upgraded.ok).toBe(true);
+        if (o1Upgraded.ok && o1Upgraded.summary.record) {
+          for (const item of o1Upgraded.summary.checklistItems) {
+            if (item.status !== 'recorded') {
+              const recRes = await recordCddChecklistItemRecord(
+                {
+                  recordId: o1Upgraded.summary.record.id,
+                  itemKey: item.itemKey,
+                  status: 'recorded',
+                  note: 'Verified Enhanced/High CDD',
+                },
+                'P-000001',
+              );
+              expect(recRes.ok).toBe(true);
+            }
+          }
+          const compRes = await completeClientCddRecord(
+            { recordId: o1Upgraded.summary.record.id },
+            'P-000001',
+          );
+          expect(compRes.ok).toBe(true);
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
     // Different Risk & Compliance user Rita (P-000049) executes compliance_approve -> transitions matter to active!
     await runAsActionActor(
       'P-000049',
@@ -1446,4 +1491,662 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
     );
     expect((crossOvr as { ok?: boolean }).ok).toBe(false);
   }, 45_000);
+
+  it('6. R761a (Blocking): openProspectiveMatterAction refuses Referred, Declined, Not started without override, and DRAFT matters under requireConflictCleared=false (allows Not started only with conflict override)', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const openAction = getDynamicAction('openProspectiveMatterAction')!;
+    const overrideAction = getDynamicAction('overrideMatterOpeningPreconditionAction')!;
+    const matterRepo = getMatterRepository();
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        // Ensure O-000001 has valid CDD (just in case)
+        const cddStart = await startOrLoadClientCddRecord(
+          { subjectType: 'organisation', subjectId: 'O-000001', createIfMissing: true },
+          'P-000001',
+        );
+        expect(cddStart.ok).toBe(true);
+        if (cddStart.ok && cddStart.summary.record && cddStart.summary.status !== 'recorded') {
+          for (const item of cddStart.summary.checklistItems) {
+            if (item.status !== 'recorded') {
+              await recordCddChecklistItemRecord(
+                {
+                  recordId: cddStart.summary.record.id,
+                  itemKey: item.itemKey,
+                  status: 'recorded',
+                  note: 'Verified for R761 test',
+                },
+                'P-000001',
+              );
+            }
+          }
+          await completeClientCddRecord({ recordId: cddStart.summary.record.id }, 'P-000001');
+        }
+
+        // Work type inheriting defaults.openingGate where requireConflictCleared === false
+        const mkParams = {
+          clientId: 'O-000001',
+          practiceAreaId: 'work_type.general_practice',
+          workTypeSubcategoryId: 'work_type.general_practice_advisory',
+          responsiblePartnerId: 'P-000001',
+          supervisingPartnerId: 'P-000001',
+          leadFeeEarnerId: 'P-000002',
+          teamMemberIds: ['P-000001', 'P-000002'],
+          riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+        };
+
+        // 1) Referred conflict -> refused even with requireConflictCleared=false
+        const refSave = await saveMatterRecord(
+          {
+            ...mkParams,
+            title: 'R761a Referred Under Default WorkType',
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Referred'),
+          },
+          { byId: 'P-000001', saveMode: 'submit_referred' },
+        );
+        expect(refSave.matter).not.toBeNull();
+        const refId = refSave.matter!.id;
+        const refOpenRes = (await openAction(refId)) as { ok: boolean; code?: string };
+        expect(refOpenRes.ok).toBe(false);
+
+        // 2) Declined conflict -> refused
+        await runAsActionActor(
+          'P-000003',
+          async () => {
+            await updateMatterConflictRecord(
+              refId,
+              makeConflictRecord('P-000003', 'Bethan Rees', 'Declined'),
+              'P-000003',
+            );
+          },
+          { roles: ['risk_compliance'], mfaVerified: false },
+        );
+        const decOpenRes = (await openAction(refId)) as { ok: boolean; code?: string };
+        expect(decOpenRes.ok).toBe(false);
+
+        // 3) Not started conflict -> refused without override; succeeds with conflict_cleared override
+        const notStartedSave = await saveMatterRecord(
+          {
+            ...mkParams,
+            title: 'R761a Not Started Conflict',
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Referred'),
+          },
+          { byId: 'P-000001', saveMode: 'submit_referred' },
+        );
+        expect(notStartedSave.matter).not.toBeNull();
+        const nsId = notStartedSave.matter!.id;
+        await matterRepo.updateMatter(
+          testTenantCtx('P-000001'),
+          {
+            ...notStartedSave.matter!,
+            conflictCheckStatus: 'Not started',
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Not started'),
+          },
+          notStartedSave.matter!.rowVersion ?? 1,
+        );
+        const nsBlocked = (await openAction(nsId)) as { ok: boolean };
+        expect(nsBlocked.ok).toBe(false);
+
+        const nsOvr = (await overrideAction({
+          matterId: nsId,
+          preconditionKey: 'conflict_cleared',
+          reason: 'Partner emergency conflict override for Not started matter',
+        })) as { ok: boolean };
+        expect(nsOvr.ok).toBe(true);
+        const nsOpened = (await openAction(nsId)) as { ok: boolean; matter?: Matter };
+        expect(nsOpened.ok).toBe(true);
+        expect(nsOpened.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+
+        // 4) DRAFT matter -> refused without allocating a permanent number
+        const draftSave = await saveMatterRecord(
+          {
+            ...mkParams,
+            title: 'R761a Unsubmitted Draft',
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+          },
+          { byId: 'P-000001', saveMode: 'draft' },
+        );
+        expect(draftSave.matter?.matterNumber).toMatch(/^DRAFT/);
+        const draftId = draftSave.matter!.id;
+        const draftOpen = (await openAction(draftId)) as { ok: boolean; message?: string };
+        expect(draftOpen.ok).toBe(false);
+        expect(draftOpen.message).toMatch(/Save and submit this matter before opening it/i);
+        const draftAfter = await matterRepo.getMatterById<Matter>(
+          testTenantCtx('P-000001'),
+          draftId,
+        );
+        expect(draftAfter?.matterNumber).toMatch(/^DRAFT/);
+      },
+      { roles: ['partner', 'admin'], mfaVerified: true },
+    );
+  }, 30_000);
+
+  it('7. R761b (Blocking): signOffMatterCostsRecord refuses opening a prospective matter when conflict is Not started, Referred, or Declined under requireConflictCleared=false', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const signOffAction = getDynamicAction('signOffMatterCostsAction')!;
+    const matterRepo = getMatterRepository();
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        for (const conflictStatus of ['Not started', 'Referred', 'Declined'] as const) {
+          const base = await saveMatterRecord(
+            {
+              title: `R761b SignOff Conflict ${conflictStatus}`,
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.general_practice',
+              workTypeSubcategoryId: 'work_type.general_practice_advisory',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              feeEstimateGbp: 10000,
+              agreedFeeCapGbp: 10000,
+              conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Referred'),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_referred' },
+          );
+          expect(base.matter).not.toBeNull();
+          const raised = await saveMatterRecord(
+            {
+              ...base.matter!,
+              feeEstimateGbp: 35000,
+              agreedFeeCapGbp: 35000,
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { id: base.matter!.id, byId: 'P-000001', saveMode: 'draft' },
+          );
+          expect(raised.matter).not.toBeNull();
+          if (conflictStatus !== 'Referred') {
+            await matterRepo.updateMatter(
+              testTenantCtx('P-000001'),
+              {
+                ...raised.matter!,
+                conflictCheckStatus: conflictStatus,
+                conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', conflictStatus),
+              },
+              raised.matter!.rowVersion ?? 1,
+            );
+          }
+          const signRes = (await signOffAction(
+            raised.matter!.id,
+            `Partner costs sign-off on ${conflictStatus} matter`,
+          )) as { matter: Matter | null };
+          expect(signRes.matter).not.toBeNull();
+          expect(signRes.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
+
+  it('8. R762 (Blocking): updateMatterConflictRecord and signOffMatterCostsRecord abort with MATTER_CONCURRENCY_CONFLICT when matter rowVersion changes before FOR UPDATE lock', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const matterRepo = getMatterRepository();
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        // Case A: updateMatterConflictRecord race
+        const conflictRaceSave = await saveMatterRecord(
+          {
+            title: 'R762 Conflict Race Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Referred'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_referred' },
+        );
+        expect(conflictRaceSave.matter).not.toBeNull();
+        const conflictRaceId = conflictRaceSave.matter!.id;
+
+        // Case B: signOffMatterCostsRecord race (Prospective Corporate matter with Cleared conflict, below threshold -> raised on draft; concurrent risk raise to High must abort)
+        const signOffBase = await saveMatterRecord(
+          {
+            title: 'R762 SignOff Race Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: 'work_type.dispute_resolution_pre_action_correspondence',
+            matterTypeId: 'matter_type.contentious',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            feeEstimateGbp: 10000,
+            agreedFeeCapGbp: 10000,
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(signOffBase.matter).not.toBeNull();
+        const signOffRaceSave = await saveMatterRecord(
+          {
+            ...signOffBase.matter!,
+            feeEstimateGbp: 35000,
+            agreedFeeCapGbp: 35000,
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { id: signOffBase.matter!.id, byId: 'P-000001', saveMode: 'draft' },
+        );
+        expect(signOffRaceSave.matter).not.toBeNull();
+        const signOffRaceId = signOffRaceSave.matter!.id;
+
+        const origWithTx = matterRepo.withTenantTransaction.bind(matterRepo);
+        try {
+          let injectedConflictRace = false;
+          matterRepo.withTenantTransaction = (async (txCtx, fn, opts) => {
+            if (!injectedConflictRace && fn.toString().includes('MATTER_CONCURRENCY_CONFLICT')) {
+              injectedConflictRace = true;
+              const fresh = await matterRepo.getMatterById<Matter>(txCtx, conflictRaceId, {
+                includeRestricted: true,
+              });
+              await matterRepo.updateMatter(
+                txCtx,
+                { ...fresh!, riskRatingId: 'risk_rating.high' },
+                fresh!.rowVersion ?? 1,
+              );
+            } else if (!injectedConflictRace && opts === undefined && txCtx.tenantId === 'not-a-law-firm') {
+              // Ensure we inject before the updateMatterConflictRecord outer transaction even before fix
+              const current = await matterRepo.getMatterById<Matter>(txCtx, conflictRaceId, {
+                includeRestricted: true,
+              });
+              if (current && current.riskRatingId !== 'risk_rating.high') {
+                injectedConflictRace = true;
+                await matterRepo.updateMatter(
+                  txCtx,
+                  { ...current, riskRatingId: 'risk_rating.high' },
+                  current.rowVersion ?? 1,
+                );
+              }
+            }
+            return origWithTx(txCtx, fn, opts);
+          }) as typeof matterRepo.withTenantTransaction;
+
+          const conflictRaceRes = (await runAsActionActor(
+            'P-000003',
+            () =>
+              updateMatterConflictRecord(
+                conflictRaceId,
+                makeConflictRecord('P-000003', 'Bethan Rees', 'Approved'),
+                'P-000003',
+              ),
+            { roles: ['risk_compliance'], mfaVerified: false },
+          )) as { matter: Matter | null; code?: string };
+          expect(injectedConflictRace).toBe(true);
+          expect(conflictRaceRes.code).toBe('MATTER_CONCURRENCY_CONFLICT');
+          expect(conflictRaceRes.matter).toBeNull();
+          const conflictAfter = await matterRepo.getMatterById<Matter>(
+            testTenantCtx('P-000001'),
+            conflictRaceId,
+          );
+          expect(conflictAfter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+          expect(conflictAfter?.riskRatingId).toBe('risk_rating.high');
+
+          let injectedSignOffRace = false;
+          matterRepo.withTenantTransaction = (async (txCtx, fn, opts) => {
+            if (!injectedSignOffRace && txCtx.tenantId === 'not-a-law-firm') {
+              const current = await matterRepo.getMatterById<Matter>(txCtx, signOffRaceId, {
+                includeRestricted: true,
+              });
+              if (current && current.riskRatingId !== 'risk_rating.high') {
+                injectedSignOffRace = true;
+                await matterRepo.updateMatter(
+                  txCtx,
+                  { ...current, riskRatingId: 'risk_rating.high' },
+                  current.rowVersion ?? 1,
+                );
+              }
+            }
+            return origWithTx(txCtx, fn, opts);
+          }) as typeof matterRepo.withTenantTransaction;
+
+          const signOffRaceRes = (await signOffMatterCostsRecord(
+            signOffRaceId,
+            'P-000001',
+            'Concurrent sign-off must abort cleanly',
+          )) as { matter: Matter | null; code?: string };
+          expect(injectedSignOffRace).toBe(true);
+          expect(signOffRaceRes.code).toBe('MATTER_CONCURRENCY_CONFLICT');
+          expect(signOffRaceRes.matter).toBeNull();
+          const signOffAfter = await matterRepo.getMatterById<Matter>(
+            testTenantCtx('P-000001'),
+            signOffRaceId,
+          );
+          expect(signOffAfter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+          expect(signOffAfter?.riskRatingId).toBe('risk_rating.high');
+        } finally {
+          matterRepo.withTenantTransaction = origWithTx;
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
+
+  it('9. R763 (Blocking): opening gate checks CDD for every client (clientId + additionalClientIds) including expiry and tier sufficiency', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const openAction = getDynamicAction('openProspectiveMatterAction')!;
+    const regRepo = new TenantRegisterRepository();
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        // Ensure O-000001 has valid Standard CDD
+        const o1Start = await startOrLoadClientCddRecord(
+          { subjectType: 'organisation', subjectId: 'O-000001', createIfMissing: true },
+          'P-000001',
+        );
+        expect(o1Start.ok).toBe(true);
+        if (o1Start.ok && o1Start.summary.record && o1Start.summary.status !== 'recorded') {
+          for (const item of o1Start.summary.checklistItems) {
+            if (item.status !== 'recorded') {
+              await recordCddChecklistItemRecord(
+                { recordId: o1Start.summary.record.id, itemKey: item.itemKey, status: 'recorded', note: 'Verified' },
+                'P-000001',
+              );
+            }
+          }
+          await completeClientCddRecord({ recordId: o1Start.summary.record.id }, 'P-000001');
+        }
+
+        // Residential Conveyancing requires CDD complete (no override); O-000002 initially has NO CDD
+        const jointSave = await saveMatterRecord(
+          {
+            title: 'R763 Joint Client Conveyancing',
+            clientId: 'O-000001',
+            additionalClientIds: ['O-000002'],
+            practiceAreaId: 'work_type.real_estate_and_property',
+            workTypeSubcategoryId: 'work_type.real_estate_and_property_residential_conveyancing',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(jointSave.matter).not.toBeNull();
+        expect(jointSave.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
+        const jointId = jointSave.matter!.id;
+
+        const openMissing = (await openAction(jointId)) as { ok: boolean; message?: string };
+        expect(openMissing.ok).toBe(false);
+        expect(openMissing.message).toMatch(/Harbourline/i);
+
+        // Complete CDD for O-000002, then backdate dueAt to 2020-01-01 to verify expiry blocks
+        const o2Start = await startOrLoadClientCddRecord(
+          { subjectType: 'organisation', subjectId: 'O-000002', createIfMissing: true },
+          'P-000001',
+        );
+        expect(o2Start.ok).toBe(true);
+        if (o2Start.ok && o2Start.summary.record) {
+          for (const item of o2Start.summary.checklistItems) {
+            if (item.status !== 'recorded') {
+              await recordCddChecklistItemRecord(
+                { recordId: o2Start.summary.record.id, itemKey: item.itemKey, status: 'recorded', note: 'Verified' },
+                'P-000001',
+              );
+            }
+          }
+          const completed = await completeClientCddRecord(
+            { recordId: o2Start.summary.record.id },
+            'P-000001',
+          );
+          expect(completed.ok).toBe(true);
+
+          const cddCtx = testTenantCtx('P-000001');
+          await regRepo.withTenantTransaction(cddCtx, async (tx) => {
+            await tx.query(
+              `UPDATE public.register_records SET due_at = '2020-01-01T00:00:00.000Z' WHERE tenant_id = $1 AND id = $2`,
+              [cddCtx.tenantId, o2Start.summary.record!.id],
+            );
+          });
+          const openExpired = (await openAction(jointId)) as { ok: boolean; message?: string };
+          expect(openExpired.ok).toBe(false);
+
+          await regRepo.withTenantTransaction(cddCtx, async (tx) => {
+            await tx.query(
+              `UPDATE public.register_records SET due_at = '2030-01-01T00:00:00.000Z' WHERE tenant_id = $1 AND id = $2`,
+              [cddCtx.tenantId, o2Start.summary.record!.id],
+            );
+          });
+        }
+
+        const openAllValid = (await openAction(jointId)) as { ok: boolean; matter?: Matter };
+        expect(openAllValid.ok).toBe(true);
+        expect(openAllValid.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+
+        // R763 tier sufficiency: a High-risk Corporate matter elevates O-000001 to High derived tier -> Standard CDD is insufficient until upgraded
+        const highTierMatterSave = await saveMatterRecord(
+          {
+            title: 'R763 High-Risk Tier Sufficiency Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: HIGH_RISK_ANSWERS, followUps: HIGH_RISK_FOLLOW_UPS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(highTierMatterSave.matter).not.toBeNull();
+        const tierGateView = await getMatterOpeningGateStateRecord(
+          highTierMatterSave.matter!.id,
+          'P-000001',
+        );
+        expect(tierGateView.ok).toBe(true);
+        if (tierGateView.ok) {
+          const cddPre = tierGateView.evaluation.preconditions.find(
+            (p) => p.key === 'cdd_complete',
+          );
+          expect(cddPre?.rawSatisfied).toBe(false);
+          expect(cddPre?.statusSummary).toMatch(/High-risk CDD|Penarth/i);
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
+
+  it('10. R764 (Blocking): refuses manual user creation of high_risk_opening for all roles and blocks leadFeeEarnerId/responsiblePartnerId from partner_approve even on system records', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const createRegAction = getDynamicAction('createRegisterRecordAction')!;
+    const transitionRegAction = getDynamicAction('transitionRegisterRecordAction')!;
+
+    // 1) Fee earner, secretary, partner cannot manually create high_risk_opening records
+    for (const [actorId, role] of [
+      ['P-000002', 'fee_earner'],
+      ['P-000010', 'legal_secretary'],
+      ['P-000001', 'partner'],
+    ] as const) {
+      const manualAttempt = (await runAsActionActor(
+        actorId,
+        () =>
+          createRegAction({
+            registerTypeKey: 'high_risk_opening',
+            title: `Manual HRO bypass attempt by ${role}`,
+            matterId: 'M-000001',
+          }),
+        { roles: [role], mfaVerified: true },
+      )) as { ok: boolean; code?: string };
+      expect(manualAttempt.ok).toBe(false);
+    }
+
+    // 2) On a genuine High-risk matter where Partner P-000005 is responsiblePartnerId (not record ownerId!),
+    //    submitted by fee earner P-000002, P-000005 must STILL be refused partner_approve!
+    let partnerLeadMatterId = '';
+    await runAsActionActor(
+      'P-000002',
+      async () => {
+        const res = await saveMatterRecord(
+          {
+            title: 'R764 Partner Approver Must Not Be Matter Lead or Responsible Partner',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000005',
+            supervisingPartnerId: 'P-000005',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000005', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Cleared'),
+            riskAssessment: { answers: HIGH_RISK_ANSWERS, followUps: HIGH_RISK_FOLLOW_UPS },
+          },
+          { byId: 'P-000002', saveMode: 'submit_cleared' },
+        );
+        expect(res.matter).not.toBeNull();
+        partnerLeadMatterId = res.matter!.id;
+      },
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+
+    const hroList = await new TenantRegisterRepository().listVisibleRegisterRecords(
+      testTenantCtx('P-000001'),
+      'P-000001',
+      { includeRestricted: true, registerTypeKey: 'high_risk_opening', matterId: partnerLeadMatterId },
+    );
+    expect(hroList).toHaveLength(1);
+    const hroId = hroList[0]!.id;
+
+    // Responsible partner P-000005 (though not HRO creator/owner) must be refused partner_approve!
+    const respPartnerTry = (await runAsActionActor(
+      'P-000005',
+      () =>
+        transitionRegAction({
+          recordId: hroId,
+          transitionKey: 'partner_approve',
+          comment: 'Self-partner approval attempt',
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok: boolean; code?: string };
+    expect(respPartnerTry.ok).toBe(false);
+  }, 30_000);
+
+  it('11. R778, R784 & R789 (Should fix): override revoke guards (>=10 chars & pre-opening only), zero raw permission keys in denials, and slim HRO DTO from getMatterOpeningGateStateRecord', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const overrideAction = getDynamicAction('overrideMatterOpeningPreconditionAction')!;
+    const revokeAction = getDynamicAction('revokeMatterOpeningOverrideAction')!;
+    const openAction = getDynamicAction('openProspectiveMatterAction')!;
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const highSave = await saveMatterRecord(
+          {
+            title: 'R778 & R789 Litigation Gate Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: 'work_type.dispute_resolution_pre_action_correspondence',
+            matterTypeId: 'matter_type.contentious',
+            responsiblePartnerId: 'P-000005',
+            supervisingPartnerId: 'P-000005',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000005', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: HIGH_RISK_ANSWERS, followUps: HIGH_RISK_FOLLOW_UPS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(highSave.matter).not.toBeNull();
+        const mId = highSave.matter!.id;
+
+        // R789: highRiskRecord returned to viewer omits raw fieldValues blob
+        const gateView = await runAsActionActor(
+          'P-000002',
+          () => getMatterOpeningGateStateRecord(mId, 'P-000002'),
+          { roles: ['fee_earner'], mfaVerified: false },
+        );
+        expect(gateView.ok).toBe(true);
+        if (gateView.ok) {
+          expect(gateView.highRiskRecord).not.toBeNull();
+          expect((gateView.highRiskRecord as unknown as Record<string, unknown>)?.fieldValues).toBeUndefined();
+        }
+
+        // Override engagement_signed -> short revoke reason (<10 chars) refused (R778)
+        const ovr = (await overrideAction({
+          matterId: mId,
+          preconditionKey: 'engagement_signed',
+          reason: 'Urgent partner override for pre-action letter',
+        })) as { ok: boolean; override?: { id: string } };
+        expect(ovr.ok).toBe(true);
+        const ovrId = ovr.override!.id;
+
+        const shortRevoke = (await revokeAction({
+          matterId: mId,
+          overrideId: ovrId,
+          reason: 'short',
+        })) as { ok: boolean };
+        expect(shortRevoke.ok).toBe(false);
+
+        // R784: No colon-separated permission keys in service denial or formatted UI error for unprivileged user
+        const noPermService = (await runAsActionActor(
+          'P-000009',
+          () => openProspectiveMatterRecord(mId, 'P-000009'),
+          { roles: ['finance'], mfaVerified: false },
+        )) as { ok: boolean; message?: string; error?: string };
+        expect(noPermService.ok).toBe(false);
+        expect(noPermService.message ?? '').not.toMatch(/[a-z_]+:[a-z_:]+/);
+
+        const noPermOpen = (await runAsActionActor(
+          'P-000009',
+          () => openAction(mId),
+          { roles: ['finance'], mfaVerified: false },
+        )) as { ok: boolean; code?: string; message?: string; error?: string };
+        expect(noPermOpen.ok).toBe(false);
+        expect(formatOpeningGateActionError(noPermOpen)).not.toMatch(/[a-z_]+:[a-z_:]+/);
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    // After matter opens, revoking its override is refused (R778)
+    await resetAllDemoData('P-000004', testDataResetContext());
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const openedLit = await saveMatterRecord(
+          {
+            title: 'R778 Opened Tribunal Override Revoke Guard',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        const mId = openedLit.matter!.id;
+        const ovr = (await overrideAction({
+          matterId: mId,
+          preconditionKey: 'engagement_signed',
+          reason: 'Urgent partner override before opening',
+        })) as { ok: boolean; override?: { id: string } };
+        expect(ovr.ok).toBe(true);
+        const opened = (await openAction(mId)) as { ok: boolean };
+        expect(opened.ok).toBe(true);
+
+        const revokeAfterOpen = (await revokeAction({
+          matterId: mId,
+          overrideId: ovr.override!.id,
+          reason: 'Attempted revoke after matter already opened',
+        })) as { ok: boolean; message?: string };
+        expect(revokeAfterOpen.ok).toBe(false);
+        expect(revokeAfterOpen.message).toMatch(/already open/i);
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
 });

@@ -1922,32 +1922,27 @@
               "openingGate": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults (ADR 0040, S1-05)",
+                "description": "Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults per setting (ADR 0040, S1-05, R768)",
                 "properties": {
                   "requireConflictCleared": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Requires a Cleared or Approved conflict check before matter opening"
+                    "description": "Overrides conflict-clearance requirement for this work type"
                   },
                   "requireCddComplete": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Requires client-level CDD to be currently recorded (and not expired) before matter opening"
+                    "description": "Overrides client-level CDD completion requirement for this work type"
                   },
                   "allowCddOverride": {
                     "type": "boolean",
-                    "default": true,
-                    "description": "Whether a partner/managing partner may record an audited override when client CDD is incomplete"
+                    "description": "Overrides whether a partner/managing partner may record an audited override when client CDD is incomplete"
                   },
                   "requireEngagementSigned": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Requires a recorded signed engagement / client care letter before matter opening"
+                    "description": "Overrides recorded signed engagement / client care letter requirement for this work type"
                   },
                   "requireFundsOnAccount": {
                     "type": "boolean",
-                    "default": false,
-                    "description": "Requires verified cleared funds on account before matter opening"
+                    "description": "Overrides cleared funds on account requirement for this work type"
                   }
                 }
               },

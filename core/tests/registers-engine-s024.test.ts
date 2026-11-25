@@ -2223,4 +2223,68 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     });
     expect(step2.updatedRecord.status).toBe('approved');
   });
+
+  it('17 (S1-05 R781 & Suggestion 8): enforces ADR 0039 §4 active approval-cycle boundary on distinct approver checks and refuses typeOverrides.high_risk_opening.enabled=false', () => {
+    const hroType = CORE_REGISTER_TYPES.high_risk_opening;
+    const sampleHro = {
+      id: 'REG-CYCLE-1',
+      tenantId: 'not-a-law-firm',
+      registerTypeKey: 'high_risk_opening',
+      reference: 'HRO-CYCLE-1',
+      title: 'Cycle test',
+      matterId: 'M-1',
+      enquiryId: null,
+      personId: null,
+      organisationId: null,
+      status: 'pending_compliance',
+      rowVersion: 2,
+      ownerId: 'P-000002',
+      createdById: 'P-000002',
+      assignedApproverId: null,
+      dueAt: null,
+      reviewAt: null,
+      decidedById: null,
+      decidedAt: null,
+      createdAt: '2026-11-25T10:00:00.000Z',
+      updatedAt: '2026-11-25T10:00:00.000Z',
+      updatedById: 'P-000002',
+      reminderScheduleDays: [],
+      fieldValues: {},
+    };
+
+    // Prior cycle had P-000003 on partner_approve, followed by withdraw_opening + fresh partner_approve by P-000001 -> P-000003 CAN approve compliance_approve in the NEW cycle!
+    const cycleRes = validateRegisterTransitionExecution({
+      registerType: hroType,
+      record: sampleHro,
+      transitionKey: 'compliance_approve',
+      actorId: 'P-000003',
+      actorRoles: ['risk_compliance'],
+      actorPermissionSet: new Set(['register:view', 'register:approve']),
+      comment: 'New cycle MLRO sign-off',
+      priorTransitions: [
+        { transitionKey: 'partner_approve', actorId: 'P-000003' },
+        { transitionKey: 'withdraw_opening', actorId: 'P-000002' },
+        { transitionKey: 'partner_approve', actorId: 'P-000001' },
+      ],
+    });
+    expect(cycleRes.nextStatus).toBe('approved');
+
+    // Suggestion 8: disabling high_risk_opening in tenant registers config must be rejected
+    const rawBase = getActiveTenantRawBaseConfig() as Record<string, unknown>;
+    expect(() =>
+      loadAndValidateTenantConfig(
+        {
+          ...rawBase,
+          registers: {
+            ...((rawBase.registers as Record<string, unknown> | undefined) ?? {}),
+            typeOverrides: {
+              high_risk_opening: { enabled: false },
+            },
+          },
+        },
+        {},
+        'test',
+      ),
+    ).toThrow(/high_risk_opening/);
+  });
 });

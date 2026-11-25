@@ -360,7 +360,7 @@ export const PERMISSION_REGISTRY: Readonly<
       'Override eligible pre-conditions on a prospective matter opening gate with a mandatory audited reason (partner and managing partner only; excluded from system admin).',
     sensitivity: 'restricted',
     requiresMfa: false,
-    sinceVersion: '1.2.0',
+    sinceVersion: '1.1.0',
   },
   'task:claim_any': {
     key: 'task:claim_any',

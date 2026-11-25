@@ -417,6 +417,11 @@
           "default": false,
           "description": "When true, every record in this register must be linked to an existing matter."
         },
+        "systemCreatedOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, records are created only by dedicated core system workflows rather than manual user creation."
+        },
         "approvalRules": {
           "$ref": "#/$defs/registerApprovalRules",
           "description": "Optional two-person approval rules (always null for undertakings)."

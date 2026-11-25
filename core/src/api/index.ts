@@ -1026,11 +1026,11 @@ export interface MatterNumberingConfig {
 }
 
 export interface WorkTypeOpeningGateConfig {
-  readonly requireConflictCleared: boolean;
-  readonly requireCddComplete: boolean;
-  readonly allowCddOverride: boolean;
-  readonly requireEngagementSigned: boolean;
-  readonly requireFundsOnAccount: boolean;
+  readonly requireConflictCleared?: boolean;
+  readonly requireCddComplete?: boolean;
+  readonly allowCddOverride?: boolean;
+  readonly requireEngagementSigned?: boolean;
+  readonly requireFundsOnAccount?: boolean;
 }
 
 export interface WorkTypeDefaultsConfig {

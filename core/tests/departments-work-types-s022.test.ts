@@ -1492,6 +1492,10 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
             matterNumber: 'DRAFT',
             openedAt: '2026-11-01',
             title: 'Alpha Isolated M&A Deal',
+            responsiblePartnerId: 'P-000005',
+            supervisingPartnerId: 'P-000005',
+            leadFeeEarnerId: 'P-000004',
+            teamMemberIds: ['P-000005', 'P-000004'],
             practiceAreaId: 'work_type.corporate_and_commercial',
             workTypeSubcategoryId:
               'work_type.corporate_and_commercial_mergers_and_acquisitions',
@@ -1511,9 +1515,10 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         );
         expect(openAlpha.errors).toBeUndefined();
         alphaMatterId = openAlpha.matter!.id;
+        const alphaClientId = openAlpha.matter!.clientId;
         expect(openAlpha.matter!.riskRatingId).toBe('risk_rating.high');
 
-        // ADR 0039: Two-stage High-risk opening sign-off before closure lifecycle test
+        // ADR 0039 & R763/R764: Upgrade client CDD to High tier in tenantAlpha and run independent Partner + Risk approvals
         const alphaCtx = makeVerifiedTenantCtx(tenantAlpha, 'P-000004');
         const hroAlpha = await getRegisterRepository().listVisibleRegisterRecords(
           alphaCtx,
@@ -1522,10 +1527,45 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         );
         expect(hroAlpha).toHaveLength(1);
         await runAsTestActor('P-000001', async () => {
+          const p1AlphaCtx = makeVerifiedTenantCtx(tenantAlpha, 'P-000001');
+          const alphaCdd = await startOrLoadClientCddRecord(
+            {
+              subjectType: alphaClientId.startsWith('P-') ? 'person' : 'organisation',
+              subjectId: alphaClientId,
+              createIfMissing: true,
+              upgradeToHighRisk: true,
+              reason: 'Alpha high-risk M&A requires High CDD',
+            },
+            'P-000001',
+            { tenantCtx: p1AlphaCtx, tenantConfig: alphaValidated },
+          );
+          expect(alphaCdd.ok).toBe(true);
+          if (alphaCdd.ok && alphaCdd.summary.record) {
+            for (const item of alphaCdd.summary.checklistItems) {
+              if (item.status !== 'recorded') {
+                await recordCddChecklistItemRecord(
+                  {
+                    recordId: alphaCdd.summary.record.id,
+                    itemKey: item.itemKey,
+                    status: 'recorded',
+                    note: 'Alpha verified',
+                  },
+                  'P-000001',
+                  { tenantCtx: p1AlphaCtx, tenantConfig: alphaValidated },
+                );
+              }
+            }
+            const comp = await completeClientCddRecord(
+              { recordId: alphaCdd.summary.record.id },
+              'P-000001',
+              { tenantCtx: p1AlphaCtx, tenantConfig: alphaValidated },
+            );
+            expect(comp.ok).toBe(true);
+          }
           const s1 = await transitionRegisterRecordService(
             { recordId: hroAlpha[0]!.id, transitionKey: 'partner_approve', comment: 'Partner stage approved' },
             'P-000001',
-            { tenantCtx: makeVerifiedTenantCtx(tenantAlpha, 'P-000001') },
+            { tenantCtx: p1AlphaCtx },
           );
           expect(s1.ok).toBe(true);
         }, { tenantId: tenantAlpha, roles: ['partner'], mfaVerified: true });
