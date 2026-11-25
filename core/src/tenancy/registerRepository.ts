@@ -897,7 +897,10 @@ export class TenantRegisterRepository extends TenantScopedRepository {
       transitionKey: string;
       actorId: string;
       comment: string | null;
-      validateAndCompute: (lockedRecord: RegisterRecord) =>
+      validateAndCompute: (
+        lockedRecord: RegisterRecord,
+        priorTransitions: readonly RegisterTransition[],
+      ) =>
         | {
             nextStatus: string;
             setsDecidedAt: boolean;
@@ -942,7 +945,21 @@ export class TenantRegisterRepository extends TenantScopedRepository {
       this.assertRowTenant(ctx, lockedRow.tenant_id, 'register_records.transition.lock');
       const previousRecord = mapRegisterRecordRow(lockedRow);
 
-      const computed = await params.validateAndCompute(previousRecord);
+      const priorRes = await tx.query<DbRegisterTransitionRow>(
+        `SELECT * FROM public.register_transitions
+         WHERE tenant_id = $1 AND register_record_id = $2
+         ORDER BY transitioned_at ASC, id ASC`,
+        [ctx.tenantId, params.recordId],
+      );
+      const priorTransitions = priorRes.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'register_transitions.lockPrior');
+        return mapRegisterTransitionRow(row);
+      });
+
+      const computed = await params.validateAndCompute(
+        previousRecord,
+        priorTransitions,
+      );
       const nowIso = new Date().toISOString();
       const decidedById = computed.setsDecidedAt
         ? params.actorId

@@ -353,6 +353,15 @@ export const PERMISSION_REGISTRY: Readonly<
     requiresMfa: false,
     sinceVersion: '1.1.0',
   },
+  'matter:opening_gate:override': {
+    key: 'matter:opening_gate:override',
+    domain: 'matter',
+    description:
+      'Override eligible pre-conditions on a prospective matter opening gate with a mandatory audited reason (partner and managing partner only; excluded from system admin).',
+    sensitivity: 'restricted',
+    requiresMfa: false,
+    sinceVersion: '1.2.0',
+  },
   'task:claim_any': {
     key: 'task:claim_any',
     domain: 'task',
@@ -880,7 +889,8 @@ export const DEFAULT_RBAC_ROLES: Readonly<
         (key) =>
           key !== 'undertaking:manage' &&
           key !== 'cdd:view' &&
-          key !== 'cdd:record',
+          key !== 'cdd:record' &&
+          key !== 'matter:opening_gate:override',
       ),
     ],
   },
@@ -922,6 +932,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'matter:restricted:access',
       'matter:restriction:lift',
       'matter:costs:sign_off',
+      'matter:opening_gate:override',
       'task:claim_any',
       'task:reassign_any',
       'task:edit',
@@ -985,6 +996,7 @@ export const DEFAULT_RBAC_ROLES: Readonly<
       'matter:edit',
       'matter:reassign_ownership',
       'matter:costs:sign_off',
+      'matter:opening_gate:override',
       'task:claim_any',
       'task:edit',
       'task:comment',

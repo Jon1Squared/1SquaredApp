@@ -102,6 +102,7 @@ export type PermissionKey =
   | 'matter:restricted:access'
   | 'matter:restriction:lift'
   | 'matter:costs:sign_off'
+  | 'matter:opening_gate:override'
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'task:edit'

@@ -221,7 +221,7 @@
         "systemOnly": {
           "type": "boolean",
           "default": false,
-          "description": "When true, only dedicated core system workflows may invoke this transition."
+          "description": "When true, only dedicated core system workflows may execute this transition."
         },
         "setsDecidedAt": {
           "type": "boolean",

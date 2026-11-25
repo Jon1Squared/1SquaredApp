@@ -334,6 +334,7 @@ export type PermissionKey =
   | 'matter:create'
   | 'matter:edit'
   | 'matter:costs:sign_off'
+  | 'matter:opening_gate:override'
   | 'matter:reassign_ownership'
   | 'matter:restricted:access'
   | 'matter:restriction:lift'
