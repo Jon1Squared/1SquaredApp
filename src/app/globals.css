@@ -223,6 +223,11 @@ mark {
   border: 0;
 }
 
+.btn:has(input.visually-hidden:focus-visible) {
+  outline: 2px solid var(--color-focus, #2563eb);
+  outline-offset: 2px;
+}
+
 /* Small uppercase section label used everywhere for grouping */
 .section-label {
   font-family: var(--font-body);

@@ -12,7 +12,7 @@ The **Registers** workspace (\`/registers\`) provides a single, configurable per
 
 ## 1. Built-in register types and direct undertaking creation
 
-1Squared ships five core register definitions in \`CORE_REGISTER_TYPES\` (with tenant-defined custom registers such as periodic file reviews configured per firm in \`registers\` module config):
+1Squared ships five built-in register types (alongside any custom registers configured for your practice, such as periodic file reviews):
 
 | Key | Label | Initial Status | Creation & Governance |
 | --- | --- | --- | --- |
@@ -20,7 +20,7 @@ The **Registers** workspace (\`/registers\`) provides a single, configurable per
 | \`undertaking\` | Undertaking | \`open\` | **Direct creation without two-person approval** (\`approvalRules: null\`): any permitted fee earner (\`undertaking:manage\`) records an undertaking directly as \`open\` and can record variations (\`varied\`), mark overdue (\`overdue\`), reopen (\`open\`), discharge (\`discharged\`), or cancel (\`cancelled\`) |
 | \`complaint\` | Client Complaint | \`open\` | Stages from \`open\` → \`investigating\` → \`resolved\` / \`closed\`; supports optional assigned reviewer (\`register_review_assigned\`) |
 | \`breach\` | Compliance Breach | \`logged\` | Stages from \`logged\` → \`remediation\` → \`closed\` (requiring \`register:approve\` with no self-approval) |
-| \`cdd\` | Client Due Diligence | \`cdd_not_started\` | Client-subject register linked to a Person or Organisation (\`personId\` or \`organisationId\`, never both); moves through \`cdd_not_started\` → \`cdd_in_progress\` → \`cdd_recorded\` → \`cdd_due_recheck\` / \`cdd_expired\`, using \`checklist\` items and scanned \`evidence\` uploads (see [Client Due Diligence](/docs/client-due-diligence)) |
+| Client Due Diligence | Client Due Diligence | In progress | Linked directly to a client Person or Organisation record (managed from client profiles rather than created standalone in Registers); moves through **In progress** → **Recorded** → **Archived** / **Superseded**, tracking verification checklists and security-scanned evidence uploads (see [Client Due Diligence](/docs/client-due-diligence)) |
 
 Undertakings live exclusively in the **Registers** engine rather than the partner sign-off queue (\`SignOffKind\` covers \`write_off\` and \`matter_opening\` only, and historical undertaking records are consolidated into the unified register engine during migration \`0017\`).
 

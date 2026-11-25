@@ -135,7 +135,7 @@ export function RegistersWorkspaceClient({
 
   // Creation form state
   const creatableTypes = useMemo(
-    () => enabledTypes.filter((t) => permSet.has(t.createPermission)),
+    () => enabledTypes.filter((t) => t.key !== 'cdd' && permSet.has(t.createPermission)),
     [enabledTypes, permSet],
   );
   const resolvedInitialCreateTypeKey =
@@ -827,7 +827,9 @@ export function RegistersWorkspaceClient({
                       selectedRecordType?.states.find((s) => s.key === selectedRecord.status)?.tone,
                     )}
                   />
-                  {selectedRecordType && permSet.has(selectedRecordType.editPermission) ? (
+                  {selectedRecordType &&
+                  selectedRecord.registerTypeKey !== 'cdd' &&
+                  permSet.has(selectedRecordType.editPermission) ? (
                     <button
                       type="button"
                       className="btn btn--secondary btn--sm"
@@ -1067,7 +1069,10 @@ export function RegistersWorkspaceClient({
                         <h3 style={{ fontSize: 13, fontWeight: 600, margin: '0 0 8px' }}>Workflow transitions</h3>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                           {selectedRecordType.transitions
-                            .filter((t) => t.fromStatuses.includes(selectedRecord.status))
+                            .filter(
+                              (t) =>
+                                !t.systemOnly && t.fromStatuses.includes(selectedRecord.status),
+                            )
                             .map((tr) => {
                               const guard = canExecuteTransitionUi(
                                 permSet,

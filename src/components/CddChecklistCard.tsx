@@ -480,7 +480,7 @@ export function CddChecklistCard({
 
                   {item.recordedAt ? (
                     <div className="muted" style={{ fontSize: 12 }}>
-                      Recorded by {item.recordedByName || item.recordedById || 'Authorised user'} on{' '}
+                      Recorded by {item.recordedByName || 'Team member'} on{' '}
                       {formatUkShortDate(item.recordedAt)}
                     </div>
                   ) : null}
@@ -501,7 +501,7 @@ export function CddChecklistCard({
                           </a>
                         ) : (
                           <span key={ref.blobKey} className="muted">
-                            Attached: {ref.fileName || ref.blobKey}
+                            Attached: {ref.fileName || 'File'}
                           </span>
                         );
                       })}
@@ -541,7 +541,7 @@ export function CddChecklistCard({
                           {busyKey === `upload:${item.itemKey}` ? 'Scanning…' : 'Attach evidence'}
                           <input
                             type="file"
-                            style={{ display: 'none' }}
+                            className="visually-hidden"
                             disabled={busyKey !== null}
                             onChange={(e) => {
                               const picked = e.target.files?.[0];

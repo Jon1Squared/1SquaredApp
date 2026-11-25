@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { createDefaultRbacConfig } from '../core/src/domain/rbac/registry';
 import { resolveTenantFromVerifiedToken } from '../core/src/tenancy/index';
 import { TenantMatterRepository } from '../core/src/tenancy/matterRepository';
+import { TenantRegisterRepository } from '../core/src/tenancy/registerRepository';
 import { getGlobalTenantPostgresPoolManager } from '../core/src/tenancy/postgresPoolManager';
 import {
   getLeftRailVisibility,
@@ -1012,10 +1013,63 @@ test.describe('S1-02b WP1b picker journeys', () => {
   });
 });
 
+async function resetClientCddForE2e(
+  subjectType: 'person' | 'organisation',
+  subjectId: string,
+): Promise<void> {
+  process.env.PLATFORM_HOSTING_MODE ??= 'multi_tenant';
+  process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
+  process.env.PLATFORM_ENVIRONMENT ??= 'test';
+  process.env.PLATFORM_POSTGRES_HOST ??= '127.0.0.1';
+  process.env.PLATFORM_POSTGRES_PORT ??= '5432';
+  process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??= 'onesquared_local_runtime';
+
+  const ctx = resolveTenantFromVerifiedToken({
+    verifiedToken: {
+      __verifiedByOidcMiddleware: true,
+      sub: 'P-000001',
+      tenantId: 'not-a-law-firm',
+      email: 'rhian.morgan@notalawfirm.example',
+      name: 'Rhian Morgan',
+      roles: ['partner', 'admin', 'risk_compliance'],
+      mfaVerified: true,
+    },
+    hostingMode: 'multi_tenant',
+    environment: 'test',
+    correlationId: `e2e-reset-cdd-${subjectType}-${subjectId}`,
+  });
+  const regRepo = new TenantRegisterRepository();
+  await regRepo.withTenantTransaction(ctx, async (tx) => {
+    await tx.query(
+      `DELETE FROM public.register_records
+        WHERE tenant_id = $1
+          AND register_type_key = 'cdd'
+          AND ((person_id = $2 AND $3 = 'person') OR (organisation_id = $2 AND $3 = 'organisation'))`,
+      [ctx.tenantId, subjectId, subjectType],
+    );
+    await tx.query(
+      `DELETE FROM public.evidence_artifacts
+        WHERE tenant_id = $1
+          AND subject_type = $2
+          AND subject_id = $3`,
+      [ctx.tenantId, subjectType, subjectId],
+    );
+    await tx.query(
+      `DELETE FROM public.intake_check_records
+        WHERE tenant_id = $1
+          AND subject_type = $2
+          AND subject_id = $3`,
+      [ctx.tenantId, subjectType, subjectId],
+    );
+  });
+}
+
 test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R748 visibility', () => {
   test('fee earner completes Standard CDD with clean PDF upload on Bay Cafés Ltd, reflected on Matter form; finance sees no CDD card', async ({
     browser,
   }) => {
+    await resetClientCddForE2e('organisation', 'O-000004');
+
     const feContext = await browser.newContext({
       storageState: storageStatePathFor('fee_earner'),
     });
@@ -1028,12 +1082,11 @@ test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R74
       await expect(card).toBeVisible({ timeout: 15_000 });
 
       const startBtn = card.getByRole('button', { name: 'Start CDD' });
-      if ((await startBtn.count()) > 0) {
-        await startBtn.click();
-        await expect(
-          card.getByTestId('cdd-item-companies_house_record'),
-        ).toBeVisible({ timeout: 15_000 });
-      }
+      await expect(startBtn).toBeVisible({ timeout: 15_000 });
+      await startBtn.click();
+      await expect(
+        card.getByTestId('cdd-item-companies_house_record'),
+      ).toBeVisible({ timeout: 15_000 });
 
       // Upload a clean minimal PDF onto the first item
       const firstItem = card.getByTestId('cdd-item-companies_house_record');
@@ -1065,20 +1118,21 @@ test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R74
         timeout: 15_000,
       });
 
-      // Verify reflection on Matter creation form
+      // Verify reflection on Matter creation form (7 · MORE DETAILS -> Compliance tab)
       await fePage.goto('/matters/new?clientId=O-000004');
       await expect(fePage.locator('h1')).toBeVisible({ timeout: 15_000 });
-      const complianceTabBtn = fePage.getByRole('button', { name: /Compliance/i });
-      if ((await complianceTabBtn.count()) > 0) {
-        await complianceTabBtn.first().click();
-        await expect(fePage.locator('main')).toContainText(
-          'Recorded manually by Dafydd Evans',
-          { timeout: 15_000 },
-        );
-      }
+      const moreDetailsSection = fePage.locator('section[aria-labelledby="card-5-heading"]');
+      await expect(moreDetailsSection).toBeVisible({ timeout: 15_000 });
+      await moreDetailsSection.getByRole('button', { name: 'Maximise' }).click();
+      await moreDetailsSection.getByRole('tab', { name: 'Compliance' }).click();
+      await expect(fePage.locator('main')).toContainText(
+        'Recorded manually by Dafydd Evans',
+        { timeout: 15_000 },
+      );
       expect(feErrors).toEqual([]);
     } finally {
       await feContext.close();
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
     }
 
     // Role without cdd:view (finance) must see zero CDD card (R748)

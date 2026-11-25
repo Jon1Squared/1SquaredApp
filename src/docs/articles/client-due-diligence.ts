@@ -14,7 +14,7 @@ Client Due Diligence (CDD) is held at **client level** on each individual Person
 
 Open any external **Person** or **Organisation** profile and scroll to the **Client Due Diligence** panel. Authorised staff can also review active records in **Registers → Client Due Diligence** and monitor pending or overdue checks from the **AML & CDD queue** panel on the Risk & Compliance Home screen.
 
-- **Who can view CDD:** Fee earners, legal secretaries, supervisors, partners, managing partner, risk & compliance, intake, and enquiries coordinators (for clients they are permitted to see).
+- **Who can view CDD:** Fee earners, legal secretaries, supervisors, partners, managing partner, and risk & compliance (for clients they are permitted to see).
 - **Who can update CDD and upload documents:** Fee earners, legal secretaries, supervisors, partners, managing partner, and risk & compliance.
 - **Who cannot view or edit CDD:** Administration and Finance roles have no access to client CDD checklists or downloaded identity documents.
 - **Staff members who instruct the firm personally:** When an employee or leaver also instructs the firm as a private client, their CDD details are hidden from colleagues across profiles, Registers, downloads, Home queues, and re-check alerts unless the viewer works on an active matter for that person or holds risk/restricted access.
@@ -36,7 +36,7 @@ Open any external **Person** or **Organisation** profile and scroll to the **Cli
 ## 3. Uploading and downloading CDD evidence
 
 - Documents such as passports, driving licences, utility bills, certificates of incorporation, and source-of-funds statements can be attached directly inside the checklist item.
-- Uploads accept PDF, JPEG, PNG, WebP, or TIFF files within the firm’s configured file-size limit (default 10 MB per file). Executable files, scripts, and macro-enabled files are blocked before storage.
+- Uploads accept PDF, JPEG, PNG, WebP, HEIC/HEIF, TIFF, plain text, and Word or Excel Office documents within the firm’s configured file-size limit (default 10 MB per file). Executable files, scripts, and macro-enabled files are blocked before storage.
 - Evidence files stay stored in the firm’s tenant-isolated file store and are served through short-lived scoped downloads only to users permitted to view that client’s CDD record.
 
 ## 4. Manual verification and screening notices
@@ -49,6 +49,6 @@ Until the firm enables a live electronic ID (e-ID) or automated screening provid
 
 ## 5. Scheduled re-check reminders
 
-Daily register reminder checks inspect **Recorded** CDD records as they approach or pass their re-check due date (**30 days**, **7 days**, on the **due date**, and **overdue**), alerting the assigned CDD owner, or falling back to the most recent active matter fee earner, or the Risk & Compliance team where no fee earner is assigned.
+Daily register reminder checks inspect **Recorded** CDD records as they approach or pass their re-check due date according to your firm’s reminder schedule (for example 14 days before, 7 days before, on the **due date**, and when **overdue**), alerting the assigned CDD owner, or falling back to the most recent active matter fee earner, or the Risk & Compliance team where no fee earner is assigned.
 `,
 };

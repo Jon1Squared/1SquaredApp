@@ -223,6 +223,7 @@ interface MatterFormClientProps {
   enableAiMatterExtraction?: boolean;
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
   enableMatterCostsGovernance?: boolean;
+  canViewCdd?: boolean;
   tenantId: string;
   initialServerSaveErrors?: Record<string, string>;
 }
@@ -332,6 +333,7 @@ export function MatterFormClient({
   enableAiMatterExtraction = false,
   aiProviderChoice = 'disabled',
   enableMatterCostsGovernance = false,
+  canViewCdd = false,
   tenantId,
   initialServerSaveErrors = {},
 }: MatterFormClientProps) {
@@ -12028,64 +12030,66 @@ export function MatterFormClient({
                           ))}
                       </select>
                     </div>
-                    <div className="field-group" style={{ gridColumn: '1 / -1' }}>
-                      <label className="field-label">Client Due Diligence (client record)</label>
-                      <div
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: 6,
-                          border: '1px solid var(--border-subtle)',
-                          background: 'var(--bg-subtle, #f8fafc)',
-                          fontSize: 13,
-                          display: 'grid',
-                          gap: 6,
-                        }}
-                      >
-                        {clientIds.length === 0 ? (
-                          <span className="muted">
-                            Select a client above to inspect their Client Due Diligence status.
-                          </span>
-                        ) : (
-                          clientIds.map((cid) => {
-                            const cddSum = clientCddSummaries[cid];
-                            const href = cid.startsWith('O-')
-                              ? `/organisations/${cid}?tab=compliance`
-                              : `/people/${cid}?tab=compliance`;
-                            if (cddSum && !cddSum.visible) {
+                    {canViewCdd ? (
+                      <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+                        <label className="field-label">Client Due Diligence (client record)</label>
+                        <div
+                          style={{
+                            padding: '10px 12px',
+                            borderRadius: 6,
+                            border: '1px solid var(--border-subtle)',
+                            background: 'var(--bg-subtle, #f8fafc)',
+                            fontSize: 13,
+                            display: 'grid',
+                            gap: 6,
+                          }}
+                        >
+                          {clientIds.length === 0 ? (
+                            <span className="muted">
+                              Select a client above to inspect their Client Due Diligence status.
+                            </span>
+                          ) : (
+                            clientIds.map((cid) => {
+                              const cddSum = clientCddSummaries[cid];
+                              const href = cid.startsWith('O-')
+                                ? `/organisations/${cid}?tab=compliance`
+                                : `/people/${cid}?tab=compliance`;
+                              if (cddSum && !cddSum.visible) {
+                                return (
+                                  <div key={cid} className="muted">
+                                    Client CDD summary is restricted for this client record.
+                                  </div>
+                                );
+                              }
+                              const text = cddSum
+                                ? buildCddStatusDisplayText(cddSum)
+                                : 'Client Due Diligence status loaded from client record.';
                               return (
-                                <div key={cid} className="muted">
-                                  Client CDD summary is restricted for this client record.
+                                <div
+                                  key={cid}
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    flexWrap: 'wrap',
+                                  }}
+                                >
+                                  <span>{text}</span>
+                                  <Link href={href} className="btn btn--secondary btn--sm">
+                                    Open client CDD
+                                  </Link>
                                 </div>
                               );
-                            }
-                            const text = cddSum
-                              ? buildCddStatusDisplayText(cddSum)
-                              : 'Client Due Diligence status loaded from client record.';
-                            return (
-                              <div
-                                key={cid}
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  alignItems: 'center',
-                                  gap: 8,
-                                  flexWrap: 'wrap',
-                                }}
-                              >
-                                <span>{text}</span>
-                                <Link href={href} className="btn btn--secondary btn--sm">
-                                  Open client CDD
-                                </Link>
-                              </div>
-                            );
-                          })
-                        )}
+                            })
+                          )}
+                        </div>
+                        <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
+                          Legacy matter-level AML and Source of Funds/Wealth fields below are
+                          read-only and derived from the client CDD record.
+                        </p>
                       </div>
-                      <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
-                        Legacy matter-level AML and Source of Funds/Wealth fields below are read-only
-                        and derived from the client CDD record (server ignores edits here).
-                      </p>
-                    </div>
+                    ) : null}
                     <div className="field-group">
                       <label className="field-label">Client due diligence (AML — read-only)</label>
                       <input

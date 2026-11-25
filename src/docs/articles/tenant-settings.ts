@@ -138,13 +138,13 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 
 | Setting | Default | Status | Notes |
 |---|---|---|---|
-| \`cdd.enabled\` | \`true\` | Active | Enables client-type CDD checklist templates on client \`cdd\` register creation |
-| \`cdd.clientTypeMapping\` | \`{}\` | Active | Maps \`organisation_type\` choice \`systemKey\`s to CDD checklist categories (\`individual\`, \`company_or_llp\`, \`trust_charity_or_partnership\`) |
-| \`cdd.riskTierMapping\` | \`{}\` | Active | Maps \`risk_rating\` choice \`systemKey\`s to CDD risk tiers (\`standard\`, \`high\`) |
-| \`cdd.checklists\` | \`{}\` | Active | Standard and \`highAdditional\` checklist items for \`individual\`, \`company_or_llp\`, and \`trust_charity_or_partnership\`, viewed in read-only summary under **Administration → Client Due Diligence** (\`ADR 0039\`) |
-| \`cdd.recheckIntervalsMonths.standard\` | \`36\` | Active | Re-check interval in months for Standard CDD (Low and Medium risk ratings) |
-| \`cdd.recheckIntervalsMonths.high\` | \`12\` | Active | Re-check interval in months for High-risk CDD (High, Critical, and Sensitive risk ratings) |
-| \`cdd.reminderScheduleDaysBefore\` | \`[14, 7, 0]\` | Active | Day offsets relative to CDD due date triggering reminder notifications via \`register-reminders\` |
-| \`cdd.maxEvidenceFileSizeBytes\` | \`10485760\` | Active | Maximum allowed file size in bytes (10 MB default) for CDD evidence uploads alongside server MIME validation and pre-storage malware/macro screening |
+| Client Due Diligence workflow | Enabled | Active | Enables client-type due diligence checklists on each client’s CDD record |
+| Client category mapping | Default firm categories | Active | Maps firm organisation types to Individual, Company or LLP, or Trust, Charity or Partnership checklist templates |
+| Risk tier mapping | Standard and High-risk tiers | Active | Maps client and matter risk ratings to Standard or High-risk Enhanced due diligence tiers |
+| Default checklists | Pre-populated by category | Active | Standard and additional high-risk checklist items for each client category, viewed in read-only summary under **Administration → Client Due Diligence** |
+| Standard re-check interval | 36 months | Active | Months between scheduled Client Due Diligence reviews for Low and Medium risk ratings |
+| High-risk re-check interval | 12 months | Active | Months between scheduled Client Due Diligence reviews for High, Critical, and Sensitive risk ratings |
+| Re-check reminder schedule | Firm default lead days | Active | Automated reminder notifications triggered on the firm’s configured schedule ahead of and on the due date |
+| Evidence upload size limit | 10 MB | Active | Maximum allowed file size per attached verification file alongside server file-type validation and pre-storage security scanning |
 `.trim(),
 };

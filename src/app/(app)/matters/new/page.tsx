@@ -57,6 +57,7 @@ export default async function NewMatterPage({
         canReassignOwnership={shell.currentUserPermissions.includes(
           'matter:reassign_ownership',
         )}
+        canViewCdd={shell.currentUserPermissions.includes('cdd:view')}
         canSignOffCosts={
           data.existing
             ? data.canSignOffCosts
