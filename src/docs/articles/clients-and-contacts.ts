@@ -41,11 +41,16 @@ Rather than duplicating directory entries per matter role, each matter links peo
   - Viewing directory profiles follows firm access controls and restricted-matter filtering. Creating or updating external contacts and organisations requires \`contact:create\` or \`contact:edit\`.
   - Viewing or editing negotiated client and corporate-group rate schedules on the **Finance** tab requires finance/matter access to view and \`matter:costs:sign_off\`, \`finance:credit_control\`, or \`admin:access\` alongside verified MFA to add, update, or remove overrides.
   - Sensitive staff employment, payroll (\`employee:payroll\`), and HR records (\`employee:sensitive\`) are filtered out of directory lists and require dedicated HR permissions and explicit profile disclosure with audit logging.
-- **Honest compliance states**: Until a third-party e-ID or sanctions/PEP provider is integrated, Person and Organisation compliance pills report only factual stored state (**Not verified**, **Not checked**, **Checks pending**, or **Review required**) and never fabricate cleared screening results.
+- **Honest compliance states**: Until a third-party e-ID or sanctions/PEP provider is integrated, Person and Organisation compliance pills report only factual stored state (**Not verified**, **Not checked**, **Checks pending**, **Manual check logged**, or **Review required**) and never fabricate cleared screening results.
 - **Audit and optimistic concurrency**: Directory saves, organisation link mutations, and merges record firm audit entries in the same transaction; merging duplicate contacts or organisations (for holders of \`record:merge\`) uses tombstone redirection (\`mergedIntoId\`) and preserves references across matters, enquiries, quotes, tasks, documents, registers, and rate schedules.
 
-## 5. Related guides
+## 5. Client Due Diligence (CDD) on profiles
 
+Every external Person and Organisation profile includes a **Client Due Diligence** card showing whether checks are **CDD not started**, **In progress**, **Recorded**, **Due for re-check**, or **Expired**, together with client-type checklist items, secure evidence uploads, and **Recorded manually by ...** attribution. When an employee or leaver instructs the firm personally, their CDD details are hidden from staff who lack risk/restricted permissions and are not working on an active matter for that person.
+
+## 6. Related guides
+
+- [Client Due Diligence (CDD) workflow and evidence](/docs/client-due-diligence) — step-by-step guide to checklists, evidence uploads, manual screening checks, and re-check schedules.
 - [How the quick conflict check works](/docs/quick-conflict-check) — full conflict traversal across all 8 relationship codes, 70 capacities, secondary emails, former names, instructing/billing/referrer contacts, links, and corporate groups, with restricted-matter redaction.
 - [Duplicate checks on People and Organisations](/docs/duplicate-checks) — live duplicate detection and single-transaction merge rules.
 - [Matter opening wizard & risk assessment](/docs/matter-opening-and-risk) — how clients, contacts, and matter parties flow through matter opening and conflict review.

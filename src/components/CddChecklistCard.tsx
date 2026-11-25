@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import type {
   CddClientCategoryKey,
   IntakeEvidenceArtifactRef,
@@ -92,10 +92,12 @@ export function CddChecklistCard({
   const [screeningRef, setScreeningRef] = useState<string>('');
   const [screeningNotes, setScreeningNotes] = useState<string>('');
 
-  useEffect(() => {
+  const [prevInitialSummary, setPrevInitialSummary] = useState<ClientCddSummary>(initialSummary);
+  if (prevInitialSummary !== initialSummary) {
+    setPrevInitialSummary(initialSummary);
     setSummary(initialSummary);
     setManualSummaryNote(initialSummary.manualSummaryNote || '');
-  }, [initialSummary]);
+  }
 
   if (!summary.visible) {
     return null;

@@ -23,7 +23,6 @@ import * as actionsModule from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { vid, type Matter, type NotificationItem, type Person } from '@/domain/types';
 import {
-  getActiveTenantConfiguration,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';

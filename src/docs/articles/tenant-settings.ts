@@ -133,5 +133,18 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 | \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator work-type configuration (\`admin:access\` + MFA) |
 | \`workTypes.items[].feeArrangementCapCategories\` | Optional | Active | Maps \`conditional_fee_agreement\` and \`damages_based_agreement\` fee bases on a work type to a core statutory cap category key (\`cfa_general_civil\`, \`cfa_personal_injury\`, \`dba_general_civil\`, \`dba_employment\`, \`dba_personal_injury\`); unmapped CFA/DBA matters and quotes fail closed with \`FEE_CAP_CATEGORY_UNMAPPED\` (\`S0-28b\`) |
 | \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Active | Per-work-type CFA/DBA fee cap percentage overrides (\`R486\`, editable up to each category’s core statutory maximum regardless of lower firm defaults; takes precedence over \`matterCosts.feeArrangementCaps\` when present) |
+
+### Client Due Diligence (CDD)
+
+| Setting | Default | Status | Notes |
+|---|---|---|---|
+| \`cdd.enabled\` | \`true\` | Active | Enables client-type CDD checklist templates on client \`cdd\` register creation |
+| \`cdd.clientTypeMapping\` | \`{}\` | Active | Maps \`organisation_type\` choice \`systemKey\`s to CDD checklist categories (\`individual\`, \`company_or_llp\`, \`trust_charity_or_partnership\`) |
+| \`cdd.riskTierMapping\` | \`{}\` | Active | Maps \`risk_rating\` choice \`systemKey\`s to CDD risk tiers (\`standard\`, \`high\`) |
+| \`cdd.checklists\` | \`{}\` | Active | Standard and \`highAdditional\` checklist items for \`individual\`, \`company_or_llp\`, and \`trust_charity_or_partnership\`, viewed in read-only summary under **Administration → Client Due Diligence** (\`ADR 0039\`) |
+| \`cdd.recheckIntervalsMonths.standard\` | \`36\` | Active | Re-check interval in months for Standard CDD (Low and Medium risk ratings) |
+| \`cdd.recheckIntervalsMonths.high\` | \`12\` | Active | Re-check interval in months for High-risk CDD (High, Critical, and Sensitive risk ratings) |
+| \`cdd.reminderScheduleDaysBefore\` | \`[14, 7, 0]\` | Active | Day offsets relative to CDD due date triggering reminder notifications via \`register-reminders\` |
+| \`cdd.maxEvidenceFileSizeBytes\` | \`10485760\` | Active | Maximum allowed file size in bytes (10 MB default) for CDD evidence uploads alongside server MIME validation and pre-storage malware/macro screening |
 `.trim(),
 };

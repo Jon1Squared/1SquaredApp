@@ -333,7 +333,6 @@ import {
   ManualSanctionsPepScreeningProvider,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
-  mergeCddConfigurations,
   mergeRegistersConfigurations,
   ORGANISATION_PARENT_CYCLE_CODE,
   poundsToMinorUnits,
