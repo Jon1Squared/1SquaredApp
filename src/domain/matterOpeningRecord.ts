@@ -1,4 +1,9 @@
 import type { WorkTypeRiskQuestionConfig } from '@platform/core-api';
+import {
+  buildCddStatusDisplayText,
+  isCddDueExpired,
+  type ClientCddCompactSummary,
+} from './cdd';
 import { formatDate, formatDateTime } from './dates';
 import { resolveLabel, valueBySystemKey } from './lists';
 import { personDisplayName } from './names';
@@ -2405,6 +2410,7 @@ export function computeClientRelationshipCdd(params: {
   readonly people: readonly (Person | EntityPickerPersonSummary)[];
   readonly values: ChoiceValue[];
   readonly today: string;
+  readonly cddSummaries?: Record<string, ClientCddCompactSummary>;
 }): ClientRelationshipCddResult {
   const {
     clientIds,
@@ -2414,6 +2420,7 @@ export function computeClientRelationshipCdd(params: {
     people,
     values,
     today,
+    cddSummaries,
   } = params;
   if (clientIds.length === 0) {
     return { option: '', summary: '' };
@@ -2422,6 +2429,7 @@ export function computeClientRelationshipCdd(params: {
   let anyHasPriorMatters = false;
   let allCddCurrent = true;
   const details: string[] = [];
+  let hasVisibleLiveCddRecord = false;
 
   for (const cid of clientIds) {
     const clientPriorMatters = priorMatters.filter(
@@ -2432,6 +2440,45 @@ export function computeClientRelationshipCdd(params: {
     );
     if (clientPriorMatters.length > 0) {
       anyHasPriorMatters = true;
+    }
+
+    const displayName = cid.startsWith('O-')
+      ? organisations.find((o) => o.id === cid)?.legalName
+      : (() => {
+          const p = people.find((x) => x.id === cid);
+          return p ? personDisplayName(p) : undefined;
+        })();
+
+    const cddSummary = cddSummaries?.[cid];
+    if (cddSummary) {
+      if (!cddSummary.visible) {
+        // R747: Never reveal whether a protected employee-client CDD record exists.
+        continue;
+      }
+      if (cddSummary.hasRecord) {
+        hasVisibleLiveCddRecord = true;
+        const org = cid.startsWith('O-') ? organisations.find((o) => o.id === cid) : undefined;
+        const person = !cid.startsWith('O-') ? people.find((p) => p.id === cid) : undefined;
+        const relLabel = resolveLabel(
+          values,
+          org?.relationshipStatusId ?? person?.relationshipStatusId,
+        ).toLowerCase();
+        if (relLabel.includes('active') || relLabel.includes('existing')) {
+          anyHasPriorMatters = true;
+        }
+        const expired = cddSummary.dueAt
+          ? isCddDueExpired(cddSummary.dueAt, today)
+          : cddSummary.isExpired;
+        const isCurrent = cddSummary.status === 'recorded' && !expired;
+        const statusText = buildCddStatusDisplayText({ ...cddSummary, isExpired: expired });
+        if (!isCurrent) {
+          allCddCurrent = false;
+        }
+        if (displayName) {
+          details.push(`${displayName}: ${statusText}`);
+        }
+        continue;
+      }
     }
 
     if (cid.startsWith('O-')) {
@@ -2512,7 +2559,10 @@ export function computeClientRelationshipCdd(params: {
   if (!anyHasPriorMatters) {
     return {
       option: 'New client',
-      summary: 'Pre-filled from client record (no prior matters)',
+      summary:
+        hasVisibleLiveCddRecord && details.length > 0
+          ? `Pre-filled from client record (no prior matters — ${details.join('; ')})`
+          : 'Pre-filled from client record (no prior matters)',
     };
   }
   if (allCddCurrent) {

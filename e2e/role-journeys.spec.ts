@@ -1011,3 +1011,89 @@ test.describe('S1-02b WP1b picker journeys', () => {
     }
   });
 });
+
+test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R748 visibility', () => {
+  test('fee earner completes Standard CDD with clean PDF upload on Bay Cafés Ltd, reflected on Matter form; finance sees no CDD card', async ({
+    browser,
+  }) => {
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+
+    try {
+      await fePage.goto('/organisations/O-000004?tab=compliance');
+      const card = fePage.getByTestId('cdd-checklist-card');
+      await expect(card).toBeVisible({ timeout: 15_000 });
+
+      const startBtn = card.getByRole('button', { name: 'Start CDD' });
+      if ((await startBtn.count()) > 0) {
+        await startBtn.click();
+        await expect(
+          card.getByTestId('cdd-item-companies_house_record'),
+        ).toBeVisible({ timeout: 15_000 });
+      }
+
+      // Upload a clean minimal PDF onto the first item
+      const firstItem = card.getByTestId('cdd-item-companies_house_record');
+      const fileInput = firstItem.locator('input[type="file"]');
+      await fileInput.setInputFiles({
+        name: 'companies-house-extract.pdf',
+        mimeType: 'application/pdf',
+        buffer: Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< >>\n%%EOF\n'),
+      });
+      await expect(firstItem).toContainText('Ready to link', { timeout: 15_000 });
+
+      // Mark every checklist item recorded sequentially
+      const items = card.locator('[data-testid^="cdd-item-"]');
+      const itemCount = await items.count();
+      expect(itemCount).toBeGreaterThan(0);
+      for (let i = 0; i < itemCount; i++) {
+        const item = items.nth(i);
+        const noteInput = item.locator('input[type="text"]');
+        await noteInput.fill(`Verified manually step ${i + 1}`);
+        await item.getByRole('button', { name: 'Mark recorded' }).click();
+        await expect(item).toContainText('Recorded', { timeout: 15_000 });
+      }
+
+      const completeBtn = card.getByRole('button', { name: 'Complete CDD' });
+      await expect(completeBtn).toBeEnabled({ timeout: 10_000 });
+      await completeBtn.click();
+
+      await expect(card).toContainText('Recorded manually by Dafydd Evans', {
+        timeout: 15_000,
+      });
+
+      // Verify reflection on Matter creation form
+      await fePage.goto('/matters/new?clientId=O-000004');
+      await expect(fePage.locator('h1')).toBeVisible({ timeout: 15_000 });
+      const complianceTabBtn = fePage.getByRole('button', { name: /Compliance/i });
+      if ((await complianceTabBtn.count()) > 0) {
+        await complianceTabBtn.first().click();
+        await expect(fePage.locator('main')).toContainText(
+          'Recorded manually by Dafydd Evans',
+          { timeout: 15_000 },
+        );
+      }
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+
+    // Role without cdd:view (finance) must see zero CDD card (R748)
+    const finContext = await browser.newContext({
+      storageState: storageStatePathFor('finance'),
+    });
+    const finPage = await finContext.newPage();
+    const finErrors = attachPageErrorCollector(finPage);
+    try {
+      await finPage.goto('/organisations/O-000004?tab=compliance');
+      await expect(finPage.locator('main')).toBeVisible({ timeout: 15_000 });
+      await expect(finPage.getByTestId('cdd-checklist-card')).toHaveCount(0);
+      expect(finErrors).toEqual([]);
+    } finally {
+      await finContext.close();
+    }
+  });
+});

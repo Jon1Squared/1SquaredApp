@@ -13,8 +13,10 @@ import * as React from 'react';
 import { redirect } from 'next/navigation';
 import {
   DEFAULT_REGISTERS_CONFIG,
+  mergeCddConfigurations,
   mergeRegistersConfigurations,
   resolveEffectiveRegisterTypes,
+  type CddConfiguration,
   type ClientRateOverrideRecord,
   type ParentChainNodeSummary,
   type RbacConfiguration,
@@ -29,6 +31,11 @@ import {
 import { isActionDenied } from '@/domain/actionResult';
 import { attentionList, type AttentionItem } from '@/domain/attention';
 import { buildLoginRedirectPath } from '@/domain/authReturnTo';
+import {
+  buildHiddenClientCddSummary,
+  type ClientCddCompactSummary,
+  type ClientCddSummary,
+} from '@/domain/cdd';
 import { addDays, addMonths, toIsoDate } from '@/domain/dates';
 import { findRecordsOwnedByLeavers } from '@/domain/employment';
 import type { EnquiriesQueueTab } from '@/domain/enquiries';
@@ -107,10 +114,12 @@ import {
   getClientPmsViewBundle,
   isDemoModeEnabled,
   listAuditEntriesForRecord,
+  listClientPriorMattersRecord,
   listClientRateOverridesRecord,
   listFirmAuditEntriesPage,
   listMatterRateOverridesRecord,
   listRegistersWorkspaceDataRecord,
+  startOrLoadClientCddRecord,
   loadEffectiveTenantRbacConfig,
   loadStaffPeople,
   loadTenantCatalogueStoreView,
@@ -1001,6 +1010,8 @@ export async function loadHomePageData(
   tasks: Task[];
   registerTypes: RegisterTypeDefinition[];
   registerRecords: RegisterRecord[];
+  cddQueueRecords: RegisterRecord[];
+  canViewCdd: boolean;
   matterFinance?: MatterFinanceRowsResult;
   myFinance?: MyFinanceFiguresResult;
   firmFinance?: FirmFinanceResult;
@@ -1021,6 +1032,18 @@ export async function loadHomePageData(
   const canReadRegisters =
     currentUserPermissions.includes('register:view') ||
     currentUserPermissions.includes('undertaking:manage');
+  const canViewCdd = currentUserPermissions.includes('cdd:view');
+  const canBypassEmployeeCddVisibility =
+    currentUserPermissions.includes('risk:view') || hasRestrictedMatterAccess;
+  const activeRoleCfg =
+    shell.homePagesConfig.roles.find((r) => r.key === activeRoleKey) ?? null;
+  const needsCddQueueOnHome =
+    canViewCdd &&
+    Boolean(
+      activeRoleCfg &&
+        (activeRoleCfg.primaryPanels.includes('aml_and_cdd_queue') ||
+          activeRoleCfg.summaryPanels.includes('aml_and_cdd_queue')),
+    );
   const roleDataNeeds = resolveHomeRoleDataNeeds(shell.homePagesConfig, activeRoleKey);
   const needsRegistersOnHome = canReadRegisters && roleDataNeeds.needsRegisters;
   const summaryOnlyHomeFinance = !roleDataNeeds.needsFullMatterFinance;
@@ -1031,6 +1054,7 @@ export async function loadHomePageData(
     tasks,
     signOffs,
     registersBundle,
+    cddRecordsRaw,
     matterFinanceRes,
     myFinanceRes,
     firmFinanceRes,
@@ -1061,12 +1085,29 @@ export async function loadHomePageData(
           registerTypes: [] as RegisterTypeDefinition[],
           registerRecords: [] as RegisterRecord[],
         }),
+    needsCddQueueOnHome
+      ? getRegisterRepository().listVisibleRegisterRecords(ctx, currentUserId, {
+          registerTypeKey: 'cdd',
+          hasRestrictedMatterAccess,
+          canViewCdd: true,
+          canBypassEmployeeCddVisibility,
+          limit: 100,
+        })
+      : Promise.resolve([] as RegisterRecord[]),
     shell.finance.canViewMatter
       ? getMatterFinanceRows(ctx, undefined, { summaryOnly: summaryOnlyHomeFinance })
       : Promise.resolve(null),
     shell.finance.canViewMatter ? getMyFinanceFigures(ctx) : Promise.resolve(null),
     shell.finance.canViewFirm ? getFirmFinance(ctx) : Promise.resolve(null),
   ]);
+
+  const cddDueHorizonYmd = toIsoDate(addDays(new Date(), 30));
+  const cddQueueRecords = cddRecordsRaw.filter(
+    (r) =>
+      r.status === 'in_progress' ||
+      (r.status === 'recorded' &&
+        Boolean(r.dueAt && r.dueAt.slice(0, 10) <= cddDueHorizonYmd)),
+  );
 
   const { people, organisations } = await collectReferencedParties({
     ctx,
@@ -1080,7 +1121,9 @@ export async function loadHomePageData(
         r.assignedApproverId,
         r.createdById,
       ]),
+      ...cddQueueRecords.map((r) => r.personId),
     ],
+    extraOrgIds: cddQueueRecords.map((r) => r.organisationId),
   });
 
   return {
@@ -1094,6 +1137,8 @@ export async function loadHomePageData(
     tasks,
     registerTypes: registersBundle.registerTypes,
     registerRecords: registersBundle.registerRecords,
+    cddQueueRecords,
+    canViewCdd,
     matterFinance:
       matterFinanceRes && !isActionDenied(matterFinanceRes)
         ? matterFinanceRes
@@ -1311,6 +1356,7 @@ export async function loadPersonDetailPageData(
         ReturnType<typeof getMyNotificationPreferences>
       >;
       canTakeByTaskId: Record<string, boolean>;
+      cddSummary: ClientCddSummary;
     }
   | null
 > {
@@ -1370,6 +1416,7 @@ export async function loadPersonDetailPageData(
   const canManageNegotiatedRates = shell.currentUserPermissions.some((p) =>
     ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(p),
   );
+  const canViewCdd = shell.currentUserPermissions.includes('cdd:view');
 
   const [
     links,
@@ -1384,6 +1431,7 @@ export async function loadPersonDetailPageData(
     rateBundle,
     ownedPeopleRaw,
     ownedOrgs,
+    cddRes,
   ] = await Promise.all([
     partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, { personIds: [person.id] }),
     partyRepo.listNotesForRecord<Note>(ctx, 'person', person.id),
@@ -1421,7 +1469,22 @@ export async function loadPersonDetailPageData(
     isEmployeeOrLeaver
       ? partyRepo.listOrganisationsOwnedByPerson<Organisation>(ctx, person.id)
       : Promise.resolve<Organisation[]>([]),
+    canViewCdd
+      ? startOrLoadClientCddRecord(
+          {
+            subjectType: 'person',
+            subjectId: person.id,
+            createIfMissing: false,
+          },
+          currentUserId,
+          { tenantCtx: ctx, tenantConfig: shell.activeTenantCfg },
+        )
+      : Promise.resolve(null),
   ]);
+  const cddSummary: ClientCddSummary =
+    cddRes && !isActionDenied(cddRes) && cddRes.ok
+      ? cddRes.summary
+      : buildHiddenClientCddSummary('person', person.id);
 
   const mainLink = mainLinkFor(person.id, links);
   const mainOrgMatters = mainLink?.organisationId
@@ -1541,6 +1604,7 @@ export async function loadPersonDetailPageData(
     canManageOwnNotificationPreferences,
     initialNotificationPreferences,
     canTakeByTaskId,
+    cddSummary,
   };
 }
 
@@ -1896,6 +1960,7 @@ export async function loadOrganisationDetailPageData(
       inheritedParentRateOverrides: InheritedParentRateOverrideView[];
       rateCustomGrades: Array<{ id: string; label: string }>;
       canTakeByTaskId: Record<string, boolean>;
+      cddSummary: ClientCddSummary;
     }
   | null
 > {
@@ -1923,6 +1988,7 @@ export async function loadOrganisationDetailPageData(
   const canManageNegotiatedRates = shell.currentUserPermissions.some((p) =>
     ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(p),
   );
+  const canViewCdd = shell.currentUserPermissions.includes('cdd:view');
 
   const [
     groupOrgs,
@@ -1937,6 +2003,7 @@ export async function loadOrganisationDetailPageData(
     audit,
     pmsViewRes,
     rateBundle,
+    cddRes,
   ] = await Promise.all([
     partyRepo.expandCorporateGroupOrganisationIds<Organisation>(ctx, [organisation.id]),
     partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
@@ -1978,7 +2045,22 @@ export async function loadOrganisationDetailPageData(
           currentUserId,
         )
       : Promise.resolve(null),
+    canViewCdd
+      ? startOrLoadClientCddRecord(
+          {
+            subjectType: 'organisation',
+            subjectId: organisation.id,
+            createIfMissing: false,
+          },
+          currentUserId,
+          { tenantCtx: ctx, tenantConfig: shell.activeTenantCfg },
+        )
+      : Promise.resolve(null),
   ]);
+  const cddSummary: ClientCddSummary =
+    cddRes && !isActionDenied(cddRes) && cddRes.ok
+      ? cddRes.summary
+      : buildHiddenClientCddSummary('organisation', organisation.id);
 
   const pmsView =
     pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined;
@@ -2057,6 +2139,7 @@ export async function loadOrganisationDetailPageData(
         : [],
     rateCustomGrades,
     canTakeByTaskId,
+    cddSummary,
   };
 }
 
@@ -2663,6 +2746,7 @@ export async function loadMatterFormPageData(
   organisations: Organisation[];
   links: PersonOrganisationLink[];
   clientMatters: ClientPriorMatterSummary[];
+  initialCddSummaries: Record<string, ClientCddCompactSummary>;
   canSignOffCosts: boolean;
   initialSignOffEstimateGbp: number | null;
   suggestedMatterGovernanceAssignees: {
@@ -2758,21 +2842,22 @@ export async function loadMatterFormPageData(
     initialQuote: initialQuoteDirect,
     initialEnquiry,
   });
-  const [links, clientMattersRaw] = await Promise.all([
+  const [links, clientPriorRes] = await Promise.all([
     orgIdsForLinks.length > 0
       ? partyRepo.listLinksForEntities<PersonOrganisationLink>(ctx, {
           organisationIds: orgIdsForLinks,
         })
       : Promise.resolve<PersonOrganisationLink[]>([]),
     initialClientIds.length > 0
-      ? matterRepo.listVisibleMattersForEntity<Matter>(
-          ctx,
-          { clientIds: initialClientIds, includeMerged: false },
-          { viewerId: currentUserId, hasRestrictedMatterAccess },
-        )
-      : Promise.resolve<Matter[]>([]),
+      ? listClientPriorMattersRecord(initialClientIds, currentUserId)
+      : Promise.resolve<{
+          matters: ClientPriorMatterSummary[];
+          cddSummaries: Record<string, ClientCddCompactSummary>;
+        }>({ matters: [], cddSummaries: {} }),
   ]);
-  const clientMatters = clientMattersRaw.map(toClientPriorMatterSummary);
+  const clientMatters = !isActionDenied(clientPriorRes) ? clientPriorRes.matters : [];
+  const initialCddSummaries =
+    !isActionDenied(clientPriorRes) ? clientPriorRes.cddSummaries : {};
   const { people, organisations } = await collectReferencedParties({
     ctx,
     shell,
@@ -2839,6 +2924,7 @@ export async function loadMatterFormPageData(
     organisations,
     links,
     clientMatters,
+    initialCddSummaries,
     canSignOffCosts,
     initialSignOffEstimateGbp,
     suggestedMatterGovernanceAssignees: {
@@ -3915,7 +4001,33 @@ export async function loadRegistersPageData(
 ) {
   const shell = await loadShellContext(actorId, options);
   const data = await listRegistersWorkspaceDataRecord({}, shell.currentUserId);
-  return { shell, data };
+  const clientLabelsById: Record<string, string> = {};
+  if (!isActionDenied(data) && data.ok) {
+    const partyRepo = getPartyRepository();
+    const personIds = Array.from(
+      new Set(data.records.map((r) => r.personId).filter((x): x is string => Boolean(x))),
+    );
+    const orgIds = Array.from(
+      new Set(
+        data.records.map((r) => r.organisationId).filter((x): x is string => Boolean(x)),
+      ),
+    );
+    const [clientPeople, clientOrgs] = await Promise.all([
+      personIds.length > 0
+        ? partyRepo.listPeopleByIds<Person>(shell.ctx, personIds)
+        : Promise.resolve<Person[]>([]),
+      orgIds.length > 0
+        ? partyRepo.listOrganisationsByIds<Organisation>(shell.ctx, orgIds)
+        : Promise.resolve<Organisation[]>([]),
+    ]);
+    for (const p of clientPeople) {
+      clientLabelsById[p.id] = personDisplayName(p);
+    }
+    for (const o of clientOrgs) {
+      clientLabelsById[o.id] = o.legalName;
+    }
+  }
+  return { shell, data, clientLabelsById };
 }
 
 // ============================================================================
@@ -3963,6 +4075,7 @@ export async function loadAdminPageData(
       employeeMigrationReport?: EmployeeMigrationReport;
       registersConfig: RegistersConfiguration;
       registerTypes: RegisterTypeDefinition[];
+      cddConfig: CddConfiguration;
       workTypesConfig: WorkTypesConfiguration;
       entraEnvStatus: ReturnType<typeof getEntraEnvStatus>;
       firmAuditPage: Awaited<ReturnType<typeof listFirmAuditEntriesPage>>;
@@ -4019,6 +4132,7 @@ export async function loadAdminPageData(
     pmsAdminResult,
     dbEmployeeMigrationReport,
     registersMeta,
+    dbCddOverride,
     expiredUnconvertedEnquiriesCount,
     matterPartyUsageCounts,
   ] = await Promise.all([
@@ -4029,6 +4143,7 @@ export async function loadAdminPageData(
     getPmsAdminSnapshot(ctx),
     getHrAndRbacRepository().getEmployeeMigrationReport<EmployeeMigrationReport>(ctx),
     resolveRegistersSummary(ctx, activeTenantCfg),
+    getCatalogueRepository().getModuleConfig<CddConfiguration>(ctx, 'cdd'),
     getIntakeQuoteRepository().countEnquiriesReadyForRetention(
       ctx,
       retentionCutoffIso,
@@ -4128,6 +4243,7 @@ export async function loadAdminPageData(
     employeeMigrationReport: dbEmployeeMigrationReport ?? undefined,
     registersConfig: registersMeta.registersConfig,
     registerTypes: registersMeta.registerTypes,
+    cddConfig: mergeCddConfigurations(activeTenantCfg.cdd, dbCddOverride),
     workTypesConfig: shell.store.workTypesConfig!,
     entraEnvStatus: getEntraEnvStatus(),
     firmAuditPage,

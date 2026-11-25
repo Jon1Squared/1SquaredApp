@@ -29,6 +29,7 @@ export default async function EditMatterPage({
         organisations={data.organisations}
         links={data.links}
         matters={data.clientMatters}
+        initialCddSummaries={data.initialCddSummaries}
         enquiries={data.initialEnquiry ? [data.initialEnquiry] : []}
         lists={shell.lists}
         values={shell.values}

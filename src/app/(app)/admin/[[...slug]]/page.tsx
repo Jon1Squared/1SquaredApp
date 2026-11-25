@@ -78,6 +78,7 @@ export default async function AdminCatchAllPage({
         currentUserKeyDatePermissions={shell.currentUserKeyDatePermissions}
         registersConfig={data.registersConfig}
         registerTypes={data.registerTypes}
+        cddConfig={data.cddConfig}
         workTypesConfig={data.workTypesConfig}
         hasMfaVerified={actor.mfaVerified}
         entraSession={actor.session}

@@ -14,7 +14,7 @@ export default async function RegistersPage({
   const resolvedSearch = await searchParams;
   const { record, type } = resolvedSearch;
   return withOptionalPageActor(async (actor) => {
-    const { shell, data } = await loadRegistersPageData(actor.personId);
+    const { shell, data, clientLabelsById } = await loadRegistersPageData(actor.personId);
 
     if (isActionDenied(data) || !data.ok) {
       return (
@@ -44,6 +44,7 @@ export default async function RegistersPage({
         initialTransitionsByRecordId={data.transitionsByRecordId}
         matters={data.matters}
         people={data.people}
+        clientLabelsById={clientLabelsById}
         initialRecordId={record}
         initialTypeKey={type}
       />

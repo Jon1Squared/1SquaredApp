@@ -76,6 +76,7 @@ import { MatterPartiesAdminSection } from './MatterPartiesAdminSection';
 import { PmsLinksAdminSection } from './PmsLinksAdminSection';
 import { RbacAdminSection } from './RbacAdminSection';
 import type {
+  CddConfiguration,
   RegistersConfiguration,
   RegisterTypeDefinition,
   WorkTypesConfiguration,
@@ -205,6 +206,7 @@ interface Props {
   keyDatesConfig?: KeyDatesConfig;
   registersConfig?: RegistersConfiguration;
   registerTypes?: RegisterTypeDefinition[];
+  cddConfig?: CddConfiguration;
   workTypesConfig?: WorkTypesConfiguration;
   hasMfaVerified?: boolean;
   currentUserKeyDatePermissions?: KeyDatePermission[];
@@ -254,6 +256,7 @@ export function AdminClient({
   keyDatesConfig,
   registersConfig,
   registerTypes = [],
+  cddConfig,
   workTypesConfig,
   hasMfaVerified = false,
   currentUserKeyDatePermissions = [],
@@ -1594,12 +1597,92 @@ export function AdminClient({
       )}
 
       {tab === 'registers' && registersConfig && (
-        <RegistersAdminPanel
-          initialConfig={registersConfig}
-          registerTypes={registerTypes}
-          canConfigure={Boolean(currentUserPermissions?.includes('register:configure'))}
-          hasMfaVerified={hasMfaVerified}
-        />
+        <div style={{ display: 'grid', gap: 16 }}>
+          <RegistersAdminPanel
+            initialConfig={registersConfig}
+            registerTypes={registerTypes}
+            canConfigure={Boolean(currentUserPermissions?.includes('register:configure'))}
+            hasMfaVerified={hasMfaVerified}
+          />
+          {cddConfig ? (
+            <section className="home-panel" aria-label="Client Due Diligence policy summary">
+              <div className="panel-header">
+                <div className="panel-title-group">
+                  <h2 className="panel-title">Client Due Diligence (CDD) policy summary</h2>
+                  <StatusPill
+                    label={cddConfig.enabled ? 'Enabled' : 'Disabled'}
+                    tone={cddConfig.enabled ? 'positive' : 'neutral'}
+                  />
+                </div>
+                <span className="panel-subtitle">
+                  Read-only tenant configuration summary
+                </span>
+              </div>
+              <div className="panel-body padded">
+                <div className="kv-grid">
+                  <div className="kv-item">
+                    <span className="kv-label">Standard CDD re-check interval</span>
+                    <span className="kv-value">
+                      {cddConfig.recheckIntervalsMonths?.standard ?? 36} months
+                    </span>
+                  </div>
+                  <div className="kv-item">
+                    <span className="kv-label">High-Risk CDD re-check interval</span>
+                    <span className="kv-value">
+                      {cddConfig.recheckIntervalsMonths?.high ?? 12} months
+                    </span>
+                  </div>
+                  <div className="kv-item">
+                    <span className="kv-label">Re-check reminder schedule</span>
+                    <span className="kv-value">
+                      {(cddConfig.reminderScheduleDaysBefore ?? []).length > 0
+                        ? (cddConfig.reminderScheduleDaysBefore ?? [])
+                            .map((d) => `${d}d`)
+                            .join(', ')
+                        : 'None'}
+                    </span>
+                  </div>
+                  <div className="kv-item">
+                    <span className="kv-label">Maximum evidence file size</span>
+                    <span className="kv-value">
+                      {Math.round(
+                        (cddConfig.maxEvidenceFileSizeBytes ?? 10 * 1024 * 1024) /
+                          (1024 * 1024),
+                      )}{' '}
+                      MB
+                    </span>
+                  </div>
+                  <div className="kv-item">
+                    <span className="kv-label">Individual checklist items</span>
+                    <span className="kv-value">
+                      {cddConfig.checklists?.individual?.standard?.length ?? 0} standard ·{' '}
+                      {cddConfig.checklists?.individual?.highAdditional?.length ?? 0} high-risk additional
+                    </span>
+                  </div>
+                  <div className="kv-item">
+                    <span className="kv-label">Company / LLP checklist items</span>
+                    <span className="kv-value">
+                      {cddConfig.checklists?.company_or_llp?.standard?.length ?? 0} standard ·{' '}
+                      {cddConfig.checklists?.company_or_llp?.highAdditional?.length ?? 0} high-risk additional
+                    </span>
+                  </div>
+                  <div className="kv-item">
+                    <span className="kv-label">Trust / charity / partnership items</span>
+                    <span className="kv-value">
+                      {cddConfig.checklists?.trust_charity_or_partnership?.standard?.length ?? 0} standard ·{' '}
+                      {cddConfig.checklists?.trust_charity_or_partnership?.highAdditional?.length ?? 0}{' '}
+                      high-risk additional
+                    </span>
+                  </div>
+                </div>
+                <p className="muted" style={{ margin: '10px 0 0', fontSize: 12.5 }}>
+                  Policy settings are validated at startup and stored per tenant. Interactive CDD
+                  checklist template editing is tracked on the platform backlog.
+                </p>
+              </div>
+            </section>
+          ) : null}
+        </div>
       )}
 
       {/* TAB 1: CHOICE LISTS */}
