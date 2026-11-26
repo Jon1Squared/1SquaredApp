@@ -2252,4 +2252,355 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       clearPermissionRequestCache();
     }
   });
+
+  it('S1-12 (ADR 0041): dual-writes *_pence and legacy columns, reads solely from *_pence + payload_json->>key (ignoring tampered float columns), preserves negative credit notes & client account entries, and isolates two tenants', async () => {
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const ctxB = makeTenantContext('tenant-b', 'P-000001');
+    const pmsRepo = getPmsRepository();
+    const matterRepo = getMatterRepository();
+    const baseStore = loadCommittedSeedStore();
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxA,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxA.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxB,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxB.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+
+    const datasetA: TenantPmsExtractDataset = {
+      extractInfo: {
+        asAtDate: '2026-10-31',
+        sourceFile: 's112-alpha.xlsx',
+        importedAt: '2026-10-31T09:00:00.000Z',
+      },
+      feeEarners: [
+        {
+          fee_earner_id: 'FE-S112-A',
+          initials: 'SA',
+          first_name: 'Sioned',
+          last_name: 'ap Hywel',
+          email: 'sioned@example.test',
+          grade: 'Partner',
+          department: 'Corporate',
+          standard_hourly_rate: 325.5,
+          annual_target_hours: 1200,
+          annual_target_fees: 245000.75,
+          active: 'Yes',
+        },
+      ],
+      clients: [
+        {
+          client_code: 'CL-S112-A',
+          client_name: 'S112 Alpha Ltd',
+          client_type: 'Organisation',
+          company_number: '11223344',
+          email: 'accounts@s112a.example',
+          phone: '01632960112',
+          billing_address: '10 Cardiff Road',
+          postcode: 'CF10 1AA',
+          client_partner_id: 'FE-S112-A',
+          credit_terms_days: 30,
+          credit_limit: 50000.25,
+          rate_discount_pct: 0,
+          date_opened: '2026-01-01',
+          sector: 'Tech',
+          crm_match_on: 'company_number',
+          status: 'Active',
+        },
+      ],
+      matters: [
+        {
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          matter_description: 'S112 Integer Pence Matter',
+          work_type: 'Advisory',
+          practice_area: 'Corporate',
+          responsible_partner_id: 'FE-S112-A',
+          fee_earner_id: 'FE-S112-A',
+          billing_basis: 'Hourly Rate',
+          fixed_fee_amount: 12500.5,
+          fee_estimate: 10000.1,
+          estimate_alert_pct: 0.75,
+          date_opened: '2026-09-01',
+          date_closed: null,
+          status: 'Open',
+          billing_frequency: 'Monthly',
+          client_reference: 'REF-S112',
+          third_party_payer: '',
+        },
+      ],
+      feeEstimates: [
+        {
+          estimate_id: 'EST-S112-A',
+          matter_code: 'MAT-S112-A',
+          date_given: '2026-09-02',
+          estimate_type: 'Initial',
+          fees_estimate: 1500.25,
+          disbursements_estimate: 300.75,
+          given_by: 'FE-S112-A',
+          accepted_by_client: 'Yes',
+          notes: 'S112 check',
+        },
+      ],
+      invoices: [
+        {
+          invoice_number: 'INV-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          invoice_date: '2026-10-01',
+          due_date: '2026-10-31',
+          invoice_type: 'Interim',
+          period_from: '2026-09-01',
+          period_to: '2026-09-30',
+          fees_net: 1000.1,
+          disbursements_net: 100.2,
+          vat: 220.06,
+          total: 1320.36,
+          status: 'Issued',
+          credit_note_for: null,
+        },
+        {
+          invoice_number: 'CN-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          invoice_date: '2026-10-15',
+          due_date: '2026-10-15',
+          invoice_type: 'Credit note',
+          period_from: null,
+          period_to: null,
+          fees_net: -20,
+          disbursements_net: 0,
+          vat: -4,
+          total: -24,
+          status: 'Issued',
+          credit_note_for: 'INV-S112-1',
+        },
+      ],
+      payments: [
+        {
+          receipt_id: 'REC-S112-1',
+          invoice_number: 'INV-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          receipt_date: '2026-10-10',
+          amount: 500.11,
+          method: 'BACS',
+          reference: 'BACS-S112',
+        },
+      ],
+      timeEntries: [
+        {
+          time_id: 'TE-S112-1',
+          matter_code: 'MAT-S112-A',
+          fee_earner_id: 'FE-S112-A',
+          date: '2026-10-05',
+          activity: 'Drafting',
+          narrative: 'Exact pence work',
+          minutes: 60,
+          units: 10,
+          hours: 1,
+          rate: 325.5,
+          value: 325.5,
+          chargeable: 'Y',
+          billed_status: 'Unbilled',
+          invoice_number: null,
+          billed_value: 0,
+          write_off_value: 15.25,
+        },
+      ],
+      disbursements: [
+        {
+          disbursement_id: 'DISB-S112-1',
+          matter_code: 'MAT-S112-A',
+          date: '2026-10-06',
+          type: 'Search',
+          supplier: 'Land Registry',
+          description: 'Official copy',
+          net_amount: 42.1,
+          vat_amount: 8.42,
+          gross_amount: 50.52,
+          paid_from: 'Office',
+          billed_status: 'Unbilled',
+          invoice_number: null,
+        },
+      ],
+      clientAccount: [
+        {
+          transaction_id: 'CA-S112-1',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          date: '2026-10-01',
+          type: 'Receipt',
+          description: 'Monies on account',
+          amount: 1000.5,
+        },
+        {
+          transaction_id: 'CA-S112-2',
+          matter_code: 'MAT-S112-A',
+          client_code: 'CL-S112-A',
+          date: '2026-10-08',
+          type: 'Payment',
+          description: 'Partial refund',
+          amount: -250.25,
+        },
+      ],
+    };
+
+    const datasetB = buildSyntheticDataset({
+      suffix: 'B',
+      asAtDate: '2026-11-15',
+      wipAmount: 8888,
+      invoiceNet: 2000,
+      unlinkedWipAmount: 4444,
+    });
+
+    await pmsRepo.clearTenantData(ctxA);
+    await pmsRepo.importExtractDataset(ctxA, datasetA);
+    await pmsRepo.clearTenantData(ctxB);
+    await pmsRepo.importExtractDataset(ctxB, datasetB);
+
+    // Update retainerMoniesOnAccountGbp on Tenant A vs Tenant B
+    const matterA = await matterRepo.getMatterById(ctxA, baseStore.matters[0]!.id);
+    const matterB = await matterRepo.getMatterById(ctxB, baseStore.matters[0]!.id);
+    expect(matterA).not.toBeNull();
+    expect(matterB).not.toBeNull();
+    await matterRepo.updateMatter(
+      ctxA,
+      { ...matterA!, retainerMoniesOnAccountGbp: 765.43 },
+      matterA!.rowVersion ?? 1,
+    );
+    await matterRepo.updateMatter(
+      ctxB,
+      { ...matterB!, retainerMoniesOnAccountGbp: 111.22 },
+      matterB!.rowVersion ?? 1,
+    );
+
+    const directA = await createDirectMigrationClient({ ctx: ctxA });
+    try {
+      // Verify dual-write populated BOTH *_pence and legacy columns before tampering
+      const preCheck = await directA.query<{
+        pence: string;
+        legacy: number;
+      }>(
+        `SELECT amount_pence::text AS pence, amount AS legacy
+           FROM public.pms_client_account_entries
+          WHERE tenant_id = $1 AND transaction_id = 'CA-S112-2'`,
+        [ctxA.tenantId],
+      );
+      expect(preCheck.rows[0]).toEqual({ pence: '-25025', legacy: -250.25 });
+
+      const matPre = await directA.query<{ retainer_pence: string; retainer_json: string }>(
+        `SELECT retainer_monies_on_account_pence::text AS retainer_pence,
+                costs_json->>'retainerMoniesOnAccountGbp' AS retainer_json
+           FROM public.matters
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctxA.tenantId, matterA!.id],
+      );
+      expect(matPre.rows[0]).toEqual({ retainer_pence: '76543', retainer_json: '765.43' });
+
+      // Corrupt ALL legacy float columns + legacy JSON retainer in Tenant A
+      await directA.query(
+        `UPDATE public.pms_fee_earners SET charge_out_rate = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_matters SET fee_estimate = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_fee_estimates SET estimated_fees_ex_vat = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_invoices SET total_inc_vat = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_payments SET amount = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_time_entries SET value = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_disbursements SET amount_ex_vat = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.pms_client_account_entries SET amount = 999999.99, balance_after = 999999.99 WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+      await directA.query(
+        `UPDATE public.matters
+            SET costs_json = jsonb_set(costs_json, '{retainerMoniesOnAccountGbp}', '999999.99'::jsonb),
+                opening_record_json = jsonb_set(opening_record_json, '{retainerMoniesOnAccountGbp}', '999999.99'::jsonb)
+          WHERE tenant_id = $1 AND id = $2`,
+        [ctxA.tenantId, matterA!.id],
+      );
+    } finally {
+      await directA.end();
+    }
+
+    // Reads come SOLELY from *_pence + payload_json->>'<key>', completely ignoring tampered floats
+    const snapA = await pmsRepo.loadTenantPmsSnapshot(ctxA);
+    expect(snapA.feeEarners[0]?.standard_hourly_rate).toBe(325.5);
+    expect(snapA.feeEarners[0]?.annual_target_fees).toBe(245000.75);
+    expect(snapA.clients[0]?.credit_limit).toBe(50000.25);
+    expect(snapA.matters[0]?.fee_estimate).toBe(10000.1);
+    expect(snapA.matters[0]?.fixed_fee_amount).toBe(12500.5);
+    expect(snapA.feeEstimates[0]?.fees_estimate).toBe(1500.25);
+    expect(snapA.feeEstimates[0]?.disbursements_estimate).toBe(300.75);
+    expect(snapA.timeEntries[0]?.rate).toBe(325.5);
+    expect(snapA.timeEntries[0]?.value).toBe(325.5);
+    expect(snapA.timeEntries[0]?.write_off_value).toBe(15.25);
+    expect(snapA.disbursements[0]?.net_amount).toBe(42.1);
+    expect(snapA.disbursements[0]?.vat_amount).toBe(8.42);
+    expect(snapA.disbursements[0]?.gross_amount).toBe(50.52);
+
+    const invBal = snapA.invoiceBalances.find((i) => i.invoice_number === 'INV-S112-1')!;
+    const cnBal = snapA.invoiceBalances.find((i) => i.invoice_number === 'CN-S112-1')!;
+    expect(invBal.fees_net).toBe(1000.1);
+    expect(invBal.disbursements_net).toBe(100.2);
+    expect(invBal.vat).toBe(220.06);
+    expect(invBal.total).toBe(1320.36);
+    expect(invBal.paid).toBe(500.11);
+    expect(invBal.credit_notes).toBe(-24);
+    expect(invBal.outstanding).toBe(796.25); // 1320.36 - 500.11 - 24.00 exact pence
+    expect(cnBal.total).toBe(-24);
+
+    expect(snapA.clientAccount.map((c) => [c.amount, c.running_balance])).toEqual([
+      [1000.5, 1000.5],
+      [-250.25, 750.25],
+    ]);
+    expect(snapA.matterFinancials[0]?.client_account_balance).toBe(750.25);
+
+    const reloadedA = await matterRepo.getMatterById(ctxA, matterA!.id);
+    const reloadedB = await matterRepo.getMatterById(ctxB, matterB!.id);
+    expect(reloadedA?.retainerMoniesOnAccountGbp).toBe(765.43);
+    expect(reloadedB?.retainerMoniesOnAccountGbp).toBe(111.22);
+
+    // Null vs zero preservation check
+    await matterRepo.updateMatter(
+      ctxA,
+      { ...reloadedA!, retainerMoniesOnAccountGbp: null },
+      reloadedA!.rowVersion ?? 2,
+    );
+    expect((await matterRepo.getMatterById(ctxA, matterA!.id))?.retainerMoniesOnAccountGbp).toBeNull();
+    const afterNull = (await matterRepo.getMatterById(ctxA, matterA!.id))!;
+    await matterRepo.updateMatter(
+      ctxA,
+      { ...afterNull, retainerMoniesOnAccountGbp: 0 },
+      afterNull.rowVersion ?? 3,
+    );
+    expect((await matterRepo.getMatterById(ctxA, matterA!.id))?.retainerMoniesOnAccountGbp).toBe(0);
+  });
 });

@@ -358,8 +358,10 @@ import {
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   MatterNumberingConfigSubSchema,
   mergeRegistersConfigurations,
+  minorUnitsToPounds,
   ORGANISATION_PARENT_CYCLE_CODE,
   poundsToMinorUnits,
+  sumMinorUnits,
   RATE_OVERRIDE_DATE_OVERLAP_CODE,
   RATE_OVERRIDE_INVALID_DATE_RANGE_CODE,
   RATE_OVERRIDE_VALIDATION_ERROR_CODE,
@@ -18335,9 +18337,14 @@ export async function getClientPmsViewBundle(
           };
         });
 
-        const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
         const sumField = (fn: (f: PmsClientFinancials) => number) =>
-          round2(companies.reduce((acc, c) => acc + (c.financials ? fn(c.financials) : 0), 0));
+          minorUnitsToPounds(
+            sumMinorUnits(
+              companies.map((c) =>
+                c.financials ? poundsToMinorUnits(fn(c.financials)) : 0,
+              ),
+            ),
+          );
 
         const outstanding_debt = sumField((f) => f.outstanding_debt);
         const credit_limit = sumField((f) => f.credit_limit);

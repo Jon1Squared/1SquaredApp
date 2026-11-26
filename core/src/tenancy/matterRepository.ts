@@ -18,6 +18,12 @@
 
 import type { MatterNumberingConfig, TenantContext } from '../api/index';
 import {
+  minorUnitsToPgBigInt,
+  minorUnitsToPounds,
+  pgBigIntToMinorUnits,
+  poundsToMinorUnits,
+} from '../domain/money/index';
+import {
   DEFAULT_MATTER_NUMBERING_CONFIG,
   formatMatterNumberFromSequence,
   MATTER_NUMBERING_ERROR_CODES,
@@ -295,6 +301,7 @@ interface DbMatterRow {
   conflict_check_record_json: Record<string, unknown> | null;
   risk_assessment_json: Record<string, unknown> | null;
   costs_json: Record<string, unknown> | null;
+  retainer_monies_on_account_pence?: string | number | null;
   opening_record_json: Record<string, unknown> | null;
   milestones_json: Record<string, unknown> | null;
 }
@@ -509,9 +516,12 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
         ? (costs.agreedFeeCapGbp as number | null)
         : ((opening.agreedFeeCapGbp as number | null) ?? null),
     retainerMoniesOnAccountGbp:
-      costs.retainerMoniesOnAccountGbp !== undefined
-        ? (costs.retainerMoniesOnAccountGbp as number | null)
-        : ((opening.retainerMoniesOnAccountGbp as number | null) ?? null),
+      row.retainer_monies_on_account_pence !== null &&
+      row.retainer_monies_on_account_pence !== undefined
+        ? minorUnitsToPounds(
+            pgBigIntToMinorUnits(row.retainer_monies_on_account_pence),
+          )
+        : null,
     stageId: row.current_stage_id ?? ((milestones.stageId as string) ?? ''),
     milestoneId: (milestones.milestoneId as string | null) ?? null,
     enquiryReceivedAt: (milestones.enquiryReceivedAt as string | null) ?? null,
@@ -624,11 +634,23 @@ function buildMatterDbParameters(
       ? (matter.fieldValues['CORE-070'] as string)
       : null;
 
+  const rawRetainerGbp = matter.retainerMoniesOnAccountGbp;
+  const retainerPence =
+    rawRetainerGbp !== null &&
+    rawRetainerGbp !== undefined &&
+    Number.isFinite(Number(rawRetainerGbp))
+      ? poundsToMinorUnits(rawRetainerGbp)
+      : null;
+  const normalizedRetainerGbp =
+    retainerPence !== null ? minorUnitsToPounds(retainerPence) : null;
+  const retainerMoniesOnAccountPence =
+    retainerPence !== null ? minorUnitsToPgBigInt(retainerPence) : null;
+
   const costsJson: Record<string, unknown> = {
     billingBasisId: matter.billingBasisId ?? '',
     feeEstimateGbp: matter.feeEstimateGbp ?? null,
     agreedFeeCapGbp: matter.agreedFeeCapGbp ?? null,
-    retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null,
+    retainerMoniesOnAccountGbp: normalizedRetainerGbp,
   };
 
   const milestonesJson: Record<string, unknown> = {
@@ -685,7 +707,7 @@ function buildMatterDbParameters(
     engagementLetterSignedAt: matter.engagementLetterSignedAt ?? null,
     feeEstimateGbp: matter.feeEstimateGbp ?? null,
     agreedFeeCapGbp: matter.agreedFeeCapGbp ?? null,
-    retainerMoniesOnAccountGbp: matter.retainerMoniesOnAccountGbp ?? null,
+    retainerMoniesOnAccountGbp: normalizedRetainerGbp,
     partiesFallback: matter.parties ?? [],
     hasSourceEnquiryId: matter.sourceEnquiryId !== undefined,
     hasSourceQuoteId: matter.sourceQuoteId !== undefined,
@@ -787,6 +809,7 @@ function buildMatterDbParameters(
       ? JSON.stringify(riskAssessmentJson)
       : null,
     costsJson: JSON.stringify(costsJson),
+    retainerMoniesOnAccountPence,
     openingRecordJson: JSON.stringify(openingRecordJson),
     milestonesJson: JSON.stringify(milestonesJson),
     numberSequenceKey: matter.numberSequenceKey ?? null,
@@ -1128,7 +1151,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            created_at, updated_at, additional_client_ids_json,
            restricted_access_user_ids_json, fields_json, custom_fields_json,
            conflict_check_record_json, risk_assessment_json, costs_json,
-           opening_record_json, milestones_json, number_sequence_key, number_sequence_value
+           opening_record_json, milestones_json, number_sequence_key, number_sequence_value,
+           retainer_monies_on_account_pence
          ) VALUES (
            $1, $2, 1, $3, $4, $5,
            $6, $7, $8,
@@ -1142,7 +1166,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            $34::timestamptz, $35::timestamptz, $36::jsonb,
            $37::jsonb, $38::jsonb, $39::jsonb,
            $40::jsonb, $41::jsonb, $42::jsonb,
-           $43::jsonb, $44::jsonb, $45, $46::bigint
+           $43::jsonb, $44::jsonb, $45, $46::bigint,
+           $47::bigint
          )
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            row_version = 1,
@@ -1189,7 +1214,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            opening_record_json = EXCLUDED.opening_record_json,
            milestones_json = EXCLUDED.milestones_json,
            number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
-           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
+           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value),
+           retainer_monies_on_account_pence = EXCLUDED.retainer_monies_on_account_pence
          WHERE public.matters.client_id = 'O-KEYDATE-STUB'
          RETURNING *`,
         [
@@ -1239,6 +1265,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.milestonesJson,
           p.numberSequenceKey,
           p.numberSequenceValue,
+          p.retainerMoniesOnAccountPence,
         ],
       );
 
@@ -1382,7 +1409,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            opening_record_json = $44::jsonb,
            milestones_json = $45::jsonb,
            number_sequence_key = COALESCE($46, public.matters.number_sequence_key),
-           number_sequence_value = COALESCE($47::bigint, public.matters.number_sequence_value)
+           number_sequence_value = COALESCE($47::bigint, public.matters.number_sequence_value),
+           retainer_monies_on_account_pence = $48::bigint
          WHERE tenant_id = $1
            AND id = $2
            AND row_version = $3
@@ -1435,6 +1463,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.milestonesJson,
           p.numberSequenceKey,
           p.numberSequenceValue,
+          p.retainerMoniesOnAccountPence,
         ],
       );
 
@@ -1532,7 +1561,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            created_at, updated_at, additional_client_ids_json,
            restricted_access_user_ids_json, fields_json, custom_fields_json,
            conflict_check_record_json, risk_assessment_json, costs_json,
-           opening_record_json, milestones_json, number_sequence_key, number_sequence_value
+           opening_record_json, milestones_json, number_sequence_key, number_sequence_value,
+           retainer_monies_on_account_pence
          ) VALUES (
            $1, $2, 1, $3, $4, $5,
            $6, $7, $8,
@@ -1546,7 +1576,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            $34::timestamptz, $35::timestamptz, $36::jsonb,
            $37::jsonb, $38::jsonb, $39::jsonb,
            $40::jsonb, $41::jsonb, $42::jsonb,
-           $43::jsonb, $44::jsonb, $45, $46::bigint
+           $43::jsonb, $44::jsonb, $45, $46::bigint,
+           $47::bigint
          )
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            row_version = COALESCE(public.matters.row_version, 0) + 1,
@@ -1593,7 +1624,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
            opening_record_json = EXCLUDED.opening_record_json,
            milestones_json = EXCLUDED.milestones_json,
            number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
-           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
+           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value),
+           retainer_monies_on_account_pence = EXCLUDED.retainer_monies_on_account_pence
          RETURNING *`,
         [
           p.tenantId,
@@ -1642,6 +1674,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.milestonesJson,
           p.numberSequenceKey,
           p.numberSequenceValue,
+          p.retainerMoniesOnAccountPence,
         ],
       );
       const saved = res.rows[0];
@@ -1710,7 +1743,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
              created_at, updated_at, additional_client_ids_json,
              restricted_access_user_ids_json, fields_json, custom_fields_json,
              conflict_check_record_json, risk_assessment_json, costs_json,
-             opening_record_json, milestones_json, number_sequence_key, number_sequence_value
+             opening_record_json, milestones_json, number_sequence_key, number_sequence_value,
+             retainer_monies_on_account_pence
            ) VALUES (
              $1, $2, $3, $4, $5, $6,
              $7, $8, $9,
@@ -1724,7 +1758,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
              $35::timestamptz, $36::timestamptz, $37::jsonb,
              $38::jsonb, $39::jsonb, $40::jsonb,
              $41::jsonb, $42::jsonb, $43::jsonb,
-             $44::jsonb, $45::jsonb, $46, $47::bigint
+             $44::jsonb, $45::jsonb, $46, $47::bigint,
+             $48::bigint
            )
            ON CONFLICT (tenant_id, id) DO UPDATE SET
              row_version = COALESCE(public.matters.row_version, EXCLUDED.row_version, 1),
@@ -1771,7 +1806,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
              opening_record_json = EXCLUDED.opening_record_json,
              milestones_json = EXCLUDED.milestones_json,
              number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
-             number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
+             number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value),
+             retainer_monies_on_account_pence = EXCLUDED.retainer_monies_on_account_pence
            RETURNING *`,
           [
             p.tenantId,
@@ -1821,6 +1857,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
             p.milestonesJson,
             p.numberSequenceKey,
             p.numberSequenceValue,
+            p.retainerMoniesOnAccountPence,
           ],
         );
 

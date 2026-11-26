@@ -9,8 +9,13 @@ import {
   parsePmsWorkbookDataset,
   resolveWorkbookPath,
 } from './importPms';
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+} from '@platform/core-api';
 import { getTenantPmsSource } from './pmsSource';
-import { openXlsxWorkbook, parseMoney } from './xlsxReader';
+import { openXlsxWorkbook, parseMoney, parseMoneyPence } from './xlsxReader';
 
 describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
   beforeAll(async () => {
@@ -72,9 +77,17 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     }
 
     // Check grand totals across all matters (Row 25 of check_matters)
-    const totalWip = parseMoney(matters.reduce((s, m) => s + m.unbilled_wip, 0));
-    const totalOutstanding = parseMoney(matters.reduce((s, m) => s + m.outstanding_debt, 0));
-    const totalClientAccount = parseMoney(matters.reduce((s, m) => s + m.client_account_balance, 0));
+    const totalWip = minorUnitsToPounds(
+      sumMinorUnits(matters.map((m) => poundsToMinorUnits(m.unbilled_wip))),
+    );
+    const totalOutstanding = minorUnitsToPounds(
+      sumMinorUnits(matters.map((m) => poundsToMinorUnits(m.outstanding_debt))),
+    );
+    const totalClientAccount = minorUnitsToPounds(
+      sumMinorUnits(
+        matters.map((m) => poundsToMinorUnits(m.client_account_balance)),
+      ),
+    );
 
     expect(totalWip).toBe(34140.0);
     expect(totalOutstanding).toBe(49130.22);
@@ -921,6 +934,22 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
       }
     }
     expect(matchedSeedPhones.length).toBeGreaterThan(20);
+  });
+
+  it('S1-12: parseMoneyPence parses canonical decimal text without float drift and round-trips half-penny ties away from zero', () => {
+    expect(parseMoneyPence('19.995')).toBe(2000);
+    expect(parseMoneyPence('-19.995')).toBe(-2000);
+    expect(parseMoneyPence('-0.005')).toBe(-1);
+    expect(parseMoneyPence('0.005')).toBe(1);
+    expect(parseMoneyPence('123456.78')).toBe(12345678);
+    expect(parseMoneyPence('1.4210854715202004e-14')).toBe(0);
+    expect(parseMoneyPence('')).toBe(0);
+    expect(parseMoneyPence(null)).toBe(0);
+    expect(
+      minorUnitsToPounds(
+        sumMinorUnits([parseMoneyPence('0.1'), parseMoneyPence('0.2')]),
+      ),
+    ).toBe(0.3);
   });
 });
 

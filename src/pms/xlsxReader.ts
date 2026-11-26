@@ -4,6 +4,11 @@
  */
 import fs from 'node:fs';
 import zlib from 'node:zlib';
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  type MinorUnits,
+} from '@platform/core-api';
 
 interface ZipEntry {
   name: string;
@@ -144,12 +149,33 @@ export function excelSerialToIsoDate(serialStr: string | number | null | undefin
   return d.toISOString().slice(0, 10);
 }
 
-/** Round money to exact 2 decimal places, avoiding floating-point drift. */
+/** Parse decimal monetary text or number to exact integer minor units (pence), avoiding floating-point drift. */
+export function parseMoneyPence(
+  val: string | number | null | undefined,
+): MinorUnits {
+  if (val === null || val === undefined) return 0 as MinorUnits;
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return 0 as MinorUnits;
+    return /[eE]/.test(String(val))
+      ? Math.abs(val) < 1e-6
+        ? (0 as MinorUnits)
+        : poundsToMinorUnits(val.toFixed(6))
+      : poundsToMinorUnits(val);
+  }
+  const trimmed = String(val).trim();
+  if (!trimmed) return 0 as MinorUnits;
+  if (/^\s*[-+]?\d+(?:\.\d+)?\s*$/.test(trimmed)) {
+    return poundsToMinorUnits(trimmed);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return 0 as MinorUnits;
+  if (Math.abs(parsed) < 1e-6) return 0 as MinorUnits;
+  return poundsToMinorUnits(parsed.toFixed(6));
+}
+
+/** Round money to exact 2 decimal places via integer-pence conversion, avoiding floating-point drift. */
 export function parseMoney(val: string | number | null | undefined): number {
-  if (val === null || val === undefined || String(val).trim() === '') return 0;
-  const n = Number(val);
-  if (!Number.isFinite(n)) return 0;
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  return minorUnitsToPounds(parseMoneyPence(val));
 }
 
 export function openXlsxWorkbook(filePath: string): ParsedWorkbook {

@@ -51,9 +51,11 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import type {
-  ClientRateOverrideRecord,
-  UserNotificationPreference,
+import {
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type ClientRateOverrideRecord,
+  type UserNotificationPreference,
 } from '@platform/core-api';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
@@ -634,11 +636,12 @@ export function PersonProfileClient({
     const overdueCount =
       canViewFinance &&
       pmsSummary &&
-      pmsSummary.aged_1_30 +
-        pmsSummary.aged_31_60 +
-        pmsSummary.aged_61_90 +
-        pmsSummary.aged_90_plus >
-        0
+      sumMinorUnits([
+        poundsToMinorUnits(pmsSummary.aged_1_30),
+        poundsToMinorUnits(pmsSummary.aged_31_60),
+        poundsToMinorUnits(pmsSummary.aged_61_90),
+        poundsToMinorUnits(pmsSummary.aged_90_plus),
+      ]) > 0
         ? 1
         : 0;
 

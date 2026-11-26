@@ -25,10 +25,14 @@ import type {
   PmsLink,
   Team,
 } from './types';
-import type {
-  PmsFieldMappingEntry,
-  PmsOutboundCommand,
-  PmsOutboundCommandType,
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type MinorUnits,
+  type PmsFieldMappingEntry,
+  type PmsOutboundCommand,
+  type PmsOutboundCommandType,
 } from '@platform/core-api';
 import type {
   PmsCashReceivedSummary,
@@ -47,16 +51,24 @@ import type {
   PmsTimeEntry,
 } from '@/pms/types';
 
+function toSafeMinorUnits(n: number | null | undefined): MinorUnits {
+  const num = Number(n ?? 0);
+  if (!Number.isFinite(num)) return 0 as MinorUnits;
+  if (/[eE]/.test(String(num))) {
+    return Math.abs(num) < 1e-6 ? (0 as MinorUnits) : poundsToMinorUnits(num.toFixed(6));
+  }
+  return poundsToMinorUnits(num);
+}
+
 /** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
 export function formatGbp(amount: number | null | undefined): string {
-  const n = Number(amount ?? 0);
-  if (!Number.isFinite(n)) return '£0.00';
-  const rounded = Math.round((Math.abs(n) + Number.EPSILON) * 100) / 100;
-  const formatted = rounded.toLocaleString('en-GB', {
+  const minor = toSafeMinorUnits(amount);
+  const absPounds = minorUnitsToPounds(Math.abs(minor));
+  const formatted = absPounds.toLocaleString('en-GB', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-  if (n < -0.004) {
+  if (minor < 0) {
     return `(£${formatted})`;
   }
   return `£${formatted}`;
@@ -545,20 +557,24 @@ export function reconcilePmsInboundMatterCommercials(
   };
 }
 
-function roundMoney2(n: number): number {
+function roundHours2(n: number): number {
   if (!Number.isFinite(n)) return 0;
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
 function sumMoneyPence<T>(rows: readonly T[], selector: (row: T) => number): number {
-  let totalPence = 0;
+  return minorUnitsToPounds(
+    sumMinorUnits(rows.map((row) => toSafeMinorUnits(selector(row)))),
+  );
+}
+
+function sumHours2<T>(rows: readonly T[], selector: (row: T) => number): number {
+  let total = 0;
   for (const row of rows) {
     const val = selector(row);
-    if (Number.isFinite(val)) {
-      totalPence += Math.round(val * 100);
-    }
+    if (Number.isFinite(val)) total += val;
   }
-  return roundMoney2(totalPence / 100);
+  return roundHours2(total);
 }
 
 /**
@@ -610,7 +626,7 @@ export function buildClientFinancialsFromRows(
     i.age_bucket === '90+' ? i.outstanding : 0,
   );
 
-  const credit_limit = roundMoney2(client.credit_limit);
+  const credit_limit = minorUnitsToPounds(toSafeMinorUnits(client.credit_limit));
 
   return {
     client_code: client.client_code,
@@ -693,7 +709,7 @@ export function buildFeeEarnerWeeklyTime(params: {
   const hoursByDate = new Map<string, number>();
   for (const t of visibleEntries) {
     if (t.date >= weekStart && t.date <= weekEnd && t.date <= asAtIso) {
-      hoursByDate.set(t.date, roundMoney2((hoursByDate.get(t.date) ?? 0) + t.hours));
+      hoursByDate.set(t.date, roundHours2((hoursByDate.get(t.date) ?? 0) + t.hours));
     }
   }
 
@@ -705,7 +721,7 @@ export function buildFeeEarnerWeeklyTime(params: {
   const weekTotalHours = Math.round(weekdays.reduce((acc, d) => acc + d.hours, 0) * 10) / 10;
 
   let mtdHours = 0;
-  let unbilledWip = 0;
+  let unbilledWipPence = 0 as MinorUnits;
   const unbilledMatters = new Set<string>();
   let oldestUnbilledDate: string | null = null;
   const currentYm = asAtIso.slice(0, 7);
@@ -715,7 +731,7 @@ export function buildFeeEarnerWeeklyTime(params: {
       mtdHours += t.hours;
     }
     if (t.billed_status === 'Unbilled') {
-      unbilledWip += t.value;
+      unbilledWipPence = sumMinorUnits([unbilledWipPence, toSafeMinorUnits(t.value)]);
       unbilledMatters.add(t.matter_code);
       if (!oldestUnbilledDate || t.date < oldestUnbilledDate) {
         oldestUnbilledDate = t.date;
@@ -729,8 +745,8 @@ export function buildFeeEarnerWeeklyTime(params: {
     dailyPaceHours,
     weeklyPaceHours,
     weekdays,
-    monthToDateHours: roundMoney2(mtdHours),
-    myUnbilledWip: roundMoney2(unbilledWip),
+    monthToDateHours: roundHours2(mtdHours),
+    myUnbilledWip: minorUnitsToPounds(unbilledWipPence),
     myUnbilledMatterCount: unbilledMatters.size,
     oldestUnbilledDate,
   };
@@ -826,10 +842,10 @@ export function buildFirmFinanceRollups(
     const feYearEntries = feEntries.filter(
       (t) => t.date.slice(0, 4) === asAtYear && t.date <= asAtIso,
     );
-    const chargeable_hours = sumMoneyPence(feYearEntries, (t) =>
+    const chargeable_hours = sumHours2(feYearEntries, (t) =>
       t.chargeable === 'Y' ? t.hours : 0,
     );
-    const chargeable_hours_this_month = sumMoneyPence(feEntries, (t) =>
+    const chargeable_hours_this_month = sumHours2(feEntries, (t) =>
       t.chargeable === 'Y' && t.date.slice(0, 7) === currentYm && t.date <= asAtIso
         ? t.hours
         : 0,
@@ -851,7 +867,7 @@ export function buildFirmFinanceRollups(
       email: fe.email,
       grade: fe.grade,
       department: fe.department,
-      standard_hourly_rate: roundMoney2(fe.standard_hourly_rate),
+      standard_hourly_rate: minorUnitsToPounds(toSafeMinorUnits(fe.standard_hourly_rate)),
       chargeable_hours,
       chargeable_hours_this_month,
       time_value,
@@ -872,7 +888,7 @@ export function buildFirmFinanceRollups(
   );
 
   // 3. Monthly fees billed (derived from asAtDate year and month range up to asAtIso, R339)
-  const byYm = new Map<string, number>();
+  const byYmPence = new Map<string, MinorUnits>();
   for (const inv of visibleInvoices) {
     if (
       inv.invoice_date.slice(0, 4) !== asAtYear ||
@@ -882,7 +898,10 @@ export function buildFirmFinanceRollups(
       continue;
     }
     const ym = inv.invoice_date.slice(0, 7);
-    byYm.set(ym, roundMoney2((byYm.get(ym) ?? 0) + inv.fees_net));
+    byYmPence.set(
+      ym,
+      sumMinorUnits([byYmPence.get(ym) ?? (0 as MinorUnits), toSafeMinorUnits(inv.fees_net)]),
+    );
   }
   const allMonthNames = [
     'Jan',
@@ -904,31 +923,31 @@ export function buildFirmFinanceRollups(
     return {
       monthKey,
       monthShort: shortName,
-      feesNet: byYm.get(monthKey) ?? 0,
+      feesNet: minorUnitsToPounds(byYmPence.get(monthKey) ?? (0 as MinorUnits)),
     };
   });
-  const yearToDateTotal = roundMoney2(months.reduce((acc, m) => acc + m.feesNet, 0));
+  const yearToDateTotal = sumMoneyPence(months, (m) => m.feesNet);
 
   // 4. Cash received summary (derived from asAtDate current & previous month)
-  let currentMonthTotal = 0;
+  let currentMonthPence = 0 as MinorUnits;
   let currentMonthReceiptCount = 0;
-  let previousMonthTotal = 0;
+  let previousMonthPence = 0 as MinorUnits;
   let previousMonthReceiptCount = 0;
   for (const p of visiblePayments) {
     if (p.receipt_date > asAtIso) continue;
     const ym = p.receipt_date.slice(0, 7);
     if (ym === currentYm) {
-      currentMonthTotal += p.amount;
+      currentMonthPence = sumMinorUnits([currentMonthPence, toSafeMinorUnits(p.amount)]);
       currentMonthReceiptCount += 1;
     } else if (ym === previousYm) {
-      previousMonthTotal += p.amount;
+      previousMonthPence = sumMinorUnits([previousMonthPence, toSafeMinorUnits(p.amount)]);
       previousMonthReceiptCount += 1;
     }
   }
   const pmsCashReceived: PmsCashReceivedSummary = {
-    currentMonthTotal: roundMoney2(currentMonthTotal),
+    currentMonthTotal: minorUnitsToPounds(currentMonthPence),
     currentMonthReceiptCount,
-    previousMonthTotal: roundMoney2(previousMonthTotal),
+    previousMonthTotal: minorUnitsToPounds(previousMonthPence),
     previousMonthReceiptCount,
   };
 
@@ -945,40 +964,35 @@ export function buildFirmFinanceRollups(
   const departments: PmsDepartmentFinancials[] = [];
   for (const [practiceArea, deptMatters] of mattersByPracticeArea.entries()) {
     const openMatters = deptMatters.filter((m) => m.status === 'Open').length;
-    const billedThisYear = roundMoney2(
-      visibleInvoices
-        .filter(
-          (inv) =>
-            matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
-            inv.invoice_date.slice(0, 4) === asAtYear &&
-            inv.invoice_date <= asAtIso &&
-            inv.exported_status !== 'Draft',
-        )
-        .reduce((s, inv) => s + inv.fees_net, 0),
+    const billedThisYear = sumMoneyPence(
+      visibleInvoices.filter(
+        (inv) =>
+          matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
+          inv.invoice_date.slice(0, 4) === asAtYear &&
+          inv.invoice_date <= asAtIso &&
+          inv.exported_status !== 'Draft',
+      ),
+      (inv) => inv.fees_net,
     );
-    const unbilledWip = roundMoney2(deptMatters.reduce((s, m) => s + m.unbilled_wip, 0));
-    const outstandingDebt = roundMoney2(
-      deptMatters.reduce((s, m) => s + m.outstanding_debt, 0),
+    const unbilledWip = sumMoneyPence(deptMatters, (m) => m.unbilled_wip);
+    const outstandingDebt = sumMoneyPence(deptMatters, (m) => m.outstanding_debt);
+    const overdueDebt = sumMoneyPence(
+      visibleInvoices.filter(
+        (inv) =>
+          matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
+          (inv.days_past_due ?? 0) > 0,
+      ),
+      (inv) => inv.outstanding,
     );
-    const overdueDebt = roundMoney2(
-      visibleInvoices
-        .filter(
-          (inv) =>
-            matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
-            (inv.days_past_due ?? 0) > 0,
-        )
-        .reduce((s, inv) => s + inv.outstanding, 0),
-    );
-    const currentMonthHours = roundMoney2(
-      visibleTimeEntries
-        .filter(
-          (t) =>
-            matterPracticeAreaByCode.get(t.matter_code) === practiceArea &&
-            t.chargeable === 'Y' &&
-            t.date.slice(0, 7) === currentYm &&
-            t.date <= asAtIso,
-        )
-        .reduce((s, t) => s + t.hours, 0),
+    const currentMonthHours = sumHours2(
+      visibleTimeEntries.filter(
+        (t) =>
+          matterPracticeAreaByCode.get(t.matter_code) === practiceArea &&
+          t.chargeable === 'Y' &&
+          t.date.slice(0, 7) === currentYm &&
+          t.date <= asAtIso,
+      ),
+      (t) => t.hours,
     );
     departments.push({
       practiceArea,
@@ -995,10 +1009,10 @@ export function buildFirmFinanceRollups(
   const firmTotal: PmsDepartmentFinancials = {
     practiceArea: 'Firm total',
     openMatters: departments.reduce((s, d) => s + d.openMatters, 0),
-    billedThisYear: roundMoney2(departments.reduce((s, d) => s + d.billedThisYear, 0)),
-    unbilledWip: roundMoney2(departments.reduce((s, d) => s + d.unbilledWip, 0)),
-    outstandingDebt: roundMoney2(departments.reduce((s, d) => s + d.outstandingDebt, 0)),
-    overdueDebt: roundMoney2(departments.reduce((s, d) => s + d.overdueDebt, 0)),
+    billedThisYear: sumMoneyPence(departments, (d) => d.billedThisYear),
+    unbilledWip: sumMoneyPence(departments, (d) => d.unbilledWip),
+    outstandingDebt: sumMoneyPence(departments, (d) => d.outstandingDebt),
+    overdueDebt: sumMoneyPence(departments, (d) => d.overdueDebt),
     currentMonthHours:
       Math.round(departments.reduce((s, d) => s + d.currentMonthHours, 0) * 10) / 10,
   };

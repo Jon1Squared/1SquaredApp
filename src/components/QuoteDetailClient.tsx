@@ -38,10 +38,13 @@ import type {
   Quote,
   QuoteDeclineReason,
 } from '@/domain/types';
-import type {
-  FeeArrangementCapEntry,
-  ResolvedApplicableRatesResult,
-  WorkTypesConfiguration,
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type FeeArrangementCapEntry,
+  type ResolvedApplicableRatesResult,
+  type WorkTypesConfiguration,
 } from '@platform/core-api';
 import { formatRateTierBadgeLabel } from '@/domain/matterCosts';
 import { QuoteFormClient } from './QuoteFormClient';
@@ -794,7 +797,15 @@ export function QuoteDetailClient({
                   </td>
                   <td className="data-list__td data-list__td--right">
                     <strong>
-                      {formatGbp(totals.feeAmountExVat + totals.vatOnFee, true)}
+                      {formatGbp(
+                        minorUnitsToPounds(
+                          sumMinorUnits([
+                            poundsToMinorUnits(totals.feeAmountExVat),
+                            poundsToMinorUnits(totals.vatOnFee),
+                          ]),
+                        ),
+                        true,
+                      )}
                     </strong>
                   </td>
                 </tr>
@@ -827,7 +838,15 @@ export function QuoteDetailClient({
                         {formatGbp(dVat, true)}
                       </td>
                       <td className="data-list__td data-list__td--right">
-                        {formatGbp(d.amountExVat + dVat, true)}
+                        {formatGbp(
+                          minorUnitsToPounds(
+                            sumMinorUnits([
+                              poundsToMinorUnits(d.amountExVat),
+                              poundsToMinorUnits(dVat),
+                            ]),
+                          ),
+                          true,
+                        )}
                       </td>
                     </tr>
                   );

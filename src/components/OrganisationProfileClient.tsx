@@ -26,9 +26,12 @@ import type {
   Task,
   Team,
 } from '@/domain/types';
-import type {
-  ClientRateOverrideRecord,
-  ParentChainNodeSummary,
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+  type ClientRateOverrideRecord,
+  type ParentChainNodeSummary,
 } from '@platform/core-api';
 import type {
   ClientPmsViewBundle,
@@ -469,7 +472,14 @@ export function OrganisationProfileClient({
   const distinctBadges = Array.from(new Set(displayMatters.map((m) => m.badge))).join(', ');
 
   const overdueDebtTotal = pmsFin
-    ? pmsFin.aged_1_30 + pmsFin.aged_31_60 + pmsFin.aged_61_90 + pmsFin.aged_90_plus
+    ? minorUnitsToPounds(
+        sumMinorUnits([
+          poundsToMinorUnits(pmsFin.aged_1_30),
+          poundsToMinorUnits(pmsFin.aged_31_60),
+          poundsToMinorUnits(pmsFin.aged_61_90),
+          poundsToMinorUnits(pmsFin.aged_90_plus),
+        ]),
+      )
     : 0;
 
   const creditPctText =

@@ -27,6 +27,12 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  subtractMinorUnits,
+  sumMinorUnits,
+} from '@platform/core-api';
+import {
   addNoteAction,
   liftMatterRestrictionAction,
   openProspectiveMatterAction,
@@ -718,10 +724,32 @@ export function MatterProfileClient({
       0;
     const totalBilled = pmsFin.fees_billed;
     const billedUnpaid = pmsFin.outstanding_debt;
-    const billedPaid = Math.max(0, totalBilled - billedUnpaid);
+    const billedPaid = Math.max(
+      0,
+      minorUnitsToPounds(
+        subtractMinorUnits(
+          poundsToMinorUnits(totalBilled),
+          poundsToMinorUnits(billedUnpaid),
+        ),
+      ),
+    );
     const unbilledWip = pmsFin.unbilled_wip;
-    const usedTotal = billedPaid + billedUnpaid + unbilledWip;
-    const remainingBudget = Math.max(0, budget - usedTotal);
+    const usedTotal = minorUnitsToPounds(
+      sumMinorUnits([
+        poundsToMinorUnits(billedPaid),
+        poundsToMinorUnits(billedUnpaid),
+        poundsToMinorUnits(unbilledWip),
+      ]),
+    );
+    const remainingBudget = Math.max(
+      0,
+      minorUnitsToPounds(
+        subtractMinorUnits(
+          poundsToMinorUnits(budget),
+          poundsToMinorUnits(usedTotal),
+        ),
+      ),
+    );
     const budgetUsedPct = budget > 0 ? Math.min(100, Math.round((usedTotal / budget) * 100)) : 0;
     const matterProgressPct = Math.min(
       100,

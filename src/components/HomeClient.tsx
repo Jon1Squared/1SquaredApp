@@ -20,6 +20,11 @@ import {
   takeTaskAction,
   transitionRegisterRecordAction,
 } from '@/app/actions';
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  sumMinorUnits,
+} from '@platform/core-api';
 import { isActionDenied } from '@/domain/actionResult';
 import { buildCddStatusDisplayText, isCddDueExpired } from '@/domain/cdd';
 import { formatDate } from '@/domain/dates';
@@ -458,28 +463,46 @@ export function HomeClient({
 
   // Firm financial totals from PMS
   const firmWipTotal = useMemo(
-    () => Math.round(allMatterFins.reduce((s, m) => s + m.unbilled_wip, 0) * 100) / 100,
+    () =>
+      minorUnitsToPounds(
+        sumMinorUnits(allMatterFins.map((m) => poundsToMinorUnits(m.unbilled_wip))),
+      ),
     [allMatterFins],
   );
   const firmTotalDebt = useMemo(
-    () => Math.round(allMatterFins.reduce((s, m) => s + m.outstanding_debt, 0) * 100) / 100,
+    () =>
+      minorUnitsToPounds(
+        sumMinorUnits(allMatterFins.map((m) => poundsToMinorUnits(m.outstanding_debt))),
+      ),
     [allMatterFins],
   );
   const firmOverdueDebt = useMemo(
     () =>
-      Math.round(
-        pmsAgedDebt
-          .filter((inv) => (inv.days_past_due ?? 0) > 0)
-          .reduce((s, inv) => s + inv.outstanding, 0) * 100,
-      ) / 100,
+      minorUnitsToPounds(
+        sumMinorUnits(
+          pmsAgedDebt
+            .filter((inv) => (inv.days_past_due ?? 0) > 0)
+            .map((inv) => poundsToMinorUnits(inv.outstanding)),
+        ),
+      ),
     [pmsAgedDebt],
   );
   const firmClientAccountHeld = useMemo(
-    () => Math.round(allMatterFins.reduce((s, m) => s + m.client_account_balance, 0) * 100) / 100,
+    () =>
+      minorUnitsToPounds(
+        sumMinorUnits(
+          allMatterFins.map((m) => poundsToMinorUnits(m.client_account_balance)),
+        ),
+      ),
     [allMatterFins],
   );
   const firmUnbilledDisbNet = useMemo(
-    () => Math.round(allMatterFins.reduce((s, m) => s + m.unbilled_disbursements, 0) * 100) / 100,
+    () =>
+      minorUnitsToPounds(
+        sumMinorUnits(
+          allMatterFins.map((m) => poundsToMinorUnits(m.unbilled_disbursements)),
+        ),
+      ),
     [allMatterFins],
   );
 
@@ -1005,12 +1028,13 @@ export function HomeClient({
           </div>
         );
       case 'fin_overdue_debt': {
-        const notYetDueTotal =
-          Math.round(
+        const notYetDueTotal = minorUnitsToPounds(
+          sumMinorUnits(
             pmsAgedDebt
               .filter((inv) => (inv.days_past_due ?? 0) <= 0)
-              .reduce((s, inv) => s + inv.outstanding, 0) * 100,
-          ) / 100;
+              .map((inv) => poundsToMinorUnits(inv.outstanding)),
+          ),
+        );
         return (
           <div key={cardId} className="kpi-card">
             <div className="kpi-label">
@@ -4046,14 +4070,23 @@ export function HomeClient({
         );
         const band90Plus = pmsAgedDebt.filter((i) => (i.days_past_due ?? 0) > 90);
         const sumBand = (list: PmsInvoiceBalance[]) =>
-          Math.round(list.reduce((s, x) => s + x.outstanding, 0) * 100) / 100;
+          minorUnitsToPounds(
+            sumMinorUnits(list.map((x) => poundsToMinorUnits(x.outstanding))),
+          );
         const valNotDue = sumBand(bandNotDue);
         const val1To30 = sumBand(band1To30);
         const val31To60 = sumBand(band31To60);
         const val61To90 = sumBand(band61To90);
         const val90Plus = sumBand(band90Plus);
-        const totalBandDebt =
-          Math.round((valNotDue + val1To30 + val31To60 + val61To90 + val90Plus) * 100) / 100;
+        const totalBandDebt = minorUnitsToPounds(
+          sumMinorUnits([
+            poundsToMinorUnits(valNotDue),
+            poundsToMinorUnits(val1To30),
+            poundsToMinorUnits(val31To60),
+            poundsToMinorUnits(val61To90),
+            poundsToMinorUnits(val90Plus),
+          ]),
+        );
         const pctOf = (v: number) =>
           totalBandDebt > 0 ? `${((v / totalBandDebt) * 100).toFixed(1)}%` : '0%';
         return (

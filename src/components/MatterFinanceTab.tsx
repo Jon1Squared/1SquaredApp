@@ -4,6 +4,12 @@ import React, { useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronRight, Link2, Unlink } from 'lucide-react';
 import { linkPmsRecordAction, unlinkPmsRecordAction } from '@/app/actions';
+import {
+  minorUnitsToPounds,
+  poundsToMinorUnits,
+  subtractMinorUnits,
+  sumMinorUnits,
+} from '@platform/core-api';
 import { formatDate } from '@/domain/dates';
 import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
 import type { AppRole } from '@/domain/types';
@@ -67,14 +73,15 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
 
   const filteredTimeTotals = useMemo(() => {
     let hours = 0;
-    let value = 0;
     for (const te of filteredTimeEntries) {
       hours += te.hours;
-      value += te.value;
     }
+    const valuePence = sumMinorUnits(
+      filteredTimeEntries.map((te) => poundsToMinorUnits(te.value)),
+    );
     return {
       hours: Math.round((hours + Number.EPSILON) * 100) / 100,
-      value: Math.round((value + Number.EPSILON) * 100) / 100,
+      value: minorUnitsToPounds(valuePence),
     };
   }, [filteredTimeEntries]);
 
@@ -213,9 +220,15 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
     isCappedFee && fin.fixed_fee_amount > 0 && fin.time_value_recorded > fin.fixed_fee_amount;
 
   // Stacked bar widths against max(currentEst, fees_billed + unbilled_wip)
+  const feesAndWipTotal = minorUnitsToPounds(
+    sumMinorUnits([
+      poundsToMinorUnits(fin.fees_billed),
+      poundsToMinorUnits(fin.unbilled_wip),
+    ]),
+  );
   const barScaleBase =
     currentEst && currentEst > 0
-      ? Math.max(currentEst, fin.fees_billed + fin.unbilled_wip)
+      ? Math.max(currentEst, feesAndWipTotal)
       : 0;
   const billedBarPct =
     barScaleBase > 0 ? Math.min(100, (fin.fees_billed / barScaleBase) * 100) : 0;
@@ -405,7 +418,14 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
               <strong>{formatGbp(fin.time_value_recorded)}</strong> against the{' '}
               <strong>{formatGbp(fin.fixed_fee_amount)}</strong> agreed cap
               {capExceeded
-                ? ` — ${formatGbp(fin.time_value_recorded - fin.fixed_fee_amount)} over the cap.`
+                ? ` — ${formatGbp(
+                    minorUnitsToPounds(
+                      subtractMinorUnits(
+                        poundsToMinorUnits(fin.time_value_recorded),
+                        poundsToMinorUnits(fin.fixed_fee_amount),
+                      ),
+                    ),
+                  )} over the cap.`
                 : '.'}
             </div>
           </div>
@@ -445,7 +465,7 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
               <div style={{ fontSize: 14, fontWeight: 600 }}>
                 Fees billed ({formatGbp(fin.fees_billed)}) + Unbilled WIP (
                 {formatGbp(fin.unbilled_wip)}) ={' '}
-                <strong>{formatGbp(fin.fees_billed + fin.unbilled_wip)}</strong> of{' '}
+                <strong>{formatGbp(feesAndWipTotal)}</strong> of{' '}
                 <strong>{formatGbp(currentEst)}</strong> estimate ({formatWholePct(pctUsed)})
               </div>
               <div className="muted" style={{ fontSize: 12 }}>
@@ -1050,7 +1070,11 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
                                           .toFixed(1)}{' '}
                                         hrs ·{' '}
                                         {formatGbp(
-                                          invTime.reduce((s, t) => s + t.value, 0),
+                                          minorUnitsToPounds(
+                                            sumMinorUnits(
+                                              invTime.map((t) => poundsToMinorUnits(t.value)),
+                                            ),
+                                          ),
                                         )}
                                         )
                                       </div>
