@@ -5809,6 +5809,16 @@ async function runMatterOpeningGate(params: {
 }
 
 const SYSTEM_HRO_CREATOR_ACTOR_ID = 'system:matter_opening';
+/**
+ * System-level withdrawal grant used solely by `withdrawPendingHighRiskOpeningInTx` (R804, R815).
+ * Reachable only from dedicated matter workflows that enforce caller permissions upfront:
+ * `saveMatterRecord` (risk downgrade/abandon via `syncHighRiskOpeningForMatterInTx`),
+ * `updateMatterConflictRecord` (conflict decline), and `openProspectiveMatterRecord`.
+ * Generic register transitions (`transitionRegisterRecordService`) never use this set and
+ * cannot reach `withdraw_opening` without `register:edit` (blocked by `systemOnly: true` ->
+ * `REGISTER_SYSTEM_ONLY_TRANSITION`, and `requiredPermission: 'register:edit'` -> `FORBIDDEN`).
+ * Proved by test 18 in `core/tests/opening-gate-numbering-s105.test.ts`.
+ */
 const SYSTEM_HRO_WITHDRAWAL_PERMISSIONS: ReadonlySet<PermissionKey> =
   new Set<PermissionKey>(['register:edit']);
 
