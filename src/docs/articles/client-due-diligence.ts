@@ -23,20 +23,22 @@ Open any external **Person** or **Organisation** profile and scroll to the **Cli
 
 1. On a client profile with **CDD not started**, click **Start CDD** to create the checklist (for existing records in **In progress** or **Recorded**, open the checklist items directly on the profile card).
 2. The checklist chooses items automatically based on the **client type** (for example Individual, Company or LLP, or Trust, charity or partnership) and the **risk tier**:
-   - **Standard CDD (Low or Medium risk):** 36-month (3-year) re-check interval, covering core identity, proof of address, or entity registration checks.
-   - **Enhanced CDD (High, Critical, or Sensitive risk):** 12-month (1-year) re-check interval, adding source of funds, source of wealth, beneficial ownership, and enhanced due diligence checks.
+   - **Standard CDD:** By default, applies to Low or Medium risk with a 36-month (3-year) re-check interval (your firm can change these settings), covering core identity, proof of address, or entity registration checks.
+   - **Enhanced CDD:** By default, applies to High, Critical, or Sensitive risk with a 12-month (1-year) re-check interval (your firm can change these settings), adding source of funds, source of wealth, beneficial ownership, and enhanced due diligence checks.
 3. Items start as **Pending**. For each item, add any supporting reference notes or evidence files and choose one of the three item actions:
    - **Mark recorded** — confirms the check or document has been received and verified.
    - **Not applicable** — records why the item does not apply (a written explanation is mandatory).
    - **Flag issue** — records a problem or discrepancy requiring follow-up (a written explanation is mandatory).
-4. Once every required checklist item is marked **Recorded** or **Not applicable**, click **Complete CDD**. Only clicking **Complete CDD** moves the record to **Recorded** and schedules the next re-check due date automatically (**36 months** ahead for Standard CDD, or **12 months** ahead for Enhanced CDD). No separate second approver sign-off is required on client CDD itself; any high-risk matter opening requires separate two-person sign-off under the **High-risk matter opening** workflow.
+4. Once every required checklist item is marked **Recorded** or **Not applicable**, click **Complete CDD**. Only clicking **Complete CDD** moves the record to **Recorded** and schedules the next re-check due date automatically (by default **36 months** ahead for Standard CDD, or **12 months** ahead for Enhanced CDD, depending on your firm’s settings). No separate second approver sign-off is required on client CDD itself; any high-risk matter opening requires separate two-person sign-off under the **High-risk matter opening** workflow.
 
-> **When a client later requires High risk CDD:** If a client holds a Standard CDD record and is later rated **High risk (based on the client’s matters)** or entity rating, upgrading is a manual step: click **Upgrade to High Risk** on the CDD panel. Trying to click **Complete CDD** at Standard tier for a High-risk client is refused until you carry out that upgrade. Upgrading preserves every already completed Standard item and attached file, adds the additional Enhanced CDD items as **Pending**, returns the record to **In progress**, and schedules the next re-check **12 months** ahead once you complete the remaining items and click **Complete CDD**.
+> **When a client later requires High risk CDD:** If a client holds a Standard CDD record and is later rated **High risk (based on the client’s matters)** or entity rating, upgrading is a manual step: click **Upgrade to High Risk** on the CDD panel. Trying to click **Complete CDD** at Standard tier for a High-risk client is refused until you carry out that upgrade. Upgrading preserves every already completed Standard item and attached file, adds the additional Enhanced CDD items as **Pending**, returns the record to **In progress**, and schedules the next re-check using your firm’s Enhanced CDD interval (by default **12 months** ahead) once you complete the remaining items and click **Complete CDD**.
 
 ## 3. Uploading and downloading CDD evidence
 
 - Documents such as passports, driving licences, utility bills, certificates of incorporation, and source-of-funds statements can be attached directly inside the checklist item before clicking **Mark recorded**.
-- Uploads accept PDF, JPEG, PNG, HEIC or HEIF images, and Word, Excel, or PowerPoint Office documents within the firm’s configured file-size limit (default 10 MB per file), verified by server file-signature checks. Executable files, scripts, unpermitted formats, and macro-enabled files are blocked before storage.
+- Only certain file types can be attached (PDF, images, Word, Excel, and PowerPoint) within your firm’s file-size limit (by default 10 MB per file).
+- Macro-enabled Office files, executable files, scripts, and other unsupported formats are refused.
+- Uploaded files receive a basic security check, which is not a full virus scan, so your firm’s usual IT protections still apply.
 - Evidence files stay stored in the firm’s tenant-isolated file store and are served through short-lived scoped downloads only to users permitted to view that client’s CDD record.
 
 ## 4. Manual verification and watchlist screening notices
