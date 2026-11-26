@@ -97,7 +97,7 @@ describe('S1-06: Communication Chasing & Engagement Config Schemas, Defaults & M
     );
   });
 
-  it('3. Validates Not A Law Firm demo base.json chasing (7/14/21 enabled) and Appendix A Legal Ombudsman wording', () => {
+  it('3. Validates demo tenant package base.json chasing (7/14/21 enabled) and Appendix A Legal Ombudsman wording', () => {
     const validated = loadAndValidateTenantConfig(
       notALawFirmBaseConfig as Record<string, unknown>,
       {},
@@ -116,10 +116,10 @@ describe('S1-06: Communication Chasing & Engagement Config Schemas, Defaults & M
     expect(validated.chasing?.moneyOnAccount).toEqual(validated.chasing?.engagementLetter);
 
     expect(validated.engagement?.clientCareIntroductoryParagraph).toContain(
-      'Not A Law Firm LLP',
+      notALawFirmBaseConfig.displayName,
     );
     expect(validated.engagement?.clientCareTermsSummary).toContain(
-      'If our own complaints process does not resolve your complaint within eight weeks, you have the right to complain to the Legal Ombudsman (demonstration wording only — Not A Law Firm LLP is a fictional firm).',
+      `If our own complaints process does not resolve your complaint within eight weeks, you have the right to complain to the Legal Ombudsman (demonstration wording only — ${notALawFirmBaseConfig.displayName} is a fictional firm).`,
     );
     expect(validated.engagement?.clientCareSignatureInstruction).toContain(
       'scanned copy or clear photograph',

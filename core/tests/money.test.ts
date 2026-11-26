@@ -39,7 +39,9 @@ describe('core minor-unit money module', () => {
       'formatMinorUnitsGbp',
     ] as const;
 
-    expect(coreApi.CORE_API_VERSION).toBe('2.3.0');
+    expect(
+      corePkg.isCoreApiRangeCompatible(coreApi.CORE_API_VERSION, '^2.3.0'),
+    ).toBe(true);
     for (const name of expectedNames) {
       expect(typeof (coreApi as Record<string, unknown>)[name]).toBe('function');
       expect(typeof (corePkg as Record<string, unknown>)[name]).toBe('function');

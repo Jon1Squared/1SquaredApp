@@ -1073,6 +1073,7 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         'outbox-drain',
         'notification-digests',
         'quote-expiry',
+        'communication-chases',
       ]);
 
       const unknownExit = await executeCliJobRunner(
