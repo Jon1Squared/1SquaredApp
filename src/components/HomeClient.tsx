@@ -20,6 +20,7 @@ import {
   takeTaskAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
+import { buildCddStatusDisplayText, isCddDueExpired } from '@/domain/cdd';
 import { formatDate } from '@/domain/dates';
 import {
   computeEnquiryDashboardMetrics,
@@ -125,6 +126,8 @@ export interface HomeClientProps extends HomeSnapshotBaseProps {
   };
   pmsAllDisbursements?: PmsDisbursement[];
   pmsClientAccountByMatterCode?: Record<string, PmsClientAccountEntry[]>;
+  canViewCdd?: boolean;
+  cddQueueRecords?: import('@platform/core-api').RegisterRecord[];
 }
 
 const DEFAULT_FINANCE_CAPABILITIES: AppFinanceCapabilities = {
@@ -195,6 +198,8 @@ export function HomeClient({
   pmsDepartmentFinancials = EMPTY_DEPARTMENT_FINANCIALS,
   pmsAllDisbursements = [],
   pmsClientAccountByMatterCode = {},
+  canViewCdd = false,
+  cddQueueRecords = [],
 }: HomeClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -4439,16 +4444,84 @@ export function HomeClient({
       // 31. aml_and_cdd_queue (06 Risk & Compliance)
       // ================================================================
       case 'aml_and_cdd_queue': {
+        if (!canViewCdd) {
+          return null;
+        }
+        const todayYmd = new Date().toISOString().slice(0, 10);
+        const orgById = new Map(organisations.map((o) => [o.id, o] as const));
+        const personById = new Map(people.map((p) => [p.id, p] as const));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">AML &amp; Customer Due Diligence queue</h2>
+                <StatusPill
+                  label={`${cddQueueRecords.length} client${cddQueueRecords.length === 1 ? '' : 's'}`}
+                  tone={cddQueueRecords.length > 0 ? 'warning' : 'positive'}
+                />
               </div>
-              <span className="panel-subtitle">MLR 2017 · ID&amp;V, SoF &amp; SoW checks</span>
+              <span className="panel-subtitle">MLR 2017 · In-progress &amp; upcoming re-checks</span>
             </div>
             <div className="panel-body">
-              <div className="panel-body padded muted">Not yet available</div>
+              {cddQueueRecords.length === 0 ? (
+                <div className="panel-body padded muted">
+                  No CDD records currently in progress or due for re-check within 30 days.
+                </div>
+              ) : (
+                <ul className="worklist">
+                  {cddQueueRecords.map((rec) => {
+                    const isOrg = Boolean(rec.organisationId);
+                    const subjectId = rec.organisationId ?? rec.personId ?? '';
+                    const org = isOrg && rec.organisationId ? orgById.get(rec.organisationId) : undefined;
+                    const person = !isOrg && rec.personId ? personById.get(rec.personId) : undefined;
+                    const subjectLabel = org
+                      ? org.legalName
+                      : person
+                        ? personDisplayName(person)
+                        : rec.title;
+                    const href = isOrg
+                      ? `/organisations/${subjectId}?tab=compliance`
+                      : `/people/${subjectId}?tab=compliance`;
+                    const decider =
+                      rec.status === 'recorded' && (rec.decidedById ?? rec.updatedById)
+                        ? personById.get(rec.decidedById ?? rec.updatedById ?? '')
+                        : undefined;
+                    const expired = rec.status === 'recorded' && isCddDueExpired(rec.dueAt, todayYmd);
+                    const statusLabel = buildCddStatusDisplayText({
+                      visible: true,
+                      hasRecord: true,
+                      status: rec.status as 'in_progress' | 'recorded',
+                      recordedByName: decider ? personDisplayName(decider) : null,
+                      recordedAt: rec.decidedAt ?? rec.updatedAt,
+                      dueAt: rec.dueAt,
+                      isExpired: expired,
+                    });
+                    const tierLabel = rec.fieldValues?.riskTier === 'high' ? 'High Risk' : 'Standard';
+                    return (
+                      <li key={rec.id} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <StatusPill
+                              label={expired ? 'Overdue' : rec.status === 'recorded' ? 'Due soon' : 'In progress'}
+                              tone={expired ? 'alert' : 'warning'}
+                            />
+                            <Link href={href}>{subjectLabel}</Link>
+                            <StatusPill label={tierLabel} tone="neutral" />
+                          </div>
+                          <div className="worklist-meta">
+                            <span>{statusLabel}</span>
+                          </div>
+                        </div>
+                        <div className="worklist-right">
+                          <Link href={href} className="btn btn--secondary btn--sm">
+                            Open CDD
+                          </Link>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           </section>
         );

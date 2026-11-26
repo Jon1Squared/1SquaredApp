@@ -26,8 +26,9 @@ Each role’s Home page renders a configurable set of panels (\`data-panel-id\` 
    - **PMS period labels**: all PMS financial panels and headline cards (\`fe_hours_month\`, \`my_time_and_wip\`, \`mp_fees_ytd\`, \`mp_cash_month\`, \`cash_collection_vs_target\`, \`firm_financial_pulse\`, \`performance_by_department\`, \`team_workload_and_utilisation\`, and \`utilisation_and_realisation_by_grade\`) derive their month and year labels from the PMS extract \`asAtDate\` (or show \`—\` / \`PMS as-at date unavailable\` when missing or invalid) and display \`PMS as at <date>\` (\`formatPmsAsAtLabel\`).
 
    - **\`undertakings_and_file_reviews\`** and **\`complaints_incidents_and_breaches\`**: list active undertakings, scheduled periodic file reviews, open complaints, and SRA breaches from visible register records in \`TenantRegisterRepository\` (respecting restricted-matter access and linking straight to \`/registers?record=...\`), falling back to neutral empty states when no open records exist.
+   - **AML & CDD queue**: displays active client-level **Client Due Diligence** records that are in progress or due for review (including overdue checks) across clients the signed-in user is permitted to inspect (excluding hidden employee-client records for non-permitted viewers).
 
-2. **Empty-state panels for upcoming modules**: Where a register or workflow is scheduled for a later roadmap stage — **\`aml_and_cdd_queue\`** (and **\`rc_aml_pending\`**), **\`documents_and_correspondence_queue\`** (and **\`ls_letters_docs\`**), **\`rc_sra_breaches\`**, and **\`firm_risk_and_exceptions_register\`** — the panel remains in the layout and renders a neutral empty state (*"Not yet available"*) with no positive status badge rather than invented rows or a fake *"0 pending"* / *"0 items"* badge.
+2. **Empty-state panels for upcoming modules**: Where a register or workflow is scheduled for a later roadmap stage — the Risk & Compliance AML pending summary card, the Documents & Correspondence panels (including Legal Secretary letters & documents), the Risk & Compliance SRA breaches card, and the firm risk and exceptions register — the panel remains in the layout and renders a neutral empty state (*"Not yet available"*) with no positive status badge rather than invented rows or a fake *"0 pending"* / *"0 items"* badge.
 
 Action buttons on Home and profile screens only appear when they perform a real server action or navigation (such as opening a record, recording a task, or downloading a CSV export). Prototype toast-only buttons are not shown.
 
@@ -38,7 +39,7 @@ On a matter profile (**Overview** tab), the **Intake & compliance** card is deri
 | Row | Source fields on the matter | Shown when populated | Shown when not yet recorded |
 | --- | --- | --- | --- |
 | **Conflict check** | \`conflictDecision.outcome\`, \`conflictDecision.decidedAt\`, \`conflictCheckDate\` | \`Conflict check cleared\` (or the recorded outcome) with the decision date | \`Conflict check not recorded\` (\`—\`) |
-| **Client due diligence** | \`amlCompletedAt\`, \`amlStatus\` | \`Verified <date>\` when \`amlCompletedAt\` is set | The stored \`amlStatus\` label, or \`Not recorded\` |
+| **Client due diligence** | Client due diligence completion status and recorded date | Verified with completion date | Current status label, or Not recorded |
 | **Engagement letter** | \`engagementLetterSignedAt\`, \`engagementLetterStatus\` | \`Engagement letter signed\` with the signed date (or status \`Signed & returned\`) | \`Engagement letter\` with the stored status (such as \`Drafted\`, \`Sent\`, or \`Signed & returned\`), or \`Not recorded\` |
 | **Matter risk assessment** | Server-scored risk assessment (\`overallRisk\`, \`completedQuestions\`, \`totalQuestions\`) | \`Matter risk assessment (<Low/Medium/High> risk)\` with \`<completed>/<total> answered\` | \`Matter risk assessment (Not started)\` with \`0/<total> answered\` |
 

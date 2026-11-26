@@ -305,7 +305,9 @@ export type RegisterPermissionKey =
   | 'register:edit'
   | 'register:approve'
   | 'register:configure'
-  | 'undertaking:manage';
+  | 'undertaking:manage'
+  | 'cdd:view'
+  | 'cdd:record';
 
 export type JobOnlyPermissionKey =
   | 'tenant:provision'

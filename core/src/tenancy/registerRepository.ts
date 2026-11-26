@@ -29,6 +29,7 @@ import {
   createRegisterDomainError,
 } from '../domain/registers/index';
 import { TenantAuditRepository } from './auditRepository';
+import { buildMatterHiddenFromViewerSql } from './intakeQuoteRepository';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
 import {
   TenantScopedRepository,
@@ -42,14 +43,117 @@ export const REGISTER_RECORD_VISIBLE_SQL_PREDICATE = `(
     SELECT 1 FROM public.matters m
     WHERE m.tenant_id = r.tenant_id
       AND m.id = r.matter_id
-      AND (
-        m.is_staff_matter = TRUE
-        OR m.has_ethical_wall = TRUE
-        OR jsonb_array_length(COALESCE(m.restricted_access_user_ids_json, '[]'::jsonb)) > 0
-      )
-      AND NOT (m.restricted_access_user_ids_json ? $2)
+      AND ${buildMatterHiddenFromViewerSql('m', 2)}
   )
 )`;
+
+export const MATTER_ACTIVE_PARTICIPANT_ROLE_KEYS_NOTE =
+  'responsiblePartnerId, supervisingPartnerId, leadFeeEarnerId, relationshipPartnerId, teamMemberIds';
+
+export function buildMatterActiveParticipantSqlPredicate(
+  matterAlias: string,
+  viewerParamIndex = 2,
+): string {
+  const v = `$${viewerParamIndex}::text`;
+  return `(
+    COALESCE(${matterAlias}.responsible_partner_id, '') = ${v}
+    OR COALESCE(${matterAlias}.supervisor_id, '') = ${v}
+    OR COALESCE(${matterAlias}.responsible_fee_earner_id, '') = ${v}
+    OR COALESCE(${matterAlias}.opening_record_json->>'relationshipPartnerId', '') = ${v}
+    OR (
+      jsonb_typeof(${matterAlias}.opening_record_json->'teamMemberIds') = 'array'
+      AND (${matterAlias}.opening_record_json->'teamMemberIds') ? ${v}
+    )
+  )`;
+}
+
+export function isActorActiveParticipantOnMatterRecord(
+  actorId: string,
+  matter: {
+    responsiblePartnerId?: string | null;
+    supervisingPartnerId?: string | null;
+    leadFeeEarnerId?: string | null;
+    relationshipPartnerId?: string | null;
+    teamMemberIds?: readonly string[] | null;
+  },
+): boolean {
+  return (
+    matter.responsiblePartnerId === actorId ||
+    matter.supervisingPartnerId === actorId ||
+    matter.leadFeeEarnerId === actorId ||
+    matter.relationshipPartnerId === actorId ||
+    (Array.isArray(matter.teamMemberIds) && matter.teamMemberIds.includes(actorId))
+  );
+}
+
+export function buildRegisterEmployeeClientVisibleSqlPredicate(params: {
+  viewerParamIndex?: number;
+  canViewCddParamIndex: number;
+  canBypassEmployeeCddParamIndex: number;
+}): string {
+  const viewerParamIndex = params.viewerParamIndex ?? 2;
+  const canCdd = `$${params.canViewCddParamIndex}::boolean`;
+  const canBypass = `$${params.canBypassEmployeeCddParamIndex}::boolean`;
+  return `(
+    r.register_type_key <> 'cdd'
+    OR (
+      ${canCdd} = TRUE
+      AND (
+        r.person_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM public.people ep
+          WHERE ep.tenant_id = r.tenant_id
+            AND ep.id = r.person_id
+            AND (
+              ep.is_employee = TRUE
+              OR EXISTS (
+                SELECT 1 FROM public.employee_employment_records eer
+                WHERE eer.tenant_id = ep.tenant_id
+                  AND eer.person_id = ep.id
+              )
+            )
+        )
+        OR ${canBypass} = TRUE
+        OR EXISTS (
+          SELECT 1 FROM public.matters em
+          WHERE em.tenant_id = r.tenant_id
+            AND (
+              em.client_id = r.person_id
+              OR (
+                jsonb_typeof(em.additional_client_ids_json) = 'array'
+                AND em.additional_client_ids_json ? r.person_id
+              )
+            )
+            AND NOT ${buildMatterHiddenFromViewerSql('em', viewerParamIndex)}
+            AND ${buildMatterActiveParticipantSqlPredicate('em', viewerParamIndex)}
+        )
+      )
+    )
+  )`;
+}
+
+export interface ListVisibleRegisterRecordsOptions {
+  registerTypeKey?: string;
+  registerTypeKeys?: readonly string[];
+  status?: string;
+  dueOrInProgressFilter?: {
+    inProgressStatus: string;
+    recordedStatus: string;
+    dueBeforeIso: string;
+  };
+  orderBy?: 'updated_desc' | 'due_asc';
+  matterId?: string;
+  enquiryId?: string;
+  personId?: string;
+  personIds?: readonly string[];
+  organisationId?: string;
+  organisationIds?: readonly string[];
+  includeRestricted?: boolean;
+  hasRestrictedMatterAccess?: boolean;
+  canViewCdd?: boolean;
+  canBypassEmployeeCddVisibility?: boolean;
+  limit?: number;
+}
 
 interface DbRegisterRecordRow {
   tenant_id: string;
@@ -489,11 +593,21 @@ export class TenantRegisterRepository extends TenantScopedRepository {
   public async getRegisterRecordById(
     ctx: TenantContext,
     recordId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+      canViewCdd?: boolean;
+      canBypassEmployeeCddVisibility?: boolean;
+    },
   ): Promise<RegisterRecord | null> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
       const viewerId = options?.viewerId ?? ctx.actorId;
+      const canViewCdd = Boolean(options?.canViewCdd);
+      const canBypassCdd =
+        Boolean(options?.canBypassEmployeeCddVisibility) ||
+        Boolean(options?.hasRestrictedMatterAccess);
       const res = includeRestricted
         ? await tx.query<DbRegisterRecordRow>(
             `SELECT * FROM public.register_records r WHERE r.tenant_id = $1 AND r.id = $2`,
@@ -503,8 +617,13 @@ export class TenantRegisterRepository extends TenantScopedRepository {
             `SELECT * FROM public.register_records r
              WHERE r.tenant_id = $1
                AND r.id = $3
-               AND ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE}`,
-            [ctx.tenantId, viewerId, recordId],
+               AND (${Boolean(options?.hasRestrictedMatterAccess)} OR ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE})
+               AND ${buildRegisterEmployeeClientVisibleSqlPredicate({
+                 viewerParamIndex: 2,
+                 canViewCddParamIndex: 4,
+                 canBypassEmployeeCddParamIndex: 5,
+               })}`,
+            [ctx.tenantId, viewerId, recordId, canViewCdd, canBypassCdd],
           );
       const row = res.rows[0];
       if (!row) return null;
@@ -516,34 +635,57 @@ export class TenantRegisterRepository extends TenantScopedRepository {
   public async listVisibleRegisterRecords(
     ctx: TenantContext,
     viewerId: string,
-    options?: {
-      registerTypeKey?: string;
-      status?: string;
-      matterId?: string;
-      enquiryId?: string;
-      includeRestricted?: boolean;
-      hasRestrictedMatterAccess?: boolean;
-      limit?: number;
-    },
+    options?: ListVisibleRegisterRecordsOptions,
   ): Promise<RegisterRecord[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
+      const includeRestricted = Boolean(options?.includeRestricted);
       const bypassMatterRestriction =
-        Boolean(options?.includeRestricted) ||
-        Boolean(options?.hasRestrictedMatterAccess);
-      const params: unknown[] = bypassMatterRestriction
+        includeRestricted || Boolean(options?.hasRestrictedMatterAccess);
+      const params: unknown[] = includeRestricted
         ? [ctx.tenantId]
-        : [ctx.tenantId, viewerId];
+        : [
+            ctx.tenantId,
+            viewerId,
+            Boolean(options?.canViewCdd),
+            Boolean(
+              options?.canBypassEmployeeCddVisibility ||
+                options?.hasRestrictedMatterAccess,
+            ),
+          ];
       const clauses: string[] = ['r.tenant_id = $1'];
-      if (!bypassMatterRestriction) {
-        clauses.push(REGISTER_RECORD_VISIBLE_SQL_PREDICATE);
+      if (!includeRestricted) {
+        if (!bypassMatterRestriction) {
+          clauses.push(REGISTER_RECORD_VISIBLE_SQL_PREDICATE);
+        }
+        clauses.push(
+          buildRegisterEmployeeClientVisibleSqlPredicate({
+            viewerParamIndex: 2,
+            canViewCddParamIndex: 3,
+            canBypassEmployeeCddParamIndex: 4,
+          }),
+        );
       }
       if (options?.registerTypeKey) {
         params.push(options.registerTypeKey);
         clauses.push(`r.register_type_key = $${params.length}`);
       }
+      if (options?.registerTypeKeys && options.registerTypeKeys.length > 0) {
+        params.push([...options.registerTypeKeys]);
+        clauses.push(`r.register_type_key = ANY($${params.length}::text[])`);
+      }
       if (options?.status) {
         params.push(options.status);
         clauses.push(`r.status = $${params.length}`);
+      }
+      if (options?.dueOrInProgressFilter) {
+        const f = options.dueOrInProgressFilter;
+        params.push(f.inProgressStatus, f.recordedStatus, f.dueBeforeIso);
+        const inProgIdx = params.length - 2;
+        const recIdx = params.length - 1;
+        const dueIdx = params.length;
+        clauses.push(
+          `(r.status = $${inProgIdx} OR (r.status = $${recIdx} AND r.due_at IS NOT NULL AND r.due_at <= $${dueIdx}::timestamptz))`,
+        );
       }
       if (options?.matterId) {
         params.push(options.matterId);
@@ -553,15 +695,35 @@ export class TenantRegisterRepository extends TenantScopedRepository {
         params.push(options.enquiryId);
         clauses.push(`r.enquiry_id = $${params.length}`);
       }
+      if (options?.personId) {
+        params.push(options.personId);
+        clauses.push(`r.person_id = $${params.length}`);
+      }
+      if (options?.personIds && options.personIds.length > 0) {
+        params.push([...options.personIds]);
+        clauses.push(`r.person_id = ANY($${params.length}::text[])`);
+      }
+      if (options?.organisationId) {
+        params.push(options.organisationId);
+        clauses.push(`r.organisation_id = $${params.length}`);
+      }
+      if (options?.organisationIds && options.organisationIds.length > 0) {
+        params.push([...options.organisationIds]);
+        clauses.push(`r.organisation_id = ANY($${params.length}::text[])`);
+      }
       let limitClause = '';
       if (options?.limit && options.limit > 0) {
         params.push(Math.floor(options.limit));
         limitClause = ` LIMIT $${params.length}`;
       }
+      const orderByClause =
+        options?.orderBy === 'due_asc'
+          ? `ORDER BY CASE WHEN r.due_at IS NOT NULL THEN 0 ELSE 1 END ASC, r.due_at ASC, r.updated_at DESC, r.id ASC`
+          : `ORDER BY r.updated_at DESC, r.created_at DESC, r.id ASC`;
       const res = await tx.query<DbRegisterRecordRow>(
         `SELECT * FROM public.register_records r
          WHERE ${clauses.join(' AND ')}
-         ORDER BY r.updated_at DESC, r.created_at DESC, r.id ASC${limitClause}`,
+         ${orderByClause}${limitClause}`,
         params,
       );
       return res.rows.map((row) => {
@@ -574,11 +736,21 @@ export class TenantRegisterRepository extends TenantScopedRepository {
   public async listTransitionsForRecord(
     ctx: TenantContext,
     registerRecordId: string,
-    options?: { viewerId?: string; includeRestricted?: boolean },
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+      canViewCdd?: boolean;
+      canBypassEmployeeCddVisibility?: boolean;
+    },
   ): Promise<RegisterTransition[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const includeRestricted = Boolean(options?.includeRestricted);
       const viewerId = options?.viewerId ?? ctx.actorId;
+      const canViewCdd = Boolean(options?.canViewCdd);
+      const canBypassCdd =
+        Boolean(options?.canBypassEmployeeCddVisibility) ||
+        Boolean(options?.hasRestrictedMatterAccess);
       const recordVisible = includeRestricted
         ? await tx.query<{ tenant_id: string }>(
             `SELECT r.tenant_id FROM public.register_records r WHERE r.tenant_id = $1 AND r.id = $2`,
@@ -586,8 +758,15 @@ export class TenantRegisterRepository extends TenantScopedRepository {
           )
         : await tx.query<{ tenant_id: string }>(
             `SELECT r.tenant_id FROM public.register_records r
-             WHERE r.tenant_id = $1 AND r.id = $3 AND ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE}`,
-            [ctx.tenantId, viewerId, registerRecordId],
+             WHERE r.tenant_id = $1
+               AND r.id = $3
+               AND (${Boolean(options?.hasRestrictedMatterAccess)} OR ${REGISTER_RECORD_VISIBLE_SQL_PREDICATE})
+               AND ${buildRegisterEmployeeClientVisibleSqlPredicate({
+                 viewerParamIndex: 2,
+                 canViewCddParamIndex: 4,
+                 canBypassEmployeeCddParamIndex: 5,
+               })}`,
+            [ctx.tenantId, viewerId, registerRecordId, canViewCdd, canBypassCdd],
           );
       if (!recordVisible.rows[0]) {
         return [];
@@ -605,6 +784,23 @@ export class TenantRegisterRepository extends TenantScopedRepository {
         return mapRegisterTransitionRow(row);
       });
     });
+  }
+
+  public async lockRegisterRecordForUpdateInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    recordId: string,
+  ): Promise<RegisterRecord | null> {
+    const lockRes = await tx.query<DbRegisterRecordRow>(
+      `SELECT * FROM public.register_records
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [ctx.tenantId, recordId],
+    );
+    const lockedRow = lockRes.rows[0];
+    if (!lockedRow) return null;
+    this.assertRowTenant(ctx, lockedRow.tenant_id, 'register_records.lockForUpdate');
+    return mapRegisterRecordRow(lockedRow);
   }
 
   public async updateRegisterRecordDetails(
@@ -706,12 +902,16 @@ export class TenantRegisterRepository extends TenantScopedRepository {
             nextStatus: string;
             setsDecidedAt: boolean;
             mergedFieldValues: Record<string, unknown>;
+            dueAt?: string | null;
+            reviewAt?: string | null;
             extraPayload?: Record<string, unknown>;
           }
         | Promise<{
             nextStatus: string;
             setsDecidedAt: boolean;
             mergedFieldValues: Record<string, unknown>;
+            dueAt?: string | null;
+            reviewAt?: string | null;
             extraPayload?: Record<string, unknown>;
           }>;
       buildAuditEntries?: (result: {
@@ -748,16 +948,22 @@ export class TenantRegisterRepository extends TenantScopedRepository {
         ? params.actorId
         : previousRecord.decidedById;
       const decidedAt = computed.setsDecidedAt ? nowIso : previousRecord.decidedAt;
+      const nextDueAt =
+        computed.dueAt !== undefined ? computed.dueAt : previousRecord.dueAt;
+      const nextReviewAt =
+        computed.reviewAt !== undefined ? computed.reviewAt : previousRecord.reviewAt;
 
       const updRes = await tx.query<DbRegisterRecordRow>(
         `UPDATE public.register_records
          SET status = $3,
              decided_by_id = $4,
              decided_at = $5::timestamptz,
-             field_values_json = $6::jsonb,
+             due_at = $6::timestamptz,
+             review_at = $7::timestamptz,
+             field_values_json = $8::jsonb,
              row_version = row_version + 1,
-             updated_by_id = $7,
-             updated_at = $8::timestamptz
+             updated_by_id = $9,
+             updated_at = $10::timestamptz
          WHERE tenant_id = $1 AND id = $2
          RETURNING *`,
         [
@@ -766,6 +972,8 @@ export class TenantRegisterRepository extends TenantScopedRepository {
           computed.nextStatus,
           decidedById,
           decidedAt,
+          nextDueAt,
+          nextReviewAt,
           JSON.stringify(computed.mergedFieldValues),
           params.actorId,
           nowIso,

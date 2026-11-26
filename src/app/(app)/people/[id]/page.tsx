@@ -62,6 +62,7 @@ export default async function PersonProfilePage({
         canViewOwnNotificationPreferences={data.canViewOwnNotificationPreferences}
         canManageOwnNotificationPreferences={data.canManageOwnNotificationPreferences}
         initialNotificationPreferences={data.initialNotificationPreferences}
+        cddSummary={data.cddSummary}
       />
     );
   }, buildRouteReturnTo(`/people/${encodeURIComponent(id)}`, resolvedSearch));

@@ -44,6 +44,12 @@ import {
 } from '../domain/document-generation/fieldCatalogue';
 import { validateExtensionManifest } from '../config-engine/index';
 
+/**
+ * Restricted compliance register types (`cdd`, `high_risk_opening`) that are never
+ * exposed to generic `register:*` extension hooks (`R782`).
+ */
+const RESTRICTED_REGISTER_EXTENSION_KEYS = new Set<string>(['cdd', 'high_risk_opening']);
+
 export class ExtensionHookTimeoutError extends Error {
   readonly code = 'EXTENSION_HOOK_TIMEOUT';
   constructor(extensionId: string, timeoutMs: number) {
@@ -904,13 +910,26 @@ export class ExtensionHost {
       throw err;
     }
 
-    const active = this.getActiveExtensionsForTenant(tenantConfig);
-    const isolatedErrors: string[] = [];
     let mergedFieldValues: Record<string, unknown> = {
       ...input.draft.fieldValues,
     };
     let dueAt = input.draft.dueAt;
     let reviewAt = input.draft.reviewAt;
+
+    const registerKey =
+      input.registerType?.key ?? input.draft?.registerTypeKey;
+    if (RESTRICTED_REGISTER_EXTENSION_KEYS.has(registerKey)) {
+      return {
+        allowProceed: true,
+        mergedFieldValues,
+        dueAt,
+        reviewAt,
+        isolatedErrors: [],
+      };
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const isolatedErrors: string[] = [];
 
     for (const ext of active) {
       const fn = ext.hooks['register.beforeCreate'];
@@ -1039,11 +1058,22 @@ export class ExtensionHost {
       throw err;
     }
 
-    const active = this.getActiveExtensionsForTenant(tenantConfig);
-    const isolatedErrors: string[] = [];
     let mergedFieldUpdates: Record<string, unknown> = {
       ...(input.fieldUpdates ?? {}),
     };
+
+    const registerKey =
+      input.registerType?.key ?? input.record?.registerTypeKey;
+    if (RESTRICTED_REGISTER_EXTENSION_KEYS.has(registerKey)) {
+      return {
+        allowProceed: true,
+        mergedFieldUpdates,
+        isolatedErrors: [],
+      };
+    }
+
+    const active = this.getActiveExtensionsForTenant(tenantConfig);
+    const isolatedErrors: string[] = [];
 
     for (const ext of active) {
       const fn = ext.hooks['register.beforeTransition'];
@@ -1144,6 +1174,12 @@ export class ExtensionHost {
       ) as Error & { code: string };
       err.code = 'EXTENSION_TRANSACTION_FORBIDDEN';
       throw err;
+    }
+
+    const registerKey =
+      input.registerType?.key ?? input.updatedRecord?.registerTypeKey;
+    if (RESTRICTED_REGISTER_EXTENSION_KEYS.has(registerKey)) {
+      return { isolatedErrors: [] };
     }
 
     const active = this.getActiveExtensionsForTenant(tenantConfig);

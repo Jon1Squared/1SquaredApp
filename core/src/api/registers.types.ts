@@ -9,13 +9,17 @@
  * - Tenant configuration subtree (`RegistersConfiguration`)
  */
 
+import type { IntakeEvidenceArtifactRef } from './index';
+
 export type RegisterPermission =
   | 'register:view'
   | 'register:create'
   | 'register:edit'
   | 'register:approve'
   | 'register:configure'
-  | 'undertaking:manage';
+  | 'undertaking:manage'
+  | 'cdd:view'
+  | 'cdd:record';
 
 export type RegisterExtensionPermission =
   | 'register:read'
@@ -34,7 +38,9 @@ export type RegisterFieldType =
   | 'boolean'
   | 'date'
   | 'select'
-  | 'person';
+  | 'person'
+  | 'checklist'
+  | 'evidence';
 
 export type RegisterStateTone =
   | 'neutral'
@@ -46,7 +52,29 @@ export type RegisterStateTone =
 export type RegisterReminderRecipientMode =
   | 'owner_and_approver'
   | 'owner_only'
-  | 'matter_team_and_owner';
+  | 'matter_team_and_owner'
+  | 'client_owner_or_recent_fee_earner';
+
+export type RegisterSubjectScope = 'matter' | 'client' | 'any';
+
+export type RegisterChecklistItemStatus =
+  | 'pending'
+  | 'recorded'
+  | 'not_applicable'
+  | 'failed';
+
+export interface RegisterChecklistItemValue {
+  itemKey: string;
+  label: string;
+  required: boolean;
+  status: RegisterChecklistItemStatus;
+  recordedById: string | null;
+  recordedByName?: string;
+  recordedAt: string | null;
+  note?: string;
+  evidenceRefs: IntakeEvidenceArtifactRef[];
+  intakeCheckRecordId?: string | null;
+}
 
 export type RegisterReminderTriggerKind = 'due' | 'review';
 
@@ -55,7 +83,13 @@ export type RegisterReminderSkippedReason =
   | 'missing_matter'
   | 'terminal_status';
 
-export type RegisterFieldValue = string | number | boolean | null;
+export type RegisterFieldValue =
+  | string
+  | number
+  | boolean
+  | null
+  | RegisterChecklistItemValue[]
+  | IntakeEvidenceArtifactRef[];
 export type RegisterFieldValuesMap = Record<string, RegisterFieldValue | undefined>;
 
 export interface RegisterFieldDefinition {
@@ -81,6 +115,7 @@ export interface RegisterTransitionDefinition {
   fromStatuses: readonly string[];
   toStatus: string;
   requiredPermission: RegisterPermission | 'signoff:approve';
+  allowedRoles?: readonly string[];
   requiresComment?: boolean;
   /**
    * When true (or whenever `approvalRules` is non-null on an approval transition),
@@ -88,6 +123,10 @@ export interface RegisterTransitionDefinition {
    */
   forbidSelfAction?: boolean;
   requireAssignedApproverMatch?: boolean;
+  mustDifferFromPreviousApprover?: boolean;
+  distinctFromTransitionKeys?: readonly string[];
+  /** When true, only dedicated core system workflows may execute this transition directly (R765). */
+  systemOnly?: boolean;
   setsDecidedAt?: boolean;
 }
 
@@ -96,6 +135,7 @@ export interface RegisterApprovalRules {
   forbidSelfApproval: true;
   allowedApproverRoles?: readonly string[];
   requireAssignedApproverMatch?: boolean;
+  allowAdminBypass?: boolean;
 }
 
 export interface RegisterReminderScheduleConfig {
@@ -114,8 +154,10 @@ export interface RegisterTypeDefinition {
   enabled: boolean;
   referencePrefix: string;
   initialStatus: string;
+  viewPermission?: RegisterPermission;
   createPermission: RegisterPermission;
   editPermission: RegisterPermission;
+  subjectScope?: RegisterSubjectScope;
   requireMatterLink?: boolean;
   /**
    * `null` for direct creation registers such as `undertaking` (no two-person partner approval gate).

@@ -41,6 +41,7 @@ export default async function NewMatterPage({
         organisations={data.organisations}
         links={data.links}
         matters={data.clientMatters}
+        initialCddSummaries={data.initialCddSummaries}
         enquiries={data.initialEnquiry ? [data.initialEnquiry] : []}
         lists={shell.lists}
         values={shell.values}
@@ -56,6 +57,7 @@ export default async function NewMatterPage({
         canReassignOwnership={shell.currentUserPermissions.includes(
           'matter:reassign_ownership',
         )}
+        canViewCdd={shell.currentUserPermissions.includes('cdd:view')}
         canSignOffCosts={
           data.existing
             ? data.canSignOffCosts

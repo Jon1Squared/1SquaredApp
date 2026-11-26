@@ -4,12 +4,18 @@ import { revalidatePath } from 'next/cache';
 import {
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  type CddClientCategoryKey,
+  type CddConfiguration,
   type ClientRateOverrideClientType,
   type GlobalSearchEntityType,
   type GlobalSearchResponse,
+  type IdentityVerificationOutcome,
+  type IntakeEvidenceArtifactRef,
   type NotificationChannelFrequency,
   type NotificationKind,
+  type RegisterChecklistItemStatus,
   type RegistersConfiguration,
+  type SanctionsPepOutcome,
   type UserNotificationPreference,
   type WorkTypesConfiguration,
 } from '@platform/core';
@@ -151,6 +157,7 @@ import {
   deleteClientRateOverrideRecord,
   getEntityRecordForEditRecord,
   getExpiredEnquiriesCountRecord,
+  completeClientCddRecord,
   listClientPriorMattersRecord,
   loadPmsLinksAdminDataRecord,
   listMatterRateOverridesRecord,
@@ -158,7 +165,11 @@ import {
   deleteMatterRateOverrideRecord,
   resolveApplicableRatesRecord,
   previewIntakeDuplicatesAndConflictsRecord,
+  recordCddChecklistItemRecord,
+  recordManualSanctionsPepRecord,
+  saveCddConfigRecord,
   searchEntityPickerRecord,
+  startOrLoadClientCddRecord,
   updateMyNotificationPreferences,
   type NotificationPreferenceUpdateEntry,
 } from '@/server/services';
@@ -168,6 +179,7 @@ import type {
   IntakePreviewInput,
   IntakePreviewResult,
 } from '@/domain/intakePreviewTypes';
+import type { ClientCddCompactSummary } from '@/domain/cdd';
 import type { ClientPriorMatterSummary } from '@/domain/matterOpeningRecord';
 import type { PmsLinksAdminPageData, PmsLinksSubTab } from '@/domain/pms';
 import type {
@@ -1930,6 +1942,95 @@ export async function saveRegistersConfigAction(
   });
 }
 
+export async function startOrLoadClientCddAction(input: {
+  subjectType: 'person' | 'organisation';
+  subjectId: string;
+  createIfMissing?: boolean;
+  clientCategory?: CddClientCategoryKey;
+  upgradeToHighRisk?: boolean;
+  reason?: string;
+}) {
+  return guardedAction('startOrLoadClientCddAction', async (actor) => {
+    const res = await startOrLoadClientCddRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    if (input.createIfMissing || input.upgradeToHighRisk) {
+      revalidateAll();
+    }
+    return res;
+  });
+}
+
+export async function recordCddChecklistItemAction(input: {
+  recordId: string;
+  itemKey: string;
+  status: RegisterChecklistItemStatus;
+  note?: string;
+  evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
+  expectedRowVersion?: number;
+  linkManualIdentityCheck?: {
+    verificationMethod: string;
+    outcome: IdentityVerificationOutcome;
+    referenceCode?: string;
+    expiresAt?: string | null;
+    notes?: string;
+  };
+}) {
+  return guardedAction('recordCddChecklistItemAction', async (actor) => {
+    const res = await recordCddChecklistItemRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function completeClientCddAction(input: {
+  recordId: string;
+  manualSummaryNote?: string;
+  expectedRowVersion?: number;
+}) {
+  return guardedAction('completeClientCddAction', async (actor) => {
+    const res = await completeClientCddRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function recordManualSanctionsPepAction(input: {
+  subjectType: 'person' | 'organisation';
+  subjectId: string;
+  outcome: SanctionsPepOutcome;
+  screeningScope: string;
+  referenceCode?: string;
+  notes?: string;
+  evidenceRefs?: readonly IntakeEvidenceArtifactRef[];
+}) {
+  return guardedAction('recordManualSanctionsPepAction', async (actor) => {
+    const res = await recordManualSanctionsPepRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveCddConfigAction(
+  newConfig: CddConfiguration,
+  reason: string,
+) {
+  return guardedAction('saveCddConfigAction', async (actor) => {
+    const res = await saveCddConfigRecord(newConfig, reason, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
 export async function searchGlobalRecordsAction(input: {
   query: string;
   entityTypes?: readonly GlobalSearchEntityType[];
@@ -1978,7 +2079,13 @@ export async function getEntityRecordForEditAction(
 
 export async function listClientPriorMattersAction(
   clientIds: readonly string[],
-): Promise<{ matters: ClientPriorMatterSummary[] } | ActionDenied> {
+): Promise<
+  | {
+      matters: ClientPriorMatterSummary[];
+      cddSummaries?: Record<string, ClientCddCompactSummary>;
+    }
+  | ActionDenied
+> {
   return guardedAction('listClientPriorMattersAction', async (actor) =>
     listClientPriorMattersRecord(clientIds, actor.personId, {
       tenantCtx: actor.tenantContext,

@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '2.1.0';
+export const CORE_API_VERSION = '2.2.0';
 
 import type {
   FeeArrangementCapEntry,
@@ -914,6 +914,43 @@ export interface TenantConfiguration {
   enquiries?: {
     readonly fallbackTeamId: string | null;
   };
+  cdd?: CddConfiguration;
+}
+
+// ------------------------------------------------------------------ Client Due Diligence Configuration (ADR 0039, S1-04)
+
+export type CddClientCategoryKey =
+  | 'individual'
+  | 'company_or_llp'
+  | 'trust_charity_or_partnership';
+
+export type CddRiskTierKey = 'standard' | 'high';
+
+export interface CddChecklistItemTemplate {
+  readonly itemKey: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly required: boolean;
+  readonly requiresEvidence: boolean;
+  readonly linkedIntakeCheckKind?: 'identity_verification' | 'sanctions_pep';
+}
+
+export interface CddChecklistTemplateSet {
+  readonly standard: readonly CddChecklistItemTemplate[];
+  readonly highAdditional: readonly CddChecklistItemTemplate[];
+}
+
+export interface CddConfiguration {
+  readonly enabled?: boolean;
+  readonly clientTypeMapping?: Readonly<Record<string, CddClientCategoryKey>>;
+  readonly riskTierMapping?: Readonly<Record<string, CddRiskTierKey>>;
+  readonly checklists?: Readonly<Partial<Record<CddClientCategoryKey, CddChecklistTemplateSet>>>;
+  readonly recheckIntervalsMonths?: {
+    readonly standard: number;
+    readonly high: number;
+  };
+  readonly reminderScheduleDaysBefore?: readonly number[];
+  readonly maxEvidenceFileSizeBytes?: number;
 }
 
 // ------------------------------------------------------------------ Work Type & Departmental Behaviour Configuration (S0-22)
@@ -2163,12 +2200,38 @@ export type IntakeCheckSubjectType =
   | 'matter'
   | 'quote';
 
+export type EvidenceArtifactSubjectType =
+  | 'person'
+  | 'organisation'
+  | 'matter'
+  | 'enquiry'
+  | 'quote'
+  | 'register';
+
+export interface EvidenceArtifactRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly blobKey: string;
+  readonly subjectType: EvidenceArtifactSubjectType;
+  readonly subjectId: string;
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+  readonly scanStatus: MalwareScanStatus;
+  readonly uploadedByPersonId: string;
+  readonly uploadedAt: string;
+}
+
 export interface IntakeEvidenceArtifactRef {
   readonly blobKey: string;
   readonly sha256: string;
   readonly contentType: string;
   readonly sizeBytes: number;
   readonly scanStatus: MalwareScanStatus | 'quarantined';
+  readonly fileName?: string;
+  readonly uploadedByActorId?: string;
+  readonly uploadedAt?: string;
 }
 
 export const IDENTITY_VERIFICATION_OUTCOMES = Object.freeze([

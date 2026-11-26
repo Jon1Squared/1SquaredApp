@@ -30,6 +30,8 @@ export default async function HomePage({
         values={shell.values}
         registerTypes={data.registerTypes}
         registerRecords={data.registerRecords}
+        canViewCdd={data.canViewCdd}
+        cddQueueRecords={data.cddQueueRecords}
         finance={shell.finance}
         pmsLinks={matterFinance?.pmsLinks}
         pmsAsAtDate={

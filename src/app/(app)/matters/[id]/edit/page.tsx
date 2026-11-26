@@ -29,6 +29,7 @@ export default async function EditMatterPage({
         organisations={data.organisations}
         links={data.links}
         matters={data.clientMatters}
+        initialCddSummaries={data.initialCddSummaries}
         enquiries={data.initialEnquiry ? [data.initialEnquiry] : []}
         lists={shell.lists}
         values={shell.values}
@@ -44,6 +45,7 @@ export default async function EditMatterPage({
         canReassignOwnership={shell.currentUserPermissions.includes(
           'matter:reassign_ownership',
         )}
+        canViewCdd={shell.currentUserPermissions.includes('cdd:view')}
         canSignOffCosts={data.canSignOffCosts}
         canManageMatterRateOverrides={shell.currentUserPermissions.some((p) =>
           ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(

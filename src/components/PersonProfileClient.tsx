@@ -31,6 +31,7 @@ import {
   maskNationalInsuranceNumber,
 } from '@/domain/employment';
 import { formatGbp } from '@/domain/pms';
+import type { ClientCddSummary } from '@/domain/cdd';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { isTaskOpen } from '@/domain/tasks';
 import type {
@@ -56,6 +57,7 @@ import type {
 } from '@platform/core-api';
 import type { ClientPmsViewBundle } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { CddChecklistCard } from './CddChecklistCard';
 import { ClientRateOverridesPanel } from './ClientRateOverridesPanel';
 import { DocumentListSection } from './DocumentListSection';
 import {
@@ -121,6 +123,7 @@ interface Props {
   canViewOwnNotificationPreferences?: boolean;
   canManageOwnNotificationPreferences?: boolean;
   initialNotificationPreferences?: readonly UserNotificationPreference[];
+  cddSummary?: ClientCddSummary;
 }
 
 export interface PersonComplianceDisplay {
@@ -225,6 +228,7 @@ export function PersonProfileClient({
   canViewOwnNotificationPreferences = false,
   canManageOwnNotificationPreferences = false,
   initialNotificationPreferences,
+  cddSummary,
 }: Props) {
   const router = useRouter();
   const { showToast } = useToast();
@@ -1237,6 +1241,12 @@ export function PersonProfileClient({
                   </div>
                 )}
               </section>
+              {cddSummary?.visible ? (
+                <CddChecklistCard
+                  initialSummary={cddSummary}
+                  subjectLabel={personFullName(person)}
+                />
+              ) : null}
             </div>
 
             {/* RIGHT SIDEBAR COLUMN */}
@@ -2081,6 +2091,12 @@ export function PersonProfileClient({
 
       {tab === 'compliance' && (
         <>
+          {cddSummary?.visible ? (
+            <CddChecklistCard
+              initialSummary={cddSummary}
+              subjectLabel={personFullName(person)}
+            />
+          ) : null}
           <div className="client-card">
             <div className="kv-grid">
               <KeyValue label="Able to act">{complianceDisplay.ableToAct.label}</KeyValue>
@@ -3088,6 +3104,12 @@ export function PersonProfileClient({
 
       {tab === 'compliance' && (
         <>
+          {cddSummary?.visible ? (
+            <CddChecklistCard
+              initialSummary={cddSummary}
+              subjectLabel={personFullName(person)}
+            />
+          ) : null}
           <div className="kv-grid">
             <KeyValue label="Contact record status">
               {resolveLabel(values, person.recordStatusId)}

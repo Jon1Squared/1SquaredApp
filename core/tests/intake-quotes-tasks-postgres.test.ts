@@ -997,16 +997,19 @@ describe('S0-17a: Intake (enquiries), quotes, tasks, notifications, sign-offs an
           await freshTwRepo.listAllSignOffsUnfiltered(ctx)
         ).find((s) => s.status === 'Pending');
         expect(pendingSignOff).toBeDefined();
+        let signOffAuditHookCalls = 0;
         setAuditAdapterFailureHookForTesting(() => {
+          signOffAuditHookCalls += 1;
           throw new Error('SIMULATED_S017A_SIGNOFF_AUDIT_FAILURE');
         });
         await expect(
           approveSignOff(pendingSignOff!.id, 'P-000001'),
-        ).rejects.toThrow(/SIMULATED_S017A_SIGNOFF_AUDIT_FAILURE/);
+        ).rejects.toThrow(/The requested register operation could not be completed\./);
         await expect(
           discussSignOff(pendingSignOff!.id, 'Discuss note', 'P-000001'),
-        ).rejects.toThrow(/SIMULATED_S017A_SIGNOFF_AUDIT_FAILURE/);
+        ).rejects.toThrow(/The requested register operation could not be completed\./);
         setAuditAdapterFailureHookForTesting(null);
+        expect(signOffAuditHookCalls).toBe(2);
 
         const freshSignOff = await freshTwRepo.getSignOffById(
           ctx,

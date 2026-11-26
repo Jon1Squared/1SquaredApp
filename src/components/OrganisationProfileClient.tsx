@@ -10,6 +10,7 @@ import { formatAddress } from '@/domain/fieldRegistry';
 import { resolveLabel, resolveLabels, systemKeyOf } from '@/domain/lists';
 import { personDisplayName, primaryEmail } from '@/domain/names';
 import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
+import type { ClientCddSummary } from '@/domain/cdd';
 import type {
   AppRole,
   AuditEntry,
@@ -34,6 +35,7 @@ import type {
   InheritedParentRateOverrideView,
 } from '@/server/services';
 import { ClientFinanceSection } from './ClientFinanceSection';
+import { CddChecklistCard } from './CddChecklistCard';
 import { ClientRateOverridesPanel } from './ClientRateOverridesPanel';
 import { DocumentListSection } from './DocumentListSection';
 import {
@@ -93,6 +95,7 @@ interface Props {
   duplicateCandidates: Organisation[];
   mergedFromId?: string | null;
   initialTab?: string;
+  cddSummary?: ClientCddSummary;
 }
 
 interface OrgMatterDisplayItem {
@@ -290,6 +293,7 @@ export function OrganisationProfileClient({
   duplicateCandidates,
   mergedFromId,
   initialTab,
+  cddSummary,
 }: Props) {
   const { showToast } = useToast();
 
@@ -1283,6 +1287,12 @@ export function OrganisationProfileClient({
                 </ul>
               </div>
             </section>
+            {cddSummary?.visible ? (
+              <CddChecklistCard
+                initialSummary={cddSummary}
+                subjectLabel={organisation.legalName}
+              />
+            ) : null}
 
             {/* 2. RELATIONSHIP PANEL */}
             <section className="home-panel" aria-label="Relationship">
@@ -1910,6 +1920,12 @@ export function OrganisationProfileClient({
       {/* ===================== TAB: COMPLIANCE & BILLING ===================== */}
       {tab === 'compliance' && (
         <>
+          {cddSummary?.visible ? (
+            <CddChecklistCard
+              initialSummary={cddSummary}
+              subjectLabel={organisation.legalName}
+            />
+          ) : null}
           <section className="home-panel">
             <div className="panel-header">
               <div className="panel-title-group">

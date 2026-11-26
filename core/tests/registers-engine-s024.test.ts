@@ -21,7 +21,10 @@ import {
   TenantRegisterRepository,
   TenantTaskWorkflowRepository,
   loadAndValidateTenantConfig,
+  resolveEffectiveRegisterTypes,
   resolveTenantFromVerifiedToken,
+  validateRegisterCreateInput,
+  validateRegisterTransitionExecution,
   validateUserOverrideOrRoleMutation,
   type RegistersConfiguration,
   type TenantContext,
@@ -135,6 +138,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
       'undertaking',
       'complaint',
       'breach',
+      'cdd',
     ]);
 
     const undertakingDef = CORE_REGISTER_TYPES.undertaking;
@@ -156,9 +160,9 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     );
   });
 
-  it('2. RBAC registry (68 user + 10 job-only = 78), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
-    expect(ALL_PERMISSION_KEYS).toHaveLength(78);
-    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(68);
+  it('2. RBAC registry (70 user + 10 job-only = 80), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
+    expect(ALL_PERMISSION_KEYS).toHaveLength(80);
+    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(70);
     expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(10);
     expect(PERMISSION_REGISTRY['register:configure'].requiresMfa).toBe(true);
     expect(PERMISSION_REGISTRY['register:run_reminders'].jobOnly).toBe(true);
@@ -1864,5 +1868,193 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
       { includeRestricted: true },
     );
     expect(unchanged?.title).toBe('R650 Concurrent Sign-Off A');
+  });
+
+  it('15 (S1-04 Commit 1, R755): enforces cdd subjectScope=client, checklist/evidence field rules, non-terminal recorded state & REGISTER_RECORD_VISIBLE_SQL_PREDICATE empty-allow-list partner visibility', async () => {
+    const cddType = CORE_REGISTER_TYPES.cdd;
+    expect(cddType.subjectScope).toBe('client');
+    expect(cddType.viewPermission).toBe('cdd:view');
+    expect(cddType.createPermission).toBe('cdd:record');
+    expect(cddType.states.find((s) => s.key === 'recorded')?.isTerminal).toBe(false);
+
+    expect(() =>
+      validateRegisterCreateInput({
+        registerType: cddType,
+        title: 'Bad dual client',
+        matterId: null,
+        personId: 'P-000013',
+        organisationId: 'O-000001',
+        dueAt: null,
+        reviewAt: null,
+        fieldValues: {
+          clientCategory: 'individual',
+          riskTier: 'standard',
+          checklistItems: [],
+        },
+      }),
+    ).toThrow(/requires exactly one of personId or organisationId/);
+
+    expect(() =>
+      validateRegisterCreateInput({
+        registerType: cddType,
+        title: 'Bad matter-linked CDD',
+        matterId: 'M-000001',
+        personId: 'P-000013',
+        dueAt: null,
+        reviewAt: null,
+        fieldValues: {
+          clientCategory: 'individual',
+          riskTier: 'standard',
+          checklistItems: [
+            {
+              itemKey: 'photo_id',
+              label: 'Photo ID',
+              required: true,
+              status: 'recorded',
+              recordedById: 'P-000002',
+              recordedAt: new Date().toISOString(),
+              evidenceRefs: [],
+            },
+          ],
+        },
+      }),
+    ).toThrow(/cannot link directly to a matterId/);
+
+    expect(() =>
+      validateRegisterCreateInput({
+        registerType: cddType,
+        title: 'Missing note on N/A',
+        matterId: null,
+        personId: 'P-000013',
+        dueAt: null,
+        reviewAt: null,
+        fieldValues: {
+          clientCategory: 'individual',
+          riskTier: 'standard',
+          checklistItems: [
+            {
+              itemKey: 'photo_id',
+              label: 'Photo ID',
+              required: true,
+              status: 'not_applicable',
+              recordedById: 'P-000002',
+              recordedAt: new Date().toISOString(),
+              note: '   ',
+              evidenceRefs: [],
+            },
+          ],
+        },
+      }),
+    ).toThrow(/requires a note when marked "not_applicable"/);
+
+    // R755: REGISTER_RECORD_VISIBLE_SQL_PREDICATE converged onto buildMatterHiddenFromViewerSql
+    // lets a restricted matter's own partner (empty allow-list fallback) see linked register rows
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const adminCtx = testTenantCtx('P-000004');
+    const matterRepo = new TenantMatterRepository();
+    const matter = await matterRepo.getMatterById(adminCtx, 'M-000001');
+    expect(matter).toBeTruthy();
+    if (!matter) throw new Error('Expected seeded M-000001');
+    matter.isStaffMatter = true;
+    matter.hasEthicalWall = false;
+    matter.restrictedAccessUserIds = [];
+    matter.responsiblePartnerId = 'P-000001';
+    matter.leadFeeEarnerId = 'P-000002';
+    matter.supervisingPartnerId = 'P-000001';
+    matter.teamMemberIds = [];
+    await matterRepo.putMatter(adminCtx, matter, { expectedRowVersion: null });
+
+    const regRepo = new TenantRegisterRepository();
+    const created = await regRepo.createRegisterRecord(adminCtx, {
+      id: 'REG-009991',
+      registerTypeKey: 'undertaking',
+      reference: 'UND-009991',
+      title: 'R755 Empty Allow-List Restricted Matter Undertaking',
+      status: 'open',
+      matterId: 'M-000001',
+      fieldValues: {
+        recipientName: 'Example Bank',
+        undertakingTerms: 'Hold title deeds',
+        givenByPersonId: 'P-000002',
+      },
+      createdById: 'P-000002',
+    });
+
+    const partnerVisible = await regRepo.listVisibleRegisterRecords(adminCtx, 'P-000001', {
+      matterId: 'M-000001',
+    });
+    expect(partnerVisible.some((r) => r.id === created.id)).toBe(true);
+
+    const outsiderVisible = await regRepo.listVisibleRegisterRecords(adminCtx, 'P-000009', {
+      matterId: 'M-000001',
+    });
+    expect(outsiderVisible.some((r) => r.id === created.id)).toBe(false);
+  });
+
+  it('16 (S1-04 Suggestion 7 & 9): enforces core permission check on viaDedicatedWorkflow and refuses typeOverrides.cdd.additionalFields', () => {
+    const cddType = CORE_REGISTER_TYPES.cdd;
+    const sampleCddRecord = {
+      id: 'REG-900001',
+      tenantId: 'not-a-law-firm',
+      registerTypeKey: 'cdd',
+      reference: 'CDD-900001',
+      title: 'Client CDD',
+      status: 'in_progress',
+      matterId: null,
+      enquiryId: null,
+      personId: 'P-000014',
+      organisationId: null,
+      ownerId: 'P-000002',
+      assignedApproverId: null,
+      decidedById: null,
+      decidedAt: null,
+      dueAt: null,
+      reviewAt: null,
+      reminderScheduleDays: null,
+      fieldValues: {},
+      rowVersion: 1,
+      createdById: 'P-000002',
+      createdAt: new Date().toISOString(),
+      updatedById: 'P-000002',
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Suggestion 7: viaDedicatedWorkflow=true still enforces transition.requiredPermission in core
+    expect(() =>
+      validateRegisterTransitionExecution({
+        registerType: cddType,
+        record: sampleCddRecord,
+        transitionKey: 'record_cdd',
+        actorId: 'P-000004',
+        actorRoles: ['admin'],
+        actorPermissionSet: new Set(['register:edit', 'cdd:view']),
+        comment: 'Complete CDD',
+        viaDedicatedWorkflow: true,
+      }),
+    ).toThrow(/Missing permission "cdd:record"/);
+
+    expect(() =>
+      validateRegisterTransitionExecution({
+        registerType: cddType,
+        record: sampleCddRecord,
+        transitionKey: 'record_cdd',
+        actorId: 'P-000002',
+        actorRoles: ['fee_earner'],
+        actorPermissionSet: new Set(['cdd:view', 'cdd:record']),
+        comment: 'Complete CDD',
+        viaDedicatedWorkflow: true,
+      }),
+    ).not.toThrow();
+
+    // Suggestion 9: core engine refuses extra firm-defined fields on cdd
+    expect(() =>
+      resolveEffectiveRegisterTypes({
+        typeOverrides: {
+          cdd: {
+            additionalFields: [{ key: 'extraNote', label: 'Extra note', type: 'text' }],
+          },
+        },
+      }),
+    ).toThrow(/REGISTER_VALIDATION_ERROR/);
   });
 });

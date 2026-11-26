@@ -12,6 +12,7 @@
 import { aboutDocs } from './articles/about-documentation';
 import { aiMatterExtractionArticle } from './articles/ai-matter-extraction';
 import { authenticationRbacAndMfaArticle } from './articles/authentication-rbac-and-mfa';
+import { clientDueDiligenceArticle } from './articles/client-due-diligence';
 import { clientsAndContactsArticle } from './articles/clients-and-contacts';
 import { dataAdministrationAndRetentionArticle } from './articles/data-administration-and-retention';
 import { demoEnvironmentArticle } from './articles/demo-environment';
@@ -96,6 +97,7 @@ export const ARTICLES: DocArticle[] = [
   sharepointDocumentStoreArticle,
   sharepointSitesSelectedSetupArticle,
   quickConflictCheck,
+  clientDueDiligenceArticle,
   clientsAndContactsArticle,
   duplicateChecks,
   employeeRecordsArticle,

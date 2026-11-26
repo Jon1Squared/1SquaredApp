@@ -13,6 +13,11 @@ import registersJsonSchema from '../../schemas/registers.config.schema.json';
 import tenantConfigJsonSchema from '../../schemas/tenant-config.schema.json';
 import {
   ALL_DOCUMENT_PERMISSION_KEYS,
+  type CddChecklistItemTemplate,
+  type CddChecklistTemplateSet,
+  type CddClientCategoryKey,
+  type CddConfiguration,
+  type CddRiskTierKey,
   type DocumentGenerationConfig,
   type DocumentPermission,
   type DocumentStoreConfig,
@@ -2487,6 +2492,8 @@ export const TenantConfigurationSchema = z
         'register:configure',
         'undertaking:manage',
         'signoff:approve',
+        'cdd:view',
+        'cdd:record',
       ]);
       const RegisterManagePermissionEnum = z.enum([
         'register:view',
@@ -2495,6 +2502,8 @@ export const TenantConfigurationSchema = z
         'register:approve',
         'register:configure',
         'undertaking:manage',
+        'cdd:view',
+        'cdd:record',
       ]);
       const RegisterFieldSchema = z
         .object({
@@ -2509,6 +2518,8 @@ export const TenantConfigurationSchema = z
             'date',
             'select',
             'person',
+            'checklist',
+            'evidence',
           ]),
           required: z.boolean().default(false).optional(),
           description: z.string().optional(),
@@ -2534,9 +2545,13 @@ export const TenantConfigurationSchema = z
           fromStatuses: z.array(z.string().min(1)).min(1),
           toStatus: z.string().min(1),
           requiredPermission: RegisterPermissionEnum,
+          allowedRoles: z.array(z.string().min(1)).optional(),
           requiresComment: z.boolean().default(false).optional(),
           forbidSelfAction: z.boolean().default(false).optional(),
           requireAssignedApproverMatch: z.boolean().default(false).optional(),
+          mustDifferFromPreviousApprover: z.boolean().default(false).optional(),
+          distinctFromTransitionKeys: z.array(z.string().min(1)).optional(),
+          systemOnly: z.boolean().default(false).optional(),
           setsDecidedAt: z.boolean().default(false).optional(),
         })
         .strict();
@@ -2546,9 +2561,16 @@ export const TenantConfigurationSchema = z
           forbidSelfApproval: z.literal(true),
           allowedApproverRoles: z.array(z.string().min(1)).optional(),
           requireAssignedApproverMatch: z.boolean().default(false).optional(),
+          allowAdminBypass: z.boolean().default(true).optional(),
         })
         .strict()
         .nullable();
+      const RegisterReminderRecipientModeEnum = z.enum([
+        'owner_and_approver',
+        'owner_only',
+        'matter_team_and_owner',
+        'client_owner_or_recent_fee_earner',
+      ]);
       const RegisterReminderScheduleSchema = z
         .object({
           enabled: z.boolean().default(true),
@@ -2558,9 +2580,7 @@ export const TenantConfigurationSchema = z
           reviewDaysBefore: z
             .array(z.number().int().min(-365).max(365))
             .default([14, 7, 0]),
-          recipientMode: z
-            .enum(['owner_and_approver', 'owner_only', 'matter_team_and_owner'])
-            .default('owner_and_approver'),
+          recipientMode: RegisterReminderRecipientModeEnum.default('owner_and_approver'),
         })
         .strict();
       const RegisterTypeDefSchema = z
@@ -2573,8 +2593,10 @@ export const TenantConfigurationSchema = z
           enabled: z.boolean().default(true),
           referencePrefix: z.string().regex(/^[A-Z0-9]{2,6}$/),
           initialStatus: z.string().min(1),
+          viewPermission: RegisterManagePermissionEnum.optional(),
           createPermission: RegisterManagePermissionEnum,
           editPermission: RegisterManagePermissionEnum,
+          subjectScope: z.enum(['matter', 'client', 'any']).default('any').optional(),
           requireMatterLink: z.boolean().default(false).optional(),
           approvalRules: RegisterApprovalRulesSchema,
           reminderSchedule: RegisterReminderScheduleSchema,
@@ -2596,9 +2618,7 @@ export const TenantConfigurationSchema = z
               enabled: z.boolean().optional(),
               dueDaysBefore: z.array(z.number().int().min(-365).max(365)).optional(),
               reviewDaysBefore: z.array(z.number().int().min(-365).max(365)).optional(),
-              recipientMode: z
-                .enum(['owner_and_approver', 'owner_only', 'matter_team_and_owner'])
-                .optional(),
+              recipientMode: RegisterReminderRecipientModeEnum.optional(),
             })
             .strict()
             .optional(),
@@ -2622,7 +2642,17 @@ export const TenantConfigurationSchema = z
             .default({})
             .optional(),
         })
-        .strict();
+        .strict()
+        .superRefine((regs, ctx) => {
+          if ((regs.typeOverrides?.['cdd']?.additionalFields?.length ?? 0) > 0) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['typeOverrides', 'cdd', 'additionalFields'],
+              message:
+                'System-managed register "cdd" does not allow extra firm-defined fields.',
+            });
+          }
+        });
     })()
       .optional()
       .describe(
@@ -2654,6 +2684,79 @@ export const TenantConfigurationSchema = z
       .strict()
       .optional()
       .describe('Tenant enquiry intake and routing settings'),
+    cdd: (() => {
+      const CddChecklistItemTemplateSchema: z.ZodType<CddChecklistItemTemplate> = z
+        .object({
+          itemKey: z.string().min(1),
+          label: z.string().min(1),
+          description: z.string().optional(),
+          required: z.boolean().default(true),
+          requiresEvidence: z.boolean().default(false),
+          linkedIntakeCheckKind: z
+            .enum(['identity_verification', 'sanctions_pep'])
+            .optional(),
+        })
+        .strict();
+      const CddChecklistTemplateSetSchema: z.ZodType<CddChecklistTemplateSet> = z
+        .object({
+          standard: z.array(CddChecklistItemTemplateSchema).default([]),
+          highAdditional: z.array(CddChecklistItemTemplateSchema).default([]),
+        })
+        .strict();
+      const CddClientCategoryEnum: z.ZodType<CddClientCategoryKey> = z.enum([
+        'individual',
+        'company_or_llp',
+        'trust_charity_or_partnership',
+      ]);
+      const CddRiskTierEnum: z.ZodType<CddRiskTierKey> = z.enum([
+        'standard',
+        'high',
+      ]);
+      return z
+        .object({
+          enabled: z.boolean().default(true).optional(),
+          clientTypeMapping: z
+            .record(z.string().min(1), CddClientCategoryEnum)
+            .default({})
+            .optional(),
+          riskTierMapping: z
+            .record(z.string().min(1), CddRiskTierEnum)
+            .default({})
+            .optional(),
+          checklists: z
+            .object({
+              individual: CddChecklistTemplateSetSchema.optional(),
+              company_or_llp: CddChecklistTemplateSetSchema.optional(),
+              trust_charity_or_partnership: CddChecklistTemplateSetSchema.optional(),
+            })
+            .strict()
+            .default({})
+            .optional(),
+          recheckIntervalsMonths: z
+            .object({
+              standard: z.number().int().min(1).max(120).default(36),
+              high: z.number().int().min(1).max(120).default(12),
+            })
+            .strict()
+            .optional(),
+          reminderScheduleDaysBefore: z
+            .array(z.number().int().min(-365).max(365))
+            .default([14, 7, 0])
+            .optional(),
+          maxEvidenceFileSizeBytes: z
+            .number()
+            .int()
+            .min(1024)
+            .max(26214400)
+            .default(10485760)
+            .optional(),
+        })
+        .strict();
+    })()
+      .optional()
+      .describe(
+        'Client Due Diligence (CDD) checklists, client-type and risk-tier mappings, re-check intervals, reminder schedule, and evidence limits (ADR 0039, S1-04)',
+      ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -3766,9 +3869,100 @@ export function loadAndValidateTenantConfig(
     | Record<string, unknown>
     | undefined;
   if (baseRegisters || overlayRegisters) {
+    const baseOverrides =
+      baseRegisters?.typeOverrides &&
+      typeof baseRegisters.typeOverrides === 'object' &&
+      !Array.isArray(baseRegisters.typeOverrides)
+        ? (baseRegisters.typeOverrides as Record<string, unknown>)
+        : undefined;
+    const overlayOverrides =
+      overlayRegisters?.typeOverrides &&
+      typeof overlayRegisters.typeOverrides === 'object' &&
+      !Array.isArray(overlayRegisters.typeOverrides)
+        ? (overlayRegisters.typeOverrides as Record<string, unknown>)
+        : undefined;
     merged.registers = {
       ...(baseRegisters ?? {}),
       ...(overlayRegisters ?? {}),
+      ...(baseOverrides || overlayOverrides
+        ? {
+            typeOverrides: {
+              ...(baseOverrides ?? {}),
+              ...(overlayOverrides ?? {}),
+            },
+          }
+        : {}),
+    };
+  }
+
+  const baseCdd = baseConfig.cdd as Record<string, unknown> | undefined;
+  const overlayCdd = environmentOverlay.cdd as
+    | Record<string, unknown>
+    | undefined;
+  if (baseCdd || overlayCdd) {
+    const asPlainObj = (v: unknown): Record<string, unknown> | undefined =>
+      v && typeof v === 'object' && !Array.isArray(v)
+        ? (v as Record<string, unknown>)
+        : undefined;
+    const baseClientMap = asPlainObj(baseCdd?.clientTypeMapping);
+    const overClientMap = asPlainObj(overlayCdd?.clientTypeMapping);
+    const baseRiskMap = asPlainObj(baseCdd?.riskTierMapping);
+    const overRiskMap = asPlainObj(overlayCdd?.riskTierMapping);
+    const baseIntervals = asPlainObj(baseCdd?.recheckIntervalsMonths);
+    const overIntervals = asPlainObj(overlayCdd?.recheckIntervalsMonths);
+    const baseChecklists = asPlainObj(baseCdd?.checklists);
+    const overChecklists = asPlainObj(overlayCdd?.checklists);
+
+    let mergedChecklists: Record<string, unknown> | undefined;
+    if (baseChecklists || overChecklists) {
+      mergedChecklists = {};
+      for (const catKey of new Set([
+        ...Object.keys(baseChecklists ?? {}),
+        ...Object.keys(overChecklists ?? {}),
+      ])) {
+        const baseCat = asPlainObj(baseChecklists?.[catKey]);
+        const overCat = asPlainObj(overChecklists?.[catKey]);
+        if (overChecklists && Object.prototype.hasOwnProperty.call(overChecklists, catKey) && !overCat) {
+          mergedChecklists[catKey] = overChecklists[catKey];
+        } else {
+          mergedChecklists[catKey] = {
+            ...(baseCat ?? {}),
+            ...(overCat ?? {}),
+          };
+        }
+      }
+    }
+
+    merged.cdd = {
+      ...(baseCdd ?? {}),
+      ...(overlayCdd ?? {}),
+      ...(baseClientMap || overClientMap
+        ? {
+            clientTypeMapping: {
+              ...(baseClientMap ?? {}),
+              ...(overClientMap ?? {}),
+            },
+          }
+        : {}),
+      ...(baseRiskMap || overRiskMap
+        ? {
+            riskTierMapping: {
+              ...(baseRiskMap ?? {}),
+              ...(overRiskMap ?? {}),
+            },
+          }
+        : {}),
+      ...(mergedChecklists !== undefined
+        ? { checklists: mergedChecklists }
+        : {}),
+      ...(baseIntervals || overIntervals
+        ? {
+            recheckIntervalsMonths: {
+              ...(baseIntervals ?? {}),
+              ...(overIntervals ?? {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -3982,6 +4176,7 @@ export function loadAndValidateTenantConfig(
 
 export const KeyDatesConfigSubSchema = TenantConfigurationSchema.shape.keyDates;
 export const RegistersConfigSubSchema = TenantConfigurationSchema.shape.registers;
+export const CddConfigSubSchema = TenantConfigurationSchema.shape.cdd;
 export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;
@@ -4048,6 +4243,23 @@ export function validateRegistersConfig(
   }
   const parsed = RegistersConfigSubSchema.unwrap().parse(rawRegistersConfig);
   return parsed as RegistersConfiguration;
+}
+
+/**
+ * Validates a standalone `cdd` configuration object against the core CDD schema
+ * (rejecting unknown keys and applying defaults).
+ */
+export function validateCddConfig(rawCddConfig: unknown): CddConfiguration {
+  if (
+    typeof rawCddConfig !== 'object' ||
+    rawCddConfig === null ||
+    Array.isArray(rawCddConfig)
+  ) {
+    throw new Error(
+      'CDD_CONFIG_INVALID: cdd configuration must be a JSON object.',
+    );
+  }
+  return CddConfigSubSchema.unwrap().parse(rawCddConfig) as CddConfiguration;
 }
 
 /**

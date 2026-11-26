@@ -358,15 +358,15 @@ afterEach(async () => {
 });
 
 describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-List & outbox-drain)', () => {
-  it('1. Migration 0019, RBAC 68+10=78 totals, JOB_PERMISSIONS/REGISTERED_CLI_JOBS, and demo/dev/test config overlays', async () => {
+  it('1. Migration 0019, RBAC 70+10=80 totals, JOB_PERMISSIONS/REGISTERED_CLI_JOBS, and demo/dev/test config overlays', async () => {
     expect(Number(CORE_REQUIRED_SCHEMA_VERSION)).toBeGreaterThanOrEqual(22);
     expect(EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019.version).toBe('0019');
     expect(EMAIL_OUTBOX_AND_PREFERENCES_MIGRATION_0019.dependsOn).toEqual([
       '0018',
     ]);
 
-    expect(ALL_PERMISSION_KEYS).toHaveLength(78);
-    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(68);
+    expect(ALL_PERMISSION_KEYS).toHaveLength(80);
+    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(70);
     expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(10);
     expect(ALL_JOB_ONLY_PERMISSION_KEYS).toContain('notification:drain_outbox');
     expect(PERMISSION_REGISTRY['notification:drain_outbox'].jobOnly).toBe(true);

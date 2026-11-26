@@ -133,5 +133,18 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 | \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator work-type configuration (\`admin:access\` + MFA) |
 | \`workTypes.items[].feeArrangementCapCategories\` | Optional | Active | Maps \`conditional_fee_agreement\` and \`damages_based_agreement\` fee bases on a work type to a core statutory cap category key (\`cfa_general_civil\`, \`cfa_personal_injury\`, \`dba_general_civil\`, \`dba_employment\`, \`dba_personal_injury\`); unmapped CFA/DBA matters and quotes fail closed with \`FEE_CAP_CATEGORY_UNMAPPED\` (\`S0-28b\`) |
 | \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Active | Per-work-type CFA/DBA fee cap percentage overrides (\`R486\`, editable up to each category’s core statutory maximum regardless of lower firm defaults; takes precedence over \`matterCosts.feeArrangementCaps\` when present) |
+
+### Client Due Diligence (CDD)
+
+| Setting | Default | Status | Notes |
+|---|---|---|---|
+| Client Due Diligence workflow | Enabled | Active | Enables client-type due diligence checklists on each client’s CDD record |
+| Client category mapping | Default firm categories | Active | Maps firm organisation types to Individual, Company or LLP, or Trust, Charity or Partnership checklist templates |
+| Risk tier mapping | Standard and High-risk tiers | Active | Maps client and matter risk ratings to Standard or High-risk Enhanced due diligence tiers |
+| Default checklists | Pre-populated by category | Active | Standard and additional high-risk checklist items for each client category, viewed in read-only summary under **Administration → Client Due Diligence** |
+| Standard re-check interval | 36 months | Active | Months between scheduled Client Due Diligence reviews for Low and Medium risk ratings |
+| High-risk re-check interval | 12 months | Active | Months between scheduled Client Due Diligence reviews for High, Critical, and Sensitive risk ratings |
+| Re-check reminder schedule | Firm default lead days | Active | Automated reminder notifications triggered on the firm’s configured schedule ahead of and on the due date |
+| Evidence upload size limit | 10 MB | Active | Maximum allowed file size per attached verification file alongside server file-type validation and pre-storage security scanning |
 `.trim(),
 };

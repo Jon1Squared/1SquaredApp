@@ -125,6 +125,10 @@ import {
 } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
 import {
+  buildCddStatusDisplayText,
+  type ClientCddCompactSummary,
+} from '@/domain/cdd';
+import {
   computeClientRelationshipCdd,
   resolveMatterRiskSections,
   summarizeMatterRiskAssessment,
@@ -195,6 +199,7 @@ interface MatterFormClientProps {
   organisations: Organisation[];
   links: PersonOrganisationLink[];
   matters?: ClientPriorMatterSummary[];
+  initialCddSummaries?: Record<string, ClientCddCompactSummary>;
   enquiries?: Enquiry[];
   lists?: ChoiceList[];
   values: ChoiceValue[];
@@ -218,6 +223,7 @@ interface MatterFormClientProps {
   enableAiMatterExtraction?: boolean;
   aiProviderChoice?: 'azure_openai_uk' | 'anthropic' | 'disabled';
   enableMatterCostsGovernance?: boolean;
+  canViewCdd?: boolean;
   tenantId: string;
   initialServerSaveErrors?: Record<string, string>;
 }
@@ -306,6 +312,7 @@ export function MatterFormClient({
   organisations: initialOrganisations,
   links: initialLinks,
   matters: initialClientMatters = [],
+  initialCddSummaries = {},
   enquiries = [],
   lists = [],
   values,
@@ -326,6 +333,7 @@ export function MatterFormClient({
   enableAiMatterExtraction = false,
   aiProviderChoice = 'disabled',
   enableMatterCostsGovernance = false,
+  canViewCdd = false,
   tenantId,
   initialServerSaveErrors = {},
 }: MatterFormClientProps) {
@@ -1169,8 +1177,8 @@ export function MatterFormClient({
   const [targetCompletionAt, setTargetCompletionAt] = useState<string | null>(
     existing?.targetCompletionAt ?? initialEnquiry?.keyDate ?? null,
   );
-  const [amlStatus, setAmlStatus] = useState<string>(existing?.amlStatus ?? '');
-  const [sourceOfFundsVerified, setSourceOfFundsVerified] = useState<string>(
+  const [amlStatus] = useState<string>(existing?.amlStatus ?? '');
+  const [sourceOfFundsVerified] = useState<string>(
     existing?.sourceOfFundsVerified ?? '',
   );
   const [engagementLetterStatus, setEngagementLetterStatus] = useState<string>(
@@ -1839,6 +1847,8 @@ export function MatterFormClient({
   const [clientMatters, setClientMatters] = useState<ClientPriorMatterSummary[]>(
     initialClientMatters,
   );
+  const [clientCddSummaries, setClientCddSummaries] =
+    useState<Record<string, ClientCddCompactSummary>>(initialCddSummaries);
   const [loadedClientMattersKey, setLoadedClientMattersKey] = useState<string>(() =>
     clientIds.join(','),
   );
@@ -1850,11 +1860,12 @@ export function MatterFormClient({
     queueMicrotask(() => {
       if (!active) return;
       setClientMatters(initialClientMatters);
+      setClientCddSummaries(initialCddSummaries);
     });
     return () => {
       active = false;
     };
-  }, [initialClientMatters]);
+  }, [initialClientMatters, initialCddSummaries]);
 
   const clientIdsKey = clientIds.join(',');
   useEffect(() => {
@@ -1864,6 +1875,7 @@ export function MatterFormClient({
       queueMicrotask(() => {
         if (cancelled) return;
         setClientMatters([]);
+        setClientCddSummaries({});
         setLoadedClientMattersKey('');
       });
       return () => {
@@ -1887,6 +1899,7 @@ export function MatterFormClient({
         if (cancelled || seq !== clientMattersSeqRef.current) return;
         if (isActionDenied(res)) {
           setClientMatters([]);
+          setClientCddSummaries({});
           setLoadedClientMattersKey(clientIdsKey);
           showToast(
             res.message || 'Could not load prior client matters for CDD check.',
@@ -1894,11 +1907,13 @@ export function MatterFormClient({
           return;
         }
         setClientMatters(res.matters);
+        setClientCddSummaries(res.cddSummaries ?? {});
         setLoadedClientMattersKey(clientIdsKey);
       })
       .catch(() => {
         if (cancelled || seq !== clientMattersSeqRef.current) return;
         setClientMatters([]);
+        setClientCddSummaries({});
         setLoadedClientMattersKey(clientIdsKey);
         showToast('Could not load prior client matters for CDD check.');
       });
@@ -1918,10 +1933,12 @@ export function MatterFormClient({
         people: [...people, ...Object.values(pickedClientPeopleById)],
         values,
         today,
+        cddSummaries: clientCddSummaries,
       }),
     [
       clientIds,
       clientMatters,
+      clientCddSummaries,
       existing?.id,
       organisations,
       pickedClientOrgsById,
@@ -12013,32 +12030,85 @@ export function MatterFormClient({
                           ))}
                       </select>
                     </div>
+                    {canViewCdd ? (
+                      <div className="field-group" style={{ gridColumn: '1 / -1' }}>
+                        <label className="field-label">Client Due Diligence (client record)</label>
+                        <div
+                          style={{
+                            padding: '10px 12px',
+                            borderRadius: 6,
+                            border: '1px solid var(--border-subtle)',
+                            background: 'var(--bg-subtle, #f8fafc)',
+                            fontSize: 13,
+                            display: 'grid',
+                            gap: 6,
+                          }}
+                        >
+                          {clientIds.length === 0 ? (
+                            <span className="muted">
+                              Select a client above to inspect their Client Due Diligence status.
+                            </span>
+                          ) : (
+                            clientIds.map((cid) => {
+                              const cddSum = clientCddSummaries[cid];
+                              const href = cid.startsWith('O-')
+                                ? `/organisations/${cid}?tab=compliance`
+                                : `/people/${cid}?tab=compliance`;
+                              if (cddSum && !cddSum.visible) {
+                                return (
+                                  <div key={cid} className="muted">
+                                    Client CDD summary is restricted for this client record.
+                                  </div>
+                                );
+                              }
+                              const text = cddSum
+                                ? buildCddStatusDisplayText(cddSum)
+                                : 'Client Due Diligence status loaded from client record.';
+                              return (
+                                <div
+                                  key={cid}
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    flexWrap: 'wrap',
+                                  }}
+                                >
+                                  <span>{text}</span>
+                                  <Link href={href} className="btn btn--secondary btn--sm">
+                                    Open client CDD
+                                  </Link>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                        <p className="muted" style={{ fontSize: 11.5, margin: '4px 0 0' }}>
+                          Legacy matter-level AML and Source of Funds/Wealth fields below are
+                          read-only and derived from the client CDD record.
+                        </p>
+                      </div>
+                    ) : null}
                     <div className="field-group">
-                      <label className="field-label">Client due diligence (AML)</label>
-                      <select
-                        className="field-select"
-                        value={amlStatus}
-                        onChange={(e) => setAmlStatus(e.target.value)}
-                      >
-                        <option value="">Unknown value</option>
-                        <option value="Pending">Pending</option>
-                        <option value="Verified">Verified</option>
-                        <option value="In progress">In progress</option>
-                      </select>
+                      <label className="field-label">Client due diligence (AML — read-only)</label>
+                      <input
+                        type="text"
+                        className="field-input"
+                        readOnly
+                        disabled
+                        value={amlStatus || 'Managed at client level'}
+                      />
                     </div>
                     <div className="field-group">
-                      <label className="field-label">Source of funds verified</label>
-                      <select
-                        className="field-select"
-                        value={sourceOfFundsVerified}
-                        onChange={(e) => setSourceOfFundsVerified(e.target.value)}
-                      >
-                        <option value="">Unknown value</option>
-                        <option value="In progress">In progress</option>
-                        <option value="Yes">Yes</option>
-                        <option value="No">No</option>
-                        <option value="N/A">N/A</option>
-                      </select>
+                      <label className="field-label">Source of funds verified (read-only)</label>
+                      <input
+                        type="text"
+                        className="field-input"
+                        readOnly
+                        disabled
+                        value={sourceOfFundsVerified || 'Managed at client level'}
+                      />
                     </div>
                     <div className="field-group">
                       <label className="field-label">Engagement letter status</label>

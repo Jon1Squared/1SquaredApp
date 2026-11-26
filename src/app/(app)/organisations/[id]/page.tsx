@@ -58,6 +58,7 @@ export default async function OrganisationProfilePage({
         duplicateCandidates={data.duplicateCandidates}
         mergedFromId={mergedFrom ?? null}
         initialTab={tab}
+        cddSummary={data.cddSummary}
       />
     );
   }, buildRouteReturnTo(`/organisations/${encodeURIComponent(id)}`, resolvedSearch));

@@ -11,8 +11,15 @@
  */
 
 import type {
+  CddChecklistItemTemplate,
+  CddChecklistTemplateSet,
+  CddClientCategoryKey,
+  CddConfiguration,
+  CddRiskTierKey,
+  IntakeEvidenceArtifactRef,
   PermissionKey,
   RegisterApprovalRules,
+  RegisterChecklistItemValue,
   RegisterFieldDefinition,
   RegisterPermission,
   RegisterRecord,
@@ -22,11 +29,13 @@ import type {
   RegisterTransitionDefinition,
   RegisterTypeDefinition,
   RegisterTypeOverride,
+  TenantConfiguration,
 } from '../../api/index';
 
 export const REGISTER_DOMAIN_ERROR_CODES = {
   VALIDATION_ERROR: 'REGISTER_VALIDATION_ERROR',
   INVALID_TRANSITION: 'REGISTER_INVALID_TRANSITION',
+  SYSTEM_ONLY_TRANSITION: 'REGISTER_SYSTEM_ONLY_TRANSITION',
   SELF_APPROVAL_FORBIDDEN: 'REGISTER_SELF_APPROVAL_FORBIDDEN',
   APPROVER_MISMATCH: 'REGISTER_APPROVER_MISMATCH',
   CONCURRENCY_CONFLICT: 'REGISTER_CONCURRENCY_CONFLICT',
@@ -65,7 +74,7 @@ export const DEFAULT_REGISTERS_CONFIG: RegistersConfiguration = Object.freeze({
 });
 
 export const CORE_REGISTER_TYPES: Readonly<
-  Record<'sign_off' | 'undertaking' | 'complaint' | 'breach', RegisterTypeDefinition>
+  Record<'sign_off' | 'undertaking' | 'complaint' | 'breach' | 'cdd', RegisterTypeDefinition>
 > = Object.freeze({
   sign_off: {
     key: 'sign_off',
@@ -434,6 +443,108 @@ export const CORE_REGISTER_TYPES: Readonly<
     ],
     showInNavigation: true,
   },
+  cdd: {
+    key: 'cdd',
+    label: 'Client Due Diligence',
+    pluralLabel: 'Client Due Diligence',
+    description:
+      'Client-subject due diligence checklists, manual ID and sanctions/PEP evidence, and scheduled re-check tracking.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'CDD',
+    initialStatus: 'in_progress',
+    viewPermission: 'cdd:view',
+    createPermission: 'cdd:record',
+    editPermission: 'cdd:record',
+    subjectScope: 'client',
+    requireMatterLink: false,
+    approvalRules: null,
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [30, 7, 0, -7, -30],
+      reviewDaysBefore: [],
+      recipientMode: 'client_owner_or_recent_fee_earner',
+    },
+    states: [
+      { key: 'in_progress', label: 'In progress', isTerminal: false, tone: 'warning' },
+      { key: 'recorded', label: 'Recorded', isTerminal: false, tone: 'success' },
+      { key: 'archived', label: 'Archived', isTerminal: true, tone: 'neutral' },
+      { key: 'superseded', label: 'Superseded', isTerminal: true, tone: 'neutral' },
+    ],
+    transitions: [
+      {
+        key: 'record_cdd',
+        label: 'Mark CDD recorded',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'recorded',
+        requiredPermission: 'cdd:record',
+        systemOnly: true,
+        setsDecidedAt: true,
+      },
+      {
+        key: 'upgrade_to_high_risk',
+        label: 'Upgrade to High-risk CDD',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'in_progress',
+        requiredPermission: 'cdd:record',
+        systemOnly: true,
+      },
+      {
+        key: 'archive_cdd',
+        label: 'Archive CDD record',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'archived',
+        requiredPermission: 'cdd:record',
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+      {
+        key: 'supersede_cdd',
+        label: 'Supersede CDD record',
+        fromStatuses: ['in_progress', 'recorded'],
+        toStatus: 'superseded',
+        requiredPermission: 'cdd:record',
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'clientCategory',
+        label: 'Client CDD category',
+        type: 'select',
+        required: true,
+        options: ['individual', 'company_or_llp', 'trust_charity_or_partnership'],
+      },
+      {
+        key: 'riskTier',
+        label: 'CDD tier',
+        type: 'select',
+        required: true,
+        options: ['standard', 'high'],
+        defaultValue: 'standard',
+      },
+      {
+        key: 'checklistItems',
+        label: 'CDD checklist items',
+        type: 'checklist',
+        required: true,
+      },
+      {
+        key: 'supportingEvidence',
+        label: 'Supporting evidence',
+        type: 'evidence',
+        required: false,
+      },
+      {
+        key: 'manualSummaryNote',
+        label: 'Compliance notes',
+        type: 'textarea',
+        required: false,
+      },
+    ],
+    showInNavigation: true,
+  },
 });
 
 const CORE_REGISTER_KEY_SET = new Set<string>(Object.keys(CORE_REGISTER_TYPES));
@@ -468,9 +579,21 @@ function cloneTransitionDefinition(
     fromStatuses: [...transitionDef.fromStatuses],
     toStatus: transitionDef.toStatus,
     requiredPermission: transitionDef.requiredPermission,
+    ...(transitionDef.allowedRoles
+      ? { allowedRoles: [...transitionDef.allowedRoles] }
+      : {}),
     requiresComment: transitionDef.requiresComment ?? false,
     forbidSelfAction: transitionDef.forbidSelfAction ?? false,
     requireAssignedApproverMatch: transitionDef.requireAssignedApproverMatch ?? false,
+    ...(transitionDef.mustDifferFromPreviousApprover !== undefined
+      ? { mustDifferFromPreviousApprover: Boolean(transitionDef.mustDifferFromPreviousApprover) }
+      : {}),
+    ...(transitionDef.distinctFromTransitionKeys
+      ? { distinctFromTransitionKeys: [...transitionDef.distinctFromTransitionKeys] }
+      : {}),
+    ...(transitionDef.systemOnly !== undefined
+      ? { systemOnly: Boolean(transitionDef.systemOnly) }
+      : {}),
     setsDecidedAt: transitionDef.setsDecidedAt ?? false,
   };
 }
@@ -492,6 +615,9 @@ function cloneApprovalRules(
       ? { allowedApproverRoles: [...approvalRules.allowedApproverRoles] }
       : {}),
     requireAssignedApproverMatch: Boolean(approvalRules.requireAssignedApproverMatch),
+    ...(approvalRules.allowAdminBypass !== undefined
+      ? { allowAdminBypass: Boolean(approvalRules.allowAdminBypass) }
+      : {}),
   };
 }
 
@@ -584,8 +710,14 @@ export function validateRegisterTypeDefinition(
     enabled: customRegisterType.enabled ?? true,
     referencePrefix: customRegisterType.referencePrefix,
     initialStatus: customRegisterType.initialStatus,
+    ...(customRegisterType.viewPermission !== undefined
+      ? { viewPermission: customRegisterType.viewPermission }
+      : {}),
     createPermission: customRegisterType.createPermission,
     editPermission: customRegisterType.editPermission,
+    ...(customRegisterType.subjectScope !== undefined
+      ? { subjectScope: customRegisterType.subjectScope }
+      : {}),
     requireMatterLink: Boolean(customRegisterType.requireMatterLink),
     approvalRules: cloneApprovalRules(customRegisterType.approvalRules),
     reminderSchedule: cloneReminderSchedule(
@@ -604,6 +736,15 @@ function applyRegisterTypeOverride(
   baseType: RegisterTypeDefinition,
   typeOverride: RegisterTypeOverride,
 ): RegisterTypeDefinition {
+  if (
+    baseType.key === 'cdd' &&
+    (typeOverride.additionalFields?.length ?? 0) > 0
+  ) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `System-managed register "${baseType.key}" does not allow firm-defined additionalFields.`,
+    );
+  }
   const nextFields = baseType.fields.map(cloneFieldDefinition);
   const existingKeys = new Set(nextFields.map((f) => f.key));
   for (const extraField of typeOverride.additionalFields ?? []) {
@@ -768,7 +909,8 @@ export function validateRegisterFieldValues(params: {
     const isEmpty =
       val === undefined ||
       val === null ||
-      (typeof val === 'string' && val.trim().length === 0);
+      (typeof val === 'string' && val.trim().length === 0) ||
+      (Array.isArray(val) && val.length === 0);
 
     if (isEmpty) {
       if (enforceRequired && fieldDef.required) {
@@ -832,6 +974,121 @@ export function validateRegisterFieldValues(params: {
         }
         break;
       }
+      case 'checklist': {
+        if (!Array.isArray(val)) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be an array of checklist items.`,
+          );
+        }
+        const VALID_STATUSES = new Set(['pending', 'recorded', 'not_applicable', 'failed']);
+        const normalisedItems: RegisterChecklistItemValue[] = [];
+        for (const rawItem of val) {
+          if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist entry in field "${fieldDef.key}" must be an object.`,
+            );
+          }
+          const item = rawItem as Record<string, unknown>;
+          const itemKey = typeof item.itemKey === 'string' ? item.itemKey.trim() : '';
+          const label = typeof item.label === 'string' ? item.label.trim() : '';
+          const status = typeof item.status === 'string' ? item.status : '';
+          if (!itemKey || !label || typeof item.required !== 'boolean' || !VALID_STATUSES.has(status)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist item "${itemKey || 'unknown'}" in field "${fieldDef.key}" has invalid structure or status.`,
+            );
+          }
+          const trimmedNote = typeof item.note === 'string' ? item.note.trim() : '';
+          if ((status === 'not_applicable' || status === 'failed') && trimmedNote.length === 0) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist item "${label}" requires a note when marked "${status}".`,
+            );
+          }
+          if (!Array.isArray(item.evidenceRefs)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Checklist item "${itemKey}" evidenceRefs must be an array.`,
+            );
+          }
+          for (const rawRef of item.evidenceRefs) {
+            if (
+              !rawRef ||
+              typeof rawRef !== 'object' ||
+              Array.isArray(rawRef) ||
+              typeof (rawRef as { blobKey?: unknown }).blobKey !== 'string' ||
+              !(rawRef as { blobKey: string }).blobKey.trim()
+            ) {
+              throw createRegisterDomainError(
+                REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+                `Checklist item "${itemKey}" contains an invalid evidence reference.`,
+              );
+            }
+          }
+          normalisedItems.push({
+            itemKey,
+            label,
+            required: item.required,
+            status: status as RegisterChecklistItemValue['status'],
+            recordedById: typeof item.recordedById === 'string' ? item.recordedById : null,
+            ...(typeof item.recordedByName === 'string' && item.recordedByName.trim()
+              ? { recordedByName: item.recordedByName.trim() }
+              : {}),
+            recordedAt: typeof item.recordedAt === 'string' ? item.recordedAt : null,
+            ...(trimmedNote ? { note: trimmedNote } : {}),
+            evidenceRefs: item.evidenceRefs as IntakeEvidenceArtifactRef[],
+            ...(item.intakeCheckRecordId !== undefined
+              ? {
+                  intakeCheckRecordId:
+                    typeof item.intakeCheckRecordId === 'string'
+                      ? item.intakeCheckRecordId
+                      : null,
+                }
+              : {}),
+          });
+        }
+        next[fieldDef.key] = normalisedItems;
+        break;
+      }
+      case 'evidence': {
+        if (!Array.isArray(val)) {
+          throw createRegisterDomainError(
+            REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+            `Field "${fieldDef.key}" must be an array of verified evidence references.`,
+          );
+        }
+        const VALID_SCANS = new Set(['clean', 'pending', 'infected', 'quarantined']);
+        for (const rawRef of val) {
+          if (!rawRef || typeof rawRef !== 'object' || Array.isArray(rawRef)) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Evidence entry in field "${fieldDef.key}" must be an object.`,
+            );
+          }
+          const ref = rawRef as Partial<IntakeEvidenceArtifactRef>;
+          if (
+            typeof ref.blobKey !== 'string' ||
+            !ref.blobKey.trim() ||
+            typeof ref.sha256 !== 'string' ||
+            !ref.sha256.trim() ||
+            typeof ref.contentType !== 'string' ||
+            !ref.contentType.trim() ||
+            typeof ref.sizeBytes !== 'number' ||
+            !Number.isFinite(ref.sizeBytes) ||
+            ref.sizeBytes <= 0 ||
+            typeof ref.scanStatus !== 'string' ||
+            !VALID_SCANS.has(ref.scanStatus)
+          ) {
+            throw createRegisterDomainError(
+              REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+              `Evidence reference in field "${fieldDef.key}" is missing required integrity metadata.`,
+            );
+          }
+        }
+        break;
+      }
     }
   }
 
@@ -842,11 +1099,24 @@ export function validateRegisterCreateInput(params: {
   registerType: RegisterTypeDefinition;
   title: string;
   matterId: string | null;
+  personId?: string | null;
+  organisationId?: string | null;
   dueAt: string | null;
   reviewAt: string | null;
   fieldValues: Record<string, unknown>;
-}): { title: string; dueAt: string | null; reviewAt: string | null; fieldValues: Record<string, unknown> } {
+}): {
+  title: string;
+  matterId: string | null;
+  personId: string | null;
+  organisationId: string | null;
+  dueAt: string | null;
+  reviewAt: string | null;
+  fieldValues: Record<string, unknown>;
+} {
   const { registerType, title, matterId, dueAt, reviewAt, fieldValues } = params;
+  const personId = params.personId?.trim() || null;
+  const organisationId = params.organisationId?.trim() || null;
+  const cleanMatterId = matterId?.trim() || null;
   if (!registerType.enabled) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.TYPE_DISABLED,
@@ -860,7 +1130,23 @@ export function validateRegisterCreateInput(params: {
       `Title is required when creating a ${registerType.label} record.`,
     );
   }
-  if (registerType.requireMatterLink && !matterId) {
+  const subjectScope = registerType.subjectScope ?? (registerType.requireMatterLink ? 'matter' : 'any');
+  if (subjectScope === 'client') {
+    if (cleanMatterId) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Client-scoped register type "${registerType.key}" cannot link directly to a matterId.`,
+      );
+    }
+    const hasPerson = Boolean(personId);
+    const hasOrg = Boolean(organisationId);
+    if (hasPerson === hasOrg) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        `Client-scoped register type "${registerType.key}" requires exactly one of personId or organisationId.`,
+      );
+    }
+  } else if ((registerType.requireMatterLink || subjectScope === 'matter') && !cleanMatterId) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
       `Register type "${registerType.key}" requires a linked matter.`,
@@ -885,10 +1171,26 @@ export function validateRegisterCreateInput(params: {
   });
   return {
     title: cleanTitle,
+    matterId: cleanMatterId,
+    personId,
+    organisationId,
     dueAt: normaliseIso(dueAt, 'dueAt'),
     reviewAt: normaliseIso(reviewAt, 'reviewAt'),
     fieldValues: normalisedFields,
   };
+}
+
+export function actorCanViewRegisterType(
+  actorPermissionSet: ReadonlySet<PermissionKey>,
+  registerType: Pick<RegisterTypeDefinition, 'key' | 'viewPermission'>,
+): boolean {
+  if (registerType.viewPermission) {
+    return actorPermissionSet.has(registerType.viewPermission as PermissionKey);
+  }
+  if (actorPermissionSet.has('register:view')) {
+    return true;
+  }
+  return registerType.key === 'undertaking' && actorPermissionSet.has('undertaking:manage');
 }
 
 export function actorCanExecuteRegisterTransition(
@@ -918,6 +1220,7 @@ export function validateRegisterTransitionExecution(params: {
   actorPermissionSet: ReadonlySet<PermissionKey>;
   comment: string | null;
   expectedRowVersion?: number;
+  viaDedicatedWorkflow?: boolean;
 }): {
   transition: RegisterTransitionDefinition;
   nextStatus: string;
@@ -932,6 +1235,7 @@ export function validateRegisterTransitionExecution(params: {
     actorPermissionSet,
     comment,
     expectedRowVersion,
+    viaDedicatedWorkflow = false,
   } = params;
 
   if (!registerType.enabled) {
@@ -953,6 +1257,20 @@ export function validateRegisterTransitionExecution(params: {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
       `Transition "${transitionKey}" is not defined on register "${registerType.key}".`,
+    );
+  }
+
+  if (transition.systemOnly && !viaDedicatedWorkflow) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.SYSTEM_ONLY_TRANSITION,
+      `Transition "${transition.key}" on register "${registerType.key}" may only be executed through its dedicated workflow.`,
+    );
+  }
+
+  if (viaDedicatedWorkflow && !transition.systemOnly) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
+      `Transition "${transition.key}" on register "${registerType.key}" is not a dedicated workflow transition.`,
     );
   }
 
@@ -1164,6 +1482,288 @@ export function isRegisterPermission(key: string): key is RegisterPermission {
     key === 'register:edit' ||
     key === 'register:approve' ||
     key === 'register:configure' ||
-    key === 'undertaking:manage'
+    key === 'undertaking:manage' ||
+    key === 'cdd:view' ||
+    key === 'cdd:record'
   );
+}
+
+// ============================================================================
+// Client Due Diligence (CDD) Configuration & Checklist Helpers (ADR 0039, S1-04)
+// ============================================================================
+
+export const DEFAULT_CDD_RECHECK_MONTHS_STANDARD = 36;
+export const DEFAULT_CDD_RECHECK_MONTHS_HIGH = 12;
+export const DEFAULT_CDD_REMINDER_DAYS_BEFORE: readonly number[] = Object.freeze([
+  14, 7, 0,
+]);
+export const DEFAULT_CDD_MAX_EVIDENCE_BYTES = 10_485_760;
+
+export interface ResolvedCddConfiguration {
+  readonly enabled: boolean;
+  readonly clientTypeMapping: Readonly<Record<string, CddClientCategoryKey>>;
+  readonly riskTierMapping: Readonly<Record<string, CddRiskTierKey>>;
+  readonly checklists: Readonly<Partial<Record<CddClientCategoryKey, CddChecklistTemplateSet>>>;
+  readonly recheckIntervalsMonths: {
+    readonly standard: number;
+    readonly high: number;
+  };
+  readonly reminderScheduleDaysBefore: readonly number[];
+  readonly maxEvidenceFileSizeBytes: number;
+}
+
+export function mergeCddConfigurations(
+  baseConfig?: CddConfiguration | null,
+  overrideConfig?: CddConfiguration | null,
+): CddConfiguration {
+  const baseChecklists = baseConfig?.checklists ?? {};
+  const overrideChecklists = overrideConfig?.checklists ?? {};
+  const mergedChecklists: Partial<Record<CddClientCategoryKey, CddChecklistTemplateSet>> = {};
+  const categoryKeys: CddClientCategoryKey[] = [
+    'individual',
+    'company_or_llp',
+    'trust_charity_or_partnership',
+  ];
+  for (const key of categoryKeys) {
+    const b = baseChecklists[key];
+    const o = overrideChecklists[key];
+    if (b || o) {
+      mergedChecklists[key] = {
+        standard: [...(o?.standard ?? b?.standard ?? [])],
+        highAdditional: [...(o?.highAdditional ?? b?.highAdditional ?? [])],
+      };
+    }
+  }
+  const baseIntervals = baseConfig?.recheckIntervalsMonths;
+  const overrideIntervals = overrideConfig?.recheckIntervalsMonths;
+  return {
+    enabled: overrideConfig?.enabled ?? baseConfig?.enabled ?? true,
+    clientTypeMapping: {
+      ...(baseConfig?.clientTypeMapping ?? {}),
+      ...(overrideConfig?.clientTypeMapping ?? {}),
+    },
+    riskTierMapping: {
+      ...(baseConfig?.riskTierMapping ?? {}),
+      ...(overrideConfig?.riskTierMapping ?? {}),
+    },
+    checklists: mergedChecklists,
+    recheckIntervalsMonths: {
+      standard:
+        overrideIntervals?.standard ??
+        baseIntervals?.standard ??
+        DEFAULT_CDD_RECHECK_MONTHS_STANDARD,
+      high:
+        overrideIntervals?.high ??
+        baseIntervals?.high ??
+        DEFAULT_CDD_RECHECK_MONTHS_HIGH,
+    },
+    reminderScheduleDaysBefore: [
+      ...(overrideConfig?.reminderScheduleDaysBefore ??
+        baseConfig?.reminderScheduleDaysBefore ??
+        DEFAULT_CDD_REMINDER_DAYS_BEFORE),
+    ],
+    maxEvidenceFileSizeBytes:
+      overrideConfig?.maxEvidenceFileSizeBytes ??
+      baseConfig?.maxEvidenceFileSizeBytes ??
+      DEFAULT_CDD_MAX_EVIDENCE_BYTES,
+  };
+}
+
+export function resolveEffectiveCddConfig(
+  config?: Pick<TenantConfiguration, 'cdd'> | null,
+  overrideConfig?: CddConfiguration | null,
+): ResolvedCddConfiguration {
+  const cdd = config?.cdd;
+  const baseRecheck = cdd?.recheckIntervalsMonths;
+  const merged = mergeCddConfigurations(
+    {
+      enabled: cdd?.enabled,
+      clientTypeMapping: cdd?.clientTypeMapping,
+      riskTierMapping: cdd?.riskTierMapping,
+      checklists: cdd?.checklists,
+      recheckIntervalsMonths: baseRecheck
+        ? {
+            standard: baseRecheck.standard,
+            high: baseRecheck.high,
+          }
+        : undefined,
+      reminderScheduleDaysBefore: cdd?.reminderScheduleDaysBefore,
+      maxEvidenceFileSizeBytes: cdd?.maxEvidenceFileSizeBytes,
+    },
+    overrideConfig,
+  );
+  const recheckIntervalsMonths = {
+    standard:
+      merged.recheckIntervalsMonths?.standard ??
+      DEFAULT_CDD_RECHECK_MONTHS_STANDARD,
+    high:
+      merged.recheckIntervalsMonths?.high ?? DEFAULT_CDD_RECHECK_MONTHS_HIGH,
+  };
+  return {
+    enabled: merged.enabled ?? true,
+    clientTypeMapping: merged.clientTypeMapping ?? {},
+    riskTierMapping: merged.riskTierMapping ?? {},
+    checklists: merged.checklists ?? {},
+    recheckIntervalsMonths,
+    reminderScheduleDaysBefore:
+      merged.reminderScheduleDaysBefore ?? [...DEFAULT_CDD_REMINDER_DAYS_BEFORE],
+    maxEvidenceFileSizeBytes:
+      merged.maxEvidenceFileSizeBytes ?? DEFAULT_CDD_MAX_EVIDENCE_BYTES,
+  };
+}
+
+export function resolveCddChecklistTemplatesForClient(
+  config: Pick<TenantConfiguration, 'cdd'> | null | undefined,
+  category: CddClientCategoryKey,
+  tier: CddRiskTierKey,
+  overrideConfig?: CddConfiguration | null,
+): CddChecklistItemTemplate[] {
+  const effective = resolveEffectiveCddConfig(config, overrideConfig);
+  const templateSet = effective.checklists[category];
+  if (!templateSet) {
+    return [];
+  }
+  const standardItems: CddChecklistItemTemplate[] = (templateSet.standard ?? []).map(
+    (item) => ({
+      itemKey: item.itemKey,
+      label: item.label,
+      ...(item.description !== undefined ? { description: item.description } : {}),
+      required: item.required,
+      requiresEvidence: item.requiresEvidence,
+      ...(item.linkedIntakeCheckKind !== undefined
+        ? { linkedIntakeCheckKind: item.linkedIntakeCheckKind }
+        : {}),
+    }),
+  );
+  if (tier !== 'high') {
+    return standardItems;
+  }
+  const highItems: CddChecklistItemTemplate[] = (
+    templateSet.highAdditional ?? []
+  ).map((item) => ({
+    itemKey: item.itemKey,
+    label: item.label,
+    ...(item.description !== undefined ? { description: item.description } : {}),
+    required: item.required,
+    requiresEvidence: item.requiresEvidence,
+    ...(item.linkedIntakeCheckKind !== undefined
+      ? { linkedIntakeCheckKind: item.linkedIntakeCheckKind }
+      : {}),
+  }));
+  return [...standardItems, ...highItems];
+}
+
+export function resolveClientCddCategory(
+  cddConfig: Pick<ResolvedCddConfiguration, 'clientTypeMapping'>,
+  params: {
+    subjectType: 'person' | 'organisation';
+    organisationTypeSystemKey?: string | null;
+    explicitCategory?: CddClientCategoryKey | null;
+  },
+): CddClientCategoryKey | null {
+  if (params.subjectType === 'person') {
+    return 'individual';
+  }
+  const sysKey = params.organisationTypeSystemKey?.trim();
+  if (sysKey && cddConfig.clientTypeMapping[sysKey]) {
+    return cddConfig.clientTypeMapping[sysKey];
+  }
+  return params.explicitCategory ?? null;
+}
+
+export function resolveClientCddRiskTier(
+  cddConfig: Pick<ResolvedCddConfiguration, 'riskTierMapping'>,
+  riskRatingSystemKeys: readonly (string | null | undefined)[],
+): CddRiskTierKey {
+  for (const rawKey of riskRatingSystemKeys) {
+    const key = rawKey?.trim().toLowerCase();
+    if (!key) continue;
+    const mapped = cddConfig.riskTierMapping[key];
+    if (mapped === 'high' || (!mapped && (key === 'high' || key === 'critical' || key === 'sensitive'))) {
+      return 'high';
+    }
+  }
+  return 'standard';
+}
+
+export function calculateCddNextReviewDueIso(
+  completedAtIso: string,
+  tier: CddRiskTierKey,
+  cddConfig: Pick<ResolvedCddConfiguration, 'recheckIntervalsMonths'>,
+): string {
+  const recheckIntervalsMonths = cddConfig.recheckIntervalsMonths;
+  const months =
+    tier === 'high'
+      ? recheckIntervalsMonths.high
+      : recheckIntervalsMonths.standard;
+  const baseDate = new Date(completedAtIso);
+  if (Number.isNaN(baseDate.getTime())) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `Invalid completedAt timestamp "${completedAtIso}" when computing CDD re-check due date.`,
+    );
+  }
+  const targetYear = baseDate.getUTCFullYear();
+  const targetMonthIndex = baseDate.getUTCMonth() + months;
+  const targetDay = baseDate.getUTCDate();
+  const endOfTargetMonth = new Date(
+    Date.UTC(targetYear, targetMonthIndex + 1, 0),
+  ).getUTCDate();
+  const clampedDay = Math.min(targetDay, endOfTargetMonth);
+  const due = new Date(
+    Date.UTC(targetYear, targetMonthIndex, clampedDay, 23, 59, 59, 999),
+  );
+  return due.toISOString();
+}
+
+export function buildCddChecklistItemsForTier(params: {
+  config?: Pick<TenantConfiguration, 'cdd'> | null;
+  overrideConfig?: CddConfiguration | null;
+  category: CddClientCategoryKey;
+  tier: CddRiskTierKey;
+  existingItems?: readonly RegisterChecklistItemValue[];
+}): RegisterChecklistItemValue[] {
+  const templates = resolveCddChecklistTemplatesForClient(
+    params.config,
+    params.category,
+    params.tier,
+    params.overrideConfig,
+  );
+  const existingByKey = new Map(
+    (params.existingItems ?? []).map((item) => [item.itemKey, item]),
+  );
+  const result: RegisterChecklistItemValue[] = [];
+  const includedKeys = new Set<string>();
+  for (const tpl of templates) {
+    includedKeys.add(tpl.itemKey);
+    const prev = existingByKey.get(tpl.itemKey);
+    if (prev) {
+      result.push({
+        ...prev,
+        label: tpl.label,
+        required: tpl.required,
+      });
+    } else {
+      result.push({
+        itemKey: tpl.itemKey,
+        label: tpl.label,
+        required: tpl.required,
+        status: 'pending',
+        recordedById: null,
+        recordedAt: null,
+        evidenceRefs: [],
+        intakeCheckRecordId: null,
+      });
+    }
+  }
+  // Preserve any custom/previously recorded items on upgrade
+  for (const prev of params.existingItems ?? []) {
+    if (!includedKeys.has(prev.itemKey)) {
+      result.push({
+        ...prev,
+        evidenceRefs: [...prev.evidenceRefs],
+      });
+    }
+  }
+  return result;
 }

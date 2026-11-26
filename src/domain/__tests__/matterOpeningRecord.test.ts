@@ -293,5 +293,98 @@ describe('matterOpeningRecord domain helpers (R345, R365, R367, R372)', () => {
         today: '2026-11-24',
       }).option,
     ).toBe('Existing, CDD current');
+
+    // 5. S1-04 live CDD summary takes precedence over stale/incomplete legacy fields, while hidden employee CDD is omitted (R747)
+    const liveCddRes = computeClientRelationshipCdd({
+      clientIds: [orgUnverifiedStatus.id],
+      priorMatters: [
+        toClientPriorMatterSummary({
+          id: 'M-OLD-PENDING',
+          clientId: orgUnverifiedStatus.id,
+          conflictCheckStatus: 'Clear',
+          amlStatus: 'Pending',
+        }),
+      ],
+      organisations: [orgUnverifiedStatus],
+      people: [],
+      values,
+      today: '2026-11-24',
+      cddSummaries: {
+        [orgUnverifiedStatus.id]: {
+          visible: true,
+          subjectType: 'organisation',
+          subjectId: orgUnverifiedStatus.id,
+          hasRecord: true,
+          recordId: 'REG-900001',
+          status: 'recorded',
+          riskTier: 'standard',
+          recordedByName: 'Dafydd Evans',
+          recordedAt: '2026-11-20T10:00:00.000Z',
+          dueAt: '2029-11-20T10:00:00.000Z',
+          isExpired: false,
+        },
+      },
+    });
+    expect(liveCddRes.option).toBe('Existing, CDD current');
+    expect(liveCddRes.summary).toContain('Recorded manually by Dafydd Evans');
+
+    const overdueLiveCddRes = computeClientRelationshipCdd({
+      clientIds: [orgUnsetStatus.id],
+      priorMatters: [
+        toClientPriorMatterSummary({
+          id: 'M-PRIOR-OK',
+          clientId: orgUnsetStatus.id,
+          conflictCheckStatus: 'Clear',
+          amlStatus: 'Verified',
+        }),
+      ],
+      organisations: [orgUnsetStatus],
+      people: [],
+      values,
+      today: '2026-11-24',
+      cddSummaries: {
+        [orgUnsetStatus.id]: {
+          visible: true,
+          subjectType: 'organisation',
+          subjectId: orgUnsetStatus.id,
+          hasRecord: true,
+          recordId: 'REG-900002',
+          status: 'recorded',
+          riskTier: 'high',
+          recordedByName: 'Rhian Morgan',
+          recordedAt: '2025-11-01T10:00:00.000Z',
+          dueAt: '2026-11-01T10:00:00.000Z',
+          isExpired: false,
+        },
+      },
+    });
+    expect(overdueLiveCddRes.option).toBe('Existing, CDD needs refresh');
+    expect(overdueLiveCddRes.summary).toContain('Re-check overdue');
+
+    const hiddenEmpCddRes = computeClientRelationshipCdd({
+      clientIds: [personVerified.id],
+      priorMatters: [],
+      organisations: [],
+      people: [personVerified],
+      values,
+      today: '2026-11-24',
+      cddSummaries: {
+        [personVerified.id]: {
+          visible: false,
+          subjectType: 'person',
+          subjectId: personVerified.id,
+          hasRecord: false,
+          recordId: null,
+          status: 'not_started',
+          riskTier: 'standard',
+          recordedByName: null,
+          recordedAt: null,
+          dueAt: null,
+          isExpired: false,
+        },
+      },
+    });
+    expect(hiddenEmpCddRes.option).toBe('New client');
+    expect(hiddenEmpCddRes.summary).not.toContain('Recorded manually');
   });
 });

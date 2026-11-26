@@ -965,5 +965,144 @@
   },
   "notifications": {
     "digestHourLocal": 8
+  },
+  "cdd": {
+    "enabled": true,
+    "clientTypeMapping": {
+      "sole_trader": "individual",
+      "company": "company_or_llp",
+      "plc": "company_or_llp",
+      "llp": "company_or_llp",
+      "law_firm": "company_or_llp",
+      "insurer": "company_or_llp",
+      "supplier": "company_or_llp",
+      "partnership": "trust_charity_or_partnership",
+      "trust": "trust_charity_or_partnership",
+      "charity": "trust_charity_or_partnership",
+      "non_profit": "trust_charity_or_partnership",
+      "barristers_chambers": "trust_charity_or_partnership",
+      "public_body": "trust_charity_or_partnership"
+    },
+    "riskTierMapping": {
+      "low": "standard",
+      "medium": "standard",
+      "conflict_flagged": "standard",
+      "high": "high",
+      "critical": "high",
+      "sensitive": "high"
+    },
+    "checklists": {
+      "individual": {
+        "standard": [
+          {
+            "itemKey": "photo_id",
+            "label": "Photo ID",
+            "description": "Current passport, photocard driving licence, or equivalent photographic identity document.",
+            "required": true,
+            "requiresEvidence": true,
+            "linkedIntakeCheckKind": "identity_verification"
+          },
+          {
+            "itemKey": "proof_of_address",
+            "label": "Proof of address",
+            "description": "Recent utility bill, council tax statement, or bank statement dated within the last three months.",
+            "required": true,
+            "requiresEvidence": true
+          }
+        ],
+        "highAdditional": [
+          {
+            "itemKey": "source_of_funds",
+            "label": "Source of funds",
+            "description": "Documented verification of the immediate transaction funding origin.",
+            "required": true,
+            "requiresEvidence": true
+          },
+          {
+            "itemKey": "source_of_wealth",
+            "label": "Source of wealth",
+            "description": "Corroboration of wider asset accumulation where enhanced due diligence applies.",
+            "required": true,
+            "requiresEvidence": true
+          }
+        ]
+      },
+      "company_or_llp": {
+        "standard": [
+          {
+            "itemKey": "companies_house_record",
+            "label": "Companies House record",
+            "description": "Official certificate of incorporation and current register extract.",
+            "required": true,
+            "requiresEvidence": true
+          },
+          {
+            "itemKey": "beneficial_owners_over_25",
+            "label": "Beneficial owners over 25%",
+            "description": "PSC register confirmation and beneficial ownership verification above 25%.",
+            "required": true,
+            "requiresEvidence": false
+          },
+          {
+            "itemKey": "director_photo_id",
+            "label": "ID for one director",
+            "description": "Photographic identity verification for at least one instructing director or designated LLP member.",
+            "required": true,
+            "requiresEvidence": true,
+            "linkedIntakeCheckKind": "identity_verification"
+          }
+        ],
+        "highAdditional": [
+          {
+            "itemKey": "ownership_structure_chart",
+            "label": "Ownership structure chart",
+            "description": "Signed group structure and intermediate holding chain diagram.",
+            "required": true,
+            "requiresEvidence": true
+          },
+          {
+            "itemKey": "source_of_funds",
+            "label": "Source of funds",
+            "description": "Corroborated corporate funding trail for the transaction.",
+            "required": true,
+            "requiresEvidence": true
+          }
+        ]
+      },
+      "trust_charity_or_partnership": {
+        "standard": [
+          {
+            "itemKey": "founding_document",
+            "label": "Founding document",
+            "description": "Trust deed, constitution, charity governing document, or partnership agreement.",
+            "required": true,
+            "requiresEvidence": true
+          },
+          {
+            "itemKey": "controllers_id",
+            "label": "Controllers' ID",
+            "description": "Identity verification for trustees, settlors, partners, or controlling officers.",
+            "required": true,
+            "requiresEvidence": true,
+            "linkedIntakeCheckKind": "identity_verification"
+          }
+        ],
+        "highAdditional": [
+          {
+            "itemKey": "source_of_funds",
+            "label": "Source of funds",
+            "description": "Documented verification of trust, charity, or partnership funds for the instruction.",
+            "required": true,
+            "requiresEvidence": true
+          }
+        ]
+      }
+    },
+    "recheckIntervalsMonths": {
+      "standard": 36,
+      "high": 12
+    },
+    "reminderScheduleDaysBefore": [30, 7, 0, -7, -30],
+    "maxEvidenceFileSizeBytes": 10485760
   }
 }

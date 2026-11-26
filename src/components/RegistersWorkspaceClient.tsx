@@ -31,6 +31,7 @@ interface RegistersWorkspaceClientProps {
   initialTransitionsByRecordId: Record<string, RegisterTransition[]>;
   matters: Matter[];
   people: Person[];
+  clientLabelsById?: Record<string, string>;
   initialRecordId?: string;
   initialTypeKey?: string;
   initialOpenCreateTypeKey?: string;
@@ -110,6 +111,7 @@ export function RegistersWorkspaceClient({
   initialTransitionsByRecordId,
   matters,
   people,
+  clientLabelsById = {},
   initialRecordId,
   initialTypeKey,
   initialOpenCreateTypeKey,
@@ -133,7 +135,7 @@ export function RegistersWorkspaceClient({
 
   // Creation form state
   const creatableTypes = useMemo(
-    () => enabledTypes.filter((t) => permSet.has(t.createPermission)),
+    () => enabledTypes.filter((t) => t.key !== 'cdd' && permSet.has(t.createPermission)),
     [enabledTypes, permSet],
   );
   const resolvedInitialCreateTypeKey =
@@ -825,7 +827,9 @@ export function RegistersWorkspaceClient({
                       selectedRecordType?.states.find((s) => s.key === selectedRecord.status)?.tone,
                     )}
                   />
-                  {selectedRecordType && permSet.has(selectedRecordType.editPermission) ? (
+                  {selectedRecordType &&
+                  selectedRecord.registerTypeKey !== 'cdd' &&
+                  permSet.has(selectedRecordType.editPermission) ? (
                     <button
                       type="button"
                       className="btn btn--secondary btn--sm"
@@ -959,6 +963,26 @@ export function RegistersWorkspaceClient({
                           )}
                         </span>
                       </div>
+                      {(selectedRecord.organisationId || selectedRecord.personId) ? (
+                        <div className="kv-item">
+                          <span className="kv-label">Client subject</span>
+                          <span className="kv-value">
+                            {selectedRecord.organisationId ? (
+                              <Link href={`/organisations/${selectedRecord.organisationId}?tab=compliance`}>
+                                {clientLabelsById[selectedRecord.organisationId] ??
+                                  selectedRecord.organisationId}
+                              </Link>
+                            ) : selectedRecord.personId ? (
+                              <Link href={`/people/${selectedRecord.personId}?tab=compliance`}>
+                                {clientLabelsById[selectedRecord.personId] ??
+                                  (peopleById.get(selectedRecord.personId)
+                                    ? personDisplayName(peopleById.get(selectedRecord.personId)!)
+                                    : selectedRecord.personId)}
+                              </Link>
+                            ) : null}
+                          </span>
+                        </div>
+                      ) : null}
                       <div className="kv-item">
                         <span className="kv-label">Due / Review dates</span>
                         <span className="kv-value">
@@ -1007,6 +1031,21 @@ export function RegistersWorkspaceClient({
                                 });
                               } else if (f.type === 'boolean') {
                                 displayVal = rawVal ? 'Yes' : 'No';
+                              } else if (Array.isArray(rawVal)) {
+                                if (f.key === 'checklistItems' || f.type === 'checklist') {
+                                  const entries = rawVal as Array<{
+                                    label?: string;
+                                    status?: string;
+                                  }>;
+                                  displayVal =
+                                    entries.length === 0
+                                      ? 'None'
+                                      : entries
+                                          .map((e) => `${e.label || 'Item'}: ${e.status || 'pending'}`)
+                                          .join('\n');
+                                } else {
+                                  displayVal = `${rawVal.length} attached item${rawVal.length === 1 ? '' : 's'}`;
+                                }
                               } else {
                                 displayVal = String(rawVal);
                               }
@@ -1030,7 +1069,10 @@ export function RegistersWorkspaceClient({
                         <h3 style={{ fontSize: 13, fontWeight: 600, margin: '0 0 8px' }}>Workflow transitions</h3>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                           {selectedRecordType.transitions
-                            .filter((t) => t.fromStatuses.includes(selectedRecord.status))
+                            .filter(
+                              (t) =>
+                                !t.systemOnly && t.fromStatuses.includes(selectedRecord.status),
+                            )
                             .map((tr) => {
                               const guard = canExecuteTransitionUi(
                                 permSet,
