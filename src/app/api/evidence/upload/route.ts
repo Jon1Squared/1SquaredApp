@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { EvidenceArtifactSubjectType } from '@platform/core';
 import { isActionDenied } from '@/domain/actionResult';
+import { formatEvidenceSizeLimitMb } from '@/domain/cdd';
 import { guardedRoute } from '@/server/authorize';
 import {
   resolveEffectiveCddMaxEvidenceBytesRecord,
@@ -19,7 +20,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         {
           ok: false,
           code: 'LENGTH_REQUIRED',
-          error: 'A valid positive Content-Length header is required for evidence uploads.',
+          error: "The upload couldn't be checked because the file size wasn't sent. Please try again.",
         },
         { status: 411 },
       );
@@ -30,7 +31,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         {
           ok: false,
           code: 'LENGTH_REQUIRED',
-          error: 'A valid positive Content-Length header is required for evidence uploads.',
+          error: "The upload couldn't be checked because the file size wasn't sent. Please try again.",
         },
         { status: 411 },
       );
@@ -45,7 +46,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         {
           ok: false,
           code: 'PAYLOAD_TOO_LARGE',
-          error: 'Uploaded request exceeds the maximum allowed evidence file size.',
+          error: `This file is too large. The limit is ${formatEvidenceSizeLimitMb(maxBytes)} MB.`,
         },
         { status: 413 },
       );
@@ -58,7 +59,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
 
     if (!fileEntry || typeof fileEntry === 'string' || typeof fileEntry.arrayBuffer !== 'function') {
       return NextResponse.json(
-        { ok: false, code: 'VALIDATION_ERROR', error: 'A multipart file field "file" is required.' },
+        { ok: false, code: 'VALIDATION_ERROR', error: 'Please choose a file to attach.' },
         { status: 400 },
       );
     }

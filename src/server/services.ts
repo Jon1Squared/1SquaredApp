@@ -309,6 +309,7 @@ import {
 } from './entraAuth';
 import {
   buildHiddenClientCddSummary,
+  formatEvidenceSizeLimitMb,
   isCddDueExpired,
   type CddChecklistItemEvidenceSummary,
   type CddChecklistItemSummary,
@@ -32157,12 +32158,12 @@ export async function uploadEvidenceArtifactRecord(
 
     const { effectiveCdd } = await resolveCddModuleAndValues(ctx, tenantCfg);
     if (!input.bytes || input.bytes.byteLength <= 0) {
-      return registerServiceFailure('VALIDATION_ERROR', 'Uploaded file must not be empty.');
+      return registerServiceFailure('VALIDATION_ERROR', 'The file is empty.');
     }
     if (input.bytes.byteLength > effectiveCdd.maxEvidenceFileSizeBytes) {
       return registerServiceFailure(
         'PAYLOAD_TOO_LARGE',
-        `Uploaded file exceeds the maximum allowed size (${effectiveCdd.maxEvidenceFileSizeBytes} bytes).`,
+        `This file is too large. The limit is ${formatEvidenceSizeLimitMb(effectiveCdd.maxEvidenceFileSizeBytes)} MB.`,
       );
     }
     const normalizedMime =
@@ -32170,7 +32171,7 @@ export async function uploadEvidenceArtifactRecord(
     if (!ALLOWED_EVIDENCE_MIMES.has(normalizedMime)) {
       return registerServiceFailure(
         'UNSUPPORTED_MEDIA_TYPE',
-        `Evidence files of content type "${normalizedMime}" are not permitted.`,
+        "This type of file can't be attached. Use a PDF, image, Word, Excel or PowerPoint file.",
       );
     }
 
@@ -32180,14 +32181,14 @@ export async function uploadEvidenceArtifactRecord(
     if (preScanStatus !== 'clean') {
       return registerServiceFailure(
         'EVIDENCE_MALWARE_DETECTED',
-        `File "${safeFileName}" failed security screening (status: ${preScanStatus}) and was rejected before storage.`,
+        "This file failed a security check and can't be attached.",
       );
     }
 
     if (!verifyEvidenceMagicBytes(input.bytes, normalizedMime)) {
       return registerServiceFailure(
         'UNSUPPORTED_MEDIA_TYPE',
-        `Uploaded file content does not match declared type "${normalizedMime}".`,
+        "This file's contents don't match its file type.",
       );
     }
 
@@ -32203,7 +32204,7 @@ export async function uploadEvidenceArtifactRecord(
     if (stored.scanStatus !== 'clean') {
       return registerServiceFailure(
         'EVIDENCE_MALWARE_DETECTED',
-        `File "${safeFileName}" failed malware screening and cannot be linked.`,
+        "This file failed a security check and can't be attached.",
       );
     }
 

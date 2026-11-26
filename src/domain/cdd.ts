@@ -163,3 +163,7 @@ export function buildHiddenClientCddSummary(
     canRecord: false,
   };
 }
+
+export function formatEvidenceSizeLimitMb(maxBytes: number): number {
+  return Math.max(1, Math.round(maxBytes / (1024 * 1024)));
+}
