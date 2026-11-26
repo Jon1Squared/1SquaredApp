@@ -98,6 +98,11 @@ Because modifying `RegisterPermission`, `RegisterFieldType`, `RegisterTransition
 - **Model A (`single_tenant`):** A single dedicated database and single tenant container store `register_records`, `register_transitions`, `evidence_artifacts`, and `evidence/` blobs; all queries and checks still require `VerifiedOidcTokenClaims`-derived `TenantContext` (`SET LOCAL ROLE`), and `local-fs` remains demo-only until `azure-blob` lands before live client onboarding.
 - **Model B (`multi_tenant`):** Each tenant has its own isolated PostgreSQL database (`pg_tenant_<slug>_<env>`) and its own container (`tenant-<tenantId>-<env>/evidence/...`). Every register query, transition lock, download token signature (`tokenSigningKey:tenantId`), audit entry, and reminder job includes and asserts `tenantId` (`assertRowTenant`, `assertBlobKeyBelongsToTenant`), with zero cross-tenant leakage verified by two-tenant tests (`tenant-alpha` vs `tenant-bravo`).
 
+### 8. Exception to standard rule 8 (migration 0025 rollback)
+- Platform Architecture Standard Rule 8 requires database migrations to be reversible. Rolling back migration `0025_registers_cdd_and_org_type_keys_expand` (`downSql`) drops `public.evidence_artifacts` and `public.tenant_evidence_artifact_id_seq` while leaving uploaded evidence blobs in `tenant-<tenantId>-<env>/evidence/...`; any `downSql` execution in a non-empty environment loses the `evidence_artifacts` metadata table rows and leaves the corresponding stored files unreferenced.
+- The product owner formally accepted this exception to Rule 8 under **R788 Option B** rather than deleting blobs automatically during rollback or maintaining shadow metadata tables.
+- Pre-rollback backup and post-rollback recovery steps are documented in [Platform Technical Notes](../guides/platform-technical-notes.md) (**Migration `0025` Rollback & Recovery (`R788` Option B)**) and in the migration header comment in `core/src/tenancy/migrations/index.ts`.
+
 ## Alternatives Considered
 
 1. **Create bespoke PostgreSQL tables (`client_cdd_records`, `high_risk_approvals`) outside the registers engine:** Rejected by decisions `S1-D5` and `S1-D7` and ADR 0032. Duplicating state machines, `row_version` locking, audit entries, reminder states, and extension hooks creates parallel maintenance and isolation risk.
