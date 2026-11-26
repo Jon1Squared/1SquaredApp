@@ -2,26 +2,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   LocalTenantStorageProvider,
   getPlatformTelemetryRecorder,
-  resolveTenantFromVerifiedToken,
   type TenantContext,
 } from '@platform/core';
+import { testTenantCtx } from '@/server/testSupport/auditTestSupport';
 import { storeEvidenceBlobAndCreateArtifact } from '../evidenceUploadStore';
 
 function makeTestContext(correlationId: string): TenantContext {
-  return resolveTenantFromVerifiedToken({
-    verifiedToken: {
-      __verifiedByOidcMiddleware: true,
-      sub: 'P-000010',
-      name: 'Test Legal Secretary',
-      email: 'secretary@not-a-law-firm.example',
-      tenantId: 'not-a-law-firm',
-      roles: ['legal_secretary'],
-      mfaVerified: false,
-    },
-    hostingMode: 'multi_tenant',
-    environment: 'test',
+  return {
+    ...testTenantCtx('P-000010', { roles: ['legal_secretary'] }),
     correlationId,
-  });
+  };
 }
 
 describe('storeEvidenceBlobAndCreateArtifact (R807)', () => {
