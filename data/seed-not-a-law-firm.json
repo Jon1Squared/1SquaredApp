@@ -25957,7 +25957,7 @@
         "statutoryNote": "Firm standard six-year civil limitation file retention policy"
       },
       "openingGate": {
-        "requireConflictCleared": false,
+        "allowConflictOverride": true,
         "requireCddComplete": false,
         "allowCddOverride": true,
         "requireEngagementSigned": false,
@@ -25972,7 +25972,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -25986,7 +25985,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26000,7 +25998,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26060,7 +26057,6 @@
           "statutoryNote": "Corporate transaction closing bible seven-year retention policy"
         },
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26074,7 +26070,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26088,7 +26083,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26102,7 +26096,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26116,7 +26109,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26130,7 +26122,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26144,7 +26135,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26196,7 +26186,6 @@
           "statutoryNote": "Residential conveyancing mortgage-lender & latent-damage 15-year file policy"
         },
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26256,7 +26245,6 @@
           "statutoryNote": "Limitation Act 1980 twelve-year specialty / deed retention policy"
         },
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26270,7 +26258,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26284,7 +26271,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26298,7 +26284,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26312,7 +26297,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26326,7 +26310,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26340,7 +26323,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26354,7 +26336,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26368,7 +26349,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26382,7 +26362,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26396,7 +26375,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26410,7 +26388,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26424,7 +26401,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26453,7 +26429,6 @@
           "statutoryNote": "Employment tribunal and statutory claims six-year file retention policy"
         },
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26470,7 +26445,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26484,7 +26458,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26498,7 +26471,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26518,7 +26490,6 @@
           "statutoryNote": "Civil litigation and dispute resolution six-year file retention policy"
         },
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26536,7 +26507,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26550,7 +26520,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26564,7 +26533,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26578,7 +26546,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26592,7 +26559,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26606,7 +26572,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26620,7 +26585,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26634,7 +26598,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26648,7 +26611,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26662,7 +26624,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26676,7 +26637,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26690,7 +26650,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26704,7 +26663,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": true,
@@ -26718,7 +26676,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26732,7 +26689,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26746,7 +26702,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": true,
@@ -26760,7 +26715,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": true,
@@ -26774,7 +26728,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": true,
@@ -26788,7 +26741,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26802,7 +26754,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26816,7 +26767,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26830,7 +26780,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26844,7 +26793,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26858,7 +26806,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26872,7 +26819,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26886,7 +26832,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": false,
           "requireEngagementSigned": false,
@@ -26900,7 +26845,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26914,7 +26858,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26928,7 +26871,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26942,7 +26884,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26956,7 +26897,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26970,7 +26910,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -26984,7 +26923,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -26998,7 +26936,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27012,7 +26949,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27026,7 +26962,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27040,7 +26975,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27054,7 +26988,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27068,7 +27001,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27082,7 +27014,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27096,7 +27027,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -27110,7 +27040,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27124,7 +27053,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -27138,7 +27066,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -27152,7 +27079,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
@@ -27166,7 +27092,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": false,
@@ -27180,7 +27105,6 @@
         "autoTaskTemplates": [],
         "riskQuestions": [],
         "openingGate": {
-          "requireConflictCleared": true,
           "requireCddComplete": true,
           "allowCddOverride": true,
           "requireEngagementSigned": true,
