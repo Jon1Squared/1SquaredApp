@@ -18,9 +18,12 @@ import {
   type CddClientCategoryKey,
   type CddConfiguration,
   type CddRiskTierKey,
+  type ChasingConfiguration,
+  type ChasingRuleConfig,
   type DocumentGenerationConfig,
   type DocumentPermission,
   type DocumentStoreConfig,
+  type EngagementConfiguration,
   type ExtensionManifest,
   type HomeRoleKey,
   type HostingMode,
@@ -59,6 +62,10 @@ import {
   validateMatterNumberingConfig,
   validateMatterNumberPattern,
 } from '../domain/matterNumbering/index';
+import {
+  DEFAULT_CHASING_RULE_CONFIG,
+  validateChasingRuleSchedule,
+} from '../domain/communication/index';
 
 export const ALL_HOME_ROLE_KEYS: readonly HomeRoleKey[] = ALL_BUILTIN_ROLE_KEYS;
 
@@ -981,6 +988,121 @@ const PmsIntegrationSyncConfigSchema = z
       .describe(
         'Maps external PMS fee-earner grade strings (case-insensitive) to canonical employee_role.* IDs during createRecordFromPms',
       ),
+  })
+  .strict();
+
+const ChasingRuleConfigSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .default(DEFAULT_CHASING_RULE_CONFIG.enabled)
+      .describe('Enables automated chasing progression for this communication kind.'),
+    sendEmails: z
+      .boolean()
+      .default(DEFAULT_CHASING_RULE_CONFIG.sendEmails)
+      .describe(
+        'When enabled alongside chasing, sends scheduled email reminders; when false, skips client email steps while retaining escalation tasks.',
+      ),
+    firstChaseDays: z
+      .number()
+      .int()
+      .min(1)
+      .max(90)
+      .default(DEFAULT_CHASING_RULE_CONFIG.firstChaseDays)
+      .describe('Days after initial send before queueing the first client chase email.'),
+    secondChaseDays: z
+      .number()
+      .int()
+      .min(2)
+      .max(180)
+      .default(DEFAULT_CHASING_RULE_CONFIG.secondChaseDays)
+      .describe(
+        'Days after initial send before queueing the second client chase email (must exceed firstChaseDays).',
+      ),
+    escalateTaskDays: z
+      .number()
+      .int()
+      .min(3)
+      .max(365)
+      .default(DEFAULT_CHASING_RULE_CONFIG.escalateTaskDays)
+      .describe(
+        'Days after initial send before raising a fee-earner escalation task (must exceed secondChaseDays).',
+      ),
+  })
+  .strict()
+  .superRefine((rule, ctx) => {
+    const check = validateChasingRuleSchedule(rule, 'chasing');
+    if (!check.ok) {
+      const targetField =
+        rule.firstChaseDays >= rule.secondChaseDays
+          ? 'secondChaseDays'
+          : 'escalateTaskDays';
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [targetField],
+        message: check.error,
+      });
+    }
+  });
+
+const createDefaultChasingRuleValue = (): ChasingRuleConfig => ({
+  enabled: false,
+  sendEmails: false,
+  firstChaseDays: 7,
+  secondChaseDays: 14,
+  escalateTaskDays: 21,
+});
+
+const ChasingConfigSchema = z
+  .object({
+    engagementLetter: ChasingRuleConfigSchema.default(createDefaultChasingRuleValue),
+    quote: ChasingRuleConfigSchema.default(createDefaultChasingRuleValue),
+    moneyOnAccount: ChasingRuleConfigSchema.default(createDefaultChasingRuleValue),
+  })
+  .strict();
+
+const NonEngagementReasonWordingSchema = z
+  .object({
+    subjectTemplate: z.string().max(500).default(''),
+    bodyParagraphs: z.array(z.string().max(4000)).max(25).default([]),
+  })
+  .strict();
+
+const createDefaultNonEngagementWordingValue = () => ({
+  subjectTemplate: '',
+  bodyParagraphs: [] as string[],
+});
+
+const NonEngagementWordingMapSchema = z
+  .object({
+    conflict: NonEngagementReasonWordingSchema.default(createDefaultNonEngagementWordingValue),
+    outside_expertise: NonEngagementReasonWordingSchema.default(
+      createDefaultNonEngagementWordingValue,
+    ),
+    not_viable: NonEngagementReasonWordingSchema.default(createDefaultNonEngagementWordingValue),
+    referred_out: NonEngagementReasonWordingSchema.default(createDefaultNonEngagementWordingValue),
+    defaultFallback: NonEngagementReasonWordingSchema.default(
+      createDefaultNonEngagementWordingValue,
+    ),
+  })
+  .strict();
+
+const createDefaultNonEngagementWordingMapValue = () => ({
+  conflict: createDefaultNonEngagementWordingValue(),
+  outside_expertise: createDefaultNonEngagementWordingValue(),
+  not_viable: createDefaultNonEngagementWordingValue(),
+  referred_out: createDefaultNonEngagementWordingValue(),
+  defaultFallback: createDefaultNonEngagementWordingValue(),
+});
+
+const EngagementConfigSchema = z
+  .object({
+    clientCareIntroductoryParagraph: z.string().max(4000).default(''),
+    clientCareTermsSummary: z.string().max(16000).default(''),
+    clientCareSignatureInstruction: z.string().max(4000).default(''),
+    nonEngagementWording: NonEngagementWordingMapSchema.default(
+      createDefaultNonEngagementWordingMapValue,
+    ),
   })
   .strict();
 
@@ -2899,6 +3021,12 @@ export const TenantConfigurationSchema = z
       .describe(
         'Configurable token-based matter reference numbering format and sequence scoping (ADR 0040, S1-05, R745).',
       ),
+    chasing: ChasingConfigSchema.optional().describe(
+      'Per-communication automated chasing schedules and outbound email controls (ADR 0042, S1-06).',
+    ),
+    engagement: EngagementConfigSchema.optional().describe(
+      'Configurable Client Care terms summary and Non-Engagement letter wording keyed by close reason (S1-06).',
+    ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -4382,6 +4510,117 @@ export function loadAndValidateTenantConfig(
           };
   }
 
+  const baseChasing =
+    baseConfig.chasing &&
+    typeof baseConfig.chasing === 'object' &&
+    !Array.isArray(baseConfig.chasing)
+      ? (baseConfig.chasing as Record<string, unknown>)
+      : undefined;
+  const overlayChasing =
+    environmentOverlay.chasing &&
+    typeof environmentOverlay.chasing === 'object' &&
+    !Array.isArray(environmentOverlay.chasing)
+      ? (environmentOverlay.chasing as Record<string, unknown>)
+      : undefined;
+  if (
+    baseChasing ||
+    overlayChasing ||
+    environmentOverlay.chasing !== undefined
+  ) {
+    if (environmentOverlay.chasing !== undefined && !overlayChasing) {
+      merged.chasing = environmentOverlay.chasing;
+    } else {
+      const mergeRule = (ruleKey: 'engagementLetter' | 'quote' | 'moneyOnAccount') => {
+        const b = baseChasing?.[ruleKey];
+        const o = overlayChasing?.[ruleKey];
+        if (o !== undefined && (typeof o !== 'object' || o === null || Array.isArray(o))) {
+          return o;
+        }
+        const bObj = b && typeof b === 'object' && !Array.isArray(b) ? (b as Record<string, unknown>) : {};
+        const oObj = o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
+        return b !== undefined || o !== undefined ? { ...bObj, ...oObj } : undefined;
+      };
+      const el = mergeRule('engagementLetter');
+      const qt = mergeRule('quote');
+      const moa = mergeRule('moneyOnAccount');
+      merged.chasing = {
+        ...(baseChasing ?? {}),
+        ...(overlayChasing ?? {}),
+        ...(el !== undefined ? { engagementLetter: el } : {}),
+        ...(qt !== undefined ? { quote: qt } : {}),
+        ...(moa !== undefined ? { moneyOnAccount: moa } : {}),
+      };
+    }
+  }
+
+  const baseEngagement =
+    baseConfig.engagement &&
+    typeof baseConfig.engagement === 'object' &&
+    !Array.isArray(baseConfig.engagement)
+      ? (baseConfig.engagement as Record<string, unknown>)
+      : undefined;
+  const overlayEngagement =
+    environmentOverlay.engagement &&
+    typeof environmentOverlay.engagement === 'object' &&
+    !Array.isArray(environmentOverlay.engagement)
+      ? (environmentOverlay.engagement as Record<string, unknown>)
+      : undefined;
+  if (
+    baseEngagement ||
+    overlayEngagement ||
+    environmentOverlay.engagement !== undefined
+  ) {
+    if (environmentOverlay.engagement !== undefined && !overlayEngagement) {
+      merged.engagement = environmentOverlay.engagement;
+    } else {
+      const baseWording =
+        baseEngagement?.nonEngagementWording &&
+        typeof baseEngagement.nonEngagementWording === 'object' &&
+        !Array.isArray(baseEngagement.nonEngagementWording)
+          ? (baseEngagement.nonEngagementWording as Record<string, unknown>)
+          : undefined;
+      const overlayWording =
+        overlayEngagement?.nonEngagementWording &&
+        typeof overlayEngagement.nonEngagementWording === 'object' &&
+        !Array.isArray(overlayEngagement.nonEngagementWording)
+          ? (overlayEngagement.nonEngagementWording as Record<string, unknown>)
+          : undefined;
+      const mergeReason = (reasonKey: string) => {
+        const b = baseWording?.[reasonKey];
+        const o = overlayWording?.[reasonKey];
+        if (o !== undefined && (typeof o !== 'object' || o === null || Array.isArray(o))) {
+          return o;
+        }
+        const bObj = b && typeof b === 'object' && !Array.isArray(b) ? (b as Record<string, unknown>) : {};
+        const oObj = o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
+        return b !== undefined || o !== undefined ? { ...bObj, ...oObj } : undefined;
+      };
+      const mergedWording =
+        overlayEngagement?.nonEngagementWording !== undefined && !overlayWording
+          ? overlayEngagement.nonEngagementWording
+          : baseWording || overlayWording
+            ? {
+                ...(baseWording ?? {}),
+                ...(overlayWording ?? {}),
+                ...(mergeReason('conflict') !== undefined ? { conflict: mergeReason('conflict') } : {}),
+                ...(mergeReason('outside_expertise') !== undefined
+                  ? { outside_expertise: mergeReason('outside_expertise') }
+                  : {}),
+                ...(mergeReason('not_viable') !== undefined ? { not_viable: mergeReason('not_viable') } : {}),
+                ...(mergeReason('referred_out') !== undefined ? { referred_out: mergeReason('referred_out') } : {}),
+                ...(mergeReason('defaultFallback') !== undefined
+                  ? { defaultFallback: mergeReason('defaultFallback') }
+                  : {}),
+              }
+            : undefined;
+      merged.engagement = {
+        ...(baseEngagement ?? {}),
+        ...(overlayEngagement ?? {}),
+        ...(mergedWording !== undefined ? { nonEngagementWording: mergedWording } : {}),
+      };
+    }
+  }
+
   return TenantConfigurationSchema.parse(merged);
 }
 
@@ -4390,6 +4629,8 @@ export const RegistersConfigSubSchema = TenantConfigurationSchema.shape.register
 export const CddConfigSubSchema = TenantConfigurationSchema.shape.cdd;
 export const MatterNumberingConfigSubSchema =
   TenantConfigurationSchema.shape.matterNumbering;
+export const ChasingConfigSubSchema = TenantConfigurationSchema.shape.chasing;
+export const EngagementConfigSubSchema = TenantConfigurationSchema.shape.engagement;
 export const RbacConfigSubSchema = TenantConfigurationSchema.shape.rbac;
 export const ConflictReviewConfigSubSchema =
   TenantConfigurationSchema.shape.conflictReview;
@@ -4397,6 +4638,50 @@ export const FirmConfigSubSchema = TenantConfigurationSchema.shape.firm;
 export const WorkTypesConfigSubSchema = WorkTypesConfigSchema;
 export const DocumentStoreConfigSubSchema =
   TenantConfigurationSchema.shape.documentStores.unwrap().element;
+
+export function validateChasingConfig(rawChasingConfig: unknown): ChasingConfiguration {
+  if (
+    typeof rawChasingConfig !== 'object' ||
+    rawChasingConfig === null ||
+    Array.isArray(rawChasingConfig)
+  ) {
+    throw new Error(
+      'CHASING_CONFIG_INVALID: chasing configuration must be a JSON object.',
+    );
+  }
+  try {
+    return ChasingConfigSubSchema.unwrap().parse(
+      rawChasingConfig,
+    ) as ChasingConfiguration;
+  } catch (err) {
+    throw new Error(
+      `CHASING_CONFIG_INVALID: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+export function validateEngagementConfig(
+  rawEngagementConfig: unknown,
+): EngagementConfiguration {
+  if (
+    typeof rawEngagementConfig !== 'object' ||
+    rawEngagementConfig === null ||
+    Array.isArray(rawEngagementConfig)
+  ) {
+    throw new Error(
+      'ENGAGEMENT_CONFIG_INVALID: engagement configuration must be a JSON object.',
+    );
+  }
+  try {
+    return EngagementConfigSubSchema.unwrap().parse(
+      rawEngagementConfig,
+    ) as EngagementConfiguration;
+  } catch (err) {
+    throw new Error(
+      `ENGAGEMENT_CONFIG_INVALID: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 export function validateWorkTypesConfig(raw: unknown) {
   return WorkTypesConfigSchema.parse(raw);

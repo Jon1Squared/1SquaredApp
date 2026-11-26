@@ -826,6 +826,16 @@ export const PERMISSION_REGISTRY: Readonly<
     jobOnly: true,
     sinceVersion: '1.1.0',
   },
+  'communication:run_chases': {
+    key: 'communication:run_chases',
+    domain: 'communication',
+    description:
+      'Execute the scheduled daily generic communication chasing sweep across engagement letters, quotes, and money on account requests (ADR 0030, ADR 0042; job-only, never granted to any user role).',
+    sensitivity: 'critical',
+    requiresMfa: false,
+    jobOnly: true,
+    sinceVersion: '1.2.0',
+  },
 };
 
 export const ALL_PERMISSION_KEYS: readonly PermissionKey[] = Object.freeze(

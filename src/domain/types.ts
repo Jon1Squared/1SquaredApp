@@ -320,7 +320,8 @@ export type JobOnlyPermissionKey =
   | 'register:run_reminders'
   | 'notification:drain_outbox'
   | 'notification:send_digests'
-  | 'quote:run_expiry';
+  | 'quote:run_expiry'
+  | 'communication:run_chases';
 
 export type PermissionKey =
   | EmployeePermission

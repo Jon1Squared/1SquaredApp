@@ -2283,5 +2283,88 @@
     "pattern": "{CLIENT_REF}-{SEQ:4}",
     "sequenceScope": "client_ref_prefix",
     "emptyTokenFallback": "MAT"
+  },
+  "chasing": {
+    "engagementLetter": {
+      "enabled": true,
+      "sendEmails": true,
+      "firstChaseDays": 7,
+      "secondChaseDays": 14,
+      "escalateTaskDays": 21
+    },
+    "quote": {
+      "enabled": true,
+      "sendEmails": true,
+      "firstChaseDays": 7,
+      "secondChaseDays": 14,
+      "escalateTaskDays": 21
+    },
+    "moneyOnAccount": {
+      "enabled": true,
+      "sendEmails": true,
+      "firstChaseDays": 7,
+      "secondChaseDays": 14,
+      "escalateTaskDays": 21
+    }
+  },
+  "engagement": {
+    "clientCareIntroductoryParagraph": "Thank you for instructing Not A Law Firm LLP. This Client Care and Engagement Letter sets out the scope of the work we have agreed to undertake for you, who will handle your matter day to day, our fees and anticipated expenses, and the regulatory terms that apply to our relationship. Please read this letter carefully alongside our estimate or quote before signing and returning a copy so that we can begin work promptly.",
+    "clientCareTermsSummary": "1. Basis of charges: Unless we have agreed a fixed fee in writing, our charges are calculated by reference to the time spent on your matter at the hourly rates notified to you, plus VAT at the prevailing UK rate and any third-party disbursements properly incurred on your behalf. Any fee estimate is given in good faith on the basis of the information currently available and is not a fixed quotation unless expressly stated as such. We will notify you promptly if it becomes clear that our estimate is likely to be exceeded.\n\n2. Money on account and billing: Where we have requested a payment on account of costs or disbursements, we are unable to incur external expenditure or begin substantive work (where required for your matter type) until cleared funds are held in our client account. Interim invoices are payable within 14 days of delivery unless otherwise agreed.\n\n3. Client identification and regulatory checks: Under the Money Laundering Regulations we are legally required to obtain satisfactory evidence of client identity and, where applicable, source of funds before acting or handling client money.\n\n4. Limitation and complaints: Not A Law Firm LLP is a demonstration legal practice (Fictional Regulator ID 000000). Our liability in connection with this matter is capped at £3,000,000 in the aggregate unless prohibited by statute. If you are dissatisfied with any aspect of our service or our bill, please contact your supervising partner in the first instance, or write to our Complaints Partner at complaints@notalawfirm.example. If our own complaints process does not resolve your complaint within eight weeks, you have the right to complain to the Legal Ombudsman (demonstration wording only — Not A Law Firm LLP is a fictional firm).",
+    "clientCareSignatureInstruction": "Please sign and date the confirmation section of this letter and return a scanned copy or clear photograph to your fee earner by email so we can record your acceptance and proceed with your matter.",
+    "nonEngagementWording": {
+      "conflict": {
+        "subjectTemplate": "Our recent enquiry ({{enquiryReference}}) — unable to act",
+        "bodyParagraphs": [
+          "Dear {{recipientName}},",
+          "Thank you for contacting Not A Law Firm LLP regarding your enquiry (Ref: {{enquiryReference}}).",
+          "Having carried out our regulatory conflict and compliance checks, we regret that professional obligations prevent Not A Law Firm LLP from accepting your instructions on this matter. For reasons of client confidentiality, we are unable to provide further details regarding the nature of the restriction.",
+          "Because we have not accepted instructions, no solicitor–client relationship exists between you and Not A Law Firm LLP, and we have not reviewed the merits or any limitation deadlines affecting your matter. You should seek alternative independent legal advice without delay, particularly if your matter may be subject to statutory time limits or court deadlines. We recommend consulting the Law Society's \"Find a Solicitor\" directory (solicitors.lawsociety.org.uk).",
+          "Yours sincerely,",
+          "{{feeEarnerOrSenderName}} — Not A Law Firm LLP"
+        ]
+      },
+      "outside_expertise": {
+        "subjectTemplate": "Your enquiry ({{enquiryReference}}) — Not A Law Firm LLP",
+        "bodyParagraphs": [
+          "Dear {{recipientName}},",
+          "Thank you for getting in touch with Not A Law Firm LLP about {{matterAreaLabel}} (Ref: {{enquiryReference}}).",
+          "Having reviewed your enquiry, we regret that this area falls outside the specialist expertise our team currently offers, so we are not in a position to accept instructions or advise you on the matter.",
+          "No solicitor–client relationship has been formed and we are not monitoring any deadlines on your behalf. If your issue is urgent or may be subject to a limitation deadline, please instruct a specialist firm promptly via solicitors.lawsociety.org.uk.",
+          "Yours sincerely,",
+          "{{feeEarnerOrSenderName}} — Not A Law Firm LLP"
+        ]
+      },
+      "not_viable": {
+        "subjectTemplate": "Your enquiry ({{enquiryReference}}) — Not A Law Firm LLP",
+        "bodyParagraphs": [
+          "Dear {{recipientName}},",
+          "Thank you for contacting Not A Law Firm LLP regarding your enquiry (Ref: {{enquiryReference}}).",
+          "Following our initial review, we regret that we are unable to take on this matter on a commercially viable basis or offer an appropriate funding arrangement for your requirements. Accordingly, Not A Law Firm LLP is not acting for you and will not take any steps on your behalf.",
+          "You may wish to approach another firm or seek guidance from Citizens Advice or a free legal advice clinic. Please act promptly if any time limits could apply to your situation.",
+          "Yours sincerely,",
+          "{{feeEarnerOrSenderName}} — Not A Law Firm LLP"
+        ]
+      },
+      "referred_out": {
+        "subjectTemplate": "Confirmation of non-engagement and referral ({{enquiryReference}})",
+        "bodyParagraphs": [
+          "Dear {{recipientName}},",
+          "Thank you for contacting Not A Law Firm LLP (Ref: {{enquiryReference}}). As discussed, we are unable to handle this matter in house and have suggested alternative external providers who may be able to assist you.",
+          "For clarity, Not A Law Firm LLP does not act for you in this matter and accepts no responsibility for any external provider you choose to instruct, nor for tracking any deadlines on your behalf. Please contact your chosen adviser promptly.",
+          "Yours sincerely,",
+          "{{feeEarnerOrSenderName}} — Not A Law Firm LLP"
+        ]
+      },
+      "defaultFallback": {
+        "subjectTemplate": "Your enquiry ({{enquiryReference}}) — Confirmation of non-engagement",
+        "bodyParagraphs": [
+          "Dear {{recipientName}},",
+          "Thank you for contacting Not A Law Firm LLP (Ref: {{enquiryReference}}). We write to confirm that Not A Law Firm LLP will not be accepting instructions or acting for you in connection with this enquiry, and our file has now been closed.",
+          "Please note that no solicitor–client relationship exists between us and we have not advised on or diarised any limitation periods or procedural deadlines. If you still require legal assistance, please seek alternative representation without delay.",
+          "Yours sincerely,",
+          "{{feeEarnerOrSenderName}} — Not A Law Firm LLP"
+        ]
+      }
+    }
   }
 }

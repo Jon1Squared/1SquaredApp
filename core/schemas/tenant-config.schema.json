@@ -2227,6 +2227,322 @@
           "description": "Uppercase fallback token used when an optional metadata token such as {DEPT} is unavailable."
         }
       }
+    },
+    "chasing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-communication automated chasing schedules and outbound email controls (ADR 0042, S1-06). Safe core defaults leave chasing disabled until configured.",
+      "default": {
+        "engagementLetter": {
+          "enabled": false,
+          "sendEmails": false,
+          "firstChaseDays": 7,
+          "secondChaseDays": 14,
+          "escalateTaskDays": 21
+        },
+        "quote": {
+          "enabled": false,
+          "sendEmails": false,
+          "firstChaseDays": 7,
+          "secondChaseDays": 14,
+          "escalateTaskDays": 21
+        },
+        "moneyOnAccount": {
+          "enabled": false,
+          "sendEmails": false,
+          "firstChaseDays": 7,
+          "secondChaseDays": 14,
+          "escalateTaskDays": 21
+        }
+      },
+      "properties": {
+        "engagementLetter": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Chasing schedule for sent, unsigned Client Care / engagement letters.",
+          "default": {
+            "enabled": false,
+            "sendEmails": false,
+            "firstChaseDays": 7,
+            "secondChaseDays": 14,
+            "escalateTaskDays": 21
+          },
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enables automated chasing progression for unsigned engagement letters."
+            },
+            "sendEmails": {
+              "type": "boolean",
+              "default": false,
+              "description": "When enabled alongside chasing, sends scheduled email reminders; when false, skips client email steps while retaining escalation tasks."
+            },
+            "firstChaseDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 7,
+              "description": "Days after initial send before queueing the first client chase email."
+            },
+            "secondChaseDays": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 180,
+              "default": 14,
+              "description": "Days after initial send before queueing the second client chase email (must exceed firstChaseDays)."
+            },
+            "escalateTaskDays": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 365,
+              "default": 21,
+              "description": "Days after initial send before raising a fee-earner escalation task (must exceed secondChaseDays)."
+            }
+          }
+        },
+        "quote": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Chasing schedule for sent, unaccepted quotes.",
+          "default": {
+            "enabled": false,
+            "sendEmails": false,
+            "firstChaseDays": 7,
+            "secondChaseDays": 14,
+            "escalateTaskDays": 21
+          },
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enables automated chasing progression for sent quotes."
+            },
+            "sendEmails": {
+              "type": "boolean",
+              "default": false,
+              "description": "When enabled alongside chasing, sends scheduled email reminders; when false, skips client email steps while retaining escalation tasks."
+            },
+            "firstChaseDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 7,
+              "description": "Days after quote send before queueing the first client chase email."
+            },
+            "secondChaseDays": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 180,
+              "default": 14,
+              "description": "Days after quote send before queueing the second client chase email (must exceed firstChaseDays)."
+            },
+            "escalateTaskDays": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 365,
+              "default": 21,
+              "description": "Days after quote send before raising a fee-earner escalation task (must exceed secondChaseDays)."
+            }
+          }
+        },
+        "moneyOnAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Chasing schedule for outstanding client money-on-account payment requests.",
+          "default": {
+            "enabled": false,
+            "sendEmails": false,
+            "firstChaseDays": 7,
+            "secondChaseDays": 14,
+            "escalateTaskDays": 21
+          },
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enables automated chasing progression for unpaid money-on-account requests."
+            },
+            "sendEmails": {
+              "type": "boolean",
+              "default": false,
+              "description": "When enabled alongside chasing, sends scheduled email reminders; when false, skips client email steps while retaining escalation tasks."
+            },
+            "firstChaseDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "default": 7,
+              "description": "Days after money-on-account request send before queueing the first client chase email."
+            },
+            "secondChaseDays": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 180,
+              "default": 14,
+              "description": "Days after money-on-account request send before queueing the second client chase email (must exceed firstChaseDays)."
+            },
+            "escalateTaskDays": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 365,
+              "default": 21,
+              "description": "Days after money-on-account request send before raising a fee-earner escalation task (must exceed secondChaseDays)."
+            }
+          }
+        }
+      }
+    },
+    "engagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Configurable Client Care terms summary and Non-Engagement letter wording keyed by close reason (S1-06). Safe core defaults leave tenant text empty until configured.",
+      "default": {
+        "clientCareIntroductoryParagraph": "",
+        "clientCareTermsSummary": "",
+        "clientCareSignatureInstruction": "",
+        "nonEngagementWording": {
+          "conflict": { "subjectTemplate": "", "bodyParagraphs": [] },
+          "outside_expertise": { "subjectTemplate": "", "bodyParagraphs": [] },
+          "not_viable": { "subjectTemplate": "", "bodyParagraphs": [] },
+          "referred_out": { "subjectTemplate": "", "bodyParagraphs": [] },
+          "defaultFallback": { "subjectTemplate": "", "bodyParagraphs": [] }
+        }
+      },
+      "properties": {
+        "clientCareIntroductoryParagraph": {
+          "type": "string",
+          "maxLength": 4000,
+          "default": "",
+          "description": "Introductory Client Care / Engagement Letter paragraph configured for the firm."
+        },
+        "clientCareTermsSummary": {
+          "type": "string",
+          "maxLength": 16000,
+          "default": "",
+          "description": "Standard Client Care terms summary and complaints wording configured for the firm."
+        },
+        "clientCareSignatureInstruction": {
+          "type": "string",
+          "maxLength": 4000,
+          "default": "",
+          "description": "Instruction telling clients how to sign and return the engagement letter."
+        },
+        "nonEngagementWording": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Non-Engagement letter templates keyed by enquiry close reason systemKey.",
+          "default": {
+            "conflict": { "subjectTemplate": "", "bodyParagraphs": [] },
+            "outside_expertise": { "subjectTemplate": "", "bodyParagraphs": [] },
+            "not_viable": { "subjectTemplate": "", "bodyParagraphs": [] },
+            "referred_out": { "subjectTemplate": "", "bodyParagraphs": [] },
+            "defaultFallback": { "subjectTemplate": "", "bodyParagraphs": [] }
+          },
+          "properties": {
+            "conflict": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Non-Engagement template used when declining due to a conflict check (must never reveal conflicting party details).",
+              "properties": {
+                "subjectTemplate": {
+                  "type": "string",
+                  "maxLength": 500,
+                  "default": "",
+                  "description": "Subject template for conflict non-engagement emails."
+                },
+                "bodyParagraphs": {
+                  "type": "array",
+                  "maxItems": 25,
+                  "items": { "type": "string", "maxLength": 4000 },
+                  "default": [],
+                  "description": "Body paragraphs for conflict non-engagement letters."
+                }
+              }
+            },
+            "outside_expertise": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Non-Engagement template used when declining because the matter is outside firm expertise.",
+              "properties": {
+                "subjectTemplate": {
+                  "type": "string",
+                  "maxLength": 500,
+                  "default": "",
+                  "description": "Subject template for outside-expertise non-engagement emails."
+                },
+                "bodyParagraphs": {
+                  "type": "array",
+                  "maxItems": 25,
+                  "items": { "type": "string", "maxLength": 4000 },
+                  "default": [],
+                  "description": "Body paragraphs for outside-expertise non-engagement letters."
+                }
+              }
+            },
+            "not_viable": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Non-Engagement template used when declining on commercial viability grounds.",
+              "properties": {
+                "subjectTemplate": {
+                  "type": "string",
+                  "maxLength": 500,
+                  "default": "",
+                  "description": "Subject template for not-viable non-engagement emails."
+                },
+                "bodyParagraphs": {
+                  "type": "array",
+                  "maxItems": 25,
+                  "items": { "type": "string", "maxLength": 4000 },
+                  "default": [],
+                  "description": "Body paragraphs for not-viable non-engagement letters."
+                }
+              }
+            },
+            "referred_out": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Non-Engagement template used when referring an enquiry to an external provider.",
+              "properties": {
+                "subjectTemplate": {
+                  "type": "string",
+                  "maxLength": 500,
+                  "default": "",
+                  "description": "Subject template for referred-out non-engagement emails."
+                },
+                "bodyParagraphs": {
+                  "type": "array",
+                  "maxItems": 25,
+                  "items": { "type": "string", "maxLength": 4000 },
+                  "default": [],
+                  "description": "Body paragraphs for referred-out non-engagement letters."
+                }
+              }
+            },
+            "defaultFallback": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Fallback Non-Engagement template used for general or custom close reasons.",
+              "properties": {
+                "subjectTemplate": {
+                  "type": "string",
+                  "maxLength": 500,
+                  "default": "",
+                  "description": "Subject template for fallback non-engagement emails."
+                },
+                "bodyParagraphs": {
+                  "type": "array",
+                  "maxItems": 25,
+                  "items": { "type": "string", "maxLength": 4000 },
+                  "default": [],
+                  "description": "Body paragraphs for fallback non-engagement letters."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

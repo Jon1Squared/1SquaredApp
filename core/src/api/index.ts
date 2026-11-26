@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '2.3.0';
+export const CORE_API_VERSION = '2.4.0';
 
 import type {
   FeeArrangementCapEntry,
@@ -84,7 +84,8 @@ export type JobOnlyPermissionKey =
   | 'register:run_reminders'
   | 'notification:drain_outbox'
   | 'notification:send_digests'
-  | 'quote:run_expiry';
+  | 'quote:run_expiry'
+  | 'communication:run_chases';
 
 export type PermissionKey =
   | EmployeePermission
@@ -146,7 +147,8 @@ export type PermissionDomain =
   | 'contact'
   | 'admin'
   | 'rbac'
-  | 'notification';
+  | 'notification'
+  | 'communication';
 
 export type PermissionSensitivity =
   | 'standard'
@@ -657,6 +659,7 @@ export interface DocumentStorageProvider {
 }
 
 export const CLIENT_CARE_DOCUMENT_TYPE = 'client_care' as const;
+export const NON_ENGAGEMENT_DOCUMENT_TYPE = 'non_engagement' as const;
 
 export type TemplateStatus =
   | 'Draft'
@@ -917,6 +920,54 @@ export interface TenantConfiguration {
     readonly fallbackTeamId: string | null;
   };
   cdd?: CddConfiguration;
+  chasing?: ChasingConfiguration;
+  engagement?: EngagementConfiguration;
+}
+
+// ------------------------------------------------------------------ Communication Chasing & Engagement Config (ADR 0042, S1-06)
+
+export interface ChasingRuleConfig {
+  readonly enabled: boolean;
+  readonly sendEmails: boolean;
+  readonly firstChaseDays: number;
+  readonly secondChaseDays: number;
+  readonly escalateTaskDays: number;
+}
+
+export interface ChasingConfiguration {
+  readonly engagementLetter: ChasingRuleConfig;
+  readonly quote: ChasingRuleConfig;
+  readonly moneyOnAccount: ChasingRuleConfig;
+}
+
+export const NON_ENGAGEMENT_REASON_KEYS = Object.freeze([
+  'conflict',
+  'outside_expertise',
+  'not_viable',
+  'referred_out',
+  'defaultFallback',
+] as const);
+
+export type NonEngagementReasonKey = (typeof NON_ENGAGEMENT_REASON_KEYS)[number];
+
+export interface NonEngagementReasonWordingConfig {
+  readonly subjectTemplate: string;
+  readonly bodyParagraphs: readonly string[];
+}
+
+export interface NonEngagementWordingMap {
+  readonly conflict: NonEngagementReasonWordingConfig;
+  readonly outside_expertise: NonEngagementReasonWordingConfig;
+  readonly not_viable: NonEngagementReasonWordingConfig;
+  readonly referred_out: NonEngagementReasonWordingConfig;
+  readonly defaultFallback: NonEngagementReasonWordingConfig;
+}
+
+export interface EngagementConfiguration {
+  readonly clientCareIntroductoryParagraph: string;
+  readonly clientCareTermsSummary: string;
+  readonly clientCareSignatureInstruction: string;
+  readonly nonEngagementWording: NonEngagementWordingMap;
 }
 
 // ------------------------------------------------------------------ Client Due Diligence Configuration (ADR 0039, S1-04)
@@ -1904,8 +1955,14 @@ export type FirmAuditRecordType =
   | 'register_record'
   | 'registers_config'
   | 'email_outbox'
+  | 'email_outbox_attachment'
   | 'teams_activity_outbox'
   | 'intake_check'
+  | 'evidence_artifact'
+  | 'engagement_dispatch'
+  | 'communication_chase'
+  | 'engagement_config'
+  | 'chasing_config'
   | 'notification_digest'
   | 'notification_preferences';
 
@@ -2232,12 +2289,22 @@ export type EvidenceArtifactSubjectType =
   | 'quote'
   | 'register';
 
+export const EVIDENCE_PURPOSES = Object.freeze([
+  'cdd',
+  'engagement_signed',
+  'moa_receipt',
+  'general',
+] as const);
+
+export type EvidencePurpose = (typeof EVIDENCE_PURPOSES)[number];
+
 export interface EvidenceArtifactRecord {
   readonly id: string;
   readonly tenantId: string;
   readonly blobKey: string;
   readonly subjectType: EvidenceArtifactSubjectType;
   readonly subjectId: string;
+  readonly purpose?: EvidencePurpose;
   readonly fileName: string;
   readonly contentType: string;
   readonly byteSize: number;
@@ -2414,6 +2481,175 @@ export interface ESignatureProvider {
       readonly subjectId: string;
     },
   ): Promise<ESignatureEnvelopeRecord | null>;
+  listEnvelopes?(
+    ctx: TenantContext,
+    subject: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+    },
+  ): Promise<readonly ESignatureEnvelopeRecord[]>;
+  cancelManualRequest?(
+    ctx: TenantContext,
+    input: {
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+      readonly referenceCode?: string | null;
+      readonly notes?: string | null;
+    },
+  ): Promise<ESignatureEnvelopeRecord>;
+  recordCheckInTx?(
+    tx: unknown,
+    ctx: TenantContext,
+    input: RecordManualESignatureInput,
+  ): Promise<ESignatureEnvelopeRecord>;
+}
+
+// ------------------------------------------------------------------ Communication Chasing & Engagement Dispatches (ADR 0042, S1-06)
+
+export const COMMUNICATION_CHASE_ENTITY_KINDS = Object.freeze([
+  'engagement_letter',
+  'quote',
+  'money_on_account',
+] as const);
+
+export type CommunicationChaseEntityKind =
+  (typeof COMMUNICATION_CHASE_ENTITY_KINDS)[number];
+
+export type CommunicationChaseStatus = 'active' | 'stopped' | 'completed';
+
+export type CommunicationChaseStoppedReason =
+  | 'signed'
+  | 'accepted'
+  | 'declined'
+  | 'expired'
+  | 'superseded'
+  | 'received'
+  | 'withdrawn'
+  | 'cancelled'
+  | 'manual_stop'
+  | 'entity_missing';
+
+export type CommunicationChaseActionKind = 'chase_email' | 'escalation_task';
+
+export type CommunicationChaseOutcome =
+  | 'executed'
+  | 'skipped_emails_disabled'
+  | 'skipped_no_recipient'
+  | 'suppressed_restricted';
+
+export interface CommunicationChaseRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly entityKind: CommunicationChaseEntityKind;
+  readonly entityId: string;
+  readonly matterId: string | null;
+  readonly quoteId: string | null;
+  readonly recipientEmail: string | null;
+  readonly recipientName: string | null;
+  readonly sentAt: string;
+  readonly status: CommunicationChaseStatus;
+  readonly stoppedReason: CommunicationChaseStoppedReason | null;
+  readonly stoppedAt: string | null;
+  readonly stoppedByPersonId: string | null;
+  readonly lastChasedAt: string | null;
+  readonly nextStepIndex: number;
+  readonly nextActionAt: string | null;
+  readonly createdByPersonId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface CommunicationChaseEventRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly chaseId: string;
+  readonly stepIndex: 1 | 2 | 3;
+  readonly actionKind: CommunicationChaseActionKind;
+  readonly outcome: CommunicationChaseOutcome;
+  readonly outboxEmailId: string | null;
+  readonly taskId: string | null;
+  readonly executedAt: string;
+}
+
+export interface CommunicationChaseStepEmailPayload {
+  readonly subject: string;
+  readonly textBody: string;
+  readonly htmlBody?: string;
+  readonly templateKey: string;
+  readonly recipientEmail: string;
+  readonly recipientName?: string | null;
+  readonly matterId?: string | null;
+  readonly quoteId?: string | null;
+  readonly enquiryId?: string | null;
+}
+
+export interface CommunicationChaseEscalationPayload {
+  readonly title: string;
+  readonly description: string;
+  readonly assigneePersonId: string | null;
+  readonly matterId?: string | null;
+  readonly quoteId?: string | null;
+  readonly enquiryId?: string | null;
+  readonly dueAt: string;
+  readonly priorityId?: string;
+  readonly autoTrigger: string;
+}
+
+export type CommunicationChaseStepPlan =
+  | { readonly action: 'stop'; readonly reason: CommunicationChaseStoppedReason }
+  | {
+      readonly action: 'skip';
+      readonly outcome:
+        | 'skipped_emails_disabled'
+        | 'skipped_no_recipient'
+        | 'suppressed_restricted';
+    }
+  | {
+      readonly action: 'send_email';
+      readonly email: CommunicationChaseStepEmailPayload;
+      readonly auditField: string;
+      readonly auditNewValue?: string;
+    }
+  | {
+      readonly action: 'create_escalation_task';
+      readonly task: CommunicationChaseEscalationPayload;
+      readonly auditField: string;
+      readonly auditNewValue?: string;
+    };
+
+export interface CommunicationChaseEntityAdapter {
+  readonly entityKind: CommunicationChaseEntityKind;
+  evaluateChaseStep(params: {
+    readonly ctx: TenantContext;
+    readonly chase: CommunicationChaseRecord;
+    readonly schedule: ChasingRuleConfig;
+    readonly stepIndex: 1 | 2 | 3;
+    readonly now: Date;
+  }): Promise<CommunicationChaseStepPlan>;
+}
+
+export type EngagementDispatchKind = 'client_care' | 'non_engagement';
+export type EngagementDispatchStatus = 'sent' | 'signed' | 'withdrawn';
+
+export interface EngagementDispatchRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly kind: EngagementDispatchKind;
+  readonly matterId: string | null;
+  readonly enquiryId: string | null;
+  readonly documentId: string | null;
+  readonly outboxEmailId: string | null;
+  readonly recipientEmail: string;
+  readonly recipientName: string | null;
+  readonly status: EngagementDispatchStatus;
+  readonly sentAt: string;
+  readonly sentByPersonId: string;
+  readonly signedEvidenceArtifactId: string | null;
+  readonly signedAt: string | null;
+  readonly signedByPersonId: string | null;
+  readonly intakeCheckRecordId: string | null;
+  readonly idempotencyKey: string;
+  readonly createdAt: string;
 }
 
 export const PAYMENT_REQUEST_OUTCOMES = Object.freeze([

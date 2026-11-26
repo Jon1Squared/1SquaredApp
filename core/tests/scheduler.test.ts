@@ -125,6 +125,7 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         'notification:drain_outbox',
         'notification:send_digests',
         'quote:run_expiry',
+        'communication:run_chases',
       ]);
       expect(ALL_PERMISSION_KEYS.length).toBe(
         ALL_USER_PERMISSION_KEYS.length + ALL_JOB_ONLY_PERMISSION_KEYS.length,

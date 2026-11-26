@@ -365,9 +365,9 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
       '0018',
     ]);
 
-    expect(ALL_PERMISSION_KEYS).toHaveLength(81);
+    expect(ALL_PERMISSION_KEYS).toHaveLength(82);
     expect(ALL_USER_PERMISSION_KEYS).toHaveLength(71);
-    expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(10);
+    expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(11);
     expect(ALL_JOB_ONLY_PERMISSION_KEYS).toContain('notification:drain_outbox');
     expect(PERMISSION_REGISTRY['notification:drain_outbox'].jobOnly).toBe(true);
     expect(PERMISSION_REGISTRY['notification:drain_outbox'].sensitivity).toBe(

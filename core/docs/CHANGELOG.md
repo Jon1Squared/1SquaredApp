@@ -2,6 +2,17 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-26 — Extension API v2.4.0 (`S1-06` Engagement Letters, Non-Engagement Dispatch, Evidence Purposes & Generic Communication Chasing, ADR 0042)
+
+### Added (Backward Compatible within `^2.0.0`)
+- **`CORE_API_VERSION` bumped from `'2.3.0'` to `'2.4.0'` (`@platform/core-api`, `core/src/api/index.ts`, [ADR 0042](../../docs/decisions/0042-generic-communication-chasing-mechanism.md)):**
+  - Added job-only permission `'communication:run_chases'` to `JobOnlyPermissionKey` and `PERMISSION_REGISTRY`.
+  - Added `NON_ENGAGEMENT_DOCUMENT_TYPE = 'non_engagement'`.
+  - Added `EVIDENCE_PURPOSES` and `EvidencePurpose` (`'cdd' | 'engagement_signed' | 'moa_receipt' | 'general'`) plus optional `purpose?: EvidencePurpose` on `EvidenceArtifactRecord` (`R817` stored-purpose decoupling).
+  - Added `ChasingRuleConfig`, `ChasingConfiguration`, `NonEngagementReasonKey`, `NonEngagementReasonWordingConfig`, `NonEngagementWordingMap`, and `EngagementConfiguration`, and optional `chasing` / `engagement` properties on `TenantConfiguration`.
+  - Added ADR 0042 generic communication chasing types (`CommunicationChaseEntityKind`, `CommunicationChaseRecord`, `CommunicationChaseEventRecord`, `CommunicationChaseEntityAdapter`) and `EngagementDispatchRecord`.
+  - Added optional additive methods `listEnvelopes?`, `cancelManualRequest?`, and `recordCheckInTx?` on `ESignatureProvider`.
+
 ## 2026-11-26 — Extension API v2.3.0 (`S1-12` Minor-Unit PostgreSQL & Formatting Helpers, ADR 0041)
 
 ### Added (Backward Compatible within `^2.0.0`)
