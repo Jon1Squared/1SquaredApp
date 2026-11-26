@@ -3,14 +3,14 @@
 | | |
 |---|---|
 | Backlog | Row `3` (Quote and costs information — moving to `Completed`), row `6` (payment on account on quotes), and stage exit item `3` |
-| Decision | Stage 1 decisions `S1-D10`, `S1-D11`; Owner decisions 1, 2, 4 (26 Nov 2026); [ADR 0034](../../decisions/0034-fee-arrangements-and-caps.md), [ADR 0038](../../decisions/0038-intake-check-interfaces-and-manual-adapters.md), [ADR 0041](../../decisions/0041-pms-money-as-integer-pence.md), Proposed [ADR 0042](../../decisions/0042-generic-communication-chasing-mechanism.md) |
+| Decision | Stage 1 decisions `S1-D10`, `S1-D11`; Owner decisions 1, 2, 4 & Q1, Q3, Q6, Q7, Q9 (26 Nov 2026); [ADR 0034](../../decisions/0034-fee-arrangements-and-caps.md), [ADR 0038](../../decisions/0038-intake-check-interfaces-and-manual-adapters.md), [ADR 0041](../../decisions/0041-pms-money-as-integer-pence.md), Proposed [ADR 0042](../../decisions/0042-generic-communication-chasing-mechanism.md) |
 | Stage plan | [docs/roadmap/stage-1-plan.md](../stage-1-plan.md), WP3 (`S1-07`) |
 | Branch | `s1-07-quotes`, stacked on `s1-06-engagement`, targeting `develop` |
 | Change class | Core extension API (additive v`2.5.0`, Rule 7); Core tenancy expand migration `0029` (`public.quotes` POA pence & dispatch metadata) + repository; Core config engine (`workTypes.*.priceTransparency`); Host PDF builder, services, `/api/quotes/[id]/pdf` route, `'quote'` chasing handler, & UI (`WorkTypesAdminPanel`, `QuoteFormClient`, `QuoteDetailClient`, `MatterFormClient`); Demo config (`client-not-a-law-firm/config/base.json`); Plain-English Help (`src/docs/`) |
 | Layer | Core API (`core/src/api/`), Core tenancy (`core/src/tenancy/`), Core config (`core/schemas/`, `core/src/config-engine/`), Host domain/server/routes/UI (`src/`), Client config (`client-not-a-law-firm/`) |
-| Size | `M–L` (`2.0–2.25` days; leverages `S1-06`'s `communication-chases` infrastructure directly) |
+| Size | `M–L` (`1.75–2.0` days; leverages `S1-06`'s `communication-chases` infrastructure directly and uses plain multi-line textareas in `WorkTypesAdminPanel`) |
 | Depends on | `S1-02a`, `S1-03`, `S1-06` (`0028` & `ADR 0042` generic chasing engine); Proposed [ADR 0042](../../decisions/0042-generic-communication-chasing-mechanism.md) to be Accepted |
-| Blocking manual tasks | None in dev/test; **live email delivery blocked by Stage 1 §8 task** (no sending mailbox on demo — emails stay queued in `public.email_outbox` with quote PDFs in `public.email_outbox_attachments`) |
+| Blocking manual tasks | None in dev/test; **live email delivery blocked by Stage 1 §8 task** (in the `S1-06` build, `demo.json` sets `integrations.email.provider` to `"disabled"` so queued quote emails stay `'pending'` and readable in **Administration → Email Outbox**; switching it back on alongside a demo sending mailbox is a Stage 1 §8 manual setup task) |
 | Baseline | `develop` at `a7e606c` |
 
 ---
@@ -20,10 +20,10 @@
 | Part | Change class | Layer |
 |---|---|---|
 | Additive `WorkTypePriceTransparencyConfig` on `WorkTypeDefaultsConfig` / `WorkTypeConfigItem`, `CORE_API_VERSION = '2.5.0'` | Core API & config types (additive, Rule 7) | `core/src/api/index.ts`, `core/docs/CHANGELOG.md` |
-| `workTypes.defaults.priceTransparency` & `workTypes.items[].priceTransparency` JSON Schema + Zod + deep-merge (`base.json` + overlay); demo Price Transparency wording (Appendix A) | Core config schema & client config | `core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `client-not-a-law-firm/config/base.json` |
+| `workTypes.defaults.priceTransparency` & `workTypes.items[].priceTransparency` JSON Schema + Zod + deep-merge (`base.json` + overlay); approved demo Price Transparency wording (Appendix A) | Core config schema & client config | `core/schemas/tenant-config.schema.json`, `core/src/config-engine/index.ts`, `client-not-a-law-firm/config/base.json` |
 | Expand migration `0029_quotes_poa_and_dispatch_expand` (`payment_on_account_pence BIGINT`, `payment_on_account_required`, `sent_to_email`, dispatch & transparency snapshot metadata); update `TenantIntakeQuoteRepository` (`upsertQuoteInTx`, `mapRowToQuote`, immutable version snapshots) | Core tenancy migration & repository | `core/src/tenancy/migrations/index.ts`, `core/src/tenancy/tenantScopedRepository.ts`, `core/src/tenancy/intakeQuoteRepository.ts` |
-| Quote DOCX/PDF builder (`selectDocumentPdfConverter` outside TX, `<= 3_000_000` bytes), `GET /api/quotes/[id]/pdf` (`guardedRoute`), `sendQuoteEmailAction` (updating all 4 "Mark as sent" call paths) + secondary `markQuoteSentOfflineAction` (Open Question 6), `'quote'` handler on ADR 0042 `communication-chases`, carry-over of quote POA into `resolveMatterCostsSnapshot` & `MatterFormClient` | Host domain, server services, HTTP routes & actions | `src/domain/quotePdf.ts`, `src/domain/quotes.ts`, `src/domain/workTypeConfig.ts`, `src/domain/matterCosts.ts`, `src/app/api/quotes/[id]/pdf/route.ts`, `src/server/services.ts`, `src/server/actionPermissions.ts`, `src/app/actions.ts` |
-| Interactive **Price Transparency** editor inside `WorkTypesAdminPanel` (per-work-type with 3-tier inheritance), Quote Form POA & email fields, Quote Detail PDF download / send / chase status UI, Matter Form POA carry-over | Host UI | `src/components/WorkTypesAdminPanel.tsx`, `src/components/QuoteFormClient.tsx`, `src/components/QuoteDetailClient.tsx`, `src/components/MatterFormClient.tsx` |
+| Quote DOCX/PDF builder (`selectDocumentPdfConverter` outside TX, `<= 3_000_000` bytes), `GET /api/quotes/[id]/pdf` (`guardedRoute`), `sendQuoteEmailAction` (updating all 4 "Mark as sent" call paths, populating `quote_id`/`matter_id` on `email_outbox` for `R823`) + confirmed secondary `markQuoteSentOfflineAction` (Q6), `'quote'` handler on ADR 0042 `communication-chases` (`chase:<chaseId>:step:<n>`, `R818`), carry-over of quote POA into `resolveMatterCostsSnapshot` & `MatterFormClient` | Host domain, server services, HTTP routes & actions | `src/domain/quotePdf.ts`, `src/domain/quotes.ts`, `src/domain/workTypeConfig.ts`, `src/domain/matterCosts.ts`, `src/app/api/quotes/[id]/pdf/route.ts`, `src/server/services.ts`, `src/server/actionPermissions.ts`, `src/app/actions.ts` |
+| Interactive **Price Transparency** editor inside `WorkTypesAdminPanel` (per-work-type plain multi-line textareas with 3-tier inheritance), Quote Form POA & email fields, Quote Detail PDF download / send / offline / chase status UI, Matter Form POA carry-over | Host UI | `src/components/WorkTypesAdminPanel.tsx`, `src/components/QuoteFormClient.tsx`, `src/components/QuoteDetailClient.tsx`, `src/components/MatterFormClient.tsx` |
 | Plain-English Help (`quotes-and-pricing.ts` / updates), technical & release notes | Help & docs (Rule 11) | `src/docs/`, `docs/` |
 
 ---
@@ -72,16 +72,17 @@
    - `GET /api/quotes/[id]/pdf` (`guardedRoute`, `quote:view` + `QUOTE_VISIBLE_SQL_PREDICATE`) lets staff preview/download the PDF directly.
 2. **Sending quotes by email (`sendQuoteEmailAction` + upgraded form buttons):**
    - All 4 "Mark as sent" flows (`QuoteDetailClient` primary button + `QuoteFormClient` create/edit/revise `"Save & send quote"`):
-     - Require a valid recipient email (`isValidEmailAddress`, defaulted from linked enquiry/contact/person email if present) unless explicitly using the secondary `"Record as sent offline"` fallback (Open Question 6).
+     - Require a valid recipient email (`isValidEmailAddress`, defaulted from linked enquiry/contact/person email if present) unless explicitly using the confirmed secondary **`"Record as sent offline"`** fallback (`markQuoteSentOfflineAction`, Owner Q6).
      - Generate quote PDF via `selectDocumentPdfConverter` **outside** `withTenantTransaction` and fail closed if `pdfBytes.byteLength > MAX_EMAIL_TOTAL_ATTACHMENT_BYTES` (`3_000_000` bytes — plain-English error, zero PII logged).
-     - Inside `withTenantTransaction`: lock quote `FOR UPDATE`, verify it is not `Accepted`/`Declined`/`Expired`/`Superseded`, enqueue to `public.email_outbox` + inline PDF into `public.email_outbox_attachments` (`idempotency_key: 'quote:send:<quoteId>:v<version>:<dispatchNonce>'`), freeze `priceTransparencySnapshot` onto `public.quotes`, transition `status = 'Sent'`, `sentAt`, `sentToEmail`, `sentByPersonId`, `lastSentOutboxId`, create/replace `'active'` row in `public.communication_chases` (`entity_kind = 'quote'`, `quote_id = quote.id`, `sent_at`, `next_step_index = 1`) when `chasing.quote.enabled === true`, append `'sent'` timeline & audit entry (`'Quote sent'`).
+     - Inside `withTenantTransaction`: lock quote `FOR UPDATE`, verify it is not `Accepted`/`Declined`/`Expired`/`Superseded`, enqueue to `public.email_outbox` (populating nullable `quote_id = quote.id` and `matter_id = quote.convertedMatterId ?? null` via `0028` for `R823` outbox filtering) + inline PDF into `public.email_outbox_attachments` (`idempotency_key: 'quote:send:<quoteId>:v<version>:<dispatchNonce>'`), freeze `priceTransparencySnapshot` onto `public.quotes`, transition `status = 'Sent'`, `sentAt`, `sentToEmail`, `sentByPersonId`, `lastSentOutboxId`, create/replace `'active'` row in `public.communication_chases` (`entity_kind = 'quote'`, `quote_id = quote.id`, `sent_at`, `next_step_index = 1`) when `chasing.quote.enabled === true`, append `'sent'` timeline & audit entry (`'Quote sent'`).
      - Drain outbox best-effort post-commit (honestly reporting `"Queued in outbox"` when `email.provider === 'disabled'`).
-   - Revising a sent quote (`reviseQuoteRecord`) stops any `'active'` chase on the superseded version (`stopped_reason = 'superseded'`), while saving & sending the new version starts a fresh chase from Day 0 (`vN+1`).
+   - Revising a sent quote (`reviseQuoteRecord`) stops any `'active'` chase on the superseded version (`stopped_reason = 'superseded'`), while saving & sending the new version starts a fresh chase from Day 0 (`vN+1`) with a new `chaseId`.
 
 ### 3.3 Automated chasing plug-in (`communication-chases`, ADR 0042) & `quote-expiry` interaction
-- Registers the `'quote'` handler in `executeCommunicationChasesForTenant`:
+- Registers the `'quote'` handler in `executeCommunicationChasesForTenant` (using the confirmed **7 / 14 / 21** day defaults from Owner Q3):
   - Checks `evaluateQuoteEffectiveStatus(quote, now)` inside TX; if `'Accepted' | 'Declined' | 'Expired' | 'Superseded'`, immediately sets chase `status = 'stopped'` (`stopped_reason` matching quote outcome) and exits without chasing.
-  - Otherwise Day `7` -> first follow-up email (re-including summary/validity date, no duplicate attachment needed or small PDF `<= 3 MB`), Day `14` -> second follow-up email, Day `21` -> escalation task assigned to `quote.feeEarnerId` (or `preparedById`, active & permitted via `QUOTE_VISIBLE_SQL_PREDICATE` / `canPersonAccessMatter` on source enquiry/matter) and sets chase `completed`.
+  - Otherwise Day `7` -> first follow-up email (**`idempotency_key: 'chase:<chaseId>:step:1'`**, keyed on `communication_chases.id` per `R818` and populating `quote_id`/`matter_id` on `email_outbox` per `R823`; re-includes summary/validity date, no duplicate attachment needed or small PDF `<= 3 MB`), Day `14` -> second follow-up email (**`idempotency_key: 'chase:<chaseId>:step:2'`**), Day `21` -> escalation task assigned to `quote.feeEarnerId` (or `preparedById`, active & permitted via `QUOTE_VISIBLE_SQL_PREDICATE` / `canPersonAccessMatter` on source enquiry/matter) and sets chase `completed`.
+  - Because chases are keyed by `chase:<chaseId>:step:<n>` (`R818`), revising and re-sending a quote on the same `quote_id` creates a new `communication_chases` row with a fresh `chaseId` and queues new day-7/day-14 emails without colliding on `email_outbox`'s `UNIQUE (tenant_id, idempotency_key)`.
   - `recordQuoteOutcomeRecord` (`services.ts:22320–22403`), `finalizeQuoteConversionToMatter` (`:22968–23031`), `reviseQuoteRecord`, and `expireQuoteIfOverdue` (`intakeQuoteRepository.ts:2819–2869`) all synchronously call `stopActiveChaseInTx(tx, ctx, 'quote', quote.id, reason)` so chasing stops **the instant** any outcome or expiry commits.
   - Existing pre-WP3 quotes remain untouched (zero retrospective chasing).
 
@@ -94,7 +95,7 @@
   - `typicalTimescales: string` (default `""`)
   - `disbursementsGuidance: string` (default `""`)
   - `exclusionsAndVatNote: string` (default `""`)
-- Resolved using the exact 3-tier per-property pattern (`work_type_subcategory -> practice_area -> firm_defaults -> core empty`) in `resolveWorkTypePriceTransparencyWithProvenance` (`src/domain/workTypeConfig.ts`), displayed inside **`QuoteFormClient`** (live preview of configured guidance + toggle to include/customise note), **`QuoteDetailClient`**, and **`quotePdf.ts`**, and interactively editable inside **`WorkTypesAdminPanel.tsx`** (`admin:access` + `mfaVerified: true`).
+- Resolved using the exact 3-tier per-property pattern (`work_type_subcategory -> practice_area -> firm_defaults -> core empty`) in `resolveWorkTypePriceTransparencyWithProvenance` (`src/domain/workTypeConfig.ts`), displayed inside **`QuoteFormClient`** (live preview of configured guidance + toggle to include/customise note), **`QuoteDetailClient`**, and **`quotePdf.ts`**, and interactively editable inside **`WorkTypesAdminPanel.tsx`** (`admin:access` + `mfaVerified: true`) using clean multi-line textareas with inheritance status and reset-to-inherited controls (avoiding bespoke rich-text editors to stay comfortably within WP3's `7–9` day budget alongside the outbox viewer).
 
 ---
 
@@ -127,9 +128,9 @@
 ## 6. Permissions, Action/Route Policies, Role Matrix & MFA
 
 - **No new RBAC permission keys needed in `S1-07`:** Reuses `quote:view`, `quote:edit`, `admin:access` (+ `mfaVerified: true` on `saveWorkTypesConfigAction`), and `S1-06`'s `communication:run_chases` (`PERMISSION_REGISTRY` stays `82 / 71 / 11`).
-- **New Actions / Route (`src/server/actionPermissions.ts`, `MAX_KNOWN_GAPS = 0`):**
+- **New Actions / Route (`src/server/actionPermissions.ts`, `MAX_KNOWN_GAPS = 0`, `ROUTE_PERMISSIONS` `17 -> 18`):**
   - `sendQuoteEmailAction` -> `{ kind: 'permission', key: 'quote:edit', enforcedBy: 'action' }`
-  - `markQuoteSentOfflineAction` *(if retained per Open Question 6)* -> `{ kind: 'permission', key: 'quote:edit', enforcedBy: 'action' }`
+  - `markQuoteSentOfflineAction` *(confirmed secondary action per Owner Q6)* -> `{ kind: 'permission', key: 'quote:edit', enforcedBy: 'action' }`
   - `GET /api/quotes/[id]/pdf` -> `{ kind: 'permission', key: 'quote:view', enforcedBy: 'action' }` *(verifying `QUOTE_VISIBLE_SQL_PREDICATE` + `ctx.tenantId`)*
   - Existing `saveQuoteAction`, `reviseQuoteAction`, `markQuoteSentAction`, `logQuoteFollowUpAction`, `recordQuoteOutcomeAction`, `saveWorkTypesConfigAction` (MFA enforced).
 
@@ -169,10 +170,11 @@ Plain British English for firm users (zero code names, error codes, or migration
 2. **Unit & config (`core/tests/rates-charging-s023.test.ts`, `core/tests/departments-work-types-s022.test.ts`, `core/tests/tenant-config-usage.test.ts`, `src/domain/__tests__/quotes.test.ts`):**
    - Quote POA minor-unit preservation across create/edit/revise snapshots and carry-over into `resolveMatterCostsSnapshot`; `QuoteDetailClient` integer total arithmetic; 3-tier Price Transparency inheritance (`work_type` -> `practice_area` -> `firm_default` -> safe empty core default).
 3. **Two-tenant PG16 isolation, PDF/outbox & chasing (`core/tests/quotes-outbox-chasing-s107.test.ts`):**
-   - `sendQuoteEmailAction` renders valid `%PDF-` via `selectDocumentPdfConverter` outside TX, enforces `3_000_000` byte cap, enqueues `email_outbox` + `email_outbox_attachments`, stamps `Sent`, starts `communication_chases` (`'quote'`), and blocks `finance` / cross-tenant callers (`GET /api/quotes/[id]/pdf` cross-tenant `404`/`403` and hidden restricted draft-enquiry rejection).
+   - `sendQuoteEmailAction` renders valid `%PDF-` via `selectDocumentPdfConverter` outside TX, enforces `3_000_000` byte cap, enqueues `email_outbox` (populating `quote_id` / `matter_id` for `R823` outbox filtering) + `email_outbox_attachments`, stamps `Sent`, starts `communication_chases` (`'quote'`), and blocks `finance` / cross-tenant callers (`GET /api/quotes/[id]/pdf` cross-tenant `404`/`403` and hidden restricted draft-enquiry rejection, plus restricted/hidden quote outbox suppression in `Admin` outbox viewer).
    - Chase progression: day 7 -> email 1, day 14 -> email 2, day 21 -> fee-earner task; **immediate stop** verified on each of `Accepted` (outcome & `finalizeQuoteConversionToMatter`), `Declined`, `Expired` (`quote-expiry` & lazy check), and `Superseded` (`reviseQuoteRecord`); pre-existing `'Sent'` quotes never chased retroactively.
+   - **Chase re-send key test (`R818`):** send quote v1 -> run `communication-chases` (day-7 queued) -> revise quote to v2 and send (`superseded` stops v1 chase, v2 gets a new `chaseId`) -> run `communication-chases` -> v2's day-7 and day-14 chase emails are queued cleanly under `chase:<chaseId>:step:<n>` with zero idempotency collision.
    - `saveWorkTypesConfigAction` MFA requirement (`admin_no_mfa` fails `MFA_REQUIRED`) & Price Transparency persistence.
-4. **Guards (`noWholeTenantLoadInRequestPaths.test.ts`, `actionPermissionGuard.test.ts`):** zero new whole-tenant loads; `actionPermissionGuard` exact counts updated for new actions + `GET /api/quotes/[id]/pdf`.
+4. **Guards (`noWholeTenantLoadInRequestPaths.test.ts`, `actionPermissionGuard.test.ts`):** zero new whole-tenant loads; `actionPermissionGuard` exact counts updated for new actions + `GET /api/quotes/[id]/pdf` (`ROUTE_PERMISSIONS` `17 -> 18`).
 5. **Playwright E2E (`e2e/role-journeys.spec.ts`):** Fee earner/Enquiries creates quote with POA and checks Price Transparency preview, clicks **Send quote by email** (helper checks `email_outbox` + PDF bytes in PG16), downloads `/api/quotes/[id]/pdf`, accepts and converts to a prospective matter verifying POA carried into Step 2!
 6. **Existing test files touched by `S1-07`:** `core/tests/migrations-postgres.test.ts`, `src/server/__tests__/actionPermissionGuard.test.ts`, `core/tests/tenant-config-usage.test.ts`, `core/tests/intake-quotes-tasks-postgres.test.ts`, `core/tests/rates-charging-s023.test.ts`, `core/tests/departments-work-types-s022.test.ts`, `e2e/role-journeys.spec.ts`.
 7. **Build-phase test cadence:** Per commit/branch run `npx tsc --noEmit`, `npm run lint`, changed/new Vitest files above, and `npx vitest run isolation`.
@@ -182,7 +184,7 @@ Plain British English for firm users (zero code names, error codes, or migration
 ## 10. Expected `docs/roadmap/feature-list.md` Updates
 
 When `S1-07` lands:
-- **Row `3` (Quote and costs information):** Update status from `Partly built` to **`Completed`**; update "What exists" to include quote PDF generation & `/api/quotes/[id]/pdf`, outbox email+PDF dispatch across all send flows (`0029`), automated 7/14/task chasing on `communication-chases` (`ADR 0042`), configurable per-work-type Price Transparency text with `WorkTypesAdminPanel` MFA editor, Payment on Account on quotes + matter conversion carry-over, Help article (`quotes-and-pricing.ts`), and two-tenant/E2E tests; clear "What's missing" (`–`).
+- **Row `3` (Quote and costs information):** Update status from `Partly built` to **`Completed`**; update "What exists" to include quote PDF generation & `/api/quotes/[id]/pdf`, outbox email+PDF dispatch across all send flows (`0029`), automated 7/14/21-day chasing on `communication-chases` (`ADR 0042`), configurable per-work-type Price Transparency text with `WorkTypesAdminPanel` MFA editor, Payment on Account on quotes + matter conversion carry-over, Help article (`quotes-and-pricing.ts`), and two-tenant/E2E tests; clear "What's missing" (`–`).
 - **Row `6` (Money on account):** Narrow "What's missing" to remove `"Payment on account amount on quotes (and quote migration)"`.
 
 ---
@@ -200,31 +202,29 @@ When `S1-07` lands:
 ## 12. Draft Owner Spot Checks (Demo — Outbox Verified)
 
 - **Price Transparency Admin (MFA):** Sign in as **Admin** (with MFA) -> **Administration -> Work Types** -> select **Residential Conveyancing** -> inspect the **Price Transparency** section, verify firm-default inheritance vs override, and update one sentence.
-- **Quote PDF, POA & Send -> Outbox:** Create a quote for Residential Conveyancing with Fixed Fee £1,200 + £200 Search disbursement + **Payment on Account £500**, confirm Price Transparency guidance appears, preview/download the **Quote PDF**, enter recipient email, and send. Inspect the outbox record confirming recipient, message, and PDF attachment (containing fee breakdown, £500 POA, and transparency text), then verify converting the accepted quote pre-fills £500 POA on the new matter.
+- **Quote PDF, POA & Send -> Outbox:** Create a quote for Residential Conveyancing with Fixed Fee £1,200 + £200 Search disbursement + **Payment on Account £500**, confirm Price Transparency guidance appears, preview/download the **Quote PDF**, enter recipient email, and send. Open **Administration -> Email Outbox** (with MFA) to inspect the queued `'pending'` message confirming recipient, message, and downloadable Quote PDF attachment (containing fee breakdown, £500 POA, and transparency text), then verify converting the accepted quote pre-fills £500 POA on the new matter.
 
 ---
 
-## 13. Risks & Open Questions (Numbered — continuing `S1-06` numbering)
+## 13. Risks & Open Questions (Resolved Owner Decisions, 26 Nov 2026)
 
-6. **Open Question 6 (Secondary "Mark as sent offline" action on Quotes):**
-   Today all four "Mark as sent" UI buttons set status `'Sent'` without sending email. Upgrading them directly to **"Save & send by email"** (requiring a recipient address and queueing an email + PDF) closes row 3's gap, while occasionally a fee earner hands a printed quote to a client in a meeting or posts it by DX.
-   - **Proposal:** Make **"Send quote by email"** (enqueueing email + PDF and starting automated chasing) the primary action, and keep a secondary **`"Record as sent offline"`** button (`markQuoteSentOfflineAction`) that records offline delivery (`status = 'Sent'`, `'sent'` audit, optional date) **without** queueing an email or chasing unless requested. **Confirm keeping `"Record as sent offline"` as a secondary option?**
-   *(Also note Open Questions `1`, `2`, `3`, and `7` from `S1-06` / `S1-08` apply across WP3.)*
+- **Owner Q6 (`"Record as sent offline"` secondary button — Resolved 26 Nov 2026):** Confirmed. **"Send quote by email"** (enqueueing email + PDF and starting automated chasing) is the primary action, and **`"Record as sent offline"`** (`markQuoteSentOfflineAction`) remains available as the secondary button for printed/DX quotes (`status = 'Sent'`, `'sent'` audit, optional date, no outbox email or automatic chasing unless requested).
+- *(Owner Q1, Q2, Q3, Q7, and Q9 are likewise resolved in `S1-06` and `S1-08`; no open questions remain.)*
 
 ---
 
-## 14. Estimate (`2.0–2.25` days)
+## 14. Estimate (`1.75–2.0` days)
 
 - Config schema/deep-merge + `base.json` defaults + `0029` migration + repository POA wiring: `0.5` day.
 - Quote PDF builder + `/api/quotes/[id]/pdf` + upgrade all 4 send paths + `'quote'` chaser handler: `0.75` day.
-- `WorkTypesAdminPanel` Price Transparency UI + `QuoteFormClient`/`QuoteDetailClient`/conversion carry-over + Help + tests: `0.75–1.0` day.
-- **Total `S1-07`:** **`2.0–2.25` days**.
+- `WorkTypesAdminPanel` plain-textarea Price Transparency UI + `QuoteFormClient`/`QuoteDetailClient`/conversion carry-over + Help + tests: `0.5–0.75` day.
+- **Total `S1-07`:** **`1.75–2.0` days**.
 
 ---
 
-## Appendix A: Draft Invented Demo Price Transparency Defaults (`client-not-a-law-firm/config/base.json`)
+## Appendix A: Approved Draft Invented Demo Price Transparency Defaults (`client-not-a-law-firm/config/base.json`)
 
-*(Submitted for owner review per Decision 1, 26 Nov 2026. Plain British English; all fees/timescales are illustrative demo guidance reflecting UK SRA Transparency Rules style.)*
+*(Approved by owner on 26 Nov 2026 per Decision 1 / Q7. Plain British English; all fees/timescales are illustrative demo guidance reflecting UK SRA Transparency Rules style.)*
 
 ### A.1 Firm Default (`workTypes.defaults.priceTransparency`)
 - `enabled`: `true`

@@ -8,7 +8,7 @@
 | Branch | `s1-12-pms-money-pence`, from `develop` (`a7e606c`), targeting `develop` |
 | Change class | Carry-over host domain/repository fix (`R816`); Core `@platform/core-api` money helpers (additive v`2.3.0`, Rule 7); Core tenancy expand migration `0027` + conversion verifier (`afterUpSql`); Core PMS/matter repository reads/writes in integer pence; Host PMS workbook parser, finance roll-ups, and UI formatters; Plain-English Help update (`src/docs/`) |
 | Layer | Core API (`core/src/api/`, `core/src/domain/money/`), Core tenancy (`core/src/tenancy/`), PMS importer (`src/pms/`), Host domain/server/UI (`src/`), Help docs (`src/docs/`) |
-| Size | `M` (`2.0–2.25` days — includes carry-over `R816` as Commit 1) |
+| Size | `M` (`1.75–2.0` days — includes carry-over `R816` as Commit 1; `payload_json` SQL conversion omitted) |
 | Depends on | `S1-02a` (merged), WP2 (`S1-04` / `S1-05`) and PR #83 (`a7e606c` baseline); Proposed [ADR 0041](../../decisions/0041-pms-money-as-integer-pence.md) to be Accepted before coding |
 | Blocking manual tasks | None in dev/test; existing Stage 1 §8 manual demo-deploy (`caj-migrate-demo`) converts demo data **in place** when WP3 deploys (re-seed is manual fallback only with owner approval at deploy time) |
 | Baseline | `develop` at `a7e606c` |
@@ -19,10 +19,10 @@
 
 | Part | Change class | Layer |
 |---|---|---|
-| **Carry-over `R816`:** Server-side `isLegacyCmiIncomplete` derived *before* CDD redaction + SQL filter alignment so Fee Earner, Finance, and Enquiries see consistent `"CMI incomplete"` pill and list filter | Carry-over host domain & repository fix | `core/src/tenancy/matterRepository.ts`, `src/domain/matterStatusDisplay.ts`, `src/domain/types.ts`, `core/tests/matter-cdd-redaction-r812.test.ts` |
+| **Carry-over `R816` (`R819`):** Pass `activeStatusIds` (resolved by `systemKey`) into `TenantMatterRepository` read options; compute `isLegacyCmiIncomplete` inside the repository for every row regardless of viewer permissions *before* CDD redaction; align status pill & SQL filter without seed IDs | Carry-over host domain & repository fix | `core/src/tenancy/matterRepository.ts`, `src/server/pageLoaders.ts`, `src/server/services.ts`, `src/domain/matterStatusDisplay.ts`, `src/domain/types.ts`, `core/tests/matter-cdd-redaction-r812.test.ts` |
 | Additive minor-unit helpers (`pgBigIntToMinorUnits`, `minorUnitsToPgBigInt`, `subtractMinorUnits`, `formatMinorUnitsGbp`) and `CORE_API_VERSION = '2.3.0'` | Core extension API (additive, Rule 7) | `core/src/domain/money/index.ts`, `core/src/api/index.ts`, `core/docs/CHANGELOG.md` |
-| Migration `0027_pms_money_and_retainer_pence_expand` (20 `BIGINT` `*_pence` PMS columns + `matters.retainer_monies_on_account_pence` + `payload_json` integer keys + `migration_0027_backfill_audit` + exact-conversion `afterUpSql` check + zero-PII `migrate` job telemetry) | Core tenancy migration & job observability | `core/src/tenancy/migrations/index.ts`, `core/src/tenancy/tenantScopedRepository.ts`, `scripts/run-job.ts` |
-| Stop reading 20 `DOUBLE PRECISION` columns; read `*_pence` + dual-write floats during Release N window; integer pence `pmsRepository` calculations (`invoice`, `matterFinancials`, `wipBreakdown`, `clientAccount`); `matters.retainer_monies_on_account_pence` parity | Core tenancy repositories | `core/src/tenancy/pmsRepository.ts`, `core/src/tenancy/matterRepository.ts` |
+| Migration `0027_pms_money_and_retainer_pence_expand` (20 `BIGINT` `*_pence` PMS columns + `matters.retainer_monies_on_account_pence` + independent `afterUpSql` conversion checks + count/difference-only `migrate` job telemetry; `payload_json` not modified in SQL) | Core tenancy migration & job observability | `core/src/tenancy/migrations/index.ts`, `core/src/tenancy/tenantScopedRepository.ts`, `scripts/run-job.ts` |
+| Stop reading 20 `DOUBLE PRECISION` columns; read `*_pence` + dual-write floats during Release N window; read the 12 `payload_json` money fields as exact SQL text via `poundsToMinorUnits`; integer pence `pmsRepository` calculations (`invoice`, `matterFinancials`, `wipBreakdown`, `clientAccount`); `matters.retainer_monies_on_account_pence` parity | Core tenancy repositories | `core/src/tenancy/pmsRepository.ts`, `core/src/tenancy/matterRepository.ts` |
 | Exact decimal workbook parsing (`parseMoney` -> `poundsToMinorUnits`), integer roll-ups across domain/services/UI without float sums (`sumMinorUnits` / `subtractMinorUnits` / `formatMinorUnitsGbp`) | PMS importer, host domain, server, & UI | `src/pms/xlsxReader.ts`, `src/pms/importPms.ts`, `src/domain/pms.ts`, `src/server/services.ts`, `src/components/HomeClient.tsx`, `src/components/MatterFinanceTab.tsx`, `src/components/OrganisationProfileClient.tsx`, `src/components/PersonProfileClient.tsx`, `src/components/MatterProfileClient.tsx`, `src/components/QuoteDetailClient.tsx` |
 | Plain-English Help note on exact pence calculation (`finance-data-and-permissions.ts`), release notes & technical docs | Help & docs (Rule 11) | `src/docs/articles/finance-data-and-permissions.ts`, `docs/guides/platform-technical-notes.md`, `docs/release-notes.md` |
 
@@ -75,7 +75,7 @@ All `DOUBLE PRECISION` columns across the entire migration catalogue appear excl
 | 21 | `pms_client_account_entries` | `1798` | `amount` | Money (GBP) | Expand -> `amount_pence BIGINT NOT NULL DEFAULT 0` |
 | 22 | `pms_client_account_entries` | `1799` | `balance_after` | Money (GBP) | Expand -> `balance_after_pence BIGINT NOT NULL DEFAULT 0` |
 
-*(No other `REAL`, `FLOAT`, or `DOUBLE PRECISION` columns exist anywhere in `core/src/tenancy/migrations/index.ts`. Twelve additional PMS monetary values live inside `payload_json` JSONB — `annual_target_fees`, `credit_limit`, `fixed_fee_amount`, `disbursements_estimate`, `fees_net`, `disbursements_net`, `vat`, `rate`, `billed_value`, `write_off_value`, `vat_amount`, `gross_amount` — and are also converted/verified as integer `*_pence` JSONB keys in `0027` and `importExtractDataset`.)*
+*(No other `REAL`, `FLOAT`, or `DOUBLE PRECISION` columns exist anywhere in `core/src/tenancy/migrations/index.ts`. Twelve additional PMS monetary values live inside `payload_json` JSONB — `annual_target_fees`, `credit_limit`, `fixed_fee_amount`, `disbursements_estimate`, `fees_net`, `disbursements_net`, `vat`, `rate`, `billed_value`, `write_off_value`, `vat_amount`, `gross_amount`. Because PostgreSQL `JSONB` stores JSON numbers as exact decimals, `TenantPmsRepository` reads them as SQL decimal text `payload_json->>'<key>'` and converts them via `poundsToMinorUnits` on read rather than rewriting `payload_json` in migration `0027`.)*
 
 ### 2.3 Complete inventory of `retainerMoniesOnAccountGbp`
 - **`public.matters` (`core/src/tenancy/migrations/index.ts:941–988`):** **no dedicated SQL column**; persisted solely in JSONB (`costs_json` and `opening_record_json`).
@@ -108,17 +108,21 @@ All `DOUBLE PRECISION` columns across the entire migration catalogue appear excl
 
 ## 3. Design & Functional Specification
 
-### 3.1 Carry-over `R816` (Commit 1 of `s1-12-pms-money-pence`)
-- **Rule enforced:** Decide on the server, **before** CDD redaction runs, whether a legacy matter (not opened through the gate, status `Active`, `amlStatus` in `{'Pending', 'CMI incomplete'}`) is CMI incomplete, and send ONLY that boolean flag (`isLegacyCmiIncomplete?: boolean`), never the underlying CDD outcome (`amlStatus`, `amlCompletedAt`, `complianceOnboarding.amlStatus`).
+### 3.1 Carry-over `R816` (`R819`, Commit 1 of `s1-12-pms-money-pence`)
+- **Rule enforced:** Decide on the server, inside `TenantMatterRepository` and **before** CDD redaction runs, whether a legacy matter (not opened through the gate, active status resolved by `systemKey`, `amlStatus` in `{'Pending', 'CMI incomplete'}`) is CMI incomplete, and send ONLY that boolean flag (`isLegacyCmiIncomplete?: boolean`), never the underlying CDD outcome (`amlStatus`, `amlCompletedAt`, `complianceOnboarding.amlStatus`). **No `matter_status.*` literals anywhere** in `core/` or `src/domain/matterStatusDisplay.ts`.
 - **Implementation:**
   1. Add optional `readonly isLegacyCmiIncomplete?: boolean` to `Matter` (`src/domain/types.ts`) and `TenantMatterRecord` (`core/src/tenancy/matterRepository.ts`).
-  2. In `TenantMatterRepository.mapMatterRow` (`core/src/tenancy/matterRepository.ts`) **before** `applyMatterCddVisibility` calls `redactMatterCddFields`, compute:
-     `isLegacyCmiIncomplete = (row.status_id === 'matter_status.active' || resolvedSystemKey === 'active') && !isPmsImport && openedViaGate !== true && (amlStatus === 'Pending' || amlStatus === 'CMI incomplete')`
-     *(and inside `redactMatterCddFields` `:50–89`, preserve existing `matter.isLegacyCmiIncomplete` or compute it defensively before overwriting `amlStatus`, strictly only when `matter.amlStatus !== REDACTED_MATTER_CDD_STATUS`)*.
-  3. Update `isMatterCmiIncompleteStatus` (`src/domain/matterStatusDisplay.ts:35–53`): on `sysKey === 'active'`, if `isMatterOpenedViaOpeningGate(matter)` is `false`, check `if (typeof matter.isLegacyCmiIncomplete === 'boolean') return matter.isLegacyCmiIncomplete;` before falling back to `matter.amlStatus === 'Pending' || matter.amlStatus === 'CMI incomplete'` (for non-DB unit-test fixtures that don't set `isLegacyCmiIncomplete`).
-  4. Result:
+  2. Pass `activeStatusIds?: readonly string[]` (resolved by callers from `matter_status` choice values where `systemKey === 'active'`, just as `loadMattersListPageData` in `src/server/pageLoaders.ts:2301–2305, 2358` already resolves `activeStatusIds`) into `TenantMatterRepository` read options (`getMatterById`, `listVisibleMatters`, `listVisibleMattersPageWithCount`, `listVisibleMattersByIds`, and `MatterVisibilityOptions`) and forward `activeStatusIds` to `mapMatterRow`.
+  3. Inside `TenantMatterRepository` (`mapMatterRow`), **for every row, whatever the viewer can see** (before `applyMatterCddVisibility` and regardless of `canViewCdd`, so a payload redacted later by `redactMatterCddInBrowserPayload` at `withPageShell` or `guardedAction` still carries the flag), compute:
+     - `const isActive = Boolean(activeStatusIds?.length && activeStatusIds.includes(row.status_id ?? ''));`
+     - `const openedViaGate = row.is_pms_import !== true && (row.fields_json?.matterOpeningGate as { openedViaGate?: unknown } | undefined)?.openedViaGate === true;`
+     - `isLegacyCmiIncomplete = isActive && !openedViaGate && (rawAmlStatus === 'Pending' || rawAmlStatus === 'CMI incomplete')`
+     - **When `activeStatusIds` is omitted or empty, `isLegacyCmiIncomplete` is `false`.**
+     *(Inside `redactMatterCddFields` `:50–89`, preserve existing `matter.isLegacyCmiIncomplete` untouched without referencing any seed ID.)*
+  4. Update `isMatterCmiIncompleteStatus` (`src/domain/matterStatusDisplay.ts:35–53`): on `sysKey === 'active'`, if `isMatterOpenedViaOpeningGate(matter)` is `false`, check `if (typeof matter.isLegacyCmiIncomplete === 'boolean') return matter.isLegacyCmiIncomplete;` before falling back to `matter.amlStatus === 'Pending' || matter.amlStatus === 'CMI incomplete'` (for non-DB unit-test fixtures that don't go through `TenantMatterRepository`).
+  5. Result:
      - **Every viewer** (Fee Earner, Partner, Finance, Enquiries) sees the exact same `"CMI incomplete"` warning pill (`MattersListClient.tsx:487, 867`, `MatterProfileClient.tsx:562–565, 1178`) and urgent indicator (`:407`) on seeded legacy Active + Pending matters such as `M-000002`, and `/matters` **"CMI incomplete"** filter agrees with the pill 100%.
-     - For Finance and Enquiries, `amlStatus` stays `'Not available to you'`, `amlCompletedAt` stays `null`, and `matterOpeningSnapshot.complianceOnboarding.amlStatus` stays `'Not available to you'` — satisfying both `R812` and `R816`. Gate-opened Active matters (`openedViaGate === true`) continue displaying `"Open"` (`R810`).
+     - For Finance and Enquiries, `amlStatus` stays `'Not available to you'`, `amlCompletedAt` stays `null`, and `matterOpeningSnapshot.complianceOnboarding.amlStatus` stays `'Not available to you'` — satisfying `R812`, `R816`, and `R819`. Gate-opened Active matters (`openedViaGate === true`) continue displaying `"Open"` (`R810`).
 
 ### 3.2 `@platform/core-api` money helpers (bump `CORE_API_VERSION` to `'2.3.0'`)
 Add cleanly in `core/src/domain/money/index.ts` (automatically re-exported by `core/src/api/index.ts:1946` and `core/src/index.ts:10`):
@@ -132,7 +136,7 @@ Add cleanly in `core/src/domain/money/index.ts` (automatically re-exported by `c
    - Replace `parseMoney` float arithmetic with `poundsToMinorUnits` (exact decimal string parsing, rejecting exponential/corrupt strings and preserving integer `*Pence` fields on `PmsExtractDataset` alongside boundary GBP values via `minorUnitsToPounds`).
 2. **Repository boundary (`core/src/tenancy/pmsRepository.ts`, `matterRepository.ts`):**
    - Add additive integer `*Pence` fields onto all PMS extract interfaces (`charge_out_rate_pence`, `fee_estimate_pence`, `wip_value_pence`, `outstanding_debt_pence`, `client_account_balance_pence`, `amount_pence`, etc.) and `TenantMatterRecord.retainerMoniesOnAccountPence` / `Matter.retainerMoniesOnAccountPence`.
-   - Update `map*Rows`, `computeDerivedInvoiceBalances`, `computeDerivedMatterFinancials`, `computeDerivedMatterWipBreakdown`, and `importExtractDataset` to operate **solely** in `MinorUnits` using `sumMinorUnits` / `subtractMinorUnits` / `pgBigIntToMinorUnits` (zero `Math.round(x * 100)` or `round2` calls; thresholds checked as `<= 0` / `> 0` pence instead of `0.005`), reading solely `*_pence` columns on SQL `SELECT` and dual-writing both `*_pence` and legacy float columns during Release N.
+   - Update `map*Rows`, `computeDerivedInvoiceBalances`, `computeDerivedMatterFinancials`, `computeDerivedMatterWipBreakdown`, and `importExtractDataset` to operate **solely** in `MinorUnits` using `sumMinorUnits` / `subtractMinorUnits` / `pgBigIntToMinorUnits` / `poundsToMinorUnits` (zero `Math.round(x * 100)` or `round2` calls; thresholds checked as `<= 0` / `> 0` pence instead of `0.005`), reading solely `*_pence` columns on SQL `SELECT`, reading the 12 `payload_json` money fields as exact SQL decimal text (`payload_json->>'<key>'`) converted via `poundsToMinorUnits` on read (no SQL JSONB conversion), and dual-writing both `*_pence` and legacy float columns during Release N.
    - `Matter.retainerMoniesOnAccountPence` persists to `public.matters.retainer_monies_on_account_pence` and syncs `retainerMoniesOnAccountGbp` at boundary via `minorUnitsToPounds`.
 3. **Domain, server, and UI roll-ups:**
    - Rewrite `src/domain/pms.ts` (`formatGbp`, `sumMoneyPence` -> `sumMinorUnits`, `buildClientFinancialsFromRows`, `allFeeEarnerPerformance`, `buildFeeEarnerWeeklyTime`, `buildFirmFinanceRollups`), `src/server/services.ts` (`getClientPmsViewBundle`), `HomeClient.tsx`, `MatterFinanceTab.tsx`, `OrganisationProfileClient.tsx`, `PersonProfileClient.tsx`, `MatterProfileClient.tsx`, and `QuoteDetailClient.tsx` to aggregate integer `*Pence` values via `sumMinorUnits` / `subtractMinorUnits` and format via `formatMinorUnitsGbp` (no `reduce((s, x) => s + floatField, 0)` anywhere on currency).
@@ -143,27 +147,31 @@ Add cleanly in `core/src/domain/money/index.ts` (automatically re-exported by `c
 
 ### 4.1 Expand migration `0027_pms_money_and_retainer_pence_expand`
 - **Version:** `'0027'` (`CORE_REQUIRED_SCHEMA_VERSION = '0027'` in `core/src/tenancy/tenantScopedRepository.ts:26`, `dependsOn: ['0009', '0013']`).
-- **Default runtime privileges:** Cluster bootstrap covers new columns/audit table automatically; `migration_0027_backfill_audit` restricts access via `REVOKE ALL` from `PUBLIC` and `role_tenant_<slug>` (matching `0021`/`0025`).
+- **Default runtime privileges:** Cluster bootstrap covers new `*_pence` columns automatically; no new audit table is needed because `payload_json` is not modified in SQL.
 - **`upSql`:**
   1. `ALTER TABLE` on all 9 `pms_*` tables adding the 20 `BIGINT NOT NULL DEFAULT 0` `*_pence` columns listed in §2.2 (explicitly leaving `pms_matter_financials.wip_hours` and `pms_time_entries.hours` untouched as `DOUBLE PRECISION`).
   2. `ALTER TABLE public.matters ADD COLUMN IF NOT EXISTS retainer_monies_on_account_pence BIGINT NULL CHECK (retainer_monies_on_account_pence IS NULL OR retainer_monies_on_account_pence >= 0);`.
-  3. Create `public.migration_0027_backfill_audit` (tracking converted table/row counts and `payload_json` keys added for exact `downSql` cleanup).
-  4. Validate no non-finite (`'NaN'`, `'Infinity'`, `'-Infinity'`) or out-of-safe-integer (`ABS(col) > 90071992547409.91`) float exists in any of the 20 columns, `payload_json` monetary fields, or `retainerMoniesOnAccountGbp`, then convert in place via PostgreSQL `numeric` symmetric half-away-from-zero:
+  3. Validate no non-finite (`'NaN'`, `'Infinity'`, `'-Infinity'`) or out-of-safe-integer (`ABS(col) > 90071992547409.91`) float exists in any of the 20 PMS columns or `retainerMoniesOnAccountGbp`, then convert in place via PostgreSQL `numeric` symmetric half-away-from-zero:
      `ROUND((col::numeric) * 100)::bigint`.
-  5. Convert `pms_*.payload_json` numeric money keys (when valid finite numbers) into integer `*_pence` sibling keys in `payload_json` and backfill `public.matters.retainer_monies_on_account_pence` from `COALESCE(NULLIF(costs_json->>'retainerMoniesOnAccountGbp', ''), NULLIF(opening_record_json->>'retainerMoniesOnAccountGbp', ''))::numeric` (`ROUND(val * 100)::bigint`).
+  4. Backfill `public.matters.retainer_monies_on_account_pence` from `COALESCE(NULLIF(costs_json->>'retainerMoniesOnAccountGbp', ''), NULLIF(opening_record_json->>'retainerMoniesOnAccountGbp', ''))::numeric` (`ROUND(val * 100)::bigint`). (`pms_*.payload_json` is left untouched in SQL and parsed as exact text via `poundsToMinorUnits` on read.)
 
-### 4.2 Automated conversion check & `migrate` job logging (Owner Decision 3)
+### 4.2 Independent conversion check & `migrate` job logging (`R820`, Owner Decision 3)
 - **`afterUpSql` verification (inside the `0027` migration transaction):**
-  - Runs a per-table SQL comparison query checking **every single converted row and column** across all 9 `pms_*` tables (20 columns), `payload_json` converted `*_pence` keys, and `public.matters.retainer_monies_on_account_pence`:
-    - `ABS(converted_pence - ROUND((original_col::numeric) * 100)::bigint) = 0`
-    - Checks signed sign parity and zero normalization.
-  - Collects `{ table, rowCount, columnsChecked, mismatchCount, maxAbsDiffPence }` per table.
-  - **Fail-closed:** If `mismatchCount > 0` on any table or column, throws `PMS_PENCE_CONVERSION_MISMATCH`, rolling back the entire `0027` transaction atomically so nothing half-converted is ever committed.
+  - Runs three independent checks across all 20 monetary columns across the 9 `pms_*` tables and `public.matters.retainer_monies_on_account_pence` (no `payload_json` keys checked because `payload_json` is not rewritten in SQL):
+    1. **Round-trip check on every non-null row:** verify `ABS((pence_col::numeric / 100.0) - orig_col::numeric) < 0.005` (with exact half-penny ties `ABS((pence_col::numeric / 100.0) - orig_col::numeric) = 0.005` additionally verifying away-from-zero direction `ABS(pence_col::numeric) > ABS(orig_col::numeric) * 100`).
+    2. **Per-column totals check:** compare `COALESCE(SUM(pence_col), 0)::bigint` against `COALESCE(ROUND(SUM(orig_col::numeric) * 100), 0)::bigint`, requiring a tolerance of at most **1 penny per non-null row** (`ABS(sum_pence - round_sum_float_pence) <= non_null_count`), and record only the per-column difference (`totalDiffPence`).
+    3. **Row count and non-null count parity:** verify that each table's total row count and each `*_pence` column's non-null count match its source column.
+  - **Fail-closed:** If any check fails (or any non-finite / out-of-safe-range value is detected), throw `PMS_PENCE_CONVERSION_MISMATCH`, rolling back the entire `0027` transaction atomically so nothing half-converted is ever committed.
 - **Structured zero-PII logging on `migrate` (`scripts/run-job.ts:347–420`):**
-  - Emits `job.migrate.pms_pence_verified` containing ONLY `{ tenantId, correlationId, databaseName, tablesVerified: 10, totalRowsChecked, totalColumnsVerified, mismatchCount: 0, maxAbsDiffPence: 0 }` (zero client names, zero matter titles, zero money values). This output is recorded in the WP3 deploy report to prove the in-place demo conversion was exact.
+  - Emits `job.migrate.pms_pence_verified` containing **ONLY counts and per-column differences** (`tenantId`, `correlationId`, `databaseName`, `tablesVerified: 10`, `totalRowsChecked`, `totalNonNullChecked`, `totalColumnsVerified: 21`, `mismatchCount: 0`, `maxColumnTotalDiffPence`, and per-column `{ table, column, rowCount, nonNullCount, totalDiffPence }`) — **never** money sums, client names, matter titles, or money values tied to any row. This output is recorded in the WP3 deploy report to prove the in-place demo conversion was verified cleanly.
 
-### 4.3 Rollback & Release N+1 Contract Path (Rule 8, Owner Decision 3)
-- **`downSql` (reversible):** Uses `migration_0027_backfill_audit` to strip added `*_pence` keys from `pms_*.payload_json`, drops `retainer_monies_on_account_pence` from `public.matters`, drops the 20 `*_pence` columns from the 9 `pms_*` tables, and drops `public.migration_0027_backfill_audit` — preserving the original `DOUBLE PRECISION` columns untouched.
+### 4.3 Rollback (`R821` Option (b)), Deploy Runbook Steps & Release N+1 Contract Path (Rule 8, Owner Decision 3)
+- **`downSql` (reversible):** Drops `retainer_monies_on_account_pence` from `public.matters` and drops the 20 `*_pence` columns from the 9 `pms_*` tables — preserving the original `DOUBLE PRECISION` columns and `payload_json` untouched.
+- **App-only rollback rule (`R821` — option (b) chosen over SQL sync trigger):** Rolling the application back to a pre-`S1-12` release after `0027` is applied **always requires running migration `0027` down**, because pre-`S1-12` code writes only the legacy float columns and `retainerMoniesOnAccountGbp` JSONB field, which would otherwise leave `*_pence` columns stale on subsequent redeployment. Re-deploying `S1-12` later runs `0027` up again, re-doing the full backfill and independent verification check from the up-to-date legacy columns.
+- **Deploy & rollback runbook steps (documented in `docs/runbooks/demo-deployment.md` in Commit 5):**
+  1. **Deploy `S1-12`:** Run `caj-migrate` (`0027` up) -> confirm `job.migrate.pms_pence_verified` logs `mismatchCount: 0` -> deploy the `S1-12` web/job container image.
+  2. **Rollback to pre-`S1-12` (if ever needed after `0027`):** Roll back web/job containers to the previous revision -> run `0027` down (`migrate --down --to 0026`) immediately -> confirm tenant schema version is `0026`. Never leave `0027` applied while running pre-`S1-12` application code.
+  3. **Re-deploy `S1-12` after a rollback:** Run `caj-migrate` (`0027` up) again to re-backfill all 20 PMS monetary columns and `retainer_monies_on_account_pence` and re-run the independent `afterUpSql` checks before bringing `S1-12` containers online.
 - **Demo fallback policy (Risk `R7` amended):** On demo deploy (`caj-migrate-demo`), existing data converts **in place**; demo is NOT re-seeded. Re-seeding is an emergency fallback **only** if `0027` verification fails, and **only** with owner approval at deploy time.
 - **Release N+1 contract migration (backlog `B34`):** Dropped in a future post-WP3 contract migration once `S1-12` rollback window closes (`wip_hours` and `hours` retained).
 
@@ -206,13 +214,15 @@ Plain British English for firm users (zero code identifiers, column names, or mi
 
 ## 9. Tests, Guards & Build-Phase Cadence
 
-1. **Carry-over `R816` tests (`core/tests/matter-cdd-redaction-r812.test.ts`, `src/domain/__tests__/matterStatusDisplay.test.ts`):**
+1. **Carry-over `R816` (`R819`) tests (`core/tests/matter-cdd-redaction-r812.test.ts`, `src/domain/__tests__/matterStatusDisplay.test.ts`):**
    - Seeded legacy Active + CDD Pending matter (`M-000002`-style without `openedViaGate`) viewed as **`finance`** (no `cdd:view`) shows `"CMI incomplete"` pill, appears under `/matters` `"CMI incomplete"` filter, AND has `amlStatus === 'Not available to you'` and `amlCompletedAt === null`. Positive control: gate-opened Active matter shows `"Open"` (`R810`) and is excluded from `"CMI incomplete"` filter.
+   - Verify `TenantMatterRepository` computes `isLegacyCmiIncomplete` for every row regardless of `canViewCdd` (so subsequent `redactMatterCddInBrowserPayload` keeps `isLegacyCmiIncomplete === true`), sets `isLegacyCmiIncomplete = false` when `activeStatusIds` is omitted or empty, and contains **zero `matter_status.*` literals** in `core/` or `src/domain/matterStatusDisplay.ts`.
 2. **Money helper & property-style rounding tests (`core/tests/money.test.ts`):**
    - `pgBigIntToMinorUnits`, `minorUnitsToPgBigInt`, `subtractMinorUnits`, `formatMinorUnitsGbp` (brackets, whole-pound formatting, boundaries).
    - Property-style tests (seeded deterministic generator across `10,000+` positive/negative amounts including half-way ties `±0.005`, `±19.995`, large balances up to `£100m`, `-0.00`, classic binary-float pitfalls like `0.1 + 0.2`, `19.99 * 100`, `1.005`) proving exact parity between `poundsToMinorUnits` and PostgreSQL `ROUND((col::numeric) * 100)::bigint`.
 3. **Migration `0027` & demo conversion verification (`core/tests/migrations-postgres.test.ts`, `core/tests/pms-postgres.test.ts`):**
-   - Full `0027` `up -> down -> up` round-trip test checking 20 converted columns, untouched `wip_hours`/`hours`, `matters.retainer_monies_on_account_pence`, and `afterUpSql` comparison check (plus synthetic mismatch injection test proving `PMS_PENCE_CONVERSION_MISMATCH` rolls back cleanly).
+   - Full `0027` `up -> down -> up` round-trip test checking 20 converted columns, untouched `wip_hours`/`hours`, `matters.retainer_monies_on_account_pence`, untouched `payload_json` (parsed as exact SQL text via `poundsToMinorUnits` on repository read), and all three independent `afterUpSql` checks (round-trip `< 0.005` + tie direction, per-column totals within 1p/row, row + non-null counts).
+   - **Failure / rollback test (`R820`):** corrupt a converted `*_pence` value **after** the backfill (before running the verification check) and prove `PMS_PENCE_CONVERSION_MISMATCH` fails and rolls back `0027` cleanly without modifying the database.
    - Full seeded demo conversion test importing `data/pms/1Squared_PMS_Demo_Data.xlsx` and `data/seed-not-a-law-firm.json` via legacy float path then running `0027`, asserting `mismatchCount === 0` across every row and comparing integer-pence roll-ups (`src/domain/pms.ts`, `getFirmFinance`, `getClientPmsViewBundle`) against exact decimal totals (zero `0.01` drift).
    - Two-tenant PG16 isolation test on `tenant-alpha` vs `tenant-bravo` proving independent `*_pence` conversion, reads, and `retainer_monies_on_account_pence` isolation.
 4. **Guards (`src/server/__tests__/noWholeTenantLoadInRequestPaths.test.ts`, `actionPermissionGuard.test.ts`):** Zero new allow-list entries.
@@ -226,40 +236,40 @@ Plain British English for firm users (zero code identifiers, column names, or mi
 ## 10. Expected `docs/roadmap/feature-list.md` Updates
 
 When `S1-12` lands:
-- **`B21`:** Change status from `Not started` to **`Completed`**; update "What exists" to note the 20 monetary PMS columns (leaving `wip_hours` and `hours` as `DOUBLE PRECISION`) + `matters.retainer_monies_on_account_pence` expanded to signed `BIGINT` pence in `0027`, automated `afterUpSql` float comparison verification, `@platform/core-api` v`2.3.0` integer-pence helpers, zero float sums across repository/domain/UI, two-tenant PostgreSQL/property tests, and `finance-data-and-permissions` Help update; set "What's missing" to `"Release N+1 contract migration to drop deprecated DOUBLE PRECISION columns tracked in B34."`
-- **Add backlog row `B34`:** `Contract migration to drop the 20 deprecated DOUBLE PRECISION PMS columns after S1-12 rollback window (retaining wip_hours and hours)` (`Stage: Before first hosted client`, `Status: Not started`).
+- **`B21`:** Change status from `Not started` to **`Completed`**; update "What exists" to note the 20 monetary PMS columns (leaving `wip_hours` and `hours` as `DOUBLE PRECISION`) + `matters.retainer_monies_on_account_pence` expanded to signed `BIGINT` pence in `0027` (`payload_json` money keys read as SQL text via `poundsToMinorUnits`), automated independent `afterUpSql` checks (round-trip, per-column totals, row/non-null counts), `@platform/core-api` v`2.3.0` integer-pence helpers, zero float sums across repository/domain/UI, two-tenant PostgreSQL/property tests, and `finance-data-and-permissions` Help update; set "What's missing" to `"Release N+1 contract migration to drop deprecated DOUBLE PRECISION columns tracked in B34."`
+- **Backlog `B34`:** Already logged in `docs/roadmap/feature-list.md` (`Contract migration to drop 20 deprecated DOUBLE PRECISION PMS monetary columns`, `Stage: Before first hosted client`).
 - **Row `6`:** Narrow "What's missing" to remove "(B21 -> S1-12)".
 
 ---
 
 ## 11. Commit Breakdown (Each Independently Testable)
 
-1. **`fix(r816): compute legacy CMI incomplete status on server before CDD redaction with Finance list parity`** (`core/src/tenancy/matterRepository.ts`, `src/domain/matterStatusDisplay.ts`, `src/domain/types.ts`, `core/tests/matter-cdd-redaction-r812.test.ts`, `src/domain/__tests__/matterStatusDisplay.test.ts`).
+1. **`fix(r816): resolve activeStatusIds by systemKey and compute isLegacyCmiIncomplete in repository before CDD redaction`** (`core/src/tenancy/matterRepository.ts`, `src/server/pageLoaders.ts`, `src/server/services.ts`, `src/domain/matterStatusDisplay.ts`, `src/domain/types.ts`, `core/tests/matter-cdd-redaction-r812.test.ts`, `src/domain/__tests__/matterStatusDisplay.test.ts`).
 2. **`feat(s1-12): add pgBigInt, subtractMinorUnits, and formatMinorUnitsGbp helpers to @platform/core-api v2.3.0`** (`core/src/domain/money/index.ts`, `core/src/api/index.ts`, `core/docs/CHANGELOG.md`, `core/tests/money.test.ts`).
-3. **`feat(s1-12): add migration 0027 expanding 20 PMS money columns and retainer funds to BIGINT pence with exact-conversion verification`** (`core/src/tenancy/migrations/index.ts`, `core/src/tenancy/tenantScopedRepository.ts`, `scripts/run-job.ts`, `core/tests/migrations-postgres.test.ts`).
-4. **`feat(s1-12): move PMS repository, matter retainer storage, workbook parser, and roll-ups/UI onto integer pence`** (`core/src/tenancy/pmsRepository.ts`, `core/src/tenancy/matterRepository.ts`, `src/pms/`, `src/domain/pms.ts`, `src/server/services.ts`, `src/components/`, `core/tests/pms-postgres.test.ts`, `src/pms/pms.test.ts`, `src/domain/home.test.ts`).
-5. **`docs(s1-12): update Finance Help article, release notes, technical notes, and feature-list (B21 Completed, B34)`** (`src/docs/articles/finance-data-and-permissions.ts`, `docs/`).
+3. **`feat(s1-12): add migration 0027 expanding 20 PMS money columns and retainer funds to BIGINT pence with independent conversion checks`** (`core/src/tenancy/migrations/index.ts`, `core/src/tenancy/tenantScopedRepository.ts`, `scripts/run-job.ts`, `core/tests/migrations-postgres.test.ts`).
+4. **`feat(s1-12): move PMS repository (incl. payload_json text parsing), matter retainer storage, workbook parser, and roll-ups/UI onto integer pence`** (`core/src/tenancy/pmsRepository.ts`, `core/src/tenancy/matterRepository.ts`, `src/pms/`, `src/domain/pms.ts`, `src/server/services.ts`, `src/components/`, `core/tests/pms-postgres.test.ts`, `src/pms/pms.test.ts`, `src/domain/home.test.ts`).
+5. **`docs(s1-12): update Finance Help article, deploy/rollback runbook, release notes, and feature-list B21`** (`src/docs/articles/finance-data-and-permissions.ts`, `docs/runbooks/demo-deployment.md`, `docs/`).
 
 ---
 
 ## 12. Draft Owner Spot Checks (Summary — Consolidated Checklist in `S1-08` §12)
 
 - **R816:** Signed in as **Finance**, locate seeded legacy matter `M-000002` (Active + CDD Pending): confirm it displays `"CMI incomplete"` (matching a Fee Earner's view), appears when filtering Matters by **"CMI incomplete"**, and continues showing `Client due diligence: Not available to you`.
-- **S1-12:** Review the WP3 deploy report's `job.migrate.pms_pence_verified` log confirming `0` mismatches across the in-place demo conversion; verify Home PMS totals, Client Finance, Matter Finance Tab, and `Client account balance` render accurately to two decimal places with identical pence totals across tabs.
+- **S1-12:** Review the WP3 deploy report's `job.migrate.pms_pence_verified` log confirming `0` mismatches and only counts/per-column differences across the in-place demo conversion; verify Home PMS totals, Client Finance, Matter Finance Tab, and `Client account balance` render accurately to two decimal places with identical pence totals across tabs.
 
 ---
 
 ## 13. Risks & Open Questions
 
-- **Risk — Negative/boundary IEEE-754 float mismatch during in-place backfill:** Mitigated by PostgreSQL `ROUND((col::numeric) * 100)::bigint` + pre-check for `NaN`/`Infinity`/safe bounds + fail-closed `afterUpSql` comparison aborting cleanly before commit (preserving demo data untouched).
+- **Risk — Negative/boundary IEEE-754 float mismatch during in-place backfill:** Mitigated by PostgreSQL `ROUND((col::numeric) * 100)::bigint` + pre-check for `NaN`/`Infinity`/safe bounds + fail-closed independent `afterUpSql` checks aborting cleanly before commit (preserving demo data untouched).
 - **Risk — Unindexed `WIP hours` confusion:** Mitigated by documenting explicitly in `ADR 0041` and `migration 0027` why 2 of the 22 `DOUBLE PRECISION` columns (`wip_hours`, `hours`) stay floating-point hours.
-- **Open questions:** None specific to `S1-12` (demo convert-in-place Decision 3 already confirmed; see consolidated Open Questions `1`–`7` across `S1-06`–`S1-08` and `Stage1-WP3-plan-report.md`).
+- **Open questions:** None.
 
 ---
 
-## 14. Estimate (`2.0–2.25` days)
+## 14. Estimate (`1.75–2.0` days)
 
-- Commit 1 (`R816`): `0.25` day.
-- Commits 2–3 (`@platform/core-api` v`2.3.0` + `0027` migration + `afterUpSql` verifier + property/PG16 tests): `0.75–1.0` day.
-- Commits 4–5 (`pmsRepository` + `xlsxReader` + all UI/domain roll-ups + Help + demo verification test): `1.0` day.
-- **Total `S1-12`:** **`2.0–2.25` days**.
+- Commit 1 (`R816` / `R819`): `0.25` day.
+- Commits 2–3 (`@platform/core-api` v`2.3.0` + `0027` migration without `payload_json` SQL conversion + independent `afterUpSql` verifier + property/PG16 tests): `0.5–0.75` day.
+- Commits 4–5 (`pmsRepository` + `payload_json` text parsing + `xlsxReader` + all UI/domain roll-ups + Help + runbook + demo verification test): `1.0` day.
+- **Total `S1-12`:** **`1.75–2.0` days**.
