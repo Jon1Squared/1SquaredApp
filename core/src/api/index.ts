@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '2.2.0';
+export const CORE_API_VERSION = '2.3.0';
 
 import type {
   FeeArrangementCapEntry,
