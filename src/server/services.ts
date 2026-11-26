@@ -5803,6 +5803,8 @@ async function runMatterOpeningGate(params: {
 }
 
 const SYSTEM_HRO_CREATOR_ACTOR_ID = 'system:matter_opening';
+const SYSTEM_HRO_WITHDRAWAL_PERMISSIONS: ReadonlySet<PermissionKey> =
+  new Set<PermissionKey>(['register:edit']);
 
 function isSystemCreatedHroRecord(
   record: Pick<RegisterRecord, 'createdById'> | null | undefined,
@@ -6411,10 +6413,9 @@ async function withdrawPendingHighRiskOpeningInTx(params: {
   tenantCfg: TenantConfiguration;
   matterId: string;
   actorId: string;
-  actorPermissionSet: ReadonlySet<PermissionKey>;
   reason: string;
 }): Promise<RegisterRecord[]> {
-  const { tx, ctx, tenantCfg, matterId, actorId, actorPermissionSet, reason } = params;
+  const { tx, ctx, tenantCfg, matterId, actorId, reason } = params;
   if (!matterId || matterId === 'M-PENDING') return [];
   const registerRepo = getRegisterRepository();
   const catRepo = getCatalogueRepository();
@@ -6457,7 +6458,7 @@ async function withdrawPendingHighRiskOpeningInTx(params: {
           transitionKey: 'withdraw_opening',
           actorId,
           actorRoles: [],
-          actorPermissionSet,
+          actorPermissionSet: SYSTEM_HRO_WITHDRAWAL_PERMISSIONS,
           comment: reason,
           viaDedicatedWorkflow: true,
           priorTransitions,
@@ -6505,7 +6506,6 @@ async function syncHighRiskOpeningForMatterInTx(params: {
   matter: Matter;
   values: readonly ChoiceValue[];
   actorId: string;
-  actorPermissionSet: ReadonlySet<PermissionKey>;
   isDraftSave: boolean;
   people: readonly Person[];
   teams: readonly Team[];
@@ -6518,7 +6518,6 @@ async function syncHighRiskOpeningForMatterInTx(params: {
     matter,
     values,
     actorId,
-    actorPermissionSet,
     isDraftSave,
     people,
     teams,
@@ -6539,7 +6538,6 @@ async function syncHighRiskOpeningForMatterInTx(params: {
       tenantCfg,
       matterId: matter.id,
       actorId,
-      actorPermissionSet,
       reason: isAborted
         ? 'Prospective matter was abandoned; pending High-risk opening sign-off withdrawn.'
         : 'Matter risk rating was reduced below High before opening; pending High-risk opening sign-off withdrawn.',
@@ -9152,7 +9150,6 @@ export async function saveMatterRecord(
           matter,
           values: inTxDbValues,
           actorId: opts.byId,
-          actorPermissionSet: saveActorPermSet.permissions,
           isDraftSave,
           people: allPeopleWithPending,
           teams,
@@ -10658,7 +10655,6 @@ export async function updateMatterConflictRecord(
             tenantCfg: tenantCfgForConflict,
             matterId: freshMatter.id,
             actorId: byId,
-            actorPermissionSet: conflictViewerPermSet.permissions,
             reason:
               'Conflict check declined by Risk & Compliance; pending High-risk opening sign-off withdrawn.',
           });
@@ -36446,7 +36442,6 @@ export async function openProspectiveMatterRecord(
           matter: lockedMatter,
           values: inTxDbValues,
           actorId: actor.id,
-          actorPermissionSet: permSet.permissions,
           isDraftSave: false,
           people: scoped.people,
           teams,

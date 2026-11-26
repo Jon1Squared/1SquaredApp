@@ -11,6 +11,7 @@ import {
   TenantPartyRepository,
   TenantPostgresPoolManager,
   TenantRegisterRepository,
+  createDefaultRbacConfig,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   type RegisterRecord,
@@ -2897,5 +2898,240 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
       },
       { roles: ['fee_earner'], mfaVerified: false },
     );
+  }, 30_000);
+
+  it('18. R804: system-driven withdrawal succeeds for a firm-defined role with matter:edit and without register:edit while auditing the caller, and still refuses users without matter:edit', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const partyRepo = new TenantPartyRepository();
+    const matterRepo = new TenantMatterRepository();
+    const regRepo = new TenantRegisterRepository();
+
+    const baseRbac = createDefaultRbacConfig();
+    const baseRawRbac = (notALawFirmBaseConfig as unknown as { rbac: Record<string, unknown> }).rbac;
+    const baseIdentityMapping = (baseRawRbac.identityMapping ?? baseRbac.identityMapping) as {
+      entraAppRoleToRoleKey?: Record<string, string[]>;
+      [k: string]: unknown;
+    };
+    setActiveTenantConfigForTesting(
+      {
+        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+        rbac: {
+          ...baseRawRbac,
+          roles: {
+            ...baseRbac.roles,
+            matter_editor_no_reg: {
+              key: 'matter_editor_no_reg',
+              label: 'Matter Editor (No Registers)',
+              shortLabel: 'Matter editor',
+              description: 'Firm-defined role with matter:edit and without register:edit.',
+              isBuiltIn: false,
+              permissions: ['employee:view_core', 'matter:edit'],
+            },
+            matter_viewer_only: {
+              key: 'matter_viewer_only',
+              label: 'Matter Viewer Only',
+              shortLabel: 'Matter viewer',
+              description: 'Firm-defined role without matter:edit.',
+              isBuiltIn: false,
+              permissions: ['employee:view_core'],
+            },
+          },
+          identityMapping: {
+            ...baseIdentityMapping,
+            entraAppRoleToRoleKey: {
+              ...(baseIdentityMapping.entraAppRoleToRoleKey ?? {}),
+              'Firm.MatterEditorNoReg': ['matter_editor_no_reg'],
+              'Firm.MatterViewerOnly': ['matter_viewer_only'],
+            },
+          },
+        },
+      },
+      {},
+    );
+
+    const seededPeople = await partyRepo.listAllPeople<Person>(ctx);
+    const baseEmp = seededPeople.find((p) => p.id === 'P-000002')!;
+    const editorPerson: Person = {
+      ...baseEmp,
+      id: 'P-S105-R804-EDITOR',
+      entraObjectId: undefined,
+      firstName: 'Nia',
+      surname: 'EditorOnly',
+      employeeRoleId: 'employee_role.support_staff',
+      roles: ['matter_editor_no_reg'],
+      appRole: 'call_handler',
+      permissionOverrides: undefined,
+      emails: [
+        {
+          id: 'em-s105-r804-editor',
+          address: 'nia.editor@notalawfirm.example',
+          isPrimary: true,
+          typeId: null,
+        },
+      ],
+    };
+    const viewerPerson: Person = {
+      ...baseEmp,
+      id: 'P-S105-R804-VIEWER',
+      entraObjectId: undefined,
+      firstName: 'Gareth',
+      surname: 'ViewerOnly',
+      employeeRoleId: 'employee_role.support_staff',
+      roles: ['matter_viewer_only'],
+      appRole: 'call_handler',
+      permissionOverrides: undefined,
+      emails: [
+        {
+          id: 'em-s105-r804-viewer',
+          address: 'gareth.viewer@notalawfirm.example',
+          isPrimary: true,
+          typeId: null,
+        },
+      ],
+    };
+    await partyRepo.putPeople(ctx, [editorPerson, viewerPerson]);
+
+    // 1. Partner opens a prospective High-risk matter -> pending_partner HRO record created
+    const highSave = await runAsActionActor(
+      'P-000001',
+      () =>
+        saveMatterRecord(
+          {
+            title: 'R804 HRO Withdrawal Firm Role Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: [
+              'P-000001',
+              'P-000002',
+              editorPerson.id,
+              viewerPerson.id,
+            ],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: {
+              answers: HIGH_RISK_ANSWERS,
+              followUps: HIGH_RISK_FOLLOW_UPS,
+            },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(highSave.errors).toBeUndefined();
+    const matter = highSave.matter!;
+    const hroBefore = (
+      await regRepo.listVisibleRegisterRecords(ctx, 'P-000001', {
+        includeRestricted: true,
+        registerTypeKey: 'high_risk_opening',
+        matterId: matter.id,
+      })
+    )[0]!;
+    expect(hroBefore.status).toBe('pending_partner');
+
+    const saveAction = getDynamicAction('saveMatterAction')!;
+
+    // 2. Firm-defined role WITHOUT matter:edit is still refused
+    const deniedRes = (await runAsActionActor(
+      viewerPerson.id,
+      () =>
+        saveAction(
+          {
+            title: matter.title,
+            clientId: matter.clientId,
+            practiceAreaId: matter.practiceAreaId,
+            workTypeSubcategoryId: matter.workTypeSubcategoryId,
+            responsiblePartnerId: matter.responsiblePartnerId,
+            supervisingPartnerId: matter.supervisingPartnerId,
+            leadFeeEarnerId: matter.leadFeeEarnerId,
+            teamMemberIds: matter.teamMemberIds,
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          {
+            id: matter.id,
+            saveMode: 'submit_cleared',
+            expectedRowVersion: matter.rowVersion,
+          },
+        ),
+      { roles: ['matter_viewer_only'], mfaVerified: false },
+    )) as { denied?: boolean; code?: string };
+    expect(isActionDenied(deniedRes as never)).toBe(true);
+
+    const hroStillPending = (
+      await regRepo.listVisibleRegisterRecords(ctx, 'P-000001', {
+        includeRestricted: true,
+        registerTypeKey: 'high_risk_opening',
+        matterId: matter.id,
+      })
+    )[0]!;
+    expect(hroStillPending.status).toBe('pending_partner');
+
+    // 3. Firm-defined role WITH matter:edit and WITHOUT register:edit lowers risk -> HRO withdrawn & caller audited
+    const lowerSave = (await runAsActionActor(
+      editorPerson.id,
+      () =>
+        saveAction(
+          {
+            title: matter.title,
+            clientId: matter.clientId,
+            practiceAreaId: matter.practiceAreaId,
+            workTypeSubcategoryId: matter.workTypeSubcategoryId,
+            responsiblePartnerId: matter.responsiblePartnerId,
+            supervisingPartnerId: matter.supervisingPartnerId,
+            leadFeeEarnerId: matter.leadFeeEarnerId,
+            teamMemberIds: matter.teamMemberIds,
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          {
+            id: matter.id,
+            saveMode: 'submit_cleared',
+            expectedRowVersion: matter.rowVersion,
+          },
+        ),
+      { roles: ['matter_editor_no_reg'], mfaVerified: false },
+    )) as { matter: Matter | null; errors?: Record<string, string> };
+    expect(isActionDenied(lowerSave as never)).toBe(false);
+    expect(lowerSave.errors).toBeUndefined();
+    expect(lowerSave.matter).not.toBeNull();
+
+    const updatedMatter = await matterRepo.getMatterById<Matter>(ctx, matter.id, {
+      includeRestricted: true,
+    });
+    expect(updatedMatter).not.toBeNull();
+
+    const hroAfter = (
+      await regRepo.listVisibleRegisterRecords(ctx, 'P-000001', {
+        includeRestricted: true,
+        registerTypeKey: 'high_risk_opening',
+        matterId: matter.id,
+      })
+    )[0]!;
+    expect(hroAfter.status).toBe('withdrawn');
+
+    const [regAudits, matterAudits] = await Promise.all([
+      auditEntriesForRecord('register_record', hroAfter.id),
+      auditEntriesForRecord('matter', matter.id),
+    ]);
+    expect(
+      regAudits.some(
+        (e) =>
+          e.action === 'status-change' &&
+          e.newValue === 'withdrawn' &&
+          e.byId === editorPerson.id,
+      ),
+    ).toBe(true);
+    expect(
+      matterAudits.some(
+        (e) =>
+          e.field === 'High-risk opening approval' &&
+          e.newValue?.includes('withdrawn') &&
+          e.byId === editorPerson.id,
+      ),
+    ).toBe(true);
   }, 30_000);
 });
