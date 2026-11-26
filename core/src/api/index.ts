@@ -102,6 +102,7 @@ export type PermissionKey =
   | 'matter:restricted:access'
   | 'matter:restriction:lift'
   | 'matter:costs:sign_off'
+  | 'matter:opening_gate:override'
   | 'task:claim_any'
   | 'task:reassign_any'
   | 'task:edit'
@@ -910,6 +911,7 @@ export interface TenantConfiguration {
   keyVault?: TenantKeyVaultConfig;
   database?: TenantDatabaseConfig;
   workTypes?: WorkTypesConfiguration;
+  matterNumbering?: MatterNumberingConfig;
   notifications?: TenantNotificationsConfig;
   enquiries?: {
     readonly fallbackTeamId: string | null;
@@ -1011,10 +1013,31 @@ export type WorkTypeFeeCapOverrideReservedConfig = WorkTypeFeeCapOverrideConfig;
 export type WorkTypeFeeArrangementCapCategoriesConfig =
   WorkTypeFeeArrangementCapCategories;
 
+export type MatterNumberingSequenceScope =
+  | 'client_ref_prefix'
+  | 'firm'
+  | 'year'
+  | 'department';
+
+export interface MatterNumberingConfig {
+  readonly pattern: string;
+  readonly sequenceScope: MatterNumberingSequenceScope;
+  readonly emptyTokenFallback: string;
+}
+
+export interface WorkTypeOpeningGateConfig {
+  readonly allowConflictOverride?: boolean;
+  readonly requireCddComplete?: boolean;
+  readonly allowCddOverride?: boolean;
+  readonly requireEngagementSigned?: boolean;
+  readonly requireFundsOnAccount?: boolean;
+}
+
 export interface WorkTypeDefaultsConfig {
   autoTaskTemplates: WorkTypeAutoTaskTemplateConfig[];
   riskQuestions: WorkTypeRiskQuestionConfig[];
   retention: WorkTypeRetentionConfig;
+  openingGate?: WorkTypeOpeningGateConfig;
 }
 
 export interface WorkTypeConfigItem {
@@ -1024,6 +1047,7 @@ export interface WorkTypeConfigItem {
   autoTaskTemplates?: WorkTypeAutoTaskTemplateConfig[];
   riskQuestions?: WorkTypeRiskQuestionConfig[];
   retention?: WorkTypeRetentionConfig;
+  openingGate?: WorkTypeOpeningGateConfig;
   feeArrangementCapCategories?: WorkTypeFeeArrangementCapCategoriesConfig;
   workTypeCapOverrides?: WorkTypeFeeCapOverrideConfig[];
 }

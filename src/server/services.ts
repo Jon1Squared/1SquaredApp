@@ -216,9 +216,22 @@ import {
   resolveEffectiveWorkTypesConfig,
   resolveMatterLifecycleTargetStatusId,
   resolveWorkTypeFeeArrangementSettings,
+  resolveWorkTypeOpeningGate,
   resolveWorkTypeRiskQuestions,
   validateMatterClosureDate,
 } from '@/domain/workTypeConfig';
+import {
+  evaluateOpeningPreconditions,
+  isEngagementLetterSignedStatus,
+  isHighOrCriticalRiskRating,
+  isMatterEngagementSignedForGate,
+  OPENING_GATE_OVERRIDE_ERROR_CODES,
+  resolveMatterRiskSystemKey,
+  type OpeningGateEvaluation,
+  type OpeningGateHighRiskRecordView,
+  type OpeningGateOverrideSummary,
+  type OpeningGatePreconditionKey,
+} from '@/domain/openingGate';
 import {
   computeServerWorkTypeRetentionState,
   instantiateWorkTypeAutoTasksInTx,
@@ -313,6 +326,7 @@ import {
   calculateCddNextReviewDueIso,
   createDefaultFirmFeeArrangementCaps,
   createRegisterDomainError,
+  DEFAULT_MATTER_NUMBERING_CONFIG,
   DEFAULT_NOTIFICATION_PREFERENCES_BY_KIND,
   DEFAULT_REGISTERS_CONFIG,
   drainEmailOutboxForTenant,
@@ -336,6 +350,7 @@ import {
   ManualSanctionsPepScreeningProvider,
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+  MatterNumberingConfigSubSchema,
   mergeRegistersConfigurations,
   ORGANISATION_PARENT_CYCLE_CODE,
   poundsToMinorUnits,
@@ -346,6 +361,7 @@ import {
   resolveClientCddCategory,
   resolveClientCddRiskTier,
   resolveEffectiveCddConfig,
+  resolveEffectiveMatterNumberingConfig,
   resolveEffectiveRegisterTypes,
   resolveEmailIntegrationConfig,
   resolveTeamsIntegrationConfig,
@@ -359,6 +375,7 @@ import {
   validateFeeArrangementTerms,
   validateFirmFeeCapEntries,
   validateKeyDatesConfig,
+  validateMatterNumberingConfig,
   validateRbacConfig,
   validateRegisterCreateInput,
   validateRegisterFieldValues,
@@ -380,6 +397,9 @@ import {
   type IdentityVerificationRecord,
   type IntakeEvidenceArtifactRef,
   type KeyVaultSecretReader,
+  type MatterNumberAllocationResult,
+  type MatterNumberingConfig,
+  type MatterOpeningGateOverrideRecord,
   type NotificationChannelFrequency,
   type RegisterChecklistItemStatus,
   type RegisterChecklistItemValue,
@@ -391,6 +411,7 @@ import {
   type TeamsDevCatcherHandler,
   type TeamsNotifier,
   type TenantConfiguration,
+  type TenantSqlClient,
   type ClientRateOverrideRecord,
   type ControlledJobRunOutcome,
   type EffectiveFeeCapResolution,
@@ -413,6 +434,7 @@ import {
   type TenantContext,
   type TenantRegistry,
   type UserNotificationPreference,
+  type WorkTypeOpeningGateConfig,
   type WorkTypesConfiguration,
 } from '@platform/core';
 import type {
@@ -5043,17 +5065,57 @@ export async function addNoteToRecord(
   return note;
 }
 
-export async function generateMatterNumber(
+function resolveMatterDepartmentCode(
+  departments: readonly OrgStructureCatalogue['departments'][number][] | undefined,
+  owningDepartmentId?: string | null,
+): string | null {
+  if (!owningDepartmentId?.trim()) return null;
+  const dept = departments?.find((d) => d.id === owningDepartmentId);
+  if (!dept) return owningDepartmentId.trim();
+  const rawName = (dept as { code?: string; name?: string }).code ?? dept.name ?? dept.id;
+  return rawName.trim() || null;
+}
+
+export async function generateMatterNumberWithConfig(
   store: FirmStore | null | undefined,
   clientId: string,
   ctx?: TenantContext,
-): Promise<string> {
+  options?: {
+    owningDepartmentId?: string | null;
+    clientOrg?: Organisation | null;
+    clientPerson?: Person | null;
+    departments?: readonly OrgStructureCatalogue['departments'][number][];
+    tenantConfig?: TenantConfiguration;
+    numberingOverride?: Partial<MatterNumberingConfig> | null;
+    nowDate?: Date;
+  },
+): Promise<MatterNumberAllocationResult> {
   const effectiveCtx = ctx ?? resolveDefaultServiceTenantContext(store);
+  const tenantCfg = options?.tenantConfig ?? getActiveTenantConfiguration();
   const partyRepo = getPartyRepository();
-  const [org, person] = await Promise.all([
-    partyRepo.getOrganisationById<Organisation>(effectiveCtx, clientId),
-    partyRepo.getPersonById<Person>(effectiveCtx, clientId),
-  ]);
+  const catRepo = getCatalogueRepository();
+  const org =
+    options?.clientOrg !== undefined
+      ? options.clientOrg
+      : clientId
+        ? await partyRepo.getOrganisationById<Organisation>(effectiveCtx, clientId)
+        : null;
+  const person =
+    options?.clientPerson !== undefined
+      ? options.clientPerson
+      : clientId
+        ? await partyRepo.getPersonById<Person>(effectiveCtx, clientId)
+        : null;
+  const numberingOverride =
+    options?.numberingOverride !== undefined
+      ? options.numberingOverride
+      : await catRepo.getMatterNumberingConfig<MatterNumberingConfig>(effectiveCtx);
+  const orgStruct =
+    options?.departments !== undefined
+      ? null
+      : store?.orgStructure
+        ? store.orgStructure
+        : await catRepo.getOrgStructureConfig<FirmStore['orgStructure']>(effectiveCtx);
   let prefix = 'MAT001';
   if (org?.clientReference?.trim()) {
     prefix = org.clientReference.trim().toUpperCase();
@@ -5062,7 +5124,34 @@ export async function generateMatterNumber(
   } else if (person) {
     prefix = person.surname.replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X') + '001';
   }
-  return getMatterRepository().allocateNextMatterNumber(effectiveCtx, prefix);
+  const effectiveNumberingCfg = resolveEffectiveMatterNumberingConfig(
+    tenantCfg,
+    numberingOverride,
+  );
+  const departments = options?.departments ?? orgStruct?.departments ?? store?.orgStructure?.departments;
+  const departmentCode = resolveMatterDepartmentCode(
+    departments,
+    options?.owningDepartmentId,
+  );
+  return getMatterRepository().allocateNextMatterNumberWithConfig(
+    effectiveCtx,
+    effectiveNumberingCfg,
+    {
+      clientRefPrefix: prefix,
+      departmentCode,
+      nowDate: options?.nowDate ?? new Date(),
+      timeZone: tenantCfg.timeZone || 'Europe/London',
+    },
+  );
+}
+
+export async function generateMatterNumber(
+  store: FirmStore | null | undefined,
+  clientId: string,
+  ctx?: TenantContext,
+): Promise<string> {
+  const allocated = await generateMatterNumberWithConfig(store, clientId, ctx);
+  return allocated.matterNumber;
 }
 
 function areCustomGradesEquivalent(
@@ -5696,8 +5785,10 @@ async function runMatterOpeningGate(params: {
         'This matter needs partner sign-off on costs before it can be opened.';
   }
 
+  // S1-05 (ADR 0040): Fix null-governance bug when enableMatterCostsGovernance is false (openGovernance === null).
   const allowProceed =
-    Object.keys(errors).length === 0 && Boolean(openGovernance?.allowProceed);
+    Object.keys(errors).length === 0 &&
+    (openGovernance === null || Boolean(openGovernance.allowProceed));
 
   return {
     allowProceed,
@@ -5709,6 +5800,905 @@ async function runMatterOpeningGate(params: {
       checkedAt: now,
     },
   };
+}
+
+const SYSTEM_HRO_CREATOR_ACTOR_ID = 'system:matter_opening';
+
+function isSystemCreatedHroRecord(
+  record: Pick<RegisterRecord, 'createdById'> | null | undefined,
+): boolean {
+  return record?.createdById === SYSTEM_HRO_CREATOR_ACTOR_ID;
+}
+
+interface ViewerCddAccess {
+  readonly viewerId: string;
+  readonly canViewCdd: boolean;
+  readonly canBypassEmployeeCddVisibility: boolean;
+  readonly hasRestrictedMatterAccess: boolean;
+  readonly actor: Person | null;
+  readonly teams: readonly Team[];
+  readonly rbacConfig: RbacConfiguration;
+}
+
+function buildViewerCddAccess(params: {
+  actorId: string;
+  actor: Person | null;
+  people: readonly Person[];
+  teams: readonly Team[];
+  rbacConfig: RbacConfiguration;
+  tokenRoles?: readonly string[];
+  context?: TenantContext;
+}): ViewerCddAccess {
+  const resolvedActor =
+    params.actor ?? params.people.find((p) => p.id === params.actorId) ?? null;
+  if (!resolvedActor) {
+    return {
+      viewerId: params.actorId,
+      canViewCdd: false,
+      canBypassEmployeeCddVisibility: false,
+      hasRestrictedMatterAccess: false,
+      actor: null,
+      teams: params.teams,
+      rbacConfig: params.rbacConfig,
+    };
+  }
+  const permSet = resolvePersonPermissionSet(resolvedActor, {
+    allPeople: params.people,
+    teams: params.teams,
+    tokenRoles: params.tokenRoles ?? params.context?.actorRoles,
+    tokenRolesActorId: resolvedActor.id,
+    config: { rbac: params.rbacConfig },
+    context: params.context,
+    mfaVerified: params.context?.mfaVerified,
+  });
+  return {
+    viewerId: resolvedActor.id,
+    canViewCdd: permSet.permissions.has('cdd:view') || permSet.permissions.has('cdd:record'),
+    canBypassEmployeeCddVisibility: permSet.permissions.has('risk:view'),
+    hasRestrictedMatterAccess: permSet.permissions.has('matter:restricted:access'),
+    actor: resolvedActor,
+    teams: params.teams,
+    rbacConfig: params.rbacConfig,
+  };
+}
+
+function buildViewerCddAccessFromPermSet(
+  actor: Person,
+  permSet: { readonly permissions: ReadonlySet<PermissionKey> },
+  teams: readonly Team[],
+  rbacConfig: RbacConfiguration,
+): ViewerCddAccess {
+  return {
+    viewerId: actor.id,
+    canViewCdd: permSet.permissions.has('cdd:view') || permSet.permissions.has('cdd:record'),
+    canBypassEmployeeCddVisibility: permSet.permissions.has('risk:view'),
+    hasRestrictedMatterAccess: permSet.permissions.has('matter:restricted:access'),
+    actor,
+    teams,
+    rbacConfig,
+  };
+}
+
+async function isClientCddSubjectVisibleToViewer(params: {
+  ctx: TenantContext;
+  clientId: string;
+  person: Person | null;
+  people: readonly Person[];
+  viewerAccess: ViewerCddAccess;
+}): Promise<boolean> {
+  const { ctx, clientId, person, people, viewerAccess } = params;
+  if (!viewerAccess.canViewCdd) {
+    return false;
+  }
+  if (person && isEmployeeSubjectPerson(person, people)) {
+    if (
+      viewerAccess.canBypassEmployeeCddVisibility ||
+      viewerAccess.hasRestrictedMatterAccess
+    ) {
+      return true;
+    }
+    if (!viewerAccess.actor) {
+      return false;
+    }
+    const candidateMatters =
+      await getMatterRepository().listVisibleMattersForEntity<Matter>(
+        ctx,
+        { clientIds: [clientId], includeMerged: false },
+        {
+          viewerId: viewerAccess.viewerId,
+          hasRestrictedMatterAccess: false,
+        },
+      );
+    return candidateMatters.some(
+      (m) =>
+        canPersonAccessMatter(m, viewerAccess.viewerId, viewerAccess.actor!, {
+          allPeople: people,
+          teams: viewerAccess.teams,
+          config: { rbac: viewerAccess.rbacConfig },
+        }) && isActorActiveParticipantOnMatter(viewerAccess.viewerId, m),
+    );
+  }
+  return true;
+}
+
+async function resolveClientCddStatusInTx(params: {
+  tx: TenantSqlClient;
+  ctx: TenantContext;
+  clientIds: readonly string[];
+  matterRiskRatingId?: string | null;
+  values: readonly ChoiceValue[];
+  todayYmd: string;
+  viewerAccess: ViewerCddAccess;
+  tenantCfg?: TenantConfiguration;
+  people?: readonly Person[];
+  organisations?: readonly Organisation[];
+}): Promise<{
+  status: CddWorkflowStatus;
+  isExpired: boolean;
+  insufficientTier: boolean;
+  visibleToViewer: boolean;
+  missingClientNames: string[];
+  expiredClientNames: string[];
+  insufficientTierClientNames: string[];
+}> {
+  const {
+    tx,
+    ctx,
+    matterRiskRatingId,
+    values,
+    todayYmd,
+    viewerAccess,
+    tenantCfg,
+    people,
+    organisations,
+  } = params;
+  const uniqueClientIds = Array.from(
+    new Set(params.clientIds.map((id) => (id ?? '').trim()).filter(Boolean)),
+  );
+  if (uniqueClientIds.length === 0) {
+    return {
+      status: 'not_started',
+      isExpired: false,
+      insufficientTier: false,
+      visibleToViewer: viewerAccess.canViewCdd,
+      missingClientNames: [],
+      expiredClientNames: [],
+      insufficientTierClientNames: [],
+    };
+  }
+
+  const catRepo = getCatalogueRepository();
+  const partyRepo = getPartyRepository();
+  const regRepo = getRegisterRepository();
+  const effectiveTenantCfg = tenantCfg ?? getActiveTenantConfiguration();
+  const cddOverride = await catRepo.getModuleConfig<CddConfiguration>(ctx, 'cdd');
+  const effectiveCdd = resolveEffectiveCddConfig(effectiveTenantCfg, cddOverride ?? null);
+
+  const riskSystemKeyById = new Map<string, string>();
+  for (const v of values) {
+    if (v.listKey === 'risk_rating' && v.systemKey?.trim()) {
+      riskSystemKeyById.set(v.id, v.systemKey.trim().toLowerCase());
+    }
+  }
+  const currentMatterRiskKey = matterRiskRatingId
+    ? riskSystemKeyById.get(matterRiskRatingId)
+    : undefined;
+  const currentMatterTier: CddRiskTierKey = currentMatterRiskKey
+    ? resolveClientCddRiskTier(effectiveCdd, [currentMatterRiskKey])
+    : 'standard';
+
+  let visibleToViewer = viewerAccess.canViewCdd;
+  const missingClientNames: string[] = [];
+  const expiredClientNames: string[] = [];
+  const insufficientTierClientNames: string[] = [];
+  let anyNotStarted = false;
+  let anyInProgress = false;
+
+  for (const clientId of uniqueClientIds) {
+    const org =
+      organisations?.find((o) => o.id === clientId) ??
+      (await partyRepo.getOrganisationById<Organisation>(ctx, clientId));
+    const person = org
+      ? null
+      : (people?.find((p) => p.id === clientId) ??
+        (await partyRepo.getPersonById<Person>(ctx, clientId)));
+    const subjectVisible = await isClientCddSubjectVisibleToViewer({
+      ctx,
+      clientId,
+      person,
+      people: people ?? [],
+      viewerAccess,
+    });
+    if (!subjectVisible) {
+      visibleToViewer = false;
+    }
+
+    const subjectType: 'person' | 'organisation' = org
+      ? 'organisation'
+      : person
+        ? 'person'
+        : clientId.startsWith('P-')
+          ? 'person'
+          : 'organisation';
+    const displayName = org
+      ? org.legalName?.trim() || clientId
+      : person
+        ? personDisplayName(person)
+        : clientId;
+
+    const subjectDerivedTier = await deriveClientCddRiskTierForSubject({
+      ctx,
+      actorId: ctx.actorId,
+      subjectId: clientId,
+      targetOrganisation: org,
+      effectiveCdd,
+      riskSystemKeyById,
+      includeRestrictedMatters: true,
+    });
+    const requiredTier: CddRiskTierKey =
+      subjectDerivedTier === 'high' || currentMatterTier === 'high'
+        ? 'high'
+        : 'standard';
+
+    const records = await regRepo.listRegisterRecordsForClientInTx(
+      tx,
+      ctx,
+      { subjectType, subjectId: clientId, registerTypeKey: 'cdd' },
+      { forShare: true },
+    );
+    const activeRecord =
+      records.find((r) => r.status === 'recorded' || r.status === 'in_progress') ??
+      records[0] ??
+      null;
+    if (!activeRecord) {
+      anyNotStarted = true;
+      missingClientNames.push(displayName);
+      continue;
+    }
+    if (activeRecord.status === 'in_progress') {
+      anyInProgress = true;
+      missingClientNames.push(displayName);
+      continue;
+    }
+    if (activeRecord.status !== 'recorded') {
+      anyNotStarted = true;
+      missingClientNames.push(displayName);
+      continue;
+    }
+    if (isCddDueExpired(activeRecord.dueAt, todayYmd)) {
+      expiredClientNames.push(displayName);
+      continue;
+    }
+    const recordTier: CddRiskTierKey =
+      String(activeRecord.fieldValues?.riskTier ?? 'standard').toLowerCase() === 'high'
+        ? 'high'
+        : 'standard';
+    if (requiredTier === 'high' && recordTier !== 'high') {
+      insufficientTierClientNames.push(displayName);
+    }
+  }
+
+  const aggregatedStatus: CddWorkflowStatus =
+    !anyNotStarted && !anyInProgress
+      ? 'recorded'
+      : anyNotStarted
+        ? 'not_started'
+        : 'in_progress';
+
+  return {
+    status: aggregatedStatus,
+    isExpired: expiredClientNames.length > 0,
+    insufficientTier: insufficientTierClientNames.length > 0,
+    visibleToViewer,
+    missingClientNames: visibleToViewer ? missingClientNames : [],
+    expiredClientNames: visibleToViewer ? expiredClientNames : [],
+    insufficientTierClientNames: visibleToViewer ? insufficientTierClientNames : [],
+  };
+}
+
+async function resolveClientCddStatusReadOnly(params: {
+  ctx: TenantContext;
+  clientIds: readonly string[];
+  matterRiskRatingId?: string | null;
+  values: readonly ChoiceValue[];
+  todayYmd: string;
+  viewerAccess: ViewerCddAccess;
+  tenantCfg?: TenantConfiguration;
+  people?: readonly Person[];
+  organisations?: readonly Organisation[];
+}): Promise<{
+  status: CddWorkflowStatus;
+  isExpired: boolean;
+  insufficientTier: boolean;
+  visibleToViewer: boolean;
+  missingClientNames: string[];
+  expiredClientNames: string[];
+  insufficientTierClientNames: string[];
+}> {
+  const uniqueClientIds = Array.from(
+    new Set(params.clientIds.map((id) => (id ?? '').trim()).filter(Boolean)),
+  );
+  if (uniqueClientIds.length === 0) {
+    return {
+      status: 'not_started',
+      isExpired: false,
+      insufficientTier: false,
+      visibleToViewer: params.viewerAccess.canViewCdd,
+      missingClientNames: [],
+      expiredClientNames: [],
+      insufficientTierClientNames: [],
+    };
+  }
+
+  const catRepo = getCatalogueRepository();
+  const partyRepo = getPartyRepository();
+  const registerRepo = getRegisterRepository();
+  const effectiveTenantCfg = params.tenantCfg ?? getActiveTenantConfiguration();
+  const cddOverride = await catRepo.getModuleConfig<CddConfiguration>(params.ctx, 'cdd');
+  const effectiveCdd = resolveEffectiveCddConfig(effectiveTenantCfg, cddOverride ?? null);
+
+  const riskSystemKeyById = new Map<string, string>();
+  for (const v of params.values) {
+    if (v.listKey === 'risk_rating' && v.systemKey?.trim()) {
+      riskSystemKeyById.set(v.id, v.systemKey.trim().toLowerCase());
+    }
+  }
+  const currentMatterRiskKey = params.matterRiskRatingId
+    ? riskSystemKeyById.get(params.matterRiskRatingId)
+    : undefined;
+  const currentMatterTier: CddRiskTierKey = currentMatterRiskKey
+    ? resolveClientCddRiskTier(effectiveCdd, [currentMatterRiskKey])
+    : 'standard';
+
+  let visibleToViewer = params.viewerAccess.canViewCdd;
+  const missingClientNames: string[] = [];
+  const expiredClientNames: string[] = [];
+  const insufficientTierClientNames: string[] = [];
+  let anyNotStarted = false;
+  let anyInProgress = false;
+
+  for (const clientId of uniqueClientIds) {
+    const org =
+      params.organisations?.find((o) => o.id === clientId) ??
+      (await partyRepo.getOrganisationById<Organisation>(params.ctx, clientId));
+    const person = org
+      ? null
+      : (params.people?.find((p) => p.id === clientId) ??
+        (await partyRepo.getPersonById<Person>(params.ctx, clientId)));
+    const subjectVisible = await isClientCddSubjectVisibleToViewer({
+      ctx: params.ctx,
+      clientId,
+      person,
+      people: params.people ?? [],
+      viewerAccess: params.viewerAccess,
+    });
+    if (!subjectVisible) {
+      visibleToViewer = false;
+    }
+
+    const subjectType: 'person' | 'organisation' = org
+      ? 'organisation'
+      : person
+        ? 'person'
+        : clientId.startsWith('P-')
+          ? 'person'
+          : 'organisation';
+    const displayName = org
+      ? org.legalName?.trim() || clientId
+      : person
+        ? personDisplayName(person)
+        : clientId;
+
+    const [allRecords, visibleRecords] = await Promise.all([
+      registerRepo.listVisibleRegisterRecords(params.ctx, params.viewerAccess.viewerId, {
+        includeRestricted: true,
+        registerTypeKey: 'cdd',
+        ...(subjectType === 'person' ? { personId: clientId } : { organisationId: clientId }),
+      }),
+      params.viewerAccess.canViewCdd
+        ? registerRepo.listVisibleRegisterRecords(params.ctx, params.viewerAccess.viewerId, {
+            registerTypeKey: 'cdd',
+            ...(subjectType === 'person'
+              ? { personId: clientId }
+              : { organisationId: clientId }),
+            canViewCdd: params.viewerAccess.canViewCdd,
+            canBypassEmployeeCddVisibility: params.viewerAccess.canBypassEmployeeCddVisibility,
+            hasRestrictedMatterAccess: params.viewerAccess.hasRestrictedMatterAccess,
+          })
+        : Promise.resolve<RegisterRecord[]>([]),
+    ]);
+    if (allRecords.length > 0 && visibleRecords.length === 0) {
+      visibleToViewer = false;
+    }
+
+    const subjectDerivedTier = await deriveClientCddRiskTierForSubject({
+      ctx: params.ctx,
+      actorId: params.viewerAccess.viewerId,
+      subjectId: clientId,
+      targetOrganisation: org,
+      effectiveCdd,
+      riskSystemKeyById,
+      includeRestrictedMatters: true,
+    });
+    const requiredTier: CddRiskTierKey =
+      subjectDerivedTier === 'high' || currentMatterTier === 'high'
+        ? 'high'
+        : 'standard';
+
+    const active =
+      allRecords.find((r) => r.status === 'recorded' || r.status === 'in_progress') ??
+      allRecords[0] ??
+      null;
+    if (!active) {
+      anyNotStarted = true;
+      missingClientNames.push(displayName);
+      continue;
+    }
+    if (active.status === 'in_progress') {
+      anyInProgress = true;
+      missingClientNames.push(displayName);
+      continue;
+    }
+    if (active.status !== 'recorded') {
+      anyNotStarted = true;
+      missingClientNames.push(displayName);
+      continue;
+    }
+    if (isCddDueExpired(active.dueAt, params.todayYmd)) {
+      expiredClientNames.push(displayName);
+      continue;
+    }
+    const recordTier: CddRiskTierKey =
+      String(active.fieldValues?.riskTier ?? 'standard').toLowerCase() === 'high'
+        ? 'high'
+        : 'standard';
+    if (requiredTier === 'high' && recordTier !== 'high') {
+      insufficientTierClientNames.push(displayName);
+    }
+  }
+
+  const aggregatedStatus: CddWorkflowStatus =
+    !anyNotStarted && !anyInProgress
+      ? 'recorded'
+      : anyNotStarted
+        ? 'not_started'
+        : 'in_progress';
+
+  return {
+    status: aggregatedStatus,
+    isExpired: expiredClientNames.length > 0,
+    insufficientTier: insufficientTierClientNames.length > 0,
+    visibleToViewer,
+    missingClientNames: visibleToViewer ? missingClientNames : [],
+    expiredClientNames: visibleToViewer ? expiredClientNames : [],
+    insufficientTierClientNames: visibleToViewer ? insufficientTierClientNames : [],
+  };
+}
+
+function mapOverridesToSummaries(
+  overrides: readonly MatterOpeningGateOverrideRecord[],
+  people: readonly Person[],
+): OpeningGateOverrideSummary[] {
+  const byId = new Map(people.map((p) => [p.id, p] as const));
+  return overrides.map((o) => {
+    const actor = byId.get(o.overriddenByPersonId);
+    return {
+      id: o.id,
+      preconditionKey: o.preconditionKey,
+      reason: o.reason,
+      overriddenByPersonId: o.overriddenByPersonId,
+      overriddenByName: actor ? personDisplayName(actor) : null,
+      overriddenAt: o.overriddenAt,
+      revokedByPersonId: o.revokedByPersonId,
+      revokedAt: o.revokedAt,
+    };
+  });
+}
+
+async function evaluateAndEnforceOpeningGateInTx(params: {
+  tx: TenantSqlClient;
+  ctx: TenantContext;
+  matter: Matter;
+  workTypesConfig: WorkTypesConfiguration;
+  values: readonly ChoiceValue[];
+  people: readonly Person[];
+  todayYmd: string;
+  viewerAccess: ViewerCddAccess;
+  tenantCfg?: TenantConfiguration;
+  organisations?: readonly Organisation[];
+}): Promise<OpeningGateEvaluation> {
+  const {
+    tx,
+    ctx,
+    matter,
+    workTypesConfig,
+    values,
+    people,
+    todayYmd,
+    viewerAccess,
+    tenantCfg,
+    organisations,
+  } = params;
+  const registerRepo = getRegisterRepository();
+  const matterRepo = getMatterRepository();
+
+  const hasPersistedMatterId = Boolean(matter.id && matter.id !== 'M-PENDING');
+  const hroRecords = (
+    hasPersistedMatterId
+      ? await registerRepo.listRegisterRecordsForMatterInTx(
+          tx,
+          ctx,
+          matter.id,
+          'high_risk_opening',
+          { forUpdate: true },
+        )
+      : []
+  ).filter(isSystemCreatedHroRecord);
+  const cddStatus = await resolveClientCddStatusInTx({
+    tx,
+    ctx,
+    clientIds: [matter.clientId, ...(matter.additionalClientIds ?? [])],
+    matterRiskRatingId: matter.riskRatingId,
+    values,
+    todayYmd,
+    viewerAccess,
+    tenantCfg,
+    people,
+    organisations,
+  });
+  const rawOverrides = hasPersistedMatterId
+    ? await matterRepo.listOpeningGateOverridesForMatterInTx(tx, ctx, matter.id, {
+        activeOnly: true,
+        forUpdate: true,
+      })
+    : [];
+
+  const gateConfig = resolveWorkTypeOpeningGate(workTypesConfig, {
+    workTypeSubcategoryId: matter.workTypeSubcategoryId,
+    practiceAreaId: matter.practiceAreaId,
+  });
+  const requiresHighRiskApproval = isHighOrCriticalRiskRating(
+    matter.riskRatingId,
+    values,
+  );
+  const selectedHro =
+    hroRecords.find((r) => r.status === 'approved') ??
+    hroRecords.find(
+      (r) => r.status === 'pending_partner' || r.status === 'pending_compliance',
+    ) ??
+    hroRecords[0] ??
+    null;
+
+  let partnerApprover: {
+    actorId: string;
+    actorName?: string | null;
+    transitionedAt: string;
+  } | null = null;
+  if (selectedHro) {
+    const hroTransitions = await registerRepo.listTransitionsForRecordInTx(
+      tx,
+      ctx,
+      selectedHro.id,
+    );
+    const partnerTr = [...hroTransitions]
+      .reverse()
+      .find((t) => t.transitionKey === 'partner_approve');
+    if (partnerTr) {
+      const pActor = people.find((p) => p.id === partnerTr.actorId);
+      partnerApprover = {
+        actorId: partnerTr.actorId,
+        actorName: pActor ? personDisplayName(pActor) : null,
+        transitionedAt: partnerTr.transitionedAt,
+      };
+    }
+  }
+
+  return evaluateOpeningPreconditions({
+    matter,
+    gateConfig,
+    cddStatus,
+    activeOverrides: mapOverridesToSummaries(rawOverrides, people),
+    highRiskRecord: selectedHro,
+    highRiskPartnerApprover: partnerApprover,
+    requiresHighRiskApproval,
+    fundsOnAccountSatisfied: false,
+  });
+}
+
+async function withdrawPendingHighRiskOpeningInTx(params: {
+  tx: TenantSqlClient;
+  ctx: TenantContext;
+  tenantCfg: TenantConfiguration;
+  matterId: string;
+  actorId: string;
+  actorPermissionSet: ReadonlySet<PermissionKey>;
+  reason: string;
+}): Promise<RegisterRecord[]> {
+  const { tx, ctx, tenantCfg, matterId, actorId, actorPermissionSet, reason } = params;
+  if (!matterId || matterId === 'M-PENDING') return [];
+  const registerRepo = getRegisterRepository();
+  const catRepo = getCatalogueRepository();
+  const pendingRecords = (
+    await registerRepo.listRegisterRecordsForMatterInTx(
+      tx,
+      ctx,
+      matterId,
+      'high_risk_opening',
+      { forUpdate: true },
+    )
+  ).filter(
+    (r) => r.status === 'pending_partner' || r.status === 'pending_compliance',
+  );
+  if (pendingRecords.length === 0) return [];
+
+  const dbOverride = await catRepo.getModuleConfig<RegistersConfiguration>(
+    ctx,
+    'registers',
+  );
+  const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
+  const hroType = findEffectiveRegisterType(
+    'high_risk_opening',
+    baseRegisters,
+    dbOverride,
+  );
+  if (!hroType) return [];
+
+  const withdrawnRecords: RegisterRecord[] = [];
+  for (const pending of pendingRecords) {
+    const outcome = await registerRepo.lockAndExecuteTransitionInTx(tx, ctx, {
+      recordId: pending.id,
+      transitionKey: 'withdraw_opening',
+      actorId,
+      comment: reason,
+      validateAndCompute: async (lockedRecord, priorTransitions) => {
+        const revalidated = validateRegisterTransitionExecution({
+          registerType: hroType,
+          record: lockedRecord,
+          transitionKey: 'withdraw_opening',
+          actorId,
+          actorRoles: [],
+          actorPermissionSet,
+          comment: reason,
+          viaDedicatedWorkflow: true,
+          priorTransitions,
+        });
+        return {
+          nextStatus: revalidated.nextStatus,
+          setsDecidedAt: Boolean(revalidated.transition.setsDecidedAt),
+          mergedFieldValues: lockedRecord.fieldValues,
+        };
+      },
+      buildAuditEntries: ({ previousRecord, updatedRecord, transition }) => [
+        {
+          recordType: 'register_record',
+          recordId: updatedRecord.id,
+          action: 'status-change',
+          field: 'High-risk opening approval',
+          oldValue: previousRecord.status,
+          newValue: updatedRecord.status,
+          byId: actorId,
+          at: transition.transitionedAt,
+          reason,
+        },
+        {
+          recordType: 'matter',
+          recordId: matterId,
+          action: 'status-change',
+          field: 'High-risk opening approval',
+          oldValue: previousRecord.status,
+          newValue: `${updatedRecord.reference} withdrawn`,
+          byId: actorId,
+          at: transition.transitionedAt,
+          reason,
+        },
+      ],
+    });
+    withdrawnRecords.push(outcome.updatedRecord);
+  }
+  return withdrawnRecords;
+}
+
+async function syncHighRiskOpeningForMatterInTx(params: {
+  tx: TenantSqlClient;
+  ctx: TenantContext;
+  tenantCfg: TenantConfiguration;
+  matter: Matter;
+  values: readonly ChoiceValue[];
+  actorId: string;
+  actorPermissionSet: ReadonlySet<PermissionKey>;
+  isDraftSave: boolean;
+  people: readonly Person[];
+  teams: readonly Team[];
+  rbacConfig: RbacConfiguration;
+}): Promise<RegisterRecord | null> {
+  const {
+    tx,
+    ctx,
+    tenantCfg,
+    matter,
+    values,
+    actorId,
+    actorPermissionSet,
+    isDraftSave,
+    people,
+    teams,
+    rbacConfig,
+  } = params;
+  if (!matter.id || matter.id === 'M-PENDING') return null;
+
+  const isHighRisk = isHighOrCriticalRiskRating(matter.riskRatingId, values);
+  const statusChoice = values.find(
+    (v) => v.listKey === 'matter_status' && v.id === matter.matterStatusId,
+  );
+  const isAborted = statusChoice?.systemKey === 'aborted';
+
+  if (!isHighRisk || isAborted) {
+    await withdrawPendingHighRiskOpeningInTx({
+      tx,
+      ctx,
+      tenantCfg,
+      matterId: matter.id,
+      actorId,
+      actorPermissionSet,
+      reason: isAborted
+        ? 'Prospective matter was abandoned; pending High-risk opening sign-off withdrawn.'
+        : 'Matter risk rating was reduced below High before opening; pending High-risk opening sign-off withdrawn.',
+    });
+    return null;
+  }
+
+  const registerRepo = getRegisterRepository();
+  const catRepo = getCatalogueRepository();
+  const existingHro = (
+    await registerRepo.listRegisterRecordsForMatterInTx(
+      tx,
+      ctx,
+      matter.id,
+      'high_risk_opening',
+      { forUpdate: true },
+    )
+  ).filter(isSystemCreatedHroRecord);
+  const existingApprovedOrPending = existingHro.find(
+    (r) =>
+      r.status === 'approved' ||
+      r.status === 'pending_partner' ||
+      r.status === 'pending_compliance',
+  );
+  if (existingApprovedOrPending) {
+    return existingApprovedOrPending;
+  }
+  if (isDraftSave) {
+    return null;
+  }
+
+  const dbOverride = await catRepo.getModuleConfig<RegistersConfiguration>(
+    ctx,
+    'registers',
+  );
+  const baseRegisters = tenantCfg.registers ?? DEFAULT_REGISTERS_CONFIG;
+  const hroType = findEffectiveRegisterType(
+    'high_risk_opening',
+    baseRegisters,
+    dbOverride,
+  );
+  if (!hroType) return null;
+
+  const newId = await registerRepo.allocateNextRecordIdInTx(tx, ctx, {
+    idPrefix: 'REG',
+  });
+  const reference = await registerRepo.allocateNextRecordIdInTx(tx, ctx, {
+    idPrefix: hroType.referencePrefix,
+  });
+  const riskKey = resolveMatterRiskSystemKey(matter.riskRatingId, values) ?? 'high';
+  const ownerId =
+    matter.leadFeeEarnerId || matter.responsiblePartnerId || actorId;
+  const nowIso = new Date().toISOString();
+
+  const created = await registerRepo.createRegisterRecordInTx(
+    tx,
+    ctx,
+    {
+      id: newId,
+      registerTypeKey: 'high_risk_opening',
+      reference,
+      title: `High-risk opening: ${matter.title || matter.matterNumber}`,
+      status: 'pending_partner',
+      matterId: matter.id,
+      ownerId,
+      assignedApproverId: matter.responsiblePartnerId || matter.supervisingPartnerId || null,
+      fieldValues: {
+        matterNumber: matter.matterNumber,
+        riskLevel: riskKey,
+        submittedById: actorId,
+      },
+      createdById: SYSTEM_HRO_CREATOR_ACTOR_ID,
+    },
+    {
+      auditEntries: [
+        {
+          recordType: 'register_record',
+          recordId: newId,
+          action: 'create',
+          field: 'High-risk opening approval',
+          oldValue: null,
+          newValue: `${reference} created (${riskKey} risk, pending_partner)`,
+          byId: actorId,
+          at: nowIso,
+        },
+        {
+          recordType: 'matter',
+          recordId: matter.id,
+          action: 'status-change',
+          field: 'High-risk opening approval',
+          oldValue: null,
+          newValue: `${reference} pending Partner approval`,
+          byId: actorId,
+          at: nowIso,
+        },
+      ],
+    },
+  );
+
+  // Notify eligible partner approver(s) (`approval_requested`, respecting restricted access & excluding creator)
+  const partnerCandidates = Array.from(
+    new Set(
+      [
+        matter.responsiblePartnerId,
+        matter.supervisingPartnerId,
+        ...people
+          .filter((p) => {
+            if (!p.isEmployee || isLeaverPerson(p) || p.mergedIntoId) return false;
+            const pSet = resolvePersonPermissionSet(p, {
+              allPeople: people,
+              teams,
+              config: { ...tenantCfg, rbac: rbacConfig },
+            });
+            return (
+              pSet.permissions.has('register:approve') &&
+              pSet.authoritativeRoles.some(
+                (rk) => rk === 'partner' || rk === 'managing_partner',
+              )
+            );
+          })
+          .map((p) => p.id),
+      ].filter((id): id is string => Boolean(id && id !== ownerId && id !== actorId)),
+    ),
+  );
+  const firstPartnerTarget = partnerCandidates.find((pid) => {
+    const p = people.find((x) => x.id === pid);
+    return (
+      p &&
+      canPersonAccessMatter(matter, p.id, p, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    );
+  });
+  if (firstPartnerTarget) {
+    await pushNotification(ctx, {
+      recipientId: firstPartnerTarget,
+      kind: 'approval_requested',
+      title: `High-risk opening requires Partner approval: ${reference}`,
+      detail: `${matter.matterNumber} — ${matter.title} (${riskKey} risk)`,
+      href: `/?panel=partner_sign_off_queue`,
+      recordId: created.id,
+      matterId: matter.id,
+      knownMatterIds: [matter.id],
+      knownTask: null,
+      preloaded: buildNotificationAccessContext({
+        people,
+        teams,
+        effectiveRbac: rbacConfig,
+        matters: [matter],
+        registerRecords: [created],
+      }),
+      tenantConfig: tenantCfg,
+      byId: actorId,
+      at: nowIso,
+    });
+  }
+  return created;
 }
 
 function resolveRequiredMatterStatusIdBySystemKey(
@@ -5786,6 +6776,7 @@ function resolveNextMatterStatusId(params: {
   existing: Matter | null;
   existingHasOpened: boolean;
   saveMode: 'draft' | 'submit_cleared' | 'submit_referred' | undefined;
+  isPmsImport?: boolean;
   prospectiveStatus: string;
   cmiIncompleteStatus: string;
   values?: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[];
@@ -5795,12 +6786,16 @@ function resolveNextMatterStatusId(params: {
     existing,
     existingHasOpened,
     saveMode,
+    isPmsImport = false,
     prospectiveStatus,
     cmiIncompleteStatus,
     values = [],
   } = params;
   const isProspective = (id: string | null | undefined) =>
     isMatterStatusProspectiveOrDraftLike(id, prospectiveStatus, values);
+  if (isPmsImport) {
+    return input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus;
+  }
   if (existingHasOpened && existing) {
     const requested = input.matterStatusId;
     return requested && !isProspective(requested)
@@ -5811,11 +6806,13 @@ function resolveNextMatterStatusId(params: {
     return prospectiveStatus;
   }
   if (saveMode === 'submit_cleared') {
-    return input.matterStatusId && !isProspective(input.matterStatusId)
-      ? input.matterStatusId
-      : cmiIncompleteStatus;
+    // S1-05 (R741): Server owns initial opening destination (`cmi_incomplete`), ignoring crafted `input.matterStatusId`.
+    return cmiIncompleteStatus;
   }
-  return input.matterStatusId || existing?.matterStatusId || cmiIncompleteStatus;
+  if (existing && isProspective(existing.matterStatusId)) {
+    return prospectiveStatus;
+  }
+  return cmiIncompleteStatus;
 }
 
 function feeEarnerOutcomeLabelFor(
@@ -6128,6 +7125,8 @@ export async function saveMatterRecord(
   code?: string;
   message?: string;
   errors?: Record<string, string>;
+  warnings?: string[];
+  openingGate?: OpeningGateEvaluation;
 }> {
   let resolvedMatterCtx: TenantContext | null = null;
   let pendingLifecycleSync: {
@@ -6309,6 +7308,15 @@ export async function saveMatterRecord(
     if (!input.clientId) errors.clientId = 'Client (instructing entity or individual) is required.';
     if (!input.practiceAreaId) errors.practiceAreaId = 'Practice area is required.';
     if (!input.workTypeSubcategoryId) errors.workTypeSubcategoryId = 'Work type subcategory is required.';
+  }
+  if (
+    opts.source !== 'pms_import' &&
+    input.engagementLetterStatus !== undefined &&
+    isEngagementLetterSignedStatus(input.engagementLetterStatus) &&
+    !(existing && isEngagementLetterSignedStatus(existing.engagementLetterStatus))
+  ) {
+    errors.engagementLetterStatus =
+      'Engagement letter cannot be marked as signed directly on matter save. Use "Mark engagement signed" instead.';
   }
 
   // Validate questionnaire answers against MATTER_RISK_SECTIONS; discard any client-supplied sections, overallRisk or scores (S0-08 / B1)
@@ -6682,19 +7690,18 @@ export async function saveMatterRecord(
     (await promoteEnquiryPersonId(
       input.clientId !== undefined ? input.clientId : existing?.clientId,
     )) ?? '';
-  const rawMatterNumberInput = (input.matterNumber ?? existing?.matterNumber ?? '').trim();
-  const rawMatterNumber =
-    !existing &&
-    rawMatterNumberInput &&
-    rawMatterNumberInput !== 'DRAFT' &&
-    (await matterRepo.existsMatterNumber(extensionCtx, rawMatterNumberInput))
-      ? ''
-      : rawMatterNumberInput;
-  const matterNumber = isDraftSave
-    ? rawMatterNumber || 'DRAFT'
-    : !rawMatterNumber || rawMatterNumber === 'DRAFT'
-      ? await generateMatterNumber(store, effectiveClientId, extensionCtx)
-      : rawMatterNumber;
+  // R744 / Owner Answer 7: Only PMS import may pass a non-clashing matter number;
+  // normal creates/updates ignore caller input.matterNumber and allocate permanently inside TX after validation.
+  const rawPmsMatterNumberInput = (input.matterNumber ?? '').trim();
+  const matterNumber =
+    opts.source === 'pms_import'
+      ? !existing &&
+        rawPmsMatterNumberInput &&
+        rawPmsMatterNumberInput !== 'DRAFT' &&
+        !(await matterRepo.existsMatterNumber(extensionCtx, rawPmsMatterNumberInput))
+        ? rawPmsMatterNumberInput
+        : 'DRAFT'
+      : existing?.matterNumber?.trim() || 'DRAFT';
 
   // Auto-create new contacts/organisations on save for any party added by typing a new name
   const createdRecordByPartyId = new Map<string, string>();
@@ -7130,6 +8137,7 @@ export async function saveMatterRecord(
     existing,
     existingHasOpened,
     saveMode: opts.saveMode,
+    isPmsImport,
     prospectiveStatus,
     cmiIncompleteStatus,
     values: store.values,
@@ -7270,7 +8278,18 @@ export async function saveMatterRecord(
               }
             : undefined;
 
-  if (willOpen && !isPmsImport) {
+  const callerAttemptedNonProspectiveStatus =
+    !existingHasOpened &&
+    !isDraftSave &&
+    opts.saveMode !== 'submit_referred' &&
+    Boolean(input.matterStatusId) &&
+    !isMatterStatusProspectiveOrDraftLike(
+      input.matterStatusId,
+      prospectiveStatus,
+      store.values,
+    );
+
+  if ((willOpen || callerAttemptedNonProspectiveStatus) && !isPmsImport) {
     if (!resolvedConflictCheckRecord && !persistedConflictRecord) {
       return {
         matter: null,
@@ -7377,6 +8396,8 @@ export async function saveMatterRecord(
     customFields: input.customFields ?? existing?.customFields ?? {},
 
     matterNumber,
+    numberSequenceKey: existing?.numberSequenceKey ?? null,
+    numberSequenceValue: existing?.numberSequenceValue ?? null,
     title: (input.title !== undefined ? input.title : existing?.title ?? '').trim(),
     shortDescription: (input.shortDescription ?? existing?.shortDescription ?? '').trim(),
     clientId: effectiveClientId,
@@ -7452,13 +8473,20 @@ export async function saveMatterRecord(
     amlCompletedAt: existing?.amlCompletedAt ?? null,
     sourceOfFundsVerified: existing?.sourceOfFundsVerified ?? 'In progress',
     sourceOfWealthVerified: existing?.sourceOfWealthVerified ?? 'N/A',
-    engagementLetterStatus: input.engagementLetterStatus ?? existing?.engagementLetterStatus ?? 'Drafting',
+    engagementLetterStatus:
+      !isPmsImport &&
+      input.engagementLetterStatus !== undefined &&
+      isEngagementLetterSignedStatus(input.engagementLetterStatus) &&
+      !(existing && isEngagementLetterSignedStatus(existing.engagementLetterStatus))
+        ? existing?.engagementLetterStatus ?? 'Drafting'
+        : input.engagementLetterStatus ?? existing?.engagementLetterStatus ?? 'Drafting',
     engagementLetterSentAt:
       input.engagementLetterSentAt !== undefined ? input.engagementLetterSentAt : existing?.engagementLetterSentAt ?? null,
-    engagementLetterSignedAt:
-      input.engagementLetterSignedAt !== undefined
+    engagementLetterSignedAt: isPmsImport
+      ? input.engagementLetterSignedAt !== undefined
         ? input.engagementLetterSignedAt
-        : existing?.engagementLetterSignedAt ?? null,
+        : existing?.engagementLetterSignedAt ?? null
+      : existing?.engagementLetterSignedAt ?? null,
     feeEstimateGbp: input.feeEstimateGbp !== undefined ? input.feeEstimateGbp : existing?.feeEstimateGbp ?? null,
     agreedFeeCapGbp: input.agreedFeeCapGbp !== undefined ? input.agreedFeeCapGbp : existing?.agreedFeeCapGbp ?? null,
     retainerMoniesOnAccountGbp:
@@ -7793,6 +8821,8 @@ export async function saveMatterRecord(
     : undefined;
   const stagedAuditMark = getStagedAuditWatermark();
   let auditFlushed = false;
+  let postTxWarnings: string[] = [];
+  let postTxOpeningGate: OpeningGateEvaluation | undefined;
   let txResult: {
     matter: null;
     code?: string;
@@ -8069,6 +9099,96 @@ export async function saveMatterRecord(
           formatFeeArrangementAuditSummary(canonicalCosts);
       }
 
+      // S1-05 (R744, Owner Answer 7): Allocate permanent matter number after validation passes.
+      // Drafts remain DRAFT; validation failures consume zero sequences; Referred and High-risk matters receive their number.
+      if (
+        !isDraftSave &&
+        (!matter.matterNumber ||
+          matter.matterNumber === 'DRAFT' ||
+          matter.matterNumber.startsWith('DRAFT'))
+      ) {
+        const allocated = await generateMatterNumberWithConfig(
+          store,
+          matter.clientId,
+          extensionCtx,
+          {
+            owningDepartmentId: matter.owningDepartmentId,
+            clientOrg:
+              allOrganisationsWithPending.find((o) => o.id === matter.clientId) ??
+              null,
+            clientPerson:
+              allPeopleWithPending.find((p) => p.id === matter.clientId) ?? null,
+            departments: store.orgStructure.departments,
+            tenantConfig: tenantCfg,
+            nowDate: new Date(),
+          },
+        );
+        matter.matterNumber = allocated.matterNumber;
+        matter.numberSequenceKey = allocated.sequenceKey;
+        matter.numberSequenceValue = allocated.sequenceValue;
+      }
+
+      // S1-05 (ADR 0039, R752): Sync pending High-risk opening sign-off before gate evaluation.
+      const saveActorPermSet = resolvePersonPermissionSet(actingUser, {
+        allPeople: allPeopleWithPending,
+        teams,
+        tokenRoles: extensionCtx.actorRoles,
+        tokenRolesActorId: actingUser.id,
+        config: { rbac: matterRbacConfig },
+        context: extensionCtx,
+        mfaVerified: extensionCtx.mfaVerified,
+      });
+      const saveViewerCddAccess = buildViewerCddAccessFromPermSet(
+        actingUser,
+        saveActorPermSet,
+        teams,
+        matterRbacConfig,
+      );
+      if (!existingHasOpened && !isPmsImport) {
+        await syncHighRiskOpeningForMatterInTx({
+          tx,
+          ctx: extensionCtx,
+          tenantCfg,
+          matter,
+          values: inTxDbValues,
+          actorId: opts.byId,
+          actorPermissionSet: saveActorPermSet.permissions,
+          isDraftSave,
+          people: allPeopleWithPending,
+          teams,
+          rbacConfig: matterRbacConfig,
+        });
+      }
+
+      // S1-05 (ADR 0040, R741, R751): Enforce per-work-type opening gate & High-risk sign-off inside TX.
+      let effectiveWillOpen = willOpen;
+      let savedOpeningGate: OpeningGateEvaluation | undefined;
+      let savedWarnings: string[] = [];
+      if (!existingHasOpened && !isPmsImport && !isDraftSave && willOpen) {
+        const gateEval = await evaluateAndEnforceOpeningGateInTx({
+          tx,
+          ctx: extensionCtx,
+          matter,
+          workTypesConfig: inTxWorkTypesConfig,
+          values: inTxDbValues,
+          people: allPeopleWithPending,
+          todayYmd: inTxTenantTodayIso,
+          viewerAccess: saveViewerCddAccess,
+          tenantCfg,
+          organisations: allOrganisationsWithPending,
+        });
+        savedOpeningGate = gateEval;
+        if (!gateEval.canOpen) {
+          effectiveWillOpen = false;
+          matter.matterStatusId = prospectiveStatus;
+          matter.recordStatusId = prospectiveStatus;
+          matter.openedAt = null;
+          savedWarnings = [...gateEval.blockingReasons];
+        }
+      }
+      postTxWarnings = savedWarnings;
+      postTxOpeningGate = savedOpeningGate;
+
       for (const link of pendingEnquiryLinks) {
         link.enquiry.linkedPersonId = link.linkedPersonId;
       }
@@ -8076,7 +9196,13 @@ export async function saveMatterRecord(
       matter.fieldValues['matterCostsGovernance'] =
         gateResult?.governance ?? calcGovernance;
       if (gateResult) {
-        matter.fieldValues['matterOpeningGate'] = gateResult.record;
+        matter.fieldValues['matterOpeningGate'] =
+          savedOpeningGate && !savedOpeningGate.canOpen
+            ? {
+                ...gateResult.record,
+                allowProceed: false,
+              }
+            : gateResult.record;
       } else if (isPmsImport && willOpen) {
         const importedGateRecord: MatterOpeningGateRecord = {
           allowProceed: true,
@@ -8228,7 +9354,7 @@ export async function saveMatterRecord(
             action: 'matter-imported-open',
             field: 'PMS import',
             oldValue: null,
-            newValue: `Imported already-open matter ${matter.matterNumber} from PMS (opening gate skipped)`,
+            newValue: `Imported already-open matter ${matter.matterNumber} from PMS — Opened by PMS import; opening gate not applied`,
             byId: opts.byId,
             at: now,
           });
@@ -8486,7 +9612,7 @@ export async function saveMatterRecord(
       }
 
       const workTypeTaskRepo = getTaskWorkflowRepository();
-      if (willOpen && !isDraftSave && !isPmsImport) {
+      if (effectiveWillOpen && !isDraftSave && !isPmsImport) {
         const currentTasks = tasks;
         await instantiateWorkTypeAutoTasksInTx({
           ctx: extensionCtx,
@@ -8585,7 +9711,11 @@ export async function saveMatterRecord(
     };
   }
 
-  return { matter };
+  return {
+    matter,
+    ...(postTxWarnings.length > 0 ? { warnings: postTxWarnings } : {}),
+    ...(postTxOpeningGate ? { openingGate: postTxOpeningGate } : {}),
+  };
   });
   if (pendingLifecycleSync) {
     const syncItem = pendingLifecycleSync as {
@@ -9049,7 +10179,13 @@ export async function updateMatterConflictRecord(
   matterId: string,
   record: ConflictCheckRecordInput | ConflictCheckRecord,
   byId: string,
-): Promise<{ matter: Matter | null; errors?: Record<string, string>; warnings?: string[] }> {
+): Promise<{
+  matter: Matter | null;
+  code?: string;
+  message?: string;
+  errors?: Record<string, string>;
+  warnings?: string[];
+}> {
     let conflictCtx: TenantContext;
     try {
       conflictCtx = resolveDefaultServiceTenantContext(null, byId);
@@ -9067,10 +10203,17 @@ export async function updateMatterConflictRecord(
       }),
       getHrAndRbacRepository().listAllTeams<Team>(conflictCtx),
     ]);
+  const initialConflictRowVersion = matter?.rowVersion ?? 1;
   const today = resolveTenantLocalDateAndHour(
     new Date(),
     getActiveTenantConfiguration().timeZone || 'Europe/London',
   ).localDate;
+  const tenantCfgForConflict = getActiveTenantConfiguration();
+  const conflictRbacConfig = await loadEffectiveTenantRbacConfig(
+    conflictCtx,
+    undefined,
+    tenantCfgForConflict,
+  );
   const actingUser = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !matter ||
@@ -9079,10 +10222,12 @@ export async function updateMatterConflictRecord(
     !canPersonAccessMatter(matter, byId, actingUser, {
       allPeople: staffPeople,
       teams,
+      config: { rbac: conflictRbacConfig },
     }) ||
     !hasPersonPermission(actingUser, 'matter:edit', {
       allPeople: staffPeople,
       teams,
+      config: { rbac: conflictRbacConfig },
     })
   ) {
     return { matter: null };
@@ -9090,6 +10235,7 @@ export async function updateMatterConflictRecord(
   const actorHasRiskView = hasPersonPermission(actingUser, 'risk:view', {
     allPeople: staffPeople,
     teams,
+    config: { rbac: conflictRbacConfig },
   });
   if (
     (record.status === 'Approved' || record.status === 'Declined') &&
@@ -9317,7 +10463,6 @@ export async function updateMatterConflictRecord(
   const gate = matter.fieldValues?.['matterOpeningGate'] as
     | MatterOpeningGateRecord
     | undefined;
-
   let transitionedToOpenOnConflictApproval = false;
   const warnings: string[] = [];
   matter.conflictCheckStatus = legacyConflictStatusFromRecord(sanitisedRecord);
@@ -9328,150 +10473,377 @@ export async function updateMatterConflictRecord(
       matter.conflictClearedById = null;
     }
     matter.conflictCheckDate = today;
-    if (
-      sanitisedRecord.status === 'Approved' &&
-      !opened
-    ) {
-      const kdConfig = await getKeyDatesConfig({ ctx: conflictCtx });
-      const [matterKeyDates, matterKeyDateNa] = kdConfig.enabled
-        ? await Promise.all([
-            getKeyDateRepository().listKeyDatesForMatter(
-              conflictCtx,
-              matter.id,
-              byId,
-            ),
-            getKeyDateRepository().listNotApplicableForMatter(
-              conflictCtx,
-              matter.id,
-              byId,
-            ),
-          ])
-        : [[], []];
-      const keyDatesOpenGate = kdConfig.enabled
-        ? evaluateMatterKeyDateOpeningGate(
-            kdConfig,
-            matter.matterTypeId || matter.practiceAreaId,
-            matterKeyDates,
-            matterKeyDateNa,
-          )
-        : { canOpen: true, missingKeyDateTypes: [] };
-      const hasPassedOpeningGate =
-        matter.matterNumber !== 'DRAFT' &&
-        !matter.matterNumber.startsWith('DRAFT') &&
-        gate?.allowProceed === true &&
-        keyDatesOpenGate.canOpen;
-      if (hasPassedOpeningGate) {
-        transitionedToOpenOnConflictApproval = true;
-        const activeStatusId = resolveActiveMatterStatusId(store);
-        matter.matterStatusId = activeStatusId;
-        matter.recordStatusId = activeStatusId;
-        if (!matter.openedAt?.trim()) {
-          matter.openedAt = resolveTenantLocalDateAndHour(
-            new Date(),
-            getActiveTenantConfiguration().timeZone || 'Europe/London',
-          ).localDate;
-        }
-        const cleanFieldVals = { ...(matter.fieldValues ?? {}) };
-        delete cleanFieldVals['matterOpeningSnapshot'];
-        const openingSnapshot = resolveMatterOpeningSnapshot(
-          { ...matter, fieldValues: cleanFieldVals },
-          people,
-          organisations,
-          store.values,
-          enquiries,
-          quotes,
-          { firmName: store.firm.name?.trim() || undefined },
-        );
-        openingSnapshot.saveMode = 'opened';
-        openingSnapshot.capturedAt = now;
-        matter.fieldValues = {
-          ...(matter.fieldValues ?? {}),
-          matterOpeningSnapshot: openingSnapshot,
-        };
-      } else {
-        warnings.push(
-          'Conflict approved. The matter will open once it passes the opening checks (including partner cost sign-off and required key dates).',
-        );
-      }
-    }
+  }
+
+  // R742: Outside-TX pre-hooks (beforeMatterOpen, Key Dates) when Approved conflict could open a prospective matter.
+  let freshConflictGateResult: Awaited<ReturnType<typeof runMatterOpeningGate>> | null = null;
+  let preConflictEstimatedFeeGbp = gate?.estimatedFeeGbp ?? 0;
+  if (sanitisedRecord.status === 'Approved' && !opened && !matter.isPmsImport) {
+    const liveDbCostsOverride =
+      await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+        conflictCtx,
+      );
+    const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+      tenantCfgForConflict,
+      liveDbCostsOverride ?? store.matterCostsConfig,
+      {
+        values: store.values,
+        clientProfileCode: tenantCfgForConflict.tenantId,
+        displayName: tenantCfgForConflict.displayName,
+        primaryDomain: tenantCfgForConflict.branding.primaryDomain,
+      },
+    );
+    const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+      tenantCfgForConflict,
+      effectiveCostsConfig,
+    );
+    const existingSavedCosts = matter.fieldValues?.['matterCosts'] as
+      | Partial<MatterCostsSnapshot>
+      | undefined;
+    const conflictClientType: ClientRateOverrideClientType | undefined =
+      organisations.some((o) => o.id === matter.clientId)
+        ? 'organisation'
+        : people.some((p) => p.id === matter.clientId)
+          ? 'person'
+          : matter.clientId?.startsWith('O-')
+            ? 'organisation'
+            : matter.clientId
+              ? 'person'
+              : undefined;
+    const preConflictRates = !existingSavedCosts?.workBasis
+      ? await getRateOverrideRepository().resolveApplicableRates(conflictCtx, {
+          matterId: matter.id,
+          clientId: matter.clientId || null,
+          clientType: conflictClientType ?? null,
+          practiceAreaId: matter.practiceAreaId || null,
+          asAtDate: today,
+          baseMatterCostsConfig: tenantCfgForConflict.matterCosts,
+          fallbackRateCardConfig: effectiveCostsConfig,
+          timeZone: tenantCfgForConflict.timeZone,
+        })
+      : null;
+    const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
+      store,
+      effectiveTenantCfg,
+      matter,
+      effectiveCostsConfig,
+      preConflictRates,
+    );
+    preConflictEstimatedFeeGbp = estimatedFeeGbp;
+    freshConflictGateResult = await runMatterOpeningGate({
+      store,
+      matter,
+      isNewMatter: false,
+      extensionCtx: conflictCtx,
+      tenantCfg: effectiveTenantCfg,
+      effectiveCostsConfig,
+      costsHookInput: {
+        matterId: matter.id,
+        workBasis: resolvedCosts.workBasis,
+        estimatedFeeGbp,
+        disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+        partnerSignOffCompleted: Boolean(
+          matter.fieldValues?.['partnerCostSignOffCompleted'],
+        ),
+      },
+      now,
+    });
   }
 
   let saved!: Matter;
   const workTypesConfigForConflict =
     store.workTypesConfig ??
     resolveEffectiveWorkTypesConfig(
-      getActiveTenantConfiguration(),
+      tenantCfgForConflict,
       store.workTypeConfigsOverride ?? null,
     );
   const taskRepo = getTaskWorkflowRepository();
-  await runWithAuditStagingScope(() =>
-    matterRepo.withTenantTransaction(conflictCtx, async () => {
-      saved = await putMatterWithInTxRestrictions(conflictCtx, matter, {
-        expectedRowVersion: null,
-      });
-      writeAudit(store, {
-        recordType: 'matter',
-        recordId: matter.id,
-        action: 'update',
-        field: 'Conflict check record',
-        oldValue: null,
-        newValue: `${sanitisedRecord.status} — ${sanitisedRecord.outcomeLabel}`,
-        byId,
-        at: now,
-      });
-      const existingTasksForConflict =
-        transitionedToOpenOnConflictApproval ||
-        sanitisedRecord.status === 'Approved' ||
-        sanitisedRecord.status === 'Cleared' ||
-        sanitisedRecord.status === 'Declined'
-          ? await taskRepo.listTasksLinkedToRecord<Task>(
+  let conflictTxEarlyResult: {
+    matter: Matter | null;
+    code?: string;
+    message?: string;
+    errors?: Record<string, string>;
+  } | null = null;
+  try {
+    conflictTxEarlyResult = await runWithAuditStagingScope(() =>
+      matterRepo.withTenantTransaction(conflictCtx, async (tx) => {
+        // Lock matter row FIRST (global lock order: matters -> register_records -> overrides).
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [conflictCtx.tenantId, matter.id],
+        );
+        const freshMatter = await matterRepo.getMatterById<Matter>(
+          conflictCtx,
+          matter.id,
+          { includeRestricted: true },
+        );
+        if (!freshMatter) {
+          return { matter: null };
+        }
+        const freshRowVersion = freshMatter.rowVersion ?? 1;
+        if (freshRowVersion !== initialConflictRowVersion) {
+          const conflictMsg =
+            'This matter changed while you were working. Refresh and try again.';
+          return {
+            matter: null,
+            code: MATTER_CONCURRENCY_CONFLICT_CODE,
+            message: conflictMsg,
+            errors: { conflict: conflictMsg },
+          };
+        }
+
+        const inTxDbValues =
+          await getCatalogueRepository().listAllChoiceValues<ChoiceValue>(
+            conflictCtx,
+          );
+        const inTxProspectiveStatus = requireActiveChoiceValueId(
+          inTxDbValues,
+          'matter_status',
+          'prospective',
+        );
+        const freshOpened = matterHasOpened(
+          freshMatter,
+          inTxProspectiveStatus,
+          inTxDbValues,
+        );
+        const freshGate = freshMatter.fieldValues?.['matterOpeningGate'] as
+          | MatterOpeningGateRecord
+          | undefined;
+        const freshSnapshot = freshMatter.fieldValues?.['matterOpeningSnapshot'] as
+          | { saveMode?: string }
+          | undefined;
+        const freshWasDraft =
+          freshSnapshot?.saveMode === 'draft' && freshGate?.allowProceed === false;
+
+        freshMatter.conflictCheckRecord = sanitisedRecord;
+        if (hasUnliftedBarrierCondition) {
+          freshMatter.hasEthicalWall = matter.hasEthicalWall;
+          freshMatter.restrictionLift = matter.restrictionLift;
+          freshMatter.restrictedAccessUserIds = matter.restrictedAccessUserIds;
+        }
+        freshMatter.conflictCheckStatus = matter.conflictCheckStatus;
+        if (sanitisedRecord.status === 'Approved' || sanitisedRecord.status === 'Cleared') {
+          freshMatter.conflictClearedById = matter.conflictClearedById;
+          freshMatter.conflictCheckDate = matter.conflictCheckDate;
+        }
+        freshMatter.updatedAt = now;
+        freshMatter.updatedById = byId;
+
+        transitionedToOpenOnConflictApproval = false;
+        const inTxWarnings: string[] = [];
+        const conflictViewerPermSet = resolvePersonPermissionSet(actingUser, {
+          allPeople: people,
+          teams,
+          tokenRoles: conflictCtx.actorRoles,
+          tokenRolesActorId: actingUser.id,
+          config: { rbac: conflictRbacConfig },
+          context: conflictCtx,
+          mfaVerified: conflictCtx.mfaVerified,
+        });
+        const conflictViewerCddAccess = buildViewerCddAccessFromPermSet(
+          actingUser,
+          conflictViewerPermSet,
+          teams,
+          conflictRbacConfig,
+        );
+
+        if (
+          sanitisedRecord.status === 'Declined' &&
+          !freshOpened &&
+          !freshMatter.isPmsImport
+        ) {
+          await withdrawPendingHighRiskOpeningInTx({
+            tx,
+            ctx: conflictCtx,
+            tenantCfg: tenantCfgForConflict,
+            matterId: freshMatter.id,
+            actorId: byId,
+            actorPermissionSet: conflictViewerPermSet.permissions,
+            reason:
+              'Conflict check declined by Risk & Compliance; pending High-risk opening sign-off withdrawn.',
+          });
+        }
+
+        if (
+          sanitisedRecord.status === 'Approved' &&
+          !freshOpened &&
+          !freshMatter.isPmsImport
+        ) {
+          const inTxWorkTypesOverride =
+            await getCatalogueRepository().getWorkTypeConfigs<WorkTypesConfiguration>(
               conflictCtx,
-              'matter',
-              matter.id,
-            )
-          : [];
-      if (
-        sanitisedRecord.status === 'Approved' ||
-        sanitisedRecord.status === 'Cleared' ||
-        sanitisedRecord.status === 'Declined'
-      ) {
-        for (const t of existingTasksForConflict) {
-          if (
-            t.status !== 'Done' &&
-            t.status !== 'Cancelled' &&
-            t.autoTrigger === 'conflict_check_review' &&
-            t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === matter.id)
-          ) {
-            t.status = 'Done';
-            t.completedById = byId;
-            t.completedAt = now;
-            t.updatedById = byId;
-            t.updatedAt = now;
-            await taskRepo.putTask(conflictCtx, t);
+            );
+          const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+            tenantCfgForConflict,
+            inTxWorkTypesOverride ?? null,
+          );
+          const gateEval = await evaluateAndEnforceOpeningGateInTx({
+            tx,
+            ctx: conflictCtx,
+            matter: freshMatter,
+            workTypesConfig: inTxWorkTypesConfig,
+            values: inTxDbValues,
+            people,
+            todayYmd: today,
+            viewerAccess: conflictViewerCddAccess,
+            tenantCfg: tenantCfgForConflict,
+            organisations,
+          });
+          const hasPassedOpeningGate = Boolean(
+            freshMatter.matterNumber !== 'DRAFT' &&
+              !freshMatter.matterNumber.startsWith('DRAFT') &&
+              !freshWasDraft &&
+              freshConflictGateResult?.allowProceed &&
+              gateEval.canOpen,
+          );
+          freshMatter.fieldValues = {
+            ...(freshMatter.fieldValues ?? {}),
+            ...(freshConflictGateResult?.governance
+              ? { matterCostsGovernance: freshConflictGateResult.governance }
+              : {}),
+            matterOpeningGate: {
+              allowProceed: hasPassedOpeningGate,
+              estimatedFeeGbp: preConflictEstimatedFeeGbp,
+              checkedAt: now,
+            },
+          };
+          if (hasPassedOpeningGate) {
+            transitionedToOpenOnConflictApproval = true;
+            const activeStatusId = requireActiveChoiceValueId(
+              inTxDbValues,
+              'matter_status',
+              'active',
+            );
+            freshMatter.matterStatusId = activeStatusId;
+            freshMatter.recordStatusId = activeStatusId;
+            if (!freshMatter.openedAt?.trim()) {
+              freshMatter.openedAt = resolveTenantLocalDateAndHour(
+                new Date(),
+                tenantCfgForConflict.timeZone || 'Europe/London',
+              ).localDate;
+            }
+            const cleanFieldVals = { ...(freshMatter.fieldValues ?? {}) };
+            delete cleanFieldVals['matterOpeningSnapshot'];
+            const openingSnapshot = resolveMatterOpeningSnapshot(
+              { ...freshMatter, fieldValues: cleanFieldVals },
+              people,
+              organisations,
+              inTxDbValues,
+              enquiries,
+              quotes,
+              { firmName: store.firm.name?.trim() || undefined },
+            );
+            openingSnapshot.saveMode = 'opened';
+            openingSnapshot.capturedAt = now;
+            freshMatter.fieldValues = {
+              ...(freshMatter.fieldValues ?? {}),
+              matterOpeningSnapshot: openingSnapshot,
+            };
+          } else {
+            const combinedReasons = Array.from(
+              new Set([
+                ...Object.values(freshConflictGateResult?.errors ?? {}),
+                ...gateEval.blockingReasons,
+              ]),
+            );
+            if (combinedReasons.length > 0) {
+              inTxWarnings.push(
+                `Conflict approved. Matter remains Prospective until remaining opening requirements clear (including partner cost sign-off and required key dates): ${combinedReasons.join(' · ')}`,
+              );
+            } else {
+              inTxWarnings.push(
+                'Conflict approved. The matter will open once it passes the opening checks (including partner cost sign-off and required key dates).',
+              );
+            }
           }
         }
-      }
-      if (transitionedToOpenOnConflictApproval) {
-        await instantiateWorkTypeAutoTasksInTx({
-          ctx: conflictCtx,
-          matter: saved,
-          people,
-          teams,
-          existingTasks: existingTasksForConflict,
-          workTypesConfig: workTypesConfigForConflict,
-          values: store.values,
-          workingHoursConfig: workingHoursConfigFromStore(store),
-          trigger: 'matter_open',
-          byId,
-          nowIso: now,
-          taskRepo,
-          writeAuditFn: (entry) => writeAudit(store, entry),
-          pushNotificationFn: pushNotification,
+
+        saved = await putMatterWithInTxRestrictions(conflictCtx, freshMatter, {
+          expectedRowVersion: freshRowVersion,
         });
-      }
-      await flushStagedAuditEntries(conflictCtx);
-    }),
-  );
+        if (inTxWarnings.length > 0) {
+          warnings.push(...inTxWarnings);
+        }
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: freshMatter.id,
+          action: 'update',
+          field: 'Conflict check record',
+          oldValue: null,
+          newValue: `${sanitisedRecord.status} — ${sanitisedRecord.outcomeLabel}`,
+          byId,
+          at: now,
+        });
+        const existingTasksForConflict =
+          transitionedToOpenOnConflictApproval ||
+          sanitisedRecord.status === 'Approved' ||
+          sanitisedRecord.status === 'Cleared' ||
+          sanitisedRecord.status === 'Declined'
+            ? await taskRepo.listTasksLinkedToRecord<Task>(
+                conflictCtx,
+                'matter',
+                freshMatter.id,
+              )
+            : [];
+        if (
+          sanitisedRecord.status === 'Approved' ||
+          sanitisedRecord.status === 'Cleared' ||
+          sanitisedRecord.status === 'Declined'
+        ) {
+          for (const t of existingTasksForConflict) {
+            if (
+              t.status !== 'Done' &&
+              t.status !== 'Cancelled' &&
+              t.autoTrigger === 'conflict_check_review' &&
+              t.linkedRecords.some((r) => r.recordType === 'matter' && r.recordId === freshMatter.id)
+            ) {
+              t.status = 'Done';
+              t.completedById = byId;
+              t.completedAt = now;
+              t.updatedById = byId;
+              t.updatedAt = now;
+              await taskRepo.putTask(conflictCtx, t);
+            }
+          }
+        }
+        if (transitionedToOpenOnConflictApproval) {
+          await instantiateWorkTypeAutoTasksInTx({
+            ctx: conflictCtx,
+            matter: saved,
+            people,
+            teams,
+            existingTasks: existingTasksForConflict,
+            workTypesConfig: workTypesConfigForConflict,
+            values: inTxDbValues,
+            workingHoursConfig: workingHoursConfigFromStore(store),
+            trigger: 'matter_open',
+            byId,
+            nowIso: now,
+            taskRepo,
+            writeAuditFn: (entry) => writeAudit(store, entry),
+            pushNotificationFn: pushNotification,
+          });
+        }
+        await flushStagedAuditEntries(conflictCtx);
+        return null;
+      }),
+    );
+  } catch (err) {
+    if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
+      const conflictMsg =
+        'This matter changed while you were working. Refresh and try again.';
+      return {
+        matter: null,
+        code: MATTER_CONCURRENCY_CONFLICT_CODE,
+        message: conflictMsg,
+        errors: { conflict: conflictMsg },
+      };
+    }
+    throw err;
+  }
+  if (conflictTxEarlyResult) {
+    return conflictTxEarlyResult;
+  }
 
   const syncCorrelationId = `corr-lifecycle-sync-${saved.id}-${Date.now()}`;
   try {
@@ -9501,7 +10873,7 @@ export async function signOffMatterCostsRecord(
     errors?: Record<string, string>;
     warnings?: string[];
   } & Partial<Omit<ActionDenied, 'code'>> & {
-    code?: ActionDenialCode | FeeCapErrorCode;
+    code?: ActionDenialCode | FeeCapErrorCode | typeof MATTER_CONCURRENCY_CONFLICT_CODE;
   }
 > {
   const tenantCfg = getActiveTenantConfiguration();
@@ -9534,15 +10906,7 @@ export async function signOffMatterCostsRecord(
     getHrAndRbacRepository().listAllTeams<Team>(prelimCtx),
   ]);
   const matter = matterDirect;
-  const prospectiveStatusId = resolveProspectiveStatusId(store);
-  const wasProspectiveBeforeSignOff = Boolean(
-    matter &&
-      isMatterStatusProspectiveOrDraftLike(
-        matter.matterStatusId,
-        prospectiveStatusId,
-        store.values,
-      ),
-  );
+  const initialSignOffRowVersion = matter?.rowVersion ?? 1;
   const actingUser = staffPeople.find((p) => p.id === byId) ?? null;
   if (
     !matter ||
@@ -9647,10 +11011,21 @@ export async function signOffMatterCostsRecord(
     );
   const taskRepoForSignOff = getTaskWorkflowRepository();
 
-  const liveDbCostsOverride =
-    await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+  const [liveDbCostsOverride, signOffRbacConfig] = await Promise.all([
+    getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
       extensionCtx,
-    );
+    ),
+    loadEffectiveTenantRbacConfig(extensionCtx, undefined, tenantCfg),
+  ]);
+  const signOffViewerCddAccess = buildViewerCddAccess({
+    actorId: byId,
+    actor: actingUser,
+    people,
+    teams,
+    rbacConfig: signOffRbacConfig,
+    tokenRoles: extensionCtx.actorRoles,
+    context: extensionCtx,
+  });
   const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
     tenantCfg,
     liveDbCostsOverride ?? store.matterCostsConfig,
@@ -9755,225 +11130,318 @@ export async function signOffMatterCostsRecord(
     gateResult.governance ?? calcGovernance;
   matter.fieldValues['matterOpeningGate'] = gateResult.record;
 
-  const signOffTxOutcome = await runWithAuditStagingScope(() =>
-    matterRepo.withTenantTransaction(extensionCtx, async (tx) => {
-      await tx.query(
-        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
-        [extensionCtx.tenantId, matter.id],
-      );
-      const inTxCostsOverride =
-        await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
-          extensionCtx,
+  type SignOffTxEarlyOutcome = {
+    earlyError?: {
+      matter: null;
+      code?: ActionDenialCode | FeeCapErrorCode | typeof MATTER_CONCURRENCY_CONFLICT_CODE;
+      message?: string;
+      errors?: Record<string, string>;
+    };
+  } | null;
+  let signOffTxOutcome: SignOffTxEarlyOutcome = null;
+  try {
+    signOffTxOutcome = await runWithAuditStagingScope(() =>
+      matterRepo.withTenantTransaction<SignOffTxEarlyOutcome>(extensionCtx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [extensionCtx.tenantId, matter.id],
         );
-      const inTxCostsConfig = resolveEffectiveMatterCostsConfig(
-        tenantCfg,
-        inTxCostsOverride ?? store.matterCostsConfig,
-        {
-          values: store.values,
-          clientProfileCode: tenantCfg.tenantId,
-          displayName: tenantCfg.displayName,
-          primaryDomain: tenantCfg.branding.primaryDomain,
-        },
-      );
-      const inTxWorkTypesOverride =
-        await getCatalogueRepository().getWorkTypeConfigs<WorkTypesConfiguration>(
+        const freshMatter = await matterRepo.getMatterById<Matter>(
           extensionCtx,
+          matter.id,
+          { includeRestricted: true },
         );
-      const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
-        tenantCfg,
-        inTxWorkTypesOverride ?? null,
-      );
-      const inTxAsAtDate = resolveTenantLocalDateAndHour(
-        new Date(),
-        tenantCfg.timeZone || 'Europe/London',
-      ).localDate;
-
-      if (!existingSavedCosts?.workBasis) {
-        const inTxResolvedRates = await rateOverrideRepo.resolveApplicableRates(
-          extensionCtx,
-          {
-            matterId: matter.id,
-            clientId: matter.clientId || null,
-            clientType: signOffClientType ?? null,
-            practiceAreaId: matter.practiceAreaId || null,
-            asAtDate: inTxAsAtDate,
-            baseMatterCostsConfig: tenantCfg.matterCosts,
-            fallbackRateCardConfig: inTxCostsConfig,
-            timeZone: tenantCfg.timeZone,
-          },
-        );
-        const inTxResolved = resolveMatterCostsSnapshot({
-          existing: {
-            ...matter,
-            fieldValues: {
-              ...(matter.fieldValues ?? {}),
-              matterCosts: undefined,
-            },
-          },
-          practiceAreaId: matter.practiceAreaId,
-          config: inTxCostsConfig,
-          values: store.values,
-          resolvedRates: inTxResolvedRates,
-        });
-        matter.fieldValues['matterCosts'] = {
-          ...inTxResolved,
-          vatRatePercent:
-            typeof inTxResolved.vatRatePercent === 'number' &&
-            Number.isFinite(inTxResolved.vatRatePercent)
-              ? inTxResolved.vatRatePercent
-              : inTxCostsConfig.vatRatePercent,
-          capturedAt: now,
-          updatedAt: now,
-        };
-      }
-
-      // Partner / Risk cost sign-off never bypasses CFA/DBA statutory, firm, or work-type caps (ADR 0034 Decision 3).
-      const signOffCosts = matter.fieldValues['matterCosts'] as
-        | MatterCostsSnapshot
-        | undefined;
-      const signOffArrangementBasis = mapMatterWorkBasisToArrangementBasis(
-        signOffCosts?.workBasis,
-      );
-      let verifiedFeeSummary: string | null = null;
-      if (signOffArrangementBasis && signOffCosts) {
-        const capCheck = validateFeeArrangementAgainstConfigs({
-          feeBasis: signOffArrangementBasis,
-          workTypeSubcategoryId: matter.workTypeSubcategoryId,
-          practiceAreaId: matter.practiceAreaId,
-          workTypesConfig: inTxWorkTypesConfig,
-          submittedCapCategoryKey: signOffCosts.feeArrangementCapCategoryKey,
-          submittedPercent: signOffCosts.feeArrangementPercent,
-          submittedCapBaseKey: signOffCosts.feeArrangementCapBaseKey,
-          effectiveCostsConfig: inTxCostsConfig,
-          tenantCfg,
-          asAtDate: inTxAsAtDate,
-        });
-        if (!capCheck.ok) {
+        if (!freshMatter) {
+          return { earlyError: { matter: null } };
+        }
+        const freshSignOffRowVersion = freshMatter.rowVersion ?? 1;
+        if (freshSignOffRowVersion !== initialSignOffRowVersion) {
+          const conflictMsg =
+            'This matter changed while you were working. Refresh and try again.';
           return {
             earlyError: {
               matter: null,
-              code: capCheck.code,
-              message: capCheck.message,
-              errors: { matterCosts: capCheck.message },
+              code: MATTER_CONCURRENCY_CONFLICT_CODE,
+              message: conflictMsg,
+              errors: { conflict: conflictMsg } as Record<string, string>,
             },
           };
         }
-        const canonicalSignOffCosts: MatterCostsSnapshot = {
-          ...signOffCosts,
-          feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
-          feeArrangementPercent: capCheck.acceptedPercent,
-          feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
-          feeArrangementCapBaseDescription:
-            capCheck.resolution.capBaseDescription,
-          feeArrangementAppliedCapPercent:
-            capCheck.resolution.appliedCapPercent,
-          feeArrangementCapLevel: capCheck.resolution.capLevel,
-        };
-        matter.fieldValues['matterCosts'] = canonicalSignOffCosts;
-        verifiedFeeSummary = formatFeeArrangementAuditSummary(
-          canonicalSignOffCosts,
-        );
-      }
 
-      if (
-        matter.matterNumber !== 'DRAFT' &&
-        !matter.matterNumber.startsWith('DRAFT') &&
-        isMatterStatusProspectiveOrDraftLike(
-          matter.matterStatusId,
-          prospectiveStatusId,
-          store.values,
-        ) &&
-        matter.conflictCheckRecord?.status === 'Approved'
-      ) {
-        if (gateResult.allowProceed) {
-          const activeStatusId = resolveActiveMatterStatusId(store);
-          matter.matterStatusId = activeStatusId;
-          matter.recordStatusId = activeStatusId;
-          if (!matter.openedAt?.trim()) {
-            matter.openedAt = inTxAsAtDate;
-          }
-          const cleanFieldVals = { ...matter.fieldValues };
-          delete cleanFieldVals['matterOpeningSnapshot'];
-          const openingSnapshot = resolveMatterOpeningSnapshot(
-            { ...matter, fieldValues: cleanFieldVals },
-            people,
-            organisations,
-            store.values,
-            enquiries,
-            quotes,
-            { firmName: store.firm.name?.trim() || undefined },
+        const inTxCostsOverride =
+          await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+            extensionCtx,
           );
-          openingSnapshot.saveMode = 'opened';
-          openingSnapshot.capturedAt = now;
-          matter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
-        } else {
-          warnings.push(
-            Object.values(gateResult.errors)[0] ??
-              'The matter will open once it passes the opening checks.',
+        const inTxCostsConfig = resolveEffectiveMatterCostsConfig(
+          tenantCfg,
+          inTxCostsOverride ?? store.matterCostsConfig,
+          {
+            values: store.values,
+            clientProfileCode: tenantCfg.tenantId,
+            displayName: tenantCfg.displayName,
+            primaryDomain: tenantCfg.branding.primaryDomain,
+          },
+        );
+        const inTxWorkTypesOverride =
+          await getCatalogueRepository().getWorkTypeConfigs<WorkTypesConfiguration>(
+            extensionCtx,
+          );
+        const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+          tenantCfg,
+          inTxWorkTypesOverride ?? null,
+        );
+        const inTxAsAtDate = resolveTenantLocalDateAndHour(
+          new Date(),
+          tenantCfg.timeZone || 'Europe/London',
+        ).localDate;
+
+        freshMatter.updatedAt = now;
+        freshMatter.updatedById = byId;
+        freshMatter.fieldValues = {
+          ...(freshMatter.fieldValues ?? {}),
+          matterCosts: frozenSnapshot,
+          partnerCostSignOffCompleted: true,
+          partnerCostSignOff: signOffRecord,
+          matterCostsGovernance: gateResult.governance ?? calcGovernance,
+          matterOpeningGate: gateResult.record,
+        };
+
+        if (!existingSavedCosts?.workBasis) {
+          const inTxResolvedRates = await rateOverrideRepo.resolveApplicableRates(
+            extensionCtx,
+            {
+              matterId: freshMatter.id,
+              clientId: freshMatter.clientId || null,
+              clientType: signOffClientType ?? null,
+              practiceAreaId: freshMatter.practiceAreaId || null,
+              asAtDate: inTxAsAtDate,
+              baseMatterCostsConfig: tenantCfg.matterCosts,
+              fallbackRateCardConfig: inTxCostsConfig,
+              timeZone: tenantCfg.timeZone,
+            },
+          );
+          const inTxResolved = resolveMatterCostsSnapshot({
+            existing: {
+              ...freshMatter,
+              fieldValues: {
+                ...(freshMatter.fieldValues ?? {}),
+                matterCosts: undefined,
+              },
+            },
+            practiceAreaId: freshMatter.practiceAreaId,
+            config: inTxCostsConfig,
+            values: store.values,
+            resolvedRates: inTxResolvedRates,
+          });
+          freshMatter.fieldValues['matterCosts'] = {
+            ...inTxResolved,
+            vatRatePercent:
+              typeof inTxResolved.vatRatePercent === 'number' &&
+              Number.isFinite(inTxResolved.vatRatePercent)
+                ? inTxResolved.vatRatePercent
+                : inTxCostsConfig.vatRatePercent,
+            capturedAt: now,
+            updatedAt: now,
+          };
+        }
+
+        // Partner / Risk cost sign-off never bypasses CFA/DBA statutory, firm, or work-type caps (ADR 0034 Decision 3).
+        const signOffCosts = freshMatter.fieldValues['matterCosts'] as
+          | MatterCostsSnapshot
+          | undefined;
+        const signOffArrangementBasis = mapMatterWorkBasisToArrangementBasis(
+          signOffCosts?.workBasis,
+        );
+        let verifiedFeeSummary: string | null = null;
+        if (signOffArrangementBasis && signOffCosts) {
+          const capCheck = validateFeeArrangementAgainstConfigs({
+            feeBasis: signOffArrangementBasis,
+            workTypeSubcategoryId: freshMatter.workTypeSubcategoryId,
+            practiceAreaId: freshMatter.practiceAreaId,
+            workTypesConfig: inTxWorkTypesConfig,
+            submittedCapCategoryKey: signOffCosts.feeArrangementCapCategoryKey,
+            submittedPercent: signOffCosts.feeArrangementPercent,
+            submittedCapBaseKey: signOffCosts.feeArrangementCapBaseKey,
+            effectiveCostsConfig: inTxCostsConfig,
+            tenantCfg,
+            asAtDate: inTxAsAtDate,
+          });
+          if (!capCheck.ok) {
+            return {
+              earlyError: {
+                matter: null,
+                code: capCheck.code,
+                message: capCheck.message,
+                errors: { matterCosts: capCheck.message } as Record<string, string>,
+              },
+            };
+          }
+          const canonicalSignOffCosts: MatterCostsSnapshot = {
+            ...signOffCosts,
+            feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+            feeArrangementPercent: capCheck.acceptedPercent,
+            feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+            feeArrangementCapBaseDescription:
+              capCheck.resolution.capBaseDescription,
+            feeArrangementAppliedCapPercent:
+              capCheck.resolution.appliedCapPercent,
+            feeArrangementCapLevel: capCheck.resolution.capLevel,
+          };
+          freshMatter.fieldValues['matterCosts'] = canonicalSignOffCosts;
+          verifiedFeeSummary = formatFeeArrangementAuditSummary(
+            canonicalSignOffCosts,
           );
         }
-      } else if (!gateResult.allowProceed) {
-        const firstErr = Object.values(gateResult.errors)[0];
-        if (firstErr) warnings.push(firstErr);
-      }
 
-      const openedBySignOff =
-        wasProspectiveBeforeSignOff && matter.matterStatusId !== prospectiveStatusId;
-      saved = await putMatterWithInTxRestrictions(extensionCtx, matter, {
-        expectedRowVersion: null,
-      });
-      writeAudit(store, {
-        recordType: 'matter',
-        recordId: matter.id,
-        action: 'update',
-        field: 'Partner cost sign-off',
-        oldValue: null,
-        newValue: `Signed off £${signedOffEstimateGbp.toLocaleString('en-GB')} by ${signOffRecord.byName}${signOffRecord.note ? ` (${signOffRecord.note})` : ''}`,
-        byId,
-        at: now,
-      });
-      if (verifiedFeeSummary) {
-        await appendTenantAuditEntries(extensionCtx, [
-          {
-            recordType: 'matter',
-            recordId: matter.id,
-            action: 'update',
-            field: 'Fee arrangement & cap (sign-off)',
-            oldValue: null,
-            newValue: verifiedFeeSummary,
-            byId,
-            at: now,
-          },
-        ]);
-      }
-      if (openedBySignOff) {
-        const existingTasksForSignOff =
-          await taskRepoForSignOff.listTasksLinkedToRecord<Task>(
+        const inTxDbValues =
+          await getCatalogueRepository().listAllChoiceValues<ChoiceValue>(
             extensionCtx,
-            'matter',
-            saved.id,
           );
-        await instantiateWorkTypeAutoTasksInTx({
-          ctx: extensionCtx,
-          matter: saved,
-          people,
-          teams,
-          existingTasks: existingTasksForSignOff,
-          workTypesConfig: workTypesConfigForSignOff,
-          values: store.values,
-          workingHoursConfig: workingHoursConfigFromStore(store),
-          trigger: 'matter_open',
-          byId,
-          nowIso: now,
-          taskRepo: taskRepoForSignOff,
-          writeAuditFn: (entry) => writeAudit(store, entry),
-          pushNotificationFn: pushNotification,
+        const inTxProspectiveId = requireActiveChoiceValueId(
+          inTxDbValues,
+          'matter_status',
+          'prospective',
+        );
+        const wasFreshProspectiveBeforeSignOff = isMatterStatusProspectiveOrDraftLike(
+          freshMatter.matterStatusId,
+          inTxProspectiveId,
+          inTxDbValues,
+        );
+        if (
+          !freshMatter.isPmsImport &&
+          freshMatter.matterNumber !== 'DRAFT' &&
+          !freshMatter.matterNumber.startsWith('DRAFT') &&
+          wasFreshProspectiveBeforeSignOff
+        ) {
+          const gateEval = await evaluateAndEnforceOpeningGateInTx({
+            tx,
+            ctx: extensionCtx,
+            matter: freshMatter,
+            workTypesConfig: inTxWorkTypesConfig,
+            values: inTxDbValues,
+            people,
+            todayYmd: inTxAsAtDate,
+            viewerAccess: signOffViewerCddAccess,
+            tenantCfg,
+            organisations,
+          });
+          if (gateResult.allowProceed && gateEval.canOpen) {
+            const activeStatusId = requireActiveChoiceValueId(
+              inTxDbValues,
+              'matter_status',
+              'active',
+            );
+            freshMatter.matterStatusId = activeStatusId;
+            freshMatter.recordStatusId = activeStatusId;
+            if (!freshMatter.openedAt?.trim()) {
+              freshMatter.openedAt = inTxAsAtDate;
+            }
+            const cleanFieldVals = { ...freshMatter.fieldValues };
+            delete cleanFieldVals['matterOpeningSnapshot'];
+            const openingSnapshot = resolveMatterOpeningSnapshot(
+              { ...freshMatter, fieldValues: cleanFieldVals },
+              people,
+              organisations,
+              inTxDbValues,
+              enquiries,
+              quotes,
+              { firmName: store.firm.name?.trim() || undefined },
+            );
+            openingSnapshot.saveMode = 'opened';
+            openingSnapshot.capturedAt = now;
+            freshMatter.fieldValues['matterOpeningSnapshot'] = openingSnapshot;
+          } else {
+            freshMatter.fieldValues['matterOpeningGate'] = {
+              ...gateResult.record,
+              allowProceed: false,
+            };
+            const combinedReasons = Array.from(
+              new Set([
+                ...Object.values(gateResult.errors),
+                ...gateEval.blockingReasons,
+              ]),
+            );
+            warnings.push(
+              combinedReasons[0] ??
+                'The matter will open once it passes the opening checks.',
+            );
+          }
+        } else if (!gateResult.allowProceed) {
+          const firstErr = Object.values(gateResult.errors)[0];
+          if (firstErr) warnings.push(firstErr);
+        }
+
+        const openedBySignOff =
+          wasFreshProspectiveBeforeSignOff &&
+          freshMatter.matterStatusId !== inTxProspectiveId;
+        saved = await putMatterWithInTxRestrictions(extensionCtx, freshMatter, {
+          expectedRowVersion: freshSignOffRowVersion,
         });
-      }
-      await flushStagedAuditEntries(extensionCtx);
-      return null;
-    }),
-  );
+        writeAudit(store, {
+          recordType: 'matter',
+          recordId: freshMatter.id,
+          action: 'update',
+          field: 'Partner cost sign-off',
+          oldValue: null,
+          newValue: `Signed off £${signedOffEstimateGbp.toLocaleString('en-GB')} by ${signOffRecord.byName}${signOffRecord.note ? ` (${signOffRecord.note})` : ''}`,
+          byId,
+          at: now,
+        });
+        if (verifiedFeeSummary) {
+          await appendTenantAuditEntries(extensionCtx, [
+            {
+              recordType: 'matter',
+              recordId: freshMatter.id,
+              action: 'update',
+              field: 'Fee arrangement & cap (sign-off)',
+              oldValue: null,
+              newValue: verifiedFeeSummary,
+              byId,
+              at: now,
+            },
+          ]);
+        }
+        if (openedBySignOff) {
+          const existingTasksForSignOff =
+            await taskRepoForSignOff.listTasksLinkedToRecord<Task>(
+              extensionCtx,
+              'matter',
+              saved.id,
+            );
+          await instantiateWorkTypeAutoTasksInTx({
+            ctx: extensionCtx,
+            matter: saved,
+            people,
+            teams,
+            existingTasks: existingTasksForSignOff,
+            workTypesConfig: workTypesConfigForSignOff,
+            values: inTxDbValues,
+            workingHoursConfig: workingHoursConfigFromStore(store),
+            trigger: 'matter_open',
+            byId,
+            nowIso: now,
+            taskRepo: taskRepoForSignOff,
+            writeAuditFn: (entry) => writeAudit(store, entry),
+            pushNotificationFn: pushNotification,
+          });
+        }
+        await flushStagedAuditEntries(extensionCtx);
+        return null;
+      }),
+    );
+  } catch (err) {
+    if ((err as { code?: string })?.code === MATTER_CONCURRENCY_CONFLICT_CODE) {
+      const conflictMsg =
+        'This matter changed while you were working. Refresh and try again.';
+      return {
+        matter: null,
+        code: MATTER_CONCURRENCY_CONFLICT_CODE,
+        message: conflictMsg,
+        errors: { conflict: conflictMsg },
+      };
+    }
+    throw err;
+  }
   if (signOffTxOutcome?.earlyError) {
     return signOffTxOutcome.earlyError;
   }
@@ -17401,9 +18869,13 @@ export async function createRecordFromPms(
       valueBySystemKey(store.values, 'matter_status', statusKey)?.id ??
       vid('matter_status', 'Active');
 
+    const trimmedPmsCode = (pm.matter_code ?? '').trim();
+    const pmsNumberClashes =
+      trimmedPmsCode.length > 0 &&
+      (await getMatterRepository().existsMatterNumber(ctx, trimmedPmsCode));
     const res = await saveMatterRecord(
       {
-        matterNumber: pm.matter_code,
+        matterNumber: pmsNumberClashes ? '' : trimmedPmsCode,
         title: pm.matter_description,
         clientId,
         practiceAreaId: paId,
@@ -18427,10 +19899,13 @@ async function executeHomeSignOffTransition(
 ): Promise<{ ok: true } | ActionDenied> {
   try {
     const { permSet } = await resolveRegisterActorAndConfig(byId);
-    if (!permSet.permissions.has('signoff:approve')) {
+    if (
+      !permSet.permissions.has('signoff:approve') &&
+      !permSet.permissions.has('register:approve')
+    ) {
       return buildActionDenied(
         'FORBIDDEN',
-        `You do not have permission (signoff:approve) to ${actionVerb} sign-off requests.`,
+        `You do not have permission (signoff:approve or register:approve) to ${actionVerb} sign-off requests.`,
       );
     }
   } catch (err) {
@@ -27087,10 +28562,17 @@ const EXPOSED_REGISTER_SERVICE_ERROR_CODES = new Set<string>([
   'UNSUPPORTED_MEDIA_TYPE',
   'EVIDENCE_MALWARE_DETECTED',
   'REGISTER_TYPE_DISABLED',
+  'MATTER_CONCURRENCY_CONFLICT',
+  'OPENING_GATE_OVERRIDE_ALREADY_ACTIVE',
+  'MATTER_NUMBERING_VALIDATION_ERROR',
+  OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
+  OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
+  OPENING_GATE_OVERRIDE_ERROR_CODES.BLOCKED,
   REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
   REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
   REGISTER_DOMAIN_ERROR_CODES.SYSTEM_ONLY_TRANSITION,
   REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
+  REGISTER_DOMAIN_ERROR_CODES.DISTINCT_APPROVER_REQUIRED,
   REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
   REGISTER_DOMAIN_ERROR_CODES.CONCURRENCY_CONFLICT,
   REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND,
@@ -27538,6 +29020,13 @@ export async function createRegisterRecordService(
         'Client Due Diligence records must be created from the client profile.',
       );
     }
+    // R764: System-created register types (such as high_risk_opening) cannot be created manually by users.
+    if (registerTypePre.systemCreatedOnly) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'This register record is created automatically by the system and cannot be created manually.',
+      );
+    }
     const hasCreatePermission =
       permSet.permissions.has(registerTypePre.createPermission) ||
       Boolean(
@@ -27592,30 +29081,41 @@ export async function createRegisterRecordService(
     });
 
     // Execute pre-create extension hooks STRICTLY OUTSIDE any PostgreSQL write transaction.
+    // R782: Restricted compliance register types (`cdd`, `high_risk_opening`) are never exposed to generic register hooks.
     const hookCfg = tenantCfg;
-    const hookResult = await getPlatformExtensionHost().executeRegisterBeforeCreateHook(
-      ctx,
-      hookCfg,
-      {
-        tenantId: ctx.tenantId,
-        actorId: actor.id,
-        correlationId: ctx.correlationId,
-        registerType: registerTypePre,
-        draft: {
-          registerTypeKey: registerTypePre.key,
-          title: validatedPre.title,
-          matterId: matterIdClean,
-          enquiryId: input.enquiryId?.trim() || null,
-          personId: input.personId?.trim() || null,
-          organisationId: input.organisationId?.trim() || null,
-          ownerId: actor.id,
-          assignedApproverId: input.assignedApproverId?.trim() || null,
+    const isRestrictedHookType =
+      registerTypePre.key === 'cdd' || registerTypePre.key === 'high_risk_opening';
+    const hookResult = isRestrictedHookType
+      ? {
+          allowProceed: true,
+          mergedFieldValues: validatedPre.fieldValues,
           dueAt: validatedPre.dueAt,
           reviewAt: validatedPre.reviewAt,
-          fieldValues: validatedPre.fieldValues,
-        },
-      },
-    );
+          isolatedErrors: [] as string[],
+        }
+      : await getPlatformExtensionHost().executeRegisterBeforeCreateHook(
+          ctx,
+          hookCfg,
+          {
+            tenantId: ctx.tenantId,
+            actorId: actor.id,
+            correlationId: ctx.correlationId,
+            registerType: registerTypePre,
+            draft: {
+              registerTypeKey: registerTypePre.key,
+              title: validatedPre.title,
+              matterId: matterIdClean,
+              enquiryId: input.enquiryId?.trim() || null,
+              personId: input.personId?.trim() || null,
+              organisationId: input.organisationId?.trim() || null,
+              ownerId: actor.id,
+              assignedApproverId: input.assignedApproverId?.trim() || null,
+              dueAt: validatedPre.dueAt,
+              reviewAt: validatedPre.reviewAt,
+              fieldValues: validatedPre.fieldValues,
+            },
+          },
+        );
     if (!hookResult.allowProceed) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
@@ -27794,7 +29294,10 @@ export async function transitionRegisterRecordService(
       return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
     }
     if (options?.viaHomeSignOffAdapter && existingPre.registerTypeKey !== 'sign_off') {
-      return registerServiceFailure('NOT_FOUND', 'Sign-off record was not found.');
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'Home sign-off actions are restricted to sign_off register records.',
+      );
     }
     if (existingPre.registerTypeKey === 'cdd') {
       if (!permSet.permissions.has('cdd:view')) {
@@ -27867,11 +29370,23 @@ export async function transitionRegisterRecordService(
         `Register type "${existingPre.registerTypeKey}" is not configured.`,
       );
     }
+    if (
+      registerTypePre.systemCreatedOnly &&
+      registerTypePre.key !== 'cdd' &&
+      input.fieldUpdates &&
+      Object.keys(input.fieldUpdates).length > 0
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'This register record is managed by the matter-opening workflow and its fields cannot be modified.',
+      );
+    }
 
     const effectivePermSet =
       options?.viaHomeSignOffAdapter &&
       existingPre.registerTypeKey === 'sign_off' &&
-      permSet.permissions.has('signoff:approve')
+      (permSet.permissions.has('signoff:approve') ||
+        permSet.permissions.has('register:approve'))
         ? new Set([...permSet.permissions, 'register:approve' as PermissionKey])
         : permSet.permissions;
     const effectiveExpectedRowVersion =
@@ -27879,6 +29394,11 @@ export async function transitionRegisterRecordService(
         ? input.expectedRowVersion
         : existingPre.rowVersion;
 
+    const prePriorTransitions = await registerRepo.listTransitionsForRecord(
+      ctx,
+      existingPre.id,
+      { includeRestricted: true },
+    );
     const preValidated = validateRegisterTransitionExecution({
       registerType: registerTypePre,
       record: existingPre,
@@ -27888,24 +29408,36 @@ export async function transitionRegisterRecordService(
       actorPermissionSet: effectivePermSet,
       comment: input.comment ?? null,
       expectedRowVersion: effectiveExpectedRowVersion,
+      priorTransitions: prePriorTransitions,
     });
 
     // Execute beforeTransition hook STRICTLY OUTSIDE any PostgreSQL write transaction.
+    // R782: Restricted compliance register types (`cdd`, `high_risk_opening`) are never passed to generic register hooks.
     const hookCfg = tenantCfg;
-    const beforeHookRes = await getPlatformExtensionHost().executeRegisterBeforeTransitionHook(
-      ctx,
-      hookCfg,
-      {
-        tenantId: ctx.tenantId,
-        actorId: actor.id,
-        correlationId: ctx.correlationId,
-        registerType: registerTypePre,
-        record: existingPre,
-        transition: preValidated.transition,
-        comment: input.comment?.trim() || null,
-        fieldUpdates: input.fieldUpdates,
-      },
-    );
+    const isRestrictedTransitionHookType =
+      registerTypePre.key === 'cdd' ||
+      registerTypePre.key === 'high_risk_opening' ||
+      Boolean(registerTypePre.systemCreatedOnly);
+    const beforeHookRes = isRestrictedTransitionHookType
+      ? {
+          allowProceed: true,
+          mergedFieldUpdates: {},
+          isolatedErrors: [] as string[],
+        }
+      : await getPlatformExtensionHost().executeRegisterBeforeTransitionHook(
+          ctx,
+          hookCfg,
+          {
+            tenantId: ctx.tenantId,
+            actorId: actor.id,
+            correlationId: ctx.correlationId,
+            registerType: registerTypePre,
+            record: existingPre,
+            transition: preValidated.transition,
+            comment: input.comment?.trim() || null,
+            fieldUpdates: input.fieldUpdates,
+          },
+        );
     if (!beforeHookRes.allowProceed) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
@@ -27913,15 +29445,187 @@ export async function transitionRegisterRecordService(
       );
     }
 
+    // ADR 0039 / R742: Outside-TX pre-hooks when compliance_approve on high_risk_opening may open the matter.
+    let preComplianceHroContext: {
+      store: FirmStore;
+      preGateResult: Awaited<ReturnType<typeof runMatterOpeningGate>>;
+      estimatedFeeGbp: number;
+      people: Person[];
+      organisations: Organisation[];
+      enquiries: Enquiry[];
+      quotes: Quote[];
+      existingTasks: Task[];
+    } | null = null;
+    if (
+      existingPre.registerTypeKey === 'high_risk_opening' &&
+      input.transitionKey === 'compliance_approve' &&
+      existingPre.matterId
+    ) {
+      const preMatter = await matterRepo.getMatterById<Matter>(
+        ctx,
+        existingPre.matterId,
+        { includeRestricted: true },
+      );
+      if (preMatter && !preMatter.isPmsImport) {
+        const storeForHro = await loadTenantCatalogueStoreView(ctx);
+        const prospectiveStatusForHro = resolveProspectiveStatusId(storeForHro);
+        if (
+          preMatter.matterNumber !== 'DRAFT' &&
+          !preMatter.matterNumber.startsWith('DRAFT') &&
+          isMatterStatusProspectiveOrDraftLike(
+            preMatter.matterStatusId,
+            prospectiveStatusForHro,
+            storeForHro.values,
+          )
+        ) {
+          const partyRepoForHro = getPartyRepository();
+          const intakeRepoForHro = getIntakeQuoteRepository();
+          const taskRepoForHro = getTaskWorkflowRepository();
+          const refIds = Array.from(
+            new Set(
+              [
+                preMatter.clientId,
+                ...(preMatter.additionalClientIds ?? []),
+                preMatter.instructingContactId,
+                preMatter.billingContactId,
+                preMatter.referrerContactId,
+                ...(preMatter.parties ?? []).map((p) => p.linkedRecordId),
+              ].filter((id): id is string => Boolean(id)),
+            ),
+          );
+          const [extraPeople, extraOrgs, srcEnq, srcQuote, existingTasks] =
+            await Promise.all([
+              refIds.length > 0
+                ? partyRepoForHro.listPeopleByIds<Person>(ctx, refIds)
+                : Promise.resolve<Person[]>([]),
+              refIds.length > 0
+                ? partyRepoForHro.listOrganisationsByIds<Organisation>(ctx, refIds)
+                : Promise.resolve<Organisation[]>([]),
+              preMatter.sourceEnquiryId
+                ? intakeRepoForHro.getEnquiryById<Enquiry>(
+                    ctx,
+                    preMatter.sourceEnquiryId,
+                    { includeRestricted: true },
+                  )
+                : Promise.resolve<Enquiry | null>(null),
+              preMatter.sourceQuoteId
+                ? intakeRepoForHro.getQuoteByIdOrReference<Quote>(
+                    ctx,
+                    preMatter.sourceQuoteId,
+                    { includeRestricted: true },
+                  )
+                : Promise.resolve<Quote | null>(null),
+              taskRepoForHro.listTasksLinkedToRecord<Task>(
+                ctx,
+                'matter',
+                preMatter.id,
+              ),
+            ]);
+          const hroPeople = dedupeById([...people, ...extraPeople]);
+          const liveDbCostsOverride =
+            await catRepo.getMatterCostsConfig<MatterCostsConfig>(ctx);
+          const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+            tenantCfg,
+            liveDbCostsOverride ?? storeForHro.matterCostsConfig,
+            {
+              values: storeForHro.values,
+              clientProfileCode: tenantCfg.tenantId,
+              displayName: tenantCfg.displayName,
+              primaryDomain: tenantCfg.branding.primaryDomain,
+            },
+          );
+          const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+            tenantCfg,
+            effectiveCostsConfig,
+          );
+          const clientTypeForRates: ClientRateOverrideClientType | undefined =
+            extraOrgs.some((o) => o.id === preMatter.clientId)
+              ? 'organisation'
+              : hroPeople.some((p) => p.id === preMatter.clientId)
+                ? 'person'
+                : preMatter.clientId?.startsWith('O-')
+                  ? 'organisation'
+                  : preMatter.clientId
+                    ? 'person'
+                    : undefined;
+          const existingSavedCosts = preMatter.fieldValues?.['matterCosts'] as
+            | Partial<MatterCostsSnapshot>
+            | undefined;
+          const todayIso = resolveTenantLocalDateAndHour(
+            new Date(),
+            tenantCfg.timeZone || 'Europe/London',
+          ).localDate;
+          const preRates = !existingSavedCosts?.workBasis
+            ? await getRateOverrideRepository().resolveApplicableRates(ctx, {
+                matterId: preMatter.id,
+                clientId: preMatter.clientId || null,
+                clientType: clientTypeForRates ?? null,
+                practiceAreaId: preMatter.practiceAreaId || null,
+                asAtDate: todayIso,
+                baseMatterCostsConfig: tenantCfg.matterCosts,
+                fallbackRateCardConfig: effectiveCostsConfig,
+                timeZone: tenantCfg.timeZone,
+              })
+            : null;
+          const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
+            storeForHro,
+            effectiveTenantCfg,
+            preMatter,
+            effectiveCostsConfig,
+            preRates,
+          );
+          const preGateResult = await runMatterOpeningGate({
+            store: storeForHro,
+            matter: preMatter,
+            isNewMatter: false,
+            extensionCtx: ctx,
+            tenantCfg: effectiveTenantCfg,
+            effectiveCostsConfig,
+            costsHookInput: {
+              matterId: preMatter.id,
+              workBasis: resolvedCosts.workBasis,
+              estimatedFeeGbp,
+              disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+              partnerSignOffCompleted: Boolean(
+                preMatter.fieldValues?.['partnerCostSignOffCompleted'],
+              ),
+            },
+            now: new Date().toISOString(),
+          });
+          preComplianceHroContext = {
+            store: storeForHro,
+            preGateResult,
+            estimatedFeeGbp,
+            people: hroPeople,
+            organisations: extraOrgs,
+            enquiries: srcEnq ? [srcEnq] : [],
+            quotes: srcQuote ? [srcQuote] : [],
+            existingTasks,
+          };
+        }
+      }
+    }
+
     let finalRegisterType = registerTypePre;
     let notificationsQueued = false;
-    const txOutcome = await registerRepo.withTenantTransaction(ctx, async () => {
-      const outcome = await registerRepo.lockAndExecuteTransition(ctx, {
+    const txOutcome = await registerRepo.withTenantTransaction(ctx, async (tx) => {
+      // Global lock order when compliance_approve touches the matter: matters -> register_records -> overrides.
+      if (
+        existingPre.registerTypeKey === 'high_risk_opening' &&
+        input.transitionKey === 'compliance_approve' &&
+        existingPre.matterId
+      ) {
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, existingPre.matterId],
+        );
+      }
+      const outcome = await registerRepo.lockAndExecuteTransitionInTx(tx, ctx, {
         recordId: existingPre.id,
         transitionKey: input.transitionKey,
         actorId: actor.id,
         comment: input.comment?.trim() || null,
-        validateAndCompute: async (lockedRecord) => {
+        validateAndCompute: async (lockedRecord, priorTransitions) => {
           const dbOverrideTx = await catRepo.getModuleConfig<RegistersConfiguration>(
             ctx,
             'registers',
@@ -27938,11 +29642,29 @@ export async function transitionRegisterRecordService(
             });
             if (
               !matterTx ||
-              !canPersonAccessMatter(matterTx, actor.id, actor, { allPeople: people, teams })
+              !canPersonAccessMatter(matterTx, actor.id, actor, {
+                allPeople: people,
+                teams,
+                config: { rbac: rbacConfig },
+              })
             ) {
               throw Object.assign(
                 new Error('You do not have access to the restricted matter linked to this register record.'),
                 { code: 'FORBIDDEN' },
+              );
+            }
+            if (
+              lockedRecord.registerTypeKey === 'high_risk_opening' &&
+              (input.transitionKey === 'partner_approve' ||
+                input.transitionKey === 'compliance_approve') &&
+              (actor.id === matterTx.leadFeeEarnerId ||
+                actor.id === matterTx.responsiblePartnerId)
+            ) {
+              throw createRegisterDomainError(
+                REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
+                input.transitionKey === 'partner_approve'
+                  ? 'You cannot give Partner approval for a matter where you lead the work or are the responsible partner.'
+                  : 'You cannot give Risk & Compliance approval for a matter where you lead the work or are the responsible partner.',
               );
             }
           }
@@ -27955,6 +29677,7 @@ export async function transitionRegisterRecordService(
             actorPermissionSet: effectivePermSet,
             comment: input.comment ?? null,
             expectedRowVersion: effectiveExpectedRowVersion,
+            priorTransitions,
           });
           const nextFieldInput: Record<string, unknown> = {
             ...lockedRecord.fieldValues,
@@ -27993,6 +29716,22 @@ export async function transitionRegisterRecordService(
           ...(outcome.transition.comment ? { reason: outcome.transition.comment } : {}),
         },
       ];
+      if (
+        outcome.updatedRecord.registerTypeKey === 'high_risk_opening' &&
+        outcome.updatedRecord.matterId
+      ) {
+        auditRows.push({
+          recordType: 'matter',
+          recordId: outcome.updatedRecord.matterId,
+          action: 'status-change',
+          field: 'High-risk opening approval',
+          oldValue: outcome.previousRecord.status,
+          newValue: `${outcome.updatedRecord.reference}: ${outcome.updatedRecord.status}${outcome.transition.comment ? ` (${outcome.transition.comment})` : ''}`,
+          byId: actor.id,
+          at: outcome.transition.transitionedAt,
+          ...(outcome.transition.comment ? { reason: outcome.transition.comment } : {}),
+        });
+      }
       if (
         outcome.updatedRecord.registerTypeKey === 'sign_off' &&
         (input.transitionKey === 'approve' || input.transitionKey === 'discuss')
@@ -28084,6 +29823,241 @@ export async function transitionRegisterRecordService(
         if (pushed) notificationsQueued = true;
       }
 
+      // ADR 0039: high_risk_opening partner_approve notifies eligible Risk & Compliance colleagues (excluding owner & actor).
+      if (
+        outcome.updatedRecord.registerTypeKey === 'high_risk_opening' &&
+        input.transitionKey === 'partner_approve'
+      ) {
+        const matterForHroNotif = outcome.updatedRecord.matterId
+          ? await matterRepo.getMatterById<Matter>(ctx, outcome.updatedRecord.matterId, {
+              includeRestricted: true,
+            })
+          : null;
+        const complianceRecipients = people.filter((p) => {
+          if (
+            !p.isEmployee ||
+            isLeaverPerson(p) ||
+            p.mergedIntoId ||
+            p.id === actor.id ||
+            p.id === outcome.updatedRecord.ownerId
+          ) {
+            return false;
+          }
+          const pSet = resolvePersonPermissionSet(p, {
+            allPeople: people,
+            teams,
+            config: { ...tenantCfg, rbac: rbacConfig },
+          });
+          if (
+            !pSet.permissions.has('register:approve') ||
+            !pSet.authoritativeRoles.includes('risk_compliance')
+          ) {
+            return false;
+          }
+          return (
+            !matterForHroNotif ||
+            canPersonAccessMatter(matterForHroNotif, p.id, p, {
+              allPeople: people,
+              teams,
+              config: { rbac: rbacConfig },
+            })
+          );
+        });
+        const preloadedHroNotif = buildNotificationAccessContext({
+          people,
+          teams,
+          effectiveRbac: rbacConfig,
+          matters: matterForHroNotif ? [matterForHroNotif] : [],
+          registerRecords: [outcome.updatedRecord],
+        });
+        for (const compUser of complianceRecipients) {
+          const pushedCompliance = await pushNotification(ctx, {
+            recipientId: compUser.id,
+            kind: 'approval_requested',
+            title: `High-risk opening awaiting Risk & Compliance: ${outcome.updatedRecord.reference}`,
+            detail: outcome.updatedRecord.title,
+            href: '/?panel=partner_sign_off_queue',
+            recordId: outcome.updatedRecord.id,
+            matterId: outcome.updatedRecord.matterId ?? null,
+            knownMatterIds: outcome.updatedRecord.matterId
+              ? [outcome.updatedRecord.matterId]
+              : undefined,
+            knownTask: null,
+            preloaded: preloadedHroNotif,
+            tenantConfig: tenantCfg,
+            byId: actor.id,
+            at: outcome.transition.transitionedAt,
+          });
+          if (pushedCompliance) notificationsQueued = true;
+        }
+      }
+
+      // ADR 0039 / R742: high_risk_opening compliance_approve evaluates the TX opening gate & transitions prospective matter to active.
+      if (
+        outcome.updatedRecord.registerTypeKey === 'high_risk_opening' &&
+        input.transitionKey === 'compliance_approve' &&
+        outcome.updatedRecord.matterId
+      ) {
+        const lockedMatter = await matterRepo.getMatterById<Matter>(
+          ctx,
+          outcome.updatedRecord.matterId,
+          { includeRestricted: true },
+        );
+        if (lockedMatter && !lockedMatter.isPmsImport) {
+          const inTxDbValues =
+            await catRepo.listAllChoiceValues<ChoiceValue>(ctx);
+          const inTxWorkTypesOverride =
+            await catRepo.getWorkTypeConfigs<WorkTypesConfiguration>(ctx);
+          const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+            tenantCfg,
+            inTxWorkTypesOverride ?? null,
+          );
+          const prospectiveStatusId = requireActiveChoiceValueId(
+            inTxDbValues,
+            'matter_status',
+            'prospective',
+          );
+          if (
+            lockedMatter.matterNumber !== 'DRAFT' &&
+            !lockedMatter.matterNumber.startsWith('DRAFT') &&
+            isMatterStatusProspectiveOrDraftLike(
+              lockedMatter.matterStatusId,
+              prospectiveStatusId,
+              inTxDbValues,
+            )
+          ) {
+            const todayLocal = resolveTenantLocalDateAndHour(
+              new Date(),
+              tenantCfg.timeZone || 'Europe/London',
+            ).localDate;
+            const gateEval = await evaluateAndEnforceOpeningGateInTx({
+              tx,
+              ctx,
+              matter: lockedMatter,
+              workTypesConfig: inTxWorkTypesConfig,
+              values: inTxDbValues,
+              people: preComplianceHroContext?.people ?? people,
+              todayYmd: todayLocal,
+              viewerAccess: buildViewerCddAccessFromPermSet(actor, permSet, teams, rbacConfig),
+              tenantCfg,
+              organisations: preComplianceHroContext?.organisations,
+            });
+            const preGateOk = preComplianceHroContext
+              ? preComplianceHroContext.preGateResult.allowProceed
+              : true;
+            if (preGateOk && gateEval.canOpen) {
+              const activeStatusId = requireActiveChoiceValueId(
+                inTxDbValues,
+                'matter_status',
+                'active',
+              );
+              const prevStatusId = lockedMatter.matterStatusId;
+              lockedMatter.matterStatusId = activeStatusId;
+              lockedMatter.recordStatusId = activeStatusId;
+              if (!lockedMatter.openedAt?.trim()) {
+                lockedMatter.openedAt = todayLocal;
+              }
+              lockedMatter.updatedAt = outcome.transition.transitionedAt;
+              lockedMatter.updatedById = actor.id;
+              const cleanFieldVals = { ...(lockedMatter.fieldValues ?? {}) };
+              delete cleanFieldVals['matterOpeningSnapshot'];
+              const hroStore =
+                preComplianceHroContext?.store ??
+                (await loadTenantCatalogueStoreView(ctx));
+              const snapshotPeople = preComplianceHroContext?.people ?? people;
+              const snapshotOrgs = preComplianceHroContext?.organisations ?? [];
+              const openingSnapshot = resolveMatterOpeningSnapshot(
+                { ...lockedMatter, fieldValues: cleanFieldVals },
+                snapshotPeople,
+                snapshotOrgs,
+                inTxDbValues,
+                preComplianceHroContext?.enquiries ?? [],
+                preComplianceHroContext?.quotes ?? [],
+                { firmName: hroStore.firm.name?.trim() || undefined },
+              );
+              openingSnapshot.saveMode = 'opened';
+              openingSnapshot.capturedAt = outcome.transition.transitionedAt;
+              lockedMatter.fieldValues = {
+                ...(lockedMatter.fieldValues ?? {}),
+                ...(preComplianceHroContext?.preGateResult.governance
+                  ? {
+                      matterCostsGovernance:
+                        preComplianceHroContext.preGateResult.governance,
+                    }
+                  : {}),
+                matterOpeningGate: {
+                  allowProceed: true,
+                  estimatedFeeGbp: preComplianceHroContext?.estimatedFeeGbp ?? 0,
+                  checkedAt: outcome.transition.transitionedAt,
+                },
+                matterOpeningSnapshot: openingSnapshot,
+              };
+              const savedHroMatter = await putMatterWithInTxRestrictions(
+                ctx,
+                lockedMatter,
+                { expectedRowVersion: lockedMatter.rowVersion ?? 1 },
+              );
+              const pendingAutoTaskAudits: FirmAuditEntryInput[] = [];
+              await instantiateWorkTypeAutoTasksInTx({
+                ctx,
+                matter: savedHroMatter,
+                people: snapshotPeople,
+                teams,
+                existingTasks: preComplianceHroContext?.existingTasks ?? [],
+                workTypesConfig: inTxWorkTypesConfig,
+                values: inTxDbValues,
+                workingHoursConfig: workingHoursConfigFromStore(hroStore),
+                trigger: 'matter_open',
+                byId: actor.id,
+                nowIso: outcome.transition.transitionedAt,
+                taskRepo: getTaskWorkflowRepository(),
+                writeAuditFn: (entry) => {
+                  pendingAutoTaskAudits.push({
+                    recordType: entry.recordType,
+                    recordId: entry.recordId,
+                    action: entry.action,
+                    field: entry.field ?? null,
+                    oldValue: entry.oldValue ?? null,
+                    newValue: entry.newValue ?? null,
+                    byId: entry.byId,
+                    at: entry.at,
+                    ...(entry.reason ? { reason: entry.reason } : {}),
+                  });
+                },
+                pushNotificationFn: pushNotification,
+              });
+              await appendTenantAuditEntries(ctx, [
+                {
+                  recordType: 'matter',
+                  recordId: savedHroMatter.id,
+                  action: 'status-change',
+                  field: 'Matter status (High-risk opening approved)',
+                  oldValue: prevStatusId,
+                  newValue: `${activeStatusId} (${outcome.updatedRecord.reference} compliance_approve)`,
+                  byId: actor.id,
+                  at: outcome.transition.transitionedAt,
+                },
+                ...pendingAutoTaskAudits,
+              ]);
+            } else {
+              lockedMatter.fieldValues = {
+                ...(lockedMatter.fieldValues ?? {}),
+                matterOpeningGate: {
+                  allowProceed: false,
+                  estimatedFeeGbp: preComplianceHroContext?.estimatedFeeGbp ?? 0,
+                  checkedAt: outcome.transition.transitionedAt,
+                },
+              };
+              lockedMatter.updatedAt = outcome.transition.transitionedAt;
+              lockedMatter.updatedById = actor.id;
+              await putMatterWithInTxRestrictions(ctx, lockedMatter, {
+                expectedRowVersion: null,
+              });
+            }
+          }
+        }
+      }
+
       return outcome;
     });
 
@@ -28092,19 +30066,23 @@ export async function transitionRegisterRecordService(
     }
 
     // Execute afterTransition hook STRICTLY POST-COMMIT outside any write transaction.
-    const afterHookRes = await getPlatformExtensionHost().executeRegisterAfterTransitionHook(
-      ctx,
-      hookCfg,
-      {
-        tenantId: ctx.tenantId,
-        actorId: actor.id,
-        correlationId: ctx.correlationId,
-        registerType: finalRegisterType,
-        previousRecord: txOutcome.previousRecord,
-        updatedRecord: txOutcome.updatedRecord,
-        transition: txOutcome.transition,
-      },
-    );
+    // R782: Restricted compliance register types (`cdd`, `high_risk_opening`) are never passed to generic register hooks.
+    const afterHookRes =
+      finalRegisterType.key === 'cdd' || finalRegisterType.key === 'high_risk_opening'
+        ? { isolatedErrors: [] as string[] }
+        : await getPlatformExtensionHost().executeRegisterAfterTransitionHook(
+            ctx,
+            hookCfg,
+            {
+              tenantId: ctx.tenantId,
+              actorId: actor.id,
+              correlationId: ctx.correlationId,
+              registerType: finalRegisterType,
+              previousRecord: txOutcome.previousRecord,
+              updatedRecord: txOutcome.updatedRecord,
+              transition: txOutcome.transition,
+            },
+          );
     if (afterHookRes.isolatedErrors.length > 0) {
       console.warn(
         JSON.stringify({
@@ -28222,6 +30200,12 @@ export async function updateRegisterRecordDetailsService(
       return registerServiceFailure(
         'FORBIDDEN',
         `Missing permission "${registerType.editPermission}" to edit ${registerType.label}.`,
+      );
+    }
+    if (registerType.systemCreatedOnly) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'This register record is managed by the matter-opening workflow and cannot be edited directly.',
       );
     }
 
@@ -30635,6 +32619,64 @@ export async function executeRegisterRemindersForTenant(
                   tryPermitCandidate(candidatePerson.id);
                 }
               }
+            }
+          } else if (record.registerTypeKey === 'high_risk_opening') {
+            const hroRecipients = new Set<string>();
+            if (record.status === 'pending_partner') {
+              if (linkedMatter?.responsiblePartnerId) {
+                hroRecipients.add(linkedMatter.responsiblePartnerId);
+              }
+              if (linkedMatter?.supervisingPartnerId) {
+                hroRecipients.add(linkedMatter.supervisingPartnerId);
+              }
+              if (record.assignedApproverId) {
+                hroRecipients.add(record.assignedApproverId);
+              }
+              for (const candidatePerson of people) {
+                if (candidatePerson.mergedIntoId || isLeaverPerson(candidatePerson)) {
+                  continue;
+                }
+                const cPerms = getPermsForPerson(candidatePerson);
+                if (
+                  cPerms.permissions.has('register:approve') &&
+                  cPerms.authoritativeRoles.some(
+                    (rk) => rk === 'partner' || rk === 'managing_partner',
+                  )
+                ) {
+                  hroRecipients.add(candidatePerson.id);
+                }
+              }
+            } else if (record.status === 'pending_compliance') {
+              const priorHroTransitions = await registerRepo.listTransitionsForRecord(
+                ctx,
+                record.id,
+                { includeRestricted: true },
+              );
+              const step1ActorId = [...priorHroTransitions]
+                .reverse()
+                .find((t) => t.transitionKey === 'partner_approve')?.actorId;
+              for (const candidatePerson of people) {
+                if (
+                  candidatePerson.mergedIntoId ||
+                  isLeaverPerson(candidatePerson) ||
+                  candidatePerson.id === step1ActorId
+                ) {
+                  continue;
+                }
+                const cPerms = getPermsForPerson(candidatePerson);
+                if (
+                  cPerms.permissions.has('register:approve') &&
+                  cPerms.authoritativeRoles.includes('risk_compliance')
+                ) {
+                  hroRecipients.add(candidatePerson.id);
+                }
+              }
+            }
+            if (record.ownerId) {
+              hroRecipients.delete(record.ownerId);
+            }
+            for (const pid of hroRecipients) {
+              tryPermitCandidate(pid);
             }
           } else {
             const rawRecipientIds = new Set<string>();
@@ -33837,5 +35879,1196 @@ export async function getExpiredEnquiriesCountRecord(
     cutoffIso,
   );
   return { count };
+}
+
+// ============================================================================
+// S1-05 (ADRs 0039 & 0040): Per-Work-Type Opening Gate, Overrides,
+// Server-Stamped Engagement, Open Prospective Matter & Matter Numbering Config
+// ============================================================================
+
+const VALID_OPENING_GATE_PRECONDITIONS = new Set<OpeningGatePreconditionKey>([
+  'conflict_cleared',
+  'cdd_complete',
+  'engagement_signed',
+  'funds_on_account',
+]);
+
+async function loadScopedMatterContextForOpening(params: {
+  ctx: TenantContext;
+  matter: Matter;
+  staffPeople: readonly Person[];
+}) {
+  const { ctx, matter, staffPeople } = params;
+  const partyRepo = getPartyRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+  const taskRepo = getTaskWorkflowRepository();
+  const refIds = Array.from(
+    new Set(
+      [
+        matter.clientId,
+        ...(matter.additionalClientIds ?? []),
+        matter.instructingContactId,
+        matter.billingContactId,
+        matter.referrerContactId,
+        ...(matter.parties ?? []).map((p) => p.linkedRecordId),
+      ].filter((id): id is string => Boolean(id && !id.startsWith('ENQ-'))),
+    ),
+  );
+  const [extraPeople, organisations, srcEnq, srcQuote, existingTasks] =
+    await Promise.all([
+      refIds.length > 0
+        ? partyRepo.listPeopleByIds<Person>(ctx, refIds)
+        : Promise.resolve<Person[]>([]),
+      refIds.length > 0
+        ? partyRepo.listOrganisationsByIds<Organisation>(ctx, refIds)
+        : Promise.resolve<Organisation[]>([]),
+      matter.sourceEnquiryId
+        ? intakeRepo.getEnquiryById<Enquiry>(ctx, matter.sourceEnquiryId, {
+            includeRestricted: true,
+          })
+        : Promise.resolve<Enquiry | null>(null),
+      matter.sourceQuoteId
+        ? intakeRepo.getQuoteByIdOrReference<Quote>(ctx, matter.sourceQuoteId, {
+            includeRestricted: true,
+          })
+        : Promise.resolve<Quote | null>(null),
+      taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', matter.id),
+    ]);
+  return {
+    people: dedupeById([...staffPeople, ...extraPeople]),
+    organisations,
+    enquiries: srcEnq ? [srcEnq] : [],
+    quotes: srcQuote ? [srcQuote] : [],
+    existingTasks,
+  };
+}
+
+async function finalizeProspectiveMatterOpeningInTx(params: {
+  ctx: TenantContext;
+  matter: Matter;
+  targetStatusId: string;
+  todayLocal: string;
+  nowIso: string;
+  actorId: string;
+  estimatedFeeGbp: number;
+  governance: unknown;
+  store: FirmStore;
+  workTypesConfig: WorkTypesConfiguration;
+  values: ChoiceValue[];
+  people: readonly Person[];
+  teams: readonly Team[];
+  organisations: readonly Organisation[];
+  enquiries: readonly Enquiry[];
+  quotes: readonly Quote[];
+  existingTasks: readonly Task[];
+  auditField: string;
+  auditNewValuePrefix: string;
+  expectedRowVersion?: number | null;
+}): Promise<Matter> {
+  const {
+    ctx,
+    matter,
+    targetStatusId,
+    todayLocal,
+    nowIso,
+    actorId,
+    estimatedFeeGbp,
+    governance,
+    store,
+    workTypesConfig,
+    values,
+    people,
+    teams,
+    organisations,
+    enquiries,
+    quotes,
+    existingTasks,
+    auditField,
+    auditNewValuePrefix,
+    expectedRowVersion = null,
+  } = params;
+  const prevStatusId = matter.matterStatusId;
+  matter.matterStatusId = targetStatusId;
+  matter.recordStatusId = targetStatusId;
+  if (!matter.openedAt?.trim()) {
+    matter.openedAt = todayLocal;
+  }
+  matter.updatedAt = nowIso;
+  matter.updatedById = actorId;
+  const cleanFieldVals = { ...(matter.fieldValues ?? {}) };
+  delete cleanFieldVals['matterOpeningSnapshot'];
+  const openingSnapshot = resolveMatterOpeningSnapshot(
+    { ...matter, fieldValues: cleanFieldVals },
+    [...people],
+    [...organisations],
+    values,
+    [...enquiries],
+    [...quotes],
+    { firmName: store.firm.name?.trim() || undefined },
+  );
+  openingSnapshot.saveMode = 'opened';
+  openingSnapshot.capturedAt = nowIso;
+  matter.fieldValues = {
+    ...(matter.fieldValues ?? {}),
+    ...(governance !== undefined ? { matterCostsGovernance: governance } : {}),
+    matterOpeningGate: {
+      allowProceed: true,
+      estimatedFeeGbp,
+      checkedAt: nowIso,
+    },
+    matterOpeningSnapshot: openingSnapshot,
+  };
+  const saved = await putMatterWithInTxRestrictions(ctx, matter, {
+    expectedRowVersion,
+  });
+  const pendingAutoTaskAudits: FirmAuditEntryInput[] = [];
+  await instantiateWorkTypeAutoTasksInTx({
+    ctx,
+    matter: saved,
+    people,
+    teams,
+    existingTasks,
+    workTypesConfig,
+    values,
+    workingHoursConfig: workingHoursConfigFromStore(store),
+    trigger: 'matter_open',
+    byId: actorId,
+    nowIso,
+    taskRepo: getTaskWorkflowRepository(),
+    writeAuditFn: (entry) => {
+      pendingAutoTaskAudits.push({
+        recordType: entry.recordType,
+        recordId: entry.recordId,
+        action: entry.action,
+        field: entry.field ?? null,
+        oldValue: entry.oldValue ?? null,
+        newValue: entry.newValue ?? null,
+        byId: entry.byId,
+        at: entry.at,
+        ...(entry.reason ? { reason: entry.reason } : {}),
+      });
+    },
+    pushNotificationFn: pushNotification,
+  });
+  await appendTenantAuditEntries(ctx, [
+    {
+      recordType: 'matter',
+      recordId: saved.id,
+      action: 'status-change',
+      field: auditField,
+      oldValue: prevStatusId,
+      newValue: `${targetStatusId} — ${auditNewValuePrefix}`,
+      byId: actorId,
+      at: nowIso,
+    },
+    ...pendingAutoTaskAudits,
+  ]);
+  return saved;
+}
+
+export async function getMatterOpeningGateStateRecord(
+  matterId: string,
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      evaluation: OpeningGateEvaluation;
+      isProspective: boolean;
+      highRiskRecord: OpeningGateHighRiskRecordView | null;
+      canOverridePermission: boolean;
+      canEditMatter: boolean;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    const matterRepo = getMatterRepository();
+    const matter = await matterRepo.getMatterById<Matter>(ctx, matterId?.trim() || '', {
+      includeRestricted: true,
+    });
+    if (
+      !matter ||
+      !canPersonAccessMatter(matter, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
+    }
+
+    const registerRepo = getRegisterRepository();
+    const todayYmd = resolveTenantLocalDateAndHour(
+      new Date(),
+      tenantCfg.timeZone || 'Europe/London',
+    ).localDate;
+    const store = await loadTenantCatalogueStoreView(ctx);
+    const gateViewerAccess = buildViewerCddAccessFromPermSet(
+      actor,
+      permSet,
+      teams,
+      rbacConfig,
+    );
+    const [rawOverrides, rawHroRecords, cddStatus] = await Promise.all([
+      matterRepo.listOpeningGateOverridesForMatter(ctx, matter.id, {
+        activeOnly: true,
+      }),
+      registerRepo.listVisibleRegisterRecords(ctx, actor.id, {
+        includeRestricted: true,
+        registerTypeKey: 'high_risk_opening',
+        matterId: matter.id,
+      }),
+      resolveClientCddStatusReadOnly({
+        ctx,
+        clientIds: [matter.clientId, ...(matter.additionalClientIds ?? [])],
+        matterRiskRatingId: matter.riskRatingId,
+        values: store.values,
+        todayYmd,
+        viewerAccess: gateViewerAccess,
+        tenantCfg,
+        people,
+      }),
+    ]);
+
+    const workTypesConfig =
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        store.workTypeConfigsOverride ?? null,
+      );
+    const gateConfig = resolveWorkTypeOpeningGate(workTypesConfig, {
+      workTypeSubcategoryId: matter.workTypeSubcategoryId,
+      practiceAreaId: matter.practiceAreaId,
+    });
+    const requiresHighRiskApproval = isHighOrCriticalRiskRating(
+      matter.riskRatingId,
+      store.values,
+    );
+    const hroRecords = rawHroRecords.filter(isSystemCreatedHroRecord);
+    const selectedHro =
+      hroRecords.find((r) => r.status === 'approved') ??
+      hroRecords.find(
+        (r) =>
+          r.status === 'pending_partner' || r.status === 'pending_compliance',
+      ) ??
+      hroRecords[0] ??
+      null;
+
+    let partnerApprover: {
+      actorId: string;
+      actorName?: string | null;
+      transitionedAt: string;
+    } | null = null;
+    let complianceApproverName: string | null = null;
+    if (selectedHro) {
+      const hroTransitions = await registerRepo.listTransitionsForRecord(
+        ctx,
+        selectedHro.id,
+        { includeRestricted: true },
+      );
+      const partnerTr = [...hroTransitions]
+        .reverse()
+        .find((t) => t.transitionKey === 'partner_approve');
+      if (partnerTr) {
+        const pActor = people.find((p) => p.id === partnerTr.actorId);
+        partnerApprover = {
+          actorId: partnerTr.actorId,
+          actorName: pActor ? personDisplayName(pActor) : null,
+          transitionedAt: partnerTr.transitionedAt,
+        };
+      }
+      const complianceTr = [...hroTransitions]
+        .reverse()
+        .find((t) => t.transitionKey === 'compliance_approve');
+      if (complianceTr) {
+        const cActor = people.find((p) => p.id === complianceTr.actorId);
+        complianceApproverName = cActor ? personDisplayName(cActor) : null;
+      }
+    }
+
+    const evaluation = evaluateOpeningPreconditions({
+      matter,
+      gateConfig,
+      cddStatus,
+      activeOverrides: mapOverridesToSummaries(rawOverrides, people),
+      highRiskRecord: selectedHro,
+      highRiskPartnerApprover: partnerApprover,
+      requiresHighRiskApproval,
+      fundsOnAccountSatisfied: false,
+    });
+
+    const prospectiveStatusId = resolveProspectiveStatusId(store);
+    const isProspective = isMatterStatusProspectiveOrDraftLike(
+      matter.matterStatusId,
+      prospectiveStatusId,
+      store.values,
+    );
+
+    const highRiskRecordView: OpeningGateHighRiskRecordView | null = selectedHro
+      ? {
+          id: selectedHro.id,
+          reference: selectedHro.reference,
+          status: selectedHro.status,
+          rowVersion: selectedHro.rowVersion,
+          partnerApproverName: partnerApprover?.actorName ?? null,
+          complianceApproverName,
+          decidedAt: selectedHro.decidedAt ?? null,
+        }
+      : null;
+
+    return {
+      ok: true,
+      evaluation,
+      isProspective,
+      highRiskRecord: highRiskRecordView,
+      canOverridePermission: permSet.permissions.has(
+        'matter:opening_gate:override',
+      ),
+      canEditMatter: permSet.permissions.has('matter:edit'),
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function openProspectiveMatterRecord(
+  matterId: string,
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      matter: Matter;
+      alreadyOpened?: boolean;
+      openingGate?: OpeningGateEvaluation;
+    }
+  | (RegisterServiceDenialOrError & {
+      openingGate?: OpeningGateEvaluation;
+      errors?: Record<string, string>;
+    })
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('matter:edit')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to open prospective matters.',
+      );
+    }
+
+    const matterRepo = getMatterRepository();
+    const matter = await matterRepo.getMatterById<Matter>(
+      ctx,
+      matterId?.trim() || '',
+      { includeRestricted: true },
+    );
+    if (
+      !matter ||
+      !canPersonAccessMatter(matter, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
+    }
+    const preLockRowVersion = matter.rowVersion ?? 1;
+
+    const store = await loadTenantCatalogueStoreView(ctx);
+    const prospectiveStatusId = resolveProspectiveStatusId(store);
+    const cmiIncompleteStatusId = resolveCmiIncompleteStatusId(store);
+    if (
+      !isMatterStatusProspectiveOrDraftLike(
+        matter.matterStatusId,
+        prospectiveStatusId,
+        store.values,
+      ) &&
+      !matter.matterNumber.startsWith('DRAFT')
+    ) {
+      return { ok: true, matter, alreadyOpened: true };
+    }
+    if (
+      !matter.matterNumber?.trim() ||
+      matter.matterNumber === 'DRAFT' ||
+      matter.matterNumber.startsWith('DRAFT')
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Save and submit this matter before opening it.',
+      );
+    }
+
+    const scoped = await loadScopedMatterContextForOpening({
+      ctx,
+      matter,
+      staffPeople: people,
+    });
+    const catRepo = getCatalogueRepository();
+    const liveDbCostsOverride =
+      await catRepo.getMatterCostsConfig<MatterCostsConfig>(ctx);
+    const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
+      tenantCfg,
+      liveDbCostsOverride ?? store.matterCostsConfig,
+      {
+        values: store.values,
+        clientProfileCode: tenantCfg.tenantId,
+        displayName: tenantCfg.displayName,
+        primaryDomain: tenantCfg.branding.primaryDomain,
+      },
+    );
+    const effectiveTenantCfg = applyEffectiveMatterCostsToTenantConfig(
+      tenantCfg,
+      effectiveCostsConfig,
+    );
+    const clientTypeForRates: ClientRateOverrideClientType | undefined =
+      scoped.organisations.some((o) => o.id === matter.clientId)
+        ? 'organisation'
+        : scoped.people.some((p) => p.id === matter.clientId)
+          ? 'person'
+          : matter.clientId?.startsWith('O-')
+            ? 'organisation'
+            : matter.clientId
+              ? 'person'
+              : undefined;
+    const todayLocal = resolveTenantLocalDateAndHour(
+      new Date(),
+      tenantCfg.timeZone || 'Europe/London',
+    ).localDate;
+    const existingSavedCosts = matter.fieldValues?.['matterCosts'] as
+      | Partial<MatterCostsSnapshot>
+      | undefined;
+    const preRates = !existingSavedCosts?.workBasis
+      ? await getRateOverrideRepository().resolveApplicableRates(ctx, {
+          matterId: matter.id,
+          clientId: matter.clientId || null,
+          clientType: clientTypeForRates ?? null,
+          practiceAreaId: matter.practiceAreaId || null,
+          asAtDate: todayLocal,
+          baseMatterCostsConfig: tenantCfg.matterCosts,
+          fallbackRateCardConfig: effectiveCostsConfig,
+          timeZone: tenantCfg.timeZone,
+        })
+      : null;
+    const { resolvedCosts, estimatedFeeGbp } = resolveMatterSignOffEstimateGbp(
+      store,
+      effectiveTenantCfg,
+      matter,
+      effectiveCostsConfig,
+      preRates,
+    );
+    const nowIso = nextMonotonicIsoTimestamp(matter.updatedAt);
+    const preGate = await runMatterOpeningGate({
+      store,
+      matter,
+      isNewMatter: false,
+      extensionCtx: ctx,
+      tenantCfg: effectiveTenantCfg,
+      effectiveCostsConfig,
+      costsHookInput: {
+        matterId: matter.id,
+        workBasis: resolvedCosts.workBasis,
+        estimatedFeeGbp,
+        disbursementsTotalGbp: resolvedCosts.disbursementsTotalGbp,
+        partnerSignOffCompleted: Boolean(
+          matter.fieldValues?.['partnerCostSignOffCompleted'],
+        ),
+      },
+      now: nowIso,
+    });
+
+    return await matterRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matter.id],
+      );
+      const lockedMatter = await matterRepo.getMatterById<Matter>(ctx, matter.id, {
+        includeRestricted: true,
+      });
+      if (!lockedMatter) {
+        return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
+      }
+      if ((lockedMatter.rowVersion ?? 1) !== preLockRowVersion) {
+        return registerServiceFailure(
+          MATTER_CONCURRENCY_CONFLICT_CODE,
+          'This matter changed while checking opening requirements. Please reload and try again.',
+        );
+      }
+
+      const inTxDbValues = await catRepo.listAllChoiceValues<ChoiceValue>(ctx);
+      const inTxProspectiveStatus = requireActiveChoiceValueId(
+        inTxDbValues,
+        'matter_status',
+        'prospective',
+      );
+      if (
+        !isMatterStatusProspectiveOrDraftLike(
+          lockedMatter.matterStatusId,
+          inTxProspectiveStatus,
+          inTxDbValues,
+        ) &&
+        !lockedMatter.matterNumber.startsWith('DRAFT')
+      ) {
+        return { ok: true as const, matter: lockedMatter, alreadyOpened: true };
+      }
+
+      if (
+        !lockedMatter.matterNumber?.trim() ||
+        lockedMatter.matterNumber === 'DRAFT' ||
+        lockedMatter.matterNumber.startsWith('DRAFT')
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Save and submit this matter before opening it.',
+        );
+      }
+
+      const inTxWorkTypesOverride =
+        await catRepo.getWorkTypeConfigs<WorkTypesConfiguration>(ctx);
+      const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        inTxWorkTypesOverride ?? null,
+      );
+
+      if (!lockedMatter.isPmsImport) {
+        await syncHighRiskOpeningForMatterInTx({
+          tx,
+          ctx,
+          tenantCfg,
+          matter: lockedMatter,
+          values: inTxDbValues,
+          actorId: actor.id,
+          actorPermissionSet: permSet.permissions,
+          isDraftSave: false,
+          people: scoped.people,
+          teams,
+          rbacConfig,
+        });
+      }
+
+      const gateEval = await evaluateAndEnforceOpeningGateInTx({
+        tx,
+        ctx,
+        matter: lockedMatter,
+        workTypesConfig: inTxWorkTypesConfig,
+        values: inTxDbValues,
+        people: scoped.people,
+        todayYmd: todayLocal,
+        viewerAccess: buildViewerCddAccessFromPermSet(actor, permSet, teams, rbacConfig),
+        tenantCfg,
+        organisations: scoped.organisations,
+      });
+
+      if (!preGate.allowProceed || !gateEval.canOpen) {
+        lockedMatter.fieldValues = {
+          ...(lockedMatter.fieldValues ?? {}),
+          matterCostsGovernance: preGate.governance,
+          matterOpeningGate: {
+            allowProceed: false,
+            estimatedFeeGbp,
+            checkedAt: nowIso,
+          },
+        };
+        lockedMatter.updatedAt = nowIso;
+        lockedMatter.updatedById = actor.id;
+        await putMatterWithInTxRestrictions(ctx, lockedMatter, {
+          expectedRowVersion: preLockRowVersion,
+        });
+        const reasons = Array.from(
+          new Set([
+            ...Object.values(preGate.errors),
+            ...gateEval.blockingReasons,
+          ]),
+        );
+        const msg =
+          reasons.join(' · ') ||
+          'Matter cannot open until all required opening checks are satisfied or overridden.';
+        return {
+          ok: false as const,
+          code: OPENING_GATE_OVERRIDE_ERROR_CODES.BLOCKED,
+          message: msg,
+          error: msg,
+          openingGate: gateEval,
+          ...(Object.keys(preGate.errors).length > 0
+            ? { errors: preGate.errors }
+            : {}),
+        };
+      }
+
+      const openedMatter = await finalizeProspectiveMatterOpeningInTx({
+        ctx,
+        matter: lockedMatter,
+        targetStatusId: cmiIncompleteStatusId,
+        todayLocal,
+        nowIso,
+        actorId: actor.id,
+        estimatedFeeGbp,
+        governance: preGate.governance,
+        store,
+        workTypesConfig: inTxWorkTypesConfig,
+        values: inTxDbValues,
+        people: scoped.people,
+        teams,
+        organisations: scoped.organisations,
+        enquiries: scoped.enquiries,
+        quotes: scoped.quotes,
+        existingTasks: scoped.existingTasks,
+        auditField: 'Matter opening (Open matter)',
+        auditNewValuePrefix: `${lockedMatter.matterNumber} opened by ${personDisplayName(actor)}`,
+        expectedRowVersion: preLockRowVersion,
+      });
+      return {
+        ok: true as const,
+        matter: openedMatter,
+        openingGate: gateEval,
+      };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function recordEngagementLetterSignedRecord(
+  input: {
+    matterId: string;
+    status?: 'Signed' | 'Signed & returned';
+    note?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<{ ok: true; matter: Matter } | RegisterServiceDenialOrError> {
+  try {
+    const { ctx, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('matter:edit')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to record signed engagement letters.',
+      );
+    }
+
+    const targetStatus = input.status ?? 'Signed & returned';
+    if (!isEngagementLetterSignedStatus(targetStatus)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Signed engagement status must be "Signed" or "Signed & returned".',
+      );
+    }
+
+    const matterRepo = getMatterRepository();
+    const matterPre = await matterRepo.getMatterById<Matter>(
+      ctx,
+      input.matterId?.trim() || '',
+      { includeRestricted: true },
+    );
+    if (
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
+    }
+
+    const cleanNote = input.note?.trim() || '';
+    const actorName = personDisplayName(actor);
+    return await matterRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedMatter = await matterRepo.getMatterById<Matter>(
+        ctx,
+        matterPre.id,
+        { includeRestricted: true },
+      );
+      if (!lockedMatter) {
+        return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
+      }
+      const nowIso = nextMonotonicIsoTimestamp(lockedMatter.updatedAt);
+      const prevStatus = lockedMatter.engagementLetterStatus || 'Drafting';
+      lockedMatter.engagementLetterStatus = targetStatus;
+      lockedMatter.engagementLetterSignedAt = nowIso;
+      lockedMatter.updatedAt = nowIso;
+      lockedMatter.updatedById = actor.id;
+      const saved = await putMatterWithInTxRestrictions(ctx, lockedMatter, {
+        expectedRowVersion: null,
+      });
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'matter',
+          recordId: saved.id,
+          action: 'update',
+          field: 'Engagement letter signed',
+          oldValue: prevStatus,
+          newValue: `${targetStatus} (recorded by ${actorName})${cleanNote ? ` — ${cleanNote}` : ''}`,
+          byId: actor.id,
+          at: nowIso,
+          ...(cleanNote ? { reason: cleanNote } : {}),
+        },
+      ]);
+      return { ok: true as const, matter: saved };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function overrideMatterOpeningPreconditionRecord(
+  input: {
+    matterId: string;
+    preconditionKey: OpeningGatePreconditionKey;
+    reason: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      override: MatterOpeningGateOverrideRecord;
+      evaluation: OpeningGateEvaluation;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('matter:opening_gate:override')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to override matter opening preconditions.',
+      );
+    }
+    if (!VALID_OPENING_GATE_PRECONDITIONS.has(input.preconditionKey)) {
+      return registerServiceFailure(
+        OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
+        `Unknown opening precondition "${input.preconditionKey}".`,
+      );
+    }
+    const cleanReason = input.reason?.trim() || '';
+    if (cleanReason.length < 10) {
+      return registerServiceFailure(
+        OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
+        'An override reason of at least 10 characters is required.',
+      );
+    }
+
+    const matterRepo = getMatterRepository();
+    const catRepo = getCatalogueRepository();
+    const matterPre = await matterRepo.getMatterById<Matter>(
+      ctx,
+      input.matterId?.trim() || '',
+      { includeRestricted: true },
+    );
+    if (
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
+    }
+
+    const todayYmd = resolveTenantLocalDateAndHour(
+      new Date(),
+      tenantCfg.timeZone || 'Europe/London',
+    ).localDate;
+
+    return await matterRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedMatter = await matterRepo.getMatterById<Matter>(
+        ctx,
+        matterPre.id,
+        { includeRestricted: true },
+      );
+      if (!lockedMatter) {
+        return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
+      }
+
+      const inTxDbValues = await catRepo.listAllChoiceValues<ChoiceValue>(ctx);
+      const prospectiveStatusId = requireActiveChoiceValueId(
+        inTxDbValues,
+        'matter_status',
+        'prospective',
+      );
+      if (
+        !isMatterStatusProspectiveOrDraftLike(
+          lockedMatter.matterStatusId,
+          prospectiveStatusId,
+          inTxDbValues,
+        )
+      ) {
+        return registerServiceFailure(
+          OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
+          'Opening gate overrides can only be recorded while a matter is Prospective.',
+        );
+      }
+
+      const inTxWorkTypesOverride =
+        await catRepo.getWorkTypeConfigs<WorkTypesConfiguration>(ctx);
+      const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        inTxWorkTypesOverride ?? null,
+      );
+      const overrideViewerAccess = buildViewerCddAccessFromPermSet(
+        actor,
+        permSet,
+        teams,
+        rbacConfig,
+      );
+
+      const preEval = await evaluateAndEnforceOpeningGateInTx({
+        tx,
+        ctx,
+        matter: lockedMatter,
+        workTypesConfig: inTxWorkTypesConfig,
+        values: inTxDbValues,
+        people,
+        todayYmd,
+        viewerAccess: overrideViewerAccess,
+        tenantCfg,
+      });
+      const check = preEval.preconditions.find(
+        (p) => p.key === input.preconditionKey,
+      );
+      if (!check) {
+        return registerServiceFailure(
+          OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
+          `Precondition "${input.preconditionKey}" could not be evaluated.`,
+        );
+      }
+      if (check.rawSatisfied) {
+        return registerServiceFailure(
+          OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
+          `${check.label} is already satisfied; no override is needed.`,
+        );
+      }
+      if (check.activeOverride) {
+        return registerServiceFailure(
+          'OPENING_GATE_OVERRIDE_ALREADY_ACTIVE',
+          `An active override already exists for "${check.label}".`,
+        );
+      }
+      if (!check.canOverride) {
+        return registerServiceFailure(
+          OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
+          check.nonOverridableReason ||
+            `Precondition "${check.label}" cannot be overridden.`,
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      let inserted: MatterOpeningGateOverrideRecord;
+      try {
+        inserted = await matterRepo.insertOpeningGateOverrideInTx(tx, ctx, {
+          matterId: lockedMatter.id,
+          preconditionKey: input.preconditionKey,
+          reason: cleanReason,
+          overriddenByPersonId: actor.id,
+          overriddenAtIso: nowIso,
+        });
+      } catch (err) {
+        const pgErr = err as { code?: string };
+        if (pgErr?.code === '23505') {
+          return registerServiceFailure(
+            'OPENING_GATE_OVERRIDE_ALREADY_ACTIVE',
+            `An active override already exists for "${check.label}".`,
+          );
+        }
+        throw err;
+      }
+
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'matter',
+          recordId: lockedMatter.id,
+          action: 'update',
+          field: 'Opening gate override',
+          oldValue: null,
+          newValue: `${check.label} (${input.preconditionKey}) overridden by ${personDisplayName(actor)} (${inserted.id})`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+        },
+      ]);
+
+      // R751: Granting an override never auto-opens the matter; user/partner clicks Open matter explicitly.
+      const evaluation = await evaluateAndEnforceOpeningGateInTx({
+        tx,
+        ctx,
+        matter: lockedMatter,
+        workTypesConfig: inTxWorkTypesConfig,
+        values: inTxDbValues,
+        people,
+        todayYmd,
+        viewerAccess: overrideViewerAccess,
+        tenantCfg,
+      });
+
+      return {
+        ok: true as const,
+        override: inserted,
+        evaluation,
+      };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function revokeMatterOpeningOverrideRecord(
+  input: {
+    matterId: string;
+    overrideId: string;
+    reason?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      override: MatterOpeningGateOverrideRecord;
+      evaluation: OpeningGateEvaluation;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('matter:opening_gate:override')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to revoke opening gate overrides.',
+      );
+    }
+    const cleanRevokeReason = input.reason?.trim() || '';
+    if (cleanRevokeReason.length < 10) {
+      return registerServiceFailure(
+        OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
+        'A revocation reason of at least 10 characters is required.',
+      );
+    }
+
+    const matterRepo = getMatterRepository();
+    const catRepo = getCatalogueRepository();
+    const matterPre = await matterRepo.getMatterById<Matter>(
+      ctx,
+      input.matterId?.trim() || '',
+      { includeRestricted: true },
+    );
+    if (
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
+    }
+
+    const todayYmd = resolveTenantLocalDateAndHour(
+      new Date(),
+      tenantCfg.timeZone || 'Europe/London',
+    ).localDate;
+
+    return await matterRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedMatter = await matterRepo.getMatterById<Matter>(
+        ctx,
+        matterPre.id,
+        { includeRestricted: true },
+      );
+      if (!lockedMatter) {
+        return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
+      }
+      const inTxDbValues = await catRepo.listAllChoiceValues<ChoiceValue>(ctx);
+      const prospectiveStatusId = requireActiveChoiceValueId(
+        inTxDbValues,
+        'matter_status',
+        'prospective',
+      );
+      if (
+        !isMatterStatusProspectiveOrDraftLike(
+          lockedMatter.matterStatusId,
+          prospectiveStatusId,
+          inTxDbValues,
+        )
+      ) {
+        return registerServiceFailure(
+          OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
+          'This matter is no longer prospective, so opening overrides cannot be revoked.',
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const revoked = await matterRepo.revokeOpeningGateOverrideInTx(tx, ctx, {
+        overrideId: input.overrideId?.trim() || '',
+        matterId: lockedMatter.id,
+        revokedByPersonId: actor.id,
+        revokedAtIso: nowIso,
+      });
+      if (!revoked) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Active opening gate override was not found.',
+        );
+      }
+
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'matter',
+          recordId: lockedMatter.id,
+          action: 'update',
+          field: 'Opening gate override revoked',
+          oldValue: `${revoked.preconditionKey} (${revoked.id})`,
+          newValue: `Revoked by ${personDisplayName(actor)}`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanRevokeReason,
+        },
+      ]);
+
+      const inTxWorkTypesOverride =
+        await catRepo.getWorkTypeConfigs<WorkTypesConfiguration>(ctx);
+      const inTxWorkTypesConfig = resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        inTxWorkTypesOverride ?? null,
+      );
+      const evaluation = await evaluateAndEnforceOpeningGateInTx({
+        tx,
+        ctx,
+        matter: lockedMatter,
+        workTypesConfig: inTxWorkTypesConfig,
+        values: inTxDbValues,
+        people,
+        todayYmd,
+        viewerAccess: buildViewerCddAccessFromPermSet(actor, permSet, teams, rbacConfig),
+        tenantCfg,
+      });
+
+      return {
+        ok: true as const,
+        override: revoked,
+        evaluation,
+      };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function saveMatterNumberingConfigRecord(
+  newConfigInput: MatterNumberingConfig,
+  reason: string,
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<{ ok: true; config: MatterNumberingConfig } | RegisterServiceDenialOrError> {
+  try {
+    const { ctx, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      options?.mfaVerified,
+      options,
+    );
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to update matter numbering configuration.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to update matter numbering configuration.',
+      );
+    }
+    const cleanReason = reason?.trim() || '';
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'An audited change reason is required to save matter numbering configuration.',
+      );
+    }
+    const schemaCheck = MatterNumberingConfigSubSchema.unwrap().safeParse(
+      newConfigInput,
+    );
+    if (!schemaCheck.success) {
+      return registerServiceFailure(
+        'MATTER_NUMBERING_VALIDATION_ERROR',
+        schemaCheck.error.issues.map((i) => i.message).join(' '),
+      );
+    }
+    const parsedConfig: MatterNumberingConfig = schemaCheck.data;
+    const configCheck = validateMatterNumberingConfig(parsedConfig);
+    if (!configCheck.ok) {
+      return registerServiceFailure(
+        'MATTER_NUMBERING_VALIDATION_ERROR',
+        configCheck.error,
+      );
+    }
+
+    const catRepo = getCatalogueRepository();
+    const nowIso = new Date().toISOString();
+    const saved = await catRepo.withTenantTransaction(ctx, async () => {
+      const prev =
+        await catRepo.getMatterNumberingConfig<MatterNumberingConfig>(ctx);
+      const stored = await catRepo.putMatterNumberingConfig(
+        ctx,
+        parsedConfig,
+        actor.id,
+      );
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'system',
+          recordId: 'FIRM-MATTER-NUMBERING-CONFIG',
+          action: 'update',
+          field: 'Matter numbering configuration',
+          oldValue: prev
+            ? `${prev.pattern} (${prev.sequenceScope})`
+            : 'default',
+          newValue: `${stored.pattern} (${stored.sequenceScope}, fallback=${stored.emptyTokenFallback})`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+          snapshot: { before: prev, after: stored },
+        },
+      ]);
+      return stored;
+    });
+    return { ok: true, config: saved };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
 }
 

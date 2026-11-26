@@ -87,10 +87,12 @@ export default async function MatterProfilePage({
         keyDateCalendarSyncs={data.keyDateCalendarSyncs}
         userKeyDatePermissions={shell.currentUserKeyDatePermissions}
         userPermissions={shell.currentUserPermissions}
+        userRoles={shell.currentUserRoles}
         registersConfig={data.registersConfig}
         registerTypes={data.registerTypes}
         matterRegisterRecords={data.matterRegisterRecords}
         matterRegisterTransitions={data.matterRegisterTransitions}
+        openingGateState={data.openingGateState}
         canVerifyByKeyDateId={data.canVerifyByKeyDateId}
         canTakeByTaskId={data.canTakeByTaskId}
         canViewFinance={shell.finance.canViewMatter}

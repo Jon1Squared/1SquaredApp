@@ -127,6 +127,8 @@ export interface RegisterTransitionDefinition {
   distinctFromTransitionKeys?: readonly string[];
   /** When true, only dedicated core system workflows may execute this transition directly (R765). */
   systemOnly?: boolean;
+  /** When true, executing this transition starts a fresh multi-stage approval cycle for distinct-approver checks. */
+  resetsApprovalCycle?: boolean;
   setsDecidedAt?: boolean;
 }
 
@@ -159,6 +161,8 @@ export interface RegisterTypeDefinition {
   editPermission: RegisterPermission;
   subjectScope?: RegisterSubjectScope;
   requireMatterLink?: boolean;
+  /** When true, users cannot create records via generic register creation; records are managed only by core workflows (R764). */
+  systemCreatedOnly?: boolean;
   /**
    * `null` for direct creation registers such as `undertaking` (no two-person partner approval gate).
    */

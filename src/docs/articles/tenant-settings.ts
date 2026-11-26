@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-21',
+  updated: '2026-11-25',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -133,6 +133,18 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 | \`workTypes.items[]\` | \`[]\` | Active | Per-work-type and practice-area overrides for auto-task templates, risk questions/weights, and closure retention periods, merged with administrator work-type configuration (\`admin:access\` + MFA) |
 | \`workTypes.items[].feeArrangementCapCategories\` | Optional | Active | Maps \`conditional_fee_agreement\` and \`damages_based_agreement\` fee bases on a work type to a core statutory cap category key (\`cfa_general_civil\`, \`cfa_personal_injury\`, \`dba_general_civil\`, \`dba_employment\`, \`dba_personal_injury\`); unmapped CFA/DBA matters and quotes fail closed with \`FEE_CAP_CATEGORY_UNMAPPED\` (\`S0-28b\`) |
 | \`workTypes.items[].workTypeCapOverrides\` | \`[]\` | Active | Per-work-type CFA/DBA fee cap percentage overrides (\`R486\`, editable up to each category’s core statutory maximum regardless of lower firm defaults; takes precedence over \`matterCosts.feeArrangementCaps\` when present) |
+| Firm opening gate defaults | Client Due Diligence and incomplete-conflict overrides allowed by default; other checks not required | Active | Firm-wide opening checks covering whether incomplete conflict checks can be overridden, Client Due Diligence, whether Client Due Diligence overrides are allowed, signed engagement letter, and funds on account; administrators enable or adjust defaults in **Administration → Work types** |
+| Work-type opening gate rules | Inherits firm defaults per setting | Active | Per-work-type and practice-area overrides merged per individual setting (subcategory, then practice area, then firm defaults) so turning on one rule preserves inherited rules, with per-setting restore to inherited defaults; edited in **Administration → Work types** |
+
+### Matter numbering policy
+
+Every tenant’s **Matter numbering policy** is summarised read-only in **Administration → Work types → Matter numbering policy**. Permanent numbers are generated automatically by the server when a matter leaves Draft and are never reused if a matter is withdrawn or deleted:
+
+| Setting | Default | Status | Notes |
+|---|---|---|---|
+| Number format pattern | Client reference prefix plus 4-digit sequence | Active | Combines optional client reference, 4-digit or custom-width sequence number, 4-digit or 2-digit year, and department code placeholders |
+| Sequence counter scope | Per client reference prefix | Active | Controls whether sequence numbers increment per client reference prefix, firm-wide, per calendar year, or per department (requiring the corresponding placeholder in the pattern) |
+| Empty value fallback | Standard fallback prefix | Active | Text inserted when a chosen pattern value is empty (for example when a client has no reference prefix) |
 
 ### Client Due Diligence (CDD)
 

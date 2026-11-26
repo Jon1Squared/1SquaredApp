@@ -48,6 +48,7 @@ import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json'
 import notALawFirmDevOverlay from '../../client-not-a-law-firm/config/environments/dev.json';
 import { notALawFirmMatterCostsExtension } from '../../client-not-a-law-firm/extensions/nalf-matter-costs-governance/src/index';
 import { syncHomeRolesWithEmployeeRoles } from '../../src/domain/homeConfig';
+import type { Matter } from '../../src/domain/types';
 import {
   createDefaultEmploymentRecord,
   migrateEmployeesToEmploymentRecords,
@@ -95,6 +96,7 @@ import {
   approveSignOff,
   assignEnquiryRecord,
   closeEnquiryRecord,
+  completeClientCddRecord,
   createOrProposeKeyDateRecord,
   createRecordFromPms,
   deleteMatterRateOverrideRecord,
@@ -120,8 +122,11 @@ import {
   listFirmAuditEntriesPage,
   markEngagementLetterDrafted,
   queryKeyDatesTeamDiaryRecord,
+  recordCddChecklistItemRecord,
+  recordEngagementLetterSignedRecord,
   recordInvoiceCreditControlAction,
   recordKeyDateNotApplicableRecord,
+  recordManualSanctionsPepRecord,
   requestMatterBill,
   resetAllDemoData,
   resolveOrProvisionEntraEmployee,
@@ -138,6 +143,8 @@ import {
   saveTaskRecord,
   searchGlobalRecords,
   signOffMatterCostsRecord,
+  startOrLoadClientCddRecord,
+  transitionRegisterRecordService,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
   updatePersonPermissionOverrides,
@@ -1813,6 +1820,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           saveMatterRecord(
             {
               ...staffMatterTemplate,
+              engagementLetterStatus: 'Sent',
+              engagementLetterSignedAt: null,
               title: 'Confidential Staff Disciplinary Matter',
               clientId: staffEmployeeClient.id,
               agreedFeeCapGbp: 5000,
@@ -1904,6 +1913,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -2213,6 +2224,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             ...matterTemplate,
             matterNumber: 'DRAFT',
             openedAt: null,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             fieldValues: {},
             title: 'R144 Concurrent Client Hire Matter',
             clientId: externalClient.id,
@@ -2514,6 +2527,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
             ...matterTemplate,
             matterNumber: 'DRAFT',
             openedAt: null,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             fieldValues: {},
             title: 'R153 Draft Matter',
             clientId: externalClient.id,
@@ -2748,6 +2763,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -3187,6 +3204,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -3485,6 +3504,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         saveMatterRecord(
           {
             ...matterTemplate,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             title: 'Display Name Team Key Rejection Test',
             leadFeeEarnerId: feeEarner.id,
             teamMemberIds: [feeEarner.id],
@@ -3748,14 +3769,22 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         verifiedSession: verifySignedEntraSessionCookie(partnerCookie)!,
       };
 
-      const { id: _omittedId, ...matterTemplate } = baseMatter;
+      const {
+        id: _omittedId,
+        engagementLetterStatus: _r169Els,
+        engagementLetterSignedAt: _r169Elsa,
+        ...matterTemplate
+      } = baseMatter;
       void _omittedId;
+      void _r169Els;
+      void _r169Elsa;
 
       await runWithActiveActorSession(feSession, async () => {
         // 1. Draft with £75,000 estimate + forged server-owned fieldValues + forged conflictClearedById
         const draftRes = await saveMatterRecord(
           {
             ...matterTemplate,
+            clientId: 'O-000001',
             title: 'R169 High Value Matter',
             leadFeeEarnerId: feeEarner.id,
             responsiblePartnerId: partner.id,
@@ -3904,7 +3933,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           /partner.*sign-off/i,
         );
 
-        // 6. Opening at the signed-off £75,000 estimate succeeds and preserves matterOpeningSnapshot on subsequent edits
+        // 6. Opening at the signed-off £75,000 estimate succeeds (and completes High-risk opening sign-off) and preserves matterOpeningSnapshot on subsequent edits
         const validOpenRes = await saveMatterRecord(
           {
             ...partnerSignOff.matter!,
@@ -3923,8 +3952,102 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
               a.recordId === matterId && a.field === 'Partner cost sign-off',
           ),
         ).toBe(true);
+        const hroRecords = await getRegisterRepository().listVisibleRegisterRecords(
+          testTenantCtx(partner.id),
+          partner.id,
+          {
+            registerTypeKey: 'high_risk_opening',
+            matterId,
+            hasRestrictedMatterAccess: true,
+          },
+        );
+        const hroRecord = hroRecords.find((r) => r.status === 'pending_partner')!;
+        expect(hroRecord).toBeDefined();
+        const riskOfficer = store.people.find(
+          (p) =>
+            p.isEmployee &&
+            p.id !== partner.id &&
+            (p.roles ?? []).includes('risk_compliance'),
+        )!;
+        const independentPartner = store.people.find(
+          (p) =>
+            p.isEmployee &&
+            p.id !== partner.id &&
+            p.id !== feeEarner.id &&
+            p.id !== riskOfficer.id &&
+            ((p.roles ?? []).includes('partner') ||
+              (p.roles ?? []).includes('managing_partner')),
+        )!;
+        expect(independentPartner).toBeDefined();
+        // R763: High-risk Corporate matter elevates O-000001 derived CDD tier to high -> upgrade & complete High CDD before compliance_approve opens the matter.
+        await runWithActiveActorSession(partnerSession, async () => {
+          const o1Cdd = await startOrLoadClientCddRecord(
+            {
+              subjectType: 'organisation',
+              subjectId: 'O-000001',
+              upgradeToHighRisk: true,
+              reason: 'R169 high-risk opening requires High CDD',
+            },
+            partner.id,
+          );
+          expect(o1Cdd.ok).toBe(true);
+          if (o1Cdd.ok && o1Cdd.summary.record) {
+            for (const item of o1Cdd.summary.checklistItems) {
+              if (item.status !== 'recorded') {
+                await recordCddChecklistItemRecord(
+                  {
+                    recordId: o1Cdd.summary.record.id,
+                    itemKey: item.itemKey,
+                    status: 'recorded',
+                    note: 'R169 verified',
+                  },
+                  partner.id,
+                );
+              }
+            }
+            const comp = await completeClientCddRecord(
+              { recordId: o1Cdd.summary.record.id },
+              partner.id,
+            );
+            expect(comp.ok).toBe(true);
+          }
+        });
+        const partnerApproveHro = await runAsTestActor(
+          independentPartner.id,
+          () =>
+            transitionRegisterRecordService(
+              {
+                recordId: hroRecord.id,
+                transitionKey: 'partner_approve',
+                expectedRowVersion: hroRecord.rowVersion,
+              },
+              independentPartner.id,
+            ),
+          { roles: ['partner'], mfaVerified: true },
+        );
+        expect(partnerApproveHro.ok).toBe(true);
+        const rcApproveHro = await runAsTestActor(
+          riskOfficer.id,
+          () =>
+            transitionRegisterRecordService(
+              {
+                recordId: hroRecord.id,
+                transitionKey: 'compliance_approve',
+                expectedRowVersion: partnerApproveHro.ok
+                  ? partnerApproveHro.record.rowVersion
+                  : undefined,
+              },
+              riskOfficer.id,
+            ),
+          { roles: ['risk_compliance'], mfaVerified: true },
+        );
+        expect(rcApproveHro.ok).toBe(true);
+        const openedMatterAfterHro = (await getMatterRepository().getMatterById<import('@/domain/types').Matter>(
+          testTenantCtx(partner.id),
+          matterId,
+        ))!;
         const capturedAt = (
-          validOpenRes.matter?.fieldValues['matterOpeningSnapshot'] as {
+          openedMatterAfterHro.fieldValues['matterOpeningSnapshot'] as {
             capturedAt?: string;
           }
         )?.capturedAt;
@@ -3932,10 +4055,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         const editOpenMatterRes = await saveMatterRecord(
           {
-            ...validOpenRes.matter!,
+            ...openedMatterAfterHro,
             title: 'R169 High Value Matter (Updated Title)',
             fieldValues: {
-              ...validOpenRes.matter!.fieldValues,
+              ...openedMatterAfterHro.fieldValues,
               matterOpeningSnapshot: { forgedOverwrite: true },
             },
           },
@@ -6289,6 +6412,69 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         'Approved with conditions',
       );
 
+      const cddSetup = await runAsTestActor(riskOfficer.id, async () => {
+        const started = await startOrLoadClientCddRecord(
+          {
+            subjectType: 'organisation',
+            subjectId: fixtureM6.clientId,
+            createIfMissing: true,
+          },
+          riskOfficer.id,
+        );
+        if (!started.ok) {
+          throw new Error(`Could not start CDD for R185: ${started.message}`);
+        }
+        if (started.summary.status !== 'recorded' && started.summary.recordId) {
+          await recordManualSanctionsPepRecord(
+            {
+              subjectType: 'organisation',
+              subjectId: fixtureM6.clientId,
+              outcome: 'clear',
+              screeningScope: 'Entity and controllers screened (R185 fixture)',
+              referenceCode: 'R185-PEP',
+            },
+            riskOfficer.id,
+          );
+          for (const item of started.summary.checklistItems) {
+            if (item.required && item.status !== 'recorded') {
+              const upd = await recordCddChecklistItemRecord(
+                {
+                  recordId: started.summary.recordId,
+                  itemKey: item.itemKey,
+                  status: 'recorded',
+                  note: 'Completed for R185 test fixture',
+                  ...(item.itemKey === 'identity_verification'
+                    ? {
+                        linkManualIdentityCheck: {
+                          verificationMethod: 'Certificate of incorporation',
+                          outcome: 'verified',
+                          referenceCode: 'R185-ID',
+                        },
+                      }
+                    : {}),
+                },
+                riskOfficer.id,
+              );
+              if (!upd.ok) {
+                throw new Error(`Could not record CDD item ${item.itemKey}: ${upd.message}`);
+              }
+            }
+          }
+          const completed = await completeClientCddRecord(
+            {
+              recordId: started.summary.recordId,
+              manualSummaryNote: 'Completed for R185 fixture',
+            },
+            riskOfficer.id,
+          );
+          if (!completed.ok) {
+            throw new Error(`Could not complete CDD for R185: ${completed.message}`);
+          }
+        }
+        return true;
+      });
+      expect(cddSetup).toBe(true);
+
       const feeEarnerOpenM6Res = await runWithActiveActorSession(
         feeEarnerSession,
         async () =>
@@ -7148,6 +7334,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -13045,8 +13233,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const seed = loadCommittedSeedStore();
       const template = seed.matters.find((m) => m.id === 'M-000004')!;
-      const { id: _id, ...baseMatter } = template;
+      const {
+        id: _id,
+        engagementLetterStatus: _els,
+        engagementLetterSignedAt: _elsa,
+        ...baseMatter
+      } = template;
       void _id;
+      void _els;
+      void _elsa;
 
       await runAsTestActor('P-000004', async () => {
         // 1. Draft save under renamed 'Prospective / Enquiry' must stay prospective, NEVER Active
@@ -13115,6 +13310,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       conflictCheckDate: _ccDate,
       matterStatusId: _msId,
       recordStatusId: _rsId,
+      engagementLetterStatus: _els,
+      engagementLetterSignedAt: _elsa,
       ...baseMatter
     } = template;
     void _id;
@@ -13122,6 +13319,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     void _ccDate;
     void _msId;
     void _rsId;
+    void _els;
+    void _elsa;
     const clearedConflict = {
       status: 'Cleared' as const,
       outcomeLabel: 'Cleared by fee earner' as const,
@@ -13157,6 +13356,11 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(draftSave.errors).toBeUndefined();
         expect(draftSave.matter?.conflictCheckDate).not.toBe('1999-02-02');
         expect(draftSave.matter?.openedAt).toBeNull();
+
+        await recordEngagementLetterSignedRecord(
+          { matterId: draftSave.matter!.id, status: 'Signed & returned' },
+          'P-000004',
+        );
 
         const openSave = await saveMatterRecord(
           {
@@ -13285,8 +13489,15 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
         // 2. Conflict draft task uses autoTrigger: 'conflict_check_draft' rather than title prefix
         const baseMatter = seed.matters.find((m) => m.id === 'M-000004')!;
-        const { id: _mid, ...matterTemplate } = baseMatter;
+        const {
+          id: _mid,
+          engagementLetterStatus: _r592Els,
+          engagementLetterSignedAt: _r592Elsa,
+          ...matterTemplate
+        } = baseMatter;
         void _mid;
+        void _r592Els;
+        void _r592Elsa;
         const draftMatter = await saveMatterRecord(
           {
             ...matterTemplate,
@@ -13297,6 +13508,10 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         );
         expect(draftMatter.errors).toBeUndefined();
         const matterId = draftMatter.matter!.id;
+        await recordEngagementLetterSignedRecord(
+          { matterId, status: 'Signed & returned' },
+          'P-000004',
+        );
         const draftTasks = await taskRepo.listAllTasksUnfiltered(ctx);
         const conflictDraftTask = draftTasks.find((t) =>
           t.linkedRecords.some(
@@ -13367,6 +13582,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       conflictCheckDate: _ccDate,
       matterStatusId: _msId,
       recordStatusId: _rsId,
+      engagementLetterStatus: _els,
+      engagementLetterSignedAt: _elsa,
       ...matterTemplate
     } = baseMatter;
     void _id;
@@ -13374,6 +13591,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     void _ccDate;
     void _msId;
     void _rsId;
+    void _els;
+    void _elsa;
 
     try {
       let referredMatterId = '';
@@ -13617,6 +13836,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       conflictCheckDate: _ccDate,
       matterStatusId: _msId,
       recordStatusId: _rsId,
+      engagementLetterStatus: _els,
+      engagementLetterSignedAt: _elsa,
       ...matterTemplate
     } = baseMatter;
     void _id;
@@ -13624,6 +13845,8 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
     void _ccDate;
     void _msId;
     void _rsId;
+    void _els;
+    void _elsa;
 
     try {
       await runAsTestActor('P-000004', async () => {
@@ -14196,6 +14419,288 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         subjectId: 'O-000004',
       });
       expect(bravoArtifacts).toHaveLength(0);
+    } finally {
+      setTestActorSession(null);
+      setActiveTenantConfigForTesting(null);
+      await poolManager.closeAllPools();
+    }
+  }, 45_000);
+
+  it('S1-05 (R777): isolates openProspectiveMatterAction, recordEngagementLetterSignedAction, revokeMatterOpeningOverrideAction, and high_risk_opening transitions across Tenant A and Tenant B', async () => {
+    const { provisionPostgresClusterRolesAndDatabases } = await import(
+      '../src/tenancy/postgresAdminBootstrap'
+    );
+    const { TenantMatterRepository, TenantRegisterRepository } = await import('@platform/core');
+    const { importFirmStoreModulesToPostgres } = await import(
+      '../../src/server/storePostgresImport'
+    );
+    const {
+      openProspectiveMatterAction,
+      recordEngagementLetterSignedAction,
+      revokeMatterOpeningOverrideAction,
+      transitionRegisterRecordAction,
+    } = await import('../../src/app/actions');
+    const { overrideMatterOpeningPreconditionRecord, saveMatterRecord } = await import(
+      '../../src/server/services'
+    );
+
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: 'tenant-alpha', environment: 'test' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      ],
+    });
+    const poolManager = new TenantPostgresPoolManager();
+    const runner = new TenantMigrationRunner();
+    const alphaRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'tenant-alpha',
+    };
+    const bravoRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'tenant-bravo',
+    };
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Partner Alpha',
+        email: 'partner@tenant-alpha.example',
+        tenantId: 'tenant-alpha',
+        roles: ['partner', 'fee_earner', 'risk_compliance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'iso-s105-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Partner Bravo',
+        email: 'partner@tenant-bravo.example',
+        tenantId: 'tenant-bravo',
+        roles: ['partner', 'fee_earner', 'risk_compliance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'iso-s105-bravo',
+    });
+
+    try {
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+      const alphaCfg = loadAndValidateTenantConfig(alphaRaw, { tenantId: 'tenant-alpha', environment: 'test' }, 'test', 'multi_tenant');
+      const bravoCfg = loadAndValidateTenantConfig(bravoRaw, { tenantId: 'tenant-bravo', environment: 'test' }, 'test', 'multi_tenant');
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxAlpha,
+        tenantConfig: alphaCfg,
+        store: createSeedStore(new Date()),
+        clearFirst: true,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxBravo,
+        tenantConfig: bravoCfg,
+        store: createSeedStore(new Date()),
+        clearFirst: true,
+      });
+
+      const matterRepo = new TenantMatterRepository({ poolManager });
+      const regRepo = new TenantRegisterRepository({ poolManager });
+
+      // Seed prospective High-Risk litigation matters & override inside Tenant Alpha ONLY
+      setActiveTenantConfigForTesting(alphaRaw, {});
+      setTestActorSession('P-000002', { tenantId: 'tenant-alpha', roles: ['fee_earner'], mfaVerified: true });
+      const alphaSaveA = await runAsTestActor(
+        'P-000002',
+        () =>
+          saveMatterRecord(
+            {
+              title: 'Alpha Prospective Gate Matter 1',
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.dispute_resolution',
+              workTypeSubcategoryId: 'work_type.dispute_resolution_pre_action_correspondence',
+              matterTypeId: 'matter_type.contentious',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '25 Nov 2026',
+                lastRunById: 'P-000002',
+                lastRunByName: 'Dafydd Evans',
+                submittedAtDisplay: '25 Nov 2026',
+                submittedByName: 'Dafydd Evans',
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [],
+              },
+              riskAssessment: {
+                answers: { highRiskJurisdictionLink: 'Yes' },
+                followUps: { highRiskJurisdictionLink: 'Simulated high risk for S1-05 isolation test.' },
+              },
+            },
+            { byId: 'P-000002', saveMode: 'submit_cleared' },
+          ),
+        { tenantId: 'tenant-alpha', roles: ['fee_earner'], mfaVerified: true },
+      );
+      expect(alphaSaveA.matter).not.toBeNull();
+      const alphaMatterId = alphaSaveA.matter!.id;
+
+      // Second matter in Alpha to verify cross-matter override ID rejection
+      const alphaSaveB = await runAsTestActor(
+        'P-000002',
+        () =>
+          saveMatterRecord(
+            {
+              title: 'Alpha Prospective Gate Matter 2',
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.dispute_resolution',
+              workTypeSubcategoryId: 'work_type.dispute_resolution_pre_action_correspondence',
+              matterTypeId: 'matter_type.contentious',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: {
+                status: 'Cleared',
+                outcomeLabel: 'Cleared by fee earner',
+                declarationConfirmed: true,
+                reviewerMessage: '',
+                lastRunAtDisplay: '25 Nov 2026',
+                lastRunById: 'P-000002',
+                lastRunByName: 'Dafydd Evans',
+                submittedAtDisplay: '25 Nov 2026',
+                submittedByName: 'Dafydd Evans',
+                parties: [],
+                matches: [],
+                runs: [],
+                comments: [],
+              },
+              riskAssessment: { answers: {} },
+            },
+            { byId: 'P-000002', saveMode: 'submit_cleared' },
+          ),
+        { tenantId: 'tenant-alpha', roles: ['fee_earner'], mfaVerified: true },
+      );
+      expect(alphaSaveB.matter).not.toBeNull();
+      const alphaOtherMatterId = alphaSaveB.matter!.id;
+
+      setTestActorSession('P-000001', { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: true });
+      const alphaOvr = await runAsTestActor(
+        'P-000001',
+        () =>
+          overrideMatterOpeningPreconditionRecord(
+            {
+              matterId: alphaMatterId,
+              preconditionKey: 'engagement_signed',
+              reason: 'Alpha urgent partner override',
+            },
+            'P-000001',
+            { tenantCtx: ctxAlpha, tenantConfig: alphaCfg },
+          ),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: true },
+      );
+      expect(alphaOvr.ok).toBe(true);
+      if (!alphaOvr.ok) return;
+      const alphaOvrId = alphaOvr.override.id;
+
+      const alphaHroRows = await regRepo.listVisibleRegisterRecords(ctxAlpha, 'P-000001', {
+        includeRestricted: true,
+        registerTypeKey: 'high_risk_opening',
+        matterId: alphaMatterId,
+      });
+      expect(alphaHroRows).toHaveLength(1);
+      const alphaHroId = alphaHroRows[0]!.id;
+
+      // Within Alpha: passing alphaOvrId with alphaOtherMatterId must NOT revoke alphaOvrId!
+      const crossMatterRevoke = await runAsTestActor(
+        'P-000001',
+        () =>
+          revokeMatterOpeningOverrideAction({
+            matterId: alphaOtherMatterId,
+            overrideId: alphaOvrId,
+            reason: 'Cross-matter override revoke tamper attempt',
+          }),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: true },
+      );
+      expect(crossMatterRevoke).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      // Bravo actor cannot open, record engagement, revoke override, or approve Alpha's HRO record
+      setActiveTenantConfigForTesting(bravoRaw, {});
+      setTestActorSession('P-000001', { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true });
+      const bravoOpen = await runAsTestActor(
+        'P-000001',
+        () => openProspectiveMatterAction(alphaMatterId),
+        { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+      );
+      expect(bravoOpen).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+
+      const bravoEng = await runAsTestActor(
+        'P-000001',
+        () => recordEngagementLetterSignedAction({ matterId: alphaMatterId, note: 'Cross tenant tamper' }),
+        { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+      );
+      expect(bravoEng).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+
+      const bravoRevoke = await runAsTestActor(
+        'P-000001',
+        () =>
+          revokeMatterOpeningOverrideAction({
+            matterId: alphaMatterId,
+            overrideId: alphaOvrId,
+            reason: 'Cross tenant revoke override attempt',
+          }),
+        { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+      );
+      expect(bravoRevoke).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+
+      const bravoHro = await runAsTestActor(
+        'P-000001',
+        () =>
+          transitionRegisterRecordAction({
+            recordId: alphaHroId,
+            transitionKey: 'partner_approve',
+            comment: 'Cross tenant HRO approve',
+          }),
+        { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+      );
+      expect(bravoHro).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      // Forged tenant claim while active config is Alpha
+      setActiveTenantConfigForTesting(alphaRaw, {});
+      setTestActorSession('P-000001', { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true });
+      await expect(
+        runAsTestActor(
+          'P-000001',
+          () => openProspectiveMatterAction(alphaMatterId),
+          { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      // Alpha rows remain untouched
+      const alphaAfterMatter = await matterRepo.getMatterById<Matter>(ctxAlpha, alphaMatterId, {
+        includeRestricted: true,
+      });
+      expect(alphaAfterMatter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      expect(alphaAfterMatter?.engagementLetterSignedAt).toBeFalsy();
+      const alphaActiveOvrs = await matterRepo.listOpeningGateOverridesForMatter(
+        ctxAlpha,
+        alphaMatterId,
+        { activeOnly: true },
+      );
+      expect(alphaActiveOvrs).toHaveLength(1);
+      const alphaAfterHro = await regRepo.getRegisterRecordById(ctxAlpha, alphaHroId, {
+        includeRestricted: true,
+      });
+      expect(alphaAfterHro?.status).toBe('pending_partner');
     } finally {
       setTestActorSession(null);
       setActiveTenantConfigForTesting(null);

@@ -386,8 +386,8 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
     expect(TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020.version).toBe('0020');
     expect(TEAMS_OUTBOX_AND_DIGESTS_MIGRATION_0020.dependsOn).toEqual(['0019']);
 
-    expect(ALL_PERMISSION_KEYS).toHaveLength(80);
-    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(70);
+    expect(ALL_PERMISSION_KEYS).toHaveLength(81);
+    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(71);
     expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(10);
     expect(ALL_USER_PERMISSION_KEYS).toContain('notification:view_own');
     expect(ALL_USER_PERMISSION_KEYS).toContain('notification:manage_own_preferences');
@@ -401,8 +401,11 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       expect(perms).toContain('notification:manage_own_preferences');
       expect(perms).not.toContain('notification:send_digests');
     }
+    expect(DEFAULT_RBAC_ROLES.admin.permissions).not.toContain(
+      'matter:opening_gate:override',
+    );
     expect(DEFAULT_RBAC_ROLES.admin.permissions).toHaveLength(
-      ALL_USER_PERMISSION_KEYS.length - 3,
+      ALL_USER_PERMISSION_KEYS.length - 4,
     );
 
     expect(JOB_PERMISSIONS['notification-digests']).toMatchObject({

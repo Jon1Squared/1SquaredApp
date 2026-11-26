@@ -430,6 +430,8 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
     void _omitId;
     const matterBase = {
       ...rawMatterBase,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterBase.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -738,6 +740,8 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
     void _omitId;
     const matterBase = {
       ...rawMatterBase,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterBase.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -1021,6 +1025,8 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
         const mAlpha = await saveMatterRecord(
           {
             ...mData,
+            engagementLetterStatus: 'Sent',
+            engagementLetterSignedAt: null,
             matterNumber: 'DRAFT',
             openedAt: null,
             title: 'Alpha Isolated Costed Matter',

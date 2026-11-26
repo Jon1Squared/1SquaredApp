@@ -16,7 +16,16 @@
  *    (failing closed when `restricted_access_user_ids_json` is empty).
  */
 
-import type { TenantContext } from '../api/index';
+import type { MatterNumberingConfig, TenantContext } from '../api/index';
+import {
+  DEFAULT_MATTER_NUMBERING_CONFIG,
+  formatMatterNumberFromSequence,
+  MATTER_NUMBERING_ERROR_CODES,
+  resolveMatterNumberSequenceKey,
+  validateMatterNumberingConfig,
+  type MatterNumberAllocationResult,
+  type MatterNumberFormatContext,
+} from '../domain/matterNumbering/index';
 import {
   getActiveTenantTransactionState,
   TenantScopedRepository,
@@ -27,6 +36,55 @@ import {
 export const MATTER_CONCURRENCY_CONFLICT_CODE = 'MATTER_CONCURRENCY_CONFLICT';
 export const MATTER_CONCURRENCY_CONFLICT_MESSAGE =
   'MATTER_CONCURRENCY_CONFLICT: This matter was changed by someone else while you were saving. Please reload and try again.';
+
+export const MATTER_NUMBER_IMMUTABLE_CODE =
+  MATTER_NUMBERING_ERROR_CODES.IMMUTABLE;
+
+export type OpeningGatePreconditionKey =
+  | 'conflict_cleared'
+  | 'cdd_complete'
+  | 'engagement_signed'
+  | 'funds_on_account';
+
+export interface MatterOpeningGateOverrideRecord {
+  id: string;
+  tenantId: string;
+  matterId: string;
+  preconditionKey: OpeningGatePreconditionKey;
+  reason: string;
+  overriddenByPersonId: string;
+  overriddenAt: string;
+  revokedByPersonId: string | null;
+  revokedAt: string | null;
+}
+
+interface DbMatterOpeningGateOverrideRow {
+  tenant_id: string;
+  id: string;
+  matter_id: string;
+  precondition_key: OpeningGatePreconditionKey;
+  reason: string;
+  overridden_by_person_id: string;
+  overridden_at: Date | string;
+  revoked_by_person_id: string | null;
+  revoked_at: Date | string | null;
+}
+
+function mapOpeningGateOverrideRow(
+  row: DbMatterOpeningGateOverrideRow,
+): MatterOpeningGateOverrideRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    matterId: row.matter_id,
+    preconditionKey: row.precondition_key,
+    reason: row.reason,
+    overriddenByPersonId: row.overridden_by_person_id,
+    overriddenAt: toIsoString(row.overridden_at),
+    revokedByPersonId: row.revoked_by_person_id ?? null,
+    revokedAt: row.revoked_at ? toIsoString(row.revoked_at) : null,
+  };
+}
 
 export function createMatterConcurrencyConflictError(): Error & {
   code: typeof MATTER_CONCURRENCY_CONFLICT_CODE;
@@ -138,6 +196,8 @@ export interface TenantMatterRecord {
   restrictionLift?: unknown;
   owningDepartmentId?: string | null;
   owningTeamId?: string | null;
+  numberSequenceKey?: string | null;
+  numberSequenceValue?: number | null;
 }
 
 interface DbMatterRow {
@@ -145,6 +205,8 @@ interface DbMatterRow {
   id: string;
   row_version: number | string;
   matter_number: string;
+  number_sequence_key: string | null;
+  number_sequence_value: string | number | null;
   title: string;
   client_type: string;
   client_id: string;
@@ -451,6 +513,12 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   if (row.team_id !== null || opening.hasOwningTeamId === true) {
     out.owningTeamId = row.team_id;
   }
+  if (row.number_sequence_key !== null && row.number_sequence_key !== undefined) {
+    out.numberSequenceKey = row.number_sequence_key;
+  }
+  if (row.number_sequence_value !== null && row.number_sequence_value !== undefined) {
+    out.numberSequenceValue = Number(row.number_sequence_value);
+  }
 
   return out as TMatter;
 }
@@ -643,6 +711,8 @@ function buildMatterDbParameters(
     costsJson: JSON.stringify(costsJson),
     openingRecordJson: JSON.stringify(openingRecordJson),
     milestonesJson: JSON.stringify(milestonesJson),
+    numberSequenceKey: matter.numberSequenceKey ?? null,
+    numberSequenceValue: matter.numberSequenceValue ?? null,
   };
 }
 
@@ -706,31 +776,38 @@ export class TenantMatterRepository extends TenantScopedRepository {
   }
 
   /**
-   * Allocates the next monotonic matter number (`<PREFIX>-NNNN`) for `prefix` (`B6`).
-   * Commits autonomously on `public.matter_number_sequences` (and advances `public.tenant_matter_number_seq`)
-   * so numbers are never reissued even when an opening is vetoed, a transaction rolls back, a matter is
-   * deleted, or `resetAllDemoData` runs.
+   * Allocates the next monotonic matter number using tenant `matterNumbering` configuration
+   * (`ADR 0040`, `S1-05`) while committing autonomously on `public.matter_number_sequences`.
    */
-  public async allocateNextMatterNumber(
+  public async allocateNextMatterNumberWithConfig(
     ctx: TenantContext,
-    prefix = 'MAT001',
-  ): Promise<string> {
-    const cleanPrefix =
-      prefix
-        ?.trim()
-        .toUpperCase()
-        .replace(/[^A-Z0-9_-]/g, '') || 'MAT001';
+    config: MatterNumberingConfig = DEFAULT_MATTER_NUMBERING_CONFIG,
+    formatCtx: MatterNumberFormatContext = {},
+  ): Promise<MatterNumberAllocationResult> {
+    const configCheck = validateMatterNumberingConfig(config);
+    if (!configCheck.ok) {
+      throw new Error(
+        `${MATTER_NUMBERING_ERROR_CODES.VALIDATION_ERROR}: ${configCheck.error}`,
+      );
+    }
+    const sequenceKey = resolveMatterNumberSequenceKey(config, formatCtx);
+    // Validate custom pattern length before touching the monotonic sequence.
+    formatMatterNumberFromSequence(config, formatCtx, 1);
 
     return this.withAutonomousTenantTransaction(ctx, async (tx) => {
       await tx.query(
         "SELECT nextval('public.tenant_matter_number_seq')::bigint",
       );
 
+      const includeLegacySuffixRegex =
+        config.sequenceScope === 'client_ref_prefix';
       const maxExistingRes = await tx.query<{ max_suffix: string | number }>(
         `SELECT COALESCE(
            MAX(
              CASE
-               WHEN matter_number ~ ('^' || $2 || '-[0-9]+$')
+               WHEN number_sequence_key = $2 AND number_sequence_value IS NOT NULL
+               THEN number_sequence_value
+               WHEN $3::boolean AND matter_number ~ ('^' || $2 || '-[0-9]+$')
                THEN SUBSTRING(matter_number FROM (char_length($2) + 2))::bigint
                ELSE 0
              END
@@ -739,7 +816,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
          ) AS max_suffix
          FROM public.matters
          WHERE tenant_id = $1`,
-        [ctx.tenantId, cleanPrefix],
+        [ctx.tenantId, sequenceKey, includeLegacySuffixRegex],
       );
       const maxExisting = Number(maxExistingRes.rows[0]?.max_suffix ?? 0);
 
@@ -753,7 +830,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            last_number = GREATEST(public.matter_number_sequences.last_number + 1, $3::bigint + 1),
            updated_at = NOW()
          RETURNING tenant_id, last_number`,
-        [ctx.tenantId, cleanPrefix, maxExisting],
+        [ctx.tenantId, sequenceKey, maxExisting],
       );
       const row = seqRes.rows[0];
       if (!row) {
@@ -762,9 +839,36 @@ export class TenantMatterRepository extends TenantScopedRepository {
         );
       }
       this.assertRowTenant(ctx, row.tenant_id, 'MatterNumberSequence');
-      const nextNum = Number(row.last_number);
-      return `${cleanPrefix}-${String(nextNum).padStart(4, '0')}`;
+      const sequenceValue = Number(row.last_number);
+      const matterNumber = formatMatterNumberFromSequence(
+        config,
+        formatCtx,
+        sequenceValue,
+      );
+      return {
+        matterNumber,
+        sequenceKey,
+        sequenceValue,
+      };
     });
+  }
+
+  /**
+   * Allocates the next monotonic matter number (`<PREFIX>-NNNN`) for `prefix` (`B6`).
+   * Commits autonomously on `public.matter_number_sequences` (and advances `public.tenant_matter_number_seq`)
+   * so numbers are never reissued even when an opening is vetoed, a transaction rolls back, a matter is
+   * deleted, or `resetAllDemoData` runs.
+   */
+  public async allocateNextMatterNumber(
+    ctx: TenantContext,
+    prefix = 'MAT001',
+  ): Promise<string> {
+    const result = await this.allocateNextMatterNumberWithConfig(
+      ctx,
+      DEFAULT_MATTER_NUMBERING_CONFIG,
+      { clientRefPrefix: prefix },
+    );
+    return result.matterNumber;
   }
 
   // ============================================================================
@@ -878,7 +982,25 @@ export class TenantMatterRepository extends TenantScopedRepository {
     tx: TenantSqlClient,
     ctx: TenantContext,
     matterNumber: string,
+    sequenceKey?: string | null,
+    sequenceValue?: number | null,
   ): Promise<void> {
+    if (
+      sequenceKey &&
+      typeof sequenceValue === 'number' &&
+      Number.isInteger(sequenceValue) &&
+      sequenceValue > 0
+    ) {
+      await tx.query(
+        `INSERT INTO public.matter_number_sequences (tenant_id, prefix, last_number, updated_at)
+         VALUES ($1, $2, $3::bigint, NOW())
+         ON CONFLICT (tenant_id, prefix) DO UPDATE SET
+           last_number = GREATEST(public.matter_number_sequences.last_number, EXCLUDED.last_number),
+           updated_at = NOW()`,
+        [ctx.tenantId, sequenceKey, sequenceValue],
+      );
+      return;
+    }
     if (!matterNumber || matterNumber === 'DRAFT') return;
     const match = /^([A-Z0-9_-]+)-(\d+)$/i.exec(matterNumber.trim());
     if (!match?.[1] || !match?.[2]) return;
@@ -928,7 +1050,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            created_at, updated_at, additional_client_ids_json,
            restricted_access_user_ids_json, fields_json, custom_fields_json,
            conflict_check_record_json, risk_assessment_json, costs_json,
-           opening_record_json, milestones_json
+           opening_record_json, milestones_json, number_sequence_key, number_sequence_value
          ) VALUES (
            $1, $2, 1, $3, $4, $5,
            $6, $7, $8,
@@ -942,7 +1064,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            $34::timestamptz, $35::timestamptz, $36::jsonb,
            $37::jsonb, $38::jsonb, $39::jsonb,
            $40::jsonb, $41::jsonb, $42::jsonb,
-           $43::jsonb, $44::jsonb
+           $43::jsonb, $44::jsonb, $45, $46::bigint
          )
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            row_version = 1,
@@ -987,7 +1109,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
            risk_assessment_json = EXCLUDED.risk_assessment_json,
            costs_json = EXCLUDED.costs_json,
            opening_record_json = EXCLUDED.opening_record_json,
-           milestones_json = EXCLUDED.milestones_json
+           milestones_json = EXCLUDED.milestones_json,
+           number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
+           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
          WHERE public.matters.client_id = 'O-KEYDATE-STUB'
          RETURNING *`,
         [
@@ -1035,6 +1159,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.costsJson,
           p.openingRecordJson,
           p.milestonesJson,
+          p.numberSequenceKey,
+          p.numberSequenceValue,
         ],
       );
 
@@ -1046,7 +1172,13 @@ export class TenantMatterRepository extends TenantScopedRepository {
       }
       this.assertRowTenant(ctx, saved.tenant_id, 'Matter');
       const partyRows = await this.syncMatterPartiesInTx(tx, ctx, matter);
-      await this.advanceMatterNumberHighWaterInTx(tx, ctx, p.matterNumber);
+      await this.advanceMatterNumberHighWaterInTx(
+        tx,
+        ctx,
+        p.matterNumber,
+        p.numberSequenceKey,
+        p.numberSequenceValue,
+      );
 
       const idMatch = /^M-(\d+)$/.exec(matter.id);
       if (idMatch?.[1]) {
@@ -1102,10 +1234,25 @@ export class TenantMatterRepository extends TenantScopedRepository {
     }
 
     return this.withTenantTransaction(ctx, async (tx) => {
-      await tx.query(
-        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+      const existingLockRes = await tx.query<{
+        id: string;
+        matter_number: string;
+      }>(
+        'SELECT id, matter_number FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
         [ctx.tenantId, matter.id],
       );
+      const existingLockRow = existingLockRes.rows[0];
+      if (existingLockRow) {
+        const prevNum = (existingLockRow.matter_number ?? '').trim();
+        const nextNum = (matter.matterNumber ?? '').trim();
+        if (prevNum && !prevNum.startsWith('DRAFT') && nextNum !== prevNum) {
+          const immutErr = new Error(
+            `${MATTER_NUMBER_IMMUTABLE_CODE}: Existing permanent matter number "${prevNum}" cannot be changed to "${nextNum}".`,
+          ) as Error & { code: string };
+          immutErr.code = MATTER_NUMBER_IMMUTABLE_CODE;
+          throw immutErr;
+        }
+      }
       const p = buildMatterDbParameters(
         ctx,
         matter,
@@ -1155,7 +1302,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
            risk_assessment_json = $42::jsonb,
            costs_json = $43::jsonb,
            opening_record_json = $44::jsonb,
-           milestones_json = $45::jsonb
+           milestones_json = $45::jsonb,
+           number_sequence_key = COALESCE($46, public.matters.number_sequence_key),
+           number_sequence_value = COALESCE($47::bigint, public.matters.number_sequence_value)
          WHERE tenant_id = $1
            AND id = $2
            AND row_version = $3
@@ -1206,6 +1355,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.costsJson,
           p.openingRecordJson,
           p.milestonesJson,
+          p.numberSequenceKey,
+          p.numberSequenceValue,
         ],
       );
 
@@ -1232,7 +1383,13 @@ export class TenantMatterRepository extends TenantScopedRepository {
 
       this.assertRowTenant(ctx, updated.tenant_id, 'Matter');
       const partyRows = await this.syncMatterPartiesInTx(tx, ctx, matter);
-      await this.advanceMatterNumberHighWaterInTx(tx, ctx, p.matterNumber);
+      await this.advanceMatterNumberHighWaterInTx(
+        tx,
+        ctx,
+        p.matterNumber,
+        p.numberSequenceKey,
+        p.numberSequenceValue,
+      );
       return mapMatterRow<TMatter>(updated, partyRows);
     });
   }
@@ -1259,10 +1416,25 @@ export class TenantMatterRepository extends TenantScopedRepository {
       });
     }
     return this.withTenantTransaction(ctx, async (tx) => {
-      await tx.query(
-        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+      const existingPutRes = await tx.query<{
+        id: string;
+        matter_number: string;
+      }>(
+        'SELECT id, matter_number FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
         [ctx.tenantId, matter.id],
       );
+      const existingPutRow = existingPutRes.rows[0];
+      if (existingPutRow) {
+        const prevNum = (existingPutRow.matter_number ?? '').trim();
+        const nextNum = (matter.matterNumber ?? '').trim();
+        if (prevNum && !prevNum.startsWith('DRAFT') && nextNum !== prevNum) {
+          const immutErr = new Error(
+            `${MATTER_NUMBER_IMMUTABLE_CODE}: Existing permanent matter number "${prevNum}" cannot be changed to "${nextNum}".`,
+          ) as Error & { code: string };
+          immutErr.code = MATTER_NUMBER_IMMUTABLE_CODE;
+          throw immutErr;
+        }
+      }
       const p = buildMatterDbParameters(
         ctx,
         matter,
@@ -1282,7 +1454,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            created_at, updated_at, additional_client_ids_json,
            restricted_access_user_ids_json, fields_json, custom_fields_json,
            conflict_check_record_json, risk_assessment_json, costs_json,
-           opening_record_json, milestones_json
+           opening_record_json, milestones_json, number_sequence_key, number_sequence_value
          ) VALUES (
            $1, $2, 1, $3, $4, $5,
            $6, $7, $8,
@@ -1296,7 +1468,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
            $34::timestamptz, $35::timestamptz, $36::jsonb,
            $37::jsonb, $38::jsonb, $39::jsonb,
            $40::jsonb, $41::jsonb, $42::jsonb,
-           $43::jsonb, $44::jsonb
+           $43::jsonb, $44::jsonb, $45, $46::bigint
          )
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            row_version = COALESCE(public.matters.row_version, 0) + 1,
@@ -1341,7 +1513,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
            risk_assessment_json = EXCLUDED.risk_assessment_json,
            costs_json = EXCLUDED.costs_json,
            opening_record_json = EXCLUDED.opening_record_json,
-           milestones_json = EXCLUDED.milestones_json
+           milestones_json = EXCLUDED.milestones_json,
+           number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
+           number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
          RETURNING *`,
         [
           p.tenantId,
@@ -1388,6 +1562,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
           p.costsJson,
           p.openingRecordJson,
           p.milestonesJson,
+          p.numberSequenceKey,
+          p.numberSequenceValue,
         ],
       );
       const saved = res.rows[0];
@@ -1398,7 +1574,13 @@ export class TenantMatterRepository extends TenantScopedRepository {
       }
       this.assertRowTenant(ctx, saved.tenant_id, 'Matter');
       const partyRows = await this.syncMatterPartiesInTx(tx, ctx, matter);
-      await this.advanceMatterNumberHighWaterInTx(tx, ctx, p.matterNumber);
+      await this.advanceMatterNumberHighWaterInTx(
+        tx,
+        ctx,
+        p.matterNumber,
+        p.numberSequenceKey,
+        p.numberSequenceValue,
+      );
       return mapMatterRow<TMatter>(saved, partyRows);
     });
   }
@@ -1450,7 +1632,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
              created_at, updated_at, additional_client_ids_json,
              restricted_access_user_ids_json, fields_json, custom_fields_json,
              conflict_check_record_json, risk_assessment_json, costs_json,
-             opening_record_json, milestones_json
+             opening_record_json, milestones_json, number_sequence_key, number_sequence_value
            ) VALUES (
              $1, $2, $3, $4, $5, $6,
              $7, $8, $9,
@@ -1464,7 +1646,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
              $35::timestamptz, $36::timestamptz, $37::jsonb,
              $38::jsonb, $39::jsonb, $40::jsonb,
              $41::jsonb, $42::jsonb, $43::jsonb,
-             $44::jsonb, $45::jsonb
+             $44::jsonb, $45::jsonb, $46, $47::bigint
            )
            ON CONFLICT (tenant_id, id) DO UPDATE SET
              row_version = COALESCE(public.matters.row_version, EXCLUDED.row_version, 1),
@@ -1509,7 +1691,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
              risk_assessment_json = EXCLUDED.risk_assessment_json,
              costs_json = EXCLUDED.costs_json,
              opening_record_json = EXCLUDED.opening_record_json,
-             milestones_json = EXCLUDED.milestones_json
+             milestones_json = EXCLUDED.milestones_json,
+             number_sequence_key = COALESCE(EXCLUDED.number_sequence_key, public.matters.number_sequence_key),
+             number_sequence_value = COALESCE(EXCLUDED.number_sequence_value, public.matters.number_sequence_value)
            RETURNING *`,
           [
             p.tenantId,
@@ -1557,6 +1741,8 @@ export class TenantMatterRepository extends TenantScopedRepository {
             p.costsJson,
             p.openingRecordJson,
             p.milestonesJson,
+            p.numberSequenceKey,
+            p.numberSequenceValue,
           ],
         );
 
@@ -1568,7 +1754,13 @@ export class TenantMatterRepository extends TenantScopedRepository {
         }
         this.assertRowTenant(ctx, saved.tenant_id, 'Matter');
         const partyRows = await this.syncMatterPartiesInTx(tx, ctx, matter);
-        await this.advanceMatterNumberHighWaterInTx(tx, ctx, p.matterNumber);
+        await this.advanceMatterNumberHighWaterInTx(
+          tx,
+          ctx,
+          p.matterNumber,
+          p.numberSequenceKey,
+          p.numberSequenceValue,
+        );
         out.push(mapMatterRow<TMatter>(saved, partyRows));
 
         const idMatch = /^M-(\d+)$/.exec(matter.id);
@@ -3096,6 +3288,75 @@ export class TenantMatterRepository extends TenantScopedRepository {
     id: string,
   ): Promise<boolean> {
     return this.withTenantTransaction(ctx, async (tx) => {
+      // R752: Auto-withdraw any pending High-Risk opening approvals when a prospective matter is deleted/abandoned
+      // (approved records are historical and never withdrawn).
+      const pendingHroRes = await tx.query<{
+        tenant_id: string;
+        id: string;
+        status: string;
+      }>(
+        `SELECT tenant_id, id, status
+           FROM public.register_records
+          WHERE tenant_id = $1
+            AND matter_id = $2
+            AND register_type_key = 'high_risk_opening'
+            AND status IN ('pending_partner', 'pending_compliance')
+            FOR UPDATE`,
+        [ctx.tenantId, id],
+      );
+      if (pendingHroRes.rows.length > 0) {
+        const nowIso = new Date().toISOString();
+        const actorId = ctx.actorId || 'system';
+        for (const hroRow of pendingHroRes.rows) {
+          this.assertRowTenant(ctx, hroRow.tenant_id, 'RegisterRecord');
+          await tx.query(
+            `UPDATE public.register_records
+                SET status = 'withdrawn',
+                    decided_by_id = $3,
+                    decided_at = $4::timestamptz,
+                    updated_by_id = $3,
+                    updated_at = $4::timestamptz,
+                    row_version = row_version + 1
+              WHERE tenant_id = $1 AND id = $2`,
+            [ctx.tenantId, hroRow.id, actorId, nowIso],
+          );
+          const trSeqRes = await tx.query<{ max_num: string | null; next_val: string }>(
+            `SELECT (
+               SELECT MAX(substring(rt.id from '^RT-([0-9]+)$')::bigint)::text
+                 FROM public.register_transitions rt
+                WHERE rt.tenant_id = $1 AND rt.id ~ '^RT-[0-9]+$'
+             ) AS max_num,
+             nextval('public.tenant_register_transition_id_seq')::text AS next_val`,
+            [ctx.tenantId],
+          );
+          const maxNum = Number(trSeqRes.rows[0]?.max_num ?? '0') || 0;
+          const seqNum = Number(trSeqRes.rows[0]?.next_val ?? '1') || 1;
+          const trId = `RT-${String(Math.max(maxNum + 1, seqNum)).padStart(6, '0')}`;
+          await tx.query(
+            `INSERT INTO public.register_transitions (
+               tenant_id, id, register_record_id, register_type_key,
+               transition_key, from_status, to_status, actor_id,
+               comment, payload_json, correlation_id, transitioned_at
+             ) VALUES (
+               $1, $2, $3, 'high_risk_opening',
+               'withdraw_opening', $4, 'withdrawn', $5,
+               $6, $7::jsonb, $8, $9::timestamptz
+             )`,
+            [
+              ctx.tenantId,
+              trId,
+              hroRow.id,
+              hroRow.status,
+              actorId,
+              'Withdrawn automatically when prospective matter was deleted.',
+              JSON.stringify({ systemAction: 'deleteMatterById', matterId: id }),
+              ctx.correlationId,
+              nowIso,
+            ],
+          );
+        }
+      }
+
       await tx.query(
         'DELETE FROM public.matter_parties WHERE tenant_id = $1 AND matter_id = $2',
         [ctx.tenantId, id],
@@ -3212,8 +3473,159 @@ export class TenantMatterRepository extends TenantScopedRepository {
     });
   }
 
+  // ============================================================================
+  // Opening Gate Overrides (`0026_opening_gate_overrides_and_numbering_expand`)
+  // ============================================================================
+
+  public async listOpeningGateOverridesForMatterInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    matterId: string,
+    options?: { activeOnly?: boolean; forUpdate?: boolean },
+  ): Promise<MatterOpeningGateOverrideRecord[]> {
+    const activeClause = options?.activeOnly ? ' AND revoked_at IS NULL' : '';
+    const lockClause = options?.forUpdate ? ' FOR UPDATE' : '';
+    const res = await tx.query<DbMatterOpeningGateOverrideRow>(
+      `SELECT tenant_id, id, matter_id, precondition_key, reason,
+              overridden_by_person_id, overridden_at,
+              revoked_by_person_id, revoked_at
+         FROM public.matter_opening_gate_overrides
+        WHERE tenant_id = $1 AND matter_id = $2${activeClause}
+        ORDER BY overridden_at DESC, id DESC${lockClause}`,
+      [ctx.tenantId, matterId],
+    );
+    return res.rows.map((row) => {
+      this.assertRowTenant(ctx, row.tenant_id, 'MatterOpeningGateOverride');
+      return mapOpeningGateOverrideRow(row);
+    });
+  }
+
+  public async listOpeningGateOverridesForMatter(
+    ctx: TenantContext,
+    matterId: string,
+    options?: { activeOnly?: boolean },
+  ): Promise<MatterOpeningGateOverrideRecord[]> {
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.listOpeningGateOverridesForMatterInTx(tx, ctx, matterId, options),
+    );
+  }
+
+  public async insertOpeningGateOverrideInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    input: {
+      matterId: string;
+      preconditionKey: OpeningGatePreconditionKey;
+      reason: string;
+      overriddenByPersonId: string;
+      overriddenAtIso?: string;
+    },
+  ): Promise<MatterOpeningGateOverrideRecord> {
+    const cleanReason = input.reason?.trim() ?? '';
+    if (cleanReason.length < 10) {
+      throw new Error(
+        'OPENING_GATE_OVERRIDE_VALIDATION_ERROR: An opening gate override requires a reason of at least 10 characters.',
+      );
+    }
+    const seqRes = await tx.query<{ seq_val: string | number }>(
+      "SELECT nextval('public.tenant_opening_override_id_seq')::bigint AS seq_val",
+    );
+    const seqNum = Number(seqRes.rows[0]?.seq_val ?? 1);
+    const id = `OVR-${String(seqNum).padStart(6, '0')}`;
+    const overriddenAtIso = safePgTimestampIso(input.overriddenAtIso);
+    const res = await tx.query<DbMatterOpeningGateOverrideRow>(
+      `INSERT INTO public.matter_opening_gate_overrides (
+         tenant_id, id, matter_id, precondition_key, reason,
+         overridden_by_person_id, overridden_at, revoked_by_person_id, revoked_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7::timestamptz, NULL, NULL
+       )
+       RETURNING *`,
+      [
+        ctx.tenantId,
+        id,
+        input.matterId,
+        input.preconditionKey,
+        cleanReason,
+        input.overriddenByPersonId,
+        overriddenAtIso,
+      ],
+    );
+    const row = res.rows[0];
+    if (!row) {
+      throw new Error(
+        'TENANCY_ISOLATION_ERROR: Could not insert opening gate override row.',
+      );
+    }
+    this.assertRowTenant(ctx, row.tenant_id, 'MatterOpeningGateOverride');
+    return mapOpeningGateOverrideRow(row);
+  }
+
+  public async insertOpeningGateOverride(
+    ctx: TenantContext,
+    input: {
+      matterId: string;
+      preconditionKey: OpeningGatePreconditionKey;
+      reason: string;
+      overriddenByPersonId: string;
+      overriddenAtIso?: string;
+    },
+  ): Promise<MatterOpeningGateOverrideRecord> {
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.insertOpeningGateOverrideInTx(tx, ctx, input),
+    );
+  }
+
+  public async revokeOpeningGateOverrideInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    params: {
+      overrideId: string;
+      matterId: string;
+      revokedByPersonId: string;
+      revokedAtIso?: string;
+    },
+  ): Promise<MatterOpeningGateOverrideRecord | null> {
+    const revokedAtIso = safePgTimestampIso(params.revokedAtIso);
+    const res = await tx.query<DbMatterOpeningGateOverrideRow>(
+      `UPDATE public.matter_opening_gate_overrides
+          SET revoked_by_person_id = $4,
+              revoked_at = $5::timestamptz
+        WHERE tenant_id = $1
+          AND id = $2
+          AND matter_id = $3
+          AND revoked_at IS NULL
+        RETURNING *`,
+      [
+        ctx.tenantId,
+        params.overrideId,
+        params.matterId,
+        params.revokedByPersonId,
+        revokedAtIso,
+      ],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    this.assertRowTenant(ctx, row.tenant_id, 'MatterOpeningGateOverride');
+    return mapOpeningGateOverrideRow(row);
+  }
+
+  public async revokeOpeningGateOverride(
+    ctx: TenantContext,
+    params: {
+      overrideId: string;
+      matterId: string;
+      revokedByPersonId: string;
+      revokedAtIso?: string;
+    },
+  ): Promise<MatterOpeningGateOverrideRecord | null> {
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.revokeOpeningGateOverrideInTx(tx, ctx, params),
+    );
+  }
+
   /**
-   * Clears `matter_parties` and `matters` for `ctx.tenantId`.
+   * Clears `matter_opening_gate_overrides`, `matter_parties`, and `matters` for `ctx.tenantId`.
    * Preserves `matter_number_sequences` by default (`B6`) so matter numbers never go backwards
    * across matter deletions or `resetAllDemoData` demo resets.
    */
@@ -3222,6 +3634,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
     options?: { resetMatterNumberSequences?: boolean },
   ): Promise<void> {
     await this.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'DELETE FROM public.matter_opening_gate_overrides WHERE tenant_id = $1',
+        [ctx.tenantId],
+      );
       await tx.query('DELETE FROM public.matter_parties WHERE tenant_id = $1', [
         ctx.tenantId,
       ]);

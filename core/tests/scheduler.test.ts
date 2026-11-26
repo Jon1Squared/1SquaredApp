@@ -1222,6 +1222,8 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
       void _omittedId;
       const matterTemplate = {
         ...rawMatterTemplate,
+        engagementLetterStatus: 'Sent' as const,
+        engagementLetterSignedAt: null,
         conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
           status: 'Cleared' as const,
           outcomeLabel: 'Cleared by fee earner' as const,
@@ -1622,8 +1624,15 @@ describe('S0-19: Tenant-aware background job scheduler (ADR 0030)', () => {
         (p) => p.isEmployee && !['P-000001', 'P-000002', 'P-000004', 'P-000010'].includes(p.id),
       )!;
       const baseMatter = matters.find((m) => !m.isStaffMatter)!;
-      const { id: _omitId, ...matterTemplate } = baseMatter;
+      const {
+        id: _omitId,
+        engagementLetterStatus: _omitEls,
+        engagementLetterSignedAt: _omitElsa,
+        ...matterTemplate
+      } = baseMatter;
       void _omitId;
+      void _omitEls;
+      void _omitElsa;
 
       // Save staff matter restricted ONLY to P-000001, P-000004 (acting admin), and P-000010 (explicitly excluding P-000002)
       const staffMatterSave = await runAsTestActor(

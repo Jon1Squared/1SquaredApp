@@ -1751,6 +1751,8 @@ describe('Key Dates Two-Tenant Isolation, Migrations & Restricted Matter Omissio
               ...matterTpl,
               matterNumber: 'DRAFT',
               openedAt: null,
+              engagementLetterStatus: 'Sent',
+              engagementLetterSignedAt: null,
               fieldValues: {},
               title: 'R610 Enquiry Conversion Matter',
               sourceEnquiryId: openEnq.id,

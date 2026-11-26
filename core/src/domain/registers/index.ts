@@ -26,6 +26,7 @@ import type {
   RegisterReminderScheduleConfig,
   RegistersConfiguration,
   RegisterStateDefinition,
+  RegisterTransition,
   RegisterTransitionDefinition,
   RegisterTypeDefinition,
   RegisterTypeOverride,
@@ -38,6 +39,7 @@ export const REGISTER_DOMAIN_ERROR_CODES = {
   SYSTEM_ONLY_TRANSITION: 'REGISTER_SYSTEM_ONLY_TRANSITION',
   SELF_APPROVAL_FORBIDDEN: 'REGISTER_SELF_APPROVAL_FORBIDDEN',
   APPROVER_MISMATCH: 'REGISTER_APPROVER_MISMATCH',
+  DISTINCT_APPROVER_REQUIRED: 'REGISTER_DISTINCT_APPROVER_REQUIRED',
   CONCURRENCY_CONFLICT: 'REGISTER_CONCURRENCY_CONFLICT',
   NOT_FOUND: 'REGISTER_NOT_FOUND',
   TYPE_DISABLED: 'REGISTER_TYPE_DISABLED',
@@ -74,14 +76,17 @@ export const DEFAULT_REGISTERS_CONFIG: RegistersConfiguration = Object.freeze({
 });
 
 export const CORE_REGISTER_TYPES: Readonly<
-  Record<'sign_off' | 'undertaking' | 'complaint' | 'breach' | 'cdd', RegisterTypeDefinition>
+  Record<
+    'sign_off' | 'undertaking' | 'complaint' | 'breach' | 'cdd' | 'high_risk_opening',
+    RegisterTypeDefinition
+  >
 > = Object.freeze({
   sign_off: {
     key: 'sign_off',
     label: 'Sign-Off',
     pluralLabel: 'Sign-Offs',
     description:
-      'Partner sign-offs for write-offs and high-risk matter openings requiring two-person approval.',
+      'Partner sign-offs for write-offs requiring two-person approval.',
     isCore: true,
     enabled: true,
     referencePrefix: 'SO',
@@ -128,6 +133,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         fromStatuses: ['discussing'],
         toStatus: 'pending_approval',
         requiredPermission: 'register:edit',
+        resetsApprovalCycle: true,
       },
       {
         key: 'approve',
@@ -226,6 +232,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         fromStatuses: ['varied', 'overdue'],
         toStatus: 'open',
         requiredPermission: 'undertaking:manage',
+        resetsApprovalCycle: true,
       },
       {
         key: 'mark_overdue',
@@ -458,6 +465,7 @@ export const CORE_REGISTER_TYPES: Readonly<
     editPermission: 'cdd:record',
     subjectScope: 'client',
     requireMatterLink: false,
+    systemCreatedOnly: true,
     approvalRules: null,
     reminderSchedule: {
       enabled: true,
@@ -545,6 +553,107 @@ export const CORE_REGISTER_TYPES: Readonly<
     ],
     showInNavigation: true,
   },
+  high_risk_opening: {
+    key: 'high_risk_opening',
+    label: 'High-Risk Matter Opening',
+    pluralLabel: 'High-Risk Matter Openings',
+    description:
+      'Mandatory two-stage sign-off (Partner followed by a different Risk & Compliance officer) before opening High- or Critical-risk matters.',
+    isCore: true,
+    enabled: true,
+    referencePrefix: 'HRO',
+    initialStatus: 'pending_partner',
+    createPermission: 'register:create',
+    editPermission: 'register:edit',
+    subjectScope: 'matter',
+    requireMatterLink: true,
+    systemCreatedOnly: true,
+    approvalRules: {
+      requireTwoPersonApproval: true,
+      forbidSelfApproval: true,
+      requireAssignedApproverMatch: false,
+      allowAdminBypass: false,
+    },
+    reminderSchedule: {
+      enabled: true,
+      dueDaysBefore: [7, 1, 0],
+      reviewDaysBefore: [],
+      recipientMode: 'owner_and_approver',
+    },
+    states: [
+      { key: 'pending_partner', label: 'Pending Partner approval', isTerminal: false, tone: 'warning' },
+      { key: 'pending_compliance', label: 'Pending Risk & Compliance approval', isTerminal: false, tone: 'info' },
+      { key: 'approved', label: 'Approved', isTerminal: true, tone: 'success' },
+      { key: 'rejected', label: 'Rejected', isTerminal: true, tone: 'danger' },
+      { key: 'withdrawn', label: 'Withdrawn', isTerminal: true, tone: 'neutral' },
+    ],
+    transitions: [
+      {
+        key: 'partner_approve',
+        label: 'Partner approve',
+        fromStatuses: ['pending_partner'],
+        toStatus: 'pending_compliance',
+        requiredPermission: 'register:approve',
+        allowedRoles: ['partner', 'managing_partner'],
+        forbidSelfAction: true,
+        requiresComment: false,
+      },
+      {
+        key: 'compliance_approve',
+        label: 'Compliance approve',
+        fromStatuses: ['pending_compliance'],
+        toStatus: 'approved',
+        requiredPermission: 'register:approve',
+        allowedRoles: ['risk_compliance'],
+        forbidSelfAction: true,
+        mustDifferFromPreviousApprover: true,
+        distinctFromTransitionKeys: ['partner_approve'],
+        setsDecidedAt: true,
+      },
+      {
+        key: 'reject_opening',
+        label: 'Reject high-risk opening',
+        fromStatuses: ['pending_partner', 'pending_compliance'],
+        toStatus: 'rejected',
+        requiredPermission: 'register:approve',
+        allowedRoles: ['partner', 'managing_partner', 'risk_compliance'],
+        forbidSelfAction: true,
+        requiresComment: true,
+        setsDecidedAt: true,
+      },
+      {
+        key: 'withdraw_opening',
+        label: 'Withdraw high-risk opening',
+        fromStatuses: ['pending_partner', 'pending_compliance'],
+        toStatus: 'withdrawn',
+        requiredPermission: 'register:edit',
+        systemOnly: true,
+        resetsApprovalCycle: true,
+        setsDecidedAt: true,
+      },
+    ],
+    fields: [
+      {
+        key: 'matterNumber',
+        label: 'Matter number',
+        type: 'text',
+        required: false,
+      },
+      {
+        key: 'riskLevel',
+        label: 'Risk rating',
+        type: 'text',
+        required: false,
+      },
+      {
+        key: 'submittedById',
+        label: 'Submitted by',
+        type: 'person',
+        required: false,
+      },
+    ],
+    showInNavigation: true,
+  },
 });
 
 const CORE_REGISTER_KEY_SET = new Set<string>(Object.keys(CORE_REGISTER_TYPES));
@@ -593,6 +702,9 @@ function cloneTransitionDefinition(
       : {}),
     ...(transitionDef.systemOnly !== undefined
       ? { systemOnly: Boolean(transitionDef.systemOnly) }
+      : {}),
+    ...(transitionDef.resetsApprovalCycle !== undefined
+      ? { resetsApprovalCycle: Boolean(transitionDef.resetsApprovalCycle) }
       : {}),
     setsDecidedAt: transitionDef.setsDecidedAt ?? false,
   };
@@ -719,6 +831,9 @@ export function validateRegisterTypeDefinition(
       ? { subjectScope: customRegisterType.subjectScope }
       : {}),
     requireMatterLink: Boolean(customRegisterType.requireMatterLink),
+    ...(customRegisterType.systemCreatedOnly !== undefined
+      ? { systemCreatedOnly: Boolean(customRegisterType.systemCreatedOnly) }
+      : {}),
     approvalRules: cloneApprovalRules(customRegisterType.approvalRules),
     reminderSchedule: cloneReminderSchedule(
       customRegisterType.reminderSchedule,
@@ -737,12 +852,18 @@ function applyRegisterTypeOverride(
   typeOverride: RegisterTypeOverride,
 ): RegisterTypeDefinition {
   if (
-    baseType.key === 'cdd' &&
+    (baseType.key === 'cdd' || baseType.systemCreatedOnly) &&
     (typeOverride.additionalFields?.length ?? 0) > 0
   ) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
       `System-managed register "${baseType.key}" does not allow firm-defined additionalFields.`,
+    );
+  }
+  if (baseType.key === 'high_risk_opening' && typeOverride.enabled === false) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      'Core register "high_risk_opening" cannot be disabled (core-locked governance rule).',
     );
   }
   const nextFields = baseType.fields.map(cloneFieldDefinition);
@@ -765,6 +886,11 @@ function applyRegisterTypeOverride(
     pluralLabel: typeOverride.pluralLabel ?? baseType.pluralLabel,
     description: typeOverride.description ?? baseType.description,
     showInNavigation: typeOverride.showInNavigation ?? baseType.showInNavigation,
+    ...(baseType.key === 'high_risk_opening' || baseType.key === 'cdd'
+      ? { systemCreatedOnly: true }
+      : baseType.systemCreatedOnly !== undefined
+        ? { systemCreatedOnly: baseType.systemCreatedOnly }
+        : {}),
     reminderSchedule: {
       enabled: rsOverride?.enabled ?? baseType.reminderSchedule.enabled,
       dueDaysBefore: rsOverride?.dueDaysBefore
@@ -898,6 +1024,18 @@ export function validateRegisterFieldValues(params: {
 }): Record<string, unknown> {
   const { registerType, fieldValues, applyDefaults, enforceRequired = true } = params;
   const next: Record<string, unknown> = { ...(fieldValues ?? {}) };
+
+  if (registerType.systemCreatedOnly) {
+    const allowedFieldKeys = new Set(registerType.fields.map((f) => f.key));
+    for (const rawKey of Object.keys(next)) {
+      if (!allowedFieldKeys.has(rawKey)) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+          `Field "${rawKey}" is not allowed on system-managed register "${registerType.label}".`,
+        );
+      }
+    }
+  }
 
   for (const fieldDef of registerType.fields) {
     let val = next[fieldDef.key];
@@ -1221,6 +1359,7 @@ export function validateRegisterTransitionExecution(params: {
   comment: string | null;
   expectedRowVersion?: number;
   viaDedicatedWorkflow?: boolean;
+  priorTransitions?: readonly Pick<RegisterTransition, 'transitionKey' | 'actorId'>[];
 }): {
   transition: RegisterTransitionDefinition;
   nextStatus: string;
@@ -1236,6 +1375,7 @@ export function validateRegisterTransitionExecution(params: {
     comment,
     expectedRowVersion,
     viaDedicatedWorkflow = false,
+    priorTransitions = [],
   } = params;
 
   if (!registerType.enabled) {
@@ -1298,45 +1438,110 @@ export function validateRegisterTransitionExecution(params: {
     );
   }
 
-  const mustBlockSelfAction =
-    transition.forbidSelfAction ||
-    Boolean(registerType.approvalRules && transition.requiredPermission !== registerType.editPermission);
+  if (!viaDedicatedWorkflow) {
+    const mustBlockSelfAction =
+      transition.forbidSelfAction ||
+      Boolean(registerType.approvalRules && transition.requiredPermission !== registerType.editPermission);
 
-  if (mustBlockSelfAction && (record.ownerId === actorId || record.createdById === actorId)) {
-    throw createRegisterDomainError(
-      REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
-      `Self-approval or self-sign-off is forbidden on ${registerType.label} "${record.reference}".`,
-    );
-  }
+    if (
+      mustBlockSelfAction &&
+      (record.ownerId === actorId ||
+        record.createdById === actorId ||
+        (registerType.key === 'high_risk_opening' &&
+          typeof record.fieldValues?.submittedById === 'string' &&
+          record.fieldValues.submittedById === actorId))
+    ) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
+        `Self-approval or self-sign-off is forbidden on ${registerType.label} "${record.reference}".`,
+      );
+    }
 
-  const mustMatchAssignedApprover =
-    Boolean(transition.requireAssignedApproverMatch) ||
-    Boolean(registerType.approvalRules?.requireAssignedApproverMatch);
+    const mustMatchAssignedApprover =
+      Boolean(transition.requireAssignedApproverMatch) ||
+      Boolean(registerType.approvalRules?.requireAssignedApproverMatch);
 
-  if (
-    mustMatchAssignedApprover &&
-    transition.forbidSelfAction &&
-    record.assignedApproverId &&
-    record.assignedApproverId !== actorId
-  ) {
-    throw createRegisterDomainError(
-      REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
-      `Only the assigned approver (${record.assignedApproverId}) may perform transition "${transition.key}".`,
-    );
-  }
-
-  if (
-    registerType.approvalRules?.allowedApproverRoles?.length &&
-    transition.forbidSelfAction &&
-    !actorRoles.includes('admin')
-  ) {
-    const allowedSet = new Set(registerType.approvalRules.allowedApproverRoles);
-    const hasAllowedRole = actorRoles.some((r) => allowedSet.has(r));
-    if (!hasAllowedRole) {
+    if (
+      mustMatchAssignedApprover &&
+      transition.forbidSelfAction &&
+      record.assignedApproverId &&
+      record.assignedApproverId !== actorId
+    ) {
       throw createRegisterDomainError(
         REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
-        `Actor roles [${actorRoles.join(', ')}] do not satisfy allowedApproverRoles for "${registerType.key}".`,
+        `Only the assigned approver (${record.assignedApproverId}) may perform transition "${transition.key}".`,
       );
+    }
+
+    const allowAdminBypass = registerType.approvalRules?.allowAdminBypass !== false;
+
+    if (
+      transition.allowedRoles?.length &&
+      (!allowAdminBypass || !actorRoles.includes('admin'))
+    ) {
+      const allowedTransitionSet = new Set(transition.allowedRoles);
+      const hasAllowedTransitionRole = actorRoles.some((r) => allowedTransitionSet.has(r));
+      if (!hasAllowedTransitionRole) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
+          `Actor roles [${actorRoles.join(', ')}] do not satisfy allowedRoles for transition "${transition.key}" on "${registerType.key}".`,
+        );
+      }
+    }
+
+    if (
+      registerType.approvalRules?.allowedApproverRoles?.length &&
+      transition.forbidSelfAction &&
+      (!allowAdminBypass || !actorRoles.includes('admin'))
+    ) {
+      const allowedSet = new Set(registerType.approvalRules.allowedApproverRoles);
+      const hasAllowedRole = actorRoles.some((r) => allowedSet.has(r));
+      if (!hasAllowedRole) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.APPROVER_MISMATCH,
+          `Actor roles [${actorRoles.join(', ')}] do not satisfy allowedApproverRoles for "${registerType.key}".`,
+        );
+      }
+    }
+
+    if (transition.mustDifferFromPreviousApprover) {
+      const targetKeySet = transition.distinctFromTransitionKeys?.length
+        ? new Set(transition.distinctFromTransitionKeys)
+        : null;
+      const transitionDefByKey = new Map(
+        registerType.transitions.map((t) => [t.key, t] as const),
+      );
+      let activeCycleStartIndex = 0;
+      for (let idx = priorTransitions.length - 1; idx >= 0; idx -= 1) {
+        const prior = priorTransitions[idx];
+        const priorDef = transitionDefByKey.get(prior.transitionKey);
+        if (
+          priorDef?.resetsApprovalCycle === true ||
+          priorDef?.toStatus === registerType.initialStatus
+        ) {
+          activeCycleStartIndex = idx + 1;
+          break;
+        }
+      }
+      const activeCycleTransitions = priorTransitions.slice(activeCycleStartIndex);
+      const sameActorAlreadyApproved = activeCycleTransitions.some((prior) => {
+        if (prior.actorId !== actorId) return false;
+        if (targetKeySet) {
+          return targetKeySet.has(prior.transitionKey);
+        }
+        const priorDef = transitionDefByKey.get(prior.transitionKey);
+        return Boolean(
+          priorDef &&
+            (priorDef.forbidSelfAction ||
+              priorDef.requiredPermission !== registerType.editPermission),
+        );
+      });
+      if (sameActorAlreadyApproved) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.DISTINCT_APPROVER_REQUIRED,
+          `Transition "${transition.key}" requires a different approver from the previous approval stage on ${registerType.label} "${record.reference}".`,
+        );
+      }
     }
   }
 

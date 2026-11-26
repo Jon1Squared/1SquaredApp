@@ -792,6 +792,62 @@ describe('ExtensionHost manifest config:read & hooks enforcement (R593)', () => 
     expect(cddTransAfter.isolatedErrors).toEqual([]);
     expect(spy).not.toHaveBeenCalled();
 
+    const hroCreateRes = await host.executeRegisterBeforeCreateHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-hro',
+        registerType: { key: 'high_risk_opening' },
+        draft: {
+          registerTypeKey: 'high_risk_opening',
+          title: 'HRO confidential notes',
+          matterId: 'M-1',
+          enquiryId: null,
+          personId: null,
+          organisationId: null,
+          ownerId: 'P-000002',
+          assignedApproverId: null,
+          dueAt: null,
+          reviewAt: null,
+          fieldValues: {},
+        },
+      } as unknown as Parameters<typeof host.executeRegisterBeforeCreateHook>[2],
+    );
+    expect(hroCreateRes.allowProceed).toBe(true);
+
+    const hroTransBefore = await host.executeRegisterBeforeTransitionHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-hro-bt',
+        registerType: { key: 'high_risk_opening' },
+        record: { id: 'REG-HRO-1', registerTypeKey: 'high_risk_opening', status: 'pending_partner' },
+        transition: { key: 'partner_approve', fromStatus: 'pending_partner', toStatus: 'pending_compliance' },
+        comment: 'Partner approve',
+      } as unknown as Parameters<typeof host.executeRegisterBeforeTransitionHook>[2],
+    );
+    expect(hroTransBefore.allowProceed).toBe(true);
+
+    const hroTransAfter = await host.executeRegisterAfterTransitionHook(
+      ctx,
+      activeConfig,
+      {
+        tenantId: ctx.tenantId,
+        actorId: 'P-000001',
+        correlationId: 'corr-r782-hro-at',
+        registerType: { key: 'high_risk_opening' },
+        previousRecord: { id: 'REG-HRO-1', registerTypeKey: 'high_risk_opening', status: 'pending_partner' },
+        updatedRecord: { id: 'REG-HRO-1', registerTypeKey: 'high_risk_opening', status: 'pending_compliance' },
+        transition: { key: 'partner_approve', fromStatus: 'pending_partner', toStatus: 'pending_compliance' },
+      } as unknown as Parameters<typeof host.executeRegisterAfterTransitionHook>[2],
+    );
+    expect(hroTransAfter.isolatedErrors).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+
     // Positive control: standard undertaking register still invokes hook
     const undCreateRes = await host.executeRegisterBeforeCreateHook(
       ctx,

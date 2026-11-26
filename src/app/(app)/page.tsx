@@ -32,6 +32,8 @@ export default async function HomePage({
         registerRecords={data.registerRecords}
         canViewCdd={data.canViewCdd}
         cddQueueRecords={data.cddQueueRecords}
+        userRoles={shell.currentUserRoles}
+        userPermissions={shell.currentUserPermissions}
         finance={shell.finance}
         pmsLinks={matterFinance?.pmsLinks}
         pmsAsAtDate={

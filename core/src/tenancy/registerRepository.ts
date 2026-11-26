@@ -301,7 +301,8 @@ export class TenantRegisterRepository extends TenantScopedRepository {
       new TenantAuditRepository({ poolManager: this.poolManager });
   }
 
-  public async allocateNextRecordIds(
+  public async allocateNextRecordIdsInTx(
+    tx: TenantSqlClient,
     ctx: TenantContext,
     count: number,
     options?: { idPrefix?: string; padDigits?: number },
@@ -314,54 +315,74 @@ export class TenantRegisterRepository extends TenantScopedRepository {
     const counterKey = `REG_${prefix}`;
     const likePattern = `${prefix}-%`;
     const regexPattern = `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-([0-9]+)$`;
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const out: string[] = [];
-      for (let i = 0; i < count; i++) {
-        const res = await tx.query<{ tenant_id: string; last_value: string }>(
-          `WITH seq AS (
-             SELECT nextval('public.tenant_register_record_id_seq') AS val
-           ),
-           max_existing AS (
-             SELECT COALESCE(
-               MAX(
-                 CASE
-                   WHEN id ~ $3 THEN substring(id FROM $3)::bigint
-                   WHEN reference ~ $3 THEN substring(reference FROM $3)::bigint
-                   ELSE NULL
-                 END
-               ),
-               0
-             ) AS max_id
-             FROM public.register_records
-             WHERE tenant_id = $1 AND (id LIKE $4 OR reference LIKE $4)
-           ),
-           legacy_counter AS (
-             SELECT COALESCE(MAX(last_value), 0) AS legacy_val
-             FROM public.tenant_record_sequences
-             WHERE tenant_id = $1 AND $5 = 'SO' AND counter_key = 'SO'
-           )
-           INSERT INTO public.tenant_record_sequences (tenant_id, counter_key, last_value)
-           SELECT $1, $2, GREATEST(
-             (SELECT val FROM seq),
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const res = await tx.query<{ tenant_id: string; last_value: string }>(
+        `WITH seq AS (
+           SELECT nextval('public.tenant_register_record_id_seq') AS val
+         ),
+         max_existing AS (
+           SELECT COALESCE(
+             MAX(
+               CASE
+                 WHEN id ~ $3 THEN substring(id FROM $3)::bigint
+                 WHEN reference ~ $3 THEN substring(reference FROM $3)::bigint
+                 ELSE NULL
+               END
+             ),
+             0
+           ) AS max_id
+           FROM public.register_records
+           WHERE tenant_id = $1 AND (id LIKE $4 OR reference LIKE $4)
+         ),
+         legacy_counter AS (
+           SELECT COALESCE(MAX(last_value), 0) AS legacy_val
+           FROM public.tenant_record_sequences
+           WHERE tenant_id = $1 AND $5 = 'SO' AND counter_key = 'SO'
+         )
+         INSERT INTO public.tenant_record_sequences (tenant_id, counter_key, last_value)
+         SELECT $1, $2, GREATEST(
+           (SELECT val FROM seq),
+           (SELECT max_id FROM max_existing) + 1,
+           (SELECT legacy_val FROM legacy_counter) + 1
+         )
+         ON CONFLICT (tenant_id, counter_key) DO UPDATE
+           SET last_value = GREATEST(
+             public.tenant_record_sequences.last_value + 1,
+             EXCLUDED.last_value,
              (SELECT max_id FROM max_existing) + 1,
              (SELECT legacy_val FROM legacy_counter) + 1
            )
-           ON CONFLICT (tenant_id, counter_key) DO UPDATE
-             SET last_value = GREATEST(
-               public.tenant_record_sequences.last_value + 1,
-               EXCLUDED.last_value,
-               (SELECT max_id FROM max_existing) + 1,
-               (SELECT legacy_val FROM legacy_counter) + 1
-             )
-           RETURNING tenant_id, last_value::text AS last_value`,
-          [ctx.tenantId, counterKey, regexPattern, likePattern, prefix],
-        );
-        const row = res.rows[0]!;
-        this.assertRowTenant(ctx, row.tenant_id, 'register_records.allocateNextRecordIds');
-        out.push(`${prefix}-${String(Number(row.last_value)).padStart(padDigits, '0')}`);
-      }
-      return out;
-    });
+         RETURNING tenant_id, last_value::text AS last_value`,
+        [ctx.tenantId, counterKey, regexPattern, likePattern, prefix],
+      );
+      const row = res.rows[0]!;
+      this.assertRowTenant(ctx, row.tenant_id, 'register_records.allocateNextRecordIds');
+      out.push(`${prefix}-${String(Number(row.last_value)).padStart(padDigits, '0')}`);
+    }
+    return out;
+  }
+
+  public async allocateNextRecordIds(
+    ctx: TenantContext,
+    count: number,
+    options?: { idPrefix?: string; padDigits?: number },
+  ): Promise<string[]> {
+    if (!Number.isInteger(count) || count <= 0) {
+      return [];
+    }
+    return this.withTenantTransaction(ctx, (tx) =>
+      this.allocateNextRecordIdsInTx(tx, ctx, count, options),
+    );
+  }
+
+  public async allocateNextRecordIdInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    options?: { idPrefix?: string; padDigits?: number },
+  ): Promise<string> {
+    const [id] = await this.allocateNextRecordIdsInTx(tx, ctx, 1, options);
+    return id!;
   }
 
   public async allocateNextRecordId(
@@ -490,6 +511,93 @@ export class TenantRegisterRepository extends TenantScopedRepository {
     return mapRegisterRecordRow(saved);
   }
 
+  public async createRegisterRecordInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    input: {
+      id: string;
+      registerTypeKey: string;
+      reference: string;
+      title: string;
+      status: string;
+      matterId?: string | null;
+      enquiryId?: string | null;
+      personId?: string | null;
+      organisationId?: string | null;
+      ownerId?: string | null;
+      assignedApproverId?: string | null;
+      dueAt?: string | null;
+      reviewAt?: string | null;
+      reminderScheduleDays?: readonly number[] | null;
+      fieldValues: Record<string, unknown>;
+      createdById: string;
+    },
+    options?: {
+      auditEntries?: readonly FirmAuditEntryInput[];
+      recordInitialTransition?: boolean;
+    },
+  ): Promise<RegisterRecord> {
+    const nowIso = new Date().toISOString();
+    const saved = await this.upsertRegisterRecordInTx(tx, ctx, {
+      id: input.id,
+      registerTypeKey: input.registerTypeKey,
+      reference: input.reference,
+      title: input.title,
+      status: input.status,
+      matterId: input.matterId ?? null,
+      enquiryId: input.enquiryId ?? null,
+      personId: input.personId ?? null,
+      organisationId: input.organisationId ?? null,
+      ownerId: input.ownerId ?? input.createdById,
+      assignedApproverId: input.assignedApproverId ?? null,
+      decidedById: null,
+      decidedAt: null,
+      dueAt: input.dueAt ?? null,
+      reviewAt: input.reviewAt ?? null,
+      reminderScheduleDays: input.reminderScheduleDays ?? null,
+      fieldValues: input.fieldValues,
+      createdById: input.createdById,
+      createdAt: nowIso,
+      updatedById: input.createdById,
+      updatedAt: nowIso,
+    });
+
+    if (options?.recordInitialTransition !== false) {
+      const trId = await this.allocateTransitionIdInTx(tx, ctx);
+      await tx.query(
+        `INSERT INTO public.register_transitions (
+           tenant_id, id, register_record_id, register_type_key,
+           transition_key, from_status, to_status, actor_id,
+           comment, payload_json, correlation_id, transitioned_at
+         )
+         VALUES (
+           $1, $2, $3, $4,
+           $5, $6, $7, $8,
+           $9, $10::jsonb, $11, $12::timestamptz
+         )`,
+        [
+          ctx.tenantId,
+          trId,
+          saved.id,
+          saved.registerTypeKey,
+          'create',
+          '',
+          saved.status,
+          input.createdById,
+          null,
+          JSON.stringify({ reference: saved.reference }),
+          ctx.correlationId,
+          nowIso,
+        ],
+      );
+    }
+
+    if (options?.auditEntries?.length) {
+      await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
+    }
+    return saved;
+  }
+
   public async createRegisterRecord(
     ctx: TenantContext,
     input: {
@@ -515,67 +623,9 @@ export class TenantRegisterRepository extends TenantScopedRepository {
       recordInitialTransition?: boolean;
     },
   ): Promise<RegisterRecord> {
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const nowIso = new Date().toISOString();
-      const saved = await this.upsertRegisterRecordInTx(tx, ctx, {
-        id: input.id,
-        registerTypeKey: input.registerTypeKey,
-        reference: input.reference,
-        title: input.title,
-        status: input.status,
-        matterId: input.matterId ?? null,
-        enquiryId: input.enquiryId ?? null,
-        personId: input.personId ?? null,
-        organisationId: input.organisationId ?? null,
-        ownerId: input.ownerId ?? input.createdById,
-        assignedApproverId: input.assignedApproverId ?? null,
-        decidedById: null,
-        decidedAt: null,
-        dueAt: input.dueAt ?? null,
-        reviewAt: input.reviewAt ?? null,
-        reminderScheduleDays: input.reminderScheduleDays ?? null,
-        fieldValues: input.fieldValues,
-        createdById: input.createdById,
-        createdAt: nowIso,
-        updatedById: input.createdById,
-        updatedAt: nowIso,
-      });
-
-      if (options?.recordInitialTransition !== false) {
-        const trId = await this.allocateTransitionIdInTx(tx, ctx);
-        await tx.query(
-          `INSERT INTO public.register_transitions (
-             tenant_id, id, register_record_id, register_type_key,
-             transition_key, from_status, to_status, actor_id,
-             comment, payload_json, correlation_id, transitioned_at
-           )
-           VALUES (
-             $1, $2, $3, $4,
-             $5, $6, $7, $8,
-             $9, $10::jsonb, $11, $12::timestamptz
-           )`,
-          [
-            ctx.tenantId,
-            trId,
-            saved.id,
-            saved.registerTypeKey,
-            'create',
-            '',
-            saved.status,
-            input.createdById,
-            null,
-            JSON.stringify({ reference: saved.reference }),
-            ctx.correlationId,
-            nowIso,
-          ],
-        );
-      }
-
-      if (options?.auditEntries?.length) {
-        await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
-      }
-      return saved;
-    });
+    return this.withTenantTransaction(ctx, (tx) =>
+      this.createRegisterRecordInTx(tx, ctx, input, options),
+    );
   }
 
   public async putRegisterRecords(
@@ -890,14 +940,98 @@ export class TenantRegisterRepository extends TenantScopedRepository {
     });
   }
 
-  public async lockAndExecuteTransition(
+  public async listRegisterRecordsForMatterInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    matterId: string,
+    registerTypeKey?: string,
+    options?: { forUpdate?: boolean },
+  ): Promise<RegisterRecord[]> {
+    const params: unknown[] = [ctx.tenantId, matterId];
+    let typeClause = '';
+    if (registerTypeKey) {
+      params.push(registerTypeKey);
+      typeClause = ` AND register_type_key = $${params.length}`;
+    }
+    const lockClause = options?.forUpdate ? ' FOR UPDATE' : '';
+    const res = await tx.query<DbRegisterRecordRow>(
+      `SELECT *
+         FROM public.register_records
+        WHERE tenant_id = $1
+          AND matter_id = $2${typeClause}
+        ORDER BY updated_at DESC, created_at DESC, id ASC${lockClause}`,
+      params,
+    );
+    return res.rows.map((row) => {
+      this.assertRowTenant(ctx, row.tenant_id, 'register_records.listForMatterInTx');
+      return mapRegisterRecordRow(row);
+    });
+  }
+
+  public async listRegisterRecordsForClientInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    input: {
+      subjectType: 'person' | 'organisation';
+      subjectId: string;
+      registerTypeKey?: string;
+    },
+    options?: { forShare?: boolean },
+  ): Promise<RegisterRecord[]> {
+    const subjectColumn =
+      input.subjectType === 'organisation' ? 'organisation_id' : 'person_id';
+    const params: unknown[] = [ctx.tenantId, input.subjectId];
+    let typeClause = '';
+    if (input.registerTypeKey) {
+      params.push(input.registerTypeKey);
+      typeClause = ` AND register_type_key = $${params.length}`;
+    }
+    const lockClause = options?.forShare ? ' FOR SHARE' : '';
+    const res = await tx.query<DbRegisterRecordRow>(
+      `SELECT *
+         FROM public.register_records
+        WHERE tenant_id = $1
+          AND ${subjectColumn} = $2${typeClause}
+        ORDER BY updated_at DESC, created_at DESC, id ASC${lockClause}`,
+      params,
+    );
+    return res.rows.map((row) => {
+      this.assertRowTenant(ctx, row.tenant_id, 'register_records.listForClientInTx');
+      return mapRegisterRecordRow(row);
+    });
+  }
+
+  public async listTransitionsForRecordInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    registerRecordId: string,
+  ): Promise<RegisterTransition[]> {
+    const res = await tx.query<DbRegisterTransitionRow>(
+      `SELECT *
+         FROM public.register_transitions
+        WHERE tenant_id = $1
+          AND register_record_id = $2
+        ORDER BY transitioned_at ASC, id ASC`,
+      [ctx.tenantId, registerRecordId],
+    );
+    return res.rows.map((row) => {
+      this.assertRowTenant(ctx, row.tenant_id, 'register_transitions.listInTx');
+      return mapRegisterTransitionRow(row);
+    });
+  }
+
+  public async lockAndExecuteTransitionInTx(
+    tx: TenantSqlClient,
     ctx: TenantContext,
     params: {
       recordId: string;
       transitionKey: string;
       actorId: string;
       comment: string | null;
-      validateAndCompute: (lockedRecord: RegisterRecord) =>
+      validateAndCompute: (
+        lockedRecord: RegisterRecord,
+        priorTransitions: readonly RegisterTransition[],
+      ) =>
         | {
             nextStatus: string;
             setsDecidedAt: boolean;
@@ -925,113 +1059,163 @@ export class TenantRegisterRepository extends TenantScopedRepository {
     updatedRecord: RegisterRecord;
     transition: RegisterTransition;
   }> {
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const lockRes = await tx.query<DbRegisterRecordRow>(
-        `SELECT * FROM public.register_records
-         WHERE tenant_id = $1 AND id = $2
-         FOR UPDATE`,
-        [ctx.tenantId, params.recordId],
+    const lockRes = await tx.query<DbRegisterRecordRow>(
+      `SELECT * FROM public.register_records
+       WHERE tenant_id = $1 AND id = $2
+       FOR UPDATE`,
+      [ctx.tenantId, params.recordId],
+    );
+    const lockedRow = lockRes.rows[0];
+    if (!lockedRow) {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND,
+        `Register record "${params.recordId}" not found.`,
       );
-      const lockedRow = lockRes.rows[0];
-      if (!lockedRow) {
-        throw createRegisterDomainError(
-          REGISTER_DOMAIN_ERROR_CODES.NOT_FOUND,
-          `Register record "${params.recordId}" not found.`,
-        );
-      }
-      this.assertRowTenant(ctx, lockedRow.tenant_id, 'register_records.transition.lock');
-      const previousRecord = mapRegisterRecordRow(lockedRow);
+    }
+    this.assertRowTenant(ctx, lockedRow.tenant_id, 'register_records.transition.lock');
+    const previousRecord = mapRegisterRecordRow(lockedRow);
 
-      const computed = await params.validateAndCompute(previousRecord);
-      const nowIso = new Date().toISOString();
-      const decidedById = computed.setsDecidedAt
-        ? params.actorId
-        : previousRecord.decidedById;
-      const decidedAt = computed.setsDecidedAt ? nowIso : previousRecord.decidedAt;
-      const nextDueAt =
-        computed.dueAt !== undefined ? computed.dueAt : previousRecord.dueAt;
-      const nextReviewAt =
-        computed.reviewAt !== undefined ? computed.reviewAt : previousRecord.reviewAt;
+    const priorTransitions = await this.listTransitionsForRecordInTx(
+      tx,
+      ctx,
+      params.recordId,
+    );
 
-      const updRes = await tx.query<DbRegisterRecordRow>(
-        `UPDATE public.register_records
-         SET status = $3,
-             decided_by_id = $4,
-             decided_at = $5::timestamptz,
-             due_at = $6::timestamptz,
-             review_at = $7::timestamptz,
-             field_values_json = $8::jsonb,
-             row_version = row_version + 1,
-             updated_by_id = $9,
-             updated_at = $10::timestamptz
-         WHERE tenant_id = $1 AND id = $2
-         RETURNING *`,
-        [
-          ctx.tenantId,
-          params.recordId,
-          computed.nextStatus,
-          decidedById,
-          decidedAt,
-          nextDueAt,
-          nextReviewAt,
-          JSON.stringify(computed.mergedFieldValues),
-          params.actorId,
-          nowIso,
-        ],
-      );
-      const updatedRow = updRes.rows[0]!;
-      this.assertRowTenant(ctx, updatedRow.tenant_id, 'register_records.transition.update');
-      const updatedRecord = mapRegisterRecordRow(updatedRow);
+    const computed = await params.validateAndCompute(
+      previousRecord,
+      priorTransitions,
+    );
+    const nowIso = new Date().toISOString();
+    const decidedById = computed.setsDecidedAt
+      ? params.actorId
+      : previousRecord.decidedById;
+    const decidedAt = computed.setsDecidedAt ? nowIso : previousRecord.decidedAt;
+    const nextDueAt =
+      computed.dueAt !== undefined ? computed.dueAt : previousRecord.dueAt;
+    const nextReviewAt =
+      computed.reviewAt !== undefined ? computed.reviewAt : previousRecord.reviewAt;
 
-      const transitionId = await this.allocateTransitionIdInTx(tx, ctx);
-      const trRes = await tx.query<DbRegisterTransitionRow>(
-        `INSERT INTO public.register_transitions (
-           tenant_id, id, register_record_id, register_type_key,
-           transition_key, from_status, to_status, actor_id,
-           comment, payload_json, correlation_id, transitioned_at
-         )
-         VALUES (
-           $1, $2, $3, $4,
-           $5, $6, $7, $8,
-           $9, $10::jsonb, $11, $12::timestamptz
-         )
-         RETURNING *`,
-        [
-          ctx.tenantId,
-          transitionId,
-          updatedRecord.id,
-          updatedRecord.registerTypeKey,
-          params.transitionKey,
-          previousRecord.status,
-          updatedRecord.status,
-          params.actorId,
-          params.comment,
-          JSON.stringify(computed.extraPayload ?? {}),
-          ctx.correlationId,
-          nowIso,
-        ],
-      );
-      const transitionRow = trRes.rows[0]!;
-      this.assertRowTenant(ctx, transitionRow.tenant_id, 'register_transitions.insert');
-      const transition = mapRegisterTransitionRow(transitionRow);
+    const updRes = await tx.query<DbRegisterRecordRow>(
+      `UPDATE public.register_records
+       SET status = $3,
+           decided_by_id = $4,
+           decided_at = $5::timestamptz,
+           due_at = $6::timestamptz,
+           review_at = $7::timestamptz,
+           field_values_json = $8::jsonb,
+           row_version = row_version + 1,
+           updated_by_id = $9,
+           updated_at = $10::timestamptz
+       WHERE tenant_id = $1 AND id = $2
+       RETURNING *`,
+      [
+        ctx.tenantId,
+        params.recordId,
+        computed.nextStatus,
+        decidedById,
+        decidedAt,
+        nextDueAt,
+        nextReviewAt,
+        JSON.stringify(computed.mergedFieldValues),
+        params.actorId,
+        nowIso,
+      ],
+    );
+    const updatedRow = updRes.rows[0]!;
+    this.assertRowTenant(ctx, updatedRow.tenant_id, 'register_records.transition.update');
+    const updatedRecord = mapRegisterRecordRow(updatedRow);
 
-      if (params.buildAuditEntries) {
-        const auditEntries = params.buildAuditEntries({
-          previousRecord,
-          updatedRecord,
-          transition,
-        });
-        if (auditEntries.length > 0) {
-          await this.auditRepo.appendAuditEntries(ctx, auditEntries);
-        }
-      }
+    const transitionId = await this.allocateTransitionIdInTx(tx, ctx);
+    const trRes = await tx.query<DbRegisterTransitionRow>(
+      `INSERT INTO public.register_transitions (
+         tenant_id, id, register_record_id, register_type_key,
+         transition_key, from_status, to_status, actor_id,
+         comment, payload_json, correlation_id, transitioned_at
+       )
+       VALUES (
+         $1, $2, $3, $4,
+         $5, $6, $7, $8,
+         $9, $10::jsonb, $11, $12::timestamptz
+       )
+       RETURNING *`,
+      [
+        ctx.tenantId,
+        transitionId,
+        updatedRecord.id,
+        updatedRecord.registerTypeKey,
+        params.transitionKey,
+        previousRecord.status,
+        updatedRecord.status,
+        params.actorId,
+        params.comment,
+        JSON.stringify(computed.extraPayload ?? {}),
+        ctx.correlationId,
+        nowIso,
+      ],
+    );
+    const transitionRow = trRes.rows[0]!;
+    this.assertRowTenant(ctx, transitionRow.tenant_id, 'register_transitions.insert');
+    const transition = mapRegisterTransitionRow(transitionRow);
 
-      return {
+    if (params.buildAuditEntries) {
+      const auditEntries = params.buildAuditEntries({
         previousRecord,
         updatedRecord,
         transition,
-      };
-    });
+      });
+      if (auditEntries.length > 0) {
+        await this.auditRepo.appendAuditEntries(ctx, auditEntries);
+      }
+    }
+
+    return {
+      previousRecord,
+      updatedRecord,
+      transition,
+    };
+  }
+
+  public async lockAndExecuteTransition(
+    ctx: TenantContext,
+    params: {
+      recordId: string;
+      transitionKey: string;
+      actorId: string;
+      comment: string | null;
+      validateAndCompute: (
+        lockedRecord: RegisterRecord,
+        priorTransitions: readonly RegisterTransition[],
+      ) =>
+        | {
+            nextStatus: string;
+            setsDecidedAt: boolean;
+            mergedFieldValues: Record<string, unknown>;
+            dueAt?: string | null;
+            reviewAt?: string | null;
+            extraPayload?: Record<string, unknown>;
+          }
+        | Promise<{
+            nextStatus: string;
+            setsDecidedAt: boolean;
+            mergedFieldValues: Record<string, unknown>;
+            dueAt?: string | null;
+            reviewAt?: string | null;
+            extraPayload?: Record<string, unknown>;
+          }>;
+      buildAuditEntries?: (result: {
+        previousRecord: RegisterRecord;
+        updatedRecord: RegisterRecord;
+        transition: RegisterTransition;
+      }) => readonly FirmAuditEntryInput[];
+    },
+  ): Promise<{
+    previousRecord: RegisterRecord;
+    updatedRecord: RegisterRecord;
+    transition: RegisterTransition;
+  }> {
+    return this.withTenantTransaction(ctx, (tx) =>
+      this.lockAndExecuteTransitionInTx(tx, ctx, params),
+    );
   }
 
   public async listReminderCandidateRecords(

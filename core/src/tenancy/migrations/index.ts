@@ -3491,6 +3491,67 @@ DROP INDEX IF EXISTS public.idx_register_records_tenant_person;
 `.trim(),
   };
 
+export const OPENING_GATE_OVERRIDES_AND_NUMBERING_MIGRATION_0026: TenantMigrationDefinition =
+  {
+    version: '0026',
+    name: '0026_opening_gate_overrides_and_numbering_expand',
+    description:
+      'Expand schema with public.matter_opening_gate_overrides (tenant_opening_override_id_seq), nullable number_sequence_key and number_sequence_value on public.matters, and non-destructive backfill without altering existing matter_number values or adding a unique matter_number index (ADR 0040, R743, R744).',
+    tablesChanged: ['matter_opening_gate_overrides', 'matters'],
+    dependsOn: ['0009', '0025'],
+    upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_opening_override_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.matter_opening_gate_overrides (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  matter_id TEXT NOT NULL,
+  precondition_key TEXT NOT NULL CHECK (
+    precondition_key IN ('conflict_cleared', 'cdd_complete', 'engagement_signed', 'funds_on_account')
+  ),
+  reason TEXT NOT NULL CHECK (char_length(btrim(reason)) >= 10),
+  overridden_by_person_id TEXT NOT NULL,
+  overridden_at TIMESTAMPTZ NOT NULL,
+  revoked_by_person_id TEXT NULL,
+  revoked_at TIMESTAMPTZ NULL,
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, matter_id)
+    REFERENCES public.matters (tenant_id, id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_matter_opening_gate_overrides_active
+  ON public.matter_opening_gate_overrides (tenant_id, matter_id, precondition_key)
+  WHERE revoked_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_matter_opening_gate_overrides_matter
+  ON public.matter_opening_gate_overrides (tenant_id, matter_id, overridden_at DESC);
+
+ALTER TABLE public.matters
+  ADD COLUMN IF NOT EXISTS number_sequence_key TEXT NULL,
+  ADD COLUMN IF NOT EXISTS number_sequence_value BIGINT NULL;
+
+UPDATE public.matters
+SET
+  number_sequence_key = UPPER((regexp_match(btrim(matter_number), '^([A-Za-z0-9_-]+)-([0-9]+)$'))[1]),
+  number_sequence_value = ((regexp_match(btrim(matter_number), '^([A-Za-z0-9_-]+)-([0-9]+)$'))[2])::bigint
+WHERE number_sequence_key IS NULL
+  AND matter_number IS NOT NULL
+  AND btrim(matter_number) <> ''
+  AND UPPER(btrim(matter_number)) NOT LIKE 'DRAFT%'
+  AND btrim(matter_number) ~ '^[A-Za-z0-9_-]+-[0-9]+$';
+`.trim(),
+    downSql: `
+ALTER TABLE public.matters
+  DROP COLUMN IF EXISTS number_sequence_value,
+  DROP COLUMN IF EXISTS number_sequence_key;
+
+DROP INDEX IF EXISTS public.idx_matter_opening_gate_overrides_matter;
+DROP INDEX IF EXISTS public.uq_matter_opening_gate_overrides_active;
+DROP TABLE IF EXISTS public.matter_opening_gate_overrides CASCADE;
+DROP SEQUENCE IF EXISTS public.tenant_opening_override_id_seq;
+`.trim(),
+  };
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -3517,6 +3578,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   INTAKE_CHECKS_AND_OUTBOX_ATTACHMENTS_MIGRATION_0023,
   SCOPED_LOOKUP_AND_CANDIDATE_INDEXES_MIGRATION_0024,
   REGISTERS_CDD_AND_ORG_TYPE_KEYS_MIGRATION_0025,
+  OPENING_GATE_OVERRIDES_AND_NUMBERING_MIGRATION_0026,
 ];
 
 export function validateMigrationCatalogueOrder(

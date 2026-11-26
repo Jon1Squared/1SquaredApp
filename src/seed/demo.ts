@@ -1812,7 +1812,7 @@ export function buildDemoData(
 
   // M-000007: Tribunal claims (EM07) for Brightwater Care Group Ltd
   const mBrightwaterTribunal = addMatter(-42, {
-    matterNumber: 'BRI001-0003',
+    matterNumber: 'BRI001-0001',
     title: 'Employment Tribunal — Defence of unfair dismissal & whistleblowing claim',
     shortDescription: 'Defence of Employment Tribunal proceedings (Bristol ET) brought by former deputy home manager alleging unfair dismissal and protected disclosure detriment.',
     clientId: brightwater.id,
@@ -3838,7 +3838,7 @@ export function buildDemoData(
 
   // TSK-000014: Employment & HR team task claimed by Siân Llewellyn (P-000005)
   addTask(-2, {
-    title: 'Prepare Respondent agenda for Bristol ET preliminary hearing (BRI001-0003)',
+    title: 'Prepare Respondent agenda for Bristol ET preliminary hearing (BRI001-0001)',
     description: 'Draft list of issues and case management agenda for Brightwater Care Group Ltd.',
     taskTypeId: v('task_type', 'Review'),
     priorityId: v('task_priority', 'High'),

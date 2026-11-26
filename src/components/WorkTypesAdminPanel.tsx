@@ -6,6 +6,7 @@ import {
   type HomeRoleKey,
   type WorkTypeAutoTaskTemplateConfig,
   type WorkTypeConfigItem,
+  type WorkTypeOpeningGateConfig,
   type WorkTypeRiskQuestionConfig,
   type WorkTypeRiskQuestionOptionConfig,
   type WorkTypesConfiguration,
@@ -22,9 +23,14 @@ import type {
   OrgStructureCatalogue,
 } from '@/domain/types';
 import {
+  clearWorkTypeOpeningGateSetting,
+  DEFAULT_WORK_TYPE_OPENING_GATE,
+  resolveInheritedOpeningGateSetting,
   resolveWorkTypeAutoTaskTemplates,
+  resolveWorkTypeOpeningGateWithProvenance,
   resolveWorkTypeRetention,
   resolveWorkTypeRiskQuestions,
+  type WorkTypeOpeningGateSettingKey,
 } from '@/domain/workTypeConfig';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
@@ -463,6 +469,66 @@ export function WorkTypesAdminPanel({
               />
               Allow matter-level retention override notes
             </label>
+          </div>
+
+          <div
+            style={{
+              padding: 12,
+              border: '1px solid var(--color-divider)',
+              borderRadius: 8,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            }}
+          >
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0 }}>
+              Firm Default Opening Gate Pre-conditions
+            </h3>
+            <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+              Baseline opening checks inherited when a work type does not specify its own opening rules.
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+              {(
+                [
+                  ['allowConflictOverride', 'Allow partner override for incomplete conflict check'],
+                  ['requireCddComplete', 'Require CDD complete'],
+                  ['allowCddOverride', 'Allow partner CDD override'],
+                  ['requireEngagementSigned', 'Require engagement letter signed'],
+                  ['requireFundsOnAccount', 'Require funds on account'],
+                ] as Array<[keyof WorkTypeOpeningGateConfig, string]>
+              ).map(([fieldKey, label]) => {
+                const baseGate: WorkTypeOpeningGateConfig = {
+                  ...DEFAULT_WORK_TYPE_OPENING_GATE,
+                  ...(draft.defaults.openingGate ?? {}),
+                };
+                return (
+                  <label
+                    key={fieldKey}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={!canEdit}
+                      checked={Boolean(baseGate[fieldKey])}
+                      onChange={(e) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          defaults: {
+                            ...prev.defaults,
+                            openingGate: {
+                              ...baseGate,
+                              ...(prev.defaults.openingGate ?? {}),
+                              [fieldKey]: e.target.checked,
+                            },
+                          },
+                        }))
+                      }
+                    />
+                    {label}
+                  </label>
+                );
+              })}
+            </div>
           </div>
 
           <hr style={{ border: 'none', borderTop: '1px solid var(--color-divider)' }} />
@@ -974,6 +1040,141 @@ export function WorkTypesAdminPanel({
                     }
                   />
                 </div>
+              </div>
+
+              <div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 6,
+                  }}
+                >
+                  <h4 style={{ fontSize: 13, fontWeight: 700, margin: 0 }}>
+                    Opening Gate Rules
+                  </h4>
+                  {selectedItem?.openingGate ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      disabled={!canEdit}
+                      onClick={() =>
+                        updateSelectedItem(selectedChoice, (item) => {
+                          const next = { ...item };
+                          delete next.openingGate;
+                          return next;
+                        })
+                      }
+                    >
+                      Inherit defaults
+                    </button>
+                  ) : null}
+                </div>
+                <p className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                  {selectedItem?.openingGate
+                    ? 'Overrides are merged per setting: this work type, then its parent practice area, then firm defaults.'
+                    : 'Currently inheriting opening gate rules per setting from parent practice area and firm defaults.'}
+                </p>
+                {(() => {
+                  const resolvedGate = resolveWorkTypeOpeningGateWithProvenance(draft, {
+                    workTypeSubcategoryId: selectedChoice.id,
+                    practiceAreaId: selectedChoice.parentId ?? undefined,
+                  });
+                  const gateFields: Array<[WorkTypeOpeningGateSettingKey, string]> = [
+                    ['allowConflictOverride', 'Allow partner conflict override'],
+                    ['requireCddComplete', 'Client Due Diligence (CDD) complete'],
+                    ['allowCddOverride', 'Allow partner CDD override'],
+                    ['requireEngagementSigned', 'Signed engagement letter'],
+                    ['requireFundsOnAccount', 'Funds on account'],
+                  ];
+                  const sourceLabels = {
+                    work_type: 'Work type',
+                    practice_area: 'Practice area',
+                    firm_default: 'Firm default',
+                  } as const;
+                  const inheritedSourceLabels = {
+                    practice_area: 'Practice area',
+                    firm_default: 'Firm default',
+                    core_default: 'Core default',
+                  } as const;
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {gateFields.map(([fieldKey, label]) => {
+                        const provenance = resolvedGate.settingSources[fieldKey];
+                        const isExplicitOnItem =
+                          typeof selectedItem?.openingGate?.[fieldKey] === 'boolean';
+                        const inherited = resolveInheritedOpeningGateSetting(
+                          draft,
+                          { practiceAreaId: selectedChoice.parentId ?? undefined },
+                          fieldKey,
+                        );
+                        return (
+                          <div
+                            key={fieldKey}
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              alignItems: 'center',
+                              gap: 8,
+                              fontSize: 13,
+                            }}
+                          >
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <input
+                                type="checkbox"
+                                disabled={!canEdit}
+                                checked={Boolean(resolvedGate[fieldKey])}
+                                onChange={(e) =>
+                                  updateSelectedItem(selectedChoice, (item) => ({
+                                    ...item,
+                                    openingGate: {
+                                      ...(item.openingGate ?? {}),
+                                      [fieldKey]: e.target.checked,
+                                    },
+                                  }))
+                                }
+                              />
+                              <span>{label}</span>
+                            </label>
+                            <StatusPill
+                              label={sourceLabels[provenance]}
+                              tone={provenance === 'work_type' ? 'warning' : 'neutral'}
+                            />
+                            <span className="muted" style={{ fontSize: 12 }}>
+                              Inherited: {inherited.value ? 'On' : 'Off'} ({inheritedSourceLabels[inherited.source]})
+                            </span>
+                            {isExplicitOnItem ? (
+                              <button
+                                type="button"
+                                className="btn btn--ghost btn--sm"
+                                disabled={!canEdit}
+                                data-testid={`opening-gate-use-inherited-${fieldKey}`}
+                                onClick={() =>
+                                  updateSelectedItem(selectedChoice, (item) => {
+                                    const nextGate = clearWorkTypeOpeningGateSetting(
+                                      item.openingGate,
+                                      fieldKey,
+                                    );
+                                    const nextItem = { ...item };
+                                    if (nextGate) {
+                                      nextItem.openingGate = nextGate;
+                                    } else {
+                                      delete nextItem.openingGate;
+                                    }
+                                    return nextItem;
+                                  })
+                                }
+                              >
+                                Use inherited
+                              </button>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>

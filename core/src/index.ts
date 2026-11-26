@@ -11,6 +11,7 @@ export * from './domain/money/index';
 export * from './domain/document-generation/index';
 export * from './domain/documents/index';
 export * from './domain/registers/index';
+export * from './domain/matterNumbering/index';
 export * from './integrations/document-stores/index';
 export * from './integrations/email/index';
 export * from './integrations/intake-checks/index';

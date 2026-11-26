@@ -24,6 +24,7 @@ import {
   resolveEffectiveRegisterTypes,
   resolveTenantFromVerifiedToken,
   validateRegisterCreateInput,
+  validateRegisterFieldValues,
   validateRegisterTransitionExecution,
   validateUserOverrideOrRoleMutation,
   type RegistersConfiguration,
@@ -139,6 +140,7 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
       'complaint',
       'breach',
       'cdd',
+      'high_risk_opening',
     ]);
 
     const undertakingDef = CORE_REGISTER_TYPES.undertaking;
@@ -160,9 +162,9 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     );
   });
 
-  it('2. RBAC registry (70 user + 10 job-only = 80), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
-    expect(ALL_PERMISSION_KEYS).toHaveLength(80);
-    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(70);
+  it('2. RBAC registry (71 user + 10 job-only = 81), undertaking:manage fee-earner-only separation & admin leak fixes', async () => {
+    expect(ALL_PERMISSION_KEYS).toHaveLength(81);
+    expect(ALL_USER_PERMISSION_KEYS).toHaveLength(71);
     expect(ALL_JOB_ONLY_PERMISSION_KEYS).toHaveLength(10);
     expect(PERMISSION_REGISTRY['register:configure'].requiresMfa).toBe(true);
     expect(PERMISSION_REGISTRY['register:run_reminders'].jobOnly).toBe(true);
@@ -2054,6 +2056,253 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
             additionalFields: [{ key: 'extraNote', label: 'Extra note', type: 'text' }],
           },
         },
+      }),
+    ).toThrow(/REGISTER_VALIDATION_ERROR/);
+  });
+
+  it('17 (S1-05 B1, ADR 0039/0040): enforces high_risk_opening core type, allowAdminBypass=false, distinct step-1/step-2 approvers, systemOnly withdraw_opening, core-lock & matter:opening_gate:override RBAC', async () => {
+    const hroType = (
+      CORE_REGISTER_TYPES as Record<string, import('../src/api/registers.types').RegisterTypeDefinition>
+    ).high_risk_opening;
+    expect(hroType).toBeDefined();
+    expect(hroType.key).toBe('high_risk_opening');
+    expect(hroType.referencePrefix).toBe('HRO');
+    expect(hroType.subjectScope).toBe('matter');
+    expect(hroType.requireMatterLink).toBe(true);
+    expect(hroType.approvalRules?.allowAdminBypass).toBe(false);
+    expect(hroType.states.find((s) => s.key === 'withdrawn')?.isTerminal).toBe(true);
+
+    const errCodes = REGISTER_DOMAIN_ERROR_CODES as Record<string, string>;
+    expect(errCodes.DISTINCT_APPROVER_REQUIRED).toBe('REGISTER_DISTINCT_APPROVER_REQUIRED');
+
+    expect(PERMISSION_REGISTRY['matter:opening_gate:override']).toBeDefined();
+    expect(DEFAULT_RBAC_ROLES.partner.permissions).toContain('matter:opening_gate:override');
+    expect(DEFAULT_RBAC_ROLES.managing_partner.permissions).toContain('matter:opening_gate:override');
+    expect(DEFAULT_RBAC_ROLES.admin.permissions).not.toContain('matter:opening_gate:override');
+    expect(DEFAULT_RBAC_ROLES.risk_compliance.permissions).not.toContain('matter:opening_gate:override');
+    expect(DEFAULT_RBAC_ROLES.fee_earner.permissions).not.toContain('matter:opening_gate:override');
+
+    const { resolveEffectiveRegisterTypes, validateRegisterTransitionExecution } = await import(
+      '../src/domain/registers/index'
+    );
+    expect(() =>
+      resolveEffectiveRegisterTypes(undefined, {
+        typeOverrides: {
+          high_risk_opening: { enabled: false },
+        },
+      }),
+    ).toThrow(/REGISTER_VALIDATION_ERROR/);
+
+    // Verify allowAdminBypass=false + distinct step-1/step-2 approvers in lockAndExecuteTransition
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const adminCtx = testTenantCtx('P-000004');
+    const regRepo = new TenantRegisterRepository();
+    const hroRec = await regRepo.createRegisterRecord(adminCtx, {
+      id: 'REG-009995',
+      registerTypeKey: 'high_risk_opening',
+      reference: 'HRO-009995',
+      title: 'High-risk opening test record',
+      status: 'pending_partner',
+      matterId: 'M-000001',
+      fieldValues: { riskLevel: 'High' },
+      createdById: 'P-000002',
+    });
+
+    // Pure admin (lacking partner/managing_partner role) must fail partner_approve despite holding register:approve
+    expect(() =>
+      validateRegisterTransitionExecution({
+        registerType: hroType,
+        record: hroRec,
+        transitionKey: 'partner_approve',
+        actorId: 'P-000099',
+        actorRoles: ['admin'],
+        actorPermissionSet: new Set(['register:view', 'register:approve']),
+        comment: null,
+      }),
+    ).toThrow(/REGISTER_APPROVER_MISMATCH/);
+
+    // Non-system actor cannot execute withdraw_opening directly
+    expect(() =>
+      validateRegisterTransitionExecution({
+        registerType: hroType,
+        record: hroRec,
+        transitionKey: 'withdraw_opening',
+        actorId: 'P-000003',
+        actorRoles: ['risk_compliance'],
+        actorPermissionSet: new Set(['register:view', 'register:edit', 'register:approve']),
+        comment: null,
+      }),
+    ).toThrow(/REGISTER_SYSTEM_ONLY_TRANSITION/);
+
+    // Dual-role partner + risk_compliance completes partner_approve
+    const step1 = await regRepo.lockAndExecuteTransition(adminCtx, {
+      recordId: hroRec.id,
+      transitionKey: 'partner_approve',
+      actorId: 'P-000001',
+      comment: 'Partner approved stage 1',
+      validateAndCompute: (locked) => {
+        const res = validateRegisterTransitionExecution({
+          registerType: hroType,
+          record: locked,
+          transitionKey: 'partner_approve',
+          actorId: 'P-000001',
+          actorRoles: ['partner', 'risk_compliance'],
+          actorPermissionSet: new Set(['register:view', 'register:approve']),
+          comment: 'Partner approved stage 1',
+        });
+        return {
+          nextStatus: res.nextStatus,
+          setsDecidedAt: Boolean(res.transition.setsDecidedAt),
+          mergedFieldValues: locked.fieldValues,
+        };
+      },
+    });
+    expect(step1.updatedRecord.status).toBe('pending_compliance');
+
+    // Same dual-role actor P-000001 must be rejected on compliance_approve (distinct approver)
+    await expect(
+      regRepo.lockAndExecuteTransition(adminCtx, {
+        recordId: hroRec.id,
+        transitionKey: 'compliance_approve',
+        actorId: 'P-000001',
+        comment: 'Same person attempting step 2',
+        validateAndCompute: (locked, ...extraArgs: unknown[]) => {
+          const priorTransitions = (extraArgs[0] ?? []) as Array<{
+            transitionKey: string;
+            actorId: string;
+          }>;
+          const res = validateRegisterTransitionExecution({
+            registerType: hroType,
+            record: locked,
+            transitionKey: 'compliance_approve',
+            actorId: 'P-000001',
+            actorRoles: ['partner', 'risk_compliance'],
+            actorPermissionSet: new Set(['register:view', 'register:approve']),
+            comment: 'Same person attempting step 2',
+            priorTransitions: priorTransitions as Parameters<
+              typeof validateRegisterTransitionExecution
+            >[0]['priorTransitions'],
+          });
+          return {
+            nextStatus: res.nextStatus,
+            setsDecidedAt: Boolean(res.transition.setsDecidedAt),
+            mergedFieldValues: locked.fieldValues,
+          };
+        },
+      }),
+    ).rejects.toThrow(/REGISTER_DISTINCT_APPROVER_REQUIRED/);
+
+    // Different risk_compliance user P-000003 succeeds
+    const step2 = await regRepo.lockAndExecuteTransition(adminCtx, {
+      recordId: hroRec.id,
+      transitionKey: 'compliance_approve',
+      actorId: 'P-000003',
+      comment: 'MLRO approved stage 2',
+      validateAndCompute: (locked, ...extraArgs: unknown[]) => {
+        const priorTransitions = (extraArgs[0] ?? []) as Array<{
+          transitionKey: string;
+          actorId: string;
+        }>;
+        const res = validateRegisterTransitionExecution({
+          registerType: hroType,
+          record: locked,
+          transitionKey: 'compliance_approve',
+          actorId: 'P-000003',
+          actorRoles: ['risk_compliance'],
+          actorPermissionSet: new Set(['register:view', 'register:approve']),
+          comment: 'MLRO approved stage 2',
+          priorTransitions: priorTransitions as Parameters<
+            typeof validateRegisterTransitionExecution
+          >[0]['priorTransitions'],
+        });
+        return {
+          nextStatus: res.nextStatus,
+          setsDecidedAt: Boolean(res.transition.setsDecidedAt),
+          mergedFieldValues: locked.fieldValues,
+        };
+      },
+    });
+    expect(step2.updatedRecord.status).toBe('approved');
+  });
+
+  it('18 (S1-05 R781, S1, S4 & R791): enforces ADR 0039 §4 active approval-cycle resetsApprovalCycle flag, refuses disabling high_risk_opening in config/schema, and rejects unknown keys on systemCreatedOnly types', () => {
+    const hroType = CORE_REGISTER_TYPES.high_risk_opening;
+    expect(hroType.transitions.find((t) => t.key === 'withdraw_opening')?.resetsApprovalCycle).toBe(true);
+    expect(CORE_REGISTER_TYPES.sign_off.transitions.find((t) => t.key === 'resubmit')?.resetsApprovalCycle).toBe(true);
+    expect(CORE_REGISTER_TYPES.undertaking.transitions.find((t) => t.key === 'reopen')?.resetsApprovalCycle).toBe(true);
+    const sampleHro = {
+      id: 'REG-CYCLE-1',
+      tenantId: 'not-a-law-firm',
+      registerTypeKey: 'high_risk_opening',
+      reference: 'HRO-CYCLE-1',
+      title: 'Cycle test',
+      matterId: 'M-1',
+      enquiryId: null,
+      personId: null,
+      organisationId: null,
+      status: 'pending_compliance',
+      rowVersion: 2,
+      ownerId: 'P-000002',
+      createdById: 'P-000002',
+      assignedApproverId: null,
+      dueAt: null,
+      reviewAt: null,
+      decidedById: null,
+      decidedAt: null,
+      createdAt: '2026-11-25T10:00:00.000Z',
+      updatedAt: '2026-11-25T10:00:00.000Z',
+      updatedById: 'P-000002',
+      reminderScheduleDays: [],
+      fieldValues: {},
+    };
+
+    // Prior cycle had P-000003 on partner_approve, followed by withdraw_opening + fresh partner_approve by P-000001 -> P-000003 CAN approve compliance_approve in the NEW cycle!
+    const cycleRes = validateRegisterTransitionExecution({
+      registerType: hroType,
+      record: sampleHro,
+      transitionKey: 'compliance_approve',
+      actorId: 'P-000003',
+      actorRoles: ['risk_compliance'],
+      actorPermissionSet: new Set(['register:view', 'register:approve']),
+      comment: 'New cycle MLRO sign-off',
+      priorTransitions: [
+        { transitionKey: 'partner_approve', actorId: 'P-000003' },
+        { transitionKey: 'withdraw_opening', actorId: 'P-000002' },
+        { transitionKey: 'partner_approve', actorId: 'P-000001' },
+      ],
+    });
+    expect(cycleRes.nextStatus).toBe('approved');
+
+    // Suggestion 8: disabling high_risk_opening in tenant registers config must be rejected
+    const rawBase = getActiveTenantRawBaseConfig() as Record<string, unknown>;
+    expect(() =>
+      loadAndValidateTenantConfig(
+        {
+          ...rawBase,
+          registers: {
+            ...((rawBase.registers as Record<string, unknown> | undefined) ?? {}),
+            typeOverrides: {
+              high_risk_opening: { enabled: false },
+            },
+          },
+        },
+        {},
+        'test',
+      ),
+    ).toThrow(/high_risk_opening/);
+
+    // R791: systemCreatedOnly registers reject unknown keys in validateRegisterFieldValues
+    expect(() =>
+      validateRegisterFieldValues({
+        registerType: hroType,
+        fieldValues: {
+          matterNumber: 'PEN001-0001',
+          riskLevel: 'high',
+          submittedById: 'P-000002',
+          systemCreated: true,
+        },
+        applyDefaults: false,
+        enforceRequired: true,
       }),
     ).toThrow(/REGISTER_VALIDATION_ERROR/);
   });

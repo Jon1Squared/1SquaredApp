@@ -56,12 +56,20 @@ import {
   createSeedStore,
 } from '@/seed/seedStoreBuilder';
 import {
+  completeClientCddRecord,
   getKeyDateRepository,
+  getRegisterRepository,
+  openProspectiveMatterRecord,
   prepareEnquiryConversion,
+  recordCddChecklistItemRecord,
+  recordEngagementLetterSignedRecord,
+  recordManualSanctionsPepRecord,
   resetAllDemoData,
   saveMatterRecord,
   saveOrgStructure,
   saveWorkTypesConfigRecord,
+  startOrLoadClientCddRecord,
+  transitionRegisterRecordService,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
 } from '@/server/services';
@@ -131,6 +139,69 @@ function makeVerifiedTenantCtx(
 function cloneBaseWorkTypesConfig(): WorkTypesConfiguration {
   const raw = getActiveTenantRawBaseConfig();
   return structuredClone(raw.workTypes as WorkTypesConfiguration);
+}
+
+async function completeClientCddForS022Test(
+  subjectType: 'person' | 'organisation',
+  subjectId: string,
+  actorId = 'P-000003',
+): Promise<void> {
+  await runAsTestActor(actorId, async () => {
+    const started = await startOrLoadClientCddRecord(
+      { subjectType, subjectId, createIfMissing: true },
+      actorId,
+    );
+    if (!started.ok) {
+      throw new Error(`Could not start CDD for ${subjectId}: ${started.message}`);
+    }
+    if (started.summary.status === 'recorded') return;
+    const recordId = started.summary.recordId!;
+    await recordManualSanctionsPepRecord(
+      {
+        subjectType,
+        subjectId,
+        outcome: 'clear',
+        screeningScope: 'Entity and controllers screened (S0-22 fixture)',
+        referenceCode: 'S022-PEP',
+      },
+      actorId,
+    );
+    for (const item of started.summary.checklistItems) {
+      if (item.required && item.status !== 'recorded') {
+        const upd = await recordCddChecklistItemRecord(
+          {
+            recordId,
+            itemKey: item.itemKey,
+            status: 'recorded',
+            note: 'Completed for S0-22 test fixture',
+            ...(item.itemKey === 'identity_verification'
+              ? {
+                  linkManualIdentityCheck: {
+                    verificationMethod: 'Passport / official ID inspected',
+                    outcome: 'verified',
+                    referenceCode: 'S022-ID',
+                  },
+                }
+              : {}),
+          },
+          actorId,
+        );
+        if (!upd.ok) {
+          throw new Error(`Could not record CDD item ${item.itemKey}: ${upd.message}`);
+        }
+      }
+    }
+    const done = await completeClientCddRecord(
+      {
+        recordId,
+        manualSummaryNote: 'S0-22 client CDD completed.',
+      },
+      actorId,
+    );
+    if (!done.ok) {
+      throw new Error(`Could not complete CDD for ${subjectId}: ${done.message}`);
+    }
+  });
 }
 
 async function queryDirectSql<T extends Record<string, unknown>>(
@@ -366,6 +437,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignored;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -418,7 +491,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
 
       expect(directRes.errors).toBeUndefined();
       const directMatter = directRes.matter!;
-      expect(directMatter.matterStatusId).toBe('matter_status.active');
+      expect(directMatter.matterStatusId).toBe('matter_status.cmi_incomplete');
 
       const directTasksFirst = await twRepo.listVisibleTasks<Task>(ctx, 'P-000001', {
         linkedRecordType: 'matter',
@@ -513,6 +586,12 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         ),
       ).toHaveLength(0);
 
+      // Complete Engagement sign-off before conflict approval opens Tribunal claim matter
+      await recordEngagementLetterSignedRecord(
+        { matterId: referredMatter.id, status: 'Signed & returned' },
+        'P-000001',
+      );
+
       // Risk & Compliance (P-000003) approves conflict -> triggers work-type opening tasks
       await runAsTestActor('P-000003', async () => {
         const approveRes = await updateMatterConflictRecord(
@@ -554,9 +633,10 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         `worktype-open:${referredMatter.id}:emp-acas-limitation-diary`,
       ]);
 
-      // (C) Enquiry conversion opening (ENQ-000004 is Commercial Property)
+      // (C) Enquiry conversion opening (ENQ-000004 is Commercial Property -> requires CDD first)
       const prepRes = await prepareEnquiryConversion('ENQ-000004', {}, 'P-000001');
       expect(prepRes.ok).toBe(true);
+      await completeClientCddForS022Test('organisation', prepRes.clientId!, 'P-000003');
       const enqConvRes = await saveMatterRecord(
         {
           ...matterTemplate,
@@ -602,6 +682,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
           p.id !== 'P-000002' &&
           p.id !== 'P-000003',
       )!;
+      await completeClientCddForS022Test('person', staffClient.id, 'P-000003');
       const fallbackRes = await saveMatterRecord(
         {
           ...matterTemplate,
@@ -627,7 +708,18 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         { byId: 'P-000001', saveMode: 'submit_cleared' },
       );
       expect(fallbackRes.errors).toBeUndefined();
-      const restrictedMatter = fallbackRes.matter!;
+      await recordEngagementLetterSignedRecord(
+        { matterId: fallbackRes.matter!.id, status: 'Signed & returned' },
+        'P-000001',
+      );
+      const openedFallback = await openProspectiveMatterRecord(
+        fallbackRes.matter!.id,
+        'P-000001',
+      );
+      if (!openedFallback.ok) {
+        throw new Error(`Expected staff matter to open: ${openedFallback.message}`);
+      }
+      const restrictedMatter = openedFallback.matter;
 
       const visibleToAllowed = await twRepo.listVisibleTasks<Task>(ctx, 'P-000001', {
         linkedRecordType: 'matter',
@@ -662,6 +754,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignored;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -827,6 +921,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignored;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -935,7 +1031,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         await migClient.end();
       }
 
-      // Verify clean rollback: matter remains Active with destruction_date NULL
+      // Verify clean rollback: matter remains opened (cmi_incomplete per R741) with destruction_date NULL
       const afterRollbackRow = await queryDirectSql<{
         status_id: string;
         destruction_date: string | null;
@@ -945,7 +1041,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
          FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, targetMatter.id],
       );
-      expect(afterRollbackRow[0].status_id).toBe('matter_status.active');
+      expect(afterRollbackRow[0].status_id).toBe('matter_status.cmi_incomplete');
       expect(afterRollbackRow[0].destruction_date).toBeNull();
 
       // Now close via lifecycle action on leap day 2024-02-29 (12 yrs -> 2036-02-29)
@@ -1367,6 +1463,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         void _omitted;
         const m4Template = {
           ...rawM4Template,
+          engagementLetterStatus: 'Sent',
+          engagementLetterSignedAt: null,
           conflictCheckRecord: rawM4Template.conflictCheckRecord ?? {
             status: 'Cleared' as const,
             outcomeLabel: 'Cleared by fee earner' as const,
@@ -1394,6 +1492,10 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
             matterNumber: 'DRAFT',
             openedAt: '2026-11-01',
             title: 'Alpha Isolated M&A Deal',
+            responsiblePartnerId: 'P-000005',
+            supervisingPartnerId: 'P-000005',
+            leadFeeEarnerId: 'P-000004',
+            teamMemberIds: ['P-000005', 'P-000004'],
             practiceAreaId: 'work_type.corporate_and_commercial',
             workTypeSubcategoryId:
               'work_type.corporate_and_commercial_mergers_and_acquisitions',
@@ -1413,20 +1515,85 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         );
         expect(openAlpha.errors).toBeUndefined();
         alphaMatterId = openAlpha.matter!.id;
+        const alphaClientId = openAlpha.matter!.clientId;
+        expect(openAlpha.matter!.riskRatingId).toBe('risk_rating.high');
+
+        // ADR 0039 & R763/R764: Upgrade client CDD to High tier in tenantAlpha and run independent Partner + Risk approvals
+        const alphaCtx = makeVerifiedTenantCtx(tenantAlpha, 'P-000004');
+        const hroAlpha = await getRegisterRepository().listVisibleRegisterRecords(
+          alphaCtx,
+          'P-000004',
+          { includeRestricted: true, registerTypeKey: 'high_risk_opening', matterId: alphaMatterId },
+        );
+        expect(hroAlpha).toHaveLength(1);
+        await runAsTestActor('P-000001', async () => {
+          const p1AlphaCtx = makeVerifiedTenantCtx(tenantAlpha, 'P-000001');
+          const alphaCdd = await startOrLoadClientCddRecord(
+            {
+              subjectType: alphaClientId.startsWith('P-') ? 'person' : 'organisation',
+              subjectId: alphaClientId,
+              createIfMissing: true,
+              upgradeToHighRisk: true,
+              reason: 'Alpha high-risk M&A requires High CDD',
+            },
+            'P-000001',
+            { tenantCtx: p1AlphaCtx, tenantConfig: alphaValidated },
+          );
+          expect(alphaCdd.ok).toBe(true);
+          if (alphaCdd.ok && alphaCdd.summary.record) {
+            for (const item of alphaCdd.summary.checklistItems) {
+              if (item.status !== 'recorded') {
+                await recordCddChecklistItemRecord(
+                  {
+                    recordId: alphaCdd.summary.record.id,
+                    itemKey: item.itemKey,
+                    status: 'recorded',
+                    note: 'Alpha verified',
+                  },
+                  'P-000001',
+                  { tenantCtx: p1AlphaCtx, tenantConfig: alphaValidated },
+                );
+              }
+            }
+            const comp = await completeClientCddRecord(
+              { recordId: alphaCdd.summary.record.id },
+              'P-000001',
+              { tenantCtx: p1AlphaCtx, tenantConfig: alphaValidated },
+            );
+            expect(comp.ok).toBe(true);
+          }
+          const s1 = await transitionRegisterRecordService(
+            { recordId: hroAlpha[0]!.id, transitionKey: 'partner_approve', comment: 'Partner stage approved' },
+            'P-000001',
+            { tenantCtx: p1AlphaCtx },
+          );
+          expect(s1.ok).toBe(true);
+        }, { tenantId: tenantAlpha, roles: ['partner'], mfaVerified: true });
+        await runAsTestActor('P-000003', async () => {
+          const s2 = await transitionRegisterRecordService(
+            { recordId: hroAlpha[0]!.id, transitionKey: 'compliance_approve', comment: 'Compliance stage approved' },
+            'P-000003',
+            { tenantCtx: makeVerifiedTenantCtx(tenantAlpha, 'P-000003') },
+          );
+          expect(s2.ok).toBe(true);
+        }, { tenantId: tenantAlpha, roles: ['risk_compliance'], mfaVerified: true });
+
         await backdateMatterOpenedOnForTest(
-          makeVerifiedTenantCtx(tenantAlpha, 'P-000004'),
+          alphaCtx,
           alphaMatterId,
           '2026-11-01',
         );
-        expect(openAlpha.matter!.riskRatingId).toBe('risk_rating.high');
 
+        const openedAlphaRowVersion = (
+          await getMatterRepository().getMatterById<Matter>(alphaCtx, alphaMatterId)
+        )?.rowVersion ?? 2;
         const closeAlpha = await updateMatterLifecycleStatusAction(
           alphaMatterId,
           'close',
           {
             closedAt: '2026-11-15',
             reason: 'Alpha completion',
-            expectedRowVersion: openAlpha.matter!.rowVersion ?? 1,
+            expectedRowVersion: openedAlphaRowVersion,
           },
         );
         expect(closeAlpha.errors).toBeUndefined();
@@ -1522,6 +1689,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignoredId;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -1675,7 +1844,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
            FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, updated.id],
       );
-      expect(pgAfterUpdate[0].status_id).toBe('matter_status.active');
+      expect(pgAfterUpdate[0].status_id).toBe('matter_status.cmi_incomplete');
       expect(pgAfterUpdate[0].retention_period).toBe('12 years');
       expect(pgAfterUpdate[0].destruction_date).toBeNull();
 
@@ -1735,7 +1904,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
            FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, updated.id],
       );
-      expect(pgStillOpen[0].status_id).toBe('matter_status.active');
+      expect(pgStillOpen[0].status_id).toBe('matter_status.cmi_incomplete');
       expect(pgStillOpen[0].closed_on).toBeNull();
       expect(pgStillOpen[0].destruction_date).toBeNull();
 
@@ -1785,6 +1954,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignoredId;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -1815,6 +1986,9 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
           matterNumber: 'DRAFT',
           openedAt: '2026-06-01',
           title: 'R496 SystemKey Status Matter',
+          practiceAreaId: 'work_type.corporate_and_commercial',
+          workTypeSubcategoryId:
+            'work_type.corporate_and_commercial_commercial_contracts',
           agreedFeeCapGbp: 5000,
           feeEstimateGbp: 5000,
           fieldValues: {
@@ -1914,6 +2088,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignoredId;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,
@@ -2036,7 +2212,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
            FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, targetMatter.id],
       );
-      expect(pgAfterKdRace[0].status_id).toBe('matter_status.active');
+      expect(pgAfterKdRace[0].status_id).toBe('matter_status.cmi_incomplete');
       expect(pgAfterKdRace[0].closed_on).toBeNull();
       expect(pgAfterKdRace[0].destruction_date).toBeNull();
 
@@ -2106,6 +2282,8 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     void _ignoredId;
     const matterTemplate = {
       ...rawMatterTemplate,
+      engagementLetterStatus: 'Sent',
+      engagementLetterSignedAt: null,
       conflictCheckRecord: rawMatterTemplate.conflictCheckRecord ?? {
         status: 'Cleared' as const,
         outcomeLabel: 'Cleared by fee earner' as const,

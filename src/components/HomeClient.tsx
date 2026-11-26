@@ -18,6 +18,7 @@ import {
   saveEnquiryAction,
   saveTaskAction,
   takeTaskAction,
+  transitionRegisterRecordAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { buildCddStatusDisplayText, isCddDueExpired } from '@/domain/cdd';
@@ -43,6 +44,7 @@ import {
 } from '@/domain/matterOpeningRecord';
 import { extractCriticalDates } from '@/domain/matters';
 import { personDisplayName } from '@/domain/names';
+import { formatOpeningGateActionError } from '@/domain/openingGate';
 import {
   findOneSquaredIdForPmsCode,
   formatGbp,
@@ -128,6 +130,8 @@ export interface HomeClientProps extends HomeSnapshotBaseProps {
   pmsClientAccountByMatterCode?: Record<string, PmsClientAccountEntry[]>;
   canViewCdd?: boolean;
   cddQueueRecords?: import('@platform/core-api').RegisterRecord[];
+  userRoles?: import('@/domain/types').HomeRoleKey[];
+  userPermissions?: import('@/domain/types').PermissionKey[];
 }
 
 const DEFAULT_FINANCE_CAPABILITIES: AppFinanceCapabilities = {
@@ -200,9 +204,16 @@ export function HomeClient({
   pmsClientAccountByMatterCode = {},
   canViewCdd = false,
   cddQueueRecords = [],
+  userRoles = [],
+  userPermissions = [],
 }: HomeClientProps) {
   const router = useRouter();
   const { showToast } = useToast();
+  const [submittingHroId, setSubmittingHroId] = useState<string | null>(null);
+  const [rejectHroModal, setRejectHroModal] = useState<
+    import('@platform/core-api').RegisterRecord | null
+  >(null);
+  const [rejectHroComment, setRejectHroComment] = useState('');
 
   // Modal state for inline Log contact
   const [logModalEnq, setLogModalEnq] = useState<Enquiry | null>(null);
@@ -3532,21 +3543,125 @@ export function HomeClient({
       // 20. sign_offs_and_approvals (02 Partner & 07 Managing Partner)
       // ================================================================
       case 'sign_offs_and_approvals': {
+        const canApproveReg = userPermissions.includes('register:approve');
+        const isPartnerOrMp =
+          userRoles.includes('partner') || userRoles.includes('managing_partner');
+        const isRiskRole = userRoles.includes('risk_compliance');
+        const hroItems = registerRecords.filter((rec) => {
+          if (rec.registerTypeKey !== 'high_risk_opening') return false;
+          if (rec.status === 'pending_partner') {
+            return isPartnerOrMp || (userRoles.length === 0 && canApproveReg);
+          }
+          if (rec.status === 'pending_compliance') {
+            return isRiskRole || (userRoles.length === 0 && canApproveReg);
+          }
+          return false;
+        });
+        const totalPendingApprovals = pendingSignOffs.length + hroItems.length;
+        const matterById = new Map(matters.map((m) => [m.id, m]));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
               <div className="panel-title-group">
                 <h2 className="panel-title">Sign-offs &amp; approvals waiting on you</h2>
-                <StatusPill label={`${pendingSignOffs.length} pending`} tone="neutral" />
+                <StatusPill label={`${totalPendingApprovals} pending`} tone="neutral" />
               </div>
             </div>
             <div className="panel-body">
-              {pendingSignOffs.length === 0 ? (
+              {totalPendingApprovals === 0 ? (
                 <div className="panel-body padded muted">
                   All partner sign-offs and approvals are up to date.
                 </div>
               ) : (
                 <ul className="worklist">
+                  {hroItems.map((rec) => {
+                    const linkedMatter = rec.matterId ? matterById.get(rec.matterId) : undefined;
+                    const isStage1 = rec.status === 'pending_partner';
+                    const transitionKey = isStage1 ? 'partner_approve' : 'compliance_approve';
+                    return (
+                      <li
+                        key={rec.id}
+                        className="worklist-row"
+                        data-testid={`home-hro-row-${rec.id}`}
+                      >
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <StatusPill
+                              label={
+                                isStage1
+                                  ? 'High-risk opening · Partner approval'
+                                  : 'High-risk opening · Risk & Compliance approval'
+                              }
+                              tone="warning"
+                            />{' '}
+                            {linkedMatter ? (
+                              <Link href={`/matters/${linkedMatter.id}`}>
+                                {linkedMatter.matterNumber} — {linkedMatter.title}
+                              </Link>
+                            ) : (
+                              <Link href={`/registers?record=${encodeURIComponent(rec.id)}`}>
+                                {rec.reference} · {rec.title}
+                              </Link>
+                            )}
+                          </div>
+                          <div className="worklist-meta">{rec.reference} · {rec.title}</div>
+                        </div>
+                        <div className="worklist-right">
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            disabled={submittingHroId === rec.id}
+                            onClick={() => {
+                              setRejectHroModal(rec);
+                              setRejectHroComment('');
+                            }}
+                          >
+                            Reject
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            data-testid={`home-hro-approve-${rec.id}`}
+                            disabled={submittingHroId === rec.id || !canApproveReg}
+                            onClick={async () => {
+                              setSubmittingHroId(rec.id);
+                              try {
+                                const res = await transitionRegisterRecordAction({
+                                  recordId: rec.id,
+                                  transitionKey,
+                                  expectedRowVersion: rec.rowVersion,
+                                });
+                                if (isActionDenied(res) || !res.ok) {
+                                  showToast(
+                                    formatOpeningGateActionError(
+                                      res,
+                                      'Could not approve High-risk opening.',
+                                    ),
+                                  );
+                                  return;
+                                }
+                                const HRO_STATUS_LABELS: Record<string, string> = {
+                                  pending_partner: 'Pending Partner approval',
+                                  pending_compliance: 'Pending Risk & Compliance approval',
+                                  approved: 'Approved',
+                                  rejected: 'Rejected',
+                                  withdrawn: 'Withdrawn',
+                                };
+                                showToast(
+                                  `${rec.reference} updated (${HRO_STATUS_LABELS[res.record.status] ?? 'Updated'})`,
+                                );
+                                router.refresh();
+                              } finally {
+                                setSubmittingHroId(null);
+                              }
+                            }}
+                          >
+                            {isStage1 ? 'Approve (Partner)' : 'Approve (Risk & Compliance)'}
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
                   {pendingSignOffs.map((so) => (
                     <li key={so.id} className="worklist-row">
                       <div className="worklist-main">
@@ -4587,11 +4702,19 @@ export function HomeClient({
       // 33. high_risk_matters_and_pep_register (06 Risk & Compliance)
       // ================================================================
       case 'high_risk_matters_and_pep_register': {
+        const canApproveReg = userPermissions.includes('register:approve');
+        const isRiskRole = userRoles.includes('risk_compliance');
         const highRiskMatters = matters.filter(
           (m) =>
             m.matterStatusId !== 'matter_status.closed' &&
             isHighOrCriticalRiskRating(m.riskRatingId, values),
         );
+        const hroRecords = registerRecords.filter(
+          (rec) =>
+            rec.registerTypeKey === 'high_risk_opening' &&
+            (rec.status === 'pending_partner' || rec.status === 'pending_compliance'),
+        );
+        const matterById = new Map(matters.map((m) => [m.id, m]));
         return (
           <section key={panelId} className="home-panel" data-panel-id={panelId}>
             <div className="panel-header">
@@ -4601,16 +4724,96 @@ export function HomeClient({
                   label={`${highRiskMatters.length} high-risk matter${highRiskMatters.length === 1 ? '' : 's'}`}
                   tone={highRiskMatters.length > 0 ? 'warning' : 'neutral'}
                 />
+                {hroRecords.length > 0 ? (
+                  <StatusPill
+                    label={`${hroRecords.length} opening sign-off${hroRecords.length === 1 ? '' : 's'}`}
+                    tone="warning"
+                  />
+                ) : null}
               </div>
               <span className="panel-subtitle">PEP &amp; sanctions watch: Not yet available</span>
             </div>
             <div className="panel-body" style={{ overflowX: 'auto' }}>
-              {highRiskMatters.length === 0 ? (
+              {highRiskMatters.length === 0 && hroRecords.length === 0 ? (
                 <div className="panel-body padded muted">
                   No high-risk open matters recorded. PEP and sanctions screening is not yet available.
                 </div>
               ) : (
                 <ul className="worklist">
+                  {hroRecords.map((rec) => {
+                    const linkedMatter = rec.matterId ? matterById.get(rec.matterId) : undefined;
+                    const isStage2 = rec.status === 'pending_compliance';
+                    return (
+                      <li key={`hro-${rec.id}`} className="worklist-row">
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <StatusPill
+                              label={
+                                isStage2
+                                  ? 'Pending Risk & Compliance approval'
+                                  : 'Pending Partner approval'
+                              }
+                              tone="warning"
+                            />{' '}
+                            {linkedMatter ? (
+                              <Link href={`/matters/${linkedMatter.id}`}>
+                                {linkedMatter.matterNumber} — {linkedMatter.title}
+                              </Link>
+                            ) : (
+                              <Link href={`/registers?record=${encodeURIComponent(rec.id)}`}>
+                                {rec.reference} · {rec.title}
+                              </Link>
+                            )}
+                          </div>
+                          <div className="worklist-meta">High-risk opening · {rec.reference}</div>
+                        </div>
+                        <div className="worklist-right">
+                          {isStage2 && canApproveReg && (isRiskRole || userRoles.length === 0) ? (
+                            <button
+                              type="button"
+                              className="btn btn--primary btn--sm"
+                              data-testid={`risk-hro-approve-${rec.id}`}
+                              disabled={submittingHroId === rec.id}
+                              onClick={async () => {
+                                setSubmittingHroId(rec.id);
+                                try {
+                                  const res = await transitionRegisterRecordAction({
+                                    recordId: rec.id,
+                                    transitionKey: 'compliance_approve',
+                                    expectedRowVersion: rec.rowVersion,
+                                  });
+                                  if (isActionDenied(res) || !res.ok) {
+                                    showToast(
+                                      res.message ||
+                                        ('error' in res ? res.error : undefined) ||
+                                        'Could not approve High-risk opening.',
+                                    );
+                                    return;
+                                  }
+                                  showToast(`${rec.reference} approved by Risk & Compliance.`);
+                                  router.refresh();
+                                } finally {
+                                  setSubmittingHroId(null);
+                                }
+                              }}
+                            >
+                              Approve (Risk &amp; Compliance)
+                            </button>
+                          ) : null}
+                          <Link
+                            href={
+                              linkedMatter
+                                ? `/matters/${linkedMatter.id}`
+                                : `/registers?record=${encodeURIComponent(rec.id)}`
+                            }
+                            className="btn btn--secondary btn--sm"
+                          >
+                            Review
+                          </Link>
+                        </div>
+                      </li>
+                    );
+                  })}
                   {highRiskMatters.map((m) => {
                     const riskLabel = resolveLabel(values, m.riskRatingId) || 'High risk';
                     return (
@@ -5440,6 +5643,74 @@ export function HomeClient({
                 </button>
                 <button type="submit" className="btn btn--primary">
                   Send &amp; create review task
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {/* High-risk Opening Rejection Modal */}
+      {rejectHroModal ? (
+        <div className="modal-backdrop" onClick={() => setRejectHroModal(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Reject High-risk opening — {rejectHroModal.reference}</h2>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!rejectHroComment.trim()) return;
+                setSubmittingHroId(rejectHroModal.id);
+                try {
+                  const res = await transitionRegisterRecordAction({
+                    recordId: rejectHroModal.id,
+                    transitionKey: 'reject_opening',
+                    comment: rejectHroComment.trim(),
+                    expectedRowVersion: rejectHroModal.rowVersion,
+                  });
+                  if (isActionDenied(res) || !res.ok) {
+                    showToast(
+                      formatOpeningGateActionError(
+                        res,
+                        'Could not reject High-risk opening.',
+                      ),
+                    );
+                    return;
+                  }
+                  showToast(`Rejected ${rejectHroModal.reference}`);
+                  setRejectHroModal(null);
+                  setRejectHroComment('');
+                  router.refresh();
+                } finally {
+                  setSubmittingHroId(null);
+                }
+              }}
+            >
+              <div>
+                <label className="field-label" htmlFor="home-hro-reject-comment-input">
+                  Reason for rejection *
+                </label>
+                <textarea
+                  id="home-hro-reject-comment-input"
+                  className="textarea"
+                  rows={3}
+                  value={rejectHroComment}
+                  onChange={(e) => setRejectHroComment(e.target.value)}
+                  placeholder="Enter the reason for rejecting this High-risk opening..."
+                  required
+                />
+              </div>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn--secondary"
+                  onClick={() => setRejectHroModal(null)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn--primary">
+                  Confirm rejection
                 </button>
               </div>
             </form>

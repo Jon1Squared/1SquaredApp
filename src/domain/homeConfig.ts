@@ -957,6 +957,8 @@ const HOME_FULL_FINANCE_PANEL_IDS: ReadonlySet<PanelId> = new Set([
 ]);
 
 const HOME_REGISTER_PANEL_IDS: ReadonlySet<PanelId> = new Set([
+  'sign_offs_and_approvals',
+  'high_risk_matters_and_pep_register',
   'undertakings_and_file_reviews',
   'complaints_incidents_and_breaches',
 ]);

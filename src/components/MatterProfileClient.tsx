@@ -29,13 +29,25 @@ import {
 import {
   addNoteAction,
   liftMatterRestrictionAction,
-  updateMatterLifecycleStatusAction,
+  openProspectiveMatterAction,
+  overrideMatterOpeningPreconditionAction,
+  recordEngagementLetterSignedAction,
+  revokeMatterOpeningOverrideAction,
   saveMatterAction,
   saveTaskAction,
+  transitionRegisterRecordAction,
   updateMatterConflictRecordAction,
+  updateMatterLifecycleStatusAction,
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDate, formatDateTime } from '@/domain/dates';
+import {
+  formatOpeningGateActionError,
+  isMatterEngagementSignedForGate,
+  OPENING_GATE_PRECONDITION_LABELS,
+  type MatterOpeningGateView,
+  type OpeningGatePreconditionKey,
+} from '@/domain/openingGate';
 import { isClosedMatterStatus, isProspectiveMatterStatus } from '@/domain/workTypeConfig';
 import { resolveLabel, resolveLabels } from '@/domain/lists';
 import {
@@ -67,6 +79,7 @@ import type {
   ChoiceValue,
   ConflictCheckRecord,
   Enquiry,
+  HomeRoleKey,
   Matter,
   Note,
   Organisation,
@@ -115,10 +128,12 @@ interface MatterProfileClientProps {
   keyDateCalendarSyncs?: KeyDateCalendarSync[];
   userKeyDatePermissions?: KeyDatePermission[];
   userPermissions?: import('@/domain/types').PermissionKey[];
+  userRoles?: HomeRoleKey[];
   registersConfig?: import('@platform/core-api').RegistersConfiguration;
   registerTypes?: import('@platform/core-api').RegisterTypeDefinition[];
   matterRegisterRecords?: import('@platform/core-api').RegisterRecord[];
   matterRegisterTransitions?: Record<string, import('@platform/core-api').RegisterTransition[]>;
+  openingGateState?: MatterOpeningGateView;
   canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
@@ -317,10 +332,12 @@ export function MatterProfileClient({
   keyDateCalendarSyncs = [],
   userKeyDatePermissions = [],
   userPermissions = [],
+  userRoles = [],
   registersConfig,
   registerTypes = [],
   matterRegisterRecords = [],
   matterRegisterTransitions = {},
+  openingGateState,
   canVerifyByKeyDateId,
   canTakeByTaskId,
   canViewFinance = false,
@@ -382,6 +399,30 @@ export function MatterProfileClient({
   const registersWorkspaceRef = useRef<{
     openCreatePanel: (preferredTypeKey?: string) => void;
   } | null>(null);
+  const [openingBusy, setOpeningBusy] = useState(false);
+  const [overrideModalKey, setOverrideModalKey] = useState<OpeningGatePreconditionKey | null>(
+    null,
+  );
+  const [overrideReason, setOverrideReason] = useState('');
+  const [revokeModalOverride, setRevokeModalOverride] = useState<{
+    preconditionKey: OpeningGatePreconditionKey;
+    overrideId: string;
+  } | null>(null);
+  const [revokeReason, setRevokeReason] = useState('');
+  const [hroRejectOpen, setHroRejectOpen] = useState(false);
+  const [hroRejectComment, setHroRejectComment] = useState('');
+  const canApproveReg = userPermissions.includes('register:approve');
+  const isPartnerOrMpRole =
+    canApproveReg &&
+    (userRoles.includes('partner') || userRoles.includes('managing_partner'));
+  const isRiskComplianceRole =
+    canApproveReg && userRoles.includes('risk_compliance');
+  const isMatterLeadOrResponsible = Boolean(
+    currentUserId &&
+      (currentUserId === matter.leadFeeEarnerId ||
+        currentUserId === matter.responsiblePartnerId),
+  );
+  const canViewRegisters = userPermissions.includes('register:view');
   const isMatterCurrentlyClosed = isClosedMatterStatus(matter.matterStatusId, values);
 
   const canViewMatterRegisters = Boolean(
@@ -1537,7 +1578,576 @@ export function MatterProfileClient({
 
       {/* ===================== TAB: OVERVIEW (Home-style 2-column grid) ===================== */}
       {tab === 'overview' ? (
-        <div className="home-grid">
+        <>
+          {openingGateState &&
+          (openingGateState.isProspective || openingGateState.highRiskRecord) ? (
+            <section
+              className="home-panel"
+              style={{ marginBottom: 16 }}
+              data-testid="matter-opening-gate-panel"
+              aria-label="Matter opening checklist and gate"
+            >
+              <div className="panel-header">
+                <div className="panel-title-group">
+                  <h2 className="panel-title">Matter opening checklist &amp; gate</h2>
+                  <StatusPill
+                    label={
+                      !openingGateState.isProspective
+                        ? 'Opened'
+                        : openingGateState.evaluation.canOpen
+                          ? 'Ready to open'
+                          : openingGateState.highRiskRecord?.status === 'pending_partner'
+                            ? 'Pending Partner approval'
+                            : openingGateState.highRiskRecord?.status === 'pending_compliance'
+                              ? 'Pending Risk & Compliance approval'
+                              : 'Blocked'
+                    }
+                    tone={
+                      !openingGateState.isProspective || openingGateState.evaluation.canOpen
+                        ? 'positive'
+                        : 'warning'
+                    }
+                  />
+                </div>
+                <div className="panel-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {openingGateState.isProspective &&
+                  openingGateState.canEditMatter &&
+                  !isMatterEngagementSignedForGate(matter) ? (
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      data-testid="mark-engagement-signed-btn"
+                      disabled={openingBusy}
+                      onClick={async () => {
+                        setOpeningBusy(true);
+                        try {
+                          const res = await recordEngagementLetterSignedAction({
+                            matterId: matter.id,
+                            status: 'Signed & returned',
+                          });
+                          if (isActionDenied(res) || !res.ok) {
+                            showToast(
+                              formatOpeningGateActionError(
+                                res,
+                                'Could not mark engagement letter signed.',
+                              ),
+                            );
+                            return;
+                          }
+                          showToast('Engagement letter marked signed.');
+                          router.refresh();
+                        } finally {
+                          setOpeningBusy(false);
+                        }
+                      }}
+                    >
+                      Mark engagement signed
+                    </button>
+                  ) : null}
+                  {openingGateState.isProspective && openingGateState.canEditMatter ? (
+                    <button
+                      type="button"
+                      className="btn btn--primary btn--sm"
+                      data-testid="open-prospective-matter-btn"
+                      disabled={openingBusy}
+                      onClick={async () => {
+                        setOpeningBusy(true);
+                        try {
+                          const res = await openProspectiveMatterAction(matter.id);
+                          if (isActionDenied(res) || !res.ok) {
+                            showToast(
+                              formatOpeningGateActionError(
+                                res,
+                                'Matter cannot open yet.',
+                              ),
+                            );
+                            return;
+                          }
+                          showToast(
+                            res.alreadyOpened
+                              ? 'Matter is already open.'
+                              : `Matter ${res.matter.matterNumber} opened.`,
+                          );
+                          router.refresh();
+                        } finally {
+                          setOpeningBusy(false);
+                        }
+                      }}
+                    >
+                      Open matter
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="panel-body">
+                <ul className="worklist">
+                  {openingGateState.evaluation.preconditions
+                    .filter((p) => p.required || !p.satisfied || p.overridden)
+                    .map((pre) => {
+                      const label = pre.label || OPENING_GATE_PRECONDITION_LABELS[pre.key];
+                      const pillLabel = pre.overridden
+                        ? 'Overridden'
+                        : pre.rawSatisfied === null
+                          ? 'Not available'
+                          : pre.rawSatisfied
+                            ? 'Met'
+                            : 'Blocked';
+                      const pillTone = pre.overridden
+                        ? 'warning'
+                        : pre.rawSatisfied === null
+                          ? 'neutral'
+                          : pre.rawSatisfied
+                            ? 'positive'
+                            : 'alert';
+                      return (
+                        <li
+                          key={pre.key}
+                          className="worklist-row"
+                          data-testid={`opening-precondition-${pre.key}`}
+                        >
+                          <div className="worklist-main">
+                            <div className="worklist-title">
+                              <StatusPill label={pillLabel} tone={pillTone} /> <span>{label}</span>
+                            </div>
+                            <div className="worklist-meta">
+                              {pre.statusSummary}
+                              {pre.nonOverridableReason ? (
+                                <span> · {pre.nonOverridableReason}</span>
+                              ) : null}
+                              {pre.activeOverride ? (
+                                <span>
+                                  {' '}
+                                  · Override by{' '}
+                                  {pre.activeOverride.overriddenByName || 'Unknown'}
+                                  : &ldquo;{pre.activeOverride.reason}&rdquo;
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="worklist-right" style={{ display: 'flex', gap: 8 }}>
+                            {openingGateState.isProspective &&
+                            openingGateState.canOverridePermission &&
+                            !pre.satisfied &&
+                            pre.canOverride ? (
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--sm"
+                                data-testid={`override-precondition-${pre.key}-btn`}
+                                disabled={openingBusy}
+                                onClick={() => {
+                                  setOverrideModalKey(pre.key);
+                                  setOverrideReason('');
+                                  setRevokeModalOverride(null);
+                                }}
+                              >
+                                Override
+                              </button>
+                            ) : null}
+                            {openingGateState.isProspective &&
+                            openingGateState.canOverridePermission &&
+                            pre.overridden &&
+                            pre.activeOverride ? (
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--sm"
+                                data-testid={`revoke-override-${pre.key}-btn`}
+                                disabled={openingBusy}
+                                onClick={() => {
+                                  setRevokeModalOverride({
+                                    preconditionKey: pre.key,
+                                    overrideId: pre.activeOverride!.id,
+                                  });
+                                  setRevokeReason('');
+                                  setOverrideModalKey(null);
+                                }}
+                              >
+                                Revoke override
+                              </button>
+                            ) : null}
+                          </div>
+                        </li>
+                      );
+                    })}
+
+                  {openingGateState.evaluation.requiresHighRiskApproval ||
+                  openingGateState.highRiskRecord ? (
+                    <li className="worklist-row" data-testid="opening-high-risk-row">
+                      <div className="worklist-main">
+                        <div className="worklist-title">
+                          <StatusPill
+                            label={openingGateState.evaluation.highRisk.statusLabel}
+                            tone={
+                              openingGateState.evaluation.highRisk.status === 'approved'
+                                ? 'positive'
+                                : openingGateState.evaluation.highRisk.status === 'rejected'
+                                  ? 'alert'
+                                  : openingGateState.evaluation.highRisk.status === 'withdrawn'
+                                    ? 'neutral'
+                                    : 'warning'
+                            }
+                          />{' '}
+                          <span>High-risk opening sign-off</span>
+                        </div>
+                        <div className="worklist-meta">
+                          {openingGateState.evaluation.highRisk.partnerApproverId ? (
+                            <span>
+                              Stage 1 Partner approved by{' '}
+                              {openingGateState.evaluation.highRisk.partnerApproverName ||
+                                'Unknown'}
+                              {' · '}
+                            </span>
+                          ) : null}
+                          {openingGateState.highRiskRecord ? (
+                            canViewRegisters ? (
+                              <Link
+                                href={`/registers?record=${encodeURIComponent(
+                                  openingGateState.highRiskRecord.id,
+                                )}`}
+                              >
+                                {openingGateState.highRiskRecord.reference} (Registers)
+                              </Link>
+                            ) : (
+                              <span>{openingGateState.highRiskRecord.reference}</span>
+                            )
+                          ) : (
+                            <span>Pending first non-draft submission.</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="worklist-right" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {openingGateState.highRiskRecord &&
+                        isPartnerOrMpRole &&
+                        !isMatterLeadOrResponsible &&
+                        openingGateState.highRiskRecord.status === 'pending_partner' ? (
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            data-testid="hro-partner-approve-btn"
+                            disabled={openingBusy}
+                            onClick={async () => {
+                              setOpeningBusy(true);
+                              try {
+                                const res = await transitionRegisterRecordAction({
+                                  recordId: openingGateState.highRiskRecord!.id,
+                                  transitionKey: 'partner_approve',
+                                  expectedRowVersion: openingGateState.highRiskRecord!.rowVersion,
+                                });
+                                if (isActionDenied(res) || !res.ok) {
+                                  showToast(
+                                    formatOpeningGateActionError(
+                                      res,
+                                      'Could not complete Stage 1 Partner approval.',
+                                    ),
+                                  );
+                                  return;
+                                }
+                                showToast('Stage 1 Partner approval recorded. Sent to Risk & Compliance.');
+                                router.refresh();
+                              } finally {
+                                setOpeningBusy(false);
+                              }
+                            }}
+                          >
+                            Approve Stage 1 (Partner)
+                          </button>
+                        ) : null}
+                        {openingGateState.highRiskRecord &&
+                        isRiskComplianceRole &&
+                        !isMatterLeadOrResponsible &&
+                        openingGateState.highRiskRecord.status === 'pending_compliance' ? (
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            data-testid="hro-compliance-approve-btn"
+                            disabled={
+                              openingBusy ||
+                              openingGateState.evaluation.highRisk.partnerApproverId ===
+                                currentUserId
+                            }
+                            title={
+                              openingGateState.evaluation.highRisk.partnerApproverId ===
+                              currentUserId
+                                ? 'Requires a different Risk & Compliance approver from Stage 1'
+                                : undefined
+                            }
+                            onClick={async () => {
+                              setOpeningBusy(true);
+                              try {
+                                const res = await transitionRegisterRecordAction({
+                                  recordId: openingGateState.highRiskRecord!.id,
+                                  transitionKey: 'compliance_approve',
+                                  expectedRowVersion: openingGateState.highRiskRecord!.rowVersion,
+                                });
+                                if (isActionDenied(res) || !res.ok) {
+                                  showToast(
+                                    formatOpeningGateActionError(
+                                      res,
+                                      'Could not complete Stage 2 Risk & Compliance approval.',
+                                    ),
+                                  );
+                                  return;
+                                }
+                                showToast('Stage 2 Risk & Compliance approval recorded.');
+                                router.refresh();
+                              } finally {
+                                setOpeningBusy(false);
+                              }
+                            }}
+                          >
+                            Approve Stage 2 (Risk &amp; Compliance)
+                          </button>
+                        ) : null}
+                        {openingGateState.highRiskRecord &&
+                        ((openingGateState.highRiskRecord.status === 'pending_partner' &&
+                          isPartnerOrMpRole) ||
+                          (openingGateState.highRiskRecord.status === 'pending_compliance' &&
+                            isRiskComplianceRole)) ? (
+                          <button
+                            type="button"
+                            className="btn btn--secondary btn--sm"
+                            data-testid="hro-reject-btn"
+                            disabled={openingBusy}
+                            onClick={() => {
+                              setHroRejectOpen((o) => !o);
+                              setHroRejectComment('');
+                            }}
+                          >
+                            Reject
+                          </button>
+                        ) : null}
+                      </div>
+                    </li>
+                  ) : null}
+                </ul>
+
+                {overrideModalKey ? (
+                  <div
+                    style={{
+                      padding: 12,
+                      borderTop: '1px solid var(--color-divider)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                    data-testid="opening-override-form"
+                  >
+                    <label
+                      className="field-label"
+                      htmlFor="opening-override-reason-input"
+                      style={{ margin: 0 }}
+                    >
+                      Override rationale for{' '}
+                      {OPENING_GATE_PRECONDITION_LABELS[overrideModalKey]} (minimum 10 characters)
+                    </label>
+                    <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                      Recording an override logs an audit entry and does not automatically open the
+                      matter; click &ldquo;Open matter&rdquo; afterwards to re-evaluate the gate.
+                    </p>
+                    <textarea
+                      id="opening-override-reason-input"
+                      className="field-input"
+                      rows={2}
+                      data-testid="opening-override-reason-input"
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      placeholder="Enter documented business or urgency reason (at least 10 characters)..."
+                    />
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        onClick={() => setOverrideModalKey(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        data-testid="confirm-opening-override-btn"
+                        disabled={openingBusy || overrideReason.trim().length < 10}
+                        onClick={async () => {
+                          setOpeningBusy(true);
+                          try {
+                            const res = await overrideMatterOpeningPreconditionAction({
+                              matterId: matter.id,
+                              preconditionKey: overrideModalKey,
+                              reason: overrideReason.trim(),
+                            });
+                            if (isActionDenied(res) || !res.ok) {
+                              showToast(
+                                formatOpeningGateActionError(
+                                  res,
+                                  'Could not record opening override.',
+                                ),
+                              );
+                              return;
+                            }
+                            setOverrideModalKey(null);
+                            setOverrideReason('');
+                            showToast(
+                              "Override recorded. Matter remains Prospective until you click 'Open matter'.",
+                            );
+                            router.refresh();
+                          } finally {
+                            setOpeningBusy(false);
+                          }
+                        }}
+                      >
+                        Confirm override
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {revokeModalOverride && openingGateState.isProspective ? (
+                  <div
+                    style={{
+                      padding: 12,
+                      borderTop: '1px solid var(--color-divider)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                    data-testid="opening-revoke-form"
+                  >
+                    <label
+                      className="field-label"
+                      htmlFor="opening-revoke-reason-input"
+                      style={{ margin: 0 }}
+                    >
+                      Revocation rationale for{' '}
+                      {OPENING_GATE_PRECONDITION_LABELS[revokeModalOverride.preconditionKey]}{' '}
+                      (minimum 10 characters)
+                    </label>
+                    <textarea
+                      id="opening-revoke-reason-input"
+                      className="field-input"
+                      rows={2}
+                      data-testid="opening-revoke-reason-input"
+                      value={revokeReason}
+                      onChange={(e) => setRevokeReason(e.target.value)}
+                      placeholder="Enter reason for revoking this override (at least 10 characters)..."
+                    />
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        onClick={() => setRevokeModalOverride(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        data-testid="confirm-opening-revoke-btn"
+                        disabled={openingBusy || revokeReason.trim().length < 10}
+                        onClick={async () => {
+                          setOpeningBusy(true);
+                          try {
+                            const res = await revokeMatterOpeningOverrideAction({
+                              matterId: matter.id,
+                              overrideId: revokeModalOverride.overrideId,
+                              reason: revokeReason.trim(),
+                            });
+                            if (isActionDenied(res) || !res.ok) {
+                              showToast(
+                                formatOpeningGateActionError(
+                                  res,
+                                  'Could not revoke override.',
+                                ),
+                              );
+                              return;
+                            }
+                            setRevokeModalOverride(null);
+                            setRevokeReason('');
+                            showToast('Opening override revoked.');
+                            router.refresh();
+                          } finally {
+                            setOpeningBusy(false);
+                          }
+                        }}
+                      >
+                        Confirm revocation
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {hroRejectOpen && openingGateState.highRiskRecord ? (
+                  <div
+                    style={{
+                      padding: 12,
+                      borderTop: '1px solid var(--color-divider)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                  >
+                    <label
+                      className="field-label"
+                      htmlFor="hro-reject-comment-input"
+                      style={{ margin: 0 }}
+                    >
+                      Reason for rejecting High-risk opening *
+                    </label>
+                    <textarea
+                      id="hro-reject-comment-input"
+                      className="field-input"
+                      rows={2}
+                      value={hroRejectComment}
+                      onChange={(e) => setHroRejectComment(e.target.value)}
+                      placeholder="Enter reason for rejection..."
+                    />
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--sm"
+                        onClick={() => setHroRejectOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        data-testid="hro-confirm-reject-btn"
+                        disabled={openingBusy || !hroRejectComment.trim()}
+                        onClick={async () => {
+                          setOpeningBusy(true);
+                          try {
+                            const res = await transitionRegisterRecordAction({
+                              recordId: openingGateState.highRiskRecord!.id,
+                              transitionKey: 'reject_opening',
+                              comment: hroRejectComment.trim(),
+                              expectedRowVersion: openingGateState.highRiskRecord!.rowVersion,
+                            });
+                            if (isActionDenied(res) || !res.ok) {
+                              showToast(
+                                formatOpeningGateActionError(
+                                  res,
+                                  'Could not reject High-risk opening.',
+                                ),
+                              );
+                              return;
+                            }
+                            setHroRejectOpen(false);
+                            setHroRejectComment('');
+                            showToast('High-risk opening rejected.');
+                            router.refresh();
+                          } finally {
+                            setOpeningBusy(false);
+                          }
+                        }}
+                      >
+                        Confirm rejection
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+          <div className="home-grid">
           {/* LEFT MAIN COLUMN */}
           <div className="home-col">
             {/* PROGRESS PANEL */}
@@ -2501,6 +3111,7 @@ export function MatterProfileClient({
             </section>
           </div>
         </div>
+        </>
       ) : null}
 
       {/* ===================== TAB: PARTIES ===================== */}

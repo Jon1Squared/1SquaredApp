@@ -44,6 +44,7 @@ export type TenantModuleConfigKey =
   | 'dismissed_duplicates'
   | 'work_type_profiles'
   | 'work_type_configs'
+  | 'matter_numbering'
   | 'document_generation_override'
   | 'document_store_override'
   | 'registers'
@@ -1201,6 +1202,20 @@ export class TenantCatalogueRepository extends TenantScopedRepository {
     updatedById = 'system',
   ): Promise<TConfig> {
     return this.putModuleConfig(ctx, 'work_type_configs', config, updatedById);
+  }
+
+  public async getMatterNumberingConfig<TConfig = unknown>(
+    ctx: TenantContext,
+  ): Promise<TConfig | null> {
+    return this.getModuleConfig<TConfig>(ctx, 'matter_numbering');
+  }
+
+  public async putMatterNumberingConfig<TConfig = unknown>(
+    ctx: TenantContext,
+    config: TConfig,
+    updatedById = 'system',
+  ): Promise<TConfig> {
+    return this.putModuleConfig(ctx, 'matter_numbering', config, updatedById);
   }
 
   public async getCountersConfig(

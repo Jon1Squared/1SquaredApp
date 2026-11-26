@@ -11,6 +11,7 @@ import {
   type GlobalSearchResponse,
   type IdentityVerificationOutcome,
   type IntakeEvidenceArtifactRef,
+  type MatterNumberingConfig,
   type NotificationChannelFrequency,
   type NotificationKind,
   type RegisterChecklistItemStatus,
@@ -81,9 +82,12 @@ import {
   markAllNotificationsRead,
   markNotificationRead,
   markQuoteSentRecord,
+  openProspectiveMatterRecord,
+  overrideMatterOpeningPreconditionRecord,
   prepareEnquiryConversion,
   prepareQuoteConversionRecord,
   reassignLeaverOwnedRecords,
+  recordEngagementLetterSignedRecord,
   recordInvoiceCreditControlAction,
   recordQuoteOutcomeRecord,
   remindTeamLeadOverdueCompliance,
@@ -96,12 +100,14 @@ import {
   resetAllDemoData,
   resetHomePagesConfig,
   reviseQuoteRecord,
+  revokeMatterOpeningOverrideRecord,
   runMatterConflictSearchRecord,
   saveCustomFieldDefinition,
   saveEnquiryRecord,
   saveEnquirySettingsRecord,
   saveHomePagesConfig,
   saveMatterCostsConfig,
+  saveMatterNumberingConfigRecord,
   saveMatterPartyCapacity,
   saveMatterPartyRelationship,
   saveOrgStructure,
@@ -180,6 +186,7 @@ import type {
   IntakePreviewResult,
 } from '@/domain/intakePreviewTypes';
 import type { ClientCddCompactSummary } from '@/domain/cdd';
+import type { OpeningGatePreconditionKey } from '@/domain/openingGate';
 import type { ClientPriorMatterSummary } from '@/domain/matterOpeningRecord';
 import type { PmsLinksAdminPageData, PmsLinksSubTab } from '@/domain/pms';
 import type {
@@ -2197,6 +2204,84 @@ export async function getExpiredEnquiriesCountAction(
       tenantCtx: actor.tenantContext,
     }),
   );
+}
+
+export async function openProspectiveMatterAction(matterId: string) {
+  return guardedAction('openProspectiveMatterAction', async (actor) => {
+    const res = await openProspectiveMatterRecord(matterId, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function recordEngagementLetterSignedAction(input: {
+  matterId: string;
+  status?: 'Signed' | 'Signed & returned';
+  note?: string;
+}) {
+  return guardedAction('recordEngagementLetterSignedAction', async (actor) => {
+    const res = await recordEngagementLetterSignedRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function overrideMatterOpeningPreconditionAction(input: {
+  matterId: string;
+  preconditionKey: OpeningGatePreconditionKey;
+  reason: string;
+}) {
+  return guardedAction(
+    'overrideMatterOpeningPreconditionAction',
+    async (actor) => {
+      const res = await overrideMatterOpeningPreconditionRecord(
+        input,
+        actor.personId,
+        { tenantCtx: actor.tenantContext },
+      );
+      revalidateAll();
+      return res;
+    },
+  );
+}
+
+export async function revokeMatterOpeningOverrideAction(input: {
+  matterId: string;
+  overrideId: string;
+  reason?: string;
+}) {
+  return guardedAction('revokeMatterOpeningOverrideAction', async (actor) => {
+    const res = await revokeMatterOpeningOverrideRecord(
+      input,
+      actor.personId,
+      { tenantCtx: actor.tenantContext },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveMatterNumberingConfigAction(
+  newConfig: MatterNumberingConfig,
+  reason: string,
+) {
+  return guardedAction('saveMatterNumberingConfigAction', async (actor) => {
+    const res = await saveMatterNumberingConfigRecord(
+      newConfig,
+      reason,
+      actor.personId,
+      {
+        mfaVerified: actor.mfaVerified,
+        tenantCtx: actor.tenantContext,
+      },
+    );
+    revalidateAll();
+    return res;
+  });
 }
 
 

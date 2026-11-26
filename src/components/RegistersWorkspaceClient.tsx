@@ -77,6 +77,7 @@ function canExecuteTransitionUi(
   transition: RegisterTransitionDefinition,
   record: RegisterRecord,
   currentUserId: string,
+  priorTransitions: readonly RegisterTransition[] = [],
 ): { allowed: boolean; reason?: string } {
   const hasPerm =
     userPerms.has(transition.requiredPermission) ||
@@ -89,8 +90,24 @@ function canExecuteTransitionUi(
   const mustBlockSelf =
     transition.forbidSelfAction ||
     Boolean(regType.approvalRules && transition.requiredPermission !== regType.editPermission);
-  if (mustBlockSelf && (record.ownerId === currentUserId || record.createdById === currentUserId)) {
+  if (
+    mustBlockSelf &&
+    (record.ownerId === currentUserId ||
+      record.createdById === currentUserId ||
+      (regType.key === 'high_risk_opening' &&
+        typeof record.fieldValues?.submittedById === 'string' &&
+        record.fieldValues.submittedById === currentUserId))
+  ) {
     return { allowed: false, reason: 'Self-approval is forbidden' };
+  }
+  if (
+    transition.mustDifferFromPreviousApprover &&
+    priorTransitions.some((t) => t.actorId === currentUserId && t.transitionKey !== 'reject_opening')
+  ) {
+    return {
+      allowed: false,
+      reason: 'Requires a different approver from the previous stage',
+    };
   }
   if (
     (transition.requireAssignedApproverMatch || regType.approvalRules?.requireAssignedApproverMatch) &&
@@ -135,7 +152,13 @@ export function RegistersWorkspaceClient({
 
   // Creation form state
   const creatableTypes = useMemo(
-    () => enabledTypes.filter((t) => t.key !== 'cdd' && permSet.has(t.createPermission)),
+    () =>
+      enabledTypes.filter(
+        (t) =>
+          t.key !== 'cdd' &&
+          !t.systemCreatedOnly &&
+          permSet.has(t.createPermission),
+      ),
     [enabledTypes, permSet],
   );
   const resolvedInitialCreateTypeKey =
@@ -829,6 +852,7 @@ export function RegistersWorkspaceClient({
                   />
                   {selectedRecordType &&
                   selectedRecord.registerTypeKey !== 'cdd' &&
+                  !selectedRecordType.systemCreatedOnly &&
                   permSet.has(selectedRecordType.editPermission) ? (
                     <button
                       type="button"
@@ -1080,6 +1104,7 @@ export function RegistersWorkspaceClient({
                                 tr,
                                 selectedRecord,
                                 currentUserId,
+                                transitionsByRecordId[selectedRecord.id] ?? [],
                               );
                               return (
                                 <button

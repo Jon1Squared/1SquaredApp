@@ -417,27 +417,45 @@
         {
           "name": "01 Client Care",
           "description": "Engagement letters, terms of business, and AML/CDD records",
-          "filingAliases": ["client_care", "engagement", "cdd"]
+          "filingAliases": [
+            "client_care",
+            "engagement",
+            "cdd"
+          ]
         },
         {
           "name": "02 Correspondence",
           "description": "Inbound and outbound correspondence with clients, counterparties, and third parties",
-          "filingAliases": ["correspondence", "letters", "emails"]
+          "filingAliases": [
+            "correspondence",
+            "letters",
+            "emails"
+          ]
         },
         {
           "name": "03 Drafts",
           "description": "Working drafts and internal notes",
-          "filingAliases": ["drafts", "working_papers"]
+          "filingAliases": [
+            "drafts",
+            "working_papers"
+          ]
         },
         {
           "name": "04 Final Documents",
           "description": "Executed agreements, engrossments, and final deliverables",
-          "filingAliases": ["final_documents", "executed"]
+          "filingAliases": [
+            "final_documents",
+            "executed"
+          ]
         },
         {
           "name": "05 Billing and Finance",
           "description": "Bills, cost estimates, disbursements, and completion statements",
-          "filingAliases": ["billing", "finance", "invoices"]
+          "filingAliases": [
+            "billing",
+            "finance",
+            "invoices"
+          ]
         }
       ]
     },
@@ -454,7 +472,10 @@
             "node": {
               "name": "03a Searches and Enquiries",
               "description": "Local authority, drainage, environmental searches and CPSE/TA enquiries",
-              "filingAliases": ["searches", "enquiries"]
+              "filingAliases": [
+                "searches",
+                "enquiries"
+              ]
             }
           },
           {
@@ -463,7 +484,11 @@
             "node": {
               "name": "03b Title and Contract",
               "description": "Official copies, title plans, epitomes, and contract pack",
-              "filingAliases": ["title", "contract", "transfer"]
+              "filingAliases": [
+                "title",
+                "contract",
+                "transfer"
+              ]
             }
           },
           {
@@ -472,7 +497,11 @@
             "node": {
               "name": "03c Completion and Post-Completion",
               "description": "Completion undertakings, SDLT/LTT returns, and HM Land Registry AP1 registration",
-              "filingAliases": ["completion", "sdlt", "hmlr"]
+              "filingAliases": [
+                "completion",
+                "sdlt",
+                "hmlr"
+              ]
             }
           }
         ]
@@ -489,7 +518,10 @@
             "node": {
               "name": "03a Searches and Enquiries",
               "description": "Local authority, drainage, environmental searches and TA forms",
-              "filingAliases": ["searches", "enquiries"]
+              "filingAliases": [
+                "searches",
+                "enquiries"
+              ]
             }
           },
           {
@@ -498,7 +530,10 @@
             "node": {
               "name": "03b Title and Contract",
               "description": "Official copies, title plans, and draft contract",
-              "filingAliases": ["title", "contract"]
+              "filingAliases": [
+                "title",
+                "contract"
+              ]
             }
           },
           {
@@ -507,7 +542,10 @@
             "node": {
               "name": "03c Completion and Post-Completion",
               "description": "Completion statement, SDLT return, and HMLR registration",
-              "filingAliases": ["completion", "post_completion"]
+              "filingAliases": [
+                "completion",
+                "post_completion"
+              ]
             }
           }
         ]
@@ -524,7 +562,11 @@
             "node": {
               "name": "03a Pleadings",
               "description": "Claim form, particulars of claim, defence, reply, and court orders",
-              "filingAliases": ["pleadings", "statements_of_case", "orders"]
+              "filingAliases": [
+                "pleadings",
+                "statements_of_case",
+                "orders"
+              ]
             }
           },
           {
@@ -533,7 +575,10 @@
             "node": {
               "name": "03b Disclosure and Evidence",
               "description": "Disclosure lists, key documents, and inspection bundles",
-              "filingAliases": ["disclosure", "evidence"]
+              "filingAliases": [
+                "disclosure",
+                "evidence"
+              ]
             }
           },
           {
@@ -542,7 +587,10 @@
             "node": {
               "name": "03c Witness Statements and Experts",
               "description": "Fact witness statements, instructions to experts, and expert reports",
-              "filingAliases": ["witness_statements", "experts"]
+              "filingAliases": [
+                "witness_statements",
+                "experts"
+              ]
             }
           },
           {
@@ -551,7 +599,11 @@
             "node": {
               "name": "03d Counsel and Hearings",
               "description": "Briefs to counsel, skeleton arguments, and hearing bundles",
-              "filingAliases": ["counsel", "hearings", "bundles"]
+              "filingAliases": [
+                "counsel",
+                "hearings",
+                "bundles"
+              ]
             }
           },
           {
@@ -560,7 +612,11 @@
             "node": {
               "name": "03e Settlement and ADR",
               "description": "Part 36 offers, mediation position statements, and Tomlin orders",
-              "filingAliases": ["settlement", "adr", "mediation"]
+              "filingAliases": [
+                "settlement",
+                "adr",
+                "mediation"
+              ]
             }
           }
         ]
@@ -577,7 +633,10 @@
             "node": {
               "name": "03a Pleadings",
               "description": "Claim form, particulars of claim, defence, reply, and court orders",
-              "filingAliases": ["pleadings", "orders"]
+              "filingAliases": [
+                "pleadings",
+                "orders"
+              ]
             }
           },
           {
@@ -586,7 +645,10 @@
             "node": {
               "name": "03b Disclosure and Evidence",
               "description": "Disclosure lists and evidence bundles",
-              "filingAliases": ["disclosure", "evidence"]
+              "filingAliases": [
+                "disclosure",
+                "evidence"
+              ]
             }
           },
           {
@@ -595,7 +657,10 @@
             "node": {
               "name": "03c Witness Statements and Experts",
               "description": "Witness statements and expert reports",
-              "filingAliases": ["witness_statements", "experts"]
+              "filingAliases": [
+                "witness_statements",
+                "experts"
+              ]
             }
           },
           {
@@ -604,7 +669,10 @@
             "node": {
               "name": "03d Counsel and Hearings",
               "description": "Instructions to counsel and hearing bundles",
-              "filingAliases": ["counsel", "hearings"]
+              "filingAliases": [
+                "counsel",
+                "hearings"
+              ]
             }
           },
           {
@@ -613,7 +681,10 @@
             "node": {
               "name": "03e Settlement and ADR",
               "description": "Part 36 offers, mediation, and settlement agreements",
-              "filingAliases": ["settlement", "adr"]
+              "filingAliases": [
+                "settlement",
+                "adr"
+              ]
             }
           }
         ]
@@ -623,44 +694,106 @@
   "keyDates": {
     "enabled": true,
     "defaults": {
-      "verification": { "required": false },
-      "calendarSync": { "enabled": true },
+      "verification": {
+        "required": false
+      },
+      "calendarSync": {
+        "enabled": true
+      },
       "reminderScheduleId": "standard",
       "teamAssignment": "matter_owning_team"
     },
     "keyDateTypes": [
-      { "id": "limitation", "label": "Limitation date", "category": "limitation", "defaultCritical": true, "allowCalculation": true, "reminderScheduleId": "limitation" },
-      { "id": "court_deadline", "label": "Court deadline", "category": "court_deadline", "defaultCritical": true },
-      { "id": "contract_date", "label": "Contractual date", "category": "contractual" },
-      { "id": "undertaking", "label": "Undertaking", "category": "undertaking", "defaultCritical": true },
-      { "id": "aml_review", "label": "AML review", "category": "compliance" },
-      { "id": "milestone", "label": "Internal milestone", "category": "internal_milestone" }
+      {
+        "id": "limitation",
+        "label": "Limitation date",
+        "category": "limitation",
+        "defaultCritical": true,
+        "allowCalculation": true,
+        "reminderScheduleId": "limitation"
+      },
+      {
+        "id": "court_deadline",
+        "label": "Court deadline",
+        "category": "court_deadline",
+        "defaultCritical": true
+      },
+      {
+        "id": "contract_date",
+        "label": "Contractual date",
+        "category": "contractual"
+      },
+      {
+        "id": "undertaking",
+        "label": "Undertaking",
+        "category": "undertaking",
+        "defaultCritical": true
+      },
+      {
+        "id": "aml_review",
+        "label": "AML review",
+        "category": "compliance"
+      },
+      {
+        "id": "milestone",
+        "label": "Internal milestone",
+        "category": "internal_milestone"
+      }
     ],
     "matterTypes": [
       {
         "matterTypeId": "matter_type.litigation",
-        "requiredKeyDateTypeIds": ["limitation"],
-        "verification": { "required": true, "appliesTo": "all" },
-        "calendarSync": { "enabled": true },
-        "defaultRuleSetIds": ["ew-sample"]
+        "requiredKeyDateTypeIds": [
+          "limitation"
+        ],
+        "verification": {
+          "required": true,
+          "appliesTo": "all"
+        },
+        "calendarSync": {
+          "enabled": true
+        },
+        "defaultRuleSetIds": [
+          "ew-sample"
+        ]
       },
       {
         "matterTypeId": "work_type.dispute_resolution",
-        "requiredKeyDateTypeIds": ["limitation"],
-        "verification": { "required": true, "appliesTo": "all" },
-        "calendarSync": { "enabled": true },
-        "defaultRuleSetIds": ["ew-sample"]
+        "requiredKeyDateTypeIds": [
+          "limitation"
+        ],
+        "verification": {
+          "required": true,
+          "appliesTo": "all"
+        },
+        "calendarSync": {
+          "enabled": true
+        },
+        "defaultRuleSetIds": [
+          "ew-sample"
+        ]
       },
       {
         "matterTypeId": "matter_type.personal_injury",
-        "requiredKeyDateTypeIds": ["limitation"],
-        "verification": { "required": true, "appliesTo": "all" },
-        "defaultRuleSetIds": ["ew-sample"]
+        "requiredKeyDateTypeIds": [
+          "limitation"
+        ],
+        "verification": {
+          "required": true,
+          "appliesTo": "all"
+        },
+        "defaultRuleSetIds": [
+          "ew-sample"
+        ]
       },
       {
         "matterTypeId": "matter_type.residential_conveyancing",
-        "verification": { "required": false },
-        "calendarSync": { "enabled": false }
+        "verification": {
+          "required": false
+        },
+        "calendarSync": {
+          "enabled": false
+        }
       }
     ],
     "reminderSchedules": [
@@ -668,26 +801,70 @@
         "id": "standard",
         "label": "Standard",
         "stages": [
-          { "daysBefore": 30, "priority": "normal" },
-          { "daysBefore": 7, "priority": "high" },
-          { "daysBefore": 1, "priority": "urgent" },
-          { "daysBefore": 0, "priority": "urgent" }
+          {
+            "daysBefore": 30,
+            "priority": "normal"
+          },
+          {
+            "daysBefore": 7,
+            "priority": "high"
+          },
+          {
+            "daysBefore": 1,
+            "priority": "urgent"
+          },
+          {
+            "daysBefore": 0,
+            "priority": "urgent"
+          }
         ],
-        "escalation": { "afterUnacknowledgedDays": 2, "levels": ["team_leads"] }
+        "escalation": {
+          "afterUnacknowledgedDays": 2,
+          "levels": [
+            "team_leads"
+          ]
+        }
       },
       {
         "id": "limitation",
         "label": "Limitation",
         "stages": [
-          { "daysBefore": 90, "priority": "normal" },
-          { "daysBefore": 60, "priority": "normal" },
-          { "daysBefore": 30, "priority": "high" },
-          { "daysBefore": 14, "priority": "high" },
-          { "daysBefore": 7, "priority": "urgent" },
-          { "daysBefore": 1, "priority": "urgent" },
-          { "daysBefore": 0, "priority": "urgent" }
+          {
+            "daysBefore": 90,
+            "priority": "normal"
+          },
+          {
+            "daysBefore": 60,
+            "priority": "normal"
+          },
+          {
+            "daysBefore": 30,
+            "priority": "high"
+          },
+          {
+            "daysBefore": 14,
+            "priority": "high"
+          },
+          {
+            "daysBefore": 7,
+            "priority": "urgent"
+          },
+          {
+            "daysBefore": 1,
+            "priority": "urgent"
+          },
+          {
+            "daysBefore": 0,
+            "priority": "urgent"
+          }
         ],
-        "escalation": { "afterUnacknowledgedDays": 1, "levels": ["team_leads", "role:risk_compliance"] }
+        "escalation": {
+          "afterUnacknowledgedDays": 1,
+          "levels": [
+            "team_leads",
+            "role:risk_compliance"
+          ]
+        }
       }
     ],
     "limitationRuleSets": [
@@ -703,20 +880,37 @@
             "label": "Simple contract",
             "claimType": "contract",
             "guidanceNote": "Sample only. Confirm the period and trigger with a solicitor before relying on this rule.",
-            "trigger": { "kind": "single", "field": "accrualDate" },
-            "period": { "years": 6 },
+            "trigger": {
+              "kind": "single",
+              "field": "accrualDate"
+            },
+            "period": {
+              "years": 6
+            },
             "calendarId": "england-and-wales",
-            "minorityAdjustment": { "enabled": true }
+            "minorityAdjustment": {
+              "enabled": true
+            }
           },
           {
             "id": "personal-injury",
             "label": "Personal injury",
             "claimType": "personal_injury",
             "guidanceNote": "Sample only. Confirm the period, trigger and any discretion with a solicitor.",
-            "trigger": { "kind": "later_of", "fields": ["accrualDate", "dateOfKnowledge"] },
-            "period": { "years": 3 },
+            "trigger": {
+              "kind": "later_of",
+              "fields": [
+                "accrualDate",
+                "dateOfKnowledge"
+              ]
+            },
+            "period": {
+              "years": 3
+            },
             "calendarId": "england-and-wales",
-            "minorityAdjustment": { "enabled": true }
+            "minorityAdjustment": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -725,20 +919,34 @@
       {
         "id": "england-and-wales",
         "label": "England and Wales",
-        "weekendDays": [0, 6],
+        "weekendDays": [
+          0,
+          6
+        ],
         "source": "manual",
         "nonWorkingDates": [
-          "2026-01-01", "2026-04-03", "2026-04-06", "2026-05-04",
-          "2026-05-25", "2026-08-31", "2026-12-25", "2026-12-28"
+          "2026-01-01",
+          "2026-04-03",
+          "2026-04-06",
+          "2026-05-04",
+          "2026-05-25",
+          "2026-08-31",
+          "2026-12-25",
+          "2026-12-28"
         ]
       }
     ],
     "calendarSync": {
       "provider": "microsoft_graph",
-      "targets": ["responsible_persons", "team_calendar"],
+      "targets": [
+        "responsible_persons",
+        "team_calendar"
+      ],
       "eventTitleTemplate": "{{matterReference}} – {{keyDateTypeLabel}}",
       "includeMatterDescription": false,
-      "statusesToSync": ["confirmed"],
+      "statusesToSync": [
+        "confirmed"
+      ],
       "teamCalendarMappings": []
     },
     "exceptions": {
@@ -765,9 +973,55 @@
         "baseline": "closed_on",
         "allowMatterOverride": false,
         "statutoryNote": "Firm standard six-year civil limitation file retention policy"
+      },
+      "openingGate": {
+        "allowConflictOverride": true,
+        "requireCddComplete": false,
+        "allowCddOverride": true,
+        "requireEngagementSigned": false,
+        "requireFundsOnAccount": false
       }
     },
     "items": [
+      {
+        "workTypeId": "work_type.corporate_and_commercial",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_company_formations_and_structures",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_shareholder_agreements",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
       {
         "workTypeId": "work_type.corporate_and_commercial_mergers_and_acquisitions",
         "practiceAreaId": "work_type.corporate_and_commercial",
@@ -819,6 +1073,141 @@
           "baseline": "closed_on",
           "allowMatterOverride": false,
           "statutoryNote": "Corporate transaction closing bible seven-year retention policy"
+        },
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_joint_ventures",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_commercial_contracts",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_agency_and_distribution",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_corporate_governance",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.corporate_and_commercial_due_diligence",
+        "practiceAreaId": "work_type.corporate_and_commercial",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_residential_conveyancing",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [
+          {
+            "id": "res-convey-protocol-pack",
+            "title": "Issue protocol property information forms and source-of-funds pack",
+            "trigger": "matter_open",
+            "dueWorkingDaysOffset": 2,
+            "priorityId": "task_priority.high",
+            "ownerRoleKey": "fee_earner"
+          }
+        ],
+        "riskQuestions": [
+          {
+            "id": "residentialSourceOfFundsSource",
+            "sectionKey": "work_type",
+            "sectionTitle": "Work-type risk factors",
+            "prompt": "Are purchase funds arriving from third-party gifts or non-UK accounts?",
+            "weight": 2,
+            "required": false,
+            "options": [
+              {
+                "value": "uk_mortgage_and_savings",
+                "label": "Standard UK high-street lender and verified domestic savings",
+                "score": 1,
+                "riskLevel": "low"
+              },
+              {
+                "value": "gifted_or_overseas_funds",
+                "label": "Gifted deposit or overseas/complex funding origin",
+                "score": 4,
+                "riskLevel": "high"
+              }
+            ]
+          }
+        ],
+        "retention": {
+          "retentionYears": 15,
+          "baseline": "closed_on",
+          "allowMatterOverride": false,
+          "statutoryNote": "Residential conveyancing mortgage-lender & latent-damage 15-year file policy"
+        },
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
         }
       },
       {
@@ -872,51 +1261,168 @@
           "baseline": "closed_on",
           "allowMatterOverride": false,
           "statutoryNote": "Limitation Act 1980 twelve-year specialty / deed retention policy"
+        },
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
         }
       },
       {
-        "workTypeId": "work_type.real_estate_and_property_residential_conveyancing",
+        "workTypeId": "work_type.real_estate_and_property_landlord_and_tenant",
         "practiceAreaId": "work_type.real_estate_and_property",
         "active": true,
-        "autoTaskTemplates": [
-          {
-            "id": "res-convey-protocol-pack",
-            "title": "Issue protocol property information forms and source-of-funds pack",
-            "trigger": "matter_open",
-            "dueWorkingDaysOffset": 2,
-            "priorityId": "task_priority.high",
-            "ownerRoleKey": "fee_earner"
-          }
-        ],
-        "riskQuestions": [
-          {
-            "id": "residentialSourceOfFundsSource",
-            "sectionKey": "work_type",
-            "sectionTitle": "Work-type risk factors",
-            "prompt": "Are purchase funds arriving from third-party gifts or non-UK accounts?",
-            "weight": 2,
-            "required": false,
-            "options": [
-              {
-                "value": "uk_mortgage_and_savings",
-                "label": "Standard UK high-street lender and verified domestic savings",
-                "score": 1,
-                "riskLevel": "low"
-              },
-              {
-                "value": "gifted_or_overseas_funds",
-                "label": "Gifted deposit or overseas/complex funding origin",
-                "score": 4,
-                "riskLevel": "high"
-              }
-            ]
-          }
-        ],
-        "retention": {
-          "retentionYears": 15,
-          "baseline": "closed_on",
-          "allowMatterOverride": false,
-          "statutoryNote": "Residential conveyancing mortgage-lender & latent-damage 15-year file policy"
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_development_and_planning",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_finance_and_secured_lending",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_property_management",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.real_estate_and_property_construction_contracts",
+        "practiceAreaId": "work_type.real_estate_and_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_employment_contracts",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_disciplinary_and_grievance",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_settlement_agreements",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_redundancy_and_restructuring",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_tupe_transfers",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_hr_policies_and_handbooks",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
         }
       },
       {
@@ -942,6 +1448,51 @@
         },
         "feeArrangementCapCategories": {
           "damages_based_agreement": "dba_employment"
+        },
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.employment_and_hr_executive_and_senior_hire",
+        "practiceAreaId": "work_type.employment_and_hr",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_pre_action_correspondence",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
         }
       },
       {
@@ -959,6 +1510,623 @@
         "feeArrangementCapCategories": {
           "conditional_fee_agreement": "cfa_general_civil",
           "damages_based_agreement": "dba_general_civil"
+        },
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_mediation_and_adr",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_arbitration",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_enforcement",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_injunctions_and_urgent_relief",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.dispute_resolution_cost_management",
+        "practiceAreaId": "work_type.dispute_resolution",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property_trade_mark_applications",
+        "practiceAreaId": "work_type.intellectual_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property_ip_assignment_and_licensing",
+        "practiceAreaId": "work_type.intellectual_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property_copyright_notices",
+        "practiceAreaId": "work_type.intellectual_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property_confidentiality_and_ndas",
+        "practiceAreaId": "work_type.intellectual_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property_ip_due_diligence",
+        "practiceAreaId": "work_type.intellectual_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.intellectual_property_infringement_and_enforcement",
+        "practiceAreaId": "work_type.intellectual_property",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client_wills_and_codicils",
+        "practiceAreaId": "work_type.private_client",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client_lasting_powers_of_attorney",
+        "practiceAreaId": "work_type.private_client",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client_trusts_and_settlements",
+        "practiceAreaId": "work_type.private_client",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client_estate_administration",
+        "practiceAreaId": "work_type.private_client",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client_inheritance_tax_planning",
+        "practiceAreaId": "work_type.private_client",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.private_client_court_of_protection",
+        "practiceAreaId": "work_type.private_client",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking_loan_and_facility_agreements",
+        "practiceAreaId": "work_type.finance_and_banking",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking_security_documents",
+        "practiceAreaId": "work_type.finance_and_banking",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking_guarantees_and_indemnities",
+        "practiceAreaId": "work_type.finance_and_banking",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking_asset_finance",
+        "practiceAreaId": "work_type.finance_and_banking",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking_restructuring_and_insolvency",
+        "practiceAreaId": "work_type.finance_and_banking",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.finance_and_banking_regulatory_compliance",
+        "practiceAreaId": "work_type.finance_and_banking",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": false,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance_data_protection_and_gdpr",
+        "practiceAreaId": "work_type.regulatory_and_compliance",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance_anti_bribery_and_corruption",
+        "practiceAreaId": "work_type.regulatory_and_compliance",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance_financial_services_regulation",
+        "practiceAreaId": "work_type.regulatory_and_compliance",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance_environmental_and_planning",
+        "practiceAreaId": "work_type.regulatory_and_compliance",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance_health_and_safety",
+        "practiceAreaId": "work_type.regulatory_and_compliance",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.regulatory_and_compliance_regulatory_investigations",
+        "practiceAreaId": "work_type.regulatory_and_compliance",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital_software_and_saas_agreements",
+        "practiceAreaId": "work_type.technology_and_digital",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital_data_sharing_and_processing",
+        "practiceAreaId": "work_type.technology_and_digital",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital_ai_and_emerging_tech",
+        "practiceAreaId": "work_type.technology_and_digital",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital_outsourcing_contracts",
+        "practiceAreaId": "work_type.technology_and_digital",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital_cyber_incident_response",
+        "practiceAreaId": "work_type.technology_and_digital",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.technology_and_digital_fintech_and_payments",
+        "practiceAreaId": "work_type.technology_and_digital",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family",
+        "practiceAreaId": "",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family_pre_nuptial_agreements",
+        "practiceAreaId": "work_type.family",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family_separation_and_divorce",
+        "practiceAreaId": "work_type.family",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family_financial_orders",
+        "practiceAreaId": "work_type.family",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family_children_arrangements",
+        "practiceAreaId": "work_type.family",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family_cohabitation_agreements",
+        "practiceAreaId": "work_type.family",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": false,
+          "requireFundsOnAccount": false
+        }
+      },
+      {
+        "workTypeId": "work_type.family_domestic_abuse_proceedings",
+        "practiceAreaId": "work_type.family",
+        "active": true,
+        "autoTaskTemplates": [],
+        "riskQuestions": [],
+        "openingGate": {
+          "requireCddComplete": true,
+          "allowCddOverride": true,
+          "requireEngagementSigned": true,
+          "requireFundsOnAccount": false
         }
       }
     ]
@@ -1102,7 +2270,18 @@
       "standard": 36,
       "high": 12
     },
-    "reminderScheduleDaysBefore": [30, 7, 0, -7, -30],
+    "reminderScheduleDaysBefore": [
+      30,
+      7,
+      0,
+      -7,
+      -30
+    ],
     "maxEvidenceFileSizeBytes": 10485760
+  },
+  "matterNumbering": {
+    "pattern": "{CLIENT_REF}-{SEQ:4}",
+    "sequenceScope": "client_ref_prefix",
+    "emptyTokenFallback": "MAT"
   }
 }

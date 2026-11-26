@@ -208,6 +208,7 @@ interface Props {
   registerTypes?: RegisterTypeDefinition[];
   cddConfig?: CddConfiguration;
   workTypesConfig?: WorkTypesConfiguration;
+  matterNumberingConfig?: import('@platform/core-api').MatterNumberingConfig;
   hasMfaVerified?: boolean;
   currentUserKeyDatePermissions?: KeyDatePermission[];
   entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
@@ -258,6 +259,7 @@ export function AdminClient({
   registerTypes = [],
   cddConfig,
   workTypesConfig,
+  matterNumberingConfig,
   hasMfaVerified = false,
   currentUserKeyDatePermissions = [],
   entraSession,
@@ -1578,14 +1580,70 @@ export function AdminClient({
 
       {/* TAB: KEY DATES & LIMITATION */}
       {tab === 'work-types' && workTypesConfig && (
-        <WorkTypesAdminPanel
-          initialConfig={workTypesConfig}
-          values={values}
-          orgStructure={orgCatalogue}
-          matterCostsConfig={matterCostsConfig}
-          canEdit={Boolean(currentUserPermissions?.includes('admin:access'))}
-          hasMfaVerified={hasMfaVerified}
-        />
+        <div style={{ display: 'grid', gap: 16 }}>
+          <WorkTypesAdminPanel
+            initialConfig={workTypesConfig}
+            values={values}
+            orgStructure={orgCatalogue}
+            matterCostsConfig={matterCostsConfig}
+            canEdit={Boolean(currentUserPermissions?.includes('admin:access'))}
+            hasMfaVerified={hasMfaVerified}
+          />
+          {matterNumberingConfig ? (() => {
+            const SEQUENCE_SCOPE_LABELS: Record<string, string> = {
+              client_ref_prefix: 'Per client reference prefix',
+              firm: 'Firm-wide',
+              year: 'Per calendar year',
+              department: 'Per department',
+            };
+            const scopeLabel =
+              SEQUENCE_SCOPE_LABELS[matterNumberingConfig.sequenceScope] ??
+              'Configured scope';
+            return (
+              <section
+                className="home-panel"
+                aria-label="Matter numbering policy summary"
+                data-testid="admin-matter-numbering-summary"
+              >
+                <div className="panel-header">
+                  <div className="panel-title-group">
+                    <h2 className="panel-title">Matter numbering policy</h2>
+                    <StatusPill label={scopeLabel} tone="neutral" />
+                  </div>
+                  <span className="panel-subtitle">
+                    Read-only tenant configuration summary
+                  </span>
+                </div>
+                <div className="panel-body padded">
+                  <div className="kv-grid">
+                    <div className="kv-item">
+                      <span className="kv-label">Active numbering pattern</span>
+                      <span className="kv-value">
+                        <code>{matterNumberingConfig.pattern}</code>
+                      </span>
+                    </div>
+                    <div className="kv-item">
+                      <span className="kv-label">Sequence scope</span>
+                      <span className="kv-value">{scopeLabel}</span>
+                    </div>
+                    <div className="kv-item">
+                      <span className="kv-label">Empty token fallback</span>
+                      <span className="kv-value">
+                        <code>{matterNumberingConfig.emptyTokenFallback}</code>
+                      </span>
+                    </div>
+                  </div>
+                  <p className="muted" style={{ margin: '10px 0 0', fontSize: 12.5 }}>
+                    Permanent matter numbers are assigned once at first non-draft submission after
+                    validation passes. Existing matter numbers are never rewritten when the firm
+                    pattern changes. Interactive token preview building is tracked on the platform
+                    backlog.
+                  </p>
+                </div>
+              </section>
+            );
+          })() : null}
+        </div>
       )}
 
       {tab === 'key-dates' && keyDatesConfig && (
