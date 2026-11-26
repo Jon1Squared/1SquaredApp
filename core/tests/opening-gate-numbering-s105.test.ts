@@ -20,11 +20,23 @@ import {
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import * as actionsModule from '@/app/actions';
+import { resolveMatterIntakeComplianceRows } from '@/components/MatterProfileClient';
 import { isActionDenied } from '@/domain/actionResult';
+import {
+  computeMatterOpeningChecklistProgress,
+  type MatterOpeningSnapshot,
+} from '@/domain/matterOpeningRecord';
+import { resolveMatterStatusPill } from '@/domain/matterStatusDisplay';
 import { formatOpeningGateActionError } from '@/domain/openingGate';
-import type { ConflictCheckRecordInput, Matter, Person } from '@/domain/types';
+import type {
+  ChoiceValue,
+  ConflictCheckRecordInput,
+  Matter,
+  Person,
+} from '@/domain/types';
 import { setActiveTenantConfigForTesting } from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
+import { loadHomePageData, loadMatterDetailPageData } from '@/server/pageLoaders';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import * as servicesModule from '@/server/services';
 import {
@@ -269,8 +281,8 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         expect(nullGovOpen.matter!.matterNumber).not.toBe('CRAFTED-9999');
         expect(nullGovOpen.matter!.numberSequenceKey).toBe('PEN001');
         expect(nullGovOpen.matter!.numberSequenceValue).toBeGreaterThan(0);
-        // Server chooses cmi_incomplete, NOT crafted active/closed!
-        expect(nullGovOpen.matter!.matterStatusId).toBe('matter_status.cmi_incomplete');
+        // Server chooses active (opened via gate with CDD outcome), NOT crafted closed!
+        expect(nullGovOpen.matter!.matterStatusId).toBe('matter_status.active');
 
         // (c) Via saveMatterAction: crafted matterNumber and matterStatusId also ignored
         const actionSaveRes = (await actionsModule.saveMatterAction(
@@ -280,7 +292,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
             practiceAreaId: 'work_type.corporate_and_commercial',
             workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
             matterNumber: 'HIJACK-7777',
-            matterStatusId: 'matter_status.active',
+            matterStatusId: 'matter_status.closed',
             responsiblePartnerId: 'P-000001',
             supervisingPartnerId: 'P-000001',
             leadFeeEarnerId: 'P-000002',
@@ -293,7 +305,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         expect(actionSaveRes.errors).toBeUndefined();
         expect(actionSaveRes.matter).not.toBeNull();
         expect(actionSaveRes.matter!.matterNumber).toMatch(/^PEN001-\d{4}$/);
-        expect(actionSaveRes.matter!.matterStatusId).toBe('matter_status.cmi_incomplete');
+        expect(actionSaveRes.matter!.matterStatusId).toBe('matter_status.active');
 
         // (d) Rejected validation after a previous allocation must consume ZERO sequence numbers,
         //     whilst Referred conflict submission DOES receive its permanent matter number cleanly (Owner Answer 7).
@@ -625,7 +637,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           matter?: Matter;
         };
         expect(fintechOpen.ok).toBe(true);
-        expect(fintechOpen.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+        expect(fintechOpen.matter?.matterStatusId).toBe('matter_status.active');
 
         // (6) Override Litigation engagement, revoke it -> still Prospective -> then record server-stamped engagement (R753) -> Open matter!
         const litOvr = (await overrideAction!({
@@ -672,7 +684,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           matter?: Matter;
         };
         expect(litOpened.ok).toBe(true);
-        expect(litOpened.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+        expect(litOpened.matter?.matterStatusId).toBe('matter_status.active');
       },
       { roles: ['partner', 'fee_earner'], mfaVerified: false },
     );
@@ -767,17 +779,31 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           matter?: Matter;
         };
         expect(openNow.ok).toBe(true);
-        expect(openNow.matter!.matterStatusId).toBe('matter_status.cmi_incomplete');
+        expect(openNow.matter!.matterStatusId).toBe('matter_status.active');
 
-        // R741: Moving opened matter cmi_incomplete -> active, and Close -> Reopen (closed -> active) are NOT openings and remain ungated!
-        const activateRes = await saveMatterRecord(
+        // R741: Moving opened matter active -> cmi_incomplete -> active, and Close -> Reopen (closed -> active) are NOT openings and remain ungated!
+        const cmiIncompleteRes = await saveMatterRecord(
           {
             title: openNow.matter!.title,
             clientId: openNow.matter!.clientId,
             practiceAreaId: openNow.matter!.practiceAreaId,
             workTypeSubcategoryId: openNow.matter!.workTypeSubcategoryId,
-            matterStatusId: 'matter_status.active',
+            matterStatusId: 'matter_status.cmi_incomplete',
             rowVersion: openNow.matter!.rowVersion,
+          },
+          { id: mId, byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(cmiIncompleteRes.errors).toBeUndefined();
+        expect(cmiIncompleteRes.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+
+        const activateRes = await saveMatterRecord(
+          {
+            title: cmiIncompleteRes.matter!.title,
+            clientId: cmiIncompleteRes.matter!.clientId,
+            practiceAreaId: cmiIncompleteRes.matter!.practiceAreaId,
+            workTypeSubcategoryId: cmiIncompleteRes.matter!.workTypeSubcategoryId,
+            matterStatusId: 'matter_status.active',
+            rowVersion: cmiIncompleteRes.matter!.rowVersion,
           },
           { id: mId, byId: 'P-000001', saveMode: 'submit_cleared' },
         );
@@ -1458,7 +1484,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
       testTenantCtx('P-000001'),
       raceMatterId,
     );
-    expect(raceMatterFinal?.matterStatusId).toBe('matter_status.cmi_incomplete');
+    expect(raceMatterFinal?.matterStatusId).toBe('matter_status.active');
 
     // Forged tenant session mismatch throws TENANCY_FORGERY_DETECTED;
     // valid Bravo session refuses tampered Alpha matter ID against Bravo DB cleanly.
@@ -1597,7 +1623,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         expect(nsOvr.ok).toBe(true);
         const nsOpened = (await openAction(nsId)) as { ok: boolean; matter?: Matter };
         expect(nsOpened.ok).toBe(true);
-        expect(nsOpened.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+        expect(nsOpened.matter?.matterStatusId).toBe('matter_status.active');
 
         // 4) DRAFT matter -> refused without allocating a permanent number
         const draftSave = await saveMatterRecord(
@@ -1913,7 +1939,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
 
         const openAllValid = (await openAction(jointId)) as { ok: boolean; matter?: Matter };
         expect(openAllValid.ok).toBe(true);
-        expect(openAllValid.matter?.matterStatusId).toBe('matter_status.cmi_incomplete');
+        expect(openAllValid.matter?.matterStatusId).toBe('matter_status.active');
 
         // R763 tier sufficiency: a High-risk Corporate matter elevates O-000001 to High derived tier -> Standard CDD is insufficient until upgraded
         const highTierMatterSave = await saveMatterRecord(
@@ -3134,4 +3160,315 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
       ),
     ).toBe(true);
   }, 30_000);
+
+  it('19. R810: records gate CDD outcome, opens gate-cleared matters to Active, preserves openedViaGate, excludes them from CMI incomplete, and masks unpermitted viewers', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const matterRepo = new TenantMatterRepository();
+    const catRepo = new TenantCatalogueRepository();
+    const statusValues = (await catRepo.listChoiceValuesForList(
+      ctx,
+      'matter_status',
+    )) as ChoiceValue[];
+    const recordSignedAction = getDynamicAction('recordEngagementLetterSignedAction')!;
+    const openAction = getDynamicAction('openProspectiveMatterAction')!;
+
+    // (a) CDD met via gate -> openProspectiveMatterRecord sets Active, Verified, amlCompletedAt, openedViaGate: true, pill "Open"
+    let verifiedMatterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const saveRes = await saveMatterRecord(
+          {
+            title: 'R810 Verified Gate Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(saveRes.errors).toBeUndefined();
+        expect(saveRes.matter).not.toBeNull();
+        verifiedMatterId = saveRes.matter!.id;
+        expect(saveRes.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
+        // (d) Prospective pill takes precedence over default amlStatus ('CMI incomplete')
+        expect(resolveMatterStatusPill(saveRes.matter!, statusValues)).toEqual({
+          label: 'Prospective',
+          tone: 'warning',
+          isCmiIncomplete: false,
+          isConflictFlagged: false,
+        });
+
+        await recordSignedAction({
+          matterId: verifiedMatterId,
+          status: 'Signed & returned',
+        });
+        const opened = (await openAction(verifiedMatterId)) as {
+          ok: boolean;
+          matter?: Matter;
+        };
+        expect(opened.ok).toBe(true);
+        expect(opened.matter).toBeDefined();
+        expect(opened.matter!.matterStatusId).toBe('matter_status.active');
+        expect(opened.matter!.amlStatus).toBe('Verified');
+        expect(opened.matter!.amlCompletedAt).toBeTruthy();
+        expect(
+          (opened.matter!.fieldValues?.['matterOpeningGate'] as { openedViaGate?: boolean })
+            ?.openedViaGate,
+        ).toBe(true);
+        const snap = opened.matter!.fieldValues?.['matterOpeningSnapshot'] as
+          | MatterOpeningSnapshot
+          | undefined;
+        expect(snap?.complianceOnboarding.amlStatus).toBe('Verified');
+        expect(resolveMatterStatusPill(opened.matter!, statusValues)).toEqual({
+          label: 'Open',
+          tone: 'positive',
+          isCmiIncomplete: false,
+          isConflictFlagged: false,
+        });
+
+        // (a2) Subsequent edit of opened matter preserves openedViaGate & amlStatus
+        const editedRes = await saveMatterRecord(
+          {
+            title: 'R810 Verified Gate Matter Updated',
+            clientId: opened.matter!.clientId,
+            practiceAreaId: opened.matter!.practiceAreaId,
+            workTypeSubcategoryId: opened.matter!.workTypeSubcategoryId,
+            matterStatusId: opened.matter!.matterStatusId,
+            rowVersion: opened.matter!.rowVersion,
+          },
+          { id: verifiedMatterId, byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(editedRes.errors).toBeUndefined();
+        expect(
+          (editedRes.matter!.fieldValues?.['matterOpeningGate'] as { openedViaGate?: boolean })
+            ?.openedViaGate,
+        ).toBe(true);
+        expect(editedRes.matter!.amlStatus).toBe('Verified');
+        expect(resolveMatterStatusPill(editedRes.matter!, statusValues).label).toBe('Open');
+      },
+      { roles: ['partner'], mfaVerified: true },
+    );
+
+    // (b) CDD partner override -> Overridden, amlCompletedAt null, openedViaGate true, pill "Open"
+    let overriddenMatterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const fintechSave = await saveMatterRecord(
+          {
+            title: 'R810 CDD Overridden Gate Matter',
+            clientId: 'O-000002',
+            practiceAreaId: 'work_type.technology_and_digital',
+            workTypeSubcategoryId: 'work_type.technology_and_digital_fintech_and_payments',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(fintechSave.matter).not.toBeNull();
+        overriddenMatterId = fintechSave.matter!.id;
+        expect(fintechSave.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
+
+        const ovr = await overrideMatterOpeningPreconditionRecord(
+          {
+            matterId: overriddenMatterId,
+            preconditionKey: 'cdd_complete',
+            reason: 'Urgent partner-authorised CDD override for R810 verification.',
+          },
+          'P-000001',
+        );
+        expect('ok' in ovr && ovr.ok).toBe(true);
+
+        const opened = await openProspectiveMatterRecord(overriddenMatterId, 'P-000001');
+        expect('ok' in opened && opened.ok).toBe(true);
+        if ('matter' in opened && opened.matter) {
+          expect(opened.matter.matterStatusId).toBe('matter_status.active');
+          expect(opened.matter.amlStatus).toBe('Overridden');
+          expect(opened.matter.amlCompletedAt).toBeNull();
+          expect(
+            (opened.matter.fieldValues?.['matterOpeningGate'] as { openedViaGate?: boolean })
+              ?.openedViaGate,
+          ).toBe(true);
+          const snap = opened.matter.fieldValues?.['matterOpeningSnapshot'] as
+            | MatterOpeningSnapshot
+            | undefined;
+          expect(snap?.complianceOnboarding.amlStatus).toBe('Overridden');
+          expect(resolveMatterStatusPill(opened.matter, statusValues)).toEqual({
+            label: 'Open',
+            tone: 'positive',
+            isCmiIncomplete: false,
+            isConflictFlagged: false,
+          });
+        }
+      },
+      { roles: ['partner'], mfaVerified: true },
+    );
+
+    // (c) CDD not required (defaults work type general_practice_advisory has requireCddComplete: false) -> Not required
+    let notRequiredMatterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const gpSave = await saveMatterRecord(
+          {
+            title: 'R810 CDD Not Required Matter',
+            clientId: 'O-000002',
+            practiceAreaId: 'work_type.general_practice',
+            workTypeSubcategoryId: 'work_type.general_practice_advisory',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(gpSave.errors).toBeUndefined();
+        expect(gpSave.matter).not.toBeNull();
+        notRequiredMatterId = gpSave.matter!.id;
+        expect(gpSave.matter!.matterStatusId).toBe('matter_status.active');
+        expect(gpSave.matter!.amlStatus).toBe('Not required');
+        expect(gpSave.matter!.amlCompletedAt).toBeNull();
+        expect(
+          (gpSave.matter!.fieldValues?.['matterOpeningGate'] as { openedViaGate?: boolean })
+            ?.openedViaGate,
+        ).toBe(true);
+        expect(resolveMatterStatusPill(gpSave.matter!, statusValues)).toEqual({
+          label: 'Open',
+          tone: 'positive',
+          isCmiIncomplete: false,
+          isConflictFlagged: false,
+        });
+      },
+      { roles: ['partner'], mfaVerified: true },
+    );
+
+    // Also create a Prospective matter to confirm repository cmi_incomplete SQL filter excludes it
+    let prospectiveMatterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const pSave = await saveMatterRecord(
+          {
+            title: 'R810 Still Prospective Matter',
+            clientId: 'O-000002',
+            practiceAreaId: 'work_type.real_estate_and_property',
+            workTypeSubcategoryId: 'work_type.real_estate_and_property_residential_conveyancing',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(pSave.matter).not.toBeNull();
+        prospectiveMatterId = pSave.matter!.id;
+        expect(pSave.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
+      },
+      { roles: ['partner'], mfaVerified: true },
+    );
+
+    // (e) & (f) Legacy Active + Pending matter shows "CMI incomplete" and is returned by cmi_incomplete filter,
+    // while gate-opened and Prospective matters are excluded.
+    const legacyPendingMatter = await matterRepo.getMatterById<Matter>(ctx, 'M-000002', {
+      includeRestricted: true,
+    });
+    expect(legacyPendingMatter).not.toBeNull();
+    expect(legacyPendingMatter!.matterStatusId).toBe('matter_status.active');
+    expect(legacyPendingMatter!.amlStatus).toBe('Pending');
+    expect(resolveMatterStatusPill(legacyPendingMatter!, statusValues)).toEqual({
+      label: 'CMI incomplete',
+      tone: 'warning',
+      isCmiIncomplete: true,
+      isConflictFlagged: false,
+    });
+
+    const cmiFilteredPage = await matterRepo.listVisibleMattersPageWithCount<Matter>(ctx, {
+      viewerId: 'P-000001',
+      hasRestrictedAccessPermission: true,
+      statusId: 'matter_status.cmi_incomplete',
+      cmiIncompleteStatusIds: ['matter_status.cmi_incomplete'],
+      activeStatusIds: ['matter_status.active'],
+      limit: 100,
+      offset: 0,
+    });
+    const cmiIds = new Set(cmiFilteredPage.items.map((m) => m.id));
+    expect(cmiIds.has('M-000002')).toBe(true);
+    expect(cmiIds.has(verifiedMatterId)).toBe(false);
+    expect(cmiIds.has(overriddenMatterId)).toBe(false);
+    expect(cmiIds.has(notRequiredMatterId)).toBe(false);
+    expect(cmiIds.has(prospectiveMatterId)).toBe(false);
+
+    // (g) computeMatterOpeningChecklistProgress handles Verified, Not required, Overridden
+    expect(
+      computeMatterOpeningChecklistProgress({
+        ...legacyPendingMatter!,
+        amlStatus: 'Verified',
+      }).amlDone,
+    ).toBe(true);
+    expect(
+      computeMatterOpeningChecklistProgress({
+        ...legacyPendingMatter!,
+        amlStatus: 'Not required',
+      }).amlDone,
+    ).toBe(true);
+    expect(
+      computeMatterOpeningChecklistProgress({
+        ...legacyPendingMatter!,
+        amlStatus: 'Overridden',
+      }).amlDone,
+    ).toBe(false);
+
+    // (h) CDD masking for unpermitted viewer (P-000009 finance role without cdd:view)
+    await runAsActionActor(
+      'P-000009',
+      async () => {
+        const profile = await loadMatterDetailPageData('P-000009', verifiedMatterId);
+        expect(profile).not.toBeNull();
+        expect(profile?.kind).toBe('profile');
+        if (profile && profile.kind === 'profile') {
+          expect(profile.canViewClientCdd).toBe(false);
+          expect(profile.matter.amlStatus).toBe('Not available to you');
+          expect(profile.matter.amlCompletedAt).toBeNull();
+          const maskedSnap = profile.matter.fieldValues?.['matterOpeningSnapshot'] as
+            | MatterOpeningSnapshot
+            | undefined;
+          expect(maskedSnap?.complianceOnboarding.amlStatus).toBe('Not available to you');
+          expect(resolveMatterStatusPill(profile.matter, statusValues).label).toBe('Open');
+          const rows = resolveMatterIntakeComplianceRows(
+            profile.matter,
+            { overallRisk: 'Low', completedQuestions: 23, totalQuestions: 23 },
+            { canViewClientCdd: profile.canViewClientCdd },
+          );
+          expect(rows.clientDueDiligence).toEqual({
+            verified: false,
+            neutral: true,
+            label: 'Client due diligence',
+            detail: 'Not available to you',
+          });
+        }
+
+        const homeData = await loadHomePageData('P-000009');
+        expect(homeData.canViewCdd).toBe(false);
+        const homeVerifiedMatter = homeData.matters.find((m) => m.id === verifiedMatterId);
+        expect(homeVerifiedMatter?.amlStatus).toBe('Not available to you');
+        expect(homeVerifiedMatter?.amlCompletedAt).toBeNull();
+      },
+      { roles: ['finance'], mfaVerified: false },
+    );
+  }, 45_000);
 });

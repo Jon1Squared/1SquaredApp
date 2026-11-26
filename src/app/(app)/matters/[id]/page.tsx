@@ -52,7 +52,7 @@ export default async function MatterProfilePage({
           canReassignOwnership={shell.currentUserPermissions.includes(
             'matter:reassign_ownership',
           )}
-          canViewCdd={shell.currentUserPermissions.includes('cdd:view')}
+          canViewCdd={data.canViewClientCdd}
           canSignOffCosts={data.canSignOffCosts}
           canManageMatterRateOverrides={data.canManageMatterRateOverrides}
           initialSignOffEstimateGbp={data.initialSignOffEstimateGbp}
@@ -93,6 +93,7 @@ export default async function MatterProfilePage({
         matterRegisterRecords={data.matterRegisterRecords}
         matterRegisterTransitions={data.matterRegisterTransitions}
         openingGateState={data.openingGateState}
+        canViewClientCdd={data.canViewClientCdd}
         canVerifyByKeyDateId={data.canVerifyByKeyDateId}
         canTakeByTaskId={data.canTakeByTaskId}
         canViewFinance={shell.finance.canViewMatter}

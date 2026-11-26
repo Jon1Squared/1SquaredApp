@@ -491,7 +491,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
 
       expect(directRes.errors).toBeUndefined();
       const directMatter = directRes.matter!;
-      expect(directMatter.matterStatusId).toBe('matter_status.cmi_incomplete');
+      expect(directMatter.matterStatusId).toBe('matter_status.active');
 
       const directTasksFirst = await twRepo.listVisibleTasks<Task>(ctx, 'P-000001', {
         linkedRecordType: 'matter',
@@ -1041,7 +1041,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
          FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, targetMatter.id],
       );
-      expect(afterRollbackRow[0].status_id).toBe('matter_status.cmi_incomplete');
+      expect(afterRollbackRow[0].status_id).toBe('matter_status.active');
       expect(afterRollbackRow[0].destruction_date).toBeNull();
 
       // Now close via lifecycle action on leap day 2024-02-29 (12 yrs -> 2036-02-29)
@@ -1844,7 +1844,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
            FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, updated.id],
       );
-      expect(pgAfterUpdate[0].status_id).toBe('matter_status.cmi_incomplete');
+      expect(pgAfterUpdate[0].status_id).toBe('matter_status.active');
       expect(pgAfterUpdate[0].retention_period).toBe('12 years');
       expect(pgAfterUpdate[0].destruction_date).toBeNull();
 
@@ -1904,7 +1904,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
            FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, updated.id],
       );
-      expect(pgStillOpen[0].status_id).toBe('matter_status.cmi_incomplete');
+      expect(pgStillOpen[0].status_id).toBe('matter_status.active');
       expect(pgStillOpen[0].closed_on).toBeNull();
       expect(pgStillOpen[0].destruction_date).toBeNull();
 
@@ -2212,7 +2212,7 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
            FROM public.matters WHERE tenant_id = $1 AND id = $2`,
         [ctx.tenantId, targetMatter.id],
       );
-      expect(pgAfterKdRace[0].status_id).toBe('matter_status.cmi_incomplete');
+      expect(pgAfterKdRace[0].status_id).toBe('matter_status.active');
       expect(pgAfterKdRace[0].closed_on).toBeNull();
       expect(pgAfterKdRace[0].destruction_date).toBeNull();
 

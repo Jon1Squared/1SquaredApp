@@ -941,7 +941,8 @@ export function computeMatterOpeningChecklistProgress(
   const amlDone =
     matter.amlStatus === 'Completed' ||
     matter.amlStatus === 'Verified' ||
-    matter.amlStatus === 'Cleared';
+    matter.amlStatus === 'Cleared' ||
+    matter.amlStatus === 'Not required';
   const engDone =
     matter.engagementLetterStatus === 'Signed' ||
     matter.engagementLetterStatus === 'Signed & returned';

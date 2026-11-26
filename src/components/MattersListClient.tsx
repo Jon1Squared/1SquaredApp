@@ -4,10 +4,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Calendar } from 'lucide-react';
-import type { PillTone, UrgencyEdgeKind } from '@/domain/badges';
+import type { UrgencyEdgeKind } from '@/domain/badges';
 import { formatDate, formatKeyDateSummary } from '@/domain/dates';
 import type { SortDirection } from '@/domain/listNavigationState';
 import { resolveLabel, systemKeyOf } from '@/domain/lists';
+import {
+  isMatterCmiIncompleteStatus,
+  resolveMatterStatusPill,
+  resolveMatterStatusSystemKey,
+} from '@/domain/matterStatusDisplay';
 import { extractCriticalDates } from '@/domain/matters';
 import { hrefForId, personDisplayName } from '@/domain/names';
 import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
@@ -72,30 +77,15 @@ const MATTERS_PARAM_DEFAULTS = {
 };
 
 const STATUS_SORT_ORDER: Record<string, number> = {
-  'cmi incomplete': 0,
+  cmi_incomplete: 0,
   active: 1,
-  'pre-engagement': 2,
-  'on hold': 3,
-  closing: 4,
+  prospective: 2,
+  on_hold: 3,
+  completed: 4,
   closed: 5,
   archived: 6,
+  aborted: 7,
 };
-
-function matterStatusTone(statusLabel: string): PillTone {
-  const l = statusLabel.toLowerCase();
-  if (l === 'active') return 'positive';
-  if (
-    l.includes('cmi incomplete') ||
-    l.includes('incomplete') ||
-    l.includes('pending') ||
-    l.includes('hold') ||
-    l.includes('pre') ||
-    l.includes('closing')
-  ) {
-    return 'warning';
-  }
-  return 'neutral';
-}
 
 export function MattersListClient({
   matters = [],
@@ -340,11 +330,11 @@ export function MattersListClient({
       if (statusFilter !== 'all') {
         const isCmiFilter =
           systemKeyOf(values, statusFilter) === 'cmi_incomplete';
-        const isMatterCmi =
-          m.matterStatusId === statusFilter ||
-          (isCmiFilter &&
-            (m.amlStatus === 'Pending' || m.amlStatus === 'CMI incomplete'));
-        if (!isMatterCmi && m.matterStatusId !== statusFilter) return false;
+        if (isCmiFilter) {
+          if (!isMatterCmiIncompleteStatus(m, values)) return false;
+        } else if (m.matterStatusId !== statusFilter) {
+          return false;
+        }
       }
       if (feeEarnerFilter !== 'all' && m.leadFeeEarnerId !== feeEarnerFilter) return false;
       if (billingBasisFilter !== 'all' && m.billingBasisId !== billingBasisFilter) {
@@ -369,10 +359,16 @@ export function MattersListClient({
         return a.matterNumber.localeCompare(b.matterNumber) * dir;
       }
       if (sort.columnId === 'status') {
-        const sA =
-          STATUS_SORT_ORDER[resolveLabel(values, a.matterStatusId).toLowerCase()] ?? 99;
-        const sB =
-          STATUS_SORT_ORDER[resolveLabel(values, b.matterStatusId).toLowerCase()] ?? 99;
+        const sA = isMatterCmiIncompleteStatus(a, values)
+          ? 0
+          : STATUS_SORT_ORDER[
+              resolveMatterStatusSystemKey(a.matterStatusId, values) ?? ''
+            ] ?? 99;
+        const sB = isMatterCmiIncompleteStatus(b, values)
+          ? 0
+          : STATUS_SORT_ORDER[
+              resolveMatterStatusSystemKey(b.matterStatusId, values) ?? ''
+            ] ?? 99;
         if (sA !== sB) return (sA - sB) * dir;
       }
       if (sort.columnId === 'openedAt') {
@@ -408,13 +404,7 @@ export function MattersListClient({
     const criticalDates = extractCriticalDates(m, subcatLabel);
     const nextCrit = criticalDates[0]?.date ?? m.targetCompletionAt;
     const kd = formatKeyDateSummary(nextCrit);
-    const statusLabel = resolveLabel(values, m.matterStatusId);
-    if (
-      kd?.isUrgentWeek ||
-      statusLabel === 'CMI incomplete' ||
-      m.amlStatus === 'CMI incomplete' ||
-      m.amlStatus === 'Pending'
-    ) {
+    if (kd?.isUrgentWeek || isMatterCmiIncompleteStatus(m, values)) {
       return 'urgent';
     }
     return null;
@@ -494,18 +484,8 @@ export function MattersListClient({
       sortable: true,
       secondarySortable: { id: 'openedAt', header: 'Age' },
       renderPrimary: (m) => {
-        if (m.conflictCheckStatus.toLowerCase().includes('conflict')) {
-          return <StatusPill label="Conflict flagged" tone="alert" />;
-        }
-        const statusLabel = resolveLabel(values, m.matterStatusId) || 'Active';
-        if (
-          systemKeyOf(values, m.matterStatusId) === 'cmi_incomplete' ||
-          m.amlStatus === 'CMI incomplete' ||
-          m.amlStatus === 'Pending'
-        ) {
-          return <StatusPill label="CMI incomplete" tone="warning" />;
-        }
-        return <StatusPill label={statusLabel} tone={matterStatusTone(statusLabel)} />;
+        const pill = resolveMatterStatusPill(m, values);
+        return <StatusPill label={pill.label} tone={pill.tone} />;
       },
       renderSecondary: (m) => (
         <RelativeTime value={m.openedAt || m.createdAt} tooltipDetail={m.typeBadge} />
@@ -884,21 +864,10 @@ export function MattersListClient({
             ariaLabel="Matters list"
             renderMobileCard={(m) => {
               const clientLabel = clientNameMap.get(m.clientId) ?? m.clientId;
-              const statusLabel = resolveLabel(values, m.matterStatusId) || 'Active';
-              const isCmiIncomplete =
-                systemKeyOf(values, m.matterStatusId) === 'cmi_incomplete' ||
-                m.amlStatus === 'CMI incomplete' ||
-                m.amlStatus === 'Pending';
-              const pillLabel = m.conflictCheckStatus.toLowerCase().includes('conflict')
-                ? 'Conflict flagged'
-                : isCmiIncomplete
-                  ? 'CMI incomplete'
-                  : statusLabel;
-              const pillTone: PillTone = m.conflictCheckStatus.toLowerCase().includes('conflict')
-                ? 'alert'
-                : isCmiIncomplete
-                  ? 'warning'
-                  : matterStatusTone(statusLabel);
+              const { label: pillLabel, tone: pillTone } = resolveMatterStatusPill(
+                m,
+                values,
+              );
               const earner = people.find((p) => p.id === m.leadFeeEarnerId);
               const earnerLabel = earner ? personDisplayName(earner) : '';
               return (

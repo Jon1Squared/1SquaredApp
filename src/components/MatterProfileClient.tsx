@@ -50,6 +50,7 @@ import {
 } from '@/domain/openingGate';
 import { isClosedMatterStatus, isProspectiveMatterStatus } from '@/domain/workTypeConfig';
 import { resolveLabel, resolveLabels } from '@/domain/lists';
+import { resolveMatterStatusPill } from '@/domain/matterStatusDisplay';
 import {
   extractCriticalDates,
   fieldGroupsForSubcategory,
@@ -134,6 +135,7 @@ interface MatterProfileClientProps {
   matterRegisterRecords?: import('@platform/core-api').RegisterRecord[];
   matterRegisterTransitions?: Record<string, import('@platform/core-api').RegisterTransition[]>;
   openingGateState?: MatterOpeningGateView;
+  canViewClientCdd?: boolean;
   canVerifyByKeyDateId?: Record<string, { allowed: boolean; reason?: string }>;
   canTakeByTaskId?: Record<string, boolean>;
   canViewFinance?: boolean;
@@ -208,6 +210,7 @@ export interface MatterIntakeComplianceRows {
   };
   clientDueDiligence: {
     verified: boolean;
+    neutral?: boolean;
     label: string;
     detail: string;
   };
@@ -239,6 +242,9 @@ export function resolveMatterIntakeComplianceRows(
     completedQuestions: number;
     totalQuestions: number;
   },
+  options?: {
+    canViewClientCdd?: boolean;
+  },
 ): MatterIntakeComplianceRows {
   const pmsImportedNoLocal = isPmsImportedWithoutLocalConflictCheck(matter);
   const conflictCleared = matter.conflictDecision?.outcome === 'Cleared';
@@ -253,10 +259,28 @@ export function resolveMatterIntakeComplianceRows(
     matter.conflictDecision?.decidedAt ?? matter.conflictCheckDate,
   );
 
-  const cddVerified = Boolean(matter.amlCompletedAt);
-  const cddDetail = matter.amlCompletedAt
-    ? `Verified ${formatShortDayMonth(matter.amlCompletedAt)}`
-    : matter.amlStatus || 'Not recorded';
+  const cddMasked =
+    options?.canViewClientCdd === false ||
+    matter.amlStatus === 'Not available to you';
+  const cddVerified =
+    !cddMasked &&
+    (matter.amlStatus === 'Not required' ||
+      matter.amlStatus === 'Verified' ||
+      matter.amlStatus === 'Completed' ||
+      matter.amlStatus === 'Cleared' ||
+      (Boolean(matter.amlCompletedAt) &&
+        matter.amlStatus !== 'Overridden' &&
+        matter.amlStatus !== 'Pending' &&
+        matter.amlStatus !== 'CMI incomplete'));
+  const cddDetail = cddMasked
+    ? 'Not available to you'
+    : matter.amlStatus === 'Not required'
+      ? 'Not required'
+      : matter.amlStatus === 'Overridden'
+        ? 'Overridden'
+        : matter.amlCompletedAt
+          ? `Verified ${formatShortDayMonth(matter.amlCompletedAt)}`
+          : matter.amlStatus || 'Not recorded';
 
   const engagementSigned =
     Boolean(matter.engagementLetterSignedAt) ||
@@ -281,6 +305,7 @@ export function resolveMatterIntakeComplianceRows(
     },
     clientDueDiligence: {
       verified: cddVerified,
+      ...(cddMasked ? { neutral: true } : {}),
       label: 'Client due diligence',
       detail: cddDetail,
     },
@@ -338,6 +363,7 @@ export function MatterProfileClient({
   matterRegisterRecords = [],
   matterRegisterTransitions = {},
   openingGateState,
+  canViewClientCdd = true,
   canVerifyByKeyDateId,
   canTakeByTaskId,
   canViewFinance = false,
@@ -481,8 +507,11 @@ export function MatterProfileClient({
   );
 
   const intakeComplianceRows = useMemo(
-    () => resolveMatterIntakeComplianceRows(matter, resolvedRiskAssessment),
-    [matter, resolvedRiskAssessment],
+    () =>
+      resolveMatterIntakeComplianceRows(matter, resolvedRiskAssessment, {
+        canViewClientCdd,
+      }),
+    [matter, resolvedRiskAssessment, canViewClientCdd],
   );
 
   const sourceEnquiry = useMemo(
@@ -530,29 +559,10 @@ export function MatterProfileClient({
   const clientLabel = nameMap.get(matter.clientId) ?? matter.clientId;
   const practiceLabel = resolveLabel(values, matter.practiceAreaId);
   const subcatLabel = resolveLabel(values, matter.workTypeSubcategoryId);
-  const rawStatusLabel = resolveLabel(values, matter.matterStatusId) || 'Active';
-  const isCmiIncomplete =
-    rawStatusLabel === 'CMI incomplete' ||
-    matter.amlStatus === 'CMI incomplete' ||
-    matter.amlStatus === 'Pending';
-  const statusPillLabel = matter.conflictCheckStatus.toLowerCase().includes('conflict')
-    ? 'Conflict flagged'
-    : isCmiIncomplete
-      ? 'CMI incomplete'
-      : rawStatusLabel === 'Active'
-        ? 'Open'
-        : rawStatusLabel;
-  const statusPillTone: 'alert' | 'warning' | 'positive' | 'neutral' = matter.conflictCheckStatus
-    .toLowerCase()
-    .includes('conflict')
-    ? 'alert'
-    : isCmiIncomplete ||
-        rawStatusLabel.toLowerCase().includes('hold') ||
-        rawStatusLabel.toLowerCase().includes('prospective')
-      ? 'warning'
-      : rawStatusLabel === 'Active'
-        ? 'positive'
-        : 'neutral';
+  const { label: statusPillLabel, tone: statusPillTone } = resolveMatterStatusPill(
+    matter,
+    values,
+  );
   const stageLabel = resolveLabel(values, matter.stageId);
   const milestoneLabel = resolveLabel(values, matter.milestoneId);
   const matterTypeLabel = resolveLabel(values, matter.matterTypeId);
@@ -2814,6 +2824,8 @@ export function MatterProfileClient({
                     >
                       {intakeComplianceRows.clientDueDiligence.verified ? (
                         <Check size={16} color="var(--pill-positive-fg)" strokeWidth={2.5} />
+                      ) : intakeComplianceRows.clientDueDiligence.neutral ? (
+                        <AlertCircle size={16} color="var(--muted)" />
                       ) : (
                         <AlertCircle size={16} color="var(--pill-warning-fg)" />
                       )}
@@ -2825,9 +2837,11 @@ export function MatterProfileClient({
                       <span
                         className="worklist-meta"
                         style={
-                          !intakeComplianceRows.clientDueDiligence.verified
-                            ? { color: 'var(--pill-warning-fg)', fontWeight: 700 }
-                            : undefined
+                          intakeComplianceRows.clientDueDiligence.neutral
+                            ? { color: 'var(--muted)' }
+                            : !intakeComplianceRows.clientDueDiligence.verified
+                              ? { color: 'var(--pill-warning-fg)', fontWeight: 700 }
+                              : undefined
                         }
                       >
                         {intakeComplianceRows.clientDueDiligence.detail}
@@ -4110,11 +4124,15 @@ export function MatterProfileClient({
                 </div>
                 <div className="kv-item">
                   <span className="kv-label">AML / CDD status (CORE-037)</span>
-                  <span className="kv-value">{matter.amlStatus}</span>
+                  <span className="kv-value">
+                    {canViewClientCdd ? matter.amlStatus : 'Not available to you'}
+                  </span>
                 </div>
                 <div className="kv-item">
                   <span className="kv-label">AML completed date (CORE-038)</span>
-                  <span className="kv-value">{formatDate(matter.amlCompletedAt)}</span>
+                  <span className="kv-value">
+                    {canViewClientCdd ? formatDate(matter.amlCompletedAt) : '—'}
+                  </span>
                 </div>
                 <div className="kv-item">
                   <span className="kv-label">Source of funds verified (CORE-039)</span>

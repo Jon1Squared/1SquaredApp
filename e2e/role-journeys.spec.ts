@@ -1575,7 +1575,8 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       const storedOpened = await matterRepo.getMatterById<Matter>(ctx, matterId, {
         includeRestricted: true,
       });
-      expect(storedOpened?.matterStatusId).toBe('matter_status.cmi_incomplete');
+      expect(storedOpened?.matterStatusId).toBe('matter_status.active');
+      expect(storedOpened?.amlStatus).toBe('Verified');
       expect(fe2Errors).toEqual([]);
     } finally {
       await fe2Context.close();
@@ -1649,7 +1650,8 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       const storedOpened = await matterRepo.getMatterById<Matter>(ctx, matterId, {
         includeRestricted: true,
       });
-      expect(storedOpened?.matterStatusId).toBe('matter_status.cmi_incomplete');
+      expect(storedOpened?.matterStatusId).toBe('matter_status.active');
+      expect(storedOpened?.amlStatus).toBe('Verified');
       expect(partnerErrors).toEqual([]);
     } finally {
       await partnerContext.close();

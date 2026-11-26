@@ -573,3 +573,29 @@ export function formatOpeningGateActionError(
   }
   return fallback;
 }
+
+export type OpeningGateCddOutcomeStatus =
+  | 'Verified'
+  | 'Overridden'
+  | 'Not required';
+
+/**
+ * Computes the server-stamped matter `amlStatus` recorded when a prospective
+ * matter opens through the opening gate (R810).
+ */
+export function resolveOpeningGateCddOutcome(params: {
+  readonly gateConfig: Pick<WorkTypeOpeningGateFields, 'requireCddComplete'>;
+  readonly cddRawSatisfied: boolean;
+  readonly hasActiveCddOverride: boolean;
+}): OpeningGateCddOutcomeStatus {
+  if (!params.gateConfig.requireCddComplete) {
+    return 'Not required';
+  }
+  if (params.cddRawSatisfied) {
+    return 'Verified';
+  }
+  if (params.hasActiveCddOverride) {
+    return 'Overridden';
+  }
+  return 'Verified';
+}

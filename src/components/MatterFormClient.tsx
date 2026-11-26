@@ -12111,7 +12111,11 @@ export function MatterFormClient({
                         className="field-input"
                         readOnly
                         disabled
-                        value={amlStatus || 'Managed at client level'}
+                        value={
+                          canViewCdd
+                            ? amlStatus || 'Managed at client level'
+                            : 'Not available to you'
+                        }
                       />
                     </div>
                     <div className="field-group">

@@ -62,6 +62,7 @@ import type { MatterPartyUsageCounts } from '@/domain/matterParties';
 import {
   toClientPriorMatterSummary,
   type ClientPriorMatterSummary,
+  type MatterOpeningSnapshot,
 } from '@/domain/matterOpeningRecord';
 import type { PmsLinksAdminPageData } from '@/domain/pms';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
@@ -1133,13 +1134,17 @@ export async function loadHomePageData(
     extraOrgIds: cddQueueRecords.map((r) => r.organisationId),
   });
 
+  const visibleMatters = canViewCdd
+    ? matters
+    : matters.map((m) => redactMatterCddForUnpermittedViewer(m));
+
   return {
     shell,
     activeRoleKey,
     signOffs,
     people,
     organisations,
-    matters,
+    matters: visibleMatters,
     enquiries,
     tasks,
     registerTypes: registersBundle.registerTypes,
@@ -2254,11 +2259,16 @@ export async function loadMattersListPageData(
     ['matter', 'status', 'openedAt'],
   );
 
-  // R727: Resolve CMI-incomplete & status sort rank order via stable systemKey.
+  // R727: Resolve CMI-incomplete, active & status sort rank order via stable systemKey.
   const cmiIncompleteStatusIds = collectChoiceIdsBySystemKey(
     shell.values,
     'matter_status',
     ['cmi_incomplete'],
+  );
+  const activeStatusIds = collectChoiceIdsBySystemKey(
+    shell.values,
+    'matter_status',
+    ['active'],
   );
   const statusSortIds =
     parsedSort?.columnId === 'status'
@@ -2311,6 +2321,7 @@ export async function loadMattersListPageData(
       practiceAreaId: practiceAreaId !== 'all' ? practiceAreaId : undefined,
       statusId: statusFilter !== 'all' ? statusFilter : undefined,
       cmiIncompleteStatusIds,
+      activeStatusIds,
       leadFeeEarnerId:
         feeEarnerFilter !== 'all' ? feeEarnerFilter : undefined,
       billingBasisId:
@@ -2366,6 +2377,31 @@ export async function loadMattersListPageData(
   };
 }
 
+function redactMatterCddForUnpermittedViewer(matter: Matter): Matter {
+  const existingSnapshot = matter.fieldValues?.['matterOpeningSnapshot'] as
+    | MatterOpeningSnapshot
+    | undefined;
+  const redactedFieldValues =
+    existingSnapshot && existingSnapshot.version === '1.0'
+      ? {
+          ...(matter.fieldValues ?? {}),
+          matterOpeningSnapshot: {
+            ...existingSnapshot,
+            complianceOnboarding: {
+              ...existingSnapshot.complianceOnboarding,
+              amlStatus: 'Not available to you',
+            },
+          },
+        }
+      : matter.fieldValues;
+  return {
+    ...matter,
+    amlStatus: 'Not available to you',
+    amlCompletedAt: null,
+    fieldValues: redactedFieldValues,
+  };
+}
+
 export async function loadMatterDetailPageData(
   actorId: string,
   id: string,
@@ -2387,6 +2423,7 @@ export async function loadMatterDetailPageData(
       clientMatters: ClientPriorMatterSummary[];
       canSignOffCosts: boolean;
       canManageMatterRateOverrides: boolean;
+      canViewClientCdd: boolean;
       initialSignOffEstimateGbp: number;
       suggestedMatterGovernanceAssignees: {
         riskReviewerId: string | null;
@@ -2414,6 +2451,7 @@ export async function loadMatterDetailPageData(
       matterRegisterRecords: RegisterRecord[];
       matterRegisterTransitions: Record<string, RegisterTransition[]>;
       openingGateState?: MatterOpeningGateView;
+      canViewClientCdd: boolean;
       pmsView?: MatterPmsViewBundle;
       canTakeByTaskId: Record<string, boolean>;
     }
@@ -2550,10 +2588,32 @@ export async function loadMatterDetailPageData(
           e.employeeRoleId === 'employee_role.practice_manager',
       ) ?? null;
 
+    let canViewClientCdd = shell.currentUserPermissions.includes('cdd:view');
+    if (
+      canViewClientCdd &&
+      clientIdsForLinks.some((cid) =>
+        shell.staffPeopleRaw.some(
+          (p) => p.id === cid && (p.isEmployee || Boolean(p.employment)),
+        ),
+      )
+    ) {
+      const formGateRes = await getMatterOpeningGateStateRecord(matter.id, currentUserId);
+      if (formGateRes && !isActionDenied(formGateRes) && formGateRes.ok) {
+        const cddPre = formGateRes.evaluation.preconditions.find(
+          (p) => p.key === 'cdd_complete',
+        );
+        if (cddPre && cddPre.rawSatisfied === null) {
+          canViewClientCdd = false;
+        }
+      } else {
+        canViewClientCdd = false;
+      }
+    }
+
     return {
       kind: 'form',
       shell,
-      matter,
+      matter: canViewClientCdd ? matter : redactMatterCddForUnpermittedViewer(matter),
       initialEnquiry,
       initialQuote,
       isReopenedDraft:
@@ -2577,6 +2637,7 @@ export async function loadMatterDetailPageData(
           teams: shell.teams,
           config: { rbac: shell.rbacConfig },
         }),
+      canViewClientCdd,
       canManageMatterRateOverrides: shell.currentUserPermissions.some((p) =>
         ['matter:costs:sign_off', 'finance:credit_control', 'admin:access'].includes(p),
       ),
@@ -2654,6 +2715,16 @@ export async function loadMatterDetailPageData(
           canEditMatter: openingGateRes.canEditMatter,
         }
       : undefined;
+  const cddGatePre = openingGateState?.evaluation.preconditions.find(
+    (p) => p.key === 'cdd_complete',
+  );
+  const canViewClientCdd =
+    shell.currentUserPermissions.includes('cdd:view') &&
+    Boolean(openingGateState) &&
+    (!cddGatePre || cddGatePre.rawSatisfied !== null);
+  const visibleMatter = canViewClientCdd
+    ? matter
+    : redactMatterCddForUnpermittedViewer(matter);
 
   const enquiries = dedupeById([...enquiriesById, ...enquiriesByConverted]);
   const quotes = dedupeById([...quotesById, ...quotesByConverted]);
@@ -2688,7 +2759,7 @@ export async function loadMatterDetailPageData(
   return {
     kind: 'profile',
     shell,
-    matter,
+    matter: visibleMatter,
     people,
     organisations,
     tasks,
@@ -2712,6 +2783,7 @@ export async function loadMatterDetailPageData(
         ? matterRegistersRes.transitionsByRecordId
         : {},
     openingGateState,
+    canViewClientCdd,
     pmsView:
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined,
     canTakeByTaskId,
@@ -2925,9 +2997,18 @@ export async function loadMatterFormPageData(
         .estimatedFeeGbp
     : null;
 
+  const canViewExistingCdd =
+    shell.currentUserPermissions.includes('cdd:view') &&
+    !(initialClientIds.length > 0 && isActionDenied(clientPriorRes)) &&
+    !Object.values(initialCddSummaries).some((s) => s.visible === false);
+  const visibleExistingMatter =
+    existingMatter && !canViewExistingCdd
+      ? redactMatterCddForUnpermittedViewer(existingMatter)
+      : existingMatter;
+
   return {
     shell,
-    existing: existingMatter,
+    existing: visibleExistingMatter,
     initialEnquiry,
     initialQuote: initialQuoteDirect,
     isReopenedDraft: Boolean(

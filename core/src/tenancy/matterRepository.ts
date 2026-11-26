@@ -2546,6 +2546,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       matchingWorkTypeIds?: readonly string[];
       statusId?: string;
       cmiIncompleteStatusIds?: readonly string[];
+      activeStatusIds?: readonly string[];
       practiceAreaId?: string;
       typeBadge?: string;
       billingBasisId?: string;
@@ -2586,6 +2587,13 @@ export class TenantMatterRepository extends TenantScopedRepository {
     const cmiIncompleteStatusIds = Array.from(
       new Set(
         (viewerOrOptions?.cmiIncompleteStatusIds ?? [])
+          .map((id) => id?.trim())
+          .filter(Boolean) as string[],
+      ),
+    );
+    const activeStatusIds = Array.from(
+      new Set(
+        (viewerOrOptions?.activeStatusIds ?? [])
           .map((id) => id?.trim())
           .filter(Boolean) as string[],
       ),
@@ -2648,8 +2656,22 @@ export class TenantMatterRepository extends TenantScopedRepository {
         params.push(statusId);
         const sIdx = params.length;
         if (cmiIncompleteStatusIds.includes(statusId)) {
+          const legacyActiveClause =
+            activeStatusIds.length > 0
+              ? (() => {
+                  params.push(activeStatusIds);
+                  return `m.status_id = ANY($${params.length}::text[])`;
+                })()
+              : "m.status_id = 'matter_status.active'";
           clauses.push(
-            `(m.status_id = $${sIdx} OR m.opening_record_json->>'amlStatus' IN ('Pending', 'CMI incomplete'))`,
+            `(
+              m.status_id = $${sIdx}
+              OR (
+                ${legacyActiveClause}
+                AND COALESCE(m.fields_json->'matterOpeningGate'->>'openedViaGate', 'false') <> 'true'
+                AND m.opening_record_json->>'amlStatus' IN ('Pending', 'CMI incomplete')
+              )
+            )`,
           );
         } else {
           clauses.push(`m.status_id = $${sIdx}`);
