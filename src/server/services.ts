@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { resolveRequestCorrelationId } from './correlationId';
+import { storeEvidenceBlobAndCreateArtifact } from './evidenceUploadStore';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
   getDocumentRepository,
@@ -32194,50 +32195,49 @@ export async function uploadEvidenceArtifactRecord(
 
     const storage = getDocumentStorage(tenantCfg);
     const objectBucket = `${input.subjectType}-${cleanSubjectId}-${randomUUID().slice(0, 8)}`;
-    const stored = await storage.putObject(ctx, {
-      category: 'evidence',
+    const nowIso = new Date().toISOString();
+    const storeOutcome = await storeEvidenceBlobAndCreateArtifact({
+      ctx,
+      storage,
       objectId: objectBucket,
       fileName: safeFileName,
       contentType: normalizedMime,
       bytes: input.bytes,
-    });
-    if (stored.scanStatus !== 'clean') {
-      return registerServiceFailure(
-        'EVIDENCE_MALWARE_DETECTED',
-        "This file failed a security check and can't be attached.",
-      );
-    }
-
-    const nowIso = new Date().toISOString();
-    const artifact = await getEvidenceArtifactRepository().createArtifact(
-      ctx,
-      {
-        blobKey: stored.blobKey,
-        subjectType: input.subjectType,
-        subjectId: cleanSubjectId,
-        fileName: safeFileName,
-        contentType: stored.contentType,
-        byteSize: stored.sizeBytes,
-        sha256: stored.sha256,
-        scanStatus: stored.scanStatus,
-        uploadedByPersonId: actor.id,
-        uploadedAt: nowIso,
-      },
-      {
-        buildAuditEntries: (createdArtifact) => [
+      createArtifact: (stored) =>
+        getEvidenceArtifactRepository().createArtifact(
+          ctx,
           {
-            recordType: 'evidence_artifact',
-            recordId: createdArtifact.id,
-            action: 'upload',
-            field: 'Evidence uploaded',
-            oldValue: '',
-            newValue: `${input.subjectType}:${cleanSubjectId} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
-            byId: actor.id,
-            at: nowIso,
+            blobKey: stored.blobKey,
+            subjectType: input.subjectType,
+            subjectId: cleanSubjectId,
+            fileName: safeFileName,
+            contentType: stored.contentType,
+            byteSize: stored.sizeBytes,
+            sha256: stored.sha256,
+            scanStatus: stored.scanStatus,
+            uploadedByPersonId: actor.id,
+            uploadedAt: nowIso,
           },
-        ],
-      },
-    );
+          {
+            buildAuditEntries: (createdArtifact) => [
+              {
+                recordType: 'evidence_artifact',
+                recordId: createdArtifact.id,
+                action: 'upload',
+                field: 'Evidence uploaded',
+                oldValue: '',
+                newValue: `${input.subjectType}:${cleanSubjectId} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
+                byId: actor.id,
+                at: nowIso,
+              },
+            ],
+          },
+        ),
+    });
+    if (!storeOutcome.ok) {
+      return registerServiceFailure(storeOutcome.code, storeOutcome.message);
+    }
+    const { artifact } = storeOutcome;
 
     const token = await storage.issueScopedDownloadToken(ctx, {
       blobKey: artifact.blobKey,

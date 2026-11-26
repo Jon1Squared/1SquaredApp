@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CORE_REGISTER_TYPES,
   CORE_REQUIRED_SCHEMA_VERSION,
@@ -117,6 +117,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
   const openPoolManagers: TenantPostgresPoolManager[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     setAuditAdapterFailureHookForTesting(null);
     setTestActorSession(null);
     setActiveTenantConfigForTesting(null);
@@ -915,6 +916,50 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(pptxRes.status).toBe(200);
+
+    //    (d) R807: post-storage non-clean scan deletes stored blob and returns plain-English security message
+    const activeStorage = getDocumentStorage(getActiveTenantConfiguration());
+    let orphanCandidateBlobKey = '';
+    const origPutObject = activeStorage.putObject.bind(activeStorage);
+    const putSpy = vi
+      .spyOn(activeStorage, 'putObject')
+      .mockImplementation(async (putCtx, putInput) => {
+        const stored = await origPutObject(putCtx, putInput);
+        orphanCandidateBlobKey = stored.blobKey;
+        return { ...stored, scanStatus: 'suspicious' };
+      });
+    try {
+      const postScanRes = await runAsActionActor(
+        'P-000010',
+        () =>
+          uploadEvidenceArtifactRecord(
+            {
+              subjectType: 'person',
+              subjectId: 'P-000015',
+              fileName: 'post-scan-suspect.pdf',
+              contentType: 'application/pdf',
+              bytes: new TextEncoder().encode('%PDF-1.4\n%Clean bytes flagged post-storage'),
+            },
+            'P-000010',
+          ),
+        { roles: ['legal_secretary'], mfaVerified: false },
+      );
+      expect(postScanRes.ok).toBe(false);
+      if (!postScanRes.ok) {
+        expect(postScanRes.code).toBe('EVIDENCE_MALWARE_DETECTED');
+        expect(postScanRes.message).toBe(
+          "This file failed a security check and can't be attached.",
+        );
+      }
+      expect(orphanCandidateBlobKey).toBeTruthy();
+      await expect(
+        activeStorage.getObjectBytes(testTenantCtx('P-000010'), {
+          blobKey: orphanCandidateBlobKey,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      putSpy.mockRestore();
+    }
 
     // 6. R777 two-tenant isolation: Alpha evidence token presented in Bravo, forged tenant claim, cross-tenant subjectId
     await provisionPostgresClusterRolesAndDatabases({
