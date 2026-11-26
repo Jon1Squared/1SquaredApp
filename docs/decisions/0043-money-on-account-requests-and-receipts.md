@@ -31,7 +31,7 @@ Because this defines new per-tenant transactional financial tables, UK Faster Pa
    - `recipient_email TEXT NOT NULL`, `recipient_name TEXT NOT NULL`
    - `status TEXT NOT NULL CHECK (status IN ('draft', 'requested', 'part_received', 'received', 'cancelled'))`
    - `requested_at TIMESTAMPTZ NULL`, `requested_by_person_id TEXT NULL`
-   - `outbox_email_id TEXT NULL` *(links `public.email_outbox.id`)*
+   - `outbox_email_id TEXT NULL` *(links `public.email_outbox.id`; the enqueued `email_outbox` row also records nullable `matter_id` and `quote_id` via `0028` for `R823` outbox visibility filtering)*
    - `bank_details_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb` *(immutable snapshot of client-account bank details sent to the client)*
    - `intake_check_record_id TEXT NULL` *(links ADR 0038 `public.intake_check_records.id` for `recordManualPaymentRequest`)*
    - `notes TEXT NULL`
@@ -87,21 +87,29 @@ MOA-<MATTER_TOKEN_MAX10>-<NN>
 ### 4. Wiring ADR 0038 `PaymentRequestProvider` & manual adapter
 
 - Services in `src/server/services.ts` wire through `createTenantIntakeCheckProviders(ctx, ...).payments` (resolved via `resolveIntakeChecksIntegrationConfig` so `integrations.intakeChecks.payments.provider` is genuinely executed):
-  - Sending a request invokes `ManualPaymentRequestProvider.recordManualPaymentRequest(ctx, { subjectType: 'matter', subjectId: matterId, amountMinorUnits: BigInt(requestedAmountPence), clientAccountReference: paymentReference, referenceCode: outboxId, ... })` (extended additively with in-transaction `recordCheckInTx` support so DB commits stay single-TX atomic while pre-verified evidence refs stay outside TX per ADR 0039).
+  - Sending a request invokes `ManualPaymentRequestProvider.recordManualPaymentRequest(ctx, { subjectType: 'matter', subjectId: matterId, amountMinorUnits: BigInt(requestedAmountPence), clientAccountReference: paymentReference, referenceCode: outboxId, ... })` (extended additively with in-transaction `recordCheckInTx` support so DB commits stay single-TX atomic while pre-verified evidence refs stay outside TX per ADR 0039) and passes `matterId` (and `quoteId` if linked) when enqueuing to `public.email_outbox` (`0028`).
   - Recording a manual or PMS-matched receipt invokes `ManualPaymentRequestProvider.recordManualReceipt(ctx, { ..., bankStatementReference: pmsTransactionId ?? bankReference })`.
   - Cancelling a request invokes a new additive method `recordManualCancellation` (`outcome: 'cancelled'`, already permitted by `0023`'s DB CHECK constraint `migrations/index.ts:3071`), and `PaymentRequestProvider` adds `listPaymentRequestsForSubject` (additive under `CORE_API_VERSION = '2.6.0'`).
   - `S1-08` domain/service validation enforces `amountMinorUnits > 0n` for requests and receipts, compensating `ManualPaymentRequestProvider`'s `>= 0n` baseline (`manualProviders.ts:471`).
-- **Pre-live security guard on bank details (`TenantConfiguration.moneyOnAccount`):**
+- **Pre-live security guard & audited changes on bank details (`TenantConfiguration.moneyOnAccount`):**
   - Bank details (`accountName`, `bankName`, `sortCode`, `accountNumber`, optional `iban`/`bic`, payment reference instructions, request wording, `allowDemoPlaceholderBankDetails`) live in schema-validated `TenantConfiguration.moneyOnAccount` (safe defaults: `enabled: false`, empty bank details).
   - `client-not-a-law-firm/config/base.json` stores obviously invented demo details (`accountName: "Not A Law Firm LLP — Client Account (DEMO ONLY)"`, `sortCode: "00-00-00"`, `accountNumber: "00000000"`, `iban: "GB00DEMO00000000000000"`).
   - Dispatching a request fails closed if bank details are unconfigured or contain placeholder values (`00-00-00` / `00000000`) when `environment === 'live'` (`MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN`).
+  - **MFA & masked audit trail (`R824`):** `saveMoneyOnAccountConfigAction` requires **`admin:access` + `mfaVerified: true`** and writes a same-transaction `audit_entries` record for every change recording **who (`byId`), when (`at`), and old and new values with all but the last 2 digits of `sortCode` and `accountNumber` masked** (e.g. `**-**-34`, `******78`; plus `iban` masked to its last 2 characters if present). This applies even under Lever 1 where there is no interactive edit screen.
 
 ### 5. Real transactional opening gate (`ADR 0040` `funds_on_account`)
 
 - Replace both hard-coded `fundsOnAccountSatisfied: false` sites (`src/server/services.ts:6438` and `:36377`) with a real transactional check (`evaluateMatterFundsOnAccountInTx`):
-  - Locks `public.money_on_account_requests` for `matter_id` (`FOR SHARE`) and sums active unreversed `public.money_on_account_receipts`.
-  - Satisfied (`fundsRawSatisfied = true`) **only when** at least one non-cancelled request has `status = 'received'` (verified received `>=` requested `> 0`) **and** no remaining active `'requested'`/`'part_received'` request blocks opening (or total verified received `>=` required `requested_amount_pence > 0`).
-  - If the work type (`resolveWorkTypeOpeningGate`) has `requireFundsOnAccount === true`, prospective matter opening across all 5 gated paths (`saveMatterRecord`, `openProspectiveMatterRecord`, `updateMatterConflictRecord`, `signOffMatterCostsRecord`, `high_risk_opening` `compliance_approve`) blocks unless `fundsRawSatisfied === true` or a partner holds an active audited `'funds_on_account'` override in `public.matter_opening_gate_overrides`.
+
+  > **Canonical funds-on-account gate rule (`evaluateMatterFundsOnAccountInTx`):**
+  > Inside the opening transaction (locking `public.money_on_account_requests` for the matter `FOR SHARE` and summing active unreversed `public.money_on_account_receipts`), funds on account are met (`fundsOnAccountSatisfied === true`) if and only if **all** of the following hold:
+  > 1. At least one non-cancelled, non-draft request exists for the matter (`status IN ('requested', 'part_received', 'received')`).
+  > 2. Every non-cancelled, non-draft request for the matter has `status = 'received'` (each such request's unreversed receipts total at least its `requested_amount_pence > 0`, leaving no unpaid or part-paid request open).
+  > 3. Where the matter has an agreed payment-on-account amount (`agreedAmountPence > 0`, resolved from the matter's costs snapshot or retainer amount, falling back to its converted source quote's payment-on-account amount), the total unreversed receipts across all non-cancelled, non-draft requests for the matter is at least `agreedAmountPence`. Where no agreed amount is set on the matter, conditions (1) and (2) alone constitute the rule.
+  >
+  > Reversing a receipt **before** the matter opens recalculates request status and receipt totals immediately, so the opening gate blocks again until replacement funds are received or a partner records an audited `funds_on_account` override. Reversing a receipt **after** the matter has already opened does not change the matter's status or reopen the opening gate, because the gate applies only at opening.
+
+- If the work type (`resolveWorkTypeOpeningGate`) has `requireFundsOnAccount === true`, prospective matter opening across all 5 gated paths (`saveMatterRecord`, `openProspectiveMatterRecord`, `updateMatterConflictRecord`, `signOffMatterCostsRecord`, `high_risk_opening` `compliance_approve`) blocks unless `fundsOnAccountSatisfied === true` or a partner holds an active audited `'funds_on_account'` override in `public.matter_opening_gate_overrides`.
 
 ### 6. Behaviour across both hosting models (Rule 6)
 
@@ -112,7 +120,7 @@ MOA-<MATTER_TOKEN_MAX10>-<NN>
 
 1. **Store requests and receipts solely in `public.intake_check_records.metadata_json` without dedicated tables:** Rejected. `intake_check_records` is an append-only check audit log without `row_version` concurrency, `status` projection, part-receipt summation constraints, foreign keys to `public.matters`, or partial unique index `uq_moa_receipts_tenant_pms_tx` to prevent concurrent double-matching of a PMS ledger line.
 2. **Treat `pms_matter_financials.client_account_balance_pence > 0` alone as satisfying the opening gate:** Rejected (`S1-D4`). Imported PMS balances can reflect historical matters, unallocated deposits, or funds received prior to disbursements; an explicit request/receipt record (backed either by manual verification or a specific matched `'Receipt'` ledger row `transaction_id`) provides an auditable trail, clean part-receipt handling, and works for new matters not yet exported to PMS.
-3. **Allow fee earners to match/record receipts directly without `finance` / `partner` separation:** Rejected (proposed Open Question 4). Client account receipt verification is an SRA Accounts Rules financial control (`finance`, `partner`, `managing_partner`) separated from requesting payment (`fee_earner`, `legal_secretary`, etc.).
+3. **Allow fee earners to match/record receipts directly without `finance` / `partner` separation:** Rejected (confirmed by owner decision Q4, 26 Nov 2026). Client account receipt verification is an SRA Accounts Rules financial control (`finance`, `partner`, `managing_partner`) separated from requesting payment (`fee_earner`, `legal_secretary`, etc.).
 
 ## Consequences
 
