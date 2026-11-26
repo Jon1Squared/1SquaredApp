@@ -21,6 +21,7 @@ import { developmentProcessArticle } from './articles/development-process';
 import { documentGenerationArticle } from './articles/document-generation';
 import { duplicateChecks } from './articles/duplicate-checks';
 import { employeeRecordsArticle } from './articles/employee-records';
+import { engagementLettersArticle } from './articles/engagement-letters';
 import { financeDataAndPermissionsArticle } from './articles/finance-data-and-permissions';
 import { globalSearchArticle } from './articles/global-search';
 import { homeAndProfileScreensArticle } from './articles/home-and-profile-screens';
@@ -94,6 +95,7 @@ export const ARTICLES: DocArticle[] = [
   keyDatesExceptionsArticle,
   keyDatesAdministrationArticle,
   documentGenerationArticle,
+  engagementLettersArticle,
   sharepointDocumentStoreArticle,
   sharepointSitesSelectedSetupArticle,
   quickConflictCheck,

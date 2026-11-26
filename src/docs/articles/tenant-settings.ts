@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-25',
+  updated: '2026-11-26',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -67,7 +67,7 @@ Per-tenant Practice Management System (PMS) extract datasets and PMS links are s
 | Setting | Default | Status | Notes |
 |---|---|---|---|
 | \`integrations.aiProviderChoice\` | \`"disabled"\` | Active | \`"anthropic"\`, \`"azure_openai_uk"\`, or \`"disabled"\` (ADR-0031) |
-| \`integrations.email.provider\` | \`"disabled"\` | Active | Outbound transactional email provider: \`"disabled"\` (default safe no-op), \`"dev_catcher"\` (non-live SMTP catcher), \`"graph"\` (Microsoft Graph app-only certificate), or \`"acs"\` (fail-closed placeholder returning \`EMAIL_PROVIDER_NOT_IMPLEMENTED\` until Stage 1) |
+| \`integrations.email.provider\` | \`"disabled"\` | Active | Outbound transactional email provider: \`"disabled"\` (default safe hold — queues messages in \`pending\` status so MFA-verified administrators can review them in **Administration → Email Outbox** without sending external mail), \`"dev_catcher"\` (non-live SMTP catcher), \`"graph"\` (Microsoft Graph app-only certificate), or \`"acs"\` (fail-closed placeholder returning \`EMAIL_PROVIDER_NOT_IMPLEMENTED\` until Stage 1) |
 | \`integrations.email.senderAddress\` | Optional | Active | Shared mailbox From address (and target Graph \`/users/{mailbox}/sendMail\` mailbox) |
 | \`integrations.email.replyTo\` | Optional | Active | Optional Reply-To mailbox address set on outbound messages |
 | \`integrations.email.outboxContentRetentionDays\` | \`30\` | Active | Days after terminal send/drop/failure before outbox message subjects, bodies, attachments, and recipient addresses are scrubbed |
@@ -158,5 +158,15 @@ Every tenant’s **Matter numbering policy** is summarised read-only in **Admini
 | High-risk re-check interval | 12 months | Active | Months between scheduled Client Due Diligence reviews for High, Critical, and Sensitive risk ratings |
 | Re-check reminder schedule | Firm default lead days | Active | Automated reminder notifications triggered on the firm’s configured schedule ahead of and on the due date |
 | Evidence upload size limit | 10 MB | Active | Maximum allowed file size per attached verification file alongside server file-type validation and pre-storage security scanning |
+
+### Engagement letters, automated chasing & Email Outbox
+
+Firm engagement wording and automated chase timings are shown read-only under **Administration → Email Outbox** (requiring multi-factor authentication) alongside the visibility-scoped outbox viewer (see [Engagement letters, follow-ups & Email Outbox](/docs/engagement-letters)):
+
+| Setting | Default | Status | Notes |
+|---|---|---|---|
+| Engagement & quote/retainer chase schedule | Disabled in core (7, 14 and 21 days in demo) | Active | Controls whether automated chasing is active, whether client reminder emails send at the first and second intervals (7 and 14 days by default), and when the fee-earner follow-up task opens (21 days by default) |
+| Client Care & Non-Engagement wording | Firm standard wording in demo config | Active | Supplies introductory text, standard terms of business (including Legal Ombudsman complaints wording), signature instructions, and Non-Engagement templates matched by close reason without revealing confidential conflict details |
+| Email Outbox inspection & attachment downloads | Active (Administrator access + MFA) | Active | Lists queued, sent, and blocked messages linked to matters, quotes, and enquiries the administrator is permitted to see, logging every view and PDF attachment download to the audit trail |
 `.trim(),
 };

@@ -6,7 +6,7 @@ export const demoEnvironmentArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'How the standalone Not A Law Firm LLP demo environment is configured, how persona switching and sample document seeding work, and how the demo dataset is seeded and reset.',
-  updated: '2026-11-20',
+  updated: '2026-11-26',
   body: `
 The **Demo environment** (\`environment: "demo"\`) provides a standalone, isolated deployment of **Not A Law Firm LLP** (\`tenantId: "not-a-law-firm"\`) for product walkthroughs and role demonstrations without putting any demo logic, fallback strings, or auto-seeding into live client deployments (ADR 0026, ADR 0028).
 
@@ -44,9 +44,9 @@ Demo data enters a non-live tenant PostgreSQL database through two controlled pa
 
 ## 4. Outbound email, Microsoft Teams safeguards & document generation
 
-In \`client-not-a-law-firm/config/environments/demo.json\`, outbound email (\`integrations.email.provider = "graph"\`, sending from \`notifications@1squared.co.uk\`) and Microsoft Teams Activity Feed alerts (\`integrations.teams.provider = "graph"\`) are permanently enabled for live demonstrations behind fail-closed non-live allow-lists, and document generation uses \`documentGeneration.pdfConverter = "container"\` with \`"builtin"\` fallback (enabled at deploy time when \`enablePdfConverterContainerApp=true\` and \`pdfConverterContainerImage\` are supplied):
+In \`client-not-a-law-firm/config/environments/demo.json\`, outbound email delivery is currently paused (\`integrations.email.provider = "disabled"\`) while retaining the configured sender address (\`notifications@1squared.co.uk\`), Key Vault allow-list references, and Microsoft Graph settings so queued Client Care letters, Non-Engagement letters, and reminders remain in \`pending\` status with attached PDFs inside **Administration → Email Outbox** for live product demonstrations without external mailbox cutover. Microsoft Teams Activity Feed alerts (\`integrations.teams.provider = "graph"\`) remain enabled behind fail-closed non-live allow-lists, and document generation uses \`documentGeneration.pdfConverter = "container"\` with \`"builtin"\` fallback (enabled at deploy time when \`enablePdfConverterContainerApp=true\` and \`pdfConverterContainerImage\` are supplied):
 
-- **Allow-list enforcement**: Outbound email and Teams notifications are permitted only for \`@1squared.co.uk\` addresses and explicit entries in the tenant Key Vault secrets \`email-recipient-allowlist\` and \`teams-recipient-allowlist\` (\`kvnotalawfi2cdo3cw7vuafm\`).
+- **Allow-list enforcement**: When outbound email is enabled, outbound email and Teams notifications are permitted only for \`@1squared.co.uk\` addresses and explicit entries in the tenant Key Vault secrets \`email-recipient-allowlist\` and \`teams-recipient-allowlist\` (\`kvnotalawfi2cdo3cw7vuafm\`).
 - **Synthetic demo personas**: Notifications targeting seeded \`@notalawfirm.example\` demo accounts are blocked automatically before calling Microsoft Graph, recording \`status = 'dropped_allowlist'\` and a zero-PII audit entry without sending external traffic or disclosing content in telemetry.
 `.trim(),
 };
