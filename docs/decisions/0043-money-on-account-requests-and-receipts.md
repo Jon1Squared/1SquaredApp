@@ -1,7 +1,7 @@
 # ADR 0043: Money on Account Requests, Payment References, and Receipts (`S1-08`)
 
 - **Date:** 2026-11-26
-- **Status:** Proposed
+- **Status:** Accepted — Accepted by the owner, 26 Nov 2026
 - **Roadmap:** Stage 1 Work Package 3, slice `S1-08` ([docs/roadmap/slices/s1-08-money-on-account.md](../roadmap/slices/s1-08-money-on-account.md)); Stage 1 decisions `S1-D1`, `S1-D4`, `S1-D6`, `S1-D10`; backlog item `6` (and item `4` opening gate completion)
 - **Builds on:** [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases & repositories), [ADR 0029](./0029-tenant-finance-and-pms-isolation.md) (per-tenant PMS data), [ADR 0038](./0038-intake-check-interfaces-and-manual-adapters.md) (`PaymentRequestProvider` interface & `public.intake_check_records`), [ADR 0040](./0040-matter-opening-gate-and-numbering.md) (`funds_on_account` work-type opening gate & overrides), [ADR 0041](./0041-pms-money-as-integer-pence.md) (PMS & retainer money in integer pence), [ADR 0042](./0042-generic-communication-chasing-mechanism.md) (generic chasing mechanism)
 

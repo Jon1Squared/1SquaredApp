@@ -1,7 +1,7 @@
 # ADR 0042: Generic Communication Chasing Mechanism (`S1-06`, `S1-07`, `S1-08`)
 
 - **Date:** 2026-11-26
-- **Status:** Proposed
+- **Status:** Accepted — Accepted by the owner, 26 Nov 2026
 - **Roadmap:** Stage 1 Work Package 3, slices `S1-06`, `S1-07`, and `S1-08` ([docs/roadmap/slices/](../roadmap/slices/)); Owner Decision 2 (26 Nov 2026); backlog items `3`, `5`, and `6`
 - **Builds on:** [ADR 0014](./0014-staff-matter-access-by-permission.md) (restricted matters), [ADR 0025](./0025-permission-enforcement-pattern.md) (action/job permission enforcement), [ADR 0027](./0027-email-sender-interface.md) (per-tenant email outbox), [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases & repositories), [ADR 0030](./0030-tenant-aware-scheduler.md) (tenant-aware scheduled jobs & Rule 4 exception), [ADR 0035](./0035-digests-and-teams-delivery.md) (notifications, outbox drain, restricted-matter filtering), [ADR 0038](./0038-intake-check-interfaces-and-manual-adapters.md) (outbox-held attachments & manual intake checks)
 

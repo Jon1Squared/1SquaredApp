@@ -1,7 +1,7 @@
 # ADR 0041: PMS Money and Retainer Funds as Integer Pence (`B21`)
 
 - **Date:** 2026-11-26
-- **Status:** Proposed
+- **Status:** Accepted — Accepted by the owner, 26 Nov 2026
 - **Roadmap:** Stage 1 Work Package 3, slice `S1-12` ([docs/roadmap/slices/s1-12-pms-money-pence.md](../roadmap/slices/s1-12-pms-money-pence.md)); Stage 0 exit decision D6; backlog `B21` and item `6`
 - **Builds on:** [ADR 0028](./0028-tenant-database-and-repositories.md) (per-tenant PostgreSQL databases and migrations), [ADR 0029](./0029-tenant-finance-and-pms-isolation.md) (per-tenant PMS data store), [ADR 0034](./0034-fee-arrangements-and-caps.md) (integer minor units on quotes and costs), [ADR 0038](./0038-intake-check-interfaces-and-manual-adapters.md) (`PaymentRequestRecord.amountMinorUnits` as `bigint` pence)
 
