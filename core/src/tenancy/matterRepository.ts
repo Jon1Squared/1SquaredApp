@@ -238,6 +238,7 @@ export interface TenantMatterRecord {
   conflictCheckRecord?: unknown;
   conflictDecision?: unknown;
   isPmsImport?: boolean;
+  isLegacyCmiIncomplete?: boolean;
   isStaffMatter?: boolean;
   hasEthicalWall?: boolean;
   restrictedAccessUserIds?: string[];
@@ -376,9 +377,33 @@ function mapPartyRow(row: DbMatterPartyRow): TenantMatterPartyRecord {
   return out;
 }
 
+function computeIsLegacyCmiIncomplete(
+  row: DbMatterRow,
+  opening: Record<string, unknown>,
+  activeStatusIds?: readonly string[],
+): boolean {
+  if (!activeStatusIds || activeStatusIds.length === 0) {
+    return false;
+  }
+  const statusId = row.status_id ?? '';
+  if (!statusId || !activeStatusIds.includes(statusId)) {
+    return false;
+  }
+  const openedViaGate =
+    opening.isPmsImport !== true &&
+    (row.fields_json?.matterOpeningGate as { openedViaGate?: unknown } | undefined)
+      ?.openedViaGate === true;
+  if (openedViaGate) {
+    return false;
+  }
+  const rawAmlStatus = typeof opening.amlStatus === 'string' ? opening.amlStatus : '';
+  return rawAmlStatus === 'Pending' || rawAmlStatus === 'CMI incomplete';
+}
+
 function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   row: DbMatterRow,
   partyRows: readonly DbMatterPartyRow[],
+  options?: { readonly activeStatusIds?: readonly string[] },
 ): TMatter {
   const opening = (row.opening_record_json ?? {}) as Record<string, unknown>;
   const costs = (row.costs_json ?? {}) as Record<string, unknown>;
@@ -555,6 +580,11 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
   if (opening.isPmsImport === true) {
     out.isPmsImport = true;
   }
+  out.isLegacyCmiIncomplete = computeIsLegacyCmiIncomplete(
+    row,
+    opening,
+    options?.activeStatusIds,
+  );
   if (row.department_id !== null || opening.hasOwningDepartmentId === true) {
     out.owningDepartmentId = row.department_id;
   }
@@ -1878,6 +1908,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       hasRestrictedAccessPermission?: boolean;
       hasRestrictedMatterAccess?: boolean;
       canViewCdd?: boolean;
+      activeStatusIds?: readonly string[];
     },
   ): Promise<TMatter | null> {
     const viewerId = options?.viewerUserId ?? options?.viewerId ?? ctx.actorId;
@@ -1887,6 +1918,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       options?.includeRestricted ??
       false;
     const canViewCdd = options?.canViewCdd !== false;
+    const activeStatusIds = options?.activeStatusIds;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
         "SELECT * FROM public.matters WHERE tenant_id = $1 AND id = $2 AND client_id <> 'O-KEYDATE-STUB'",
@@ -1901,7 +1933,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       const partiesMap = await this.loadPartiesByMatterIdsInTx(tx, ctx, [
         row.id,
       ]);
-      const matter = mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []);
+      const matter = mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+        activeStatusIds,
+      });
       return this.applyMatterCddVisibility(matter, canViewCdd);
     });
   }
@@ -1924,6 +1958,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           limit?: number;
           offset?: number;
         },
@@ -1931,6 +1966,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
     viewerId: string;
     includeRestricted: boolean;
     canViewCdd: boolean;
+    activeStatusIds: readonly string[] | undefined;
     limit: number | null;
     offset: number | null;
   } {
@@ -1954,6 +1990,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
       viewerOrOptions.canViewCdd === false
         ? false
         : true;
+    const activeStatusIds =
+      typeof viewerOrOptions === 'object' && viewerOrOptions !== null
+        ? viewerOrOptions.activeStatusIds
+        : undefined;
     const limit =
       typeof viewerOrOptions === 'object' &&
       viewerOrOptions !== null &&
@@ -1968,7 +2008,14 @@ export class TenantMatterRepository extends TenantScopedRepository {
       Number.isFinite(viewerOrOptions.offset)
         ? Math.max(0, Math.floor(viewerOrOptions.offset))
         : null;
-    return { viewerId, includeRestricted, canViewCdd, limit, offset };
+    return {
+      viewerId,
+      includeRestricted,
+      canViewCdd,
+      activeStatusIds,
+      limit,
+      offset,
+    };
   }
 
   private buildMatterEntityFilterClauses(
@@ -2074,13 +2121,20 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           includeMerged?: boolean;
           limit?: number;
           offset?: number;
         } = ctx.actorId,
   ): Promise<TMatter[]> {
-    const { viewerId, includeRestricted, canViewCdd, limit, offset } =
-      this.resolveMatterViewerOptions(ctx, viewerOrOptions);
+    const {
+      viewerId,
+      includeRestricted,
+      canViewCdd,
+      activeStatusIds,
+      limit,
+      offset,
+    } = this.resolveMatterViewerOptions(ctx, viewerOrOptions);
     const includeMerged =
       typeof viewerOrOptions === 'object' && viewerOrOptions !== null
         ? viewerOrOptions.includeMerged
@@ -2130,7 +2184,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds,
+          }),
           canViewCdd,
         ),
       );
@@ -2139,6 +2195,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
 
   public async listAllMattersUnfiltered<TMatter extends TenantMatterRecord = TenantMatterRecord>(
     ctx: TenantContext,
+    options?: { activeStatusIds?: readonly string[] },
   ): Promise<TMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
@@ -2154,7 +2211,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
         res.rows.map((r) => r.id),
       );
       return res.rows.map((row) =>
-        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+          activeStatusIds: options?.activeStatusIds,
+        }),
       );
     });
   }
@@ -2174,6 +2233,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       readonly ownerPersonId?: string;
       readonly conflictReferenceEntityId?: string;
     },
+    options?: { readonly activeStatusIds?: readonly string[] },
   ): Promise<TMatter[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const params: unknown[] = [ctx.tenantId];
@@ -2196,7 +2256,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
         res.rows.map((r) => r.id),
       );
       return res.rows.map((row) =>
-        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+        mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+          activeStatusIds: options?.activeStatusIds,
+        }),
       );
     });
   }
@@ -2230,6 +2292,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           limit?: number;
         } = ctx.actorId,
   ): Promise<TMatter[]> {
@@ -2285,7 +2348,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds: resolved.activeStatusIds,
+          }),
           resolved.canViewCdd,
         ),
       );
@@ -2414,6 +2479,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
           includeMerged?: boolean;
           excludeIds?: readonly string[];
           limit?: number;
@@ -2427,7 +2493,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
     const excludeIds = Array.from(
       new Set((optsObj?.excludeIds ?? []).map((id) => id?.trim()).filter(Boolean) as string[]),
     );
-    const { viewerId, includeRestricted, canViewCdd, limit } =
+    const { viewerId, includeRestricted, canViewCdd, activeStatusIds, limit } =
       this.resolveMatterViewerOptions(ctx, viewerOrOptions);
     if (!cleanQuery && excludeIds.length === 0 && optsObj?.includeMerged === undefined) {
       return this.listVisibleMatters<TMatter>(ctx, viewerOrOptions);
@@ -2494,7 +2560,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds,
+          }),
           canViewCdd,
         ),
       );
@@ -2515,6 +2583,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
       hasRestrictedAccessPermission?: boolean;
       hasRestrictedMatterAccess?: boolean;
       canViewCdd?: boolean;
+      activeStatusIds?: readonly string[];
     },
   ): Promise<TMatter[]> {
     const cleanIds = Array.from(
@@ -2531,6 +2600,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
         viewerOrOptions?.includeRestricted,
     );
     const canViewCdd = viewerOrOptions?.canViewCdd !== false;
+    const activeStatusIds = viewerOrOptions?.activeStatusIds;
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbMatterRow>(
         `SELECT * FROM public.matters
@@ -2551,7 +2621,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       );
       return visibleRows.map((row) =>
         this.applyMatterCddVisibility(
-          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+          mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+            activeStatusIds,
+          }),
           canViewCdd,
         ),
       );
@@ -2883,7 +2955,9 @@ export class TenantMatterRepository extends TenantScopedRepository {
       return {
         items: visibleRows.map((row) =>
           this.applyMatterCddVisibility(
-            mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? []),
+            mapMatterRow<TMatter>(row, partiesMap.get(row.id) ?? [], {
+              activeStatusIds,
+            }),
             canViewCdd,
           ),
         ),
@@ -3383,6 +3457,7 @@ export class TenantMatterRepository extends TenantScopedRepository {
           hasRestrictedAccessPermission?: boolean;
           hasRestrictedMatterAccess?: boolean;
           canViewCdd?: boolean;
+          activeStatusIds?: readonly string[];
         } = ctx.actorId,
   ): Promise<TMatter[]> {
     return this.listVisibleMatters<TMatter>(ctx, viewerOrOptions);

@@ -126,4 +126,59 @@ describe('R814: matterStatusDisplay resolves strictly via systemKey without hard
       ),
     ).toBe(false);
   });
+
+  it('R816 / R819: respects server-derived isLegacyCmiIncomplete when present on redacted rows', () => {
+    const customValues = [
+      makeStatusValue('tenant_status.live', 'Live Matter', 'active'),
+    ];
+
+    expect(
+      isMatterCmiIncompleteStatus(
+        {
+          matterStatusId: 'tenant_status.live',
+          amlStatus: 'Not available to you',
+          fieldValues: {},
+          isPmsImport: false,
+          isLegacyCmiIncomplete: true,
+        },
+        customValues,
+      ),
+    ).toBe(true);
+
+    expect(
+      resolveMatterStatusPill(
+        {
+          matterStatusId: 'tenant_status.live',
+          amlStatus: 'Not available to you',
+          conflictCheckStatus: 'Cleared',
+          fieldValues: {},
+          isPmsImport: false,
+          isLegacyCmiIncomplete: true,
+        },
+        customValues,
+      ),
+    ).toMatchObject({
+      label: 'CMI incomplete',
+      tone: 'warning',
+      isCmiIncomplete: true,
+    });
+
+    expect(
+      resolveMatterStatusPill(
+        {
+          matterStatusId: 'tenant_status.live',
+          amlStatus: 'Pending',
+          conflictCheckStatus: 'Cleared',
+          fieldValues: {},
+          isPmsImport: false,
+          isLegacyCmiIncomplete: false,
+        },
+        customValues,
+      ),
+    ).toMatchObject({
+      label: 'Open',
+      tone: 'positive',
+      isCmiIncomplete: false,
+    });
+  });
 });

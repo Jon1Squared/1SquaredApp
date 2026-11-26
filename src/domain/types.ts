@@ -1027,6 +1027,8 @@ export interface Matter extends RecordBase {
   conflictDecision?: OrganisationConflictDecision | null;
   /** True when this matter was created via server-side PMS import (`createRecordFromPms`). */
   isPmsImport?: boolean;
+  /** Server-derived legacy active + CMI incomplete flag computed before CDD redaction (`R816` / `R819`). */
+  readonly isLegacyCmiIncomplete?: boolean;
   /** True when the client is a current employee of the firm; restricts browsing to authorized staff. */
   isStaffMatter?: boolean;
   /** True when an ethical wall / information barrier applies to this matter. */
