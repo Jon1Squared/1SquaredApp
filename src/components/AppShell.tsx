@@ -804,9 +804,8 @@ export function AppShell({
                         type="submit"
                         className="popover-menu__item"
                         style={{ width: '100%', textAlign: 'left' }}
-                        onClick={() => setAvatarOpen(false)}
                       >
-                        <span>Sign out of Microsoft Entra ({entraSession.email || entraSession.displayName})</span>
+                        <span>Sign out ({entraSession.email || entraSession.displayName})</span>
                       </button>
                     </form>
                   ) : (

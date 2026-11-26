@@ -22,6 +22,7 @@ import {
   requireAuthenticatedActor,
   resetAllDemoData,
   saveHomePagesConfig,
+  USER_COOKIE,
 } from '../../src/server/services';
 import {
   auditEntriesSince,
@@ -30,7 +31,10 @@ import {
 } from '../../src/server/testSupport/auditTestSupport';
 import { switchUserAction } from '../../src/app/actions';
 import { GET as callbackGet } from '../../src/app/api/auth/callback/microsoft-entra-id/route';
-import { GET as logoutGet } from '../../src/app/api/auth/logout/route';
+import {
+  GET as logoutGet,
+  POST as logoutPost,
+} from '../../src/app/api/auth/logout/route';
 import { POST as extractMatterPost } from '../../src/app/api/matters/extract/route';
 import AdminCatchAllPage from '../../src/app/(app)/admin/[[...slug]]/page';
 import { testDataResetContext } from '../../src/test/testTenantContexts';
@@ -837,5 +841,30 @@ describe('Microsoft Entra ID OIDC Authentication, JWT Verification & Cookie Secu
     );
     expect(validActor.tenantId).toBe('not-a-law-firm');
     expect(validActor.sub).toBe('P-000001');
+  });
+
+  it('POST /api/auth/logout returns 303 to /?signedOut=1 and expires session, PKCE, and user cookies with Path=/', async () => {
+    delete process.env.ENTRA_REDIRECT_URI;
+    const req = new NextRequest('http://localhost:3000/api/auth/logout', {
+      method: 'POST',
+    });
+    const res = await logoutPost(req);
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/?signedOut=1');
+
+    const setCookies = res.headers.getSetCookie();
+    for (const cookieName of [
+      ENTRA_SESSION_COOKIE,
+      ENTRA_PKCE_COOKIE,
+      USER_COOKIE,
+    ]) {
+      const header = setCookies.find((c) => c.startsWith(`${cookieName}=;`));
+      expect(header, `Missing expired Set-Cookie for ${cookieName}`).toBeDefined();
+      expect(header).toContain('Path=/');
+      expect(
+        header?.includes('Expires=Thu, 01 Jan 1970 00:00:00 GMT') ||
+          header?.includes('Max-Age=0'),
+      ).toBe(true);
+    }
   });
 });
