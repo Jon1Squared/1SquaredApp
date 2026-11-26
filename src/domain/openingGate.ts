@@ -526,6 +526,21 @@ export function evaluateOpeningPreconditions(
   };
 }
 
+export const OPENING_GATE_INCONSISTENT_CODE = 'OPENING_GATE_INCONSISTENT' as const;
+
+export const OPENING_GATE_INCONSISTENT_USER_MESSAGE =
+  "This matter can't be opened yet. Refresh the page and check the opening checklist.";
+
+export function createOpeningGateInconsistentError(): Error & {
+  code: typeof OPENING_GATE_INCONSISTENT_CODE;
+} {
+  const err = new Error(OPENING_GATE_INCONSISTENT_USER_MESSAGE) as Error & {
+    code: typeof OPENING_GATE_INCONSISTENT_CODE;
+  };
+  err.code = OPENING_GATE_INCONSISTENT_CODE;
+  return err;
+}
+
 /**
  * Formats action/service error responses from matter opening, engagement,
  * override, or high-risk approval flows into plain British English without
@@ -542,6 +557,9 @@ export function formatOpeningGateActionError(
   const code = (err?.code ?? '').trim();
   const raw = (err?.message ?? err?.error ?? '').trim();
 
+  if (code === OPENING_GATE_INCONSISTENT_CODE) {
+    return OPENING_GATE_INCONSISTENT_USER_MESSAGE;
+  }
   if (code === 'MFA_REQUIRED' || /multi-factor authentication/i.test(raw)) {
     return 'Please complete multi-factor authentication before performing this action.';
   }
@@ -572,4 +590,30 @@ export function formatOpeningGateActionError(
     if (cleaned) return cleaned;
   }
   return fallback;
+}
+
+export type OpeningGateCddOutcomeStatus =
+  | 'Verified'
+  | 'Overridden'
+  | 'Not required';
+
+/**
+ * Computes the server-stamped matter `amlStatus` recorded when a prospective
+ * matter opens through the opening gate (R810, R813 fail closed).
+ */
+export function resolveOpeningGateCddOutcome(params: {
+  readonly gateConfig: Pick<WorkTypeOpeningGateFields, 'requireCddComplete'>;
+  readonly cddRawSatisfied: boolean;
+  readonly hasActiveCddOverride: boolean;
+}): OpeningGateCddOutcomeStatus {
+  if (!params.gateConfig.requireCddComplete) {
+    return 'Not required';
+  }
+  if (params.cddRawSatisfied) {
+    return 'Verified';
+  }
+  if (params.hasActiveCddOverride) {
+    return 'Overridden';
+  }
+  throw createOpeningGateInconsistentError();
 }

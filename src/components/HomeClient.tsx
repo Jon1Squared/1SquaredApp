@@ -2532,7 +2532,7 @@ export function HomeClient({
               <div className="panel-title-group">
                 <h2 className="panel-title">Matter openings — onboarding checklist</h2>
                 <span className="panel-subtitle">
-                  Conflict check · AML/CDD · Engagement letter · Retainer
+                  Conflict check · Client due diligence · Engagement letter · Retainer
                 </span>
               </div>
             </div>
@@ -2587,9 +2587,25 @@ export function HomeClient({
                                     : m.conflictCheckStatus || 'Not recorded'}
                               </span>
                             </div>
-                            <div className={`onb-step ${amlDone ? 'done' : 'warn'}`}>
-                              <span>2. AML / CDD</span>
-                              <span>{amlDone ? '✓ Complete' : m.amlStatus || 'Not recorded'}</span>
+                            <div
+                              className={
+                                !canViewCdd || m.amlStatus === 'Not available to you'
+                                  ? 'onb-step'
+                                  : `onb-step ${amlDone ? 'done' : 'warn'}`
+                              }
+                            >
+                              <span>2. Client due diligence</span>
+                              <span>
+                                {!canViewCdd || m.amlStatus === 'Not available to you'
+                                  ? 'Not available to you'
+                                  : m.amlStatus === 'Not required'
+                                    ? '✓ Not required'
+                                    : amlDone
+                                      ? '✓ Complete'
+                                      : m.amlStatus === 'Overridden'
+                                        ? 'Overridden'
+                                        : m.amlStatus || 'Not recorded'}
+                              </span>
                             </div>
                             <div className={`onb-step ${engDone ? 'done' : 'warn'}`}>
                               <span>3. Engagement letter</span>
@@ -3428,7 +3444,13 @@ export function HomeClient({
         for (const m of supervisedMatters) {
           if (seenCodes.has(m.matterNumber)) continue;
           const amlLabel = m.amlStatus;
-          if (isHighOrCriticalRiskRating(m.riskRatingId, values) && amlLabel !== 'Verified') {
+          if (
+            canViewCdd &&
+            amlLabel !== 'Not available to you' &&
+            isHighOrCriticalRiskRating(m.riskRatingId, values) &&
+            amlLabel !== 'Verified' &&
+            amlLabel !== 'Not required'
+          ) {
             const clientObj = orgById.get(m.clientId) ?? personById.get(m.clientId);
             const clientName = clientObj
               ? 'legalName' in clientObj
@@ -3439,7 +3461,12 @@ export function HomeClient({
             attentionRows.push({
               code: m.matterNumber,
               title: `${m.title} (${clientName})`,
-              pillLabel: `High risk · AML ${amlLabel || 'Pending'}`,
+              pillLabel:
+                amlLabel === 'Overridden'
+                  ? 'High risk · CDD overridden'
+                  : amlLabel === 'CMI incomplete'
+                    ? 'High risk · CDD incomplete'
+                    : 'High risk · CDD pending',
               pillTone: 'alert',
               meta: `Lead: ${lead ? personDisplayName(lead) : 'Unassigned'}`,
               wip: 0,

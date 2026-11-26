@@ -24,6 +24,7 @@ export interface MatterOpeningGateRecord {
   allowProceed: boolean;
   estimatedFeeGbp: number;
   checkedAt: string;
+  openedViaGate?: boolean;
 }
 
 export function stripServerOwnedFieldValues(

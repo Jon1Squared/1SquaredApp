@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { resolveRequestCorrelationId } from './correlationId';
+import { storeEvidenceBlobAndCreateArtifact } from './evidenceUploadStore';
 import { syncMatterLifecycleOnSaveSync } from './documentStoreServices';
 import {
   getDocumentRepository,
@@ -225,8 +226,12 @@ import {
   isEngagementLetterSignedStatus,
   isHighOrCriticalRiskRating,
   isMatterEngagementSignedForGate,
+  OPENING_GATE_INCONSISTENT_CODE,
+  OPENING_GATE_INCONSISTENT_USER_MESSAGE,
   OPENING_GATE_OVERRIDE_ERROR_CODES,
   resolveMatterRiskSystemKey,
+  resolveOpeningGateCddOutcome,
+  type OpeningGateCddOutcomeStatus,
   type OpeningGateEvaluation,
   type OpeningGateHighRiskRecordView,
   type OpeningGateOverrideSummary,
@@ -309,6 +314,7 @@ import {
 } from './entraAuth';
 import {
   buildHiddenClientCddSummary,
+  formatEvidenceSizeLimitMb,
   isCddDueExpired,
   type CddChecklistItemEvidenceSummary,
   type CddChecklistItemSummary,
@@ -5803,6 +5809,18 @@ async function runMatterOpeningGate(params: {
 }
 
 const SYSTEM_HRO_CREATOR_ACTOR_ID = 'system:matter_opening';
+/**
+ * System-level withdrawal grant used solely by `withdrawPendingHighRiskOpeningInTx` (R804, R815).
+ * Reachable only from dedicated matter workflows that enforce caller permissions upfront:
+ * `saveMatterRecord` (risk downgrade/abandon via `syncHighRiskOpeningForMatterInTx`),
+ * `updateMatterConflictRecord` (conflict decline), and `openProspectiveMatterRecord`.
+ * Generic register transitions (`transitionRegisterRecordService`) never use this set and
+ * cannot reach `withdraw_opening` without `register:edit` (blocked by `systemOnly: true` ->
+ * `REGISTER_SYSTEM_ONLY_TRANSITION`, and `requiredPermission: 'register:edit'` -> `FORBIDDEN`).
+ * Proved by test 18 in `core/tests/opening-gate-numbering-s105.test.ts`.
+ */
+const SYSTEM_HRO_WITHDRAWAL_PERMISSIONS: ReadonlySet<PermissionKey> =
+  new Set<PermissionKey>(['register:edit']);
 
 function isSystemCreatedHroRecord(
   record: Pick<RegisterRecord, 'createdById'> | null | undefined,
@@ -6295,7 +6313,19 @@ function mapOverridesToSummaries(
   });
 }
 
-async function evaluateAndEnforceOpeningGateInTx(params: {
+function applyOpeningGateCddOutcomeToMatter(
+  matter: Matter,
+  cddOutcome: OpeningGateCddOutcomeStatus,
+  openedDateYmd: string,
+): void {
+  matter.amlStatus = cddOutcome;
+  matter.amlCompletedAt =
+    cddOutcome === 'Verified'
+      ? matter.openedAt?.trim() || openedDateYmd
+      : null;
+}
+
+async function evaluateOpeningGateForServerInTx(params: {
   tx: TenantSqlClient;
   ctx: TenantContext;
   matter: Matter;
@@ -6306,7 +6336,10 @@ async function evaluateAndEnforceOpeningGateInTx(params: {
   viewerAccess: ViewerCddAccess;
   tenantCfg?: TenantConfiguration;
   organisations?: readonly Organisation[];
-}): Promise<OpeningGateEvaluation> {
+}): Promise<{
+  readonly evaluation: OpeningGateEvaluation;
+  readonly resolveCddOutcomeForOpening: () => OpeningGateCddOutcomeStatus;
+}> {
   const {
     tx,
     ctx,
@@ -6393,16 +6426,53 @@ async function evaluateAndEnforceOpeningGateInTx(params: {
     }
   }
 
-  return evaluateOpeningPreconditions({
+  const activeOverrides = mapOverridesToSummaries(rawOverrides, people);
+  const evaluation = evaluateOpeningPreconditions({
     matter,
     gateConfig,
     cddStatus,
-    activeOverrides: mapOverridesToSummaries(rawOverrides, people),
+    activeOverrides,
     highRiskRecord: selectedHro,
     highRiskPartnerApprover: partnerApprover,
     requiresHighRiskApproval,
     fundsOnAccountSatisfied: false,
   });
+  const cddRawSatisfied =
+    cddStatus.status === 'recorded' &&
+    !cddStatus.isExpired &&
+    !cddStatus.insufficientTier;
+  const hasActiveCddOverride = Boolean(
+    gateConfig.allowCddOverride &&
+      activeOverrides.some(
+        (ovr) => !ovr.revokedAt && ovr.preconditionKey === 'cdd_complete',
+      ),
+  );
+
+  return {
+    evaluation,
+    resolveCddOutcomeForOpening: () =>
+      resolveOpeningGateCddOutcome({
+        gateConfig,
+        cddRawSatisfied,
+        hasActiveCddOverride,
+      }),
+  };
+}
+
+async function evaluateAndEnforceOpeningGateInTx(params: {
+  tx: TenantSqlClient;
+  ctx: TenantContext;
+  matter: Matter;
+  workTypesConfig: WorkTypesConfiguration;
+  values: readonly ChoiceValue[];
+  people: readonly Person[];
+  todayYmd: string;
+  viewerAccess: ViewerCddAccess;
+  tenantCfg?: TenantConfiguration;
+  organisations?: readonly Organisation[];
+}): Promise<OpeningGateEvaluation> {
+  const { evaluation } = await evaluateOpeningGateForServerInTx(params);
+  return evaluation;
 }
 
 async function withdrawPendingHighRiskOpeningInTx(params: {
@@ -6411,10 +6481,9 @@ async function withdrawPendingHighRiskOpeningInTx(params: {
   tenantCfg: TenantConfiguration;
   matterId: string;
   actorId: string;
-  actorPermissionSet: ReadonlySet<PermissionKey>;
   reason: string;
 }): Promise<RegisterRecord[]> {
-  const { tx, ctx, tenantCfg, matterId, actorId, actorPermissionSet, reason } = params;
+  const { tx, ctx, tenantCfg, matterId, actorId, reason } = params;
   if (!matterId || matterId === 'M-PENDING') return [];
   const registerRepo = getRegisterRepository();
   const catRepo = getCatalogueRepository();
@@ -6457,7 +6526,7 @@ async function withdrawPendingHighRiskOpeningInTx(params: {
           transitionKey: 'withdraw_opening',
           actorId,
           actorRoles: [],
-          actorPermissionSet,
+          actorPermissionSet: SYSTEM_HRO_WITHDRAWAL_PERMISSIONS,
           comment: reason,
           viaDedicatedWorkflow: true,
           priorTransitions,
@@ -6505,7 +6574,6 @@ async function syncHighRiskOpeningForMatterInTx(params: {
   matter: Matter;
   values: readonly ChoiceValue[];
   actorId: string;
-  actorPermissionSet: ReadonlySet<PermissionKey>;
   isDraftSave: boolean;
   people: readonly Person[];
   teams: readonly Team[];
@@ -6518,7 +6586,6 @@ async function syncHighRiskOpeningForMatterInTx(params: {
     matter,
     values,
     actorId,
-    actorPermissionSet,
     isDraftSave,
     people,
     teams,
@@ -6539,7 +6606,6 @@ async function syncHighRiskOpeningForMatterInTx(params: {
       tenantCfg,
       matterId: matter.id,
       actorId,
-      actorPermissionSet,
       reason: isAborted
         ? 'Prospective matter was abandoned; pending High-risk opening sign-off withdrawn.'
         : 'Matter risk rating was reduced below High before opening; pending High-risk opening sign-off withdrawn.',
@@ -6779,6 +6845,7 @@ function resolveNextMatterStatusId(params: {
   isPmsImport?: boolean;
   prospectiveStatus: string;
   cmiIncompleteStatus: string;
+  activeStatus: string;
   values?: readonly Pick<ChoiceValue, 'id' | 'listKey' | 'systemKey'>[];
 }): string {
   const {
@@ -6789,6 +6856,7 @@ function resolveNextMatterStatusId(params: {
     isPmsImport = false,
     prospectiveStatus,
     cmiIncompleteStatus,
+    activeStatus,
     values = [],
   } = params;
   const isProspective = (id: string | null | undefined) =>
@@ -6806,13 +6874,13 @@ function resolveNextMatterStatusId(params: {
     return prospectiveStatus;
   }
   if (saveMode === 'submit_cleared') {
-    // S1-05 (R741): Server owns initial opening destination (`cmi_incomplete`), ignoring crafted `input.matterStatusId`.
-    return cmiIncompleteStatus;
+    // R810 / R741: Server owns initial opening destination (`active` once the gate clears), ignoring crafted `input.matterStatusId`.
+    return activeStatus;
   }
   if (existing && isProspective(existing.matterStatusId)) {
     return prospectiveStatus;
   }
-  return cmiIncompleteStatus;
+  return activeStatus;
 }
 
 function feeEarnerOutcomeLabelFor(
@@ -7541,6 +7609,7 @@ export async function saveMatterRecord(
   let dupNone: string;
   let cmiIncompleteStatus: string;
   let prospectiveStatus: string;
+  let activeStatus: string;
   try {
     dupNone = requireActiveChoiceValueId(
       store.values,
@@ -7549,6 +7618,7 @@ export async function saveMatterRecord(
     );
     cmiIncompleteStatus = resolveCmiIncompleteStatusId(store);
     prospectiveStatus = resolveProspectiveStatusId(store);
+    activeStatus = resolveActiveMatterStatusId(store);
   } catch (err) {
     const fieldKey =
       err instanceof Error && err.message.startsWith('CHOICE_VALUE_NOT_CONFIGURED')
@@ -8140,6 +8210,7 @@ export async function saveMatterRecord(
     isPmsImport,
     prospectiveStatus,
     cmiIncompleteStatus,
+    activeStatus,
     values: store.values,
   });
   const willOpen =
@@ -9152,7 +9223,6 @@ export async function saveMatterRecord(
           matter,
           values: inTxDbValues,
           actorId: opts.byId,
-          actorPermissionSet: saveActorPermSet.permissions,
           isDraftSave,
           people: allPeopleWithPending,
           teams,
@@ -9164,8 +9234,9 @@ export async function saveMatterRecord(
       let effectiveWillOpen = willOpen;
       let savedOpeningGate: OpeningGateEvaluation | undefined;
       let savedWarnings: string[] = [];
+      let openedViaGateInTx = false;
       if (!existingHasOpened && !isPmsImport && !isDraftSave && willOpen) {
-        const gateEval = await evaluateAndEnforceOpeningGateInTx({
+        const gateResultTx = await evaluateOpeningGateForServerInTx({
           tx,
           ctx: extensionCtx,
           matter,
@@ -9177,6 +9248,7 @@ export async function saveMatterRecord(
           tenantCfg,
           organisations: allOrganisationsWithPending,
         });
+        const gateEval = gateResultTx.evaluation;
         savedOpeningGate = gateEval;
         if (!gateEval.canOpen) {
           effectiveWillOpen = false;
@@ -9184,6 +9256,16 @@ export async function saveMatterRecord(
           matter.recordStatusId = prospectiveStatus;
           matter.openedAt = null;
           savedWarnings = [...gateEval.blockingReasons];
+        } else {
+          openedViaGateInTx = true;
+          if (!matter.openedAt?.trim()) {
+            matter.openedAt = inTxTenantTodayIso;
+          }
+          applyOpeningGateCddOutcomeToMatter(
+            matter,
+            gateResultTx.resolveCddOutcomeForOpening(),
+            matter.openedAt || inTxTenantTodayIso,
+          );
         }
       }
       postTxWarnings = savedWarnings;
@@ -9195,14 +9277,27 @@ export async function saveMatterRecord(
 
       matter.fieldValues['matterCostsGovernance'] =
         gateResult?.governance ?? calcGovernance;
+      const existingOpenedViaGate =
+        (
+          (inTxExisting?.fieldValues?.['matterOpeningGate'] ??
+            existing?.fieldValues?.['matterOpeningGate']) as
+            | MatterOpeningGateRecord
+            | undefined
+        )?.openedViaGate === true;
       if (gateResult) {
         matter.fieldValues['matterOpeningGate'] =
           savedOpeningGate && !savedOpeningGate.canOpen
             ? {
                 ...gateResult.record,
                 allowProceed: false,
+                openedViaGate: false,
               }
-            : gateResult.record;
+            : {
+                ...gateResult.record,
+                ...(openedViaGateInTx || existingOpenedViaGate
+                  ? { openedViaGate: true }
+                  : {}),
+              };
       } else if (isPmsImport && willOpen) {
         const importedGateRecord: MatterOpeningGateRecord = {
           allowProceed: true,
@@ -9212,9 +9307,10 @@ export async function saveMatterRecord(
         matter.fieldValues['matterOpeningGate'] = importedGateRecord;
       } else if (!existingHasOpened) {
         const draftGateRecord: MatterOpeningGateRecord = {
-          allowProceed: false,
+          allowProceed: openedViaGateInTx,
           estimatedFeeGbp,
           checkedAt: now,
+          ...(openedViaGateInTx ? { openedViaGate: true } : {}),
         };
         matter.fieldValues['matterOpeningGate'] = draftGateRecord;
       }
@@ -9689,6 +9785,16 @@ export async function saveMatterRecord(
         message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
         errors: {
           conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+        },
+      };
+    }
+    if ((err as { code?: string })?.code === OPENING_GATE_INCONSISTENT_CODE) {
+      return {
+        matter: null,
+        code: OPENING_GATE_INCONSISTENT_CODE,
+        message: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+        errors: {
+          openingGate: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
         },
       };
     }
@@ -10658,7 +10764,6 @@ export async function updateMatterConflictRecord(
             tenantCfg: tenantCfgForConflict,
             matterId: freshMatter.id,
             actorId: byId,
-            actorPermissionSet: conflictViewerPermSet.permissions,
             reason:
               'Conflict check declined by Risk & Compliance; pending High-risk opening sign-off withdrawn.',
           });
@@ -10677,7 +10782,7 @@ export async function updateMatterConflictRecord(
             tenantCfgForConflict,
             inTxWorkTypesOverride ?? null,
           );
-          const gateEval = await evaluateAndEnforceOpeningGateInTx({
+          const gateResultTx = await evaluateOpeningGateForServerInTx({
             tx,
             ctx: conflictCtx,
             matter: freshMatter,
@@ -10689,6 +10794,7 @@ export async function updateMatterConflictRecord(
             tenantCfg: tenantCfgForConflict,
             organisations,
           });
+          const gateEval = gateResultTx.evaluation;
           const hasPassedOpeningGate = Boolean(
             freshMatter.matterNumber !== 'DRAFT' &&
               !freshMatter.matterNumber.startsWith('DRAFT') &&
@@ -10705,6 +10811,7 @@ export async function updateMatterConflictRecord(
               allowProceed: hasPassedOpeningGate,
               estimatedFeeGbp: preConflictEstimatedFeeGbp,
               checkedAt: now,
+              ...(hasPassedOpeningGate ? { openedViaGate: true } : {}),
             },
           };
           if (hasPassedOpeningGate) {
@@ -10722,6 +10829,11 @@ export async function updateMatterConflictRecord(
                 tenantCfgForConflict.timeZone || 'Europe/London',
               ).localDate;
             }
+            applyOpeningGateCddOutcomeToMatter(
+              freshMatter,
+              gateResultTx.resolveCddOutcomeForOpening(),
+              freshMatter.openedAt || today,
+            );
             const cleanFieldVals = { ...(freshMatter.fieldValues ?? {}) };
             delete cleanFieldVals['matterOpeningSnapshot'];
             const openingSnapshot = resolveMatterOpeningSnapshot(
@@ -10839,6 +10951,14 @@ export async function updateMatterConflictRecord(
         errors: { conflict: conflictMsg },
       };
     }
+    if ((err as { code?: string })?.code === OPENING_GATE_INCONSISTENT_CODE) {
+      return {
+        matter: null,
+        code: OPENING_GATE_INCONSISTENT_CODE,
+        message: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+        errors: { openingGate: OPENING_GATE_INCONSISTENT_USER_MESSAGE },
+      };
+    }
     throw err;
   }
   if (conflictTxEarlyResult) {
@@ -10873,7 +10993,11 @@ export async function signOffMatterCostsRecord(
     errors?: Record<string, string>;
     warnings?: string[];
   } & Partial<Omit<ActionDenied, 'code'>> & {
-    code?: ActionDenialCode | FeeCapErrorCode | typeof MATTER_CONCURRENCY_CONFLICT_CODE;
+    code?:
+      | ActionDenialCode
+      | FeeCapErrorCode
+      | typeof MATTER_CONCURRENCY_CONFLICT_CODE
+      | typeof OPENING_GATE_INCONSISTENT_CODE;
   }
 > {
   const tenantCfg = getActiveTenantConfiguration();
@@ -11313,7 +11437,7 @@ export async function signOffMatterCostsRecord(
           !freshMatter.matterNumber.startsWith('DRAFT') &&
           wasFreshProspectiveBeforeSignOff
         ) {
-          const gateEval = await evaluateAndEnforceOpeningGateInTx({
+          const gateResultTx = await evaluateOpeningGateForServerInTx({
             tx,
             ctx: extensionCtx,
             matter: freshMatter,
@@ -11325,6 +11449,7 @@ export async function signOffMatterCostsRecord(
             tenantCfg,
             organisations,
           });
+          const gateEval = gateResultTx.evaluation;
           if (gateResult.allowProceed && gateEval.canOpen) {
             const activeStatusId = requireActiveChoiceValueId(
               inTxDbValues,
@@ -11336,6 +11461,19 @@ export async function signOffMatterCostsRecord(
             if (!freshMatter.openedAt?.trim()) {
               freshMatter.openedAt = inTxAsAtDate;
             }
+            applyOpeningGateCddOutcomeToMatter(
+              freshMatter,
+              gateResultTx.resolveCddOutcomeForOpening(),
+              freshMatter.openedAt || inTxAsAtDate,
+            );
+            freshMatter.fieldValues = {
+              ...(freshMatter.fieldValues ?? {}),
+              matterOpeningGate: {
+                ...gateResult.record,
+                allowProceed: true,
+                openedViaGate: true,
+              },
+            };
             const cleanFieldVals = { ...freshMatter.fieldValues };
             delete cleanFieldVals['matterOpeningSnapshot'];
             const openingSnapshot = resolveMatterOpeningSnapshot(
@@ -11438,6 +11576,14 @@ export async function signOffMatterCostsRecord(
         code: MATTER_CONCURRENCY_CONFLICT_CODE,
         message: conflictMsg,
         errors: { conflict: conflictMsg },
+      };
+    }
+    if ((err as { code?: string })?.code === OPENING_GATE_INCONSISTENT_CODE) {
+      return {
+        matter: null,
+        code: OPENING_GATE_INCONSISTENT_CODE,
+        message: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+        errors: { openingGate: OPENING_GATE_INCONSISTENT_USER_MESSAGE },
       };
     }
     throw err;
@@ -28593,6 +28739,12 @@ function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
       rawErr?.message || 'Multi-factor authentication is required for this action.';
     return registerServiceFailure('MFA_REQUIRED', msg);
   }
+  if (rawCode === OPENING_GATE_INCONSISTENT_CODE) {
+    return registerServiceFailure(
+      OPENING_GATE_INCONSISTENT_CODE,
+      OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+    );
+  }
   if (EXPOSED_REGISTER_SERVICE_ERROR_CODES.has(rawCode)) {
     const msg =
       rawErr?.message || (err instanceof Error ? err.message : 'Register operation failed.');
@@ -28811,6 +28963,7 @@ export async function listRegistersWorkspaceDataRecord(
       {
         viewerId: actor.id,
         hasRestrictedMatterAccess,
+        canViewCdd,
       },
     );
     const visibleMatters = candidateMatters.filter((m) =>
@@ -29930,7 +30083,7 @@ export async function transitionRegisterRecordService(
               new Date(),
               tenantCfg.timeZone || 'Europe/London',
             ).localDate;
-            const gateEval = await evaluateAndEnforceOpeningGateInTx({
+            const gateResultTx = await evaluateOpeningGateForServerInTx({
               tx,
               ctx,
               matter: lockedMatter,
@@ -29942,6 +30095,7 @@ export async function transitionRegisterRecordService(
               tenantCfg,
               organisations: preComplianceHroContext?.organisations,
             });
+            const gateEval = gateResultTx.evaluation;
             const preGateOk = preComplianceHroContext
               ? preComplianceHroContext.preGateResult.allowProceed
               : true;
@@ -29957,6 +30111,11 @@ export async function transitionRegisterRecordService(
               if (!lockedMatter.openedAt?.trim()) {
                 lockedMatter.openedAt = todayLocal;
               }
+              applyOpeningGateCddOutcomeToMatter(
+                lockedMatter,
+                gateResultTx.resolveCddOutcomeForOpening(),
+                lockedMatter.openedAt || todayLocal,
+              );
               lockedMatter.updatedAt = outcome.transition.transitionedAt;
               lockedMatter.updatedById = actor.id;
               const cleanFieldVals = { ...(lockedMatter.fieldValues ?? {}) };
@@ -29989,6 +30148,7 @@ export async function transitionRegisterRecordService(
                   allowProceed: true,
                   estimatedFeeGbp: preComplianceHroContext?.estimatedFeeGbp ?? 0,
                   checkedAt: outcome.transition.transitionedAt,
+                  openedViaGate: true,
                 },
                 matterOpeningSnapshot: openingSnapshot,
               };
@@ -32161,12 +32321,12 @@ export async function uploadEvidenceArtifactRecord(
 
     const { effectiveCdd } = await resolveCddModuleAndValues(ctx, tenantCfg);
     if (!input.bytes || input.bytes.byteLength <= 0) {
-      return registerServiceFailure('VALIDATION_ERROR', 'Uploaded file must not be empty.');
+      return registerServiceFailure('VALIDATION_ERROR', 'The file is empty.');
     }
     if (input.bytes.byteLength > effectiveCdd.maxEvidenceFileSizeBytes) {
       return registerServiceFailure(
         'PAYLOAD_TOO_LARGE',
-        `Uploaded file exceeds the maximum allowed size (${effectiveCdd.maxEvidenceFileSizeBytes} bytes).`,
+        `This file is too large. The limit is ${formatEvidenceSizeLimitMb(effectiveCdd.maxEvidenceFileSizeBytes)} MB.`,
       );
     }
     const normalizedMime =
@@ -32174,7 +32334,7 @@ export async function uploadEvidenceArtifactRecord(
     if (!ALLOWED_EVIDENCE_MIMES.has(normalizedMime)) {
       return registerServiceFailure(
         'UNSUPPORTED_MEDIA_TYPE',
-        `Evidence files of content type "${normalizedMime}" are not permitted.`,
+        "This type of file can't be attached. Use a PDF, image, Word, Excel or PowerPoint file.",
       );
     }
 
@@ -32184,63 +32344,62 @@ export async function uploadEvidenceArtifactRecord(
     if (preScanStatus !== 'clean') {
       return registerServiceFailure(
         'EVIDENCE_MALWARE_DETECTED',
-        `File "${safeFileName}" failed security screening (status: ${preScanStatus}) and was rejected before storage.`,
+        "This file failed a security check and can't be attached.",
       );
     }
 
     if (!verifyEvidenceMagicBytes(input.bytes, normalizedMime)) {
       return registerServiceFailure(
         'UNSUPPORTED_MEDIA_TYPE',
-        `Uploaded file content does not match declared type "${normalizedMime}".`,
+        "This file's contents don't match its file type.",
       );
     }
 
     const storage = getDocumentStorage(tenantCfg);
     const objectBucket = `${input.subjectType}-${cleanSubjectId}-${randomUUID().slice(0, 8)}`;
-    const stored = await storage.putObject(ctx, {
-      category: 'evidence',
+    const nowIso = new Date().toISOString();
+    const storeOutcome = await storeEvidenceBlobAndCreateArtifact({
+      ctx,
+      storage,
       objectId: objectBucket,
       fileName: safeFileName,
       contentType: normalizedMime,
       bytes: input.bytes,
-    });
-    if (stored.scanStatus !== 'clean') {
-      return registerServiceFailure(
-        'EVIDENCE_MALWARE_DETECTED',
-        `File "${safeFileName}" failed malware screening and cannot be linked.`,
-      );
-    }
-
-    const nowIso = new Date().toISOString();
-    const artifact = await getEvidenceArtifactRepository().createArtifact(
-      ctx,
-      {
-        blobKey: stored.blobKey,
-        subjectType: input.subjectType,
-        subjectId: cleanSubjectId,
-        fileName: safeFileName,
-        contentType: stored.contentType,
-        byteSize: stored.sizeBytes,
-        sha256: stored.sha256,
-        scanStatus: stored.scanStatus,
-        uploadedByPersonId: actor.id,
-        uploadedAt: nowIso,
-      },
-      {
-        buildAuditEntries: (createdArtifact) => [
+      createArtifact: (stored) =>
+        getEvidenceArtifactRepository().createArtifact(
+          ctx,
           {
-            recordType: 'evidence_artifact',
-            recordId: createdArtifact.id,
-            action: 'upload',
-            field: 'Evidence uploaded',
-            oldValue: '',
-            newValue: `${input.subjectType}:${cleanSubjectId} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
-            byId: actor.id,
-            at: nowIso,
+            blobKey: stored.blobKey,
+            subjectType: input.subjectType,
+            subjectId: cleanSubjectId,
+            fileName: safeFileName,
+            contentType: stored.contentType,
+            byteSize: stored.sizeBytes,
+            sha256: stored.sha256,
+            scanStatus: stored.scanStatus,
+            uploadedByPersonId: actor.id,
+            uploadedAt: nowIso,
           },
-        ],
-      },
-    );
+          {
+            buildAuditEntries: (createdArtifact) => [
+              {
+                recordType: 'evidence_artifact',
+                recordId: createdArtifact.id,
+                action: 'upload',
+                field: 'Evidence uploaded',
+                oldValue: '',
+                newValue: `${input.subjectType}:${cleanSubjectId} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
+                byId: actor.id,
+                at: nowIso,
+              },
+            ],
+          },
+        ),
+    });
+    if (!storeOutcome.ok) {
+      return registerServiceFailure(storeOutcome.code, storeOutcome.message);
+    }
+    const { artifact } = storeOutcome;
 
     const token = await storage.issueScopedDownloadToken(ctx, {
       blobKey: artifact.blobKey,
@@ -35408,7 +35567,7 @@ export async function listClientPriorMattersRecord(
     getMatterRepository().listVisibleMattersForEntity<Matter>(
       ctx,
       { clientIds: cleanIds, includeMerged: false },
-      { viewerId: actor.id, hasRestrictedMatterAccess },
+      { viewerId: actor.id, hasRestrictedMatterAccess, canViewCdd },
     ),
     partyRepo.listPeopleByIds<Person>(ctx, cleanIds),
     partyRepo.listOrganisationsByIds<Organisation>(ctx, cleanIds),
@@ -35528,7 +35687,15 @@ export async function listClientPriorMattersRecord(
   }
 
   return {
-    matters: visible.map(toClientPriorMatterSummary),
+    matters: visible.map((m) => {
+      const hasHiddenEmployeeClient = [
+        m.clientId,
+        ...(m.additionalClientIds ?? []),
+      ].some((cid) => cddSummaries[cid]?.visible === false);
+      return toClientPriorMatterSummary(m, {
+        canViewCdd: canViewCdd && !hasHiddenEmployeeClient,
+      });
+    }),
     cddSummaries,
   };
 }
@@ -35947,6 +36114,7 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
   ctx: TenantContext;
   matter: Matter;
   targetStatusId: string;
+  cddOutcome: OpeningGateCddOutcomeStatus;
   todayLocal: string;
   nowIso: string;
   actorId: string;
@@ -35969,6 +36137,7 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
     ctx,
     matter,
     targetStatusId,
+    cddOutcome,
     todayLocal,
     nowIso,
     actorId,
@@ -35993,6 +36162,11 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
   if (!matter.openedAt?.trim()) {
     matter.openedAt = todayLocal;
   }
+  applyOpeningGateCddOutcomeToMatter(
+    matter,
+    cddOutcome,
+    matter.openedAt || todayLocal,
+  );
   matter.updatedAt = nowIso;
   matter.updatedById = actorId;
   const cleanFieldVals = { ...(matter.fieldValues ?? {}) };
@@ -36015,6 +36189,7 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
       allowProceed: true,
       estimatedFeeGbp,
       checkedAt: nowIso,
+      openedViaGate: true,
     },
     matterOpeningSnapshot: openingSnapshot,
   };
@@ -36285,7 +36460,7 @@ export async function openProspectiveMatterRecord(
 
     const store = await loadTenantCatalogueStoreView(ctx);
     const prospectiveStatusId = resolveProspectiveStatusId(store);
-    const cmiIncompleteStatusId = resolveCmiIncompleteStatusId(store);
+    const activeStatusId = resolveActiveMatterStatusId(store);
     if (
       !isMatterStatusProspectiveOrDraftLike(
         matter.matterStatusId,
@@ -36446,7 +36621,6 @@ export async function openProspectiveMatterRecord(
           matter: lockedMatter,
           values: inTxDbValues,
           actorId: actor.id,
-          actorPermissionSet: permSet.permissions,
           isDraftSave: false,
           people: scoped.people,
           teams,
@@ -36454,7 +36628,7 @@ export async function openProspectiveMatterRecord(
         });
       }
 
-      const gateEval = await evaluateAndEnforceOpeningGateInTx({
+      const gateResultTx = await evaluateOpeningGateForServerInTx({
         tx,
         ctx,
         matter: lockedMatter,
@@ -36466,6 +36640,7 @@ export async function openProspectiveMatterRecord(
         tenantCfg,
         organisations: scoped.organisations,
       });
+      const gateEval = gateResultTx.evaluation;
 
       if (!preGate.allowProceed || !gateEval.canOpen) {
         lockedMatter.fieldValues = {
@@ -36506,7 +36681,8 @@ export async function openProspectiveMatterRecord(
       const openedMatter = await finalizeProspectiveMatterOpeningInTx({
         ctx,
         matter: lockedMatter,
-        targetStatusId: cmiIncompleteStatusId,
+        targetStatusId: activeStatusId,
+        cddOutcome: gateResultTx.resolveCddOutcomeForOpening(),
         todayLocal,
         nowIso,
         actorId: actor.id,

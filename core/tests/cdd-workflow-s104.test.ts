@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CORE_REGISTER_TYPES,
   CORE_REQUIRED_SCHEMA_VERSION,
@@ -47,6 +47,7 @@ import {
   searchGlobalRecords,
   transitionRegisterRecordService,
   updateRegisterRecordDetailsService,
+  uploadEvidenceArtifactRecord,
 } from '@/server/services';
 import {
   runAsTestActor,
@@ -116,6 +117,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
   const openPoolManagers: TenantPostgresPoolManager[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     setAuditAdapterFailureHookForTesting(null);
     setTestActorSession(null);
     setActiveTenantConfigForTesting(null);
@@ -648,8 +650,9 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(malwareRes.status).toBe(422);
-    const malwareJson = (await malwareRes.json()) as { code?: string };
+    const malwareJson = (await malwareRes.json()) as { code?: string; error?: string };
     expect(malwareJson.code).toBe('EVIDENCE_MALWARE_DETECTED');
+    expect(malwareJson.error).toBe("This file failed a security check and can't be attached.");
     const postArtifacts = await evidenceRepo.listArtifactsForSubject(testTenantCtx('P-000010'), {
       subjectType: 'person',
       subjectId: 'P-000015',
@@ -738,6 +741,10 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(missingLenRes.status).toBe(411);
+    const missingLenJson = (await missingLenRes.json()) as { error?: string };
+    expect(missingLenJson.error).toBe(
+      "The upload couldn't be checked because the file size wasn't sent. Please try again.",
+    );
 
     let formDataCalledOnOversize = false;
     const oversizeReq = new Request('http://localhost/api/evidence/upload', {
@@ -760,7 +767,64 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(oversizeRes.status).toBe(413);
+    const oversizeJson = (await oversizeRes.json()) as { error?: string };
+    expect(oversizeJson.error).toBe('This file is too large. The limit is 10 MB.');
     expect(formDataCalledOnOversize).toBe(false);
+
+    // Missing file field & R805 service-level plain-English messages
+    const missingFileForm = new FormData();
+    missingFileForm.set('subjectType', 'person');
+    missingFileForm.set('subjectId', 'P-000015');
+    const missingFileRes = await runAsActionActor(
+      'P-000010',
+      async () => uploadRoute!.POST(await buildMultipartUploadRequest(missingFileForm)),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(missingFileRes.status).toBe(400);
+    const missingFileJson = (await missingFileRes.json()) as { error?: string };
+    expect(missingFileJson.error).toBe('Please choose a file to attach.');
+
+    const emptyServiceRes = await runAsActionActor(
+      'P-000010',
+      () =>
+        uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'person',
+            subjectId: 'P-000015',
+            fileName: 'empty-passport.pdf',
+            contentType: 'application/pdf',
+            bytes: new Uint8Array(0),
+          },
+          'P-000010',
+        ),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(emptyServiceRes.ok).toBe(false);
+    if (!emptyServiceRes.ok) {
+      expect(emptyServiceRes.code).toBe('VALIDATION_ERROR');
+      expect(emptyServiceRes.message).toBe('The file is empty.');
+    }
+
+    const oversizeServiceRes = await runAsActionActor(
+      'P-000010',
+      () =>
+        uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'person',
+            subjectId: 'P-000015',
+            fileName: 'huge-passport.pdf',
+            contentType: 'application/pdf',
+            bytes: new Uint8Array(11 * 1024 * 1024),
+          },
+          'P-000010',
+        ),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(oversizeServiceRes.ok).toBe(false);
+    if (!oversizeServiceRes.ok) {
+      expect(oversizeServiceRes.code).toBe('PAYLOAD_TOO_LARGE');
+      expect(oversizeServiceRes.message).toBe('This file is too large. The limit is 10 MB.');
+    }
 
     //    (c) Allowlist MIME + magic-byte check: HTML / spoofed PDF / WebP / text refused; valid HEIC / PPTX accepted
     const badMimeForm = new FormData();
@@ -774,6 +838,10 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(badMimeRes.status).toBe(415);
+    const badMimeJson = (await badMimeRes.json()) as { error?: string };
+    expect(badMimeJson.error).toBe(
+      "This type of file can't be attached. Use a PDF, image, Word, Excel or PowerPoint file.",
+    );
 
     const spoofedPdfForm = new FormData();
     spoofedPdfForm.set('subjectType', 'person');
@@ -785,6 +853,31 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(spoofedPdfRes.status).toBe(415);
+    const spoofedPdfJson = (await spoofedPdfRes.json()) as { error?: string };
+    expect(spoofedPdfJson.error).toBe("This file's contents don't match its file type.");
+
+    // R805: verify no upload error exposes MIME types, raw byte counts, status codes, or uploaded filenames
+    const collectedUploadMessages = [
+      malwareJson.error ?? '',
+      missingLenJson.error ?? '',
+      oversizeJson.error ?? '',
+      missingFileJson.error ?? '',
+      !emptyServiceRes.ok ? emptyServiceRes.message : '',
+      !oversizeServiceRes.ok ? oversizeServiceRes.message : '',
+      badMimeJson.error ?? '',
+      spoofedPdfJson.error ?? '',
+    ];
+    for (const msg of collectedUploadMessages) {
+      expect(msg.length).toBeGreaterThan(0);
+      expect(msg).not.toContain('application/');
+      expect(msg).not.toContain('bytes');
+      expect(msg).not.toContain('status:');
+      expect(msg).not.toContain('eicar-passport.pdf');
+      expect(msg).not.toContain('empty-passport.pdf');
+      expect(msg).not.toContain('huge-passport.pdf');
+      expect(msg).not.toContain('page.html');
+      expect(msg).not.toContain('fake.pdf');
+    }
 
     for (const removedMime of [
       { ext: 'webp', type: 'image/webp', bytes: new TextEncoder().encode('RIFFxxxxWEBP') },
@@ -823,6 +916,50 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(pptxRes.status).toBe(200);
+
+    //    (d) R807: post-storage non-clean scan deletes stored blob and returns plain-English security message
+    const activeStorage = getDocumentStorage(getActiveTenantConfiguration());
+    let orphanCandidateBlobKey = '';
+    const origPutObject = activeStorage.putObject.bind(activeStorage);
+    const putSpy = vi
+      .spyOn(activeStorage, 'putObject')
+      .mockImplementation(async (putCtx, putInput) => {
+        const stored = await origPutObject(putCtx, putInput);
+        orphanCandidateBlobKey = stored.blobKey;
+        return { ...stored, scanStatus: 'infected' };
+      });
+    try {
+      const postScanRes = await runAsActionActor(
+        'P-000010',
+        () =>
+          uploadEvidenceArtifactRecord(
+            {
+              subjectType: 'person',
+              subjectId: 'P-000015',
+              fileName: 'post-scan-suspect.pdf',
+              contentType: 'application/pdf',
+              bytes: new TextEncoder().encode('%PDF-1.4\n%Clean bytes flagged post-storage'),
+            },
+            'P-000010',
+          ),
+        { roles: ['legal_secretary'], mfaVerified: false },
+      );
+      expect(postScanRes.ok).toBe(false);
+      if (!postScanRes.ok) {
+        expect(postScanRes.code).toBe('EVIDENCE_MALWARE_DETECTED');
+        expect(postScanRes.message).toBe(
+          "This file failed a security check and can't be attached.",
+        );
+      }
+      expect(orphanCandidateBlobKey).toBeTruthy();
+      await expect(
+        activeStorage.getObjectBytes(testTenantCtx('P-000010'), {
+          blobKey: orphanCandidateBlobKey,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      putSpy.mockRestore();
+    }
 
     // 6. R777 two-tenant isolation: Alpha evidence token presented in Bravo, forged tenant claim, cross-tenant subjectId
     await provisionPostgresClusterRolesAndDatabases({

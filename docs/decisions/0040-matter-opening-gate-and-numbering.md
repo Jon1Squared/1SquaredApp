@@ -2,6 +2,7 @@
 
 - **Date:** 2026-11-24
 - **Status:** Accepted (owner, 24 Nov 2026)
+- **Amended 26 Nov 2026 (R810/R811, owner-confirmed):** Gate-cleared openings now go to `active` on every path. They previously went to `cmi_incomplete` on `saveMatterRecord` and `openProspectiveMatterRecord`. When the gate opens a matter, it also records the client due diligence outcome on the matter (`Verified`, `Overridden` or `Not required`).
 - **Roadmap:** Stage 1 decisions `S1-D6`, `S1-D7`, `S1-D8`, `S1-D10`; Work Package 2 slice `S1-05` ([stage-1-plan.md](../roadmap/stage-1-plan.md)); backlog items `4` and `B6`
 - **Builds on:** [ADR 0014](./0014-staff-matter-access-by-permission.md) (restricted matters), [ADR 0022](./0022-key-dates-and-limitation-module.md) (key dates opening gate), [ADR 0025](./0025-permission-enforcement-pattern.md) (permission enforcement), [ADR 0028](./0028-tenant-database-and-repositories.md) (tenant databases & repositories), [ADR 0032](./0032-registers-engine.md) (registers engine), [ADR 0034](./0034-fee-arrangements-and-caps.md) (work-type config overrides), [ADR 0039](./0039-registers-engine-extensions-cdd-high-risk.md) (high-risk opening & CDD registers)
 
@@ -82,8 +83,12 @@ Because this establishes a platform-wide transactional gate invariant, an audite
 ### 3. Opening definition, complete path inventory & `evaluateAndEnforceOpeningGateInTx` (`R741`, `R742`, `R751`)
 - **Definition of "opening" (`R741`):**
   - Opening is strictly **the first transition out of `prospective` or draft-like (`matterHasOpened === false`, `src/server/services.ts:5730-5742`) into any opened status (`cmi_incomplete`, `active`, or `on_hold`)**.
-  - **Server-owned status on first opening:** On that first opening transition, the **server chooses the destination opened status** (`cmi_incomplete` in `saveMatterRecord` and `openProspectiveMatterRecord`, or `active` where conflict-approval, cost sign-off, and `compliance_approve` do so today) and **ignores any caller-supplied `input.matterStatusId`** from `saveMatterAction` or external callers (closing the `resolveNextMatterStatusId` bypass at `services.ts:5773-5776` where crafted `submit_cleared` payloads could jump directly to `active` or `closed`). Only internal `source === 'pms_import'` calls from `createRecordFromPms` may supply initial `input.matterStatusId` / `input.matterNumber`.
-  - Subsequent transitions between already-opened statuses (`cmi_incomplete → active`, `active → on_hold`) and reopening from `closed` (`updateMatterLifecycleStatusRecord`, `:25916-25970`) are **not openings** and are **not gated**.
+  - **Server-owned status on first opening (`R810`/`R811`):** On first opening, the server always moves the matter to **`active`** on all five gated paths (`saveMatterRecord`, `openProspectiveMatterRecord`, `updateMatterConflictRecord`, `signOffMatterCostsRecord`, `high_risk_opening` `compliance_approve`), records the client due diligence outcome (`Verified`, `Overridden`, or `Not required`) before building the opening snapshot, and **ignores any caller-supplied `input.matterStatusId`** from `saveMatterAction` or external callers (closing the `resolveNextMatterStatusId` bypass at `services.ts:5773-5776` where crafted `submit_cleared` payloads could jump directly to `active` or `closed`). Only internal `source === 'pms_import'` calls from `createRecordFromPms` may supply initial `input.matterStatusId` / `input.matterNumber`.
+  - Where `cmi_incomplete` stays:
+    - as the status for PMS-imported matters;
+    - for legacy matters;
+    - as a status that can still be chosen between already-opened statuses (`active` → `cmi_incomplete` → `active`), which isn't an opening and isn't gated.
+  - Subsequent transitions between already-opened statuses (`active` → `cmi_incomplete` → `active`, `active` → `on_hold`) and reopening from `closed` (`updateMatterLifecycleStatusRecord`, `:25916-25970`) are **not openings** and are **not gated**.
 - **Complete inventory of matter creation / opening paths (`R742`, `R751`):**
   1. `saveMatterRecord` (also called by enquiry conversion `prepareEnquiryConversion` and quote conversion `prepareQuoteConversionRecord` — neither conversion path is separate),
   2. Dedicated **"Open matter"** retry action (`openProspectiveMatterAction` / `openProspectiveMatterRecord`, `matter:edit`) so previously blocked `prospective` matters can be opened cleanly once late CDD, engagement, or overrides arrive (`granting an override never opens the matter by itself`),

@@ -3,6 +3,10 @@ import { isInactiveStatus } from './attention';
 import { formatDate } from './dates';
 import { enquiryDisplayName, isEnquiryOpen } from './enquiries';
 import { resolveLabel, systemKeyOf } from './lists';
+import {
+  resolveMatterStatusPill,
+  resolveMatterStatusSystemKey,
+} from './matterStatusDisplay';
 import { personDisplayName, personFullName } from './names';
 import type { SearchDoc, SearchField, StatusTone } from './search';
 import { isTaskOpen, isTaskOverdue } from './tasks';
@@ -126,16 +130,15 @@ export function buildSearchIndex(
     for (const t of m.tags) fields.push({ kind: 'tag', text: t });
 
     const pills: { label: string; tone: StatusTone }[] = [];
-    if (m.conflictCheckStatus.toLowerCase().includes('conflict')) {
+    const statusPill = resolveMatterStatusPill(m, values);
+    const statusSysKey = resolveMatterStatusSystemKey(m.matterStatusId, values);
+    if (statusPill.isConflictFlagged) {
       pills.push({ label: m.conflictCheckStatus, tone: 'alert' });
     }
-    const statusLabel = resolveLabel(values, m.matterStatusId) || 'Active';
-    if (
-      statusLabel === 'CMI incomplete' ||
-      m.amlStatus === 'CMI incomplete' ||
-      m.amlStatus === 'Pending'
-    ) {
+    if (statusPill.isCmiIncomplete) {
       pills.push({ label: 'CMI incomplete', tone: 'warning' });
+    } else if (statusSysKey === 'prospective') {
+      pills.push({ label: 'Prospective', tone: 'warning' });
     } else if (m.amlStatus === 'High risk / EDD') {
       pills.push({ label: `AML: ${m.amlStatus}`, tone: 'warning' });
     }
@@ -145,7 +148,9 @@ export function buildSearchIndex(
       type: 'matter',
       title: `${m.matterNumber} — ${m.title}`,
       subtitle: [clientLabel, subcatLabel].filter(Boolean).join(' · '),
-      status: resolveLabel(values, m.matterStatusId) || 'Active',
+      status: statusPill.isConflictFlagged
+        ? resolveLabel(values, m.matterStatusId) || 'Active'
+        : statusPill.label,
       pills,
       fields,
       inactive: false,

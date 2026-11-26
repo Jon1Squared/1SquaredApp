@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
-import type { EvidenceArtifactSubjectType } from '@platform/core';
+import {
+  emitTenantTelemetryException,
+  type EvidenceArtifactSubjectType,
+} from '@platform/core';
 import { isActionDenied } from '@/domain/actionResult';
+import { formatEvidenceSizeLimitMb } from '@/domain/cdd';
 import { guardedRoute } from '@/server/authorize';
 import {
   resolveEffectiveCddMaxEvidenceBytesRecord,
@@ -19,7 +23,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         {
           ok: false,
           code: 'LENGTH_REQUIRED',
-          error: 'A valid positive Content-Length header is required for evidence uploads.',
+          error: "The upload couldn't be checked because the file size wasn't sent. Please try again.",
         },
         { status: 411 },
       );
@@ -30,7 +34,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         {
           ok: false,
           code: 'LENGTH_REQUIRED',
-          error: 'A valid positive Content-Length header is required for evidence uploads.',
+          error: "The upload couldn't be checked because the file size wasn't sent. Please try again.",
         },
         { status: 411 },
       );
@@ -45,20 +49,32 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         {
           ok: false,
           code: 'PAYLOAD_TOO_LARGE',
-          error: 'Uploaded request exceeds the maximum allowed evidence file size.',
+          error: `This file is too large. The limit is ${formatEvidenceSizeLimitMb(maxBytes)} MB.`,
         },
         { status: 413 },
       );
     }
 
-    const formData = await request.formData();
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: 'VALIDATION_ERROR',
+          error: 'The uploaded file could not be read. Please try again.',
+        },
+        { status: 400 },
+      );
+    }
     const subjectTypeRaw = String(formData.get('subjectType') ?? '').trim();
     const subjectId = String(formData.get('subjectId') ?? '').trim();
     const fileEntry = formData.get('file');
 
     if (!fileEntry || typeof fileEntry === 'string' || typeof fileEntry.arrayBuffer !== 'function') {
       return NextResponse.json(
-        { ok: false, code: 'VALIDATION_ERROR', error: 'A multipart file field "file" is required.' },
+        { ok: false, code: 'VALIDATION_ERROR', error: 'Please choose a file to attach.' },
         { status: 400 },
       );
     }
@@ -85,6 +101,16 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
       );
     }
     if (!result.ok) {
+      if (result.code === 'INTERNAL_ERROR') {
+        return NextResponse.json(
+          {
+            ok: false,
+            code: 'INTERNAL_ERROR',
+            error: 'Something went wrong while uploading the file. Please try again.',
+          },
+          { status: 500 },
+        );
+      }
       const status =
         result.code === 'EVIDENCE_MALWARE_DETECTED'
           ? 422
@@ -94,7 +120,11 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
               ? 415
               : result.code === 'NOT_FOUND'
                 ? 404
-                : 400;
+                : result.code === 'FORBIDDEN'
+                  ? 403
+                  : result.code === 'UNAUTHENTICATED'
+                    ? 401
+                    : 400;
       return NextResponse.json(
         { ok: false, code: result.code, error: result.message },
         { status },
@@ -116,10 +146,26 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
         },
       },
     );
-  } catch {
+  } catch (err) {
+    if (actor?.tenantContext?.tenantId && actor?.tenantContext?.correlationId) {
+      try {
+        emitTenantTelemetryException({
+          eventName: 'api.evidence.upload.unhandled_error',
+          tenantId: actor.tenantContext.tenantId,
+          correlationId: actor.tenantContext.correlationId,
+          error: err,
+        });
+      } catch {
+        // Never fail error responses if telemetry logging fails.
+      }
+    }
     return NextResponse.json(
-      { ok: false, code: 'UPLOAD_ERROR', error: 'Unable to upload evidence file.' },
-      { status: 400 },
+      {
+        ok: false,
+        code: 'INTERNAL_ERROR',
+        error: 'Something went wrong while uploading the file. Please try again.',
+      },
+      { status: 500 },
     );
   }
 });

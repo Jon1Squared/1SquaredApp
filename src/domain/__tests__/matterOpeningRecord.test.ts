@@ -386,5 +386,25 @@ describe('matterOpeningRecord domain helpers (R345, R365, R367, R372)', () => {
     });
     expect(hiddenEmpCddRes.option).toBe('New client');
     expect(hiddenEmpCddRes.summary).not.toContain('Recorded manually');
+
+    // 4. R812: When viewer lacks cdd:view, toClientPriorMatterSummary omits amlStatus
+    const redactedPriorSummary = toClientPriorMatterSummary(
+      {
+        id: 'M-VERIFIED-PRIOR',
+        clientId: orgUnverifiedStatus.id,
+        additionalClientIds: [personVerified.id],
+        conflictCheckStatus: 'Clear',
+        amlStatus: 'Verified',
+      },
+      { canViewCdd: false },
+    );
+    expect(redactedPriorSummary).toEqual({
+      id: 'M-VERIFIED-PRIOR',
+      clientId: orgUnverifiedStatus.id,
+      additionalClientIds: [personVerified.id],
+      conflictCheckStatus: 'Clear',
+    });
+    expect('amlStatus' in redactedPriorSummary).toBe(false);
+    expect(redactedPriorSummary.amlStatus).toBeUndefined();
   });
 });
