@@ -105,7 +105,7 @@ export function scanBytesForMalwareAndMacros(
   bytes: Uint8Array,
   fileName: string,
 ): MalwareScanStatus {
-  if (/\.docm$/i.test(fileName) || /\.dotm$/i.test(fileName)) {
+  if (/\.(docm|dotm|xlsm|xltm|pptm|potm)$/i.test(fileName)) {
     return 'infected';
   }
   const textSample = new TextDecoder('latin1').decode(

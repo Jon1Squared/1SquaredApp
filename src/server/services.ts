@@ -297,6 +297,8 @@ import {
 import {
   buildHiddenClientCddSummary,
   isCddDueExpired,
+  type CddChecklistItemEvidenceSummary,
+  type CddChecklistItemSummary,
   type CddEvidenceDownloadableRef,
   type CddWorkflowStatus,
   type ClientCddCompactSummary,
@@ -27191,7 +27193,7 @@ async function assertActorCanAccessClientCddSubject(params: {
     if (!org || org.mergedIntoId) {
       return {
         ok: false,
-        denial: registerServiceFailure('NOT_FOUND', `Organisation "${cleanId}" was not found.`),
+        denial: registerServiceFailure('NOT_FOUND', 'Client subject was not found.'),
       };
     }
     return { ok: true, targetPerson: null, targetOrganisation: org, isEmployeeClient: false };
@@ -27201,7 +27203,7 @@ async function assertActorCanAccessClientCddSubject(params: {
   if (!targetPerson || targetPerson.mergedIntoId) {
     return {
       ok: false,
-      denial: registerServiceFailure('NOT_FOUND', `Person "${cleanId}" was not found.`),
+      denial: registerServiceFailure('NOT_FOUND', 'Client subject was not found.'),
     };
   }
 
@@ -27226,10 +27228,7 @@ async function assertActorCanAccessClientCddSubject(params: {
       if (!isParticipant) {
         return {
           ok: false,
-          denial: registerServiceFailure(
-            'FORBIDDEN',
-            'You do not have permission to access client CDD records for this employee.',
-          ),
+          denial: registerServiceFailure('NOT_FOUND', 'Client subject was not found.'),
         };
       }
     }
@@ -27409,6 +27408,10 @@ export async function getRegisterRecordDetailRecord(
     if (!record) {
       return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
     }
+    if (record.registerTypeKey === 'cdd' && !permSet.permissions.has('cdd:view')) {
+      // R800: Callers without cdd:view receive identical NOT_FOUND for every CDD ID.
+      return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
+    }
     const dbOverride = await getCatalogueRepository().getModuleConfig<RegistersConfiguration>(
       ctx,
       'registers',
@@ -27440,10 +27443,7 @@ export async function getRegisterRecordDetailRecord(
         rbacConfig,
       });
       if (!cddAccess.ok) {
-        if (cddAccess.denial.code === 'FORBIDDEN') {
-          return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
-        }
-        return cddAccess.denial;
+        return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
       }
     }
     if (record.matterId) {
@@ -27797,8 +27797,12 @@ export async function transitionRegisterRecordService(
       return registerServiceFailure('NOT_FOUND', 'Sign-off record was not found.');
     }
     if (existingPre.registerTypeKey === 'cdd') {
+      if (!permSet.permissions.has('cdd:view')) {
+        // R800: Callers without cdd:view receive identical NOT_FOUND for every CDD ID.
+        return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
+      }
       if (existingPre.personId || existingPre.organisationId) {
-        const cddAccess = await assertActorCanAccessClientCddSubject({
+        const viewAccess = await assertActorCanAccessClientCddSubject({
           ctx,
           actor,
           permSet,
@@ -27807,16 +27811,14 @@ export async function transitionRegisterRecordService(
           people,
           teams,
           rbacConfig,
-          requireRecordPermission: true,
+          requireRecordPermission: false,
         });
-        if (!cddAccess.ok) {
-          if (!permSet.permissions.has('cdd:record')) {
-            return cddAccess.denial;
-          }
-          // R770: return identical NOT_FOUND for hidden employee-client CDD IDs
+        if (!viewAccess.ok) {
+          // R770 / R800: Return identical NOT_FOUND for hidden employee-client or missing CDD subjects.
           return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
         }
-      } else if (!permSet.permissions.has('cdd:record')) {
+      }
+      if (!permSet.permissions.has('cdd:record')) {
         return registerServiceFailure(
           'FORBIDDEN',
           'Missing required permission "cdd:record" to record or update client CDD.',
@@ -28159,8 +28161,12 @@ export async function updateRegisterRecordDetailsService(
       return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
     }
     if (existing.registerTypeKey === 'cdd') {
+      if (!permSet.permissions.has('cdd:view')) {
+        // R800: Callers without cdd:view receive identical NOT_FOUND for every CDD ID.
+        return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
+      }
       if (existing.personId || existing.organisationId) {
-        const cddAccess = await assertActorCanAccessClientCddSubject({
+        const viewAccess = await assertActorCanAccessClientCddSubject({
           ctx,
           actor,
           permSet,
@@ -28169,16 +28175,14 @@ export async function updateRegisterRecordDetailsService(
           people,
           teams,
           rbacConfig,
-          requireRecordPermission: true,
+          requireRecordPermission: false,
         });
-        if (!cddAccess.ok) {
-          if (!permSet.permissions.has('cdd:record')) {
-            return cddAccess.denial;
-          }
-          // R770: return identical NOT_FOUND for hidden employee-client CDD IDs
+        if (!viewAccess.ok) {
+          // R770 / R800: Return identical NOT_FOUND for hidden employee-client or missing CDD subjects.
           return registerServiceFailure('NOT_FOUND', 'Register record was not found.');
         }
-      } else if (!permSet.permissions.has('cdd:record')) {
+      }
+      if (!permSet.permissions.has('cdd:record')) {
         return registerServiceFailure(
           'FORBIDDEN',
           'Missing required permission "cdd:record" to record or update client CDD.',
@@ -28462,11 +28466,19 @@ async function resolveEvidenceRefsDownloadable(params: {
   subjectType: 'person' | 'organisation';
   subjectId: string;
   recordId?: string;
-}): Promise<CddEvidenceDownloadableRef[]> {
+}): Promise<{
+  evidenceRefs: CddEvidenceDownloadableRef[];
+  itemSummaryByBlobKey: Map<string, CddChecklistItemEvidenceSummary>;
+  verifiedBlobKeys: Set<string>;
+}> {
   const { ctx, storage, refs, subjectType, subjectId, recordId } = params;
-  if (refs.length === 0) return [];
-  const evidenceRepo = getEvidenceArtifactRepository();
   const out: CddEvidenceDownloadableRef[] = [];
+  const itemSummaryByBlobKey = new Map<string, CddChecklistItemEvidenceSummary>();
+  const verifiedBlobKeys = new Set<string>();
+  if (refs.length === 0) {
+    return { evidenceRefs: out, itemSummaryByBlobKey, verifiedBlobKeys };
+  }
+  const evidenceRepo = getEvidenceArtifactRepository();
   for (const ref of refs) {
     const artifact = await evidenceRepo.getArtifactByBlobKey(ctx, ref.blobKey);
     if (!artifact || artifact.scanStatus !== 'clean') {
@@ -28485,13 +28497,15 @@ async function resolveEvidenceRefsDownloadable(params: {
       );
       continue;
     }
+    verifiedBlobKeys.add(artifact.blobKey);
+    const safeName = artifact.fileName || ref.fileName || 'evidence.bin';
     try {
-      const safeName = artifact.fileName || ref.fileName || 'evidence.bin';
       const token = await storage.issueScopedDownloadToken(ctx, {
         blobKey: artifact.blobKey,
         fileName: safeName,
         documentId: artifact.id,
       });
+      const downloadUrl = `/api/evidence/download?token=${encodeURIComponent(token.token)}`;
       out.push({
         ...ref,
         fileName: safeName,
@@ -28502,7 +28516,13 @@ async function resolveEvidenceRefsDownloadable(params: {
         uploadedByActorId: artifact.uploadedByPersonId,
         uploadedAt: artifact.uploadedAt,
         artifactId: artifact.id,
-        downloadUrl: `/api/evidence/download?token=${encodeURIComponent(token.token)}`,
+        downloadUrl,
+      });
+      itemSummaryByBlobKey.set(artifact.blobKey, {
+        artifactId: artifact.id,
+        displayName: safeName,
+        downloadable: true,
+        downloadUrl,
       });
     } catch {
       console.warn(
@@ -28515,10 +28535,15 @@ async function resolveEvidenceRefsDownloadable(params: {
           recordId: recordId ?? null,
         }),
       );
+      itemSummaryByBlobKey.set(artifact.blobKey, {
+        artifactId: artifact.id,
+        displayName: safeName,
+        downloadable: false,
+      });
       continue;
     }
   }
-  return out;
+  return { evidenceRefs: out, itemSummaryByBlobKey, verifiedBlobKeys };
 }
 
 async function verifyEvidenceRefsOwnedInTx(params: {
@@ -28649,6 +28674,8 @@ async function buildClientCddSummaryInternal(params: {
   const canBypassEmployeeCddVisibility = permSet.permissions.has('risk:view') || hasRestrictedMatterAccess;
 
   const registerRepo = getRegisterRepository();
+  // R799: Client risk tier is ALWAYS derived firm-wide (never revealing which hidden matter caused it)
+  // so the tier shown on the CDD card and Upgrade trigger matches server enforcement on completion/creation.
   const [cddRecords, clientMatters, matterStatuses] = await Promise.all([
     registerRepo.listVisibleRegisterRecords(ctx, actor.id, {
       registerTypeKey: 'cdd',
@@ -28660,7 +28687,7 @@ async function buildClientCddSummaryInternal(params: {
     getMatterRepository().listVisibleMattersForEntity<Matter>(
       ctx,
       { clientIds: [subjectId], includeMerged: false },
-      { viewerId: actor.id, hasRestrictedMatterAccess },
+      { viewerId: actor.id, hasRestrictedMatterAccess: true },
     ),
     getCatalogueRepository().listChoiceValuesForList(ctx, 'matter_status'),
   ]);
@@ -28672,7 +28699,7 @@ async function buildClientCddSummaryInternal(params: {
     targetOrganisation,
     effectiveCdd,
     riskSystemKeyById,
-    includeRestrictedMatters: hasRestrictedMatterAccess,
+    includeRestrictedMatters: true,
     preloadedMatters: clientMatters,
     preloadedMatterStatuses: matterStatuses as unknown as ChoiceValue[],
   });
@@ -28751,7 +28778,11 @@ async function buildClientCddSummaryInternal(params: {
       }
     }
   }
-  const evidenceRefs = await resolveEvidenceRefsDownloadable({
+  const {
+    evidenceRefs,
+    itemSummaryByBlobKey,
+    verifiedBlobKeys,
+  } = await resolveEvidenceRefsDownloadable({
     ctx,
     storage,
     refs: combinedEvidenceRefs,
@@ -28759,6 +28790,43 @@ async function buildClientCddSummaryInternal(params: {
     subjectId,
     recordId: activeRecord.id,
   });
+
+  // R801: Filter every checklist item's evidenceRefs to verified same-subject refs and emit slim metadata only.
+  const sanitisedChecklistItems: CddChecklistItemSummary[] = rawChecklist.map((item) => {
+    const filteredRefs: CddChecklistItemEvidenceSummary[] = [];
+    const seenIds = new Set<string>();
+    for (const ref of item.evidenceRefs ?? []) {
+      const itemRef = itemSummaryByBlobKey.get(ref.blobKey);
+      if (itemRef && !seenIds.has(itemRef.artifactId)) {
+        seenIds.add(itemRef.artifactId);
+        filteredRefs.push(itemRef);
+      }
+    }
+    return {
+      itemKey: item.itemKey,
+      label: item.label,
+      required: item.required,
+      status: item.status,
+      recordedById: item.recordedById,
+      recordedByName: item.recordedByName,
+      recordedAt: item.recordedAt,
+      note: item.note,
+      intakeCheckRecordId: item.intakeCheckRecordId,
+      evidenceRefs: filteredRefs,
+    };
+  });
+
+  const sanitisedRecord: RegisterRecord = {
+    ...activeRecord,
+    fieldValues: {
+      ...activeRecord.fieldValues,
+      checklistItems: rawChecklist.map((item) => ({
+        ...item,
+        evidenceRefs: (item.evidenceRefs ?? []).filter((r) => verifiedBlobKeys.has(r.blobKey)),
+      })),
+      supportingEvidence: rawEvidenceRefs.filter((r) => verifiedBlobKeys.has(r.blobKey)),
+    },
+  };
 
   const recordTier: CddRiskTierKey =
     activeRecord.fieldValues.riskTier === 'high' ? 'high' : 'standard';
@@ -28773,7 +28841,7 @@ async function buildClientCddSummaryInternal(params: {
     const decider =
       people.find((p) => p.id === decidedActorId) ??
       (await getPartyRepository().getPersonById<Person>(ctx, decidedActorId));
-    recordedByName = decider ? personDisplayName(decider) : decidedActorId;
+    recordedByName = decider ? personDisplayName(decider) : null;
   }
 
   const todayYmd = resolveTenantLocalDateAndHour(
@@ -28790,7 +28858,7 @@ async function buildClientCddSummaryInternal(params: {
     subjectId,
     hasRecord: true,
     recordId: activeRecord.id,
-    record: activeRecord,
+    record: sanitisedRecord,
     status: activeRecord.status as CddWorkflowStatus,
     clientCategory: resolvedCategory,
     riskTier: recordTier,
@@ -28799,7 +28867,7 @@ async function buildClientCddSummaryInternal(params: {
       recordTier === 'standard' &&
       derivedRiskTier === 'high' &&
       (activeRecord.status === 'in_progress' || activeRecord.status === 'recorded'),
-    checklistItems: rawChecklist,
+    checklistItems: sanitisedChecklistItems,
     evidenceRefs,
     recordedByName,
     recordedAt: activeRecord.status === 'recorded' ? (activeRecord.decidedAt ?? activeRecord.updatedAt) : null,
@@ -29002,7 +29070,7 @@ export async function startOrLoadClientCddRecord(
               actorPermissionSet: permSet.permissions,
               comment: input.reason?.trim() || 'Upgraded client CDD tier to High Risk',
               expectedRowVersion: locked.rowVersion,
-              isSystemActor: true,
+              viaDedicatedWorkflow: true,
             });
             const lockedCategory =
               (typeof locked.fieldValues.clientCategory === 'string'
@@ -29414,7 +29482,7 @@ export async function completeClientCddRecord(
             actorPermissionSet: permSet.permissions,
             comment: input.manualSummaryNote ?? null,
             expectedRowVersion: input.expectedRowVersion ?? locked.rowVersion,
-            isSystemActor: true,
+            viaDedicatedWorkflow: true,
           });
           const riskTier: CddRiskTierKey =
             locked.fieldValues.riskTier === 'high' ? 'high' : 'standard';
@@ -29716,22 +29784,100 @@ const VALID_EVIDENCE_SUBJECT_TYPES = new Set<EvidenceArtifactSubjectType>([
   'register',
 ]);
 
-// R775: Strict MIME allowlist (PDF, JPEG, PNG, HEIC/HEIF, WebP, TIFF, plain text, Word .doc/.docx, Excel .xls/.xlsx).
-// Active content (HTML, SVG, JS, executables) and arbitrary octet-streams are rejected unconditionally.
+// Strict planned MIME allowlist (PDF, JPEG, PNG, HEIC/HEIF, Word .doc/.docx, Excel .xls/.xlsx, PowerPoint .ppt/.pptx).
+// Active content (HTML, SVG, JS, executables), WebP, TIFF, plain text, and arbitrary octet-streams are rejected unconditionally.
 const ALLOWED_EVIDENCE_MIMES = new Set<string>([
   'application/pdf',
   'image/jpeg',
   'image/png',
   'image/heic',
   'image/heif',
-  'image/webp',
-  'image/tiff',
-  'text/plain',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ]);
+
+const HEIF_BRANDS = new Set([
+  'heic',
+  'heix',
+  'hevc',
+  'hevx',
+  'heim',
+  'heis',
+  'mif1',
+  'msf1',
+  'heif',
+]);
+
+function verifyEvidenceMagicBytes(bytes: Uint8Array, declaredMime: string): boolean {
+  switch (declaredMime) {
+    case 'application/pdf':
+      return (
+        bytes.byteLength >= 5 &&
+        bytes[0] === 0x25 &&
+        bytes[1] === 0x50 &&
+        bytes[2] === 0x44 &&
+        bytes[3] === 0x46 &&
+        bytes[4] === 0x2d
+      );
+    case 'image/jpeg':
+      return (
+        bytes.byteLength >= 3 &&
+        bytes[0] === 0xff &&
+        bytes[1] === 0xd8 &&
+        bytes[2] === 0xff
+      );
+    case 'image/png':
+      return (
+        bytes.byteLength >= 8 &&
+        bytes[0] === 0x89 &&
+        bytes[1] === 0x50 &&
+        bytes[2] === 0x4e &&
+        bytes[3] === 0x47 &&
+        bytes[4] === 0x0d &&
+        bytes[5] === 0x0a &&
+        bytes[6] === 0x1a &&
+        bytes[7] === 0x0a
+      );
+    case 'image/heic':
+    case 'image/heif': {
+      if (bytes.byteLength < 12) return false;
+      const box = String.fromCharCode(bytes[4]!, bytes[5]!, bytes[6]!, bytes[7]!);
+      if (box !== 'ftyp') return false;
+      const brand = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!).toLowerCase();
+      return HEIF_BRANDS.has(brand);
+    }
+    case 'application/msword':
+    case 'application/vnd.ms-excel':
+    case 'application/vnd.ms-powerpoint':
+      return (
+        bytes.byteLength >= 8 &&
+        bytes[0] === 0xd0 &&
+        bytes[1] === 0xcf &&
+        bytes[2] === 0x11 &&
+        bytes[3] === 0xe0 &&
+        bytes[4] === 0xa1 &&
+        bytes[5] === 0xb1 &&
+        bytes[6] === 0x1a &&
+        bytes[7] === 0xe1
+      );
+    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+    case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+    case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+      return (
+        bytes.byteLength >= 4 &&
+        bytes[0] === 0x50 &&
+        bytes[1] === 0x4b &&
+        bytes[2] === 0x03 &&
+        bytes[3] === 0x04
+      );
+    default:
+      return false;
+  }
+}
 
 async function assertActorCanAccessEvidenceSubject(params: {
   ctx: TenantContext;
@@ -30055,6 +30201,13 @@ export async function uploadEvidenceArtifactRecord(
       return registerServiceFailure(
         'EVIDENCE_MALWARE_DETECTED',
         `File "${safeFileName}" failed security screening (status: ${preScanStatus}) and was rejected before storage.`,
+      );
+    }
+
+    if (!verifyEvidenceMagicBytes(input.bytes, normalizedMime)) {
+      return registerServiceFailure(
+        'UNSUPPORTED_MEDIA_TYPE',
+        `Uploaded file content does not match declared type "${normalizedMime}".`,
       );
     }
 

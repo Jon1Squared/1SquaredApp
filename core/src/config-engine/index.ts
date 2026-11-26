@@ -2642,7 +2642,17 @@ export const TenantConfigurationSchema = z
             .default({})
             .optional(),
         })
-        .strict();
+        .strict()
+        .superRefine((regs, ctx) => {
+          if ((regs.typeOverrides?.['cdd']?.additionalFields?.length ?? 0) > 0) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['typeOverrides', 'cdd', 'additionalFields'],
+              message:
+                'System-managed register "cdd" does not allow extra firm-defined fields.',
+            });
+          }
+        });
     })()
       .optional()
       .describe(

@@ -24,8 +24,12 @@ import * as actionsModule from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { vid, type Matter, type NotificationItem, type Person } from '@/domain/types';
 import {
+  getActiveTenantConfiguration,
   setActiveTenantConfigForTesting,
 } from '@/platform/tenantRuntime';
+import { getDocumentStorage } from '@/server/documentGenerationServices';
+import type { CddChecklistItemEvidenceSummary } from '@/domain/cdd';
+import registersConfigJsonSchema from '../schemas/registers.config.schema.json';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
 import * as servicesModule from '@/server/services';
@@ -194,15 +198,17 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       expect(adminList.records.some((r) => r.registerTypeKey === 'cdd')).toBe(false);
     }
 
-    const adminDetail = await runAsActionActor(
+    const [adminDetail, adminMissingDetail] = await runAsActionActor(
       pureAdmin.id,
-      () => getRegisterRecordDetailRecord('REG-000003', pureAdmin.id),
+      () =>
+        Promise.all([
+          getRegisterRecordDetailRecord('REG-000003', pureAdmin.id),
+          getRegisterRecordDetailRecord('REG-DOES-NOT-EXIST-ADMIN', pureAdmin.id),
+        ]),
       { roles: ['admin'], mfaVerified: true },
     );
-    expect(isActionDenied(adminDetail)).toBe(true);
-    if (isActionDenied(adminDetail)) {
-      expect(adminDetail.code).toBe('FORBIDDEN');
-    }
+    expect(adminDetail).toMatchObject({ ok: false, code: 'NOT_FOUND', message: 'Register record was not found.' });
+    expect(adminDetail).toEqual(adminMissingDetail);
 
     // Finance cannot view `cdd` register records either
     const financeList = await runAsActionActor(
@@ -422,8 +428,18 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
           subjectId: 'P-000005',
         }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { denied?: boolean; code?: string };
-    expect(isActionDenied(outsiderProfileCdd as never)).toBe(true);
+    )) as { ok: boolean; code?: string };
+    const missingProfileCdd = (await runAsActionActor(
+      'P-000006',
+      () =>
+        startOrLoadClientCddAction!({
+          subjectType: 'person',
+          subjectId: 'P-DOES-NOT-EXIST-S104',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; code?: string };
+    expect(outsiderProfileCdd).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    expect(outsiderProfileCdd).toEqual(missingProfileCdd);
 
     const outsiderSearch = await runAsActionActor(
       'P-000006',
@@ -461,7 +477,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     expect(complianceDetail.ok).toBe(true);
     expect(await matterRepo.getMatterById(ctx, empMatter.id, { includeRestricted: true })).toBeDefined();
 
-    // R777 (Test 2 evidence upload & download on employee-client P-000005):
+    // R777 / R800 / R803 (Test 2 evidence upload & download on employee-client P-000005):
     const uploadRoute = await import('@/app/api/evidence/upload/route');
     const downloadRoute = await import('@/app/api/evidence/download/route');
     const empPdf = new TextEncoder().encode('%PDF-1.4\n%Employee Confidential ID');
@@ -476,7 +492,11 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['fee_earner'], mfaVerified: false },
     );
     expect(empUpRes.status).toBe(200);
-    const empUpJson = (await empUpRes.json()) as { downloadUrl?: string };
+    const empUpJson = (await empUpRes.json()) as {
+      artifact?: { id: string };
+      evidenceRef?: { blobKey: string };
+      downloadUrl?: string;
+    };
     expect(empUpJson.downloadUrl).toMatch(/^\/api\/evidence\/download\?token=/);
 
     const outsiderEmpUpForm = new FormData();
@@ -489,8 +509,20 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       () => uploadRoute.POST(outsiderEmpUpReq),
       { roles: ['fee_earner'], mfaVerified: false },
     );
-    expect(outsiderEmpUpRes.status).toBe(403);
+    const missingEmpUpForm = new FormData();
+    missingEmpUpForm.set('subjectType', 'person');
+    missingEmpUpForm.set('subjectId', 'P-DOES-NOT-EXIST-S104');
+    missingEmpUpForm.set('file', new File([empPdf], 'outsider-attempt.pdf', { type: 'application/pdf' }));
+    const missingEmpUpRes = await runAsActionActor(
+      'P-000006',
+      async () => uploadRoute.POST(await buildMultipartUploadRequest(missingEmpUpForm)),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(outsiderEmpUpRes.status).toBe(404);
+    expect(missingEmpUpRes.status).toBe(404);
+    expect(await outsiderEmpUpRes.json()).toEqual(await missingEmpUpRes.json());
 
+    // Another user's token fails token-owner check with 403
     const outsiderEmpDlRes = await runAsActionActor(
       'P-000006',
       () =>
@@ -500,6 +532,30 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['fee_earner'], mfaVerified: false },
     );
     expect(outsiderEmpDlRes.status).toBe(403);
+
+    // R803: Token owned by P-000006 passes token-owner check and reaches R747 employee check -> 404 NOT_FOUND
+    const storageForP6 = getDocumentStorage(getActiveTenantConfiguration());
+    const p6OwnToken = await storageForP6.issueScopedDownloadToken(
+      makeVerifiedTenantCtx('not-a-law-firm', 'P-000006', ['fee_earner'], false),
+      {
+        blobKey: empUpJson.evidenceRef!.blobKey,
+        fileName: 'sian-passport.pdf',
+        documentId: empUpJson.artifact!.id,
+      },
+    );
+    const p6OwnTokenDlRes = await runAsActionActor(
+      'P-000006',
+      () =>
+        downloadRoute.GET(
+          new Request(
+            `http://localhost/api/evidence/download?token=${encodeURIComponent(p6OwnToken.token)}`,
+            { method: 'GET' },
+          ),
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(p6OwnTokenDlRes.status).toBe(404);
+    expect(await p6OwnTokenDlRes.json()).toMatchObject({ ok: false, code: 'NOT_FOUND' });
 
     // R771: relationshipPartnerId alone on an unrestricted matter for P-000005 grants aligned SQL list, detail & startOrLoad access (no duplicate record created)
     await matterRepo.createMatter<Matter>(ctx, {
@@ -706,7 +762,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     expect(oversizeRes.status).toBe(413);
     expect(formDataCalledOnOversize).toBe(false);
 
-    //    (c) Allowlist MIME check: HTML / macro Word refused; HEIC / DOCX accepted
+    //    (c) Allowlist MIME + magic-byte check: HTML / spoofed PDF / WebP / text refused; valid HEIC / PPTX accepted
     const badMimeForm = new FormData();
     badMimeForm.set('subjectType', 'person');
     badMimeForm.set('subjectId', 'P-000015');
@@ -717,18 +773,56 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       () => uploadRoute!.POST(badMimeReq),
       { roles: ['legal_secretary'], mfaVerified: false },
     );
-    expect([400, 415, 422]).toContain(badMimeRes.status);
+    expect(badMimeRes.status).toBe(415);
+
+    const spoofedPdfForm = new FormData();
+    spoofedPdfForm.set('subjectType', 'person');
+    spoofedPdfForm.set('subjectId', 'P-000015');
+    spoofedPdfForm.set('file', new File([new TextEncoder().encode('<script>1</script>')], 'fake.pdf', { type: 'application/pdf' }));
+    const spoofedPdfRes = await runAsActionActor(
+      'P-000010',
+      async () => uploadRoute!.POST(await buildMultipartUploadRequest(spoofedPdfForm)),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(spoofedPdfRes.status).toBe(415);
+
+    for (const removedMime of [
+      { ext: 'webp', type: 'image/webp', bytes: new TextEncoder().encode('RIFFxxxxWEBP') },
+      { ext: 'txt', type: 'text/plain', bytes: new TextEncoder().encode('plain text') },
+    ]) {
+      const f = new FormData();
+      f.set('subjectType', 'person');
+      f.set('subjectId', 'P-000015');
+      f.set('file', new File([removedMime.bytes], `doc.${removedMime.ext}`, { type: removedMime.type }));
+      const r = await runAsActionActor(
+        'P-000010',
+        async () => uploadRoute!.POST(await buildMultipartUploadRequest(f)),
+        { roles: ['legal_secretary'], mfaVerified: false },
+      );
+      expect(r.status).toBe(415);
+    }
 
     const heicForm = new FormData();
     heicForm.set('subjectType', 'person');
     heicForm.set('subjectId', 'P-000015');
-    heicForm.set('file', new File([new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70])], 'id.heic', { type: 'image/heic' }));
+    heicForm.set('file', new File([new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63])], 'id.heic', { type: 'image/heic' }));
     const heicRes = await runAsActionActor(
       'P-000010',
       async () => uploadRoute!.POST(await buildMultipartUploadRequest(heicForm)),
       { roles: ['legal_secretary'], mfaVerified: false },
     );
     expect(heicRes.status).toBe(200);
+
+    const pptxForm = new FormData();
+    pptxForm.set('subjectType', 'person');
+    pptxForm.set('subjectId', 'P-000015');
+    pptxForm.set('file', new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00])], 'slides.pptx', { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }));
+    const pptxRes = await runAsActionActor(
+      'P-000010',
+      async () => uploadRoute!.POST(await buildMultipartUploadRequest(pptxForm)),
+      { roles: ['legal_secretary'], mfaVerified: false },
+    );
+    expect(pptxRes.status).toBe(200);
 
     // 6. R777 two-tenant isolation: Alpha evidence token presented in Bravo, forged tenant claim, cross-tenant subjectId
     await provisionPostgresClusterRolesAndDatabases({
@@ -1311,7 +1405,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
         }),
       { roles: ['fee_earner'], mfaVerified: false },
     )) as { ok?: boolean; denied?: boolean; code?: string };
-    expect(isActionDenied(genCreateRes as never) || genCreateRes.ok === false).toBe(true);
+    expect(genCreateRes).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
   }, 30_000);
 
   it('7b. R765 (Blocking): generic updateRegisterRecordAction refuses cdd', async () => {
@@ -1374,8 +1468,8 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
           },
         }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok?: boolean; denied?: boolean };
-    expect(isActionDenied(genUpdateRes as never) || genUpdateRes.ok === false).toBe(true);
+    )) as { ok?: boolean; denied?: boolean; code?: string };
+    expect(genUpdateRes).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
   }, 30_000);
 
   it('7c. R765 (Blocking): generic transitionRegisterRecordAction refuses record_cdd, upgrade_to_high_risk, and fieldUpdates on supersede_cdd', async () => {
@@ -1405,8 +1499,8 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
           comment: 'Bypass checklist completion',
         }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok?: boolean; denied?: boolean };
-    expect(isActionDenied(genTransRecordCdd as never) || genTransRecordCdd.ok === false).toBe(true);
+    )) as { ok?: boolean; denied?: boolean; code?: string };
+    expect(genTransRecordCdd).toMatchObject({ ok: false, code: 'REGISTER_SYSTEM_ONLY_TRANSITION' });
 
     const genTransUpgrade = (await runAsActionActor(
       'P-000002',
@@ -1416,8 +1510,8 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
           transitionKey: 'upgrade_to_high_risk',
         }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok?: boolean; denied?: boolean };
-    expect(isActionDenied(genTransUpgrade as never) || genTransUpgrade.ok === false).toBe(true);
+    )) as { ok?: boolean; denied?: boolean; code?: string };
+    expect(genTransUpgrade).toMatchObject({ ok: false, code: 'REGISTER_SYSTEM_ONLY_TRANSITION' });
 
     const badFieldUpdatesSupersede = (await runAsActionActor(
       'P-000002',
@@ -1429,11 +1523,11 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
           fieldUpdates: { riskTier: 'standard' },
         }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok?: boolean; denied?: boolean };
-    expect(isActionDenied(badFieldUpdatesSupersede as never) || badFieldUpdatesSupersede.ok === false).toBe(true);
+    )) as { ok?: boolean; denied?: boolean; code?: string };
+    expect(badFieldUpdatesSupersede).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
   }, 30_000);
 
-  it('7d1. R766 (Blocking): resolveEvidenceRefsDownloadable strips cross-subject artifacts from summary', async () => {
+  it('7d1. R766 & R801 (Blocking / Should fix): strips cross-subject artifacts from summary and checklist items, emitting slim item evidence metadata only', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
     const ctx = testTenantCtx('P-000001');
     const regRepo = new TenantRegisterRepository();
@@ -1452,6 +1546,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     );
     expect(empUpRes.status).toBe(200);
     const empJson = (await empUpRes.json()) as {
+      artifact: { id: string };
       evidenceRef: { blobKey: string; sha256: string; contentType: string; sizeBytes: number; scanStatus: 'clean'; fileName?: string };
     };
 
@@ -1480,15 +1575,23 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     );
     expect(upRes.status).toBe(200);
     const upJson = (await upRes.json()) as {
+      artifact: { id: string };
       evidenceRef: { blobKey: string; sha256: string; contentType: string; sizeBytes: number; scanStatus: 'clean'; fileName?: string };
     };
 
     const p15RecPre = (await regRepo.getRegisterRecordById(ctx, p15RecordId, { canViewCdd: true }))!;
+    const existingItems = (p15RecPre.fieldValues.checklistItems ?? []) as Array<Record<string, unknown>>;
+    const tamperedItems = existingItems.map((it, idx) =>
+      idx === 0
+        ? { ...it, evidenceRefs: [upJson.evidenceRef, empJson.evidenceRef] }
+        : it,
+    );
     await regRepo.updateRegisterRecordDetails(ctx, {
       recordId: p15RecordId,
       updatedById: 'P-000002',
       fieldValues: {
         ...p15RecPre.fieldValues,
+        checklistItems: tamperedItems,
         supportingEvidence: [upJson.evidenceRef, empJson.evidenceRef],
       },
     });
@@ -1496,11 +1599,41 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       'P-000002',
       () => startOrLoadClientCddAction({ subjectType: 'person', subjectId: 'P-000015' }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok: boolean; summary?: { visible: boolean; evidenceRefs: Array<{ blobKey: string; fileName?: string }> } };
+    )) as {
+      ok: boolean;
+      summary?: {
+        visible: boolean;
+        evidenceRefs: Array<{ blobKey: string; fileName?: string }>;
+        checklistItems: Array<{
+          itemKey: string;
+          evidenceRefs: CddChecklistItemEvidenceSummary[];
+        }>;
+      };
+    };
     expect(r766SummaryRes.ok).toBe(true);
     expect(r766SummaryRes.summary?.visible).toBe(true);
     expect(r766SummaryRes.summary?.evidenceRefs.some((r) => r.blobKey === upJson.evidenceRef.blobKey)).toBe(true);
     expect(r766SummaryRes.summary?.evidenceRefs.some((r) => r.blobKey === empJson.evidenceRef.blobKey)).toBe(false);
+
+    // R801: Item-level evidenceRefs carries slim metadata only for verified same-subject artifact (no cross-subject ref, no blobKey)
+    const firstItem = r766SummaryRes.summary?.checklistItems[0];
+    expect(firstItem?.evidenceRefs).toHaveLength(1);
+    expect(firstItem?.evidenceRefs[0]).toMatchObject({
+      artifactId: upJson.artifact.id,
+      displayName: 'p15-id.pdf',
+      downloadable: true,
+    });
+    expect(firstItem?.evidenceRefs[0]?.downloadUrl).toMatch(/^\/api\/evidence\/download\?token=/);
+    expect(Object.keys(firstItem!.evidenceRefs[0]!).sort()).toEqual([
+      'artifactId',
+      'displayName',
+      'downloadUrl',
+      'downloadable',
+    ]);
+    const serialisedSummary = JSON.stringify(r766SummaryRes.summary);
+    expect(serialisedSummary).not.toContain('sian-llewellyn-secret-passport.pdf');
+    expect(serialisedSummary).not.toContain(empJson.evidenceRef.blobKey);
+    expect(serialisedSummary).not.toContain(empJson.artifact.id);
   }, 30_000);
 
   it('7d2. R766 (Blocking): resolveEvidenceRefsDownloadable isolates pending-scan or unstored blobs without breaking CDD card', async () => {
@@ -1713,8 +1846,8 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       'P-000002',
       () => recordCddChecklistItemAction({ recordId: p15RecordId, itemKey: loadedP15.summary!.checklistItems[0]!.itemKey, status: 'recorded', note: 'Edit after archive' }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok?: boolean; denied?: boolean };
-    expect(isActionDenied(editArchivedRes as never) || editArchivedRes.ok === false).toBe(true);
+    )) as { ok?: boolean; denied?: boolean; code?: string };
+    expect(editArchivedRes).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
 
     // R773: Standard CDD completion refused when client O-000006 has an active High-risk matter
     for (const item of o6Items) {
@@ -1739,8 +1872,8 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       'P-000002',
       () => completeClientCddAction({ recordId: o6Id }),
       { roles: ['fee_earner'], mfaVerified: false },
-    )) as { ok: boolean; message?: string; error?: string };
-    expect(completeStdOnHighRes.ok).toBe(false);
+    )) as { ok: boolean; code?: string; message?: string; error?: string };
+    expect(completeStdOnHighRes).toMatchObject({ ok: false, code: 'REGISTER_VALIDATION_ERROR' });
 
     // Upgrade to High risk, complete remaining items, then verify R774 audit failure rolls back completeClientCddAction
     const upgradedO6 = (await runAsActionActor(
@@ -1766,9 +1899,162 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       { roles: ['fee_earner'], mfaVerified: false },
     )) as { ok?: boolean; code?: string };
     setAuditAdapterFailureHookForTesting(null);
-    expect(rollbackRes.ok).toBe(false);
+    expect(rollbackRes).toMatchObject({ ok: false, code: 'INTERNAL_ERROR' });
 
     const o6RolledBack = await regRepo.getRegisterRecordById(ctx, o6Id, { canViewCdd: true });
     expect(o6RolledBack?.status).toBe('in_progress');
+  }, 45_000);
+
+  it('7f. R799, R800 & Suggestion 9: derives CDD tier firm-wide without exposing restricted matters, gives NOT_FOUND parity to admin without cdd:record, and rejects extra cdd register fields', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const matterRepo = new TenantMatterRepository();
+    const startOrLoadClientCddAction = actionsModule.startOrLoadClientCddAction;
+    const recordCddChecklistItemAction = actionsModule.recordCddChecklistItemAction;
+    const completeClientCddAction = actionsModule.completeClientCddAction;
+
+    // R799: P-000014 starts Standard CDD, then gets a High-risk restricted staff matter hidden from P-000002
+    const stdLoad = (await runAsActionActor(
+      'P-000002',
+      () => startOrLoadClientCddAction({ subjectType: 'person', subjectId: 'P-000014', createIfMissing: true }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { record?: { id: string } | null; checklistItems: Array<{ itemKey: string }> } };
+    expect(stdLoad.ok).toBe(true);
+    const p14RecId = stdLoad.summary!.record!.id;
+    for (const item of stdLoad.summary!.checklistItems) {
+      await runAsActionActor(
+        'P-000002',
+        () => recordCddChecklistItemAction({ recordId: p14RecId, itemKey: item.itemKey, status: 'recorded', note: 'OK' }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+    }
+
+    const baseMatter = (await matterRepo.getMatterById<Matter>(ctx, 'M-000001'))!;
+    await matterRepo.createMatter<Matter>(ctx, {
+      ...baseMatter,
+      id: 'M-S104-R799-STAFF',
+      recordType: 'matter',
+      matterNumber: 'S104-R799-0001',
+      title: 'Confidential Executive High Risk Matter',
+      clientId: 'P-000014',
+      riskRatingId: 'risk_rating.high',
+      matterStatusId: vid('matter_status', 'Active'),
+      responsiblePartnerId: 'P-000001',
+      supervisingPartnerId: 'P-000001',
+      leadFeeEarnerId: 'P-000001',
+      teamMemberIds: ['P-000001'],
+      isStaffMatter: true,
+      restrictedAccessUserIds: ['P-000001'],
+    });
+
+    // Fee earner P-000002 cannot see M-S104-R799-STAFF, yet card shows High risk & needsUpgradeToHighRisk=true with zero matter leak
+    const cardForOutsider = (await runAsActionActor(
+      'P-000002',
+      () => startOrLoadClientCddAction({ subjectType: 'person', subjectId: 'P-000014' }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { derivedRiskTier: string; riskTier: string; needsUpgradeToHighRisk: boolean } };
+    expect(cardForOutsider.ok).toBe(true);
+    expect(cardForOutsider.summary?.riskTier).toBe('standard');
+    expect(cardForOutsider.summary?.derivedRiskTier).toBe('high');
+    expect(cardForOutsider.summary?.needsUpgradeToHighRisk).toBe(true);
+    expect(JSON.stringify(cardForOutsider.summary)).not.toContain('Confidential Executive High Risk Matter');
+    expect(JSON.stringify(cardForOutsider.summary)).not.toContain('M-S104-R799-STAFF');
+
+    const completeStd = (await runAsActionActor(
+      'P-000002',
+      () => completeClientCddAction({ recordId: p14RecId }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; code?: string };
+    expect(completeStd).toMatchObject({ ok: false, code: 'REGISTER_VALIDATION_ERROR' });
+
+    const upgradeRes = (await runAsActionActor(
+      'P-000002',
+      () => startOrLoadClientCddAction({ subjectType: 'person', subjectId: 'P-000014', upgradeToHighRisk: true }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; summary?: { riskTier: string; needsUpgradeToHighRisk: boolean } };
+    expect(upgradeRes.ok).toBe(true);
+    expect(upgradeRes.summary?.riskTier).toBe('high');
+    expect(upgradeRes.summary?.needsUpgradeToHighRisk).toBe(false);
+
+    // R800: Admin holding register:view & register:edit, WITHOUT cdd:view/cdd:record, receives equal NOT_FOUND on existing vs missing CDD ID
+    const partyRepo7f = new TenantPartyRepository();
+    const seededBaseEmp = (await partyRepo7f.getPersonById<Person>(ctx, 'P-000004'))!;
+    const pureAdmin7f: Person = {
+      ...seededBaseEmp,
+      id: 'P-S104-7F-ADMIN',
+      entraObjectId: undefined,
+      firstName: 'Alun',
+      surname: 'Admin7f',
+      employeeRoleId: 'employee_role.system_administrator',
+      roles: ['admin'],
+      appRole: 'admin',
+      permissionOverrides: { grant: [], revoke: [] },
+      emails: [
+        {
+          id: 'em-s104-7f-admin',
+          address: 'alun.admin7f@notalawfirm.example',
+          isPrimary: true,
+          typeId: null,
+        },
+      ],
+    };
+    await partyRepo7f.putPeople(ctx, [pureAdmin7f]);
+
+    const missingId = 'REG-S104-ADMIN-MISSING';
+    const [adminDetReal, adminDetMissing] = await runAsActionActor(
+      pureAdmin7f.id,
+      () => Promise.all([
+        getRegisterRecordDetailRecord(p14RecId, pureAdmin7f.id),
+        getRegisterRecordDetailRecord(missingId, pureAdmin7f.id),
+      ]),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(adminDetReal).toMatchObject({ ok: false, code: 'NOT_FOUND', message: 'Register record was not found.' });
+    expect(adminDetReal).toEqual(adminDetMissing);
+
+    const [adminTransReal, adminTransMissing] = await runAsActionActor(
+      pureAdmin7f.id,
+      () => Promise.all([
+        transitionRegisterRecordService({ recordId: p14RecId, transitionKey: 'archive_cdd', comment: 'Admin probe' }, pureAdmin7f.id),
+        transitionRegisterRecordService({ recordId: missingId, transitionKey: 'archive_cdd', comment: 'Admin probe' }, pureAdmin7f.id),
+      ]),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(adminTransReal).toMatchObject({ ok: false, code: 'NOT_FOUND', message: 'Register record was not found.' });
+    expect(adminTransReal).toEqual(adminTransMissing);
+
+    const [adminUpdReal, adminUpdMissing] = await runAsActionActor(
+      pureAdmin7f.id,
+      () => Promise.all([
+        updateRegisterRecordDetailsService({ recordId: p14RecId, title: 'Admin probe' }, pureAdmin7f.id),
+        updateRegisterRecordDetailsService({ recordId: missingId, title: 'Admin probe' }, pureAdmin7f.id),
+      ]),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(adminUpdReal).toMatchObject({ ok: false, code: 'NOT_FOUND', message: 'Register record was not found.' });
+    expect(adminUpdReal).toEqual(adminUpdMissing);
+
+    // Suggestion 9: Schema + Zod reject typeOverrides.cdd.additionalFields
+    expect(() =>
+      loadAndValidateTenantConfig(
+        {
+          ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+          registers: {
+            ...(notALawFirmBaseConfig as unknown as { registers: Record<string, unknown> }).registers,
+            typeOverrides: {
+              cdd: {
+                additionalFields: [
+                  { key: 'customFlag', label: 'Custom', type: 'text' },
+                ],
+              },
+            },
+          },
+        },
+        {},
+        'test',
+        'multi_tenant',
+      ),
+    ).toThrow(/cdd/i);
+    expect(registersConfigJsonSchema.properties.typeOverrides).toHaveProperty('allOf');
   }, 45_000);
 });

@@ -17,6 +17,7 @@ import { isActionDenied } from '@/domain/actionResult';
 import {
   buildCddStatusDisplayText,
   formatUkShortDate,
+  type CddChecklistItemSummary,
   type CddEvidenceDownloadableRef,
   type ClientCddSummary,
 } from '@/domain/cdd';
@@ -103,20 +104,6 @@ export function CddChecklistCard({
     return null;
   }
 
-  const downloadUrlByBlobKey = new Map<string, string>();
-  for (const ref of summary.evidenceRefs) {
-    if (ref.downloadUrl) {
-      downloadUrlByBlobKey.set(ref.blobKey, ref.downloadUrl);
-    }
-  }
-  for (const list of Object.values(pendingEvidenceByItemKey)) {
-    for (const ref of list) {
-      if (ref.downloadUrl) {
-        downloadUrlByBlobKey.set(ref.blobKey, ref.downloadUrl);
-      }
-    }
-  }
-
   const statusText = buildCddStatusDisplayText(summary);
   const incompleteRequiredCount = summary.checklistItems.filter(
     (item) =>
@@ -196,7 +183,7 @@ export function CddChecklistCard({
   };
 
   const handleRecordItem = async (
-    item: RegisterChecklistItemValue,
+    item: CddChecklistItemSummary,
     nextStatus: 'recorded' | 'not_applicable' | 'failed',
   ) => {
     if (!summary.record) return;
@@ -395,7 +382,13 @@ export function CddChecklistCard({
               {summary.requiredTotal === 1 ? '' : 's'} satisfied
             </span>
           ) : (
-            <span> · Checklist items follow the client’s MLR 2017 category and risk tier.</span>
+            <span>
+              {' '}
+              ·{' '}
+              {summary.derivedRiskTier === 'high'
+                ? 'High risk (based on the client’s matters).'
+                : 'Checklist items follow the client’s MLR 2017 category and risk tier.'}
+            </span>
           )}
         </div>
 
@@ -410,8 +403,9 @@ export function CddChecklistCard({
               fontSize: 13,
             }}
           >
-            This client is currently rated <strong>High Risk</strong> based on client or active
-            matter risk ratings. Upgrade the CDD record to capture enhanced due diligence items.
+            This client is currently rated <strong>High risk (based on the client’s matters)</strong>.
+            Upgrade the CDD record using <strong>Upgrade to High Risk</strong> to capture enhanced
+            due diligence items before completing.
           </div>
         ) : null}
 
@@ -487,24 +481,23 @@ export function CddChecklistCard({
 
                   {(existingEvidence.length > 0 || pendingForItem.length > 0) && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 12.5 }}>
-                      {existingEvidence.map((ref) => {
-                        const href = downloadUrlByBlobKey.get(ref.blobKey);
-                        return href ? (
+                      {existingEvidence.map((ref) =>
+                        ref.downloadable && ref.downloadUrl ? (
                           <a
-                            key={ref.blobKey}
-                            href={href}
+                            key={ref.artifactId}
+                            href={ref.downloadUrl}
                             target="_blank"
                             rel="noreferrer"
                             className="btn btn--secondary btn--sm"
                           >
-                            Download: {ref.fileName || 'Evidence file'}
+                            Download: {ref.displayName || 'Evidence file'}
                           </a>
                         ) : (
-                          <span key={ref.blobKey} className="muted">
-                            Attached: {ref.fileName || 'File'}
+                          <span key={ref.artifactId} className="muted">
+                            Attached: {ref.displayName || 'File'}
                           </span>
-                        );
-                      })}
+                        ),
+                      )}
                       {pendingForItem.map((ref) => (
                         <span key={ref.blobKey} className="client-pill client-pill--green">
                           Ready to link: {ref.fileName || 'Uploaded file'}

@@ -21,6 +21,18 @@ export interface CddEvidenceDownloadableRef extends IntakeEvidenceArtifactRef {
   readonly downloadUrl?: string;
 }
 
+export interface CddChecklistItemEvidenceSummary {
+  readonly artifactId: string;
+  readonly displayName: string;
+  readonly downloadable: boolean;
+  readonly downloadUrl?: string;
+}
+
+export interface CddChecklistItemSummary
+  extends Omit<RegisterChecklistItemValue, 'evidenceRefs'> {
+  readonly evidenceRefs: CddChecklistItemEvidenceSummary[];
+}
+
 export type CddWorkflowStatus =
   | 'not_started'
   | 'in_progress'
@@ -47,7 +59,7 @@ export interface ClientCddSummary extends ClientCddCompactSummary {
   readonly clientCategory: CddClientCategoryKey | null;
   readonly derivedRiskTier: CddRiskTierKey;
   readonly needsUpgradeToHighRisk: boolean;
-  readonly checklistItems: RegisterChecklistItemValue[];
+  readonly checklistItems: CddChecklistItemSummary[];
   readonly evidenceRefs: CddEvidenceDownloadableRef[];
   readonly requiredTotal: number;
   readonly requiredCompleted: number;

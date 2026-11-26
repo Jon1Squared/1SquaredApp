@@ -45,6 +45,21 @@
       "additionalProperties": {
         "$ref": "#/$defs/registerTypeOverride"
       },
+      "allOf": [
+        {
+          "not": {
+            "required": ["cdd"],
+            "properties": {
+              "cdd": {
+                "required": ["additionalFields"],
+                "properties": {
+                  "additionalFields": { "minItems": 1 }
+                }
+              }
+            }
+          }
+        }
+      ],
       "default": {},
       "description": "Per-register-type overrides keyed by register key (e.g. sign_off, undertaking, complaint, breach, or custom register key)."
     }

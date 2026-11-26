@@ -21,8 +21,10 @@ import {
   TenantRegisterRepository,
   TenantTaskWorkflowRepository,
   loadAndValidateTenantConfig,
+  resolveEffectiveRegisterTypes,
   resolveTenantFromVerifiedToken,
   validateRegisterCreateInput,
+  validateRegisterTransitionExecution,
   validateUserOverrideOrRoleMutation,
   type RegistersConfiguration,
   type TenantContext,
@@ -1987,5 +1989,72 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
       matterId: 'M-000001',
     });
     expect(outsiderVisible.some((r) => r.id === created.id)).toBe(false);
+  });
+
+  it('16 (S1-04 Suggestion 7 & 9): enforces core permission check on viaDedicatedWorkflow and refuses typeOverrides.cdd.additionalFields', () => {
+    const cddType = CORE_REGISTER_TYPES.cdd;
+    const sampleCddRecord = {
+      id: 'REG-900001',
+      tenantId: 'not-a-law-firm',
+      registerTypeKey: 'cdd',
+      reference: 'CDD-900001',
+      title: 'Client CDD',
+      status: 'in_progress',
+      matterId: null,
+      enquiryId: null,
+      personId: 'P-000014',
+      organisationId: null,
+      ownerId: 'P-000002',
+      assignedApproverId: null,
+      decidedById: null,
+      decidedAt: null,
+      dueAt: null,
+      reviewAt: null,
+      reminderScheduleDays: null,
+      fieldValues: {},
+      rowVersion: 1,
+      createdById: 'P-000002',
+      createdAt: new Date().toISOString(),
+      updatedById: 'P-000002',
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Suggestion 7: viaDedicatedWorkflow=true still enforces transition.requiredPermission in core
+    expect(() =>
+      validateRegisterTransitionExecution({
+        registerType: cddType,
+        record: sampleCddRecord,
+        transitionKey: 'record_cdd',
+        actorId: 'P-000004',
+        actorRoles: ['admin'],
+        actorPermissionSet: new Set(['register:edit', 'cdd:view']),
+        comment: 'Complete CDD',
+        viaDedicatedWorkflow: true,
+      }),
+    ).toThrow(/Missing permission "cdd:record"/);
+
+    expect(() =>
+      validateRegisterTransitionExecution({
+        registerType: cddType,
+        record: sampleCddRecord,
+        transitionKey: 'record_cdd',
+        actorId: 'P-000002',
+        actorRoles: ['fee_earner'],
+        actorPermissionSet: new Set(['cdd:view', 'cdd:record']),
+        comment: 'Complete CDD',
+        viaDedicatedWorkflow: true,
+      }),
+    ).not.toThrow();
+
+    // Suggestion 9: core engine refuses extra firm-defined fields on cdd
+    expect(() =>
+      resolveEffectiveRegisterTypes({
+        typeOverrides: {
+          cdd: {
+            additionalFields: [{ key: 'extraNote', label: 'Extra note', type: 'text' }],
+          },
+        },
+      }),
+    ).toThrow(/REGISTER_VALIDATION_ERROR/);
   });
 });

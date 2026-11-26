@@ -736,6 +736,15 @@ function applyRegisterTypeOverride(
   baseType: RegisterTypeDefinition,
   typeOverride: RegisterTypeOverride,
 ): RegisterTypeDefinition {
+  if (
+    baseType.key === 'cdd' &&
+    (typeOverride.additionalFields?.length ?? 0) > 0
+  ) {
+    throw createRegisterDomainError(
+      REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+      `System-managed register "${baseType.key}" does not allow firm-defined additionalFields.`,
+    );
+  }
   const nextFields = baseType.fields.map(cloneFieldDefinition);
   const existingKeys = new Set(nextFields.map((f) => f.key));
   for (const extraField of typeOverride.additionalFields ?? []) {
@@ -1211,7 +1220,7 @@ export function validateRegisterTransitionExecution(params: {
   actorPermissionSet: ReadonlySet<PermissionKey>;
   comment: string | null;
   expectedRowVersion?: number;
-  isSystemActor?: boolean;
+  viaDedicatedWorkflow?: boolean;
 }): {
   transition: RegisterTransitionDefinition;
   nextStatus: string;
@@ -1226,7 +1235,7 @@ export function validateRegisterTransitionExecution(params: {
     actorPermissionSet,
     comment,
     expectedRowVersion,
-    isSystemActor = false,
+    viaDedicatedWorkflow = false,
   } = params;
 
   if (!registerType.enabled) {
@@ -1251,17 +1260,17 @@ export function validateRegisterTransitionExecution(params: {
     );
   }
 
-  if (transition.systemOnly && !isSystemActor) {
+  if (transition.systemOnly && !viaDedicatedWorkflow) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.SYSTEM_ONLY_TRANSITION,
       `Transition "${transition.key}" on register "${registerType.key}" may only be executed through its dedicated workflow.`,
     );
   }
 
-  if (isSystemActor && !transition.systemOnly) {
+  if (viaDedicatedWorkflow && !transition.systemOnly) {
     throw createRegisterDomainError(
       REGISTER_DOMAIN_ERROR_CODES.INVALID_TRANSITION,
-      `Transition "${transition.key}" on register "${registerType.key}" is not a system-only workflow transition.`,
+      `Transition "${transition.key}" on register "${registerType.key}" is not a dedicated workflow transition.`,
     );
   }
 

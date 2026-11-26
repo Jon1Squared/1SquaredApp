@@ -39,7 +39,7 @@ On a matter profile (**Overview** tab), the **Intake & compliance** card is deri
 | Row | Source fields on the matter | Shown when populated | Shown when not yet recorded |
 | --- | --- | --- | --- |
 | **Conflict check** | \`conflictDecision.outcome\`, \`conflictDecision.decidedAt\`, \`conflictCheckDate\` | \`Conflict check cleared\` (or the recorded outcome) with the decision date | \`Conflict check not recorded\` (\`—\`) |
-| **Client due diligence** | \`amlCompletedAt\`, \`amlStatus\` | \`Verified <date>\` when \`amlCompletedAt\` is set | The stored \`amlStatus\` label, or \`Not recorded\` |
+| **Client due diligence** | Client due diligence completion status and recorded date | Verified with completion date | Current status label, or Not recorded |
 | **Engagement letter** | \`engagementLetterSignedAt\`, \`engagementLetterStatus\` | \`Engagement letter signed\` with the signed date (or status \`Signed & returned\`) | \`Engagement letter\` with the stored status (such as \`Drafted\`, \`Sent\`, or \`Signed & returned\`), or \`Not recorded\` |
 | **Matter risk assessment** | Server-scored risk assessment (\`overallRisk\`, \`completedQuestions\`, \`totalQuestions\`) | \`Matter risk assessment (<Low/Medium/High> risk)\` with \`<completed>/<total> answered\` | \`Matter risk assessment (Not started)\` with \`0/<total> answered\` |
 
