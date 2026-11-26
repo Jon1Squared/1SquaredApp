@@ -926,7 +926,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
       .mockImplementation(async (putCtx, putInput) => {
         const stored = await origPutObject(putCtx, putInput);
         orphanCandidateBlobKey = stored.blobKey;
-        return { ...stored, scanStatus: 'suspicious' };
+        return { ...stored, scanStatus: 'infected' };
       });
     try {
       const postScanRes = await runAsActionActor(

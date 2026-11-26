@@ -41,8 +41,8 @@ describe('storeEvidenceBlobAndCreateArtifact (R807)', () => {
       ) {
         const stored = await storage.putObject(putCtx, input);
         storedBlobKey = stored.blobKey;
-        storage.setMalwareScanStatusForBlob(putCtx, stored.blobKey, 'suspicious');
-        return { ...stored, scanStatus: 'suspicious' as const };
+        storage.setMalwareScanStatusForBlob(putCtx, stored.blobKey, 'infected');
+        return { ...stored, scanStatus: 'infected' as const };
       },
       deleteObject: storage.deleteObject.bind(storage),
     };
@@ -118,7 +118,7 @@ describe('storeEvidenceBlobAndCreateArtifact (R807)', () => {
     expect(entries[0]).toMatchObject({
       kind: 'event',
       eventName: 'evidence.upload.artifact_insert_failed_cleanup',
-      severity: 'warning',
+      severity: 'warn',
       tenantId: ctx.tenantId,
       correlationId,
     });
@@ -157,7 +157,7 @@ describe('storeEvidenceBlobAndCreateArtifact (R807)', () => {
       correlationId,
     });
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.severity).toBe('warning');
+    expect(entries[0]?.severity).toBe('warn');
     expect(entries[0]?.tenantId).toBe(ctx.tenantId);
     expect(entries[0]?.correlationId).toBe(correlationId);
     expect(JSON.stringify(entries[0])).not.toContain('hidden-name.pdf');

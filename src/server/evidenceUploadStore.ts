@@ -49,7 +49,7 @@ function emitCleanupWarning(
       eventName,
       tenantId: ctx.tenantId,
       correlationId: ctx.correlationId,
-      severity: 'warning',
+      severity: 'warn',
     });
   } catch {
     // Never mask upload validation or database failures when telemetry context is invalid.
