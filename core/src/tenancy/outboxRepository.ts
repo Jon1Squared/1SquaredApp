@@ -42,9 +42,7 @@ import {
 import { TenantAuditRepository } from './auditRepository';
 import {
   buildMatterHiddenFromViewerSql,
-  ENQUIRY_DRAFT_ONLY_SQL_PREDICATE,
   ENQUIRY_VISIBLE_SQL_PREDICATE,
-  QUOTE_DRAFT_ONLY_SQL_PREDICATE,
   QUOTE_VISIBLE_SQL_PREDICATE,
 } from './intakeQuoteRepository';
 import { sanitizeJobErrorCode } from './jobRunRepository';
@@ -273,48 +271,14 @@ function mapOutboxRow(row: DbEmailOutboxRow): EmailOutboxRecord {
   };
 }
 
-function buildAdminOutboxVisibleWhereSql(
-  hasRestrictedMatterAccess: boolean,
-): string {
+function buildAdminOutboxVisibleWhereSql(): string {
   // R826: Only outbox rows linked to a matter, quote, or enquiry are visible
   // in Administration -> Email Outbox (omits pre-0028, staff alert, and digest emails).
   const linkageSql =
     '(eo.matter_id IS NOT NULL OR eo.quote_id IS NOT NULL OR eo.enquiry_id IS NOT NULL)';
 
-  // R823: Enforce exact matter, quote, and enquiry SQL visibility predicates;
-  // Admin is NOT exempt from restricted matters or ethical walls.
-  if (hasRestrictedMatterAccess) {
-    return `(
-      ${linkageSql}
-      AND (
-        eo.matter_id IS NULL
-        OR EXISTS (
-          SELECT 1 FROM public.matters m
-           WHERE m.tenant_id = eo.tenant_id
-             AND m.id = eo.matter_id
-        )
-      )
-      AND (
-        eo.quote_id IS NULL
-        OR EXISTS (
-          SELECT 1 FROM public.quotes q
-           WHERE q.tenant_id = eo.tenant_id
-             AND q.id = eo.quote_id
-             AND ${QUOTE_DRAFT_ONLY_SQL_PREDICATE}
-        )
-      )
-      AND (
-        eo.enquiry_id IS NULL
-        OR EXISTS (
-          SELECT 1 FROM public.enquiries e
-           WHERE e.tenant_id = eo.tenant_id
-             AND e.id = eo.enquiry_id
-             AND ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
-        )
-      )
-    )`;
-  }
-
+  // R823: Always enforce exact matter, quote, and enquiry SQL visibility predicates;
+  // Admin is NEVER exempt from restricted matters, staff matters, or ethical walls.
   return `(
     ${linkageSql}
     AND (
@@ -1258,7 +1222,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     ctx: TenantContext,
     params: {
       readonly viewerId: string;
-      readonly hasRestrictedMatterAccess: boolean;
+      readonly hasRestrictedMatterAccess?: boolean;
       readonly status?: EmailOutboxStatus;
       readonly limit?: number;
       readonly offset?: number;
@@ -1267,9 +1231,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     const cleanViewerId = params.viewerId?.trim() ?? '';
     const limit = Math.max(1, Math.min(200, Math.floor(params.limit ?? 50)));
     const offset = Math.max(0, Math.floor(params.offset ?? 0));
-    const visibilitySql = buildAdminOutboxVisibleWhereSql(
-      params.hasRestrictedMatterAccess,
-    );
+    const visibilitySql = buildAdminOutboxVisibleWhereSql();
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const sqlParams: unknown[] = [ctx.tenantId, cleanViewerId];
@@ -1351,15 +1313,13 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     params: {
       readonly outboxId: string;
       readonly viewerId: string;
-      readonly hasRestrictedMatterAccess: boolean;
+      readonly hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<EmailOutboxAdminDetail | null> {
     const cleanId = params.outboxId?.trim() ?? '';
     const cleanViewerId = params.viewerId?.trim() ?? '';
     if (!cleanId) return null;
-    const visibilitySql = buildAdminOutboxVisibleWhereSql(
-      params.hasRestrictedMatterAccess,
-    );
+    const visibilitySql = buildAdminOutboxVisibleWhereSql();
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<DbEmailOutboxRow>(
@@ -1410,7 +1370,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       readonly outboxId: string;
       readonly ordinal: number;
       readonly viewerId: string;
-      readonly hasRestrictedMatterAccess: boolean;
+      readonly hasRestrictedMatterAccess?: boolean;
     },
   ): Promise<EmailOutboxAdminAttachmentResult | null> {
     const cleanId = params.outboxId?.trim() ?? '';
@@ -1418,9 +1378,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     if (!cleanId || !Number.isInteger(params.ordinal) || params.ordinal < 0) {
       return null;
     }
-    const visibilitySql = buildAdminOutboxVisibleWhereSql(
-      params.hasRestrictedMatterAccess,
-    );
+    const visibilitySql = buildAdminOutboxVisibleWhereSql();
 
     return this.withTenantReadTransaction(ctx, async (tx) => {
       const res = await tx.query<{

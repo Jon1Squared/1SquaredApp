@@ -148,6 +148,7 @@ import {
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
   updatePersonPermissionOverrides,
+  uploadEvidenceArtifactRecord,
 } from '../../src/server/services';
 import {
   loadHomePageData,
@@ -13357,8 +13358,24 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         expect(draftSave.matter?.conflictCheckDate).not.toBe('1999-02-02');
         expect(draftSave.matter?.openedAt).toBeNull();
 
+        const r589SignedCopy = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: draftSave.matter!.id,
+            purpose: 'engagement_signed',
+            fileName: 'r589-signed.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% R589 signed engagement\n%%EOF\n'),
+          },
+          'P-000004',
+        );
+        if (!r589SignedCopy.ok) throw new Error(r589SignedCopy.message);
         await recordEngagementLetterSignedRecord(
-          { matterId: draftSave.matter!.id, status: 'Signed & returned' },
+          {
+            matterId: draftSave.matter!.id,
+            evidenceArtifactId: r589SignedCopy.artifact.id,
+            status: 'Signed & returned',
+          },
           'P-000004',
         );
 
@@ -13508,8 +13525,24 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         );
         expect(draftMatter.errors).toBeUndefined();
         const matterId = draftMatter.matter!.id;
+        const r592SignedCopy = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: matterId,
+            purpose: 'engagement_signed',
+            fileName: 'r592-signed.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% R592 signed engagement\n%%EOF\n'),
+          },
+          'P-000004',
+        );
+        if (!r592SignedCopy.ok) throw new Error(r592SignedCopy.message);
         await recordEngagementLetterSignedRecord(
-          { matterId, status: 'Signed & returned' },
+          {
+            matterId,
+            evidenceArtifactId: r592SignedCopy.artifact.id,
+            status: 'Signed & returned',
+          },
           'P-000004',
         );
         const draftTasks = await taskRepo.listAllTasksUnfiltered(ctx);

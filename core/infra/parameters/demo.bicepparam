@@ -26,6 +26,7 @@ param enableRegisterRemindersJob = true
 param enableOutboxDrainJob = true
 param enableNotificationDigestsJob = true
 param enableQuoteExpiryJob = true
+param enableCommunicationChasesJob = true
 param enableSeedDemoJob = true
 param enableIdealPostcodesSecret = false
 param enableAnthropicSecret = false

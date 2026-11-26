@@ -86,6 +86,9 @@ param enableNotificationDigestsJob bool = true
 @description('Enable the hourly quote-expiry scheduled Container Apps job (S1-02a, R663)')
 param enableQuoteExpiryJob bool = true
 
+@description('Enable the hourly communication-chases scheduled Container Apps job (ADR 0042, S1-06)')
+param enableCommunicationChasesJob bool = true
+
 @description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
 param enableSeedDemoJob bool = environment != 'live'
 
@@ -193,6 +196,7 @@ var registerRemindersJobName = take('caj-reg-rem-${environment}', 32)
 var outboxDrainJobName = take('caj-outbox-drain-${environment}', 32)
 var notificationDigestsJobName = take('caj-ntf-dig-${environment}', 32)
 var quoteExpiryJobName = take('caj-quo-exp-${environment}', 32)
+var communicationChasesJobName = take('caj-comm-chase-${environment}', 32)
 var jobFailureActionGroupName = take('ag-jobs-${resourceSuffix}', 60)
 var jobFailureAlertRuleName = take('alrt-jobs-${resourceSuffix}', 60)
 
@@ -580,7 +584,7 @@ resource jobFailureAlertRule 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
     appInsights
   ]
   properties: {
-    description: 'Raises an alert whenever a 1Squared Container Apps job (provision, migrate, seed-demo, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise, register-reminders, outbox-drain, notification-digests, quote-expiry) fails, times out, or emits a permanent outbox delivery failure (ADR 0027 §6.4, ADR 0030 §7, ADR 0032, ADR 0035).'
+    description: 'Raises an alert whenever a 1Squared Container Apps job (provision, migrate, seed-demo, key-date-reminders, usage-retention-purge, enquiry-retention-anonymise, register-reminders, outbox-drain, notification-digests, quote-expiry, communication-chases) fails, times out, or emits a permanent outbox delivery failure (ADR 0027 §6.4, ADR 0030 §7, ADR 0032, ADR 0035, ADR 0042).'
     enabled: true
     evaluationFrequency: 'PT5M'
     scopes: [
@@ -1775,6 +1779,64 @@ resource quoteExpiryJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enab
             'node'
             'dist/jobs/run-job.mjs'
             'quote-expiry'
+          ]
+          env: concat(runtimeCommonEnv, pdfConverterEnv)
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
+          }
+        }
+      ]
+    }
+  }
+  dependsOn: [
+    runtimePlatformKvSecretsUserRole
+    runtimeAcrPullRole
+    runtimeAppInsightsMetricsPublisherRole
+    pgMinTlsVersion
+    pgBouncerPoolMode
+  ]
+}
+
+resource communicationChasesJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps && enableSchedulerJobs && enableCommunicationChasesJob) {
+  name: communicationChasesJobName
+  location: location
+  tags: platformTags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${runtimeIdentity.id}': {}
+    }
+  }
+  properties: {
+    environmentId: containerAppsEnv.id
+    workloadProfileName: 'Consumption'
+    configuration: {
+      triggerType: 'Schedule'
+      replicaTimeout: 1800
+      replicaRetryLimit: 1
+      scheduleTriggerConfig: {
+        cronExpression: '0 * * * *'
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      registries: [
+        {
+          server: acrLoginServer
+          identity: runtimeIdentity.id
+        }
+      ]
+      secrets: runtimeKeyVaultSecrets
+    }
+    template: {
+      containers: [
+        {
+          name: 'communication-chases'
+          image: appContainerImage
+          command: [
+            'node'
+            'dist/jobs/run-job.mjs'
+            'communication-chases'
           ]
           env: concat(runtimeCommonEnv, pdfConverterEnv)
           resources: {

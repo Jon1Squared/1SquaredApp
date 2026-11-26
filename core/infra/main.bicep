@@ -127,6 +127,9 @@ param enableNotificationDigestsJob bool = true
 @description('Enable the hourly quote-expiry scheduled Container Apps job (S1-02a, R663)')
 param enableQuoteExpiryJob bool = true
 
+@description('Enable the hourly communication-chases scheduled Container Apps job (ADR 0042, S1-06)')
+param enableCommunicationChasesJob bool = true
+
 @description('Enable the manual seed-demo Container Apps job (non-live environments only; forbidden in live)')
 param enableSeedDemoJob bool = environment != 'live'
 
@@ -206,6 +209,7 @@ module platform 'modules/platform.bicep' = {
     enableOutboxDrainJob: enableOutboxDrainJob
     enableNotificationDigestsJob: enableNotificationDigestsJob
     enableQuoteExpiryJob: enableQuoteExpiryJob
+    enableCommunicationChasesJob: enableCommunicationChasesJob
     enableSeedDemoJob: enableSeedDemoJob
     enableIdealPostcodesSecret: enableIdealPostcodesSecret
     enableAnthropicSecret: enableAnthropicSecret

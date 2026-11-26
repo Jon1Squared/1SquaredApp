@@ -6,7 +6,11 @@ import {
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   type CddClientCategoryKey,
   type CddConfiguration,
+  type ChasingConfiguration,
   type ClientRateOverrideClientType,
+  type CommunicationChaseStoppedReason,
+  type EmailOutboxStatus,
+  type EngagementConfiguration,
   type GlobalSearchEntityType,
   type GlobalSearchResponse,
   type IdentityVerificationOutcome,
@@ -163,10 +167,14 @@ import {
   deleteClientRateOverrideRecord,
   getEntityRecordForEditRecord,
   getExpiredEnquiriesCountRecord,
+  getOutboxMessageForAdminRecord,
   completeClientCddRecord,
   listClientPriorMattersRecord,
+  listOutboxMessagesForAdminRecord,
   loadPmsLinksAdminDataRecord,
   listMatterRateOverridesRecord,
+  saveChasingConfigRecord,
+  saveEngagementConfigRecord,
   saveMatterRateOverrideRecord,
   deleteMatterRateOverrideRecord,
   resolveApplicableRatesRecord,
@@ -175,7 +183,10 @@ import {
   recordManualSanctionsPepRecord,
   saveCddConfigRecord,
   searchEntityPickerRecord,
+  sendEngagementLetterRecord,
+  sendNonEngagementLetterRecord,
   startOrLoadClientCddRecord,
+  stopCommunicationChaseRecord,
   updateMyNotificationPreferences,
   type NotificationPreferenceUpdateEntry,
 } from '@/server/services';
@@ -2218,6 +2229,7 @@ export async function openProspectiveMatterAction(matterId: string) {
 
 export async function recordEngagementLetterSignedAction(input: {
   matterId: string;
+  evidenceArtifactId?: string;
   status?: 'Signed' | 'Signed & returned';
   note?: string;
 }) {
@@ -2284,7 +2296,113 @@ export async function saveMatterNumberingConfigAction(
   });
 }
 
+export async function sendEngagementLetterAction(input: {
+  matterId: string;
+  recipientEmail?: string;
+  recipientName?: string;
+  sourceDocumentId?: string | null;
+  subject?: string;
+  customIntroNote?: string;
+  idempotencyKey?: string;
+}) {
+  return guardedAction('sendEngagementLetterAction', async (actor) => {
+    const res = await sendEngagementLetterRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
 
+export async function stopCommunicationChaseAction(input: {
+  chaseId: string;
+  reason?: CommunicationChaseStoppedReason;
+}) {
+  return guardedAction('stopCommunicationChaseAction', async (actor) => {
+    const res = await stopCommunicationChaseRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
 
+export async function sendNonEngagementLetterAction(input: {
+  enquiryId: string;
+  recipientEmail?: string;
+  recipientName?: string;
+  closeReasonSystemKey?: string | null;
+  idempotencyKey?: string;
+}) {
+  return guardedAction('sendNonEngagementLetterAction', async (actor) => {
+    const res = await sendNonEngagementLetterRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
 
+export async function saveEngagementConfigAction(
+  newConfig: Partial<EngagementConfiguration>,
+  reason: string,
+) {
+  return guardedAction('saveEngagementConfigAction', async (actor) => {
+    const res = await saveEngagementConfigRecord(
+      newConfig,
+      reason,
+      actor.personId,
+      {
+        mfaVerified: actor.mfaVerified,
+        tenantCtx: actor.tenantContext,
+      },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function saveChasingConfigAction(
+  newConfig: Partial<ChasingConfiguration>,
+  reason: string,
+) {
+  return guardedAction('saveChasingConfigAction', async (actor) => {
+    const res = await saveChasingConfigRecord(
+      newConfig,
+      reason,
+      actor.personId,
+      {
+        mfaVerified: actor.mfaVerified,
+        tenantCtx: actor.tenantContext,
+      },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function listOutboxMessagesForAdminAction(
+  filter: {
+    status?: EmailOutboxStatus;
+    limit?: number;
+    offset?: number;
+  } = {},
+) {
+  return guardedAction('listOutboxMessagesForAdminAction', async (actor) =>
+    listOutboxMessagesForAdminRecord(filter, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+      tenantCtx: actor.tenantContext,
+    }),
+  );
+}
+
+export async function getOutboxMessageForAdminAction(input: { outboxId: string }) {
+  return guardedAction('getOutboxMessageForAdminAction', async (actor) => {
+    const res = await getOutboxMessageForAdminRecord(input, actor.personId, {
+      mfaVerified: actor.mfaVerified,
+      tenantCtx: actor.tenantContext,
+    });
+    return res;
+  });
+}
 

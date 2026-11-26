@@ -36,6 +36,7 @@ import {
   resetAllDemoData,
   saveMatterRecord,
   updateMatterConflictRecord,
+  uploadEvidenceArtifactRecord,
 } from '@/server/services';
 import {
   runAsTestActor,
@@ -135,8 +136,24 @@ describe('R813: Opening gate fail-closed guard & PG16 transaction rollback on OP
       expect(saved.matter).not.toBeNull();
       prospectiveId = saved.matter!.id;
 
+      const signedCopy = await uploadEvidenceArtifactRecord(
+        {
+          subjectType: 'matter',
+          subjectId: prospectiveId,
+          purpose: 'engagement_signed',
+          fileName: 'signed-engagement-r813.pdf',
+          contentType: 'application/pdf',
+          bytes: Buffer.from('%PDF-1.4\n% R813 signed engagement copy\n%%EOF\n'),
+        },
+        'P-000001',
+      );
+      if (!signedCopy.ok) throw new Error(signedCopy.message);
       const engRes = await recordEngagementLetterSignedRecord(
-        { matterId: prospectiveId, status: 'Signed & returned' },
+        {
+          matterId: prospectiveId,
+          evidenceArtifactId: signedCopy.artifact.id,
+          status: 'Signed & returned',
+        },
         'P-000001',
       );
       expect(engRes.ok).toBe(true);

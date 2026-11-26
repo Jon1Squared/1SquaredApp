@@ -57,6 +57,7 @@ import {
   transitionRegisterRecordService,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
+  uploadEvidenceArtifactRecord,
 } from '@/server/services';
 import {
   auditEntriesForRecord,
@@ -661,8 +662,21 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         expect(openStillBlocked.code).toBe('MATTER_OPENING_GATE_BLOCKED');
 
         // R753: recordEngagementLetterSignedAction stamps server engagementLetterSignedAt & opens on Open matter
+        const litSignedCopy = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: litigationMatterId,
+            purpose: 'engagement_signed',
+            fileName: 'lit-signed-engagement.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% Litigation signed engagement\n%%EOF\n'),
+          },
+          'P-000001',
+        );
+        if (!litSignedCopy.ok) throw new Error(litSignedCopy.message);
         const signRes = (await recordSignedAction!({
           matterId: litigationMatterId,
+          evidenceArtifactId: litSignedCopy.artifact.id,
           status: 'Signed & returned',
           note: 'Received signed copy from client contact.',
         })) as { ok: boolean; matter?: Matter };
@@ -772,8 +786,24 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         expect(signOffStillBlocked.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
 
         // Complete engagement stamp -> now Open matter opens cleanly
+        const mSignedCopy = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: mId,
+            purpose: 'engagement_signed',
+            fileName: 'm-signed-engagement.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% Matter signed engagement\n%%EOF\n'),
+          },
+          'P-000001',
+        );
+        if (!mSignedCopy.ok) throw new Error(mSignedCopy.message);
         const recordSignedAction = getDynamicAction('recordEngagementLetterSignedAction')!;
-        await recordSignedAction({ matterId: mId, status: 'Signed & returned' });
+        await recordSignedAction({
+          matterId: mId,
+          evidenceArtifactId: mSignedCopy.artifact.id,
+          status: 'Signed & returned',
+        });
         const openNow = (await getDynamicAction('openProspectiveMatterAction')!(mId)) as {
           ok: boolean;
           matter?: Matter;
@@ -3205,8 +3235,21 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           isConflictFlagged: false,
         });
 
+        const r810SignedCopy = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: verifiedMatterId,
+            purpose: 'engagement_signed',
+            fileName: 'r810-signed-engagement.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% R810 signed engagement\n%%EOF\n'),
+          },
+          'P-000001',
+        );
+        if (!r810SignedCopy.ok) throw new Error(r810SignedCopy.message);
         await recordSignedAction({
           matterId: verifiedMatterId,
+          evidenceArtifactId: r810SignedCopy.artifact.id,
           status: 'Signed & returned',
         });
         const opened = (await openAction(verifiedMatterId)) as {

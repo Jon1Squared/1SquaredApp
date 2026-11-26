@@ -72,6 +72,7 @@ import {
   transitionRegisterRecordService,
   updateMatterConflictRecord,
   updateMatterLifecycleStatusRecord,
+  uploadEvidenceArtifactRecord,
 } from '@/server/services';
 import { getAppSnapshot } from '@/server/__tests__/testAppSnapshot';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
@@ -587,8 +588,24 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
       ).toHaveLength(0);
 
       // Complete Engagement sign-off before conflict approval opens Tribunal claim matter
+      const signedCopy1 = await uploadEvidenceArtifactRecord(
+        {
+          subjectType: 'matter',
+          subjectId: referredMatter.id,
+          purpose: 'engagement_signed',
+          fileName: 'signed-engagement-1.pdf',
+          contentType: 'application/pdf',
+          bytes: Buffer.from('%PDF-1.4\n% S022 signed engagement copy\n%%EOF\n'),
+        },
+        'P-000001',
+      );
+      if (!signedCopy1.ok) throw new Error(signedCopy1.message);
       await recordEngagementLetterSignedRecord(
-        { matterId: referredMatter.id, status: 'Signed & returned' },
+        {
+          matterId: referredMatter.id,
+          evidenceArtifactId: signedCopy1.artifact.id,
+          status: 'Signed & returned',
+        },
         'P-000001',
       );
 
@@ -708,8 +725,24 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
         { byId: 'P-000001', saveMode: 'submit_cleared' },
       );
       expect(fallbackRes.errors).toBeUndefined();
+      const signedCopy2 = await uploadEvidenceArtifactRecord(
+        {
+          subjectType: 'matter',
+          subjectId: fallbackRes.matter!.id,
+          purpose: 'engagement_signed',
+          fileName: 'signed-engagement-2.pdf',
+          contentType: 'application/pdf',
+          bytes: Buffer.from('%PDF-1.4\n% S022 signed engagement copy\n%%EOF\n'),
+        },
+        'P-000001',
+      );
+      if (!signedCopy2.ok) throw new Error(signedCopy2.message);
       await recordEngagementLetterSignedRecord(
-        { matterId: fallbackRes.matter!.id, status: 'Signed & returned' },
+        {
+          matterId: fallbackRes.matter!.id,
+          evidenceArtifactId: signedCopy2.artifact.id,
+          status: 'Signed & returned',
+        },
         'P-000001',
       );
       const openedFallback = await openProspectiveMatterRecord(

@@ -1105,7 +1105,8 @@ export type AutoTaskTrigger =
 export type TaskAutoTrigger =
   | AutoTaskTrigger
   | 'conflict_check_review'
-  | 'work_type_auto_task';
+  | 'work_type_auto_task'
+  | 'communication_chase_escalation';
 
 export interface Task {
   id: string; // TSK-000001

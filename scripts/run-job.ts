@@ -35,6 +35,7 @@ import {
   getPlatformExtensionHost,
 } from '../src/platform/tenantRuntime';
 import {
+  runScheduledCommunicationChasesJobSweep,
   runScheduledEnquiryRetentionAnonymisationJobSweep,
   runScheduledKeyDateRemindersJobSweep,
   runScheduledNotificationDigestsJobSweep,
@@ -118,6 +119,13 @@ export const REGISTERED_CLI_JOBS: readonly RegisteredCliJobDescriptor[] =
       name: 'quote-expiry',
       description:
         'Transition overdue Sent and Follow-up due quotes past validUntil to Expired once per local day at 02:00 local time',
+      mode: 'scheduled',
+      schedule: '0 * * * *',
+    },
+    {
+      name: 'communication-chases',
+      description:
+        'Run automated communication chasing steps (day-7 and day-14 client reminder emails, day-21 escalation tasks) once per local day at 08:00 local time',
       mode: 'scheduled',
       schedule: '0 * * * *',
     },
@@ -1020,6 +1028,19 @@ export async function executeCliJobRunner(
       writeOut(
         `${JSON.stringify({
           event: 'job.quote-expiry.completed',
+          succeededCount: summary.succeededTenants.length,
+          skippedCount: summary.skippedTenants.length,
+          failedCount: summary.failedTenants.length,
+        })}\n`,
+      );
+      return summary.exitCode;
+    }
+
+    if (jobName === 'communication-chases') {
+      const summary = await runScheduledCommunicationChasesJobSweep();
+      writeOut(
+        `${JSON.stringify({
+          event: 'job.communication-chases.completed',
           succeededCount: summary.succeededTenants.length,
           skippedCount: summary.skippedTenants.length,
           failedCount: summary.failedTenants.length,

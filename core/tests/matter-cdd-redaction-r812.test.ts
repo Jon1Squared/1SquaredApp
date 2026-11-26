@@ -65,6 +65,7 @@ import {
   resetAllDemoData,
   saveMatterRecord,
   startOrLoadClientCddRecord,
+  uploadEvidenceArtifactRecord,
 } from '@/server/services';
 import {
   runAsTestActor,
@@ -266,6 +267,7 @@ function assertTargetShowsVerified(
 
 interface TestFixtureIds {
   verifiedMatterId: string;
+  verifiedMatterSignedArtifactId: string;
   closableVerifiedMatterId: string;
   closableVerifiedOpenedAt: string;
   draftMatterId: string;
@@ -428,6 +430,7 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
   const keyDateId = 'KD-R812-01';
 
   let verifiedMatterId = '';
+  let verifiedMatterSignedArtifactId = '';
   let closableVerifiedMatterId = '';
   let closableVerifiedOpenedAt = '';
   let draftMatterId = '';
@@ -457,8 +460,26 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
       expect(saveMain.errors).toBeUndefined();
       verifiedMatterId = saveMain.matter!.id;
 
+      const uploadSigned = async (matterId: string): Promise<string> => {
+        const up = await uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: matterId,
+            purpose: 'engagement_signed',
+            fileName: `signed-${matterId}.pdf`,
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% R812 signed engagement copy\n%%EOF\n'),
+          },
+          'P-000001',
+        );
+        if (!up.ok) throw new Error(up.message);
+        return up.artifact.id;
+      };
+
+      verifiedMatterSignedArtifactId = await uploadSigned(verifiedMatterId);
       await recordEngagementLetterSignedAction({
         matterId: verifiedMatterId,
+        evidenceArtifactId: verifiedMatterSignedArtifactId,
         status: 'Signed & returned',
       });
       const openedMain = (await openProspectiveMatterAction(verifiedMatterId)) as {
@@ -485,8 +506,10 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
       );
       expect(saveClosable.errors).toBeUndefined();
       closableVerifiedMatterId = saveClosable.matter!.id;
+      const closableSignedId = await uploadSigned(closableVerifiedMatterId);
       await recordEngagementLetterSignedAction({
         matterId: closableVerifiedMatterId,
+        evidenceArtifactId: closableSignedId,
         status: 'Signed & returned',
       });
       const openedClosable = (await openProspectiveMatterAction(closableVerifiedMatterId)) as {
@@ -530,8 +553,10 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
       );
       expect(saveProspectiveOpen.matter).not.toBeNull();
       prospectiveOpenMatterId = saveProspectiveOpen.matter!.id;
+      const prospectiveSignedId = await uploadSigned(prospectiveOpenMatterId);
       await recordEngagementLetterSignedAction({
         matterId: prospectiveOpenMatterId,
+        evidenceArtifactId: prospectiveSignedId,
         status: 'Signed & returned',
       });
 
@@ -554,8 +579,10 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
       );
       expect(saveWall.matter).not.toBeNull();
       ethicalWallMatterId = saveWall.matter!.id;
+      const wallSignedId = await uploadSigned(ethicalWallMatterId);
       await recordEngagementLetterSignedAction({
         matterId: ethicalWallMatterId,
+        evidenceArtifactId: wallSignedId,
         status: 'Signed & returned',
       });
       const openedWall = (await openProspectiveMatterAction(ethicalWallMatterId)) as {
@@ -583,8 +610,10 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
       );
       expect(saveEmpClient.matter).not.toBeNull();
       employeeClientMatterId = saveEmpClient.matter!.id;
+      const empSignedId = await uploadSigned(employeeClientMatterId);
       await recordEngagementLetterSignedAction({
         matterId: employeeClientMatterId,
+        evidenceArtifactId: empSignedId,
         status: 'Signed & returned',
       });
       const openedEmp = (await openProspectiveMatterAction(employeeClientMatterId)) as {
@@ -741,6 +770,7 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
 
   return {
     verifiedMatterId,
+    verifiedMatterSignedArtifactId,
     closableVerifiedMatterId,
     closableVerifiedOpenedAt,
     draftMatterId,
@@ -1102,6 +1132,7 @@ describe('R812: Shared CDD redaction choke point across all page loaders & serve
       run: () =>
         recordEngagementLetterSignedAction({
           matterId: fx.verifiedMatterId,
+          evidenceArtifactId: fx.verifiedMatterSignedArtifactId,
           status: 'Signed & returned',
           note: 'R812 test update',
         }),

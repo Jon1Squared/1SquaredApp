@@ -8,6 +8,8 @@ export const dynamic = 'force-dynamic';
 
 export const GET = guardedRoute('GET /api/evidence/download', async (request, _context, actor) => {
   try {
+    // R817: Ignore any `purpose` query parameter; permission and subject branching uses ONLY
+    // the stored `evidence_artifacts.purpose` column resolved after token verification.
     const url = new URL(request.url);
     const token = url.searchParams.get('token')?.trim() ?? '';
     if (!token) {

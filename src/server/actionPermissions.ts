@@ -845,6 +845,41 @@ export const ACTION_PERMISSIONS = {
     key: 'admin:access',
     enforcedBy: 'action',
   },
+  sendEngagementLetterAction: {
+    kind: 'permission',
+    key: 'matter:edit',
+    enforcedBy: 'action',
+  },
+  stopCommunicationChaseAction: {
+    kind: 'permission',
+    key: { anyOf: ['matter:edit', 'quote:edit'] },
+    enforcedBy: 'service',
+  },
+  sendNonEngagementLetterAction: {
+    kind: 'permission',
+    key: { anyOf: ['enquiry:edit', 'enquiry:close', 'matter:edit'] },
+    enforcedBy: 'action',
+  },
+  saveEngagementConfigAction: {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'service',
+  },
+  saveChasingConfigAction: {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'service',
+  },
+  listOutboxMessagesForAdminAction: {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'service',
+  },
+  getOutboxMessageForAdminAction: {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'service',
+  },
 } as const satisfies Record<string, ActionPolicy>;
 
 export type RegisteredActionName = keyof typeof ACTION_PERMISSIONS;
@@ -938,13 +973,18 @@ export const ROUTE_PERMISSIONS = {
   },
   'POST /api/evidence/upload': {
     kind: 'permission',
-    key: 'cdd:record',
-    enforcedBy: 'action',
+    key: { anyOf: ['cdd:record', 'matter:edit'] },
+    enforcedBy: 'service',
   },
   'GET /api/evidence/download': {
     kind: 'permission',
-    key: 'cdd:view',
-    enforcedBy: 'action',
+    key: { anyOf: ['cdd:view', 'matter:edit', 'document:view'] },
+    enforcedBy: 'service',
+  },
+  'GET /api/admin/outbox/[id]/attachments/[ordinal]': {
+    kind: 'permission',
+    key: 'admin:access',
+    enforcedBy: 'service',
   },
 } as const satisfies Record<string, ActionPolicy>;
 
@@ -1051,6 +1091,15 @@ export const JOB_PERMISSIONS = {
     defaultRunHourLocal: 2,
     description:
       'Transition Sent and Follow-up due quotes past validUntil to Expired with timeline and zero-PII audit once per local day in tenant timezone (ADR 0030, R663).',
+  },
+  'communication-chases': {
+    kind: 'job',
+    permission: 'communication:run_chases',
+    jobOnly: true,
+    timeoutMs: 120_000,
+    defaultRunHourLocal: 8,
+    description:
+      'Run automated communication chasing steps (day-7 and day-14 client reminder emails, day-21 escalation tasks) across engagement letters, quotes, and money on account once per local day in tenant timezone (ADR 0030, ADR 0042).',
   },
 } as const satisfies Record<string, JobPolicy>;
 

@@ -86,6 +86,7 @@ export interface TenantTaskRecord {
     | 'conflict_check_draft'
     | 'conflict_check_review'
     | 'work_type_auto_task'
+    | 'communication_chase_escalation'
     | null;
   linkedKeyDateId?: string | null;
   idempotencyKey?: string | null;

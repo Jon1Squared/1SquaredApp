@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import {
   emitTenantTelemetryException,
   type EvidenceArtifactSubjectType,
+  type EvidencePurpose,
 } from '@platform/core';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatEvidenceSizeLimitMb } from '@/domain/cdd';
@@ -70,6 +71,11 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
     }
     const subjectTypeRaw = String(formData.get('subjectType') ?? '').trim();
     const subjectId = String(formData.get('subjectId') ?? '').trim();
+    const purposeRaw = formData.get('purpose');
+    const purposeStr =
+      purposeRaw === null || purposeRaw === undefined
+        ? undefined
+        : String(purposeRaw).trim();
     const fileEntry = formData.get('file');
 
     if (!fileEntry || typeof fileEntry === 'string' || typeof fileEntry.arrayBuffer !== 'function') {
@@ -85,6 +91,7 @@ export const POST = guardedRoute('POST /api/evidence/upload', async (request, _c
       {
         subjectType: subjectTypeRaw as EvidenceArtifactSubjectType,
         subjectId,
+        ...(purposeStr !== undefined ? { purpose: purposeStr as EvidencePurpose } : {}),
         fileName: fileEntry.name || 'evidence.bin',
         contentType: fileEntry.type || 'application/octet-stream',
         bytes,

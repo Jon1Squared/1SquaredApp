@@ -19,6 +19,8 @@ import {
   flushStagedAuditEntries,
   getAuditRepository,
   getCatalogueRepository,
+  getChasingRepository,
+  getEngagementRepository,
   getEvidenceArtifactRepository,
   getHrAndRbacRepository,
   getIntakeCheckRepository,
@@ -325,12 +327,20 @@ import {
   type ClientCddSummary,
 } from '@/domain/cdd';
 import {
+  buildDocumentActorFromPerson,
+  buildFieldResolutionContextForRecord,
+  buildFullCatalogueFromStoreCustomFields,
+} from '@/domain/documentGeneration';
+import {
   ALL_NOTIFICATION_KINDS,
   actorCanViewRegisterType,
   assertBlobKeyBelongsToTenant,
+  BasicMergeEngine,
   buildCddChecklistItemsForTier,
   buildSafeTeamsActivityFromNotification,
+  buildValidDocxArchive,
   calculateCddNextReviewDueIso,
+  CLIENT_CARE_DOCUMENT_TYPE,
   createDefaultFirmFeeArrangementCaps,
   createRegisterDomainError,
   DEFAULT_MATTER_NUMBERING_CONFIG,
@@ -348,9 +358,11 @@ import {
   findEffectiveRegisterType,
   getActiveTenantTransactionState,
   getEffectiveReminderHourLocal,
+  getEngagementStatusRank,
   hasActiveTenantTransaction,
   INVALID_PARENT_ORGANISATION_CODE,
   isActorActiveParticipantOnMatterRecord,
+  isEngagementStatusRegression,
   isValidEmailAddress,
   loadActiveTenantRegistry,
   ManualIdentityVerificationProvider,
@@ -358,10 +370,16 @@ import {
   MATTER_CONCURRENCY_CONFLICT_CODE,
   MATTER_CONCURRENCY_CONFLICT_MESSAGE,
   MatterNumberingConfigSubSchema,
+  MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
   mergeRegistersConfigurations,
   minorUnitsToPounds,
+  NON_ENGAGEMENT_DOCUMENT_TYPE,
   ORGANISATION_PARENT_CYCLE_CODE,
   poundsToMinorUnits,
+  renderNonEngagementLetterContent,
+  resolveCatalogueValues,
+  resolveChasingConfiguration,
+  resolveEngagementConfiguration,
   sumMinorUnits,
   RATE_OVERRIDE_DATE_OVERLAP_CODE,
   RATE_OVERRIDE_INVALID_DATE_RANGE_CODE,
@@ -379,8 +397,13 @@ import {
   runTenantBackgroundJob,
   sanitizeJobErrorCode,
   scanBytesForMalwareAndMacros,
+  selectDocumentPdfConverter,
+  TenantDocumentRepository,
   TenantKeyDateRepository,
   validateCddConfig,
+  validateChasingConfig,
+  validateChasingRuleSchedule,
+  validateEngagementConfig,
   validateFeeArrangementTerms,
   validateFirmFeeCapEntries,
   validateKeyDatesConfig,
@@ -392,60 +415,75 @@ import {
   validateRegisterTransitionExecution,
   validateWorkTypesConfig,
   verifyEvidenceArtifacts,
-  type CddClientCategoryKey,
-  type CddConfiguration,
-  type CddRiskTierKey,
-  type ClientRateOverrideClientType,
-  type CombinedOutboxDrainResult,
-  type DocumentStorageProvider,
-  type EmailOutboxRecord,
-  type EmailSender,
-  type EvidenceArtifactRecord,
-  type EvidenceArtifactSubjectType,
-  type IdentityVerificationOutcome,
-  type IdentityVerificationRecord,
-  type IntakeEvidenceArtifactRef,
-  type KeyVaultSecretReader,
-  type MatterNumberAllocationResult,
-  type MatterNumberingConfig,
-  type MatterOpeningGateOverrideRecord,
-  type MinorUnits,
-  type NotificationChannelFrequency,
-  type RegisterChecklistItemStatus,
-  type RegisterChecklistItemValue,
-  type ResolvedCddConfiguration,
-  type ResolvedPermissionSet,
-  type SanctionsPepOutcome,
-  type SanctionsPepScreeningRecord,
-  type TeamsActivityOutboxRecord,
-  type TeamsDevCatcherHandler,
-  type TeamsNotifier,
-  type TenantConfiguration,
-  type TenantSqlClient,
-  type ClientRateOverrideRecord,
-  type ControlledJobRunOutcome,
-  type EffectiveFeeCapResolution,
-  type FeeArrangementBasis,
-  type FeeCapErrorCode,
   createZeroGlobalSearchCounts,
-  type FirmAuditEntryInput,
-  type FirmAuditEntryRecord,
-  type GlobalSearchEntityType,
-  type GlobalSearchResponse,
-  type JobRunRecord,
-  type KeyDatesConfiguration,
-  type MatterRateOverrideRecord,
-  type ParentChainNodeSummary,
-  type RegisterRecord,
-  type RegistersConfiguration,
-  type RegisterTransition,
-  type RegisterTypeDefinition,
-  type ResolvedApplicableRatesResult,
-  type TenantContext,
-  type TenantRegistry,
-  type UserNotificationPreference,
-  type WorkTypeOpeningGateConfig,
-  type WorkTypesConfiguration,
+} from '@platform/core';
+import type {
+  CddClientCategoryKey,
+  CddConfiguration,
+  CddRiskTierKey,
+  ChasingConfiguration,
+  ChasingRuleConfig,
+  ClientRateOverrideClientType,
+  CombinedOutboxDrainResult,
+  CommunicationChaseEntityKind,
+  CommunicationChaseRecord,
+  CommunicationChaseStoppedReason,
+  DocumentPdfConverter,
+  DocumentStorageProvider,
+  EmailOutboxAdminAttachmentResult,
+  EmailOutboxAdminDetail,
+  EmailOutboxAdminListItem,
+  EmailOutboxRecord,
+  EmailOutboxStatus,
+  EmailSender,
+  EngagementConfiguration,
+  EngagementDispatchRecord,
+  EvidenceArtifactRecord,
+  EvidenceArtifactSubjectType,
+  EvidencePurpose,
+  GeneratedDocumentRecord,
+  IdentityVerificationOutcome,
+  IntakeEvidenceArtifactRef,
+  KeyVaultSecretReader,
+  MatterNumberAllocationResult,
+  MatterNumberingConfig,
+  MatterOpeningGateOverrideRecord,
+  MinorUnits,
+  NotificationChannelFrequency,
+  RegisterChecklistItemStatus,
+  RegisterChecklistItemValue,
+  ResolvedCddConfiguration,
+  ResolvedPermissionSet,
+  SanctionsPepOutcome,
+  SanctionsPepScreeningRecord,
+  TeamsActivityOutboxRecord,
+  TeamsDevCatcherHandler,
+  TeamsNotifier,
+  TenantConfiguration,
+  TenantSqlClient,
+  ClientRateOverrideRecord,
+  ControlledJobRunOutcome,
+  EffectiveFeeCapResolution,
+  FeeArrangementBasis,
+  FeeCapErrorCode,
+  FirmAuditEntryInput,
+  FirmAuditEntryRecord,
+  GlobalSearchEntityType,
+  GlobalSearchResponse,
+  JobRunRecord,
+  KeyDatesConfiguration,
+  MatterRateOverrideRecord,
+  ParentChainNodeSummary,
+  RegisterRecord,
+  RegistersConfiguration,
+  RegisterTransition,
+  RegisterTypeDefinition,
+  ResolvedApplicableRatesResult,
+  TenantContext,
+  TenantRegistry,
+  UserNotificationPreference,
+  WorkTypeOpeningGateConfig,
+  WorkTypesConfiguration,
 } from '@platform/core';
 import type {
   CalculationResult,
@@ -7410,6 +7448,17 @@ export async function saveMatterRecord(
   ) {
     errors.engagementLetterStatus =
       'Engagement letter cannot be marked as signed directly on matter save. Use "Mark engagement signed" instead.';
+  } else if (
+    opts.source !== 'pms_import' &&
+    existing &&
+    input.engagementLetterStatus !== undefined &&
+    isEngagementStatusRegression(
+      existing.engagementLetterStatus,
+      input.engagementLetterStatus,
+    )
+  ) {
+    errors.engagementLetterStatus =
+      'Engagement letter status cannot move backwards once progressed.';
   }
   const retainerError = validateRetainerMoniesOnAccountInput(
     input.retainerMoniesOnAccountGbp,
@@ -8596,12 +8645,20 @@ export async function saveMatterRecord(
     engagementLetterStatus:
       !isPmsImport &&
       input.engagementLetterStatus !== undefined &&
-      isEngagementLetterSignedStatus(input.engagementLetterStatus) &&
-      !(existing && isEngagementLetterSignedStatus(existing.engagementLetterStatus))
+      ((isEngagementLetterSignedStatus(input.engagementLetterStatus) &&
+        !(existing && isEngagementLetterSignedStatus(existing.engagementLetterStatus))) ||
+        (existing &&
+          isEngagementStatusRegression(
+            existing.engagementLetterStatus,
+            input.engagementLetterStatus,
+          )))
         ? existing?.engagementLetterStatus ?? 'Drafting'
         : input.engagementLetterStatus ?? existing?.engagementLetterStatus ?? 'Drafting',
-    engagementLetterSentAt:
-      input.engagementLetterSentAt !== undefined ? input.engagementLetterSentAt : existing?.engagementLetterSentAt ?? null,
+    engagementLetterSentAt: isPmsImport
+      ? input.engagementLetterSentAt !== undefined
+        ? input.engagementLetterSentAt
+        : existing?.engagementLetterSentAt ?? null
+      : existing?.engagementLetterSentAt ?? null,
     engagementLetterSignedAt: isPmsImport
       ? input.engagementLetterSignedAt !== undefined
         ? input.engagementLetterSignedAt
@@ -28846,6 +28903,10 @@ const EXPOSED_REGISTER_SERVICE_ERROR_CODES = new Set<string>([
   'MATTER_CONCURRENCY_CONFLICT',
   'OPENING_GATE_OVERRIDE_ALREADY_ACTIVE',
   'MATTER_NUMBERING_VALIDATION_ERROR',
+  'ENGAGEMENT_SIGNED_COPY_REQUIRED',
+  'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED',
+  'CHASING_VALIDATION_ERROR',
+  'ENGAGEMENT_CONFIG_VALIDATION_ERROR',
   OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
   OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
   OPENING_GATE_OVERRIDE_ERROR_CODES.BLOCKED,
@@ -30763,6 +30824,19 @@ async function resolveEvidenceRefsDownloadable(params: {
     if (!artifact || artifact.scanStatus !== 'clean') {
       continue;
     }
+    if ((artifact.purpose ?? 'cdd') !== 'cdd') {
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'cdd.evidence.purpose_mismatch_skipped',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          artifactId: artifact.id,
+          recordId: recordId ?? null,
+        }),
+      );
+      continue;
+    }
     if (artifact.subjectType !== subjectType || artifact.subjectId !== subjectId) {
       console.warn(
         JSON.stringify({
@@ -30844,6 +30918,12 @@ async function verifyEvidenceRefsOwnedInTx(params: {
       throw createRegisterDomainError(
         REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
         'Unsafe evidence artifact cannot be linked to a CDD record.',
+      );
+    }
+    if ((artifact.purpose ?? 'cdd') !== 'cdd') {
+      throw createRegisterDomainError(
+        REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+        'Only CDD evidence artifacts may be attached to client CDD records.',
       );
     }
     if (artifact.subjectType !== params.subjectType || artifact.subjectId !== params.subjectId) {
@@ -32079,6 +32159,43 @@ const ALLOWED_EVIDENCE_MIMES = new Set<string>([
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ]);
 
+const ALLOWED_SIGNED_ENGAGEMENT_MIMES = new Set<string>([
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+]);
+
+function isPurposePermittedForEvidenceUpload(
+  purpose: EvidencePurpose,
+  permSet: ResolvedPermissionSet,
+): boolean {
+  if (purpose === 'cdd') {
+    return permSet.permissions.has('cdd:record');
+  }
+  if (purpose === 'engagement_signed' || purpose === 'moa_receipt') {
+    return permSet.permissions.has('matter:edit');
+  }
+  return false;
+}
+
+function isStoredPurposePermittedForEvidenceDownload(
+  storedPurpose: EvidencePurpose,
+  subjectType: EvidenceArtifactSubjectType,
+  permSet: ResolvedPermissionSet,
+): boolean {
+  if (storedPurpose === 'cdd') {
+    return permSet.permissions.has('cdd:view');
+  }
+  if (storedPurpose === 'engagement_signed' || storedPurpose === 'moa_receipt') {
+    return (
+      subjectType === 'matter' &&
+      (permSet.permissions.has('document:view') ||
+        permSet.permissions.has('matter:edit'))
+    );
+  }
+  return false;
+}
+
 const HEIF_BRANDS = new Set([
   'heic',
   'heix',
@@ -32402,6 +32519,7 @@ export async function uploadEvidenceArtifactRecord(
   input: {
     subjectType: EvidenceArtifactSubjectType;
     subjectId: string;
+    purpose?: EvidencePurpose;
     fileName: string;
     contentType: string;
     bytes: Uint8Array;
@@ -32423,16 +32541,44 @@ export async function uploadEvidenceArtifactRecord(
   try {
     const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
-    if (!permSet.permissions.has('cdd:record')) {
+
+    const requestedPurpose = (
+      input.purpose === undefined ? 'cdd' : input.purpose
+    ) as EvidencePurpose;
+    if (
+      requestedPurpose !== 'cdd' &&
+      requestedPurpose !== 'engagement_signed' &&
+      requestedPurpose !== 'moa_receipt'
+    ) {
       return registerServiceFailure(
-        'FORBIDDEN',
-        'Missing required permission "cdd:record" to upload evidence files.',
+        'VALIDATION_ERROR',
+        `Unsupported evidence purpose "${String(input.purpose)}".`,
       );
     }
+
+    if (!isPurposePermittedForEvidenceUpload(requestedPurpose, permSet)) {
+      const requiredPermLabel =
+        requestedPurpose === 'cdd' ? '"cdd:record"' : '"matter:edit"';
+      return registerServiceFailure(
+        'FORBIDDEN',
+        `Missing required permission ${requiredPermLabel} to upload ${requestedPurpose} files.`,
+      );
+    }
+
     if (!VALID_EVIDENCE_SUBJECT_TYPES.has(input.subjectType)) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
         `Unsupported evidence subjectType "${String(input.subjectType)}".`,
+      );
+    }
+    if (
+      (requestedPurpose === 'engagement_signed' ||
+        requestedPurpose === 'moa_receipt') &&
+      input.subjectType !== 'matter'
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        `Files uploaded for "${requestedPurpose}" must target a matter record.`,
       );
     }
     const cleanSubjectId = input.subjectId?.trim() || '';
@@ -32450,9 +32596,17 @@ export async function uploadEvidenceArtifactRecord(
       people,
       teams,
       rbacConfig,
-      requireRecordPermission: true,
+      requireRecordPermission: requestedPurpose === 'cdd',
     });
-    if (subjectDenial) return subjectDenial;
+    if (subjectDenial) {
+      if (requestedPurpose !== 'cdd') {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Evidence file not found or access denied.',
+        );
+      }
+      return subjectDenial;
+    }
 
     const { effectiveCdd } = await resolveCddModuleAndValues(ctx, tenantCfg);
     if (!input.bytes || input.bytes.byteLength <= 0) {
@@ -32466,10 +32620,16 @@ export async function uploadEvidenceArtifactRecord(
     }
     const normalizedMime =
       (input.contentType ?? '').split(';')[0]?.trim().toLowerCase() || 'application/octet-stream';
-    if (!ALLOWED_EVIDENCE_MIMES.has(normalizedMime)) {
+    const mimeAllowlist =
+      requestedPurpose === 'cdd'
+        ? ALLOWED_EVIDENCE_MIMES
+        : ALLOWED_SIGNED_ENGAGEMENT_MIMES;
+    if (!mimeAllowlist.has(normalizedMime)) {
       return registerServiceFailure(
         'UNSUPPORTED_MEDIA_TYPE',
-        "This type of file can't be attached. Use a PDF, image, Word, Excel or PowerPoint file.",
+        requestedPurpose === 'cdd'
+          ? "This type of file can't be attached. Use a PDF, image, Word, Excel or PowerPoint file."
+          : "This type of file can't be attached. Please upload a PDF, JPEG or PNG file.",
       );
     }
 
@@ -32507,6 +32667,7 @@ export async function uploadEvidenceArtifactRecord(
             blobKey: stored.blobKey,
             subjectType: input.subjectType,
             subjectId: cleanSubjectId,
+            purpose: requestedPurpose,
             fileName: safeFileName,
             contentType: stored.contentType,
             byteSize: stored.sizeBytes,
@@ -32523,7 +32684,7 @@ export async function uploadEvidenceArtifactRecord(
                 action: 'upload',
                 field: 'Evidence uploaded',
                 oldValue: '',
-                newValue: `${input.subjectType}:${cleanSubjectId} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
+                newValue: `${input.subjectType}:${cleanSubjectId} purpose=${requestedPurpose} sha256=${stored.sha256.slice(0, 12)} bytes=${stored.sizeBytes}`,
                 byId: actor.id,
                 at: nowIso,
               },
@@ -32571,15 +32732,12 @@ export async function downloadEvidenceArtifactRecord(
   | { ok: true; artifact: EvidenceArtifactRecord; bytes: Uint8Array }
   | RegisterServiceDenialOrError
 > {
+  const opaqueNotFound = () =>
+    registerServiceFailure('NOT_FOUND', 'Evidence file not found or access denied.');
+
   try {
     const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
-    if (!permSet.permissions.has('cdd:view')) {
-      return registerServiceFailure(
-        'FORBIDDEN',
-        'Missing required permission "cdd:view" to download evidence files.',
-      );
-    }
     const tokenClean = input.token?.trim() || '';
     if (!tokenClean) {
       return registerServiceFailure('VALIDATION_ERROR', 'Download token is required.');
@@ -32607,20 +32765,35 @@ export async function downloadEvidenceArtifactRecord(
         'Evidence download token belongs to another signed-in user.',
       );
     }
-    assertBlobKeyBelongsToTenant(ctx, verified.blobKey);
+
+    try {
+      assertBlobKeyBelongsToTenant(ctx, verified.blobKey);
+    } catch {
+      return opaqueNotFound();
+    }
 
     const evidenceRepo = getEvidenceArtifactRepository();
     const artifact = verified.documentId
       ? await evidenceRepo.getArtifactById(ctx, verified.documentId)
       : await evidenceRepo.getArtifactByBlobKey(ctx, verified.blobKey);
-    if (!artifact || artifact.blobKey !== verified.blobKey) {
-      return registerServiceFailure('NOT_FOUND', 'Evidence artifact was not found.');
+    if (
+      !artifact ||
+      artifact.blobKey !== verified.blobKey ||
+      artifact.scanStatus !== 'clean'
+    ) {
+      return opaqueNotFound();
     }
-    if (artifact.scanStatus !== 'clean') {
-      return registerServiceFailure(
-        'FORBIDDEN',
-        'Evidence artifact has not passed malware screening.',
-      );
+
+    // R817: Branch permissions and subject checks SOLELY on stored `artifact.purpose`.
+    const storedPurpose: EvidencePurpose = artifact.purpose ?? 'cdd';
+    if (
+      !isStoredPurposePermittedForEvidenceDownload(
+        storedPurpose,
+        artifact.subjectType,
+        permSet,
+      )
+    ) {
+      return opaqueNotFound();
     }
 
     const downloadDenial = await assertActorCanAccessEvidenceSubject({
@@ -32635,7 +32808,9 @@ export async function downloadEvidenceArtifactRecord(
       rbacConfig,
       requireRecordPermission: false,
     });
-    if (downloadDenial) return downloadDenial;
+    if (downloadDenial) {
+      return opaqueNotFound();
+    }
 
     const bytes = await storage.getObjectBytes(ctx, { blobKey: artifact.blobKey });
     await appendTenantAuditEntries(ctx, [
@@ -32645,7 +32820,7 @@ export async function downloadEvidenceArtifactRecord(
         action: 'view',
         field: 'Evidence downloaded',
         oldValue: '',
-        newValue: `${artifact.subjectType}:${artifact.subjectId}`,
+        newValue: `${artifact.subjectType}:${artifact.subjectId} purpose=${storedPurpose}`,
         byId: actor.id,
         at: new Date().toISOString(),
       },
@@ -36850,6 +37025,7 @@ export async function openProspectiveMatterRecord(
 export async function recordEngagementLetterSignedRecord(
   input: {
     matterId: string;
+    evidenceArtifactId?: string;
     status?: 'Signed' | 'Signed & returned';
     note?: string;
   },
@@ -36860,7 +37036,7 @@ export async function recordEngagementLetterSignedRecord(
   },
 ): Promise<{ ok: true; matter: Matter } | RegisterServiceDenialOrError> {
   try {
-    const { ctx, actor, people, teams, rbacConfig, permSet } =
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
     if (!permSet.permissions.has('matter:edit')) {
       return registerServiceFailure(
@@ -36894,6 +37070,51 @@ export async function recordEngagementLetterSignedRecord(
       return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
     }
 
+    const artifactId = input.evidenceArtifactId?.trim() || '';
+    if (!artifactId) {
+      return registerServiceFailure(
+        'ENGAGEMENT_SIGNED_COPY_REQUIRED',
+        'Please upload a signed copy of the engagement letter before marking it signed.',
+      );
+    }
+
+    const evidenceRepo = getEvidenceArtifactRepository();
+    const preArtifact = await evidenceRepo.getArtifactById(ctx, artifactId);
+    if (
+      !preArtifact ||
+      preArtifact.subjectType !== 'matter' ||
+      preArtifact.subjectId !== matterPre.id ||
+      (preArtifact.purpose ?? 'cdd') !== 'engagement_signed' ||
+      preArtifact.scanStatus !== 'clean'
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Signed engagement copy must be a clean uploaded PDF or image linked to this matter.',
+      );
+    }
+
+    let verifiedRefs: IntakeEvidenceArtifactRef[];
+    try {
+      const storage = getDocumentStorage(tenantCfg);
+      verifiedRefs = await verifyEvidenceArtifacts(ctx, storage, [
+        {
+          blobKey: preArtifact.blobKey,
+          sha256: preArtifact.sha256,
+          contentType: preArtifact.contentType,
+          sizeBytes: preArtifact.byteSize,
+          scanStatus: preArtifact.scanStatus,
+          fileName: preArtifact.fileName,
+          uploadedByActorId: preArtifact.uploadedByPersonId,
+          uploadedAt: preArtifact.uploadedAt,
+        },
+      ]);
+    } catch {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Uploaded signed engagement copy failed integrity or security verification.',
+      );
+    }
+
     const cleanNote = input.note?.trim() || '';
     const actorName = personDisplayName(actor);
     return await matterRepo.withTenantTransaction(ctx, async (tx) => {
@@ -36909,8 +37130,43 @@ export async function recordEngagementLetterSignedRecord(
       if (!lockedMatter) {
         return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
       }
+
+      const lockedArtifact = await evidenceRepo.getArtifactByIdInTx(
+        tx,
+        ctx,
+        preArtifact.id,
+      );
+      if (
+        !lockedArtifact ||
+        lockedArtifact.subjectType !== 'matter' ||
+        lockedArtifact.subjectId !== lockedMatter.id ||
+        (lockedArtifact.purpose ?? 'cdd') !== 'engagement_signed' ||
+        lockedArtifact.scanStatus !== 'clean'
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Signed engagement copy is invalid or does not match this matter.',
+        );
+      }
+
       const nowIso = nextMonotonicIsoTimestamp(lockedMatter.updatedAt);
       const prevStatus = lockedMatter.engagementLetterStatus || 'Drafting';
+      const eSigCheck = await getIntakeCheckRepository().recordCheckInTx(tx, ctx, {
+        checkKind: 'e_signature',
+        provider: 'manual',
+        subjectType: 'matter',
+        subjectId: lockedMatter.id,
+        outcome: 'signed_uploaded',
+        referenceCode: lockedArtifact.id,
+        metadata: {
+          matterId: lockedMatter.id,
+          signedArtifactId: lockedArtifact.id,
+          targetStatus,
+        },
+        evidenceRefs: verifiedRefs,
+        auditAction: 'engagement-signed',
+      });
+
       lockedMatter.engagementLetterStatus = targetStatus;
       lockedMatter.engagementLetterSignedAt = nowIso;
       lockedMatter.updatedAt = nowIso;
@@ -36918,6 +37174,27 @@ export async function recordEngagementLetterSignedRecord(
       const saved = await putMatterWithInTxRestrictions(ctx, lockedMatter, {
         expectedRowVersion: null,
       });
+
+      await getEngagementRepository().markLatestClientCareDispatchSignedInTx(
+        tx,
+        ctx,
+        {
+          matterId: saved.id,
+          signedEvidenceArtifactId: lockedArtifact.id,
+          signedAt: nowIso,
+          signedByPersonId: actor.id,
+          intakeCheckRecordId: eSigCheck.id,
+        },
+      );
+
+      await getChasingRepository().stopActiveChaseInTx(tx, ctx, {
+        entityKind: 'engagement_letter',
+        entityId: saved.id,
+        reason: 'signed',
+        stoppedByPersonId: actor.id,
+        stoppedAt: nowIso,
+      });
+
       await appendTenantAuditEntries(ctx, [
         {
           recordType: 'matter',
@@ -36925,7 +37202,7 @@ export async function recordEngagementLetterSignedRecord(
           action: 'update',
           field: 'Engagement letter signed',
           oldValue: prevStatus,
-          newValue: `${targetStatus} (recorded by ${actorName})${cleanNote ? ` — ${cleanNote}` : ''}`,
+          newValue: `${targetStatus} (artifact ${lockedArtifact.id}, recorded by ${actorName})${cleanNote ? ` — ${cleanNote}` : ''}`,
           byId: actor.id,
           at: nowIso,
           ...(cleanNote ? { reason: cleanNote } : {}),
@@ -37382,4 +37659,2297 @@ export async function saveMatterNumberingConfigRecord(
     return mapRegisterErrorToDenial(err);
   }
 }
+
+// =============================================================================
+// S1-06: Client Care / Engagement Letters, Non-Engagement Letters, Outbox Viewer & Chasing
+// =============================================================================
+
+export async function resolveEffectiveChasingConfig(
+  ctx: TenantContext,
+  tenantConfig: TenantConfiguration = getActiveTenantConfiguration(),
+): Promise<ChasingConfiguration> {
+  const override = await getCatalogueRepository().getModuleConfig<
+    Partial<ChasingConfiguration>
+  >(ctx, 'communication_chasing');
+  const merged = override
+    ? {
+        engagementLetter:
+          override.engagementLetter ?? tenantConfig.chasing?.engagementLetter,
+        quote: override.quote ?? tenantConfig.chasing?.quote,
+        moneyOnAccount:
+          override.moneyOnAccount ?? tenantConfig.chasing?.moneyOnAccount,
+      }
+    : tenantConfig.chasing;
+  return resolveChasingConfiguration({
+    chasing: merged as ChasingConfiguration | undefined,
+  });
+}
+
+export async function resolveEffectiveEngagementConfig(
+  ctx: TenantContext,
+  tenantConfig: TenantConfiguration = getActiveTenantConfiguration(),
+): Promise<EngagementConfiguration> {
+  const override = await getCatalogueRepository().getModuleConfig<
+    Partial<EngagementConfiguration>
+  >(ctx, 'engagement_config');
+  const base = tenantConfig.engagement;
+  const merged = override
+    ? {
+        clientCareIntroductoryParagraph:
+          override.clientCareIntroductoryParagraph ??
+          base?.clientCareIntroductoryParagraph,
+        clientCareTermsSummary:
+          override.clientCareTermsSummary ?? base?.clientCareTermsSummary,
+        clientCareSignatureInstruction:
+          override.clientCareSignatureInstruction ??
+          base?.clientCareSignatureInstruction,
+        nonEngagementWording: {
+          ...(base?.nonEngagementWording ?? {}),
+          ...(override.nonEngagementWording ?? {}),
+        },
+      }
+    : base;
+  return resolveEngagementConfiguration({
+    engagement: merged as EngagementConfiguration | undefined,
+  });
+}
+
+export async function saveChasingConfigRecord(
+  newConfigInput: Partial<ChasingConfiguration>,
+  reason: string,
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<{ ok: true; config: ChasingConfiguration } | RegisterServiceDenialOrError> {
+  try {
+    const { ctx, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      options?.mfaVerified,
+      options,
+    );
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to update communication chasing settings.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to update communication chasing settings.',
+      );
+    }
+    const cleanReason = reason?.trim() || '';
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'An audited change reason is required to save communication chasing settings.',
+      );
+    }
+
+    let schemaValidated: ChasingConfiguration;
+    try {
+      schemaValidated = validateChasingConfig(newConfigInput);
+    } catch (err) {
+      return registerServiceFailure(
+        'CHASING_VALIDATION_ERROR',
+        err instanceof Error ? err.message : 'Invalid chasing configuration.',
+      );
+    }
+
+    for (const [key, rule] of [
+      ['engagementLetter', schemaValidated.engagementLetter],
+      ['quote', schemaValidated.quote],
+      ['moneyOnAccount', schemaValidated.moneyOnAccount],
+    ] as const) {
+      const check = validateChasingRuleSchedule(rule, key);
+      if (!check.ok) {
+        return registerServiceFailure('CHASING_VALIDATION_ERROR', check.error);
+      }
+    }
+
+    const catRepo = getCatalogueRepository();
+    const nowIso = new Date().toISOString();
+    const saved = await catRepo.withTenantTransaction(ctx, async () => {
+      const prev =
+        await catRepo.getModuleConfig<ChasingConfiguration>(
+          ctx,
+          'communication_chasing',
+        );
+      const stored = await catRepo.putModuleConfig<ChasingConfiguration>(
+        ctx,
+        'communication_chasing',
+        schemaValidated,
+        actor.id,
+      );
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'chasing_config',
+          recordId: 'FIRM-CHASING-CONFIG',
+          action: 'update',
+          field: 'Communication chasing configuration',
+          oldValue: prev ? 'custom' : 'default',
+          newValue: `engagement=${stored.engagementLetter.enabled ? 'on' : 'off'}(${stored.engagementLetter.firstChaseDays}/${stored.engagementLetter.secondChaseDays}/${stored.engagementLetter.escalateTaskDays}) quote=${stored.quote.enabled ? 'on' : 'off'} moa=${stored.moneyOnAccount.enabled ? 'on' : 'off'}`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+          snapshot: { before: prev, after: stored },
+        },
+      ]);
+      return stored;
+    });
+
+    return { ok: true, config: saved };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function saveEngagementConfigRecord(
+  newConfigInput: Partial<EngagementConfiguration>,
+  reason: string,
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<{ ok: true; config: EngagementConfiguration } | RegisterServiceDenialOrError> {
+  try {
+    const { ctx, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      options?.mfaVerified,
+      options,
+    );
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to update engagement wording settings.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to update engagement wording settings.',
+      );
+    }
+    const cleanReason = reason?.trim() || '';
+    if (!cleanReason) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'An audited change reason is required to save engagement configuration.',
+      );
+    }
+
+    let schemaValidated: EngagementConfiguration;
+    try {
+      schemaValidated = validateEngagementConfig(newConfigInput);
+    } catch (err) {
+      return registerServiceFailure(
+        'ENGAGEMENT_CONFIG_VALIDATION_ERROR',
+        err instanceof Error ? err.message : 'Invalid engagement configuration.',
+      );
+    }
+
+    const catRepo = getCatalogueRepository();
+    const nowIso = new Date().toISOString();
+    const saved = await catRepo.withTenantTransaction(ctx, async () => {
+      const prev =
+        await catRepo.getModuleConfig<EngagementConfiguration>(
+          ctx,
+          'engagement_config',
+        );
+      const stored = await catRepo.putModuleConfig<EngagementConfiguration>(
+        ctx,
+        'engagement_config',
+        schemaValidated,
+        actor.id,
+      );
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'engagement_config',
+          recordId: 'FIRM-ENGAGEMENT-CONFIG',
+          action: 'update',
+          field: 'Engagement wording configuration',
+          oldValue: prev ? 'custom' : 'default',
+          newValue: `introChars=${stored.clientCareIntroductoryParagraph.length} termsChars=${stored.clientCareTermsSummary.length}`,
+          byId: actor.id,
+          at: nowIso,
+          reason: cleanReason,
+        },
+      ]);
+      return stored;
+    });
+
+    return { ok: true, config: saved };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+function sanitizeTemplateIdSuffix(tenantId: string): string {
+  return tenantId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 48) || 'default';
+}
+
+async function ensureBuiltInCommunicationTemplateInTx(
+  tx: TenantSqlClient,
+  ctx: TenantContext,
+  docRepo: TenantDocumentRepository,
+  params: {
+    readonly templateId: string;
+    readonly versionId: string;
+    readonly code: string;
+    readonly name: string;
+    readonly documentType: string;
+    readonly actorId: string;
+    readonly nowIso: string;
+    readonly sourceContext: 'matter' | 'client';
+  },
+): Promise<void> {
+  const existingTplRes = await tx.query<{ id: string }>(
+    `SELECT id FROM public.document_templates WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+    [ctx.tenantId, params.templateId],
+  );
+  if (!existingTplRes.rows[0]) {
+    await docRepo.putTemplate(ctx, {
+      id: params.templateId,
+      tenantId: ctx.tenantId,
+      code: params.code,
+      name: params.name,
+      description: `System-managed template metadata for ${params.name}.`,
+      category: 'Client Care',
+      tags: ['system', params.documentType],
+      outputDocumentType: params.documentType,
+      filenamePattern: '{{matter.reference}} - {{template.name}}',
+      availabilityRules: { sourceContexts: [params.sourceContext] },
+      activeVersionId: params.versionId,
+      status: 'Active',
+      createdByUserId: params.actorId,
+      createdAt: params.nowIso,
+      updatedAt: params.nowIso,
+    });
+  }
+
+  const existingVerRes = await tx.query<{ id: string }>(
+    `SELECT id FROM public.document_template_versions WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+    [ctx.tenantId, params.versionId],
+  );
+  if (!existingVerRes.rows[0]) {
+    await docRepo.putTemplateVersion(ctx, {
+      id: params.versionId,
+      tenantId: ctx.tenantId,
+      templateId: params.templateId,
+      versionNumber: 1,
+      engine: 'basic-merge',
+      status: 'Active',
+      storageProvider: 'local-fs',
+      blobKey: `${ctx.tenantId}/templates/${params.versionId}.docx`,
+      fileName: `${params.code}.docx`,
+      fileSha256: createHash('sha256').update(params.versionId).digest('hex'),
+      fileSizeBytes: 0,
+      scanStatus: 'clean',
+      extractedPlaceholders: [],
+      fieldMappings: {},
+      promptedFields: [],
+      createdByUserId: params.actorId,
+      createdAt: params.nowIso,
+    });
+  }
+}
+
+function buildClientCareFallbackDocxBytes(params: {
+  readonly firmName: string;
+  readonly complaintsPartnerName?: string | null;
+  readonly contactEmail?: string | null;
+  readonly matterReference: string;
+  readonly matterTitle: string;
+  readonly matterDescription: string;
+  readonly practiceAreaLabel: string;
+  readonly clientName: string;
+  readonly recipientName: string;
+  readonly feeEarnerName: string;
+  readonly feeEstimateText: string;
+  readonly engagementConfig: EngagementConfiguration;
+  readonly customIntroNote?: string;
+}): Uint8Array {
+  const intro =
+    params.engagementConfig.clientCareIntroductoryParagraph.trim() ||
+    `Thank you for instructing ${params.firmName} to act for ${params.clientName} in connection with ${params.matterTitle} (${params.matterReference}).`;
+  const termsLines = params.engagementConfig.clientCareTermsSummary
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const signatureInstruction =
+    params.engagementConfig.clientCareSignatureInstruction.trim() ||
+    'Please sign and return a scanned copy or clear photograph of this letter so we can confirm your instructions.';
+
+  const paragraphs: Array<{
+    text: string;
+    heading?: 'Heading1' | 'Heading2';
+    bold?: boolean;
+  }> = [
+    { text: params.firmName, heading: 'Heading1', bold: true },
+    { text: `PRIVATE & CONFIDENTIAL — Our Ref: ${params.matterReference}`, bold: true },
+    { text: `Dear ${params.recipientName},` },
+    {
+      text: `Client Care & Engagement Letter: ${params.matterTitle} (${params.practiceAreaLabel})`,
+      heading: 'Heading2',
+      bold: true,
+    },
+    { text: intro },
+  ];
+
+  if (params.customIntroNote?.trim()) {
+    paragraphs.push({ text: params.customIntroNote.trim() });
+  }
+  if (params.matterDescription.trim()) {
+    paragraphs.push({
+      text: `Scope of Instructions: ${params.matterDescription.trim()}`,
+    });
+  }
+  paragraphs.push({
+    text: `Person Responsible: ${params.feeEarnerName}. Estimated charges / fee basis: ${params.feeEstimateText}.`,
+  });
+
+  if (termsLines.length > 0) {
+    paragraphs.push({
+      text: 'Key Terms & Regulatory Information',
+      heading: 'Heading2',
+      bold: true,
+    });
+    for (const line of termsLines) {
+      paragraphs.push({ text: line });
+    }
+  } else {
+    const complaintsPart = params.complaintsPartnerName
+      ? `Complaints Partner: ${params.complaintsPartnerName}${params.contactEmail ? ` (${params.contactEmail})` : ''}.`
+      : '';
+    if (complaintsPart) {
+      paragraphs.push({ text: complaintsPart });
+    }
+  }
+
+  paragraphs.push({ text: signatureInstruction });
+  paragraphs.push({ text: 'Yours faithfully,' });
+  paragraphs.push({ text: `${params.feeEarnerName} — ${params.firmName}`, bold: true });
+
+  return buildValidDocxArchive({
+    headerText: `${params.firmName} | Ref: ${params.matterReference}`,
+    footerText: 'Client Care & Engagement Letter | Private & Confidential',
+    paragraphs,
+  });
+}
+
+function buildEngagementEmailBodies(params: {
+  readonly firmName: string;
+  readonly recipientName: string;
+  readonly matterReference: string;
+  readonly matterTitle: string;
+  readonly senderName: string;
+  readonly introParagraph: string;
+  readonly signatureInstruction: string;
+}): { readonly htmlBody: string; readonly textBody: string } {
+  const intro =
+    params.introParagraph.trim() ||
+    `Please find attached your Client Care & Engagement Letter for ${params.matterTitle} (Ref: ${params.matterReference}).`;
+  const sig =
+    params.signatureInstruction.trim() ||
+    'Please sign and return a scanned copy or clear photograph so we can confirm your instructions.';
+
+  const lines = [
+    `Dear ${params.recipientName},`,
+    '',
+    intro,
+    '',
+    sig,
+    '',
+    'Yours faithfully,',
+    `${params.senderName} — ${params.firmName}`,
+  ];
+  const textBody = lines.join('\n');
+  const htmlBody = [
+    `<p>Dear ${escapeHtmlTextForEmail(params.recipientName)},</p>`,
+    `<p>${escapeHtmlTextForEmail(intro)}</p>`,
+    `<p>${escapeHtmlTextForEmail(sig)}</p>`,
+    `<p>Yours faithfully,<br/><strong>${escapeHtmlTextForEmail(params.senderName)}</strong> — ${escapeHtmlTextForEmail(params.firmName)}</p>`,
+  ].join('');
+  return { htmlBody, textBody };
+}
+
+export async function sendEngagementLetterRecord(
+  input: {
+    matterId: string;
+    recipientEmail?: string;
+    recipientName?: string;
+    sourceDocumentId?: string | null;
+    subject?: string;
+    customIntroNote?: string;
+    idempotencyKey?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  },
+): Promise<
+  | {
+      ok: true;
+      matter: Matter;
+      dispatch: EngagementDispatchRecord;
+      chase: CommunicationChaseRecord | null;
+      outboxRecord: EmailOutboxRecord;
+      emailProviderDisabled: boolean;
+      documentId: string;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('matter:edit')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to send client care or engagement letters.',
+      );
+    }
+
+    const matterIdClean = input.matterId?.trim() || '';
+    if (!matterIdClean) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Matter ID is required.');
+    }
+
+    const matterRepo = getMatterRepository();
+    const matterPre = await matterRepo.getMatterById<Matter>(ctx, matterIdClean, {
+      includeRestricted: true,
+    });
+    if (
+      !matterPre ||
+      !canPersonAccessMatter(matterPre, actor.id, actor, {
+        allPeople: people,
+        teams,
+        config: { rbac: rbacConfig },
+      })
+    ) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Matter was not found or access denied.',
+      );
+    }
+
+    const store = await loadTenantCatalogueStoreView(ctx, {
+      includePmsLinks: false,
+    });
+    if (isClosedOrArchivedMatterStatus(matterPre.matterStatusId, store.values)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Client care letters cannot be sent on closed or archived matters.',
+      );
+    }
+    if (isMatterEngagementSignedForGate(matterPre)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'The engagement letter has already been signed for this matter.',
+      );
+    }
+
+    const partyRepo = getPartyRepository();
+    const [clientPerson, clientOrg, instructingPerson] = await Promise.all([
+      matterPre.clientId.startsWith('P-')
+        ? partyRepo.getPersonById<Person>(ctx, matterPre.clientId)
+        : Promise.resolve(null),
+      matterPre.clientId.startsWith('O-')
+        ? partyRepo.getOrganisationById<Organisation>(ctx, matterPre.clientId)
+        : Promise.resolve(null),
+      matterPre.instructingContactId &&
+      matterPre.instructingContactId !== matterPre.clientId
+        ? partyRepo.getPersonById<Person>(ctx, matterPre.instructingContactId)
+        : Promise.resolve(null),
+    ]);
+
+    const recipientPerson = instructingPerson ?? clientPerson;
+    const resolvedEmail = (
+      input.recipientEmail?.trim() ||
+      (recipientPerson ? primaryEmail(recipientPerson) : '') ||
+      clientOrg?.generalEmail?.trim() ||
+      ''
+    ).trim();
+    if (!resolvedEmail || !isValidEmailAddress(resolvedEmail)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid client recipient email address is required before sending.',
+      );
+    }
+
+    const resolvedRecipientName = (
+      input.recipientName?.trim() ||
+      (recipientPerson ? personDisplayName(recipientPerson) : '') ||
+      clientOrg?.legalName ||
+      'Client'
+    ).trim();
+    const clientName =
+      clientOrg?.legalName ||
+      (clientPerson ? personDisplayName(clientPerson) : resolvedRecipientName);
+
+    const [effectiveEngagement, effectiveChasing] = await Promise.all([
+      resolveEffectiveEngagementConfig(ctx, tenantCfg),
+      resolveEffectiveChasingConfig(ctx, tenantCfg),
+    ]);
+
+    const storage = options?.storageProvider ?? getDocumentStorage(tenantCfg);
+    const docRepo = getDocumentRepository();
+
+    let documentId = '';
+    let pdfFileName = `${matterPre.matterNumber || matterPre.id} - Client Care Letter.pdf`.replace(
+      /[/\\]/g,
+      '_',
+    );
+    let pdfBytes: Uint8Array;
+    let newlyGeneratedDoc: GeneratedDocumentRecord | null = null;
+    let templateIdToUse = `TPL-SYS-CCL-${sanitizeTemplateIdSuffix(ctx.tenantId)}`;
+    let templateNameToUse = 'Client Care & Engagement Letter';
+    let templateVersionIdToUse = `${templateIdToUse}-V1`;
+    let templateVersionNumberToUse = 1;
+    let needsSystemTemplateEnsure = false;
+
+    const cleanSourceDocId = input.sourceDocumentId?.trim() || '';
+    if (cleanSourceDocId) {
+      const existingDoc = await docRepo.getDocumentById(ctx, cleanSourceDocId);
+      if (
+        !existingDoc ||
+        existingDoc.isDeleted ||
+        existingDoc.primaryMatterId !== matterPre.id ||
+        existingDoc.documentType !== CLIENT_CARE_DOCUMENT_TYPE ||
+        existingDoc.outputFormat !== 'pdf'
+      ) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'The selected Client Care PDF document could not be found on this matter.',
+        );
+      }
+      documentId = existingDoc.id;
+      pdfFileName = existingDoc.fileName || pdfFileName;
+      pdfBytes = await storage.getObjectBytes(ctx, {
+        blobKey: existingDoc.storageKey,
+      });
+    } else {
+      // Pre-TX DOCX -> PDF conversion (S1-D11: never invoke converter inside TX)
+      const templates = await docRepo.listTemplates(ctx);
+      const customActiveTemplate = templates.find(
+        (t) =>
+          t.outputDocumentType === CLIENT_CARE_DOCUMENT_TYPE &&
+          t.status === 'Active' &&
+          t.activeVersionId &&
+          t.id !== 'TPL-SEED-CCL',
+      );
+      const seedActiveTemplate = templates.find(
+        (t) => t.id === 'TPL-SEED-CCL' && t.status === 'Active' && t.activeVersionId,
+      );
+
+      let docxBytes: Uint8Array | null = null;
+
+      if (customActiveTemplate?.activeVersionId) {
+        const ver = await docRepo.getTemplateVersionById(
+          ctx,
+          customActiveTemplate.activeVersionId,
+        );
+        if (ver && ver.scanStatus === 'clean') {
+          try {
+            const tplBytes = await storage.getObjectBytes(ctx, {
+              blobKey: ver.blobKey,
+            });
+            const catalogue = buildFullCatalogueFromStoreCustomFields(
+              store.customFields,
+            );
+            const scopedPeople = [
+              ...people,
+              ...(clientPerson && !people.some((p) => p.id === clientPerson.id)
+                ? [clientPerson]
+                : []),
+              ...(instructingPerson &&
+              !people.some((p) => p.id === instructingPerson.id)
+                ? [instructingPerson]
+                : []),
+            ];
+            const scopedOrgs = clientOrg ? [clientOrg] : [];
+            const resolutionContext = buildFieldResolutionContextForRecord({
+              tenantId: ctx.tenantId,
+              matter: matterPre,
+              organisation: clientOrg ?? undefined,
+              person: clientPerson ?? undefined,
+              currentUser: actor,
+              promptedValues: {
+                specialScopeNotes:
+                  input.customIntroNote?.trim() ||
+                  'Standard firm terms of business apply.',
+              },
+              people: scopedPeople,
+              organisations: scopedOrgs,
+              values: store.values,
+              firm: {
+                name: store.firm.shortName,
+                legalName: store.firm.name,
+                email:
+                  tenantCfg.firm?.contactEmail ||
+                  tenantCfg.branding.contactEmail ||
+                  '',
+                website:
+                  tenantCfg.firm?.website || tenantCfg.branding.website || '',
+              },
+            });
+            const docActor = buildDocumentActorFromPerson(actor, {
+              tenantId: ctx.tenantId,
+              actorRoles: actor.roles,
+              mfaVerified: permSet.mfaVerified,
+            });
+            const { values: resolvedValues } = resolveCatalogueValues(
+              resolutionContext,
+              catalogue,
+              docActor,
+              tenantCfg,
+            );
+            const mergeEngine = new BasicMergeEngine();
+            const rendered = await mergeEngine.render({
+              docxBytes: tplBytes,
+              resolvedValues,
+              mappings: ver.fieldMappings,
+            });
+            if (rendered.missingRequiredFields.length === 0) {
+              docxBytes = rendered.outputBytes;
+              templateIdToUse = customActiveTemplate.id;
+              templateNameToUse = customActiveTemplate.name;
+              templateVersionIdToUse = ver.id;
+              templateVersionNumberToUse = ver.versionNumber;
+            }
+          } catch {
+            docxBytes = null;
+          }
+        }
+      }
+
+      if (!docxBytes) {
+        if (seedActiveTemplate?.activeVersionId) {
+          templateIdToUse = seedActiveTemplate.id;
+          templateNameToUse = seedActiveTemplate.name;
+          templateVersionIdToUse = seedActiveTemplate.activeVersionId;
+          templateVersionNumberToUse = 1;
+        } else {
+          needsSystemTemplateEnsure = true;
+        }
+        const feeEarner =
+          people.find(
+            (p) =>
+              p.id ===
+              (matterPre.leadFeeEarnerId || matterPre.responsiblePartnerId),
+          ) ?? actor;
+        const practiceAreaLabel =
+          resolveLabel(store.values, matterPre.practiceAreaId) || 'Legal Matter';
+        const feeEstimateText =
+          typeof matterPre.feeEstimateGbp === 'number' &&
+          Number.isFinite(matterPre.feeEstimateGbp)
+            ? `£${matterPre.feeEstimateGbp.toLocaleString('en-GB', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })} plus VAT and disbursements`
+            : 'As set out in your fee quote / scope of work';
+        docxBytes = buildClientCareFallbackDocxBytes({
+          firmName: store.firm.name || tenantCfg.displayName || 'Law Firm',
+          complaintsPartnerName: null,
+          contactEmail:
+            tenantCfg.firm?.contactEmail || tenantCfg.branding.contactEmail,
+          matterReference: matterPre.matterNumber || matterPre.id,
+          matterTitle: matterPre.title,
+          matterDescription: matterPre.shortDescription || '',
+          practiceAreaLabel,
+          clientName,
+          recipientName: resolvedRecipientName,
+          feeEarnerName: personDisplayName(feeEarner),
+          feeEstimateText,
+          engagementConfig: effectiveEngagement,
+          customIntroNote: input.customIntroNote,
+        });
+      }
+
+      const converter =
+        options?.pdfConverter ??
+        selectDocumentPdfConverter(tenantCfg, {
+          converterUrl: process.env.DOC_CONVERTER_URL,
+        });
+      pdfBytes = await converter.convertDocxToPdf({
+        docxBytes,
+        title: `Client Care Letter — ${matterPre.matterNumber || matterPre.id}`,
+        authorName: personDisplayName(actor),
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+      });
+    }
+
+    if (pdfBytes.byteLength > MAX_EMAIL_TOTAL_ATTACHMENT_BYTES) {
+      return registerServiceFailure(
+        'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED',
+        'The generated letter PDF exceeds the 3 MB email attachment limit. Remove large embedded images or download and split the document before sending.',
+      );
+    }
+
+    const firmName = store.firm.name || tenantCfg.displayName || 'the firm';
+    const rawSubject =
+      input.subject?.trim() ||
+      `Client Care & Engagement Letter: ${matterPre.title} (${matterPre.matterNumber || matterPre.id})`;
+    const safeSubject = rawSubject.replace(/[\r\n]+/g, ' ').trim();
+    const { htmlBody, textBody } = buildEngagementEmailBodies({
+      firmName,
+      recipientName: resolvedRecipientName,
+      matterReference: matterPre.matterNumber || matterPre.id,
+      matterTitle: matterPre.title,
+      senderName: personDisplayName(actor),
+      introParagraph: effectiveEngagement.clientCareIntroductoryParagraph,
+      signatureInstruction: effectiveEngagement.clientCareSignatureInstruction,
+    });
+
+    if (!cleanSourceDocId) {
+      const generatedAtPre = new Date().toISOString();
+      documentId = `DOC-CCL-${randomUUID().slice(0, 12).toUpperCase()}`;
+      const storedBlob = await storage.putObject(ctx, {
+        category: 'documents',
+        objectId: documentId,
+        fileName: pdfFileName,
+        contentType: 'application/pdf',
+        bytes: pdfBytes,
+      });
+      const sha256 = createHash('sha256').update(pdfBytes).digest('hex');
+
+      newlyGeneratedDoc = {
+        id: documentId,
+        tenantId: ctx.tenantId,
+        title: `${matterPre.matterNumber || matterPre.id} — Client Care & Engagement Letter`,
+        fileName: pdfFileName,
+        documentType: CLIENT_CARE_DOCUMENT_TYPE,
+        outputFormat: 'pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: pdfBytes.byteLength,
+        fileSha256: sha256,
+        templateId: templateIdToUse,
+        templateName: templateNameToUse,
+        templateVersionId: templateVersionIdToUse,
+        templateVersionNumber: templateVersionNumberToUse,
+        storageProvider: storedBlob.storageProvider,
+        storageKey: storedBlob.blobKey,
+        externalId: storedBlob.externalId ?? null,
+        externalVersion: storedBlob.externalVersion ?? null,
+        generatedByUserId: actor.id,
+        generatedByName: personDisplayName(actor),
+        generatedAt: generatedAtPre,
+        primaryMatterId: matterPre.id,
+        primaryClientId: matterPre.clientId,
+        primaryEnquiryId: matterPre.sourceEnquiryId ?? null,
+        recipientPartyId: recipientPerson?.id ?? null,
+        isDeleted: false,
+      };
+    }
+
+    const outboxRepo = getOutboxRepository();
+    const engagementRepo = getEngagementRepository();
+    const chasingRepo = getChasingRepository();
+    const intakeCheckRepo = getIntakeCheckRepository();
+
+    const dispatchKey = input.idempotencyKey?.trim() || randomUUID();
+    const outboxIdempotencyKey = `engagement:client_care:${matterPre.id}:${dispatchKey}`;
+
+    const txResult = await matterRepo.withTenantTransaction(ctx, async (tx) => {
+      await tx.query(
+        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [ctx.tenantId, matterPre.id],
+      );
+      const lockedMatter = await matterRepo.getMatterById<Matter>(
+        ctx,
+        matterPre.id,
+        { includeRestricted: true },
+      );
+      if (!lockedMatter) {
+        return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
+      }
+      if (isMatterEngagementSignedForGate(lockedMatter)) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'The engagement letter has already been signed for this matter.',
+        );
+      }
+
+      const nowIso = nextMonotonicIsoTimestamp(lockedMatter.updatedAt);
+
+      if (newlyGeneratedDoc) {
+        if (needsSystemTemplateEnsure) {
+          await ensureBuiltInCommunicationTemplateInTx(tx, ctx, docRepo, {
+            templateId: newlyGeneratedDoc.templateId,
+            versionId: newlyGeneratedDoc.templateVersionId,
+            code: 'SYS-CCL-01',
+            name: 'Client Care & Engagement Letter',
+            documentType: CLIENT_CARE_DOCUMENT_TYPE,
+            actorId: actor.id,
+            nowIso,
+            sourceContext: 'matter',
+          });
+        }
+        await docRepo.putDocumentInTx(tx, ctx, {
+          ...newlyGeneratedDoc,
+          generatedAt: nowIso,
+        });
+        await docRepo.putDocumentLinkInTx(tx, ctx, {
+          id: `DL-${randomUUID().slice(0, 12).toUpperCase()}`,
+          tenantId: ctx.tenantId,
+          documentId: newlyGeneratedDoc.id,
+          entityType: 'matter',
+          entityId: lockedMatter.id,
+          linkRole: 'source_matter',
+          createdAt: nowIso,
+        });
+        if (lockedMatter.clientId) {
+          await docRepo.putDocumentLinkInTx(tx, ctx, {
+            id: `DL-${randomUUID().slice(0, 12).toUpperCase()}`,
+            tenantId: ctx.tenantId,
+            documentId: newlyGeneratedDoc.id,
+            entityType: lockedMatter.clientId.startsWith('O-')
+              ? 'organisation'
+              : 'person',
+            entityId: lockedMatter.clientId,
+            linkRole: 'primary_client',
+            createdAt: nowIso,
+          });
+        }
+      }
+
+      const queued = await outboxRepo.enqueueEmailInTx(tx, ctx, {
+        idempotencyKey: outboxIdempotencyKey,
+        templateKey: 'engagement.client_care',
+        recipients: { to: [resolvedEmail] },
+        subject: safeSubject,
+        htmlBody,
+        textBody,
+        attachments: [
+          {
+            kind: 'inline',
+            fileName: pdfFileName,
+            contentType: 'application/pdf',
+            contentBytes: pdfBytes,
+          },
+        ],
+        matterId: lockedMatter.id,
+        createdByPersonId: actor.id,
+        correlationId: ctx.correlationId,
+      });
+
+      const eSigCheck = await intakeCheckRepo.recordCheckInTx(tx, ctx, {
+        checkKind: 'e_signature',
+        provider: 'manual',
+        subjectType: 'matter',
+        subjectId: lockedMatter.id,
+        outcome: 'requested_manual',
+        referenceCode: documentId,
+        metadata: {
+          matterId: lockedMatter.id,
+          documentId,
+          outboxEmailId: queued.record.id,
+        },
+        evidenceRefs: [],
+        auditAction: 'engagement-requested',
+      });
+
+      const dispatchRes = await engagementRepo.createDispatchInTx(tx, ctx, {
+        kind: 'client_care',
+        matterId: lockedMatter.id,
+        documentId,
+        outboxEmailId: queued.record.id,
+        recipientEmail: resolvedEmail,
+        recipientName: resolvedRecipientName,
+        sentAt: nowIso,
+        sentByPersonId: actor.id,
+        intakeCheckRecordId: eSigCheck.id,
+        idempotencyKey: outboxIdempotencyKey,
+      });
+
+      let savedMatter = lockedMatter;
+      let chaseRecord: CommunicationChaseRecord | null = null;
+      if (!dispatchRes.deduplicated) {
+        const prevStatus = lockedMatter.engagementLetterStatus || 'Drafting';
+        if (getEngagementStatusRank(lockedMatter.engagementLetterStatus) < 2) {
+          lockedMatter.engagementLetterStatus = 'Sent';
+        }
+        lockedMatter.engagementLetterSentAt = nowIso;
+        lockedMatter.updatedAt = nowIso;
+        lockedMatter.updatedById = actor.id;
+        savedMatter = await putMatterWithInTxRestrictions(ctx, lockedMatter, {
+          expectedRowVersion: null,
+        });
+
+        if (effectiveChasing.engagementLetter.enabled) {
+          const nextActionIso = addDays(
+            new Date(nowIso),
+            effectiveChasing.engagementLetter.firstChaseDays,
+          ).toISOString();
+          const chaseCreated = await chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
+            entityKind: 'engagement_letter',
+            entityId: savedMatter.id,
+            matterId: savedMatter.id,
+            recipientEmail: resolvedEmail,
+            recipientName: resolvedRecipientName,
+            sentAt: nowIso,
+            nextActionAt: nextActionIso,
+            createdByPersonId: actor.id,
+          });
+          chaseRecord = chaseCreated.chase;
+        }
+
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'matter',
+            recordId: savedMatter.id,
+            action: 'update',
+            field: 'Engagement letter sent',
+            oldValue: prevStatus,
+            newValue: `${savedMatter.engagementLetterStatus} (dispatch ${dispatchRes.record.id}, outbox ${queued.record.id})`,
+            byId: actor.id,
+            at: nowIso,
+          },
+        ]);
+      } else {
+        chaseRecord = await chasingRepo.getActiveChaseForEntity(ctx, {
+          entityKind: 'engagement_letter',
+          entityId: lockedMatter.id,
+        });
+      }
+
+      return {
+        ok: true as const,
+        matter: savedMatter,
+        dispatch: dispatchRes.record,
+        chase: chaseRecord,
+        outboxRecord: queued.record,
+      };
+    });
+
+    if (!txResult.ok) {
+      return txResult;
+    }
+
+    const emailProviderDisabled =
+      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
+      'disabled';
+    let finalOutboxRecord = txResult.outboxRecord;
+    if (
+      options?.drainAfterCommit !== false &&
+      !emailProviderDisabled &&
+      !hasActiveTenantTransaction(ctx)
+    ) {
+      try {
+        await drainEmailOutboxForTenant(ctx, {
+          tenantConfig: tenantCfg,
+          outboxRepository: outboxRepo,
+          emailSender: options?.emailSender,
+          secretReader: options?.secretReader,
+          storageProvider: storage,
+          actorId: actor.id,
+          batchSize: 10,
+        });
+        const refreshed = await outboxRepo.getOutboxRecordById(
+          ctx,
+          txResult.outboxRecord.id,
+        );
+        if (refreshed) {
+          finalOutboxRecord = refreshed;
+        }
+      } catch {
+        // Best-effort post-commit drain; outbox row stays pending for outbox-drain job.
+      }
+    }
+
+    return {
+      ok: true,
+      matter: txResult.matter,
+      dispatch: txResult.dispatch,
+      chase: txResult.chase,
+      outboxRecord: finalOutboxRecord,
+      emailProviderDisabled,
+      documentId,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function stopCommunicationChaseRecord(
+  input: {
+    chaseId: string;
+    reason?: CommunicationChaseStoppedReason;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<{ ok: true; chase: CommunicationChaseRecord } | RegisterServiceDenialOrError> {
+  try {
+    const { ctx, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (
+      !permSet.permissions.has('matter:edit') &&
+      !permSet.permissions.has('quote:edit')
+    ) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to stop communication chasing.',
+      );
+    }
+
+    const cleanChaseId = input.chaseId?.trim() || '';
+    if (!cleanChaseId) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Chase ID is required.');
+    }
+
+    const chasingRepo = getChasingRepository();
+    const chasePre = await chasingRepo.getChaseById(ctx, cleanChaseId);
+    if (!chasePre) {
+      return registerServiceFailure('NOT_FOUND', 'Communication chase was not found.');
+    }
+
+    if (
+      chasePre.entityKind === 'engagement_letter' ||
+      chasePre.entityKind === 'money_on_account'
+    ) {
+      if (!permSet.permissions.has('matter:edit')) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'Missing permission "matter:edit" to stop this chase.',
+        );
+      }
+      const matter = await getMatterRepository().getMatterById<Matter>(
+        ctx,
+        chasePre.matterId ?? chasePre.entityId,
+        { includeRestricted: true },
+      );
+      if (
+        !matter ||
+        !canPersonAccessMatter(matter, actor.id, actor, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        })
+      ) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Communication chase was not found.',
+        );
+      }
+    } else if (chasePre.entityKind === 'quote') {
+      if (!permSet.permissions.has('quote:edit')) {
+        return registerServiceFailure(
+          'FORBIDDEN',
+          'Missing permission "quote:edit" to stop quote chasing.',
+        );
+      }
+      const hasRestrictedMatterAccess = permSet.permissions.has(
+        'matter:restricted:access',
+      );
+      const quoteHidden = await getIntakeQuoteRepository().isQuoteHiddenFromViewer(
+        ctx,
+        chasePre.quoteId ?? chasePre.entityId,
+        actor.id,
+        { hasRestrictedMatterAccess },
+      );
+      if (quoteHidden) {
+        return registerServiceFailure(
+          'NOT_FOUND',
+          'Communication chase was not found.',
+        );
+      }
+    }
+
+    const stopReason: CommunicationChaseStoppedReason =
+      input.reason ?? 'manual_stop';
+    const stoppedAt = new Date().toISOString();
+    const stopped = await chasingRepo.withTenantTransaction(ctx, async (tx) => {
+      const res = await chasingRepo.stopChaseByIdInTx(tx, ctx, {
+        chaseId: chasePre.id,
+        reason: stopReason,
+        stoppedByPersonId: actor.id,
+        stoppedAt,
+      });
+      if (!res) return null;
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'communication_chase',
+          recordId: res.id,
+          action: 'update',
+          field: 'Communication chase stopped',
+          oldValue: chasePre.status,
+          newValue: `${res.status} (${res.stoppedReason ?? stopReason})`,
+          byId: actor.id,
+          at: stoppedAt,
+        },
+      ]);
+      return res;
+    });
+
+    if (!stopped) {
+      return registerServiceFailure('NOT_FOUND', 'Communication chase was not found.');
+    }
+    return { ok: true, chase: stopped };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function sendNonEngagementLetterRecord(
+  input: {
+    enquiryId: string;
+    recipientEmail?: string;
+    recipientName?: string;
+    closeReasonSystemKey?: string | null;
+    idempotencyKey?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  },
+): Promise<
+  | {
+      ok: true;
+      dispatch: EngagementDispatchRecord;
+      outboxRecord: EmailOutboxRecord;
+      documentId: string;
+      closedTaskIds: string[];
+      emailProviderDisabled: boolean;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (
+      !permSet.permissions.has('enquiry:edit') &&
+      !permSet.permissions.has('enquiry:close') &&
+      !permSet.permissions.has('matter:edit')
+    ) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to send non-engagement letters.',
+      );
+    }
+
+    const cleanEnquiryId = input.enquiryId?.trim() || '';
+    if (!cleanEnquiryId) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Enquiry ID is required.');
+    }
+
+    const intakeRepo = getIntakeQuoteRepository();
+    const enquiryPre = await intakeRepo.getEnquiryById<Enquiry>(
+      ctx,
+      cleanEnquiryId,
+      { includeRestricted: true },
+    );
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const hidden = enquiryPre
+      ? await intakeRepo.isEnquiryHiddenFromViewer(ctx, enquiryPre.id, actor.id, {
+          hasRestrictedMatterAccess,
+        })
+      : true;
+    if (!enquiryPre || hidden) {
+      return registerServiceFailure('NOT_FOUND', 'Enquiry was not found.');
+    }
+
+    const store = await loadTenantCatalogueStoreView(ctx, {
+      includePmsLinks: false,
+    });
+    const partyRepo = getPartyRepository();
+    const linkedPerson = enquiryPre.linkedPersonId
+      ? await partyRepo.getPersonById<Person>(ctx, enquiryPre.linkedPersonId)
+      : null;
+
+    const resolvedEmail = (
+      input.recipientEmail?.trim() ||
+      (linkedPerson ? primaryEmail(linkedPerson) : '') ||
+      enquiryPre.email?.trim() ||
+      ''
+    ).trim();
+    if (!resolvedEmail || !isValidEmailAddress(resolvedEmail)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid recipient email address is required to send the non-engagement letter.',
+      );
+    }
+
+    const resolvedRecipientName = (
+      input.recipientName?.trim() ||
+      (linkedPerson ? personDisplayName(linkedPerson) : '') ||
+      `${enquiryPre.firstName} ${enquiryPre.lastName}`.trim() ||
+      enquiryPre.callingOnBehalfOf ||
+      'Client'
+    ).trim();
+
+    const closeReasonKey =
+      input.closeReasonSystemKey?.trim() ||
+      systemKeyOf(store.values, enquiryPre.closeReasonId) ||
+      null;
+    const matterAreaLabel = resolveLabel(store.values, enquiryPre.practiceAreaId);
+    const effectiveEngagement = await resolveEffectiveEngagementConfig(
+      ctx,
+      tenantCfg,
+    );
+    const firmName = store.firm.name || tenantCfg.displayName || 'the firm';
+    const renderedLetter = renderNonEngagementLetterContent({
+      config: {
+        displayName: firmName,
+        engagement: effectiveEngagement,
+      },
+      closeReasonSystemKey: closeReasonKey,
+      recipientName: resolvedRecipientName,
+      enquiryReference: enquiryPre.reference || enquiryPre.id,
+      matterAreaLabel,
+      feeEarnerOrSenderName: personDisplayName(actor),
+    });
+
+    const docxBytes = buildValidDocxArchive({
+      headerText: `${firmName} | Ref: ${enquiryPre.reference || enquiryPre.id}`,
+      footerText: 'Private & Confidential — Non-Engagement Confirmation',
+      paragraphs: [
+        { text: firmName, heading: 'Heading1', bold: true },
+        {
+          text: `PRIVATE & CONFIDENTIAL — Ref: ${enquiryPre.reference || enquiryPre.id}`,
+          bold: true,
+        },
+        { text: renderedLetter.subject, heading: 'Heading2', bold: true },
+        ...renderedLetter.paragraphs.map((text) => ({ text })),
+      ],
+    });
+
+    const converter =
+      options?.pdfConverter ??
+      selectDocumentPdfConverter(tenantCfg, {
+        converterUrl: process.env.DOC_CONVERTER_URL,
+      });
+    const pdfBytes = await converter.convertDocxToPdf({
+      docxBytes,
+      title: `Non-Engagement Letter — ${enquiryPre.reference || enquiryPre.id}`,
+      authorName: personDisplayName(actor),
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+    });
+
+    if (pdfBytes.byteLength > MAX_EMAIL_TOTAL_ATTACHMENT_BYTES) {
+      return registerServiceFailure(
+        'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED',
+        'The generated letter PDF exceeds the 3 MB email attachment limit.',
+      );
+    }
+
+    const storage = options?.storageProvider ?? getDocumentStorage(tenantCfg);
+    const docId = `DOC-NENG-${randomUUID().slice(0, 12).toUpperCase()}`;
+    const pdfFileName =
+      `${enquiryPre.reference || enquiryPre.id} - Non-Engagement Letter.pdf`.replace(
+        /[/\\]/g,
+        '_',
+      );
+    const storedBlob = await storage.putObject(ctx, {
+      category: 'documents',
+      objectId: docId,
+      fileName: pdfFileName,
+      contentType: 'application/pdf',
+      bytes: pdfBytes,
+    });
+
+    const sha256 = createHash('sha256').update(pdfBytes).digest('hex');
+    const safeSubject = renderedLetter.subject.replace(/[\r\n]+/g, ' ').trim();
+    const textBody = renderedLetter.paragraphs.join('\n\n');
+    const htmlBody = renderedLetter.paragraphs
+      .map((p) => `<p>${escapeHtmlTextForEmail(p)}</p>`)
+      .join('');
+
+    const docRepo = getDocumentRepository();
+    const outboxRepo = getOutboxRepository();
+    const engagementRepo = getEngagementRepository();
+    const taskRepo = getTaskWorkflowRepository();
+
+    const sysTplId = `TPL-SYS-NON-ENG-${sanitizeTemplateIdSuffix(ctx.tenantId)}`;
+    const sysVerId = `${sysTplId}-V1`;
+    const dispatchKey = input.idempotencyKey?.trim() || randomUUID();
+    const outboxIdempotencyKey = `engagement:non_engagement:${enquiryPre.id}:${dispatchKey}`;
+
+    const txResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+      const nowIso = new Date().toISOString();
+      await ensureBuiltInCommunicationTemplateInTx(tx, ctx, docRepo, {
+        templateId: sysTplId,
+        versionId: sysVerId,
+        code: 'SYS-NON-ENG-01',
+        name: 'Non-Engagement Letter',
+        documentType: NON_ENGAGEMENT_DOCUMENT_TYPE,
+        actorId: actor.id,
+        nowIso,
+        sourceContext: 'client',
+      });
+
+      await docRepo.putDocumentInTx(tx, ctx, {
+        id: docId,
+        tenantId: ctx.tenantId,
+        title: `${enquiryPre.reference || enquiryPre.id} — Non-Engagement Letter`,
+        fileName: pdfFileName,
+        documentType: NON_ENGAGEMENT_DOCUMENT_TYPE,
+        outputFormat: 'pdf',
+        mimeType: 'application/pdf',
+        fileSizeBytes: pdfBytes.byteLength,
+        fileSha256: sha256,
+        templateId: sysTplId,
+        templateName: 'Non-Engagement Letter',
+        templateVersionId: sysVerId,
+        templateVersionNumber: 1,
+        storageProvider: storedBlob.storageProvider,
+        storageKey: storedBlob.blobKey,
+        externalId: storedBlob.externalId ?? null,
+        externalVersion: storedBlob.externalVersion ?? null,
+        generatedByUserId: actor.id,
+        generatedByName: personDisplayName(actor),
+        generatedAt: nowIso,
+        primaryMatterId: null,
+        primaryClientId:
+          enquiryPre.linkedOrganisationId ?? enquiryPre.linkedPersonId ?? null,
+        primaryEnquiryId: enquiryPre.id,
+        recipientPartyId: enquiryPre.linkedPersonId ?? null,
+        isDeleted: false,
+      });
+      await docRepo.putDocumentLinkInTx(tx, ctx, {
+        id: `DL-${randomUUID().slice(0, 12).toUpperCase()}`,
+        tenantId: ctx.tenantId,
+        documentId: docId,
+        entityType: 'enquiry',
+        entityId: enquiryPre.id,
+        linkRole: 'source_enquiry',
+        createdAt: nowIso,
+      });
+
+      const queued = await outboxRepo.enqueueEmailInTx(tx, ctx, {
+        idempotencyKey: outboxIdempotencyKey,
+        templateKey: 'engagement.non_engagement',
+        recipients: { to: [resolvedEmail] },
+        subject: safeSubject,
+        htmlBody,
+        textBody,
+        attachments: [
+          {
+            kind: 'inline',
+            fileName: pdfFileName,
+            contentType: 'application/pdf',
+            contentBytes: pdfBytes,
+          },
+        ],
+        enquiryId: enquiryPre.id,
+        createdByPersonId: actor.id,
+        correlationId: ctx.correlationId,
+      });
+
+      const dispatchRes = await engagementRepo.createDispatchInTx(tx, ctx, {
+        kind: 'non_engagement',
+        enquiryId: enquiryPre.id,
+        documentId: docId,
+        outboxEmailId: queued.record.id,
+        recipientEmail: resolvedEmail,
+        recipientName: resolvedRecipientName,
+        sentAt: nowIso,
+        sentByPersonId: actor.id,
+        idempotencyKey: outboxIdempotencyKey,
+      });
+
+      const linkedTasks = await taskRepo.listTasksLinkedToRecord<Task>(
+        ctx,
+        'enquiry',
+        enquiryPre.id,
+      );
+      const closedTaskIds: string[] = [];
+      for (const t of linkedTasks) {
+        if (t.autoTrigger === 'non_engagement_letter' && isTaskOpen(t)) {
+          const prevTaskStatus = t.status;
+          const updatedTask: Task = {
+            ...t,
+            status: 'Done',
+            completedAt: nowIso,
+            completedById: actor.id,
+            updatedAt: nowIso,
+            updatedById: actor.id,
+          };
+          await taskRepo.putTask(ctx, updatedTask);
+          closedTaskIds.push(t.id);
+          await appendTenantAuditEntries(ctx, [
+            {
+              recordType: 'task',
+              recordId: t.id,
+              action: 'status-change',
+              field: 'Task completed on non-engagement letter dispatch',
+              oldValue: prevTaskStatus,
+              newValue: 'Done',
+              byId: actor.id,
+              at: nowIso,
+            },
+          ]);
+        }
+      }
+
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'enquiry',
+          recordId: enquiryPre.id,
+          action: 'update',
+          field: 'Non-engagement letter sent',
+          oldValue: enquiryPre.status,
+          newValue: `reason=${renderedLetter.reasonKey} dispatch=${dispatchRes.record.id} outbox=${queued.record.id}`,
+          byId: actor.id,
+          at: nowIso,
+        },
+      ]);
+
+      return {
+        dispatch: dispatchRes.record,
+        outboxRecord: queued.record,
+        closedTaskIds,
+      };
+    });
+
+    const emailProviderDisabled =
+      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
+      'disabled';
+    let finalOutboxRecord = txResult.outboxRecord;
+    if (
+      options?.drainAfterCommit !== false &&
+      !emailProviderDisabled &&
+      !hasActiveTenantTransaction(ctx)
+    ) {
+      try {
+        await drainEmailOutboxForTenant(ctx, {
+          tenantConfig: tenantCfg,
+          outboxRepository: outboxRepo,
+          emailSender: options?.emailSender,
+          secretReader: options?.secretReader,
+          storageProvider: storage,
+          actorId: actor.id,
+          batchSize: 10,
+        });
+        const refreshed = await outboxRepo.getOutboxRecordById(
+          ctx,
+          txResult.outboxRecord.id,
+        );
+        if (refreshed) {
+          finalOutboxRecord = refreshed;
+        }
+      } catch {
+        // Best-effort post-commit drain; email stays pending in email_outbox.
+      }
+    }
+
+    return {
+      ok: true,
+      dispatch: txResult.dispatch,
+      outboxRecord: finalOutboxRecord,
+      documentId: docId,
+      closedTaskIds: txResult.closedTaskIds,
+      emailProviderDisabled,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function listOutboxMessagesForAdminRecord(
+  filter: {
+    status?: EmailOutboxStatus;
+    limit?: number;
+    offset?: number;
+  } = {},
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | { ok: true; messages: readonly EmailOutboxAdminListItem[] }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      options?.mfaVerified,
+      options,
+    );
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to view the email outbox.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to view the email outbox.',
+      );
+    }
+
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const messages = await getOutboxRepository().listVisibleOutboxRecordsForAdmin(
+      ctx,
+      {
+        viewerId: actor.id,
+        hasRestrictedMatterAccess,
+        ...(filter.status ? { status: filter.status } : {}),
+        limit: filter.limit,
+        offset: filter.offset,
+      },
+    );
+    return { ok: true, messages };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function getOutboxMessageForAdminRecord(
+  input: { outboxId: string },
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  { ok: true; message: EmailOutboxAdminDetail } | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      options?.mfaVerified,
+      options,
+    );
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to view the email outbox.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to view outbox messages.',
+      );
+    }
+
+    const cleanId = input.outboxId?.trim() || '';
+    if (!cleanId) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Email outbox message was not found.',
+      );
+    }
+
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const message = await getOutboxRepository().getVisibleOutboxRecordForAdmin(
+      ctx,
+      {
+        outboxId: cleanId,
+        viewerId: actor.id,
+        hasRestrictedMatterAccess,
+      },
+    );
+    if (!message) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Email outbox message was not found.',
+      );
+    }
+
+    await appendTenantAuditEntries(ctx, [
+      {
+        recordType: 'email_outbox',
+        recordId: message.id,
+        action: 'view',
+        field: 'Outbox message inspected',
+        oldValue: '',
+        newValue: `template=${message.templateKey} status=${message.status}`,
+        byId: actor.id,
+        at: new Date().toISOString(),
+      },
+    ]);
+
+    return { ok: true, message };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function downloadOutboxAttachmentForAdminRecord(
+  input: { outboxId: string; ordinal: number },
+  byId?: string,
+  options?: {
+    readonly mfaVerified?: boolean;
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | { ok: true; attachment: EmailOutboxAdminAttachmentResult }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, actor, permSet } = await resolveRegisterActorAndConfig(
+      byId,
+      options?.mfaVerified,
+      options,
+    );
+    if (!permSet.permissions.has('admin:access')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to download outbox attachments.',
+      );
+    }
+    if (!permSet.mfaVerified) {
+      return registerServiceFailure(
+        'MFA_REQUIRED',
+        'Multi-factor authentication is required to download outbox attachments.',
+      );
+    }
+
+    const cleanId = input.outboxId?.trim() || '';
+    if (!cleanId || !Number.isInteger(input.ordinal) || input.ordinal < 0) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Email outbox attachment was not found.',
+      );
+    }
+
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const attachment =
+      await getOutboxRepository().getVisibleOutboxAttachmentForAdmin(ctx, {
+        outboxId: cleanId,
+        ordinal: input.ordinal,
+        viewerId: actor.id,
+        hasRestrictedMatterAccess,
+      });
+    if (!attachment) {
+      return registerServiceFailure(
+        'NOT_FOUND',
+        'Email outbox attachment was not found.',
+      );
+    }
+
+    await appendTenantAuditEntries(ctx, [
+      {
+        recordType: 'email_outbox_attachment',
+        recordId: `${attachment.outboxId}:${attachment.ordinal}`,
+        action: 'download',
+        field: 'Outbox attachment downloaded',
+        oldValue: '',
+        newValue: `bytes=${attachment.byteSize} sha256=${attachment.sha256.slice(0, 12)}`,
+        byId: actor.id,
+        at: new Date().toISOString(),
+      },
+    ]);
+
+    return { ok: true, attachment };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export interface CommunicationChaseExecutionContext {
+  readonly tx: TenantSqlClient;
+  readonly ctx: TenantContext;
+  readonly chase: CommunicationChaseRecord;
+  readonly rule: ChasingRuleConfig;
+  readonly tenantConfig: TenantConfiguration;
+  readonly store: Awaited<ReturnType<typeof loadTenantCatalogueStoreView>>;
+  readonly people: readonly Person[];
+  readonly teams: readonly Team[];
+  readonly rbacConfig: RbacConfiguration;
+  readonly nowIso: string;
+}
+
+export interface CommunicationChaseEntityHandler {
+  executeStep(
+    exec: CommunicationChaseExecutionContext,
+  ): Promise<{
+    readonly queuedEmailId?: string | null;
+    readonly createdTaskId?: string | null;
+    readonly stoppedReason?: CommunicationChaseStoppedReason | null;
+  }>;
+}
+
+function resolveEligibleMatterChaseEscalationAssignee(params: {
+  readonly matter: Matter;
+  readonly people: readonly Person[];
+  readonly teams: readonly Team[];
+  readonly rbacConfig: RbacConfiguration;
+}): Person | null {
+  const orderedIds = [
+    params.matter.leadFeeEarnerId,
+    params.matter.responsiblePartnerId,
+    params.matter.supervisingPartnerId,
+  ].filter((id): id is string => Boolean(id?.trim()));
+
+  for (const candidateId of orderedIds) {
+    const candidate = params.people.find(
+      (p) =>
+        p.id === candidateId &&
+        p.isEmployee &&
+        !p.mergedIntoId &&
+        !isLeaverPerson(p),
+    );
+    if (!candidate) continue;
+    if (
+      canPersonAccessMatter(params.matter, candidate.id, candidate, {
+        allPeople: params.people,
+        teams: params.teams,
+        config: { rbac: params.rbacConfig },
+      })
+    ) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export const COMMUNICATION_CHASE_ADAPTERS: Partial<
+  Record<CommunicationChaseEntityKind, CommunicationChaseEntityHandler>
+> = {
+  engagement_letter: {
+    async executeStep(exec) {
+      const {
+        tx,
+        ctx,
+        chase,
+        rule,
+        tenantConfig,
+        store,
+        people,
+        teams,
+        rbacConfig,
+        nowIso,
+      } = exec;
+      const matterId = chase.matterId ?? chase.entityId;
+      const matter = await getMatterRepository().getMatterById<Matter>(
+        ctx,
+        matterId,
+        { includeRestricted: true },
+      );
+      const chasingRepo = getChasingRepository();
+
+      if (
+        !matter ||
+        isClosedOrArchivedMatterStatus(matter.matterStatusId, store.values)
+      ) {
+        await chasingRepo.stopChaseByIdInTx(tx, ctx, {
+          chaseId: chase.id,
+          reason: 'withdrawn',
+          stoppedByPersonId: ctx.actorId,
+          stoppedAt: nowIso,
+        });
+        return { stoppedReason: 'withdrawn' };
+      }
+
+      if (isMatterEngagementSignedForGate(matter)) {
+        await chasingRepo.stopChaseByIdInTx(tx, ctx, {
+          chaseId: chase.id,
+          reason: 'signed',
+          stoppedByPersonId: ctx.actorId,
+          stoppedAt: nowIso,
+        });
+        return { stoppedReason: 'signed' };
+      }
+
+      const stepIndex: 1 | 2 | 3 =
+        chase.nextStepIndex >= 3 ? 3 : chase.nextStepIndex === 2 ? 2 : 1;
+
+      if (stepIndex === 1 || stepIndex === 2) {
+        const nextActionAtIso =
+          stepIndex === 1
+            ? addDays(new Date(chase.sentAt), rule.secondChaseDays).toISOString()
+            : addDays(
+                new Date(chase.sentAt),
+                rule.escalateTaskDays,
+              ).toISOString();
+
+        const recipientEmail = chase.recipientEmail?.trim() || '';
+        const recipientName = chase.recipientName?.trim() || 'Client';
+        if (!rule.sendEmails) {
+          await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+            chaseId: chase.id,
+            stepIndex,
+            actionKind: 'chase_email',
+            outcome: 'skipped_emails_disabled',
+            executedAt: nowIso,
+            nextActionAt: nextActionAtIso,
+          });
+          return {};
+        }
+        if (!recipientEmail || !isValidEmailAddress(recipientEmail)) {
+          await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+            chaseId: chase.id,
+            stepIndex,
+            actionKind: 'chase_email',
+            outcome: 'skipped_no_recipient',
+            executedAt: nowIso,
+            nextActionAt: nextActionAtIso,
+          });
+          return {};
+        }
+
+        const firmName =
+          store.firm.name || tenantConfig.displayName || 'the firm';
+        const isSecond = stepIndex === 2;
+        const subject = isSecond
+          ? `Second reminder: Client Care & Engagement Letter (${matter.matterNumber || matter.id})`
+          : `Reminder: Client Care & Engagement Letter (${matter.matterNumber || matter.id})`;
+        const textBody = isSecond
+          ? `Dear ${recipientName},\n\nWe are writing again regarding the Client Care & Engagement Letter for ${matter.title} (${matter.matterNumber || matter.id}). Please sign and return a scanned copy or clear photograph so we can confirm your instructions and begin work.\n\nYours faithfully,\n${firmName}`
+          : `Dear ${recipientName},\n\nThis is a friendly reminder regarding the Client Care & Engagement Letter sent for ${matter.title} (${matter.matterNumber || matter.id}). Please sign and return a scanned copy or clear photograph at your convenience.\n\nYours faithfully,\n${firmName}`;
+        const htmlBody = `<p>Dear ${escapeHtmlTextForEmail(recipientName)},</p><p>${escapeHtmlTextForEmail(textBody.split('\n\n')[1] ?? textBody)}</p><p>Yours faithfully,<br/>${escapeHtmlTextForEmail(firmName)}</p>`;
+
+        // R818: Outbox idempotency key is keyed by chaseId & step so resend creates a fresh chaseId.
+        const outboxKey = `chase:${chase.id}:step:${stepIndex}`;
+        const queued = await getOutboxRepository().enqueueEmailInTx(tx, ctx, {
+          idempotencyKey: outboxKey,
+          templateKey: isSecond
+            ? 'communication.chase.engagement_letter.step2'
+            : 'communication.chase.engagement_letter.step1',
+          recipients: { to: [recipientEmail] },
+          subject: subject.replace(/[\r\n]+/g, ' ').trim(),
+          htmlBody,
+          textBody,
+          matterId: matter.id,
+          createdByPersonId: null,
+          correlationId: ctx.correlationId,
+        });
+
+        await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+          chaseId: chase.id,
+          stepIndex,
+          actionKind: 'chase_email',
+          outcome: 'executed',
+          outboxEmailId: queued.record.id,
+          executedAt: nowIso,
+          nextActionAt: nextActionAtIso,
+        });
+        return { queuedEmailId: queued.deduplicated ? null : queued.record.id };
+      }
+
+      // Step 3: Raise fee-earner escalation task for an active permitted matter viewer
+      const assignee = resolveEligibleMatterChaseEscalationAssignee({
+        matter,
+        people,
+        teams,
+        rbacConfig,
+      });
+      if (!assignee) {
+        await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+          chaseId: chase.id,
+          stepIndex: 3,
+          actionKind: 'escalation_task',
+          outcome: 'skipped_no_recipient',
+          executedAt: nowIso,
+          nextActionAt: null,
+        });
+        return {};
+      }
+
+      const taskRepo = getTaskWorkflowRepository();
+      const escalationKey = `chase:${chase.id}:step:3`;
+      const existingLinkedTasks = await taskRepo.listTasksLinkedToRecord<Task>(
+        ctx,
+        'matter',
+        matter.id,
+      );
+      const alreadyExists = existingLinkedTasks.find(
+        (t) =>
+          (t.systemKey === escalationKey || t.idempotencyKey === escalationKey) &&
+          isTaskOpen(t),
+      );
+      let taskId = alreadyExists?.id ?? null;
+
+      if (!alreadyExists) {
+        const taskTypeId =
+          valueBySystemKey(store.values, 'task_type', 'follow_up')?.id ??
+          vid('task_type', 'Follow up');
+        const priorityId =
+          valueBySystemKey(store.values, 'task_priority', 'high')?.id ??
+          valueBySystemKey(store.values, 'task_priority', 'normal')?.id ??
+          vid('task_priority', 'Normal');
+        const newId = await taskRepo.allocateNextTaskId(ctx);
+        const task: Task = {
+          id: newId,
+          reference: newId,
+          title: `Follow up unsigned engagement letter: ${matter.matterNumber || matter.id}`,
+          description: `No signed engagement letter has been recorded after ${rule.escalateTaskDays} days. Please contact the client to confirm instructions.`,
+          taskTypeId,
+          priorityId,
+          dueAt: toIsoDate(new Date(nowIso)),
+          assignedTeamId: null,
+          assignedPersonId: assignee.id,
+          status: 'To do',
+          linkedRecords: [{ recordType: 'matter', recordId: matter.id }],
+          createdById: ctx.actorId,
+          createdAt: nowIso,
+          updatedById: ctx.actorId,
+          updatedAt: nowIso,
+          completedById: null,
+          completedAt: null,
+          comments: [],
+          autoTrigger: 'communication_chase_escalation',
+          idempotencyKey: escalationKey,
+          systemKey: escalationKey,
+        };
+        await taskRepo.putTask(ctx, task);
+        taskId = task.id;
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'task',
+            recordId: task.id,
+            action: 'create',
+            field: 'Engagement chase escalation task',
+            oldValue: null,
+            newValue: `${task.reference} -> matter ${matter.id}`,
+            byId: ctx.actorId,
+            at: nowIso,
+          },
+        ]);
+        await pushNotification(ctx, {
+          recipientId: assignee.id,
+          kind: 'task_assigned',
+          title: `Task assigned to you: ${task.title}`,
+          detail: `${task.reference} · Engagement letter chase escalated`,
+          href: `/tasks/${task.id}`,
+          recordId: task.id,
+          matterId: matter.id,
+          knownMatterIds: [matter.id],
+          knownTask: task,
+          tenantConfig,
+          byId: ctx.actorId,
+          at: nowIso,
+        });
+      }
+
+      await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+        chaseId: chase.id,
+        stepIndex: 3,
+        actionKind: 'escalation_task',
+        outcome: 'executed',
+        taskId,
+        executedAt: nowIso,
+        nextActionAt: null,
+      });
+      return { createdTaskId: taskId };
+    },
+  },
+};
+
+export interface CommunicationChasesJobSummary {
+  readonly tenantId: string;
+  readonly localDate: string;
+  readonly dueEvaluated: number;
+  readonly emailsQueuedCount: number;
+  readonly tasksCreatedCount: number;
+  readonly autoStoppedCount: number;
+  readonly skippedCount: number;
+}
+
+export async function executeCommunicationChasesForTenant(
+  ctx: TenantContext,
+  options: {
+    triggerSource: 'scheduled' | 'manual';
+    triggeredById: string;
+    timeZone?: string;
+    defaultRunHourLocal?: number;
+    statementTimeoutMs?: number;
+    signal?: AbortSignal;
+    tenantConfig?: TenantConfiguration;
+    emailSender?: EmailSender;
+    secretReader?: KeyVaultSecretReader;
+    storageProvider?: DocumentStorageProvider;
+    drainAfterCommit?: boolean;
+    now?: Date;
+  },
+): Promise<ControlledJobRunOutcome<{ summary: CommunicationChasesJobSummary }>> {
+  const tenantConfig = resolveVerifiedTenantConfiguration(
+    ctx,
+    options.tenantConfig,
+  );
+  const effectiveTimeZone =
+    options.timeZone?.trim() || tenantConfig.timeZone || 'Europe/London';
+  const now = options.now ?? new Date();
+
+  const outcome = await getJobRunRepository().executeControlledTenantJobRun(
+    ctx,
+    {
+      jobKey: 'communication-chases',
+      triggerSource: options.triggerSource,
+      triggeredById: options.triggeredById,
+      timeZone: effectiveTimeZone,
+      targetLocalHour: options.defaultRunHourLocal ?? 8,
+      now,
+      statementTimeoutMs: options.statementTimeoutMs,
+      signal: options.signal,
+      work: async ({ tx, localDate, nowIso }) => {
+        const chasingRepo = getChasingRepository();
+        const effectiveChasing = await resolveEffectiveChasingConfig(
+          ctx,
+          tenantConfig,
+        );
+        const dueChases = await chasingRepo.listDueActiveChases(ctx, {
+          nowIso,
+          limit: 200,
+        });
+
+        let emailsQueuedCount = 0;
+        let tasksCreatedCount = 0;
+        let autoStoppedCount = 0;
+        let skippedCount = 0;
+
+        if (dueChases.length > 0) {
+          const [store, staffPeople, teams, rbacOverride] = await Promise.all([
+            loadTenantCatalogueStoreView(ctx, { includePmsLinks: false }),
+            loadStaffPeople(ctx),
+            getHrAndRbacRepository().listAllTeams<Team>(ctx),
+            getHrAndRbacRepository().getRbacConfigOverride<RbacConfiguration>(
+              ctx,
+            ),
+          ]);
+          const effectiveRbac = rbacOverride
+            ? mergeRbacConfigOverlay(
+                getDefaultTenantRbacConfig(ctx.tenantId),
+                rbacOverride,
+              )
+            : getDefaultTenantRbacConfig(ctx.tenantId);
+
+          for (const candidate of dueChases) {
+            const lockedChase = await chasingRepo.lockDueChaseForUpdateInTx(
+              tx,
+              ctx,
+              candidate.id,
+            );
+            if (!lockedChase) {
+              skippedCount += 1;
+              continue;
+            }
+            const rule =
+              lockedChase.entityKind === 'engagement_letter'
+                ? effectiveChasing.engagementLetter
+                : lockedChase.entityKind === 'quote'
+                  ? effectiveChasing.quote
+                  : effectiveChasing.moneyOnAccount;
+            if (!rule.enabled) {
+              skippedCount += 1;
+              continue;
+            }
+            const handler = COMMUNICATION_CHASE_ADAPTERS[lockedChase.entityKind];
+            if (!handler) {
+              skippedCount += 1;
+              continue;
+            }
+            const stepResult = await handler.executeStep({
+              tx,
+              ctx,
+              chase: lockedChase,
+              rule,
+              tenantConfig,
+              store,
+              people: staffPeople,
+              teams,
+              rbacConfig: effectiveRbac,
+              nowIso,
+            });
+            if (stepResult.stoppedReason) {
+              autoStoppedCount += 1;
+            } else if (stepResult.queuedEmailId) {
+              emailsQueuedCount += 1;
+            } else if (stepResult.createdTaskId) {
+              tasksCreatedCount += 1;
+            } else {
+              skippedCount += 1;
+            }
+          }
+        }
+
+        const summary: CommunicationChasesJobSummary = {
+          tenantId: ctx.tenantId,
+          localDate,
+          dueEvaluated: dueChases.length,
+          emailsQueuedCount,
+          tasksCreatedCount,
+          autoStoppedCount,
+          skippedCount,
+        };
+
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: 'FIRM-CHASING-JOB',
+            action: 'job-run',
+            field: 'Communication chasing sweep',
+            oldValue: '',
+            newValue: `date=${localDate} due=${dueChases.length} emails=${emailsQueuedCount} tasks=${tasksCreatedCount} stopped=${autoStoppedCount}`,
+            byId: options.triggeredById,
+            at: nowIso,
+          },
+        ]);
+
+        console.info(
+          JSON.stringify({
+            level: 'info',
+            event: 'communication_chases.completed',
+            tenantId: ctx.tenantId,
+            correlationId: ctx.correlationId,
+            localDate,
+            dueEvaluated: dueChases.length,
+            emailsQueuedCount,
+            tasksCreatedCount,
+            autoStoppedCount,
+            skippedCount,
+          }),
+        );
+
+        return {
+          result: { summary },
+          summary: {
+            dueEvaluated: dueChases.length,
+            emailsQueuedCount,
+            tasksCreatedCount,
+            autoStoppedCount,
+            skippedCount,
+          },
+        };
+      },
+    },
+  );
+
+  if (
+    outcome.outcome === 'executed' &&
+    outcome.result.summary.emailsQueuedCount > 0 &&
+    options.drainAfterCommit !== false &&
+    (resolveEmailIntegrationConfig(tenantConfig).provider ?? 'disabled') !==
+      'disabled'
+  ) {
+    try {
+      await drainEmailOutboxForTenant(ctx, {
+        tenantConfig,
+        outboxRepository: getOutboxRepository(),
+        emailSender: options.emailSender,
+        secretReader: options.secretReader,
+        storageProvider: options.storageProvider,
+        actorId: options.triggeredById,
+        now,
+      });
+    } catch {
+      // Best-effort post-commit drain; queued chase emails stay in email_outbox.
+    }
+  }
+
+  return outcome;
+}
+
+export async function runScheduledCommunicationChasesJobSweep(options?: {
+  readonly registry?: TenantRegistry;
+  readonly timeoutMs?: number;
+  readonly defaultRunHourLocal?: number;
+  readonly guardedJobOptions?: GuardedJobOptions;
+  readonly tenantConfigOverrideByTenantId?: Record<string, TenantConfiguration>;
+  readonly emailSender?: EmailSender;
+  readonly secretReader?: KeyVaultSecretReader;
+  readonly storageProvider?: DocumentStorageProvider;
+  readonly drainAfterCommit?: boolean;
+  readonly now?: Date;
+}): Promise<ScheduledTenantJobSweepSummary> {
+  assertTestOnlyTenantConfigOverride(options?.tenantConfigOverrideByTenantId);
+  const registry = options?.registry ?? loadActiveTenantRegistry();
+  const succeededTenants: string[] = [];
+  const skippedTenants: Array<{
+    readonly tenantId: string;
+    readonly status: 'skipped' | 'already_running';
+    readonly reason?: string;
+  }> = [];
+  const failedTenants: Array<{
+    readonly tenantId: string;
+    readonly errorCode?: string;
+  }> = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) continue;
+    try {
+      const outcome = await guardedJob(
+        'communication-chases',
+        entry,
+        async ({ tenantContext, tenantEntry, timeoutMs, signal }) => {
+          const tenantConfig =
+            options?.tenantConfigOverrideByTenantId?.[tenantEntry.tenantId] ??
+            getTenantConfigurationForRegistryEntry(
+              tenantEntry,
+              registry.hostingMode,
+            );
+          return executeCommunicationChasesForTenant(tenantContext, {
+            triggerSource: 'scheduled',
+            triggeredById: 'system:communication-chases',
+            timeZone: tenantEntry.timeZone,
+            defaultRunHourLocal: options?.defaultRunHourLocal,
+            statementTimeoutMs: timeoutMs,
+            signal,
+            tenantConfig,
+            emailSender: options?.emailSender,
+            secretReader: options?.secretReader,
+            storageProvider: options?.storageProvider,
+            drainAfterCommit: options?.drainAfterCommit,
+            now: options?.now,
+          });
+        },
+        {
+          registry,
+          timeoutMs: options?.timeoutMs,
+          ...options?.guardedJobOptions,
+        },
+      );
+      if (outcome.outcome === 'executed') {
+        succeededTenants.push(entry.tenantId);
+      } else {
+        skippedTenants.push({
+          tenantId: entry.tenantId,
+          status:
+            outcome.outcome === 'already_running' ? 'already_running' : 'skipped',
+          reason: outcome.outcome,
+        });
+      }
+    } catch (err) {
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: sanitizeJobErrorCode(err),
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    succeededTenants,
+    skippedTenants,
+    failedTenants,
+  };
+}
+
 
