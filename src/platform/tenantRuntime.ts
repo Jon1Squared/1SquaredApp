@@ -21,6 +21,8 @@ import {
   resolveTenantPostgresConfig,
   TenantAuditRepository,
   TenantCatalogueRepository,
+  TenantChasingRepository,
+  TenantEngagementRepository,
   TenantEvidenceArtifactRepository,
   TenantHrAndRbacRepository,
   TenantIntakeCheckRepository,
@@ -977,6 +979,8 @@ const rateOverrideRepositoryInstance = new TenantRateOverrideRepository();
 const registerRepositoryInstance = new TenantRegisterRepository();
 const intakeCheckRepositoryInstance = new TenantIntakeCheckRepository();
 const evidenceArtifactRepositoryInstance = new TenantEvidenceArtifactRepository();
+const chasingRepositoryInstance = new TenantChasingRepository();
+const engagementRepositoryInstance = new TenantEngagementRepository();
 const searchRepositoryInstance = new TenantSearchRepository();
 const jobRunRepositoryInstance = new TenantJobRunRepository();
 const outboxRepositoryInstance = new TenantOutboxRepository();
@@ -1026,6 +1030,14 @@ export function getIntakeCheckRepository(): TenantIntakeCheckRepository {
 
 export function getEvidenceArtifactRepository(): TenantEvidenceArtifactRepository {
   return evidenceArtifactRepositoryInstance;
+}
+
+export function getChasingRepository(): TenantChasingRepository {
+  return chasingRepositoryInstance;
+}
+
+export function getEngagementRepository(): TenantEngagementRepository {
+  return engagementRepositoryInstance;
 }
 
 export function getSearchRepository(): TenantSearchRepository {
@@ -1298,6 +1310,8 @@ export function createVerifiedTenantContext(
 export {
   TenantAuditRepository,
   TenantCatalogueRepository,
+  TenantChasingRepository,
+  TenantEngagementRepository,
   TenantEvidenceArtifactRepository,
   TenantHrAndRbacRepository,
   TenantIntakeCheckRepository,

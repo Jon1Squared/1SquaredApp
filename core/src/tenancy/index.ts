@@ -49,6 +49,8 @@ export * from './searchRepository';
 export * from './outboxRepository';
 export * from './intakeCheckRepository';
 export * from './evidenceRepository';
+export * from './chasingRepository';
+export * from './engagementRepository';
 
 export {
   isEntraMfaVerified,

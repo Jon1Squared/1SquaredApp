@@ -22,6 +22,9 @@ import {
   MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
   type EmailAttachmentRef,
   type EmailInlineAttachment,
+  type EmailOutboxAdminAttachmentResult,
+  type EmailOutboxAdminDetail,
+  type EmailOutboxAdminListItem,
   type EmailOutboxRecord,
   type EmailOutboxStatus,
   type EmailOutboxStoredAttachment,
@@ -37,11 +40,19 @@ import {
   type UserNotificationPreference,
 } from '../api/index';
 import { TenantAuditRepository } from './auditRepository';
+import {
+  buildMatterHiddenFromViewerSql,
+  ENQUIRY_DRAFT_ONLY_SQL_PREDICATE,
+  ENQUIRY_VISIBLE_SQL_PREDICATE,
+  QUOTE_DRAFT_ONLY_SQL_PREDICATE,
+  QUOTE_VISIBLE_SQL_PREDICATE,
+} from './intakeQuoteRepository';
 import { sanitizeJobErrorCode } from './jobRunRepository';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
 import {
   TenantScopedRepository,
   toIsoString,
+  type TenantSqlClient,
 } from './tenantScopedRepository';
 
 export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 5;
@@ -123,6 +134,9 @@ interface DbEmailOutboxRow {
   provider_message_id: string | null;
   last_error_code: string | null;
   content_scrubbed_at: Date | string | null;
+  matter_id: string | null;
+  quote_id: string | null;
+  enquiry_id: string | null;
   created_by_person_id: string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -245,9 +259,92 @@ function mapOutboxRow(row: DbEmailOutboxRow): EmailOutboxRecord {
     lastErrorCode: row.last_error_code ?? null,
     contentScrubbedAt: toNullableIsoString(row.content_scrubbed_at),
     createdByPersonId: row.created_by_person_id ?? null,
+    ...(row.matter_id !== null && row.matter_id !== undefined
+      ? { matterId: row.matter_id }
+      : {}),
+    ...(row.quote_id !== null && row.quote_id !== undefined
+      ? { quoteId: row.quote_id }
+      : {}),
+    ...(row.enquiry_id !== null && row.enquiry_id !== undefined
+      ? { enquiryId: row.enquiry_id }
+      : {}),
     createdAt: toIsoString(row.created_at),
     updatedAt: toIsoString(row.updated_at),
   };
+}
+
+function buildAdminOutboxVisibleWhereSql(
+  hasRestrictedMatterAccess: boolean,
+): string {
+  // R826: Only outbox rows linked to a matter, quote, or enquiry are visible
+  // in Administration -> Email Outbox (omits pre-0028, staff alert, and digest emails).
+  const linkageSql =
+    '(eo.matter_id IS NOT NULL OR eo.quote_id IS NOT NULL OR eo.enquiry_id IS NOT NULL)';
+
+  // R823: Enforce exact matter, quote, and enquiry SQL visibility predicates;
+  // Admin is NOT exempt from restricted matters or ethical walls.
+  if (hasRestrictedMatterAccess) {
+    return `(
+      ${linkageSql}
+      AND (
+        eo.matter_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM public.matters m
+           WHERE m.tenant_id = eo.tenant_id
+             AND m.id = eo.matter_id
+        )
+      )
+      AND (
+        eo.quote_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM public.quotes q
+           WHERE q.tenant_id = eo.tenant_id
+             AND q.id = eo.quote_id
+             AND ${QUOTE_DRAFT_ONLY_SQL_PREDICATE}
+        )
+      )
+      AND (
+        eo.enquiry_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM public.enquiries e
+           WHERE e.tenant_id = eo.tenant_id
+             AND e.id = eo.enquiry_id
+             AND ${ENQUIRY_DRAFT_ONLY_SQL_PREDICATE}
+        )
+      )
+    )`;
+  }
+
+  return `(
+    ${linkageSql}
+    AND (
+      eo.matter_id IS NULL
+      OR EXISTS (
+        SELECT 1 FROM public.matters m
+         WHERE m.tenant_id = eo.tenant_id
+           AND m.id = eo.matter_id
+           AND NOT ${buildMatterHiddenFromViewerSql('m', 2)}
+      )
+    )
+    AND (
+      eo.quote_id IS NULL
+      OR EXISTS (
+        SELECT 1 FROM public.quotes q
+         WHERE q.tenant_id = eo.tenant_id
+           AND q.id = eo.quote_id
+           AND ${QUOTE_VISIBLE_SQL_PREDICATE}
+      )
+    )
+    AND (
+      eo.enquiry_id IS NULL
+      OR EXISTS (
+        SELECT 1 FROM public.enquiries e
+         WHERE e.tenant_id = eo.tenant_id
+           AND e.id = eo.enquiry_id
+           AND ${ENQUIRY_VISIBLE_SQL_PREDICATE}
+      )
+    )
+  )`;
 }
 
 function mapPreferenceRow(
@@ -405,6 +502,9 @@ export interface EnqueueEmailOutboxInput {
   readonly htmlBody: string;
   readonly textBody: string;
   readonly attachments?: readonly OutgoingEmailAttachment[];
+  readonly matterId?: string | null;
+  readonly quoteId?: string | null;
+  readonly enquiryId?: string | null;
   readonly createdByPersonId?: string | null;
   readonly nextAttemptAt?: string;
   readonly correlationId?: string;
@@ -439,11 +539,7 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       new TenantAuditRepository({ poolManager: this.poolManager });
   }
 
-  public async enqueueEmail(
-    ctx: TenantContext,
-    input: EnqueueEmailOutboxInput,
-    options?: { readonly auditEntries?: readonly FirmAuditEntryInput[] },
-  ): Promise<EnqueueEmailOutboxResult> {
+  private prepareEmailOutboxEnqueue(input: EnqueueEmailOutboxInput) {
     const idempotencyKey =
       input.idempotencyKey?.trim() || `auto:${randomUUID()}`;
     const templateKey = input.templateKey.trim();
@@ -535,8 +631,93 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       }
     }
 
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const existingRes = await tx.query<DbEmailOutboxRow>(
+    return {
+      idempotencyKey,
+      templateKey,
+      normalizedRecipients,
+      preparedInlineAttachments,
+      attachmentsJson,
+    };
+  }
+
+  public async enqueueEmailInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    input: EnqueueEmailOutboxInput,
+    options?: { readonly auditEntries?: readonly FirmAuditEntryInput[] },
+  ): Promise<EnqueueEmailOutboxResult> {
+    const {
+      idempotencyKey,
+      templateKey,
+      normalizedRecipients,
+      preparedInlineAttachments,
+      attachmentsJson,
+    } = this.prepareEmailOutboxEnqueue(input);
+
+    const existingRes = await tx.query<DbEmailOutboxRow>(
+      `SELECT *
+         FROM public.email_outbox
+        WHERE tenant_id = $1
+          AND idempotency_key = $2
+        LIMIT 1`,
+      [ctx.tenantId, idempotencyKey],
+    );
+    if (existingRes.rows[0]) {
+      this.assertRowTenant(ctx, existingRes.rows[0].tenant_id, 'EmailOutbox');
+      return {
+        record: mapOutboxRow(existingRes.rows[0]),
+        deduplicated: true,
+      };
+    }
+
+    const seqRes = await tx.query<{ seq: string }>(
+      `SELECT nextval('public.tenant_email_outbox_id_seq')::text AS seq`,
+    );
+    const id = `EO-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
+    const nowIso = new Date().toISOString();
+    const nextAttemptAt = input.nextAttemptAt?.trim() || nowIso;
+    const correlationId = input.correlationId?.trim() || ctx.correlationId;
+
+    const insertRes = await tx.query<DbEmailOutboxRow>(
+      `INSERT INTO public.email_outbox (
+         tenant_id, id, idempotency_key, template_key, correlation_id,
+         recipients_json, subject, html_body, text_body, attachments_json,
+         status, attempt_count, next_attempt_at, claimed_at, claim_token,
+         sent_at, provider_message_id, last_error_code, content_scrubbed_at,
+         matter_id, quote_id, enquiry_id,
+         created_by_person_id, created_at, updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5,
+         $6::jsonb, $7, $8, $9, $10::jsonb,
+         'pending', 0, $11::timestamptz, NULL, NULL,
+         NULL, NULL, NULL, NULL,
+         $12, $13, $14,
+         $15, $16::timestamptz, $16::timestamptz
+       )
+       ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+       RETURNING *`,
+      [
+        ctx.tenantId,
+        id,
+        idempotencyKey,
+        templateKey,
+        correlationId,
+        JSON.stringify(normalizedRecipients),
+        input.subject,
+        input.htmlBody,
+        input.textBody,
+        JSON.stringify(attachmentsJson),
+        nextAttemptAt,
+        input.matterId?.trim() || null,
+        input.quoteId?.trim() || null,
+        input.enquiryId?.trim() || null,
+        input.createdByPersonId ?? null,
+        nowIso,
+      ],
+    );
+
+    if (!insertRes.rows[0]) {
+      const winnerRes = await tx.query<DbEmailOutboxRow>(
         `SELECT *
            FROM public.email_outbox
           WHERE tenant_id = $1
@@ -544,100 +725,52 @@ export class TenantOutboxRepository extends TenantScopedRepository {
           LIMIT 1`,
         [ctx.tenantId, idempotencyKey],
       );
-      if (existingRes.rows[0]) {
-        this.assertRowTenant(ctx, existingRes.rows[0].tenant_id, 'EmailOutbox');
-        return {
-          record: mapOutboxRow(existingRes.rows[0]),
-          deduplicated: true,
-        };
-      }
+      const winner = winnerRes.rows[0]!;
+      this.assertRowTenant(ctx, winner.tenant_id, 'EmailOutbox');
+      return {
+        record: mapOutboxRow(winner),
+        deduplicated: true,
+      };
+    }
 
-      const seqRes = await tx.query<{ seq: string }>(
-        `SELECT nextval('public.tenant_email_outbox_id_seq')::text AS seq`,
-      );
-      const id = `EO-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
-      const nowIso = new Date().toISOString();
-      const nextAttemptAt = input.nextAttemptAt?.trim() || nowIso;
-      const correlationId = input.correlationId?.trim() || ctx.correlationId;
-
-      const insertRes = await tx.query<DbEmailOutboxRow>(
-        `INSERT INTO public.email_outbox (
-           tenant_id, id, idempotency_key, template_key, correlation_id,
-           recipients_json, subject, html_body, text_body, attachments_json,
-           status, attempt_count, next_attempt_at, claimed_at, claim_token,
-           sent_at, provider_message_id, last_error_code, content_scrubbed_at,
-           created_by_person_id, created_at, updated_at
-         ) VALUES (
-           $1, $2, $3, $4, $5,
-           $6::jsonb, $7, $8, $9, $10::jsonb,
-           'pending', 0, $11::timestamptz, NULL, NULL,
-           NULL, NULL, NULL, NULL,
-           $12, $13::timestamptz, $13::timestamptz
-         )
-         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-         RETURNING *`,
+    const inserted = insertRes.rows[0];
+    this.assertRowTenant(ctx, inserted.tenant_id, 'EmailOutbox');
+    for (const att of preparedInlineAttachments) {
+      await tx.query(
+        `INSERT INTO public.email_outbox_attachments (
+           tenant_id, outbox_id, ordinal, file_name, content_type,
+           byte_size, sha256, content_bytes
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           ctx.tenantId,
-          id,
-          idempotencyKey,
-          templateKey,
-          correlationId,
-          JSON.stringify(normalizedRecipients),
-          input.subject,
-          input.htmlBody,
-          input.textBody,
-          JSON.stringify(attachmentsJson),
-          nextAttemptAt,
-          input.createdByPersonId ?? null,
-          nowIso,
+          inserted.id,
+          att.ordinal,
+          att.fileName,
+          att.contentType,
+          att.byteSize,
+          att.sha256,
+          Buffer.from(att.contentBytes),
         ],
       );
+    }
+    if (options?.auditEntries && options.auditEntries.length > 0) {
+      await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
+    }
+    return {
+      record: mapOutboxRow(inserted),
+      deduplicated: false,
+    };
+  }
 
-      if (!insertRes.rows[0]) {
-        const winnerRes = await tx.query<DbEmailOutboxRow>(
-          `SELECT *
-             FROM public.email_outbox
-            WHERE tenant_id = $1
-              AND idempotency_key = $2
-            LIMIT 1`,
-          [ctx.tenantId, idempotencyKey],
-        );
-        const winner = winnerRes.rows[0]!;
-        this.assertRowTenant(ctx, winner.tenant_id, 'EmailOutbox');
-        return {
-          record: mapOutboxRow(winner),
-          deduplicated: true,
-        };
-      }
-
-      const inserted = insertRes.rows[0];
-      this.assertRowTenant(ctx, inserted.tenant_id, 'EmailOutbox');
-      for (const att of preparedInlineAttachments) {
-        await tx.query(
-          `INSERT INTO public.email_outbox_attachments (
-             tenant_id, outbox_id, ordinal, file_name, content_type,
-             byte_size, sha256, content_bytes
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [
-            ctx.tenantId,
-            inserted.id,
-            att.ordinal,
-            att.fileName,
-            att.contentType,
-            att.byteSize,
-            att.sha256,
-            Buffer.from(att.contentBytes),
-          ],
-        );
-      }
-      if (options?.auditEntries && options.auditEntries.length > 0) {
-        await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
-      }
-      return {
-        record: mapOutboxRow(inserted),
-        deduplicated: false,
-      };
-    });
+  public async enqueueEmail(
+    ctx: TenantContext,
+    input: EnqueueEmailOutboxInput,
+    options?: { readonly auditEntries?: readonly FirmAuditEntryInput[] },
+  ): Promise<EnqueueEmailOutboxResult> {
+    this.prepareEmailOutboxEnqueue(input);
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.enqueueEmailInTx(tx, ctx, input, options),
+    );
   }
 
   public async claimDueOutboxBatch(
@@ -1112,6 +1245,227 @@ export class TenantOutboxRepository extends TenantScopedRepository {
         this.assertRowTenant(ctx, row.tenant_id, 'EmailOutbox');
         return mapOutboxRow(row);
       });
+    });
+  }
+
+  /**
+   * Lists outbound emails visible to an Admin in Administration -> Email Outbox (`R823` & `R826`):
+   * - Requires at least one link (`matter_id`, `quote_id`, or `enquiry_id`), omitting staff notifications & digests.
+   * - Filters by matter/quote/enquiry SQL visibility predicates (Admin is NOT exempt).
+   * - Never selects `html_body` or `text_body` in list queries.
+   */
+  public async listVisibleOutboxRecordsForAdmin(
+    ctx: TenantContext,
+    params: {
+      readonly viewerId: string;
+      readonly hasRestrictedMatterAccess: boolean;
+      readonly status?: EmailOutboxStatus;
+      readonly limit?: number;
+      readonly offset?: number;
+    },
+  ): Promise<readonly EmailOutboxAdminListItem[]> {
+    const cleanViewerId = params.viewerId?.trim() ?? '';
+    const limit = Math.max(1, Math.min(200, Math.floor(params.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(params.offset ?? 0));
+    const visibilitySql = buildAdminOutboxVisibleWhereSql(
+      params.hasRestrictedMatterAccess,
+    );
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const sqlParams: unknown[] = [ctx.tenantId, cleanViewerId];
+      let whereSql = `eo.tenant_id = $1 AND ${visibilitySql}`;
+      if (params.status) {
+        sqlParams.push(params.status);
+        whereSql += ` AND eo.status = $${sqlParams.length}`;
+      }
+      sqlParams.push(limit);
+      const limitParam = `$${sqlParams.length}`;
+      sqlParams.push(offset);
+      const offsetParam = `$${sqlParams.length}`;
+
+      const res = await tx.query<{
+        tenant_id: string;
+        id: string;
+        template_key: string;
+        recipients_json: unknown;
+        subject: string | null;
+        attachments_json: unknown;
+        status: string;
+        attempt_count: number | string;
+        next_attempt_at: Date | string;
+        sent_at: Date | string | null;
+        last_error_code: string | null;
+        content_scrubbed_at: Date | string | null;
+        matter_id: string | null;
+        quote_id: string | null;
+        enquiry_id: string | null;
+        created_by_person_id: string | null;
+        created_at: Date | string;
+        updated_at: Date | string;
+      }>(
+        `SELECT eo.tenant_id, eo.id, eo.template_key, eo.recipients_json, eo.subject,
+                eo.attachments_json, eo.status, eo.attempt_count, eo.next_attempt_at,
+                eo.sent_at, eo.last_error_code, eo.content_scrubbed_at,
+                eo.matter_id, eo.quote_id, eo.enquiry_id,
+                eo.created_by_person_id, eo.created_at, eo.updated_at
+           FROM public.email_outbox eo
+          WHERE ${whereSql}
+          ORDER BY eo.created_at DESC, eo.id DESC
+          LIMIT ${limitParam} OFFSET ${offsetParam}`,
+        sqlParams,
+      );
+
+      return res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'EmailOutboxAdminList');
+        return {
+          tenantId: row.tenant_id,
+          id: row.id,
+          templateKey: row.template_key,
+          recipients: normalizeRecipients(row.recipients_json),
+          subject: row.subject ?? null,
+          attachments: normalizeAttachments(row.attachments_json),
+          status: row.status as EmailOutboxStatus,
+          attemptCount: Number(row.attempt_count ?? 0),
+          nextAttemptAt: toIsoString(row.next_attempt_at),
+          sentAt: toNullableIsoString(row.sent_at),
+          lastErrorCode: row.last_error_code ?? null,
+          contentScrubbedAt: toNullableIsoString(row.content_scrubbed_at),
+          matterId: row.matter_id ?? null,
+          quoteId: row.quote_id ?? null,
+          enquiryId: row.enquiry_id ?? null,
+          createdByPersonId: row.created_by_person_id ?? null,
+          createdAt: toIsoString(row.created_at),
+          updatedAt: toIsoString(row.updated_at),
+        };
+      });
+    });
+  }
+
+  /**
+   * Loads one linked outbox message (including body) only if it satisfies R826 linkage
+   * and R823 visibility for `viewerId`. Returns `null` when missing, cross-tenant, unlinked,
+   * or belonging to a hidden matter/quote/enquiry (uniform NOT_FOUND at caller level).
+   */
+  public async getVisibleOutboxRecordForAdmin(
+    ctx: TenantContext,
+    params: {
+      readonly outboxId: string;
+      readonly viewerId: string;
+      readonly hasRestrictedMatterAccess: boolean;
+    },
+  ): Promise<EmailOutboxAdminDetail | null> {
+    const cleanId = params.outboxId?.trim() ?? '';
+    const cleanViewerId = params.viewerId?.trim() ?? '';
+    if (!cleanId) return null;
+    const visibilitySql = buildAdminOutboxVisibleWhereSql(
+      params.hasRestrictedMatterAccess,
+    );
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbEmailOutboxRow>(
+        `SELECT eo.*
+           FROM public.email_outbox eo
+          WHERE eo.tenant_id = $1
+            AND eo.id = $3
+            AND ${visibilitySql}
+          LIMIT 1`,
+        [ctx.tenantId, cleanViewerId, cleanId],
+      );
+      const row = res.rows[0];
+      if (!row) return null;
+      this.assertRowTenant(ctx, row.tenant_id, 'EmailOutboxAdminDetail');
+      return {
+        tenantId: row.tenant_id,
+        id: row.id,
+        templateKey: row.template_key,
+        recipients: normalizeRecipients(row.recipients_json),
+        subject: row.subject ?? null,
+        htmlBody: row.html_body ?? null,
+        textBody: row.text_body ?? null,
+        attachments: normalizeAttachments(row.attachments_json),
+        status: row.status as EmailOutboxStatus,
+        attemptCount: Number(row.attempt_count ?? 0),
+        nextAttemptAt: toIsoString(row.next_attempt_at),
+        sentAt: toNullableIsoString(row.sent_at),
+        providerMessageId: row.provider_message_id ?? null,
+        lastErrorCode: row.last_error_code ?? null,
+        contentScrubbedAt: toNullableIsoString(row.content_scrubbed_at),
+        matterId: row.matter_id ?? null,
+        quoteId: row.quote_id ?? null,
+        enquiryId: row.enquiry_id ?? null,
+        createdByPersonId: row.created_by_person_id ?? null,
+        createdAt: toIsoString(row.created_at),
+        updatedAt: toIsoString(row.updated_at),
+      };
+    });
+  }
+
+  /**
+   * Reads an inline attachment non-destructively (read-only TX; zero outbox status mutation)
+   * only when the parent outbox row satisfies R826 linkage and R823 visibility.
+   */
+  public async getVisibleOutboxAttachmentForAdmin(
+    ctx: TenantContext,
+    params: {
+      readonly outboxId: string;
+      readonly ordinal: number;
+      readonly viewerId: string;
+      readonly hasRestrictedMatterAccess: boolean;
+    },
+  ): Promise<EmailOutboxAdminAttachmentResult | null> {
+    const cleanId = params.outboxId?.trim() ?? '';
+    const cleanViewerId = params.viewerId?.trim() ?? '';
+    if (!cleanId || !Number.isInteger(params.ordinal) || params.ordinal < 0) {
+      return null;
+    }
+    const visibilitySql = buildAdminOutboxVisibleWhereSql(
+      params.hasRestrictedMatterAccess,
+    );
+
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{
+        tenant_id: string;
+        outbox_id: string;
+        ordinal: number | string;
+        file_name: string;
+        content_type: string;
+        byte_size: number | string;
+        sha256: string;
+        content_bytes: Buffer;
+      }>(
+        `SELECT a.tenant_id, a.outbox_id, a.ordinal, a.file_name,
+                a.content_type, a.byte_size, a.sha256, a.content_bytes
+           FROM public.email_outbox_attachments a
+           JOIN public.email_outbox eo
+             ON eo.tenant_id = a.tenant_id
+            AND eo.id = a.outbox_id
+          WHERE eo.tenant_id = $1
+            AND eo.id = $3
+            AND a.ordinal = $4
+            AND eo.content_scrubbed_at IS NULL
+            AND ${visibilitySql}
+          LIMIT 1`,
+        [ctx.tenantId, cleanViewerId, cleanId, params.ordinal],
+      );
+      const row = res.rows[0];
+      if (!row) return null;
+      this.assertRowTenant(ctx, row.tenant_id, 'EmailOutboxAdminAttachment');
+      const bytes = new Uint8Array(row.content_bytes);
+      const actualSha = createHash('sha256').update(bytes).digest('hex');
+      if (actualSha !== row.sha256) {
+        throw new Error(
+          'EMAIL_OUTBOX_ATTACHMENT_CORRUPTED: Stored outbox attachment digest mismatch.',
+        );
+      }
+      return {
+        outboxId: row.outbox_id,
+        ordinal: Number(row.ordinal),
+        fileName: row.file_name,
+        contentType: row.content_type,
+        byteSize: Number(row.byte_size),
+        sha256: row.sha256,
+        contentBytes: bytes,
+      };
     });
   }
 

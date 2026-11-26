@@ -17,7 +17,11 @@ import {
 } from '../api/index';
 import { TenantAuditRepository } from './auditRepository';
 import type { TenantPostgresPoolManager } from './postgresPoolManager';
-import { TenantScopedRepository, toIsoString } from './tenantScopedRepository';
+import {
+  TenantScopedRepository,
+  toIsoString,
+  type TenantSqlClient,
+} from './tenantScopedRepository';
 
 export const ALLOWED_INTAKE_CHECK_OUTCOMES_BY_KIND: Readonly<
   Record<IntakeCheckKind, readonly string[]>
@@ -120,7 +124,8 @@ export class TenantIntakeCheckRepository extends TenantScopedRepository {
       new TenantAuditRepository({ poolManager: this.poolManager });
   }
 
-  public async recordCheck(
+  public async recordCheckInTx(
+    tx: TenantSqlClient,
     ctx: TenantContext,
     input: {
       readonly checkKind: IntakeCheckKind;
@@ -149,66 +154,85 @@ export class TenantIntakeCheckRepository extends TenantScopedRepository {
     }
     const outcome = assertValidIntakeCheckOutcome(input.checkKind, input.outcome);
 
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const seqRes = await tx.query<{ seq: string }>(
-        `SELECT nextval('public.tenant_intake_check_id_seq')::text AS seq`,
-      );
-      const id = `ICHK-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
-      const recordedAt = new Date().toISOString();
-      const amountStr =
-        input.amountMinorUnits === null || input.amountMinorUnits === undefined
-          ? null
-          : input.amountMinorUnits.toString();
+    const seqRes = await tx.query<{ seq: string }>(
+      `SELECT nextval('public.tenant_intake_check_id_seq')::text AS seq`,
+    );
+    const id = `ICHK-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
+    const recordedAt = new Date().toISOString();
+    const amountStr =
+      input.amountMinorUnits === null || input.amountMinorUnits === undefined
+        ? null
+        : input.amountMinorUnits.toString();
 
-      const insertRes = await tx.query<DbIntakeCheckRow>(
-        `INSERT INTO public.intake_check_records (
-           tenant_id, id, check_kind, provider, subject_type, subject_id,
-           outcome, amount_minor_units, currency, reference_code,
-           metadata_json, evidence_refs_json, recorded_by_person_id, recorded_at, correlation_id
-         ) VALUES (
-           $1, $2, $3, $4, $5, $6,
-           $7, $8::bigint, $9, $10,
-           $11::jsonb, $12::jsonb, $13, $14::timestamptz, $15
-         )
-         RETURNING *`,
-        [
-          ctx.tenantId,
-          id,
-          input.checkKind,
-          input.provider,
-          input.subjectType,
-          subjectId,
-          outcome,
-          amountStr,
-          input.currency ?? null,
-          input.referenceCode ?? null,
-          JSON.stringify(input.metadata ?? {}),
-          JSON.stringify(input.evidenceRefs ?? []),
-          ctx.actorId,
-          recordedAt,
-          ctx.correlationId,
-        ],
-      );
+    const insertRes = await tx.query<DbIntakeCheckRow>(
+      `INSERT INTO public.intake_check_records (
+         tenant_id, id, check_kind, provider, subject_type, subject_id,
+         outcome, amount_minor_units, currency, reference_code,
+         metadata_json, evidence_refs_json, recorded_by_person_id, recorded_at, correlation_id
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, $8::bigint, $9, $10,
+         $11::jsonb, $12::jsonb, $13, $14::timestamptz, $15
+       )
+       RETURNING *`,
+      [
+        ctx.tenantId,
+        id,
+        input.checkKind,
+        input.provider,
+        input.subjectType,
+        subjectId,
+        outcome,
+        amountStr,
+        input.currency ?? null,
+        input.referenceCode ?? null,
+        JSON.stringify(input.metadata ?? {}),
+        JSON.stringify(input.evidenceRefs ?? []),
+        ctx.actorId,
+        recordedAt,
+        ctx.correlationId,
+      ],
+    );
 
-      const inserted = insertRes.rows[0]!;
-      this.assertRowTenant(ctx, inserted.tenant_id, 'IntakeCheckRecord');
+    const inserted = insertRes.rows[0]!;
+    this.assertRowTenant(ctx, inserted.tenant_id, 'IntakeCheckRecord');
 
-      // Append zero-PII audit entry in the same transaction (ADR 0020)
-      const auditEntry: FirmAuditEntryInput = {
-        recordType: 'intake_check',
-        recordId: inserted.id,
-        action: input.auditAction ?? 'intake-check-recorded',
-        field: input.checkKind,
-        oldValue: null,
-        newValue: `${input.provider}:${input.outcome}`,
-        byId: ctx.actorId,
-        at: recordedAt,
-        reason: `Intake check recorded (kind=${input.checkKind}, provider=${input.provider}, subjectType=${input.subjectType}, evidenceCount=${input.evidenceRefs.length}, correlationId=${ctx.correlationId}).`,
-      };
-      await this.auditRepo.appendAuditEntries(ctx, [auditEntry]);
+    // Append zero-PII audit entry in the same transaction (ADR 0020)
+    const auditEntry: FirmAuditEntryInput = {
+      recordType: 'intake_check',
+      recordId: inserted.id,
+      action: input.auditAction ?? 'intake-check-recorded',
+      field: input.checkKind,
+      oldValue: null,
+      newValue: `${input.provider}:${input.outcome}`,
+      byId: ctx.actorId,
+      at: recordedAt,
+      reason: `Intake check recorded (kind=${input.checkKind}, provider=${input.provider}, subjectType=${input.subjectType}, evidenceCount=${input.evidenceRefs.length}, correlationId=${ctx.correlationId}).`,
+    };
+    await this.auditRepo.appendAuditEntries(ctx, [auditEntry]);
 
-      return mapIntakeCheckRow(inserted);
-    });
+    return mapIntakeCheckRow(inserted);
+  }
+
+  public async recordCheck(
+    ctx: TenantContext,
+    input: {
+      readonly checkKind: IntakeCheckKind;
+      readonly provider: IntakeCheckProviderMode;
+      readonly subjectType: IntakeCheckSubjectType;
+      readonly subjectId: string;
+      readonly outcome: string;
+      readonly amountMinorUnits?: bigint | null;
+      readonly currency?: 'GBP' | null;
+      readonly referenceCode?: string | null;
+      readonly metadata: Record<string, unknown>;
+      readonly evidenceRefs: readonly IntakeEvidenceArtifactRef[];
+      readonly auditAction?: string;
+    },
+  ): Promise<StoredIntakeCheckRow> {
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.recordCheckInTx(tx, ctx, input),
+    );
   }
 
   public async getCheckById(

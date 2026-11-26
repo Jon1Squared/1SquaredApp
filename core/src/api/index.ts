@@ -743,6 +743,7 @@ export interface GeneratedDocumentRecord {
   generatedAt: string;
   primaryMatterId?: string | null;
   primaryClientId?: string | null;
+  primaryEnquiryId?: string | null;
   recipientPartyId?: string | null;
   isDeleted: boolean;
   deletedByUserId?: string | null;
@@ -753,9 +754,9 @@ export interface DocumentLinkRecord {
   id: string;
   tenantId: string;
   documentId: string;
-  entityType: 'matter' | 'organisation' | 'person';
+  entityType: 'matter' | 'organisation' | 'person' | 'enquiry';
   entityId: string;
-  linkRole: 'source_matter' | 'primary_client' | 'recipient_party';
+  linkRole: 'source_matter' | 'source_enquiry' | 'primary_client' | 'recipient_party';
   createdAt: string;
 }
 
@@ -2140,8 +2141,48 @@ export interface EmailOutboxRecord {
   readonly lastErrorCode: string | null;
   readonly contentScrubbedAt: string | null;
   readonly createdByPersonId: string | null;
+  readonly matterId?: string | null;
+  readonly quoteId?: string | null;
+  readonly enquiryId?: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+export interface EmailOutboxAdminListItem {
+  readonly tenantId: string;
+  readonly id: string;
+  readonly templateKey: string;
+  readonly recipients: EmailRecipientList;
+  readonly subject: string | null;
+  readonly attachments: readonly EmailOutboxStoredAttachment[];
+  readonly status: EmailOutboxStatus;
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string;
+  readonly sentAt: string | null;
+  readonly lastErrorCode: string | null;
+  readonly contentScrubbedAt: string | null;
+  readonly matterId: string | null;
+  readonly quoteId: string | null;
+  readonly enquiryId: string | null;
+  readonly createdByPersonId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface EmailOutboxAdminDetail extends EmailOutboxAdminListItem {
+  readonly htmlBody: string | null;
+  readonly textBody: string | null;
+  readonly providerMessageId: string | null;
+}
+
+export interface EmailOutboxAdminAttachmentResult {
+  readonly outboxId: string;
+  readonly ordinal: number;
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly byteSize: number;
+  readonly sha256: string;
+  readonly contentBytes: Uint8Array;
 }
 
 export type NotificationKind =

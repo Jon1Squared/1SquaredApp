@@ -120,7 +120,14 @@ export function sanitizePostgresError(
         existingCode.startsWith('PMS_') ||
         existingCode.startsWith('MIGRATION_') ||
         existingCode.startsWith('DOCUMENT_') ||
-        existingCode.startsWith('TEMPLATE_'))
+        existingCode.startsWith('TEMPLATE_') ||
+        existingCode.startsWith('EVIDENCE_') ||
+        existingCode.startsWith('ENGAGEMENT_') ||
+        existingCode.startsWith('COMMUNICATION_') ||
+        existingCode.startsWith('CHASE_') ||
+        existingCode.startsWith('EMAIL_') ||
+        existingCode.startsWith('OUTBOX_') ||
+        existingCode.startsWith('ENQUIRY_'))
     ) {
       return err as Error & { code?: string };
     }
@@ -148,7 +155,13 @@ export function sanitizePostgresError(
       err.message.startsWith('MIGRATION_') ||
       err.message.startsWith('DOCUMENT_') ||
       err.message.startsWith('TEMPLATE_') ||
-      err.message.startsWith('EVIDENCE_')
+      err.message.startsWith('EVIDENCE_') ||
+      err.message.startsWith('ENGAGEMENT_') ||
+      err.message.startsWith('COMMUNICATION_') ||
+      err.message.startsWith('CHASE_') ||
+      err.message.startsWith('EMAIL_') ||
+      err.message.startsWith('OUTBOX_') ||
+      err.message.startsWith('ENQUIRY_')
     ) {
       return err as Error & { code?: string };
     }

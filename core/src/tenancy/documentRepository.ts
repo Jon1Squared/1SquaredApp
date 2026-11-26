@@ -29,6 +29,7 @@ import {
   TenantScopedRepository,
   toIsoString,
   toNullableIsoString,
+  type TenantSqlClient,
 } from './tenantScopedRepository';
 
 interface DbTemplateRow {
@@ -98,6 +99,7 @@ interface DbDocumentRow {
   generated_at: Date | string;
   primary_matter_id: string | null;
   primary_client_id: string | null;
+  primary_enquiry_id: string | null;
   recipient_party_id: string | null;
   is_deleted: boolean;
   deleted_by_user_id: string | null;
@@ -256,6 +258,9 @@ function mapDocumentRow(row: DbDocumentRow): GeneratedDocumentRecord {
     generatedAt: toIsoString(row.generated_at),
     primaryMatterId: row.primary_matter_id,
     primaryClientId: row.primary_client_id,
+    ...(row.primary_enquiry_id !== null && row.primary_enquiry_id !== undefined
+      ? { primaryEnquiryId: row.primary_enquiry_id }
+      : {}),
     recipientPartyId: row.recipient_party_id,
     isDeleted: Boolean(row.is_deleted),
     ...(row.deleted_by_user_id !== null
@@ -612,7 +617,8 @@ export class TenantDocumentRepository extends TenantScopedRepository {
   // Generated Documents & Links
   // ============================================================================
 
-  public async putDocument(
+  public async putDocumentInTx(
+    tx: TenantSqlClient,
     ctx: TenantContext,
     doc: GeneratedDocumentRecord,
   ): Promise<GeneratedDocumentRecord> {
@@ -624,75 +630,84 @@ export class TenantDocumentRepository extends TenantScopedRepository {
       generatedById?: string;
       deletedById?: string | null;
     };
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbDocumentRow>(
-        `INSERT INTO documents (
-           id, tenant_id, title, file_name, document_type, output_format, mime_type,
-           file_size_bytes, file_sha256, template_id, template_name, template_version_id,
-           template_version_number, storage_provider, storage_key, external_id, external_version,
-           generated_by_user_id, generated_by_name, generated_at, primary_matter_id,
-           primary_client_id, recipient_party_id, is_deleted, deleted_by_user_id, deleted_at
-         ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
-         )
-         ON CONFLICT (id) DO UPDATE SET
-           title = EXCLUDED.title,
-           file_name = EXCLUDED.file_name,
-           document_type = EXCLUDED.document_type,
-           output_format = EXCLUDED.output_format,
-           mime_type = EXCLUDED.mime_type,
-           file_size_bytes = EXCLUDED.file_size_bytes,
-           file_sha256 = EXCLUDED.file_sha256,
-           storage_provider = EXCLUDED.storage_provider,
-           storage_key = EXCLUDED.storage_key,
-           external_id = EXCLUDED.external_id,
-           external_version = EXCLUDED.external_version,
-           primary_matter_id = EXCLUDED.primary_matter_id,
-           primary_client_id = EXCLUDED.primary_client_id,
-           recipient_party_id = EXCLUDED.recipient_party_id,
-           is_deleted = EXCLUDED.is_deleted,
-           deleted_by_user_id = EXCLUDED.deleted_by_user_id,
-           deleted_at = EXCLUDED.deleted_at
-         WHERE documents.tenant_id = $2
-         RETURNING *`,
-        [
-          doc.id,
-          ctx.tenantId,
-          doc.title,
-          doc.fileName,
-          doc.documentType ?? 'letter',
-          doc.outputFormat ?? 'docx',
-          doc.mimeType,
-          doc.fileSizeBytes ?? legacyShape.sizeBytes ?? 0,
-          doc.fileSha256 ?? legacyShape.sha256 ?? '',
-          doc.templateId ?? legacyShape.templateCode ?? 'TPL-LEGACY',
-          doc.templateName ?? doc.title ?? 'Template',
-          doc.templateVersionId ?? 'TPLV-LEGACY',
-          doc.templateVersionNumber ?? 1,
-          doc.storageProvider ?? 'local-fs',
-          doc.storageKey,
-          doc.externalId ?? null,
-          doc.externalVersion ?? null,
-          doc.generatedByUserId ?? legacyShape.generatedById ?? ctx.actorId,
-          doc.generatedByName ?? ctx.actorName ?? '',
-          doc.generatedAt,
-          doc.primaryMatterId ?? null,
-          doc.primaryClientId ?? null,
-          doc.recipientPartyId ?? null,
-          Boolean(doc.isDeleted),
-          doc.deletedByUserId ?? legacyShape.deletedById ?? null,
-          doc.deletedAt ?? null,
-        ],
+    const res = await tx.query<DbDocumentRow>(
+      `INSERT INTO documents (
+         id, tenant_id, title, file_name, document_type, output_format, mime_type,
+         file_size_bytes, file_sha256, template_id, template_name, template_version_id,
+         template_version_number, storage_provider, storage_key, external_id, external_version,
+         generated_by_user_id, generated_by_name, generated_at, primary_matter_id,
+         primary_client_id, primary_enquiry_id, recipient_party_id, is_deleted, deleted_by_user_id, deleted_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         title = EXCLUDED.title,
+         file_name = EXCLUDED.file_name,
+         document_type = EXCLUDED.document_type,
+         output_format = EXCLUDED.output_format,
+         mime_type = EXCLUDED.mime_type,
+         file_size_bytes = EXCLUDED.file_size_bytes,
+         file_sha256 = EXCLUDED.file_sha256,
+         storage_provider = EXCLUDED.storage_provider,
+         storage_key = EXCLUDED.storage_key,
+         external_id = EXCLUDED.external_id,
+         external_version = EXCLUDED.external_version,
+         primary_matter_id = EXCLUDED.primary_matter_id,
+         primary_client_id = EXCLUDED.primary_client_id,
+         primary_enquiry_id = EXCLUDED.primary_enquiry_id,
+         recipient_party_id = EXCLUDED.recipient_party_id,
+         is_deleted = EXCLUDED.is_deleted,
+         deleted_by_user_id = EXCLUDED.deleted_by_user_id,
+         deleted_at = EXCLUDED.deleted_at
+       WHERE documents.tenant_id = $2
+       RETURNING *`,
+      [
+        doc.id,
+        ctx.tenantId,
+        doc.title,
+        doc.fileName,
+        doc.documentType ?? 'letter',
+        doc.outputFormat ?? 'docx',
+        doc.mimeType,
+        doc.fileSizeBytes ?? legacyShape.sizeBytes ?? 0,
+        doc.fileSha256 ?? legacyShape.sha256 ?? '',
+        doc.templateId ?? legacyShape.templateCode ?? 'TPL-LEGACY',
+        doc.templateName ?? doc.title ?? 'Template',
+        doc.templateVersionId ?? 'TPLV-LEGACY',
+        doc.templateVersionNumber ?? 1,
+        doc.storageProvider ?? 'local-fs',
+        doc.storageKey,
+        doc.externalId ?? null,
+        doc.externalVersion ?? null,
+        doc.generatedByUserId ?? legacyShape.generatedById ?? ctx.actorId,
+        doc.generatedByName ?? ctx.actorName ?? '',
+        doc.generatedAt,
+        doc.primaryMatterId ?? null,
+        doc.primaryClientId ?? null,
+        doc.primaryEnquiryId ?? null,
+        doc.recipientPartyId ?? null,
+        Boolean(doc.isDeleted),
+        doc.deletedByUserId ?? legacyShape.deletedById ?? null,
+        doc.deletedAt ?? null,
+      ],
+    );
+    const saved = res.rows[0];
+    if (!saved) {
+      throw new Error(
+        'TENANCY_ISOLATION_ERROR: Cross-tenant document ID collision rejected.',
       );
-      const saved = res.rows[0];
-      if (!saved) {
-        throw new Error(
-          'TENANCY_ISOLATION_ERROR: Cross-tenant document ID collision rejected.',
-        );
-      }
-      this.assertRowTenant(ctx, saved.tenant_id, 'GeneratedDocumentRecord');
-      return mapDocumentRow(saved);
-    });
+    }
+    this.assertRowTenant(ctx, saved.tenant_id, 'GeneratedDocumentRecord');
+    return mapDocumentRow(saved);
+  }
+
+  public async putDocument(
+    ctx: TenantContext,
+    doc: GeneratedDocumentRecord,
+  ): Promise<GeneratedDocumentRecord> {
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.putDocumentInTx(tx, ctx, doc),
+    );
   }
 
   public async getDocumentById(
@@ -727,41 +742,49 @@ export class TenantDocumentRepository extends TenantScopedRepository {
     });
   }
 
-  public async putDocumentLink(
+  public async putDocumentLinkInTx(
+    tx: TenantSqlClient,
     ctx: TenantContext,
     link: DocumentLinkRecord,
   ): Promise<DocumentLinkRecord> {
     this.assertRowTenant(ctx, link.tenantId, 'DocumentLinkRecord');
-    return this.withTenantTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbDocumentLinkRow>(
-        `INSERT INTO document_links (
-           id, tenant_id, document_id, entity_type, entity_id, link_role, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (id) DO UPDATE SET
-           entity_type = EXCLUDED.entity_type,
-           entity_id = EXCLUDED.entity_id,
-           link_role = EXCLUDED.link_role
-         WHERE document_links.tenant_id = $2
-         RETURNING *`,
-        [
-          link.id,
-          ctx.tenantId,
-          link.documentId,
-          link.entityType,
-          link.entityId,
-          link.linkRole,
-          link.createdAt,
-        ],
+    const res = await tx.query<DbDocumentLinkRow>(
+      `INSERT INTO document_links (
+         id, tenant_id, document_id, entity_type, entity_id, link_role, created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (id) DO UPDATE SET
+         entity_type = EXCLUDED.entity_type,
+         entity_id = EXCLUDED.entity_id,
+         link_role = EXCLUDED.link_role
+       WHERE document_links.tenant_id = $2
+       RETURNING *`,
+      [
+        link.id,
+        ctx.tenantId,
+        link.documentId,
+        link.entityType,
+        link.entityId,
+        link.linkRole,
+        link.createdAt,
+      ],
+    );
+    const saved = res.rows[0];
+    if (!saved) {
+      throw new Error(
+        'TENANCY_ISOLATION_ERROR: Cross-tenant document link ID collision rejected.',
       );
-      const saved = res.rows[0];
-      if (!saved) {
-        throw new Error(
-          'TENANCY_ISOLATION_ERROR: Cross-tenant document link ID collision rejected.',
-        );
-      }
-      this.assertRowTenant(ctx, saved.tenant_id, 'DocumentLinkRecord');
-      return mapDocumentLinkRow(saved);
-    });
+    }
+    this.assertRowTenant(ctx, saved.tenant_id, 'DocumentLinkRecord');
+    return mapDocumentLinkRow(saved);
+  }
+
+  public async putDocumentLink(
+    ctx: TenantContext,
+    link: DocumentLinkRecord,
+  ): Promise<DocumentLinkRecord> {
+    return this.withTenantTransaction(ctx, async (tx) =>
+      this.putDocumentLinkInTx(tx, ctx, link),
+    );
   }
 
   public async listAllDocumentLinks(
@@ -808,7 +831,7 @@ export class TenantDocumentRepository extends TenantScopedRepository {
 
   public async listDocumentsForEntity(
     ctx: TenantContext,
-    entityType: 'matter' | 'organisation' | 'person',
+    entityType: 'matter' | 'organisation' | 'person' | 'enquiry',
     entityId: string,
   ): Promise<GeneratedDocumentRecord[]> {
     return this.withTenantReadTransaction(ctx, async (tx) => {
@@ -825,18 +848,30 @@ export class TenantDocumentRepository extends TenantScopedRepository {
                  OR (l.entity_type = $2 AND l.entity_id = $3)
                )
              ORDER BY d.generated_at DESC`
-          : `SELECT DISTINCT d.*
-             FROM documents d
-             LEFT JOIN document_links l
-               ON l.document_id = d.id AND l.tenant_id = d.tenant_id
-             WHERE d.tenant_id = $1
-               AND d.is_deleted = FALSE
-               AND (
-                 d.primary_client_id = $3
-                 OR d.recipient_party_id = $3
-                 OR (l.entity_type = $2 AND l.entity_id = $3)
-               )
-             ORDER BY d.generated_at DESC`,
+          : entityType === 'enquiry'
+            ? `SELECT DISTINCT d.*
+               FROM documents d
+               LEFT JOIN document_links l
+                 ON l.document_id = d.id AND l.tenant_id = d.tenant_id
+               WHERE d.tenant_id = $1
+                 AND d.is_deleted = FALSE
+                 AND (
+                   d.primary_enquiry_id = $3
+                   OR (l.entity_type = $2 AND l.entity_id = $3)
+                 )
+               ORDER BY d.generated_at DESC`
+            : `SELECT DISTINCT d.*
+               FROM documents d
+               LEFT JOIN document_links l
+                 ON l.document_id = d.id AND l.tenant_id = d.tenant_id
+               WHERE d.tenant_id = $1
+                 AND d.is_deleted = FALSE
+                 AND (
+                   d.primary_client_id = $3
+                   OR d.recipient_party_id = $3
+                   OR (l.entity_type = $2 AND l.entity_id = $3)
+                 )
+               ORDER BY d.generated_at DESC`,
         [ctx.tenantId, entityType, entityId],
       );
       return res.rows.map((r) => {

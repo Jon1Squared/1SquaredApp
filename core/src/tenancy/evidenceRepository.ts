@@ -10,6 +10,7 @@
 import type {
   EvidenceArtifactRecord,
   EvidenceArtifactSubjectType,
+  EvidencePurpose,
   FirmAuditEntryInput,
   MalwareScanStatus,
   TenantContext,
@@ -28,6 +29,7 @@ interface DbEvidenceArtifactRow {
   blob_key: string;
   subject_type: EvidenceArtifactSubjectType;
   subject_id: string;
+  purpose: EvidencePurpose | null;
   file_name: string;
   content_type: string;
   byte_size: number | string;
@@ -44,6 +46,7 @@ function mapEvidenceArtifactRow(row: DbEvidenceArtifactRow): EvidenceArtifactRec
     blobKey: row.blob_key,
     subjectType: row.subject_type,
     subjectId: row.subject_id,
+    purpose: (row.purpose ?? 'cdd') as EvidencePurpose,
     fileName: row.file_name,
     contentType: row.content_type,
     byteSize: Number(row.byte_size),
@@ -89,6 +92,7 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
       readonly blobKey: string;
       readonly subjectType: EvidenceArtifactSubjectType;
       readonly subjectId: string;
+      readonly purpose?: EvidencePurpose;
       readonly fileName: string;
       readonly contentType: string;
       readonly byteSize: number;
@@ -111,18 +115,19 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
       err.code = 'EVIDENCE_MALWARE_DETECTED';
       throw err;
     }
+    const purpose: EvidencePurpose = input.purpose ?? 'cdd';
     const id = input.id?.trim() || (await this.allocateArtifactIdInTx(tx, ctx));
     const uploadedAt = input.uploadedAt || new Date().toISOString();
     const res = await tx.query<DbEvidenceArtifactRow>(
       `INSERT INTO public.evidence_artifacts (
-         tenant_id, id, blob_key, subject_type, subject_id,
+         tenant_id, id, blob_key, subject_type, subject_id, purpose,
          file_name, content_type, byte_size, sha256, scan_status,
          uploaded_by_person_id, uploaded_at
        )
        VALUES (
-         $1, $2, $3, $4, $5,
-         $6, $7, $8::bigint, $9, $10,
-         $11, $12::timestamptz
+         $1, $2, $3, $4, $5, $6,
+         $7, $8, $9::bigint, $10, $11,
+         $12, $13::timestamptz
        )
        RETURNING *`,
       [
@@ -131,6 +136,7 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
         input.blobKey,
         input.subjectType,
         input.subjectId,
+        purpose,
         input.fileName,
         input.contentType,
         Math.floor(input.byteSize),
@@ -165,6 +171,7 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
       readonly blobKey: string;
       readonly subjectType: EvidenceArtifactSubjectType;
       readonly subjectId: string;
+      readonly purpose?: EvidencePurpose;
       readonly fileName: string;
       readonly contentType: string;
       readonly byteSize: number;
@@ -185,42 +192,62 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     );
   }
 
+  public async getArtifactByIdInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    artifactId: string,
+  ): Promise<EvidenceArtifactRecord | null> {
+    const res = await tx.query<DbEvidenceArtifactRow>(
+      `SELECT *
+       FROM public.evidence_artifacts
+       WHERE tenant_id = $1 AND id = $2
+       LIMIT 1`,
+      [ctx.tenantId, artifactId],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    this.assertRowTenant(ctx, row.tenant_id, 'evidence_artifacts.getByIdInTx');
+    return mapEvidenceArtifactRow(row);
+  }
+
   public async getArtifactById(
     ctx: TenantContext,
     artifactId: string,
   ): Promise<EvidenceArtifactRecord | null> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbEvidenceArtifactRow>(
-        `SELECT *
-         FROM public.evidence_artifacts
-         WHERE tenant_id = $1 AND id = $2
-         LIMIT 1`,
-        [ctx.tenantId, artifactId],
-      );
-      const row = res.rows[0];
-      if (!row) return null;
-      this.assertRowTenant(ctx, row.tenant_id, 'evidence_artifacts.getById');
-      return mapEvidenceArtifactRow(row);
-    });
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.getArtifactByIdInTx(tx, ctx, artifactId),
+    );
+  }
+
+  public async getArtifactByBlobKeyInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    blobKey: string,
+  ): Promise<EvidenceArtifactRecord | null> {
+    const res = await tx.query<DbEvidenceArtifactRow>(
+      `SELECT *
+       FROM public.evidence_artifacts
+       WHERE tenant_id = $1 AND blob_key = $2
+       LIMIT 1`,
+      [ctx.tenantId, blobKey],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    this.assertRowTenant(
+      ctx,
+      row.tenant_id,
+      'evidence_artifacts.getByBlobKeyInTx',
+    );
+    return mapEvidenceArtifactRow(row);
   }
 
   public async getArtifactByBlobKey(
     ctx: TenantContext,
     blobKey: string,
   ): Promise<EvidenceArtifactRecord | null> {
-    return this.withTenantReadTransaction(ctx, async (tx) => {
-      const res = await tx.query<DbEvidenceArtifactRow>(
-        `SELECT *
-         FROM public.evidence_artifacts
-         WHERE tenant_id = $1 AND blob_key = $2
-         LIMIT 1`,
-        [ctx.tenantId, blobKey],
-      );
-      const row = res.rows[0];
-      if (!row) return null;
-      this.assertRowTenant(ctx, row.tenant_id, 'evidence_artifacts.getByBlobKey');
-      return mapEvidenceArtifactRow(row);
-    });
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.getArtifactByBlobKeyInTx(tx, ctx, blobKey),
+    );
   }
 
   public async listArtifactsForSubject(

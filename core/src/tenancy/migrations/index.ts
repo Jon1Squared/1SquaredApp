@@ -4048,6 +4048,177 @@ ALTER TABLE public.pms_fee_earners
 `.trim(),
   };
 
+export const ENGAGEMENT_AND_CHASING_MIGRATION_0028: TenantMigrationDefinition = {
+  version: '0028',
+  name: '0028_engagement_and_chasing_expand',
+  description:
+    'Expand-phase migration adding public.communication_chases, public.communication_chase_events, public.engagement_dispatches, evidence_artifacts.purpose (R817), documents.primary_enquiry_id, and email_outbox.{matter_id, quote_id, enquiry_id} links (R823 / R826, ADR 0042, S1-06).',
+  dependsOn: ['0001', '0009', '0010', '0019', '0023', '0025'],
+  tablesChanged: [
+    'communication_chases',
+    'communication_chase_events',
+    'engagement_dispatches',
+    'evidence_artifacts',
+    'documents',
+    'email_outbox',
+  ],
+  upSql: `
+CREATE SEQUENCE IF NOT EXISTS public.tenant_communication_chase_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS public.tenant_communication_chase_event_id_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS public.tenant_engagement_dispatch_id_seq START WITH 1 INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS public.communication_chases (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  entity_kind TEXT NOT NULL CHECK (entity_kind IN ('engagement_letter', 'quote', 'money_on_account')),
+  entity_id TEXT NOT NULL,
+  matter_id TEXT NULL,
+  quote_id TEXT NULL,
+  recipient_email TEXT NULL,
+  recipient_name TEXT NULL,
+  sent_at TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'stopped', 'completed')),
+  stopped_reason TEXT NULL CHECK (
+    stopped_reason IS NULL OR stopped_reason IN (
+      'signed', 'accepted', 'declined', 'expired', 'superseded',
+      'received', 'withdrawn', 'cancelled', 'manual_stop', 'entity_missing'
+    )
+  ),
+  stopped_at TIMESTAMPTZ NULL,
+  stopped_by_person_id TEXT NULL,
+  last_chased_at TIMESTAMPTZ NULL,
+  next_step_index INTEGER NOT NULL DEFAULT 1 CHECK (next_step_index BETWEEN 1 AND 4),
+  next_action_at TIMESTAMPTZ NULL,
+  created_by_person_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_communication_chases_active
+  ON public.communication_chases (tenant_id, entity_kind, entity_id)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_communication_chases_due
+  ON public.communication_chases (tenant_id, status, next_action_at ASC)
+  WHERE status = 'active' AND next_action_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_communication_chases_matter
+  ON public.communication_chases (tenant_id, matter_id)
+  WHERE matter_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.communication_chase_events (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  chase_id TEXT NOT NULL,
+  step_index INTEGER NOT NULL CHECK (step_index IN (1, 2, 3)),
+  action_kind TEXT NOT NULL CHECK (action_kind IN ('chase_email', 'escalation_task')),
+  outcome TEXT NOT NULL CHECK (
+    outcome IN ('executed', 'skipped_emails_disabled', 'skipped_no_recipient', 'suppressed_restricted')
+  ),
+  outbox_email_id TEXT NULL,
+  task_id TEXT NULL,
+  executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id, chase_id)
+    REFERENCES public.communication_chases (tenant_id, id)
+    ON DELETE CASCADE,
+  CONSTRAINT uq_communication_chase_events_step UNIQUE (tenant_id, chase_id, step_index)
+);
+
+CREATE TABLE IF NOT EXISTS public.engagement_dispatches (
+  tenant_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('client_care', 'non_engagement')),
+  matter_id TEXT NULL,
+  enquiry_id TEXT NULL,
+  document_id TEXT NULL,
+  outbox_email_id TEXT NULL,
+  recipient_email TEXT NOT NULL,
+  recipient_name TEXT NULL,
+  status TEXT NOT NULL CHECK (status IN ('sent', 'signed', 'withdrawn')),
+  sent_at TIMESTAMPTZ NOT NULL,
+  sent_by_person_id TEXT NOT NULL,
+  signed_evidence_artifact_id TEXT NULL,
+  signed_at TIMESTAMPTZ NULL,
+  signed_by_person_id TEXT NULL,
+  intake_check_record_id TEXT NULL,
+  idempotency_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, id),
+  CONSTRAINT uq_engagement_dispatches_idempotency UNIQUE (tenant_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_engagement_dispatches_tenant_matter
+  ON public.engagement_dispatches (tenant_id, matter_id, sent_at DESC)
+  WHERE matter_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_engagement_dispatches_tenant_enquiry
+  ON public.engagement_dispatches (tenant_id, enquiry_id, sent_at DESC)
+  WHERE enquiry_id IS NOT NULL;
+
+ALTER TABLE public.evidence_artifacts
+  ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'cdd'
+  CHECK (purpose IN ('cdd', 'engagement_signed', 'moa_receipt', 'general'));
+
+ALTER TABLE public.documents
+  ADD COLUMN IF NOT EXISTS primary_enquiry_id TEXT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_documents_tenant_enquiry
+  ON public.documents (tenant_id, primary_enquiry_id)
+  WHERE primary_enquiry_id IS NOT NULL;
+
+ALTER TABLE public.email_outbox
+  ADD COLUMN IF NOT EXISTS matter_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS quote_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS enquiry_id TEXT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_email_outbox_tenant_matter
+  ON public.email_outbox (tenant_id, matter_id, created_at DESC)
+  WHERE matter_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_email_outbox_tenant_quote
+  ON public.email_outbox (tenant_id, quote_id, created_at DESC)
+  WHERE quote_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_email_outbox_tenant_enquiry
+  ON public.email_outbox (tenant_id, enquiry_id, created_at DESC)
+  WHERE enquiry_id IS NOT NULL;
+`.trim(),
+  downSql: `
+DROP INDEX IF EXISTS idx_email_outbox_tenant_enquiry;
+DROP INDEX IF EXISTS idx_email_outbox_tenant_quote;
+DROP INDEX IF EXISTS idx_email_outbox_tenant_matter;
+
+ALTER TABLE public.email_outbox
+  DROP COLUMN IF EXISTS enquiry_id,
+  DROP COLUMN IF EXISTS quote_id,
+  DROP COLUMN IF EXISTS matter_id;
+
+DROP INDEX IF EXISTS idx_documents_tenant_enquiry;
+
+ALTER TABLE public.documents
+  DROP COLUMN IF EXISTS primary_enquiry_id;
+
+ALTER TABLE public.evidence_artifacts
+  DROP COLUMN IF EXISTS purpose;
+
+DROP INDEX IF EXISTS idx_engagement_dispatches_tenant_enquiry;
+DROP INDEX IF EXISTS idx_engagement_dispatches_tenant_matter;
+DROP TABLE IF EXISTS public.engagement_dispatches;
+
+DROP TABLE IF EXISTS public.communication_chase_events;
+DROP INDEX IF EXISTS idx_communication_chases_matter;
+DROP INDEX IF EXISTS idx_communication_chases_due;
+DROP INDEX IF EXISTS uq_communication_chases_active;
+DROP TABLE IF EXISTS public.communication_chases;
+
+DROP SEQUENCE IF EXISTS public.tenant_engagement_dispatch_id_seq;
+DROP SEQUENCE IF EXISTS public.tenant_communication_chase_event_id_seq;
+DROP SEQUENCE IF EXISTS public.tenant_communication_chase_id_seq;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -4076,6 +4247,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   REGISTERS_CDD_AND_ORG_TYPE_KEYS_MIGRATION_0025,
   OPENING_GATE_OVERRIDES_AND_NUMBERING_MIGRATION_0026,
   PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027,
+  ENGAGEMENT_AND_CHASING_MIGRATION_0028,
 ];
 
 export function validateMigrationCatalogueOrder(

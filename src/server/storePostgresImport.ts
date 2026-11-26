@@ -13,8 +13,10 @@ import {
   mergeDeclarativeTenantConfigCustomFields,
   TenantAuditRepository,
   TenantCatalogueRepository,
+  TenantChasingRepository,
   TenantDocumentRepository,
   TenantDocumentStoreRepository,
+  TenantEngagementRepository,
   TenantEvidenceArtifactRepository,
   TenantHrAndRbacRepository,
   TenantIntakeCheckRepository,
@@ -243,6 +245,8 @@ export async function clearMigratedPostgresModulesForTenant(options: {
     await taskRepo.clearTenantData(ctx);
     const outboxRepo = new TenantOutboxRepository();
     await outboxRepo.clearTenantData(ctx);
+    await new TenantChasingRepository().clearTenantData(ctx);
+    await new TenantEngagementRepository().clearTenantData(ctx);
   }
   if (modules.includes('intake') || modules.includes('quotes')) {
     const intakeQuoteRepo = new TenantIntakeQuoteRepository();
