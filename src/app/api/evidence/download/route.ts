@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { emitTenantTelemetryException } from '@platform/core';
 import { isActionDenied } from '@/domain/actionResult';
 import { guardedRoute } from '@/server/authorize';
 import { downloadEvidenceArtifactRecord } from '@/server/services';
@@ -30,6 +31,16 @@ export const GET = guardedRoute('GET /api/evidence/download', async (request, _c
       );
     }
     if (!result.ok) {
+      if (result.code === 'INTERNAL_ERROR') {
+        return NextResponse.json(
+          {
+            ok: false,
+            code: 'INTERNAL_ERROR',
+            error: 'Something went wrong while downloading the file. Please try again.',
+          },
+          { status: 500 },
+        );
+      }
       const status =
         result.code === 'UNAUTHENTICATED'
           ? 401
@@ -60,10 +71,26 @@ export const GET = guardedRoute('GET /api/evidence/download', async (request, _c
         'Cache-Control': 'no-store, max-age=0',
       },
     });
-  } catch {
+  } catch (err) {
+    if (actor?.tenantContext?.tenantId && actor?.tenantContext?.correlationId) {
+      try {
+        emitTenantTelemetryException({
+          eventName: 'api.evidence.download.unhandled_error',
+          tenantId: actor.tenantContext.tenantId,
+          correlationId: actor.tenantContext.correlationId,
+          error: err,
+        });
+      } catch {
+        // Never fail error responses if telemetry logging fails.
+      }
+    }
     return NextResponse.json(
-      { ok: false, code: 'DOWNLOAD_ERROR', error: 'Unable to download evidence file.' },
-      { status: 403 },
+      {
+        ok: false,
+        code: 'INTERNAL_ERROR',
+        error: 'Something went wrong while downloading the file. Please try again.',
+      },
+      { status: 500 },
     );
   }
 });
