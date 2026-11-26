@@ -226,6 +226,8 @@ import {
   isEngagementLetterSignedStatus,
   isHighOrCriticalRiskRating,
   isMatterEngagementSignedForGate,
+  OPENING_GATE_INCONSISTENT_CODE,
+  OPENING_GATE_INCONSISTENT_USER_MESSAGE,
   OPENING_GATE_OVERRIDE_ERROR_CODES,
   resolveMatterRiskSystemKey,
   resolveOpeningGateCddOutcome,
@@ -6326,7 +6328,7 @@ async function evaluateOpeningGateForServerInTx(params: {
   organisations?: readonly Organisation[];
 }): Promise<{
   readonly evaluation: OpeningGateEvaluation;
-  readonly serverCddOutcome: OpeningGateCddOutcomeStatus;
+  readonly resolveCddOutcomeForOpening: () => OpeningGateCddOutcomeStatus;
 }> {
   const {
     tx,
@@ -6435,13 +6437,16 @@ async function evaluateOpeningGateForServerInTx(params: {
         (ovr) => !ovr.revokedAt && ovr.preconditionKey === 'cdd_complete',
       ),
   );
-  const serverCddOutcome = resolveOpeningGateCddOutcome({
-    gateConfig,
-    cddRawSatisfied,
-    hasActiveCddOverride,
-  });
 
-  return { evaluation, serverCddOutcome };
+  return {
+    evaluation,
+    resolveCddOutcomeForOpening: () =>
+      resolveOpeningGateCddOutcome({
+        gateConfig,
+        cddRawSatisfied,
+        hasActiveCddOverride,
+      }),
+  };
 }
 
 async function evaluateAndEnforceOpeningGateInTx(params: {
@@ -9248,7 +9253,7 @@ export async function saveMatterRecord(
           }
           applyOpeningGateCddOutcomeToMatter(
             matter,
-            gateResultTx.serverCddOutcome,
+            gateResultTx.resolveCddOutcomeForOpening(),
             matter.openedAt || inTxTenantTodayIso,
           );
         }
@@ -9770,6 +9775,16 @@ export async function saveMatterRecord(
         message: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
         errors: {
           conflict: MATTER_CONCURRENCY_CONFLICT_MESSAGE,
+        },
+      };
+    }
+    if ((err as { code?: string })?.code === OPENING_GATE_INCONSISTENT_CODE) {
+      return {
+        matter: null,
+        code: OPENING_GATE_INCONSISTENT_CODE,
+        message: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+        errors: {
+          openingGate: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
         },
       };
     }
@@ -10806,7 +10821,7 @@ export async function updateMatterConflictRecord(
             }
             applyOpeningGateCddOutcomeToMatter(
               freshMatter,
-              gateResultTx.serverCddOutcome,
+              gateResultTx.resolveCddOutcomeForOpening(),
               freshMatter.openedAt || today,
             );
             const cleanFieldVals = { ...(freshMatter.fieldValues ?? {}) };
@@ -10926,6 +10941,14 @@ export async function updateMatterConflictRecord(
         errors: { conflict: conflictMsg },
       };
     }
+    if ((err as { code?: string })?.code === OPENING_GATE_INCONSISTENT_CODE) {
+      return {
+        matter: null,
+        code: OPENING_GATE_INCONSISTENT_CODE,
+        message: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+        errors: { openingGate: OPENING_GATE_INCONSISTENT_USER_MESSAGE },
+      };
+    }
     throw err;
   }
   if (conflictTxEarlyResult) {
@@ -10960,7 +10983,11 @@ export async function signOffMatterCostsRecord(
     errors?: Record<string, string>;
     warnings?: string[];
   } & Partial<Omit<ActionDenied, 'code'>> & {
-    code?: ActionDenialCode | FeeCapErrorCode | typeof MATTER_CONCURRENCY_CONFLICT_CODE;
+    code?:
+      | ActionDenialCode
+      | FeeCapErrorCode
+      | typeof MATTER_CONCURRENCY_CONFLICT_CODE
+      | typeof OPENING_GATE_INCONSISTENT_CODE;
   }
 > {
   const tenantCfg = getActiveTenantConfiguration();
@@ -11426,7 +11453,7 @@ export async function signOffMatterCostsRecord(
             }
             applyOpeningGateCddOutcomeToMatter(
               freshMatter,
-              gateResultTx.serverCddOutcome,
+              gateResultTx.resolveCddOutcomeForOpening(),
               freshMatter.openedAt || inTxAsAtDate,
             );
             freshMatter.fieldValues = {
@@ -11539,6 +11566,14 @@ export async function signOffMatterCostsRecord(
         code: MATTER_CONCURRENCY_CONFLICT_CODE,
         message: conflictMsg,
         errors: { conflict: conflictMsg },
+      };
+    }
+    if ((err as { code?: string })?.code === OPENING_GATE_INCONSISTENT_CODE) {
+      return {
+        matter: null,
+        code: OPENING_GATE_INCONSISTENT_CODE,
+        message: OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+        errors: { openingGate: OPENING_GATE_INCONSISTENT_USER_MESSAGE },
       };
     }
     throw err;
@@ -28694,6 +28729,12 @@ function mapRegisterErrorToDenial(err: unknown): RegisterServiceDenialOrError {
       rawErr?.message || 'Multi-factor authentication is required for this action.';
     return registerServiceFailure('MFA_REQUIRED', msg);
   }
+  if (rawCode === OPENING_GATE_INCONSISTENT_CODE) {
+    return registerServiceFailure(
+      OPENING_GATE_INCONSISTENT_CODE,
+      OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+    );
+  }
   if (EXPOSED_REGISTER_SERVICE_ERROR_CODES.has(rawCode)) {
     const msg =
       rawErr?.message || (err instanceof Error ? err.message : 'Register operation failed.');
@@ -30062,7 +30103,7 @@ export async function transitionRegisterRecordService(
               }
               applyOpeningGateCddOutcomeToMatter(
                 lockedMatter,
-                gateResultTx.serverCddOutcome,
+                gateResultTx.resolveCddOutcomeForOpening(),
                 lockedMatter.openedAt || todayLocal,
               );
               lockedMatter.updatedAt = outcome.transition.transitionedAt;
@@ -36631,7 +36672,7 @@ export async function openProspectiveMatterRecord(
         ctx,
         matter: lockedMatter,
         targetStatusId: activeStatusId,
-        cddOutcome: gateResultTx.serverCddOutcome,
+        cddOutcome: gateResultTx.resolveCddOutcomeForOpening(),
         todayLocal,
         nowIso,
         actorId: actor.id,

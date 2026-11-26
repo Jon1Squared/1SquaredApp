@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateOpeningPreconditions,
   formatOpeningGateActionError,
+  OPENING_GATE_INCONSISTENT_CODE,
+  OPENING_GATE_INCONSISTENT_USER_MESSAGE,
+  resolveOpeningGateCddOutcome,
 } from '../openingGate';
 import {
   clearWorkTypeOpeningGateSetting,
@@ -181,5 +184,52 @@ describe('openingGate domain logic (R761, R763, R785, R793, R794, R796, R798, S1
       expect(formatted).not.toMatch(/[a-z_]+:[a-z_:]+/);
       expect(formatted).not.toMatch(/allowedRoles/i);
     }
+  });
+
+  it('R813: resolveOpeningGateCddOutcome fails closed with OPENING_GATE_INCONSISTENT when CDD is required, raw-unsatisfied, and not overridden', () => {
+    expect(
+      resolveOpeningGateCddOutcome({
+        gateConfig: { requireCddComplete: false },
+        cddRawSatisfied: false,
+        hasActiveCddOverride: false,
+      }),
+    ).toBe('Not required');
+
+    expect(
+      resolveOpeningGateCddOutcome({
+        gateConfig: { requireCddComplete: true },
+        cddRawSatisfied: true,
+        hasActiveCddOverride: false,
+      }),
+    ).toBe('Verified');
+
+    expect(
+      resolveOpeningGateCddOutcome({
+        gateConfig: { requireCddComplete: true },
+        cddRawSatisfied: false,
+        hasActiveCddOverride: true,
+      }),
+    ).toBe('Overridden');
+
+    let thrown: unknown;
+    try {
+      resolveOpeningGateCddOutcome({
+        gateConfig: { requireCddComplete: true },
+        cddRawSatisfied: false,
+        hasActiveCddOverride: false,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as { code?: string }).code).toBe(OPENING_GATE_INCONSISTENT_CODE);
+    expect((thrown as Error).message).toBe(OPENING_GATE_INCONSISTENT_USER_MESSAGE);
+
+    const userFacing = formatOpeningGateActionError({
+      code: OPENING_GATE_INCONSISTENT_CODE,
+      message: 'Error: raw stack\n    at resolveOpeningGateCddOutcome (src/domain/openingGate.ts:600:9)',
+    });
+    expect(userFacing).toBe(OPENING_GATE_INCONSISTENT_USER_MESSAGE);
+    expect(userFacing).not.toMatch(/\n\s+at\s+/);
   });
 });
