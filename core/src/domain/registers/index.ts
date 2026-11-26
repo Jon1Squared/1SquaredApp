@@ -133,6 +133,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         fromStatuses: ['discussing'],
         toStatus: 'pending_approval',
         requiredPermission: 'register:edit',
+        resetsApprovalCycle: true,
       },
       {
         key: 'approve',
@@ -231,6 +232,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         fromStatuses: ['varied', 'overdue'],
         toStatus: 'open',
         requiredPermission: 'undertaking:manage',
+        resetsApprovalCycle: true,
       },
       {
         key: 'mark_overdue',
@@ -626,6 +628,7 @@ export const CORE_REGISTER_TYPES: Readonly<
         toStatus: 'withdrawn',
         requiredPermission: 'register:edit',
         systemOnly: true,
+        resetsApprovalCycle: true,
         setsDecidedAt: true,
       },
     ],
@@ -699,6 +702,9 @@ function cloneTransitionDefinition(
       : {}),
     ...(transitionDef.systemOnly !== undefined
       ? { systemOnly: Boolean(transitionDef.systemOnly) }
+      : {}),
+    ...(transitionDef.resetsApprovalCycle !== undefined
+      ? { resetsApprovalCycle: Boolean(transitionDef.resetsApprovalCycle) }
       : {}),
     setsDecidedAt: transitionDef.setsDecidedAt ?? false,
   };
@@ -846,7 +852,7 @@ function applyRegisterTypeOverride(
   typeOverride: RegisterTypeOverride,
 ): RegisterTypeDefinition {
   if (
-    baseType.key === 'cdd' &&
+    (baseType.key === 'cdd' || baseType.systemCreatedOnly) &&
     (typeOverride.additionalFields?.length ?? 0) > 0
   ) {
     throw createRegisterDomainError(
@@ -1018,6 +1024,18 @@ export function validateRegisterFieldValues(params: {
 }): Record<string, unknown> {
   const { registerType, fieldValues, applyDefaults, enforceRequired = true } = params;
   const next: Record<string, unknown> = { ...(fieldValues ?? {}) };
+
+  if (registerType.systemCreatedOnly) {
+    const allowedFieldKeys = new Set(registerType.fields.map((f) => f.key));
+    for (const rawKey of Object.keys(next)) {
+      if (!allowedFieldKeys.has(rawKey)) {
+        throw createRegisterDomainError(
+          REGISTER_DOMAIN_ERROR_CODES.VALIDATION_ERROR,
+          `Field "${rawKey}" is not allowed on system-managed register "${registerType.label}".`,
+        );
+      }
+    }
+  }
 
   for (const fieldDef of registerType.fields) {
     let val = next[fieldDef.key];
@@ -1425,7 +1443,14 @@ export function validateRegisterTransitionExecution(params: {
       transition.forbidSelfAction ||
       Boolean(registerType.approvalRules && transition.requiredPermission !== registerType.editPermission);
 
-    if (mustBlockSelfAction && (record.ownerId === actorId || record.createdById === actorId)) {
+    if (
+      mustBlockSelfAction &&
+      (record.ownerId === actorId ||
+        record.createdById === actorId ||
+        (registerType.key === 'high_risk_opening' &&
+          typeof record.fieldValues?.submittedById === 'string' &&
+          record.fieldValues.submittedById === actorId))
+    ) {
       throw createRegisterDomainError(
         REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
         `Self-approval or self-sign-off is forbidden on ${registerType.label} "${record.reference}".`,
@@ -1483,13 +1508,6 @@ export function validateRegisterTransitionExecution(params: {
       const targetKeySet = transition.distinctFromTransitionKeys?.length
         ? new Set(transition.distinctFromTransitionKeys)
         : null;
-      const CYCLE_RESET_TRANSITION_KEYS = new Set([
-        'reopen',
-        'resubmit',
-        'request_changes',
-        'withdraw',
-        'withdraw_opening',
-      ]);
       const transitionDefByKey = new Map(
         registerType.transitions.map((t) => [t.key, t] as const),
       );
@@ -1498,7 +1516,7 @@ export function validateRegisterTransitionExecution(params: {
         const prior = priorTransitions[idx];
         const priorDef = transitionDefByKey.get(prior.transitionKey);
         if (
-          CYCLE_RESET_TRANSITION_KEYS.has(prior.transitionKey) ||
+          priorDef?.resetsApprovalCycle === true ||
           priorDef?.toStatus === registerType.initialStatus
         ) {
           activeCycleStartIndex = idx + 1;

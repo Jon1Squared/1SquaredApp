@@ -8,10 +8,10 @@
  * page loaders, and client UI evaluate opening readiness identically.
  */
 
-import type { RegisterRecord, WorkTypeOpeningGateConfig } from '@platform/core-api';
+import type { RegisterRecord } from '@platform/core-api';
 import type { CddWorkflowStatus } from './cdd';
 import { hasUnapprovedRestrictedMatches } from './matterConflicts';
-import { DEFAULT_WORK_TYPE_OPENING_GATE, type WorkTypeOpeningGateFields } from './workTypeConfig';
+import type { WorkTypeOpeningGateFields } from './workTypeConfig';
 import type { ChoiceValue, ConflictCheckStatusPill, Matter } from './types';
 
 export type OpeningGatePreconditionKey =
@@ -97,7 +97,7 @@ export interface OpeningGatePreconditionResult {
   readonly key: OpeningGatePreconditionKey;
   readonly label: string;
   readonly required: boolean;
-  readonly rawSatisfied: boolean;
+  readonly rawSatisfied: boolean | null;
   readonly overridden: boolean;
   readonly satisfied: boolean;
   readonly canOverride: boolean;
@@ -166,7 +166,7 @@ export const OPENING_GATE_PRECONDITION_LABELS: Record<
 };
 
 function normaliseConflictStatusForGate(
-  matter: Pick<Matter, 'conflictCheckRecord' | 'conflictCheckStatus'>,
+  matter: Pick<Matter, 'conflictCheckRecord'>,
 ): ConflictCheckStatusPill {
   const recStatus = matter.conflictCheckRecord?.status;
   if (
@@ -179,14 +179,6 @@ function normaliseConflictStatusForGate(
   ) {
     return recStatus;
   }
-  const legacy = (matter.conflictCheckStatus ?? '').trim();
-  if (legacy === 'Cleared' || legacy === 'Clear') return 'Cleared';
-  if (legacy === 'Approved') return 'Approved';
-  if (legacy === 'Referred' || legacy === 'Pending conflict review') {
-    return 'Referred';
-  }
-  if (legacy === 'Declined') return 'Declined';
-  if (legacy === 'In progress' || legacy === 'Draft') return 'In progress';
   return 'Not started';
 }
 
@@ -203,7 +195,7 @@ export interface EvaluateOpeningPreconditionsInput {
     readonly leadFeeEarnerId?: string | null;
     readonly responsiblePartnerId?: string | null;
   };
-  readonly gateConfig: WorkTypeOpeningGateConfig;
+  readonly gateConfig: WorkTypeOpeningGateFields;
   readonly cddStatus: {
     readonly status: CddWorkflowStatus;
     readonly isExpired: boolean;
@@ -227,34 +219,12 @@ export interface EvaluateOpeningPreconditionsInput {
   readonly fundsOnAccountSatisfied?: boolean;
 }
 
-function normaliseGateConfigFields(
-  gateConfig: WorkTypeOpeningGateConfig,
-): WorkTypeOpeningGateFields {
-  return {
-    requireConflictCleared:
-      gateConfig.requireConflictCleared ??
-      DEFAULT_WORK_TYPE_OPENING_GATE.requireConflictCleared,
-    requireCddComplete:
-      gateConfig.requireCddComplete ??
-      DEFAULT_WORK_TYPE_OPENING_GATE.requireCddComplete,
-    allowCddOverride:
-      gateConfig.allowCddOverride ??
-      DEFAULT_WORK_TYPE_OPENING_GATE.allowCddOverride,
-    requireEngagementSigned:
-      gateConfig.requireEngagementSigned ??
-      DEFAULT_WORK_TYPE_OPENING_GATE.requireEngagementSigned,
-    requireFundsOnAccount:
-      gateConfig.requireFundsOnAccount ??
-      DEFAULT_WORK_TYPE_OPENING_GATE.requireFundsOnAccount,
-  };
-}
-
 export function evaluateOpeningPreconditions(
   params: EvaluateOpeningPreconditionsInput,
 ): OpeningGateEvaluation {
   const {
     matter,
-    gateConfig: rawGateConfig,
+    gateConfig,
     cddStatus,
     activeOverrides,
     highRiskRecord,
@@ -262,7 +232,6 @@ export function evaluateOpeningPreconditions(
     requiresHighRiskApproval,
     fundsOnAccountSatisfied = false,
   } = params;
-  const gateConfig = normaliseGateConfigFields(rawGateConfig);
 
   const activeByKey = new Map<OpeningGatePreconditionKey, OpeningGateOverrideSummary>();
   for (const ovr of activeOverrides) {
@@ -279,10 +248,12 @@ export function evaluateOpeningPreconditions(
   const conflictRawSatisfied =
     (conflictPill === 'Cleared' || conflictPill === 'Approved') &&
     !hasUnapprovedRestricted;
+  const conflictPolicyDisallowsOverride = !gateConfig.allowConflictOverride;
   const conflictNonOverridable =
     conflictPill === 'Referred' ||
     conflictPill === 'Declined' ||
-    hasUnapprovedRestricted;
+    hasUnapprovedRestricted ||
+    conflictPolicyDisallowsOverride;
   const conflictOverride = !conflictNonOverridable
     ? activeByKey.get('conflict_cleared') ?? null
     : null;
@@ -295,7 +266,9 @@ export function evaluateOpeningPreconditions(
     ? null
     : hasUnapprovedRestricted
       ? 'Conflict check has an unapproved restricted match; it must be reviewed by Risk & Compliance.'
-      : `Conflict status "${conflictPill}" cannot be overridden; it must be reviewed by Risk & Compliance.`;
+      : conflictPill === 'Referred' || conflictPill === 'Declined'
+        ? `Conflict status "${conflictPill}" cannot be overridden; it must be reviewed by Risk & Compliance.`
+        : 'Incomplete conflict checks cannot be overridden for this work type.';
 
   const conflictStatusSummary = conflictRawSatisfied
     ? `${conflictPill}`
@@ -365,20 +338,34 @@ export function evaluateOpeningPreconditions(
                 ? 'In progress'
                 : 'Not started';
 
-  const cddResult: OpeningGatePreconditionResult = {
-    key: 'cdd_complete',
-    label: OPENING_GATE_PRECONDITION_LABELS.cdd_complete,
-    required: gateConfig.requireCddComplete,
-    rawSatisfied: cddRawSatisfied,
-    overridden: !cddRawSatisfied && Boolean(cddOverride),
-    satisfied: cddSatisfied,
-    canOverride: !cddRawSatisfied && cddAllowOverride,
-    nonOverridableReason: cddAllowOverride
-      ? null
-      : 'Client Due Diligence is mandatory for this work type and cannot be overridden.',
-    statusSummary: cddStatusSummary,
-    activeOverride: cddOverride,
-  };
+  const cddResult: OpeningGatePreconditionResult = cddMasked
+    ? {
+        key: 'cdd_complete',
+        label: OPENING_GATE_PRECONDITION_LABELS.cdd_complete,
+        required: gateConfig.requireCddComplete,
+        rawSatisfied: null,
+        overridden: false,
+        satisfied: cddSatisfied,
+        canOverride: false,
+        nonOverridableReason:
+          'You cannot override a client due diligence requirement that is not available to you.',
+        statusSummary: 'Not available to you',
+        activeOverride: null,
+      }
+    : {
+        key: 'cdd_complete',
+        label: OPENING_GATE_PRECONDITION_LABELS.cdd_complete,
+        required: gateConfig.requireCddComplete,
+        rawSatisfied: cddRawSatisfied,
+        overridden: !cddRawSatisfied && Boolean(cddOverride),
+        satisfied: cddSatisfied,
+        canOverride: !cddRawSatisfied && cddAllowOverride,
+        nonOverridableReason: cddAllowOverride
+          ? null
+          : 'Client Due Diligence is mandatory for this work type and cannot be overridden.',
+        statusSummary: cddStatusSummary,
+        activeOverride: cddOverride,
+      };
 
   const engagementRawSatisfied = isMatterEngagementSignedForGate(matter);
   const engagementOverride = activeByKey.get('engagement_signed') ?? null;
@@ -448,16 +435,24 @@ export function evaluateOpeningPreconditions(
       (highRiskPartnerApprover.actorId === matter.leadFeeEarnerId ||
         highRiskPartnerApprover.actorId === matter.responsiblePartnerId),
   );
+  const complianceIsMatterLeadOrResponsible = Boolean(
+    hroStatus === 'approved' &&
+      highRiskRecord?.decidedById &&
+      (highRiskRecord.decidedById === matter.leadFeeEarnerId ||
+        highRiskRecord.decidedById === matter.responsiblePartnerId),
+  );
+  const hroApproverIsMatterLeadOrResponsible =
+    partnerIsMatterLeadOrResponsible || complianceIsMatterLeadOrResponsible;
   const highRiskSatisfied =
     !requiresHighRiskApproval ||
-    (hroStatus === 'approved' && !partnerIsMatterLeadOrResponsible);
+    (hroStatus === 'approved' && !hroApproverIsMatterLeadOrResponsible);
   const highRiskStatusLabel = ((): string => {
     if (
       requiresHighRiskApproval &&
       hroStatus === 'approved' &&
-      partnerIsMatterLeadOrResponsible
+      hroApproverIsMatterLeadOrResponsible
     ) {
-      return 'Independent partner approval required (cannot be lead fee earner or responsible partner)';
+      return 'Independent partner and Risk & Compliance approval required (neither stage may be approved by the lead fee earner or responsible partner)';
     }
     switch (hroStatus) {
       case 'not_required':
@@ -502,7 +497,13 @@ export function evaluateOpeningPreconditions(
   const blockingReasons: string[] = [];
   for (const check of preconditions) {
     if (check.required && !check.satisfied) {
-      blockingReasons.push(`${check.label}: ${check.statusSummary}`);
+      if (check.key === 'cdd_complete' && cddMasked) {
+        blockingReasons.push(
+          'Client due diligence is not complete for one or more clients.',
+        );
+      } else {
+        blockingReasons.push(`${check.label}: ${check.statusSummary}`);
+      }
     }
   }
   if (requiresHighRiskApproval && !highRiskSatisfied) {
@@ -519,7 +520,9 @@ export function evaluateOpeningPreconditions(
     gateConfig,
     preconditions,
     blockingReasons,
-    activeOverrides: Array.from(activeByKey.values()),
+    activeOverrides: Array.from(activeByKey.values()).filter(
+      (o) => !(cddMasked && o.preconditionKey === 'cdd_complete'),
+    ),
   };
 }
 

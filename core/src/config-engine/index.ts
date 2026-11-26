@@ -371,11 +371,11 @@ const DEFAULT_WORK_TYPE_RETENTION = {
 
 const WorkTypeOpeningGateSchema = z
   .object({
-    requireConflictCleared: z
+    allowConflictOverride: z
       .boolean()
-      .default(DEFAULT_WORK_TYPE_OPENING_GATE.requireConflictCleared)
+      .default(DEFAULT_WORK_TYPE_OPENING_GATE.allowConflictOverride)
       .describe(
-        'Requires a Cleared or Approved conflict check before matter opening',
+        'Whether a partner/managing partner may record an audited override when the conflict check is Not started or In progress',
       ),
     requireCddComplete: z
       .boolean()
@@ -406,11 +406,11 @@ const WorkTypeOpeningGateSchema = z
 
 const WorkTypeOpeningGateOverrideSchema = z
   .object({
-    requireConflictCleared: z
+    allowConflictOverride: z
       .boolean()
       .optional()
       .describe(
-        'Optional override requiring a Cleared or Approved conflict check before matter opening',
+        'Optional override controlling whether a partner/managing partner may record an audited conflict override for Not started or In progress checks',
       ),
     requireCddComplete: z
       .boolean()
@@ -2634,6 +2634,7 @@ export const TenantConfigurationSchema = z
           mustDifferFromPreviousApprover: z.boolean().default(false).optional(),
           distinctFromTransitionKeys: z.array(z.string().min(1)).optional(),
           systemOnly: z.boolean().default(false).optional(),
+          resetsApprovalCycle: z.boolean().default(false).optional(),
           setsDecidedAt: z.boolean().default(false).optional(),
         })
         .strict();

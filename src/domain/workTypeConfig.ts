@@ -14,7 +14,7 @@ import type {
 import type { ChoiceValue } from './types';
 
 export interface WorkTypeOpeningGateFields {
-  requireConflictCleared: boolean;
+  allowConflictOverride: boolean;
   requireCddComplete: boolean;
   allowCddOverride: boolean;
   requireEngagementSigned: boolean;
@@ -30,7 +30,7 @@ export type WorkTypeOpeningGateSettingSource =
 export const DEFAULT_WORK_TYPE_RETENTION_YEARS = 6;
 
 export const DEFAULT_WORK_TYPE_OPENING_GATE: WorkTypeOpeningGateFields = {
-  requireConflictCleared: false,
+  allowConflictOverride: true,
   requireCddComplete: false,
   allowCddOverride: true,
   requireEngagementSigned: false,
@@ -159,10 +159,10 @@ export function resolveEffectiveWorkTypesConfig(
   const defaultsGateSource =
     overrideDefaults?.openingGate ?? baseDefaults?.openingGate;
   const defaultsOpeningGate: WorkTypeOpeningGateFields = {
-    requireConflictCleared:
-      defaultsGateSource?.requireConflictCleared ??
-      baseDefaults?.openingGate?.requireConflictCleared ??
-      DEFAULT_WORK_TYPE_OPENING_GATE.requireConflictCleared,
+    allowConflictOverride:
+      defaultsGateSource?.allowConflictOverride ??
+      baseDefaults?.openingGate?.allowConflictOverride ??
+      DEFAULT_WORK_TYPE_OPENING_GATE.allowConflictOverride,
     requireCddComplete:
       defaultsGateSource?.requireCddComplete ??
       baseDefaults?.openingGate?.requireCddComplete ??
@@ -297,15 +297,15 @@ export function resolveEffectiveWorkTypesConfig(
 
       const rawGate = item.openingGate;
       const partialGate: {
-        requireConflictCleared?: boolean;
+        allowConflictOverride?: boolean;
         requireCddComplete?: boolean;
         allowCddOverride?: boolean;
         requireEngagementSigned?: boolean;
         requireFundsOnAccount?: boolean;
       } = {};
       if (rawGate) {
-        if (typeof rawGate.requireConflictCleared === 'boolean') {
-          partialGate.requireConflictCleared = rawGate.requireConflictCleared;
+        if (typeof rawGate.allowConflictOverride === 'boolean') {
+          partialGate.allowConflictOverride = rawGate.allowConflictOverride;
         }
         if (typeof rawGate.requireCddComplete === 'boolean') {
           partialGate.requireCddComplete = rawGate.requireCddComplete;
@@ -477,7 +477,7 @@ export function resolveWorkTypeOpeningGateWithProvenance(
     };
   };
 
-  const requireConflictCleared = pickSetting('requireConflictCleared');
+  const allowConflictOverride = pickSetting('allowConflictOverride');
   const requireCddComplete = pickSetting('requireCddComplete');
   const allowCddOverride = pickSetting('allowCddOverride');
   const requireEngagementSigned = pickSetting('requireEngagementSigned');
@@ -487,7 +487,7 @@ export function resolveWorkTypeOpeningGateWithProvenance(
     WorkTypeOpeningGateSettingKey,
     WorkTypeOpeningGateSettingSource
   > = {
-    requireConflictCleared: requireConflictCleared.source,
+    allowConflictOverride: allowConflictOverride.source,
     requireCddComplete: requireCddComplete.source,
     allowCddOverride: allowCddOverride.source,
     requireEngagementSigned: requireEngagementSigned.source,
@@ -512,7 +512,7 @@ export function resolveWorkTypeOpeningGateWithProvenance(
       : null;
 
   return {
-    requireConflictCleared: requireConflictCleared.value,
+    allowConflictOverride: allowConflictOverride.value,
     requireCddComplete: requireCddComplete.value,
     allowCddOverride: allowCddOverride.value,
     requireEngagementSigned: requireEngagementSigned.value,
@@ -523,12 +523,51 @@ export function resolveWorkTypeOpeningGateWithProvenance(
   };
 }
 
+export function clearWorkTypeOpeningGateSetting(
+  itemGate: WorkTypeOpeningGateConfig | undefined,
+  key: WorkTypeOpeningGateSettingKey,
+): WorkTypeOpeningGateConfig | undefined {
+  if (!itemGate) return undefined;
+  const next: Record<string, boolean> = {};
+  for (const [entryKey, entryVal] of Object.entries(itemGate)) {
+    if (entryKey !== key && typeof entryVal === 'boolean') {
+      next[entryKey] = entryVal;
+    }
+  }
+  return Object.keys(next).length > 0
+    ? (next as WorkTypeOpeningGateConfig)
+    : undefined;
+}
+
+export function resolveInheritedOpeningGateSetting(
+  config: WorkTypesConfiguration,
+  input: { readonly practiceAreaId?: string | null },
+  key: WorkTypeOpeningGateSettingKey,
+): { value: boolean; source: 'practice_area' | 'firm_default' | 'core_default' } {
+  const cleanPaId = input.practiceAreaId?.trim() || '';
+  if (cleanPaId) {
+    const paItem = (config.items ?? []).find((i) => i.workTypeId === cleanPaId);
+    const paVal = paItem?.openingGate?.[key];
+    if (typeof paVal === 'boolean') {
+      return { value: paVal, source: 'practice_area' };
+    }
+  }
+  const defVal = config.defaults.openingGate?.[key];
+  if (typeof defVal === 'boolean') {
+    return { value: defVal, source: 'firm_default' };
+  }
+  return {
+    value: DEFAULT_WORK_TYPE_OPENING_GATE[key],
+    source: 'core_default',
+  };
+}
+
 export function resolveWorkTypeOpeningGate(
   config: WorkTypesConfiguration,
   input: EffectiveWorkTypesResolutionInput,
 ): ResolvedWorkTypeOpeningGate {
   const {
-    requireConflictCleared,
+    allowConflictOverride,
     requireCddComplete,
     allowCddOverride,
     requireEngagementSigned,
@@ -537,7 +576,7 @@ export function resolveWorkTypeOpeningGate(
     matchedWorkTypeId,
   } = resolveWorkTypeOpeningGateWithProvenance(config, input);
   return {
-    requireConflictCleared,
+    allowConflictOverride,
     requireCddComplete,
     allowCddOverride,
     requireEngagementSigned,

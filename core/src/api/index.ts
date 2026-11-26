@@ -1026,7 +1026,7 @@ export interface MatterNumberingConfig {
 }
 
 export interface WorkTypeOpeningGateConfig {
-  readonly requireConflictCleared?: boolean;
+  readonly allowConflictOverride?: boolean;
   readonly requireCddComplete?: boolean;
   readonly allowCddOverride?: boolean;
   readonly requireEngagementSigned?: boolean;

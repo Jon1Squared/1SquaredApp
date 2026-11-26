@@ -24,6 +24,7 @@ import {
   resolveEffectiveRegisterTypes,
   resolveTenantFromVerifiedToken,
   validateRegisterCreateInput,
+  validateRegisterFieldValues,
   validateRegisterTransitionExecution,
   validateUserOverrideOrRoleMutation,
   type RegistersConfiguration,
@@ -2224,8 +2225,11 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
     expect(step2.updatedRecord.status).toBe('approved');
   });
 
-  it('17 (S1-05 R781 & Suggestion 8): enforces ADR 0039 §4 active approval-cycle boundary on distinct approver checks and refuses typeOverrides.high_risk_opening.enabled=false', () => {
+  it('18 (S1-05 R781, S1, S4 & R791): enforces ADR 0039 §4 active approval-cycle resetsApprovalCycle flag, refuses disabling high_risk_opening in config/schema, and rejects unknown keys on systemCreatedOnly types', () => {
     const hroType = CORE_REGISTER_TYPES.high_risk_opening;
+    expect(hroType.transitions.find((t) => t.key === 'withdraw_opening')?.resetsApprovalCycle).toBe(true);
+    expect(CORE_REGISTER_TYPES.sign_off.transitions.find((t) => t.key === 'resubmit')?.resetsApprovalCycle).toBe(true);
+    expect(CORE_REGISTER_TYPES.undertaking.transitions.find((t) => t.key === 'reopen')?.resetsApprovalCycle).toBe(true);
     const sampleHro = {
       id: 'REG-CYCLE-1',
       tenantId: 'not-a-law-firm',
@@ -2286,5 +2290,20 @@ describe('S0-24: Configurable Registers Engine, Direct Undertakings, RBAC, Hooks
         'test',
       ),
     ).toThrow(/high_risk_opening/);
+
+    // R791: systemCreatedOnly registers reject unknown keys in validateRegisterFieldValues
+    expect(() =>
+      validateRegisterFieldValues({
+        registerType: hroType,
+        fieldValues: {
+          matterNumber: 'PEN001-0001',
+          riskLevel: 'high',
+          submittedById: 'P-000002',
+          systemCreated: true,
+        },
+        applyDefaults: false,
+        enforceRequired: true,
+      }),
+    ).toThrow(/REGISTER_VALIDATION_ERROR/);
   });
 });

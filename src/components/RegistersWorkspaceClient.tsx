@@ -90,7 +90,14 @@ function canExecuteTransitionUi(
   const mustBlockSelf =
     transition.forbidSelfAction ||
     Boolean(regType.approvalRules && transition.requiredPermission !== regType.editPermission);
-  if (mustBlockSelf && (record.ownerId === currentUserId || record.createdById === currentUserId)) {
+  if (
+    mustBlockSelf &&
+    (record.ownerId === currentUserId ||
+      record.createdById === currentUserId ||
+      (regType.key === 'high_risk_opening' &&
+        typeof record.fieldValues?.submittedById === 'string' &&
+        record.fieldValues.submittedById === currentUserId))
+  ) {
     return { allowed: false, reason: 'Self-approval is forbidden' };
   }
   if (
@@ -845,6 +852,7 @@ export function RegistersWorkspaceClient({
                   />
                   {selectedRecordType &&
                   selectedRecord.registerTypeKey !== 'cdd' &&
+                  !selectedRecordType.systemCreatedOnly &&
                   permSet.has(selectedRecordType.editPermission) ? (
                     <button
                       type="button"

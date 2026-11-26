@@ -39,7 +39,7 @@ export const DEFAULT_MATTER_NUMBERING_CONFIG: MatterNumberingConfig = Object.fre
 
 export const DEFAULT_WORK_TYPE_OPENING_GATE: Required<WorkTypeOpeningGateConfig> =
   Object.freeze({
-  requireConflictCleared: false,
+  allowConflictOverride: true,
   requireCddComplete: false,
   allowCddOverride: true,
   requireEngagementSigned: false,

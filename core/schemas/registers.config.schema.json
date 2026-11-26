@@ -58,6 +58,19 @@
               }
             }
           }
+        },
+        {
+          "not": {
+            "required": ["high_risk_opening"],
+            "properties": {
+              "high_risk_opening": {
+                "required": ["enabled"],
+                "properties": {
+                  "enabled": { "const": false }
+                }
+              }
+            }
+          }
         }
       ],
       "default": {},
@@ -222,6 +235,11 @@
           "type": "boolean",
           "default": false,
           "description": "When true, only dedicated core system workflows may execute this transition."
+        },
+        "resetsApprovalCycle": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, executing this transition starts a fresh multi-stage approval cycle for distinct-approver checks."
         },
         "setsDecidedAt": {
           "type": "boolean",

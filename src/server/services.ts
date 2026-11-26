@@ -5802,10 +5802,123 @@ async function runMatterOpeningGate(params: {
   };
 }
 
+const SYSTEM_HRO_CREATOR_ACTOR_ID = 'system:matter_opening';
+
 function isSystemCreatedHroRecord(
-  record: Pick<RegisterRecord, 'fieldValues'> | null | undefined,
+  record: Pick<RegisterRecord, 'createdById'> | null | undefined,
 ): boolean {
-  return (record?.fieldValues as Record<string, unknown> | undefined)?.systemCreated === true;
+  return record?.createdById === SYSTEM_HRO_CREATOR_ACTOR_ID;
+}
+
+interface ViewerCddAccess {
+  readonly viewerId: string;
+  readonly canViewCdd: boolean;
+  readonly canBypassEmployeeCddVisibility: boolean;
+  readonly hasRestrictedMatterAccess: boolean;
+  readonly actor: Person | null;
+  readonly teams: readonly Team[];
+  readonly rbacConfig: RbacConfiguration;
+}
+
+function buildViewerCddAccess(params: {
+  actorId: string;
+  actor: Person | null;
+  people: readonly Person[];
+  teams: readonly Team[];
+  rbacConfig: RbacConfiguration;
+  tokenRoles?: readonly string[];
+  context?: TenantContext;
+}): ViewerCddAccess {
+  const resolvedActor =
+    params.actor ?? params.people.find((p) => p.id === params.actorId) ?? null;
+  if (!resolvedActor) {
+    return {
+      viewerId: params.actorId,
+      canViewCdd: false,
+      canBypassEmployeeCddVisibility: false,
+      hasRestrictedMatterAccess: false,
+      actor: null,
+      teams: params.teams,
+      rbacConfig: params.rbacConfig,
+    };
+  }
+  const permSet = resolvePersonPermissionSet(resolvedActor, {
+    allPeople: params.people,
+    teams: params.teams,
+    tokenRoles: params.tokenRoles ?? params.context?.actorRoles,
+    tokenRolesActorId: resolvedActor.id,
+    config: { rbac: params.rbacConfig },
+    context: params.context,
+    mfaVerified: params.context?.mfaVerified,
+  });
+  return {
+    viewerId: resolvedActor.id,
+    canViewCdd: permSet.permissions.has('cdd:view') || permSet.permissions.has('cdd:record'),
+    canBypassEmployeeCddVisibility: permSet.permissions.has('risk:view'),
+    hasRestrictedMatterAccess: permSet.permissions.has('matter:restricted:access'),
+    actor: resolvedActor,
+    teams: params.teams,
+    rbacConfig: params.rbacConfig,
+  };
+}
+
+function buildViewerCddAccessFromPermSet(
+  actor: Person,
+  permSet: { readonly permissions: ReadonlySet<PermissionKey> },
+  teams: readonly Team[],
+  rbacConfig: RbacConfiguration,
+): ViewerCddAccess {
+  return {
+    viewerId: actor.id,
+    canViewCdd: permSet.permissions.has('cdd:view') || permSet.permissions.has('cdd:record'),
+    canBypassEmployeeCddVisibility: permSet.permissions.has('risk:view'),
+    hasRestrictedMatterAccess: permSet.permissions.has('matter:restricted:access'),
+    actor,
+    teams,
+    rbacConfig,
+  };
+}
+
+async function isClientCddSubjectVisibleToViewer(params: {
+  ctx: TenantContext;
+  clientId: string;
+  person: Person | null;
+  people: readonly Person[];
+  viewerAccess: ViewerCddAccess;
+}): Promise<boolean> {
+  const { ctx, clientId, person, people, viewerAccess } = params;
+  if (!viewerAccess.canViewCdd) {
+    return false;
+  }
+  if (person && isEmployeeSubjectPerson(person, people)) {
+    if (
+      viewerAccess.canBypassEmployeeCddVisibility ||
+      viewerAccess.hasRestrictedMatterAccess
+    ) {
+      return true;
+    }
+    if (!viewerAccess.actor) {
+      return false;
+    }
+    const candidateMatters =
+      await getMatterRepository().listVisibleMattersForEntity<Matter>(
+        ctx,
+        { clientIds: [clientId], includeMerged: false },
+        {
+          viewerId: viewerAccess.viewerId,
+          hasRestrictedMatterAccess: false,
+        },
+      );
+    return candidateMatters.some(
+      (m) =>
+        canPersonAccessMatter(m, viewerAccess.viewerId, viewerAccess.actor!, {
+          allPeople: people,
+          teams: viewerAccess.teams,
+          config: { rbac: viewerAccess.rbacConfig },
+        }) && isActorActiveParticipantOnMatter(viewerAccess.viewerId, m),
+    );
+  }
+  return true;
 }
 
 async function resolveClientCddStatusInTx(params: {
@@ -5815,6 +5928,7 @@ async function resolveClientCddStatusInTx(params: {
   matterRiskRatingId?: string | null;
   values: readonly ChoiceValue[];
   todayYmd: string;
+  viewerAccess: ViewerCddAccess;
   tenantCfg?: TenantConfiguration;
   people?: readonly Person[];
   organisations?: readonly Organisation[];
@@ -5822,11 +5936,22 @@ async function resolveClientCddStatusInTx(params: {
   status: CddWorkflowStatus;
   isExpired: boolean;
   insufficientTier: boolean;
+  visibleToViewer: boolean;
   missingClientNames: string[];
   expiredClientNames: string[];
   insufficientTierClientNames: string[];
 }> {
-  const { tx, ctx, matterRiskRatingId, values, todayYmd, tenantCfg, people, organisations } = params;
+  const {
+    tx,
+    ctx,
+    matterRiskRatingId,
+    values,
+    todayYmd,
+    viewerAccess,
+    tenantCfg,
+    people,
+    organisations,
+  } = params;
   const uniqueClientIds = Array.from(
     new Set(params.clientIds.map((id) => (id ?? '').trim()).filter(Boolean)),
   );
@@ -5835,6 +5960,7 @@ async function resolveClientCddStatusInTx(params: {
       status: 'not_started',
       isExpired: false,
       insufficientTier: false,
+      visibleToViewer: viewerAccess.canViewCdd,
       missingClientNames: [],
       expiredClientNames: [],
       insufficientTierClientNames: [],
@@ -5861,6 +5987,7 @@ async function resolveClientCddStatusInTx(params: {
     ? resolveClientCddRiskTier(effectiveCdd, [currentMatterRiskKey])
     : 'standard';
 
+  let visibleToViewer = viewerAccess.canViewCdd;
   const missingClientNames: string[] = [];
   const expiredClientNames: string[] = [];
   const insufficientTierClientNames: string[] = [];
@@ -5875,6 +6002,17 @@ async function resolveClientCddStatusInTx(params: {
       ? null
       : (people?.find((p) => p.id === clientId) ??
         (await partyRepo.getPersonById<Person>(ctx, clientId)));
+    const subjectVisible = await isClientCddSubjectVisibleToViewer({
+      ctx,
+      clientId,
+      person,
+      people: people ?? [],
+      viewerAccess,
+    });
+    if (!subjectVisible) {
+      visibleToViewer = false;
+    }
+
     const subjectType: 'person' | 'organisation' = org
       ? 'organisation'
       : person
@@ -5951,9 +6089,10 @@ async function resolveClientCddStatusInTx(params: {
     status: aggregatedStatus,
     isExpired: expiredClientNames.length > 0,
     insufficientTier: insufficientTierClientNames.length > 0,
-    missingClientNames,
-    expiredClientNames,
-    insufficientTierClientNames,
+    visibleToViewer,
+    missingClientNames: visibleToViewer ? missingClientNames : [],
+    expiredClientNames: visibleToViewer ? expiredClientNames : [],
+    insufficientTierClientNames: visibleToViewer ? insufficientTierClientNames : [],
   };
 }
 
@@ -5963,11 +6102,8 @@ async function resolveClientCddStatusReadOnly(params: {
   matterRiskRatingId?: string | null;
   values: readonly ChoiceValue[];
   todayYmd: string;
+  viewerAccess: ViewerCddAccess;
   tenantCfg?: TenantConfiguration;
-  viewerId: string;
-  canViewCdd: boolean;
-  canBypassEmployeeCddVisibility: boolean;
-  hasRestrictedMatterAccess: boolean;
   people?: readonly Person[];
   organisations?: readonly Organisation[];
 }): Promise<{
@@ -5987,7 +6123,7 @@ async function resolveClientCddStatusReadOnly(params: {
       status: 'not_started',
       isExpired: false,
       insufficientTier: false,
-      visibleToViewer: params.canViewCdd,
+      visibleToViewer: params.viewerAccess.canViewCdd,
       missingClientNames: [],
       expiredClientNames: [],
       insufficientTierClientNames: [],
@@ -6014,7 +6150,7 @@ async function resolveClientCddStatusReadOnly(params: {
     ? resolveClientCddRiskTier(effectiveCdd, [currentMatterRiskKey])
     : 'standard';
 
-  let visibleToViewer = params.canViewCdd;
+  let visibleToViewer = params.viewerAccess.canViewCdd;
   const missingClientNames: string[] = [];
   const expiredClientNames: string[] = [];
   const insufficientTierClientNames: string[] = [];
@@ -6029,6 +6165,17 @@ async function resolveClientCddStatusReadOnly(params: {
       ? null
       : (params.people?.find((p) => p.id === clientId) ??
         (await partyRepo.getPersonById<Person>(params.ctx, clientId)));
+    const subjectVisible = await isClientCddSubjectVisibleToViewer({
+      ctx: params.ctx,
+      clientId,
+      person,
+      people: params.people ?? [],
+      viewerAccess: params.viewerAccess,
+    });
+    if (!subjectVisible) {
+      visibleToViewer = false;
+    }
+
     const subjectType: 'person' | 'organisation' = org
       ? 'organisation'
       : person
@@ -6043,20 +6190,20 @@ async function resolveClientCddStatusReadOnly(params: {
         : clientId;
 
     const [allRecords, visibleRecords] = await Promise.all([
-      registerRepo.listVisibleRegisterRecords(params.ctx, params.viewerId, {
+      registerRepo.listVisibleRegisterRecords(params.ctx, params.viewerAccess.viewerId, {
         includeRestricted: true,
         registerTypeKey: 'cdd',
         ...(subjectType === 'person' ? { personId: clientId } : { organisationId: clientId }),
       }),
-      params.canViewCdd
-        ? registerRepo.listVisibleRegisterRecords(params.ctx, params.viewerId, {
+      params.viewerAccess.canViewCdd
+        ? registerRepo.listVisibleRegisterRecords(params.ctx, params.viewerAccess.viewerId, {
             registerTypeKey: 'cdd',
             ...(subjectType === 'person'
               ? { personId: clientId }
               : { organisationId: clientId }),
-            canViewCdd: params.canViewCdd,
-            canBypassEmployeeCddVisibility: params.canBypassEmployeeCddVisibility,
-            hasRestrictedMatterAccess: params.hasRestrictedMatterAccess,
+            canViewCdd: params.viewerAccess.canViewCdd,
+            canBypassEmployeeCddVisibility: params.viewerAccess.canBypassEmployeeCddVisibility,
+            hasRestrictedMatterAccess: params.viewerAccess.hasRestrictedMatterAccess,
           })
         : Promise.resolve<RegisterRecord[]>([]),
     ]);
@@ -6066,7 +6213,7 @@ async function resolveClientCddStatusReadOnly(params: {
 
     const subjectDerivedTier = await deriveClientCddRiskTierForSubject({
       ctx: params.ctx,
-      actorId: params.viewerId,
+      actorId: params.viewerAccess.viewerId,
       subjectId: clientId,
       targetOrganisation: org,
       effectiveCdd,
@@ -6140,7 +6287,7 @@ function mapOverridesToSummaries(
       preconditionKey: o.preconditionKey,
       reason: o.reason,
       overriddenByPersonId: o.overriddenByPersonId,
-      overriddenByName: actor ? personDisplayName(actor) : o.overriddenByPersonId,
+      overriddenByName: actor ? personDisplayName(actor) : null,
       overriddenAt: o.overriddenAt,
       revokedByPersonId: o.revokedByPersonId,
       revokedAt: o.revokedAt,
@@ -6156,11 +6303,22 @@ async function evaluateAndEnforceOpeningGateInTx(params: {
   values: readonly ChoiceValue[];
   people: readonly Person[];
   todayYmd: string;
+  viewerAccess: ViewerCddAccess;
   tenantCfg?: TenantConfiguration;
   organisations?: readonly Organisation[];
 }): Promise<OpeningGateEvaluation> {
-  const { tx, ctx, matter, workTypesConfig, values, people, todayYmd, tenantCfg, organisations } =
-    params;
+  const {
+    tx,
+    ctx,
+    matter,
+    workTypesConfig,
+    values,
+    people,
+    todayYmd,
+    viewerAccess,
+    tenantCfg,
+    organisations,
+  } = params;
   const registerRepo = getRegisterRepository();
   const matterRepo = getMatterRepository();
 
@@ -6183,6 +6341,7 @@ async function evaluateAndEnforceOpeningGateInTx(params: {
     matterRiskRatingId: matter.riskRatingId,
     values,
     todayYmd,
+    viewerAccess,
     tenantCfg,
     people,
     organisations,
@@ -6228,7 +6387,7 @@ async function evaluateAndEnforceOpeningGateInTx(params: {
       const pActor = people.find((p) => p.id === partnerTr.actorId);
       partnerApprover = {
         actorId: partnerTr.actorId,
-        actorName: pActor ? personDisplayName(pActor) : partnerTr.actorId,
+        actorName: pActor ? personDisplayName(pActor) : null,
         transitionedAt: partnerTr.transitionedAt,
       };
     }
@@ -6252,9 +6411,10 @@ async function withdrawPendingHighRiskOpeningInTx(params: {
   tenantCfg: TenantConfiguration;
   matterId: string;
   actorId: string;
+  actorPermissionSet: ReadonlySet<PermissionKey>;
   reason: string;
 }): Promise<RegisterRecord[]> {
-  const { tx, ctx, tenantCfg, matterId, actorId, reason } = params;
+  const { tx, ctx, tenantCfg, matterId, actorId, actorPermissionSet, reason } = params;
   if (!matterId || matterId === 'M-PENDING') return [];
   const registerRepo = getRegisterRepository();
   const catRepo = getCatalogueRepository();
@@ -6297,9 +6457,9 @@ async function withdrawPendingHighRiskOpeningInTx(params: {
           transitionKey: 'withdraw_opening',
           actorId,
           actorRoles: [],
-          actorPermissionSet: new Set<PermissionKey>(),
+          actorPermissionSet,
           comment: reason,
-          isSystemActor: true,
+          viaDedicatedWorkflow: true,
           priorTransitions,
         });
         return {
@@ -6345,6 +6505,7 @@ async function syncHighRiskOpeningForMatterInTx(params: {
   matter: Matter;
   values: readonly ChoiceValue[];
   actorId: string;
+  actorPermissionSet: ReadonlySet<PermissionKey>;
   isDraftSave: boolean;
   people: readonly Person[];
   teams: readonly Team[];
@@ -6357,6 +6518,7 @@ async function syncHighRiskOpeningForMatterInTx(params: {
     matter,
     values,
     actorId,
+    actorPermissionSet,
     isDraftSave,
     people,
     teams,
@@ -6377,6 +6539,7 @@ async function syncHighRiskOpeningForMatterInTx(params: {
       tenantCfg,
       matterId: matter.id,
       actorId,
+      actorPermissionSet,
       reason: isAborted
         ? 'Prospective matter was abandoned; pending High-risk opening sign-off withdrawn.'
         : 'Matter risk rating was reduced below High before opening; pending High-risk opening sign-off withdrawn.',
@@ -6444,12 +6607,11 @@ async function syncHighRiskOpeningForMatterInTx(params: {
       ownerId,
       assignedApproverId: matter.responsiblePartnerId || matter.supervisingPartnerId || null,
       fieldValues: {
-        systemCreated: true,
         matterNumber: matter.matterNumber,
         riskLevel: riskKey,
         submittedById: actorId,
       },
-      createdById: actorId,
+      createdById: SYSTEM_HRO_CREATOR_ACTOR_ID,
     },
     {
       auditEntries: [
@@ -8967,6 +9129,21 @@ export async function saveMatterRecord(
       }
 
       // S1-05 (ADR 0039, R752): Sync pending High-risk opening sign-off before gate evaluation.
+      const saveActorPermSet = resolvePersonPermissionSet(actingUser, {
+        allPeople: allPeopleWithPending,
+        teams,
+        tokenRoles: extensionCtx.actorRoles,
+        tokenRolesActorId: actingUser.id,
+        config: { rbac: matterRbacConfig },
+        context: extensionCtx,
+        mfaVerified: extensionCtx.mfaVerified,
+      });
+      const saveViewerCddAccess = buildViewerCddAccessFromPermSet(
+        actingUser,
+        saveActorPermSet,
+        teams,
+        matterRbacConfig,
+      );
       if (!existingHasOpened && !isPmsImport) {
         await syncHighRiskOpeningForMatterInTx({
           tx,
@@ -8975,6 +9152,7 @@ export async function saveMatterRecord(
           matter,
           values: inTxDbValues,
           actorId: opts.byId,
+          actorPermissionSet: saveActorPermSet.permissions,
           isDraftSave,
           people: allPeopleWithPending,
           teams,
@@ -8995,6 +9173,7 @@ export async function saveMatterRecord(
           values: inTxDbValues,
           people: allPeopleWithPending,
           todayYmd: inTxTenantTodayIso,
+          viewerAccess: saveViewerCddAccess,
           tenantCfg,
           organisations: allOrganisationsWithPending,
         });
@@ -10452,6 +10631,21 @@ export async function updateMatterConflictRecord(
 
         transitionedToOpenOnConflictApproval = false;
         const inTxWarnings: string[] = [];
+        const conflictViewerPermSet = resolvePersonPermissionSet(actingUser, {
+          allPeople: people,
+          teams,
+          tokenRoles: conflictCtx.actorRoles,
+          tokenRolesActorId: actingUser.id,
+          config: { rbac: conflictRbacConfig },
+          context: conflictCtx,
+          mfaVerified: conflictCtx.mfaVerified,
+        });
+        const conflictViewerCddAccess = buildViewerCddAccessFromPermSet(
+          actingUser,
+          conflictViewerPermSet,
+          teams,
+          conflictRbacConfig,
+        );
 
         if (
           sanitisedRecord.status === 'Declined' &&
@@ -10464,6 +10658,7 @@ export async function updateMatterConflictRecord(
             tenantCfg: tenantCfgForConflict,
             matterId: freshMatter.id,
             actorId: byId,
+            actorPermissionSet: conflictViewerPermSet.permissions,
             reason:
               'Conflict check declined by Risk & Compliance; pending High-risk opening sign-off withdrawn.',
           });
@@ -10490,6 +10685,7 @@ export async function updateMatterConflictRecord(
             values: inTxDbValues,
             people,
             todayYmd: today,
+            viewerAccess: conflictViewerCddAccess,
             tenantCfg: tenantCfgForConflict,
             organisations,
           });
@@ -10815,10 +11011,21 @@ export async function signOffMatterCostsRecord(
     );
   const taskRepoForSignOff = getTaskWorkflowRepository();
 
-  const liveDbCostsOverride =
-    await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
+  const [liveDbCostsOverride, signOffRbacConfig] = await Promise.all([
+    getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(
       extensionCtx,
-    );
+    ),
+    loadEffectiveTenantRbacConfig(extensionCtx, undefined, tenantCfg),
+  ]);
+  const signOffViewerCddAccess = buildViewerCddAccess({
+    actorId: byId,
+    actor: actingUser,
+    people,
+    teams,
+    rbacConfig: signOffRbacConfig,
+    tokenRoles: extensionCtx.actorRoles,
+    context: extensionCtx,
+  });
   const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
     tenantCfg,
     liveDbCostsOverride ?? store.matterCostsConfig,
@@ -11114,6 +11321,7 @@ export async function signOffMatterCostsRecord(
             values: inTxDbValues,
             people,
             todayYmd: inTxAsAtDate,
+            viewerAccess: signOffViewerCddAccess,
             tenantCfg,
             organisations,
           });
@@ -29162,6 +29370,17 @@ export async function transitionRegisterRecordService(
         `Register type "${existingPre.registerTypeKey}" is not configured.`,
       );
     }
+    if (
+      registerTypePre.systemCreatedOnly &&
+      registerTypePre.key !== 'cdd' &&
+      input.fieldUpdates &&
+      Object.keys(input.fieldUpdates).length > 0
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'This register record is managed by the matter-opening workflow and its fields cannot be modified.',
+      );
+    }
 
     const effectivePermSet =
       options?.viaHomeSignOffAdapter &&
@@ -29196,11 +29415,13 @@ export async function transitionRegisterRecordService(
     // R782: Restricted compliance register types (`cdd`, `high_risk_opening`) are never passed to generic register hooks.
     const hookCfg = tenantCfg;
     const isRestrictedTransitionHookType =
-      registerTypePre.key === 'cdd' || registerTypePre.key === 'high_risk_opening';
+      registerTypePre.key === 'cdd' ||
+      registerTypePre.key === 'high_risk_opening' ||
+      Boolean(registerTypePre.systemCreatedOnly);
     const beforeHookRes = isRestrictedTransitionHookType
       ? {
           allowProceed: true,
-          mergedFieldUpdates: input.fieldUpdates ? { ...input.fieldUpdates } : {},
+          mergedFieldUpdates: {},
           isolatedErrors: [] as string[],
         }
       : await getPlatformExtensionHost().executeRegisterBeforeTransitionHook(
@@ -29434,13 +29655,16 @@ export async function transitionRegisterRecordService(
             }
             if (
               lockedRecord.registerTypeKey === 'high_risk_opening' &&
-              input.transitionKey === 'partner_approve' &&
+              (input.transitionKey === 'partner_approve' ||
+                input.transitionKey === 'compliance_approve') &&
               (actor.id === matterTx.leadFeeEarnerId ||
                 actor.id === matterTx.responsiblePartnerId)
             ) {
               throw createRegisterDomainError(
                 REGISTER_DOMAIN_ERROR_CODES.SELF_APPROVAL_FORBIDDEN,
-                'You cannot give Partner approval for a matter where you lead the work or are the responsible partner.',
+                input.transitionKey === 'partner_approve'
+                  ? 'You cannot give Partner approval for a matter where you lead the work or are the responsible partner.'
+                  : 'You cannot give Risk & Compliance approval for a matter where you lead the work or are the responsible partner.',
               );
             }
           }
@@ -29714,6 +29938,7 @@ export async function transitionRegisterRecordService(
               values: inTxDbValues,
               people: preComplianceHroContext?.people ?? people,
               todayYmd: todayLocal,
+              viewerAccess: buildViewerCddAccessFromPermSet(actor, permSet, teams, rbacConfig),
               tenantCfg,
               organisations: preComplianceHroContext?.organisations,
             });
@@ -29770,7 +29995,7 @@ export async function transitionRegisterRecordService(
               const savedHroMatter = await putMatterWithInTxRestrictions(
                 ctx,
                 lockedMatter,
-                { expectedRowVersion: null },
+                { expectedRowVersion: lockedMatter.rowVersion ?? 1 },
               );
               const pendingAutoTaskAudits: FirmAuditEntryInput[] = [];
               await instantiateWorkTypeAutoTasksInTx({
@@ -29975,6 +30200,12 @@ export async function updateRegisterRecordDetailsService(
       return registerServiceFailure(
         'FORBIDDEN',
         `Missing permission "${registerType.editPermission}" to edit ${registerType.label}.`,
+      );
+    }
+    if (registerType.systemCreatedOnly) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'This register record is managed by the matter-opening workflow and cannot be edited directly.',
       );
     }
 
@@ -35732,6 +35963,7 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
   existingTasks: readonly Task[];
   auditField: string;
   auditNewValuePrefix: string;
+  expectedRowVersion?: number | null;
 }): Promise<Matter> {
   const {
     ctx,
@@ -35753,6 +35985,7 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
     existingTasks,
     auditField,
     auditNewValuePrefix,
+    expectedRowVersion = null,
   } = params;
   const prevStatusId = matter.matterStatusId;
   matter.matterStatusId = targetStatusId;
@@ -35786,7 +36019,7 @@ async function finalizeProspectiveMatterOpeningInTx(params: {
     matterOpeningSnapshot: openingSnapshot,
   };
   const saved = await putMatterWithInTxRestrictions(ctx, matter, {
-    expectedRowVersion: null,
+    expectedRowVersion,
   });
   const pendingAutoTaskAudits: FirmAuditEntryInput[] = [];
   await instantiateWorkTypeAutoTasksInTx({
@@ -35875,6 +36108,12 @@ export async function getMatterOpeningGateStateRecord(
       tenantCfg.timeZone || 'Europe/London',
     ).localDate;
     const store = await loadTenantCatalogueStoreView(ctx);
+    const gateViewerAccess = buildViewerCddAccessFromPermSet(
+      actor,
+      permSet,
+      teams,
+      rbacConfig,
+    );
     const [rawOverrides, rawHroRecords, cddStatus] = await Promise.all([
       matterRepo.listOpeningGateOverridesForMatter(ctx, matter.id, {
         activeOnly: true,
@@ -35890,15 +36129,8 @@ export async function getMatterOpeningGateStateRecord(
         matterRiskRatingId: matter.riskRatingId,
         values: store.values,
         todayYmd,
+        viewerAccess: gateViewerAccess,
         tenantCfg,
-        viewerId: actor.id,
-        canViewCdd:
-          permSet.permissions.has('cdd:view') ||
-          permSet.permissions.has('cdd:record'),
-        canBypassEmployeeCddVisibility: permSet.permissions.has('risk:view'),
-        hasRestrictedMatterAccess: permSet.permissions.has(
-          'matter:restricted:access',
-        ),
         people,
       }),
     ]);
@@ -35946,7 +36178,7 @@ export async function getMatterOpeningGateStateRecord(
         const pActor = people.find((p) => p.id === partnerTr.actorId);
         partnerApprover = {
           actorId: partnerTr.actorId,
-          actorName: pActor ? personDisplayName(pActor) : partnerTr.actorId,
+          actorName: pActor ? personDisplayName(pActor) : null,
           transitionedAt: partnerTr.transitionedAt,
         };
       }
@@ -35955,9 +36187,7 @@ export async function getMatterOpeningGateStateRecord(
         .find((t) => t.transitionKey === 'compliance_approve');
       if (complianceTr) {
         const cActor = people.find((p) => p.id === complianceTr.actorId);
-        complianceApproverName = cActor
-          ? personDisplayName(cActor)
-          : complianceTr.actorId;
+        complianceApproverName = cActor ? personDisplayName(cActor) : null;
       }
     }
 
@@ -36051,6 +36281,7 @@ export async function openProspectiveMatterRecord(
     ) {
       return registerServiceFailure('FORBIDDEN', 'Matter not found or restricted.');
     }
+    const preLockRowVersion = matter.rowVersion ?? 1;
 
     const store = await loadTenantCatalogueStoreView(ctx);
     const prospectiveStatusId = resolveProspectiveStatusId(store);
@@ -36165,6 +36396,12 @@ export async function openProspectiveMatterRecord(
       if (!lockedMatter) {
         return registerServiceFailure('NOT_FOUND', 'Matter was not found.');
       }
+      if ((lockedMatter.rowVersion ?? 1) !== preLockRowVersion) {
+        return registerServiceFailure(
+          MATTER_CONCURRENCY_CONFLICT_CODE,
+          'This matter changed while checking opening requirements. Please reload and try again.',
+        );
+      }
 
       const inTxDbValues = await catRepo.listAllChoiceValues<ChoiceValue>(ctx);
       const inTxProspectiveStatus = requireActiveChoiceValueId(
@@ -36209,6 +36446,7 @@ export async function openProspectiveMatterRecord(
           matter: lockedMatter,
           values: inTxDbValues,
           actorId: actor.id,
+          actorPermissionSet: permSet.permissions,
           isDraftSave: false,
           people: scoped.people,
           teams,
@@ -36224,6 +36462,7 @@ export async function openProspectiveMatterRecord(
         values: inTxDbValues,
         people: scoped.people,
         todayYmd: todayLocal,
+        viewerAccess: buildViewerCddAccessFromPermSet(actor, permSet, teams, rbacConfig),
         tenantCfg,
         organisations: scoped.organisations,
       });
@@ -36241,7 +36480,7 @@ export async function openProspectiveMatterRecord(
         lockedMatter.updatedAt = nowIso;
         lockedMatter.updatedById = actor.id;
         await putMatterWithInTxRestrictions(ctx, lockedMatter, {
-          expectedRowVersion: null,
+          expectedRowVersion: preLockRowVersion,
         });
         const reasons = Array.from(
           new Set([
@@ -36284,6 +36523,7 @@ export async function openProspectiveMatterRecord(
         existingTasks: scoped.existingTasks,
         auditField: 'Matter opening (Open matter)',
         auditNewValuePrefix: `${lockedMatter.matterNumber} opened by ${personDisplayName(actor)}`,
+        expectedRowVersion: preLockRowVersion,
       });
       return {
         ok: true as const,
@@ -36491,6 +36731,12 @@ export async function overrideMatterOpeningPreconditionRecord(
         tenantCfg,
         inTxWorkTypesOverride ?? null,
       );
+      const overrideViewerAccess = buildViewerCddAccessFromPermSet(
+        actor,
+        permSet,
+        teams,
+        rbacConfig,
+      );
 
       const preEval = await evaluateAndEnforceOpeningGateInTx({
         tx,
@@ -36500,6 +36746,7 @@ export async function overrideMatterOpeningPreconditionRecord(
         values: inTxDbValues,
         people,
         todayYmd,
+        viewerAccess: overrideViewerAccess,
         tenantCfg,
       });
       const check = preEval.preconditions.find(
@@ -36575,6 +36822,7 @@ export async function overrideMatterOpeningPreconditionRecord(
         values: inTxDbValues,
         people,
         todayYmd,
+        viewerAccess: overrideViewerAccess,
         tenantCfg,
       });
 
@@ -36676,7 +36924,7 @@ export async function revokeMatterOpeningOverrideRecord(
       ) {
         return registerServiceFailure(
           OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
-          'This matter is already open; the override can no longer be revoked.',
+          'This matter is no longer prospective, so opening overrides cannot be revoked.',
         );
       }
 
@@ -36722,6 +36970,7 @@ export async function revokeMatterOpeningOverrideRecord(
         values: inTxDbValues,
         people,
         todayYmd,
+        viewerAccess: buildViewerCddAccessFromPermSet(actor, permSet, teams, rbacConfig),
         tenantCfg,
       });
 

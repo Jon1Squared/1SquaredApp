@@ -127,6 +127,8 @@ export interface RegisterTransitionDefinition {
   distinctFromTransitionKeys?: readonly string[];
   /** When true, only dedicated core system workflows may execute this transition directly (R765). */
   systemOnly?: boolean;
+  /** When true, executing this transition starts a fresh multi-stage approval cycle for distinct-approver checks. */
+  resetsApprovalCycle?: boolean;
   setsDecidedAt?: boolean;
 }
 

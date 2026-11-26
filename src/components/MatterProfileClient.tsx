@@ -1688,14 +1688,18 @@ export function MatterProfileClient({
                       const label = pre.label || OPENING_GATE_PRECONDITION_LABELS[pre.key];
                       const pillLabel = pre.overridden
                         ? 'Overridden'
-                        : pre.rawSatisfied
-                          ? 'Met'
-                          : 'Blocked';
+                        : pre.rawSatisfied === null
+                          ? 'Not available'
+                          : pre.rawSatisfied
+                            ? 'Met'
+                            : 'Blocked';
                       const pillTone = pre.overridden
                         ? 'warning'
-                        : pre.rawSatisfied
-                          ? 'positive'
-                          : 'alert';
+                        : pre.rawSatisfied === null
+                          ? 'neutral'
+                          : pre.rawSatisfied
+                            ? 'positive'
+                            : 'alert';
                       return (
                         <li
                           key={pre.key}
@@ -1850,6 +1854,7 @@ export function MatterProfileClient({
                         ) : null}
                         {openingGateState.highRiskRecord &&
                         isRiskComplianceRole &&
+                        !isMatterLeadOrResponsible &&
                         openingGateState.highRiskRecord.status === 'pending_compliance' ? (
                           <button
                             type="button"

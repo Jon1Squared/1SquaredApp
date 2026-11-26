@@ -22,7 +22,7 @@ import {
   formatMatterNumberFromSequence,
   MATTER_NUMBERING_ERROR_CODES,
   resolveMatterNumberSequenceKey,
-  validateMatterNumberPattern,
+  validateMatterNumberingConfig,
   type MatterNumberAllocationResult,
   type MatterNumberFormatContext,
 } from '../domain/matterNumbering/index';
@@ -784,10 +784,10 @@ export class TenantMatterRepository extends TenantScopedRepository {
     config: MatterNumberingConfig = DEFAULT_MATTER_NUMBERING_CONFIG,
     formatCtx: MatterNumberFormatContext = {},
   ): Promise<MatterNumberAllocationResult> {
-    const patternCheck = validateMatterNumberPattern(config.pattern);
-    if (!patternCheck.ok) {
+    const configCheck = validateMatterNumberingConfig(config);
+    if (!configCheck.ok) {
       throw new Error(
-        `${MATTER_NUMBERING_ERROR_CODES.VALIDATION_ERROR}: ${patternCheck.error}`,
+        `${MATTER_NUMBERING_ERROR_CODES.VALIDATION_ERROR}: ${configCheck.error}`,
       );
     }
     const sequenceKey = resolveMatterNumberSequenceKey(config, formatCtx);

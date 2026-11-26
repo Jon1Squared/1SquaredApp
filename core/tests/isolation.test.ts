@@ -14631,7 +14631,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           }),
         { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: true },
       );
-      expect((crossMatterRevoke as { ok: boolean }).ok).toBe(false);
+      expect(crossMatterRevoke).toMatchObject({ ok: false, code: 'NOT_FOUND' });
 
       // Bravo actor cannot open, record engagement, revoke override, or approve Alpha's HRO record
       setActiveTenantConfigForTesting(bravoRaw, {});
@@ -14641,14 +14641,14 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
         () => openProspectiveMatterAction(alphaMatterId),
         { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
       );
-      expect((bravoOpen as { ok: boolean }).ok).toBe(false);
+      expect(bravoOpen).toMatchObject({ ok: false, code: 'FORBIDDEN' });
 
       const bravoEng = await runAsTestActor(
         'P-000001',
         () => recordEngagementLetterSignedAction({ matterId: alphaMatterId, note: 'Cross tenant tamper' }),
         { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
       );
-      expect((bravoEng as { ok: boolean }).ok).toBe(false);
+      expect(bravoEng).toMatchObject({ ok: false, code: 'FORBIDDEN' });
 
       const bravoRevoke = await runAsTestActor(
         'P-000001',
@@ -14660,7 +14660,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           }),
         { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
       );
-      expect((bravoRevoke as { ok: boolean }).ok).toBe(false);
+      expect(bravoRevoke).toMatchObject({ ok: false, code: 'FORBIDDEN' });
 
       const bravoHro = await runAsTestActor(
         'P-000001',
@@ -14672,7 +14672,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           }),
         { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
       );
-      expect((bravoHro as { ok: boolean }).ok).toBe(false);
+      expect(bravoHro).toMatchObject({ ok: false, code: 'NOT_FOUND' });
 
       // Forged tenant claim while active config is Alpha
       setActiveTenantConfigForTesting(alphaRaw, {});
@@ -14689,6 +14689,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       const alphaAfterMatter = await matterRepo.getMatterById<Matter>(ctxAlpha, alphaMatterId, {
         includeRestricted: true,
       });
+      expect(alphaAfterMatter?.matterStatusId).toBe('matter_status.prospective_enquiry');
       expect(alphaAfterMatter?.engagementLetterSignedAt).toBeFalsy();
       const alphaActiveOvrs = await matterRepo.listOpeningGateOverridesForMatter(
         ctxAlpha,

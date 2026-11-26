@@ -1492,7 +1492,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
     expect((crossOvr as { ok?: boolean }).ok).toBe(false);
   }, 45_000);
 
-  it('6. R761a (Blocking): openProspectiveMatterAction refuses Referred, Declined, Not started without override, and DRAFT matters under requireConflictCleared=false (allows Not started only with conflict override)', async () => {
+  it('6. R761a (Blocking): openProspectiveMatterAction refuses Referred, Declined, Not started without override, and DRAFT matters under firm defaults (allows Not started only with conflict override)', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
     const openAction = getDynamicAction('openProspectiveMatterAction')!;
     const overrideAction = getDynamicAction('overrideMatterOpeningPreconditionAction')!;
@@ -1524,7 +1524,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           await completeClientCddRecord({ recordId: cddStart.summary.record.id }, 'P-000001');
         }
 
-        // Work type inheriting defaults.openingGate where requireConflictCleared === false
+        // Work type inheriting defaults.openingGate (allowConflictOverride === true)
         const mkParams = {
           clientId: 'O-000001',
           practiceAreaId: 'work_type.general_practice',
@@ -1536,7 +1536,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
         };
 
-        // 1) Referred conflict -> refused even with requireConflictCleared=false
+        // 1) Referred conflict -> refused even when partner conflict overrides are enabled
         const refSave = await saveMatterRecord(
           {
             ...mkParams,
@@ -1622,7 +1622,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
     );
   }, 30_000);
 
-  it('7. R761b (Blocking): signOffMatterCostsRecord refuses opening a prospective matter when conflict is Not started, Referred, or Declined under requireConflictCleared=false', async () => {
+  it('7. R761b (Blocking): signOffMatterCostsRecord refuses opening a prospective matter when conflict is Not started, Referred, or Declined even when conflict overrides are permitted', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
     const signOffAction = getDynamicAction('signOffMatterCostsAction')!;
     const matterRepo = getMatterRepository();
@@ -1744,18 +1744,7 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
         try {
           let injectedConflictRace = false;
           matterRepo.withTenantTransaction = (async (txCtx, fn, opts) => {
-            if (!injectedConflictRace && fn.toString().includes('MATTER_CONCURRENCY_CONFLICT')) {
-              injectedConflictRace = true;
-              const fresh = await matterRepo.getMatterById<Matter>(txCtx, conflictRaceId, {
-                includeRestricted: true,
-              });
-              await matterRepo.updateMatter(
-                txCtx,
-                { ...fresh!, riskRatingId: 'risk_rating.high' },
-                fresh!.rowVersion ?? 1,
-              );
-            } else if (!injectedConflictRace && opts === undefined && txCtx.tenantId === 'not-a-law-firm') {
-              // Ensure we inject before the updateMatterConflictRecord outer transaction even before fix
+            if (!injectedConflictRace && opts === undefined && txCtx.tenantId === 'not-a-law-firm') {
               const current = await matterRepo.getMatterById<Matter>(txCtx, conflictRaceId, {
                 includeRestricted: true,
               });
@@ -2144,9 +2133,769 @@ describe('S1-05 (ADRs 0039 & 0040): High-risk opening sign-off, transactional wo
           reason: 'Attempted revoke after matter already opened',
         })) as { ok: boolean; message?: string };
         expect(revokeAfterOpen.ok).toBe(false);
-        expect(revokeAfterOpen.message).toMatch(/already open/i);
+        expect(revokeAfterOpen.message).toMatch(/no longer prospective/i);
       },
       { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
+
+  it('12. R791 (Blocking): generic updateRegisterRecordAction and transitionRegisterRecordAction fieldUpdates are refused on system HRO records and server-owned marker cannot be forged', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const matterRepo = getMatterRepository();
+    const updateRegAction = getDynamicAction('updateRegisterRecordAction')!;
+    const transitionRegAction = getDynamicAction('transitionRegisterRecordAction')!;
+
+    // Seed high-risk prospective matter submitted by P-000002 -> sync creates system HRO record
+    let highMatterId = '';
+    await runAsActionActor(
+      'P-000002',
+      async () => {
+        const highSave = await saveMatterRecord(
+          {
+            title: 'R791 HRO Integrity Test Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Cleared'),
+            riskAssessment: { answers: HIGH_RISK_ANSWERS, followUps: HIGH_RISK_FOLLOW_UPS },
+          },
+          { byId: 'P-000002', saveMode: 'submit_cleared' },
+        );
+        expect(highSave.matter).not.toBeNull();
+        highMatterId = highSave.matter!.id;
+      },
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+
+    const gateBefore = await runAsActionActor(
+      'P-000002',
+      () => getMatterOpeningGateStateRecord(highMatterId, 'P-000002'),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(gateBefore.ok).toBe(true);
+    const hroId = gateBefore.ok ? gateBefore.highRiskRecord?.id ?? '' : '';
+    expect(hroId).toMatch(/^REG-/);
+
+    const regRepo = new TenantRegisterRepository();
+    const ctx = testTenantCtx('P-000001');
+    const beforeRec = await regRepo.getRegisterRecordById(ctx, hroId, { includeRestricted: true });
+    expect(beforeRec).not.toBeNull();
+    expect(beforeRec?.createdById).toBe('system:matter_opening');
+    expect('systemCreated' in (beforeRec?.fieldValues ?? {})).toBe(false);
+    expect(beforeRec?.fieldValues?.submittedById).toBe('P-000002');
+
+    // 1) Actor with register:edit tries to unset systemCreated & forge submittedById via updateRegisterRecordAction
+    const genericUpdateRes = (await runAsActionActor(
+      'P-000004',
+      () =>
+        updateRegAction({
+          recordId: hroId,
+          fieldValues: {
+            ...(beforeRec!.fieldValues ?? {}),
+            systemCreated: false,
+            submittedById: 'P-000099',
+          },
+        }),
+      { roles: ['admin'], mfaVerified: true },
+    )) as { ok: boolean; code?: string; message?: string };
+    expect(genericUpdateRes.ok).toBe(false);
+    expect(genericUpdateRes.code).toBe('VALIDATION_ERROR');
+    expect(genericUpdateRes.message ?? '').toMatch(/matter-opening workflow/i);
+
+    const afterGenericRec = await regRepo.getRegisterRecordById(ctx, hroId, { includeRestricted: true });
+    expect(afterGenericRec?.fieldValues).toEqual(beforeRec?.fieldValues);
+
+    // 2) Independent partner tries to pass fieldUpdates on partner_approve via transitionRegisterRecordAction
+    const transitionTamperRes = (await runAsActionActor(
+      'P-000038',
+      () =>
+        transitionRegAction({
+          recordId: hroId,
+          transitionKey: 'partner_approve',
+          comment: 'Partner attempt with tampered riskLevel',
+          fieldUpdates: { riskLevel: 'Low' },
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok: boolean; code?: string; message?: string };
+    expect(transitionTamperRes.ok).toBe(false);
+    expect(transitionTamperRes.code).toBe('VALIDATION_ERROR');
+    expect(transitionTamperRes.message ?? '').toMatch(/matter-opening workflow/i);
+
+    const afterTransitionRec = await regRepo.getRegisterRecordById(ctx, hroId, {
+      includeRestricted: true,
+    });
+    expect(afterTransitionRec?.status).toBe('pending_partner');
+    expect(afterTransitionRec?.fieldValues).toEqual(beforeRec?.fieldValues);
+
+    // 3) Opening gate still finds the exact same server-owned system HRO record
+    const gateAfter = await runAsActionActor(
+      'P-000002',
+      () => getMatterOpeningGateStateRecord(highMatterId, 'P-000002'),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(gateAfter.ok).toBe(true);
+    if (gateAfter.ok) {
+      expect(gateAfter.highRiskRecord?.id).toBe(hroId);
+    }
+    expect(await matterRepo.getMatterById(ctx, highMatterId)).not.toBeNull();
+  }, 30_000);
+
+  it('13. R792 & R796 (Blocking): opening gate masks hidden employee-client names when employee has NO CDD record across open, override, cost sign-off, and gate view', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const matterRepo = getMatterRepository();
+    const openAction = getDynamicAction('openProspectiveMatterAction')!;
+    const overrideAction = getDynamicAction('overrideMatterOpeningPreconditionAction')!;
+    const signOffAction = getDynamicAction('signOffMatterCostsAction')!;
+
+    // Complete CDD for primary org O-000001; leave additional employee-client P-000005 (Siân Llewellyn) with NO CDD record at all
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const o1Start = await startOrLoadClientCddRecord(
+          { subjectType: 'organisation', subjectId: 'O-000001', createIfMissing: true },
+          'P-000001',
+        );
+        expect(o1Start.ok).toBe(true);
+        if (o1Start.ok && o1Start.summary.record) {
+          for (const item of o1Start.summary.checklistItems) {
+            if (item.status !== 'recorded') {
+              await recordCddChecklistItemRecord(
+                {
+                  recordId: o1Start.summary.record.id,
+                  itemKey: item.itemKey,
+                  status: 'recorded',
+                  note: 'Verified for joint matter test',
+                },
+                'P-000001',
+              );
+            }
+          }
+          const completed = await completeClientCddRecord(
+            { recordId: o1Start.summary.record.id },
+            'P-000001',
+          );
+          expect(completed.ok).toBe(true);
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    // Create prospective joint-client matter (Dispute Resolution -> Arbitration: requireCddComplete=true, allowCddOverride=true, requireEngagementSigned=true)
+    // Raise fee estimate to £35,000 so costs await partner sign-off; P-000006 and P-000038 are NOT participants on any matter for P-000005
+    let jointMatterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const saved = await saveMatterRecord(
+          {
+            title: 'R792 Masked Joint Employee Matter',
+            clientId: 'O-000001',
+            additionalClientIds: ['P-000005'],
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: 'work_type.dispute_resolution_arbitration',
+            matterTypeId: 'matter_type.contentious',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            feeEstimateGbp: 10000,
+            agreedFeeCapGbp: 10000,
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(saved.errors).toBeUndefined();
+        expect(saved.matter).not.toBeNull();
+        expect(saved.matter!.matterStatusId).toBe('matter_status.prospective_enquiry');
+        jointMatterId = saved.matter!.id;
+
+        const raised = await saveMatterRecord(
+          {
+            ...saved.matter!,
+            feeEstimateGbp: 35000,
+            agreedFeeCapGbp: 35000,
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { id: jointMatterId, byId: 'P-000001', saveMode: 'draft' },
+        );
+        expect(raised.errors).toBeUndefined();
+        expect(raised.matter).not.toBeNull();
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    // Lift staff_matter restriction on the joint matter so P-000006 & P-000038 can view/act on the matter
+    // without holding risk:view / matter:restricted:access or participating on P-000005's matters
+    const liftRes = (await runAsActionActor(
+      'P-000050',
+      () =>
+        actionsModule.liftMatterRestrictionAction(
+          jointMatterId,
+          'staff_matter',
+          'Joint client matter involving external lead client; staff restriction lifted for general handling.',
+        ),
+      { roles: ['managing_partner'], mfaVerified: true },
+    )) as { matter: Matter | null; errors?: Record<string, string> };
+    expect(liftRes.errors).toBeUndefined();
+    expect(liftRes.matter?.isStaffMatter).toBe(false);
+
+    // 1) Fee earner P-000006 (lacks risk:view / matter:restricted:access, not on matter) calls getMatterOpeningGateStateRecord and openProspectiveMatterAction
+    const feGate = await runAsActionActor(
+      'P-000006',
+      () => getMatterOpeningGateStateRecord(jointMatterId, 'P-000006'),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(feGate.ok).toBe(true);
+    expect(JSON.stringify(feGate)).not.toMatch(/Llewellyn|Si[aâ]n/i);
+    if (feGate.ok) {
+      const cddPre = feGate.evaluation.preconditions.find((p) => p.key === 'cdd_complete');
+      expect(cddPre?.rawSatisfied).toBeNull();
+      expect(cddPre?.canOverride).toBe(false);
+      expect(cddPre?.statusSummary).toBe('Not available to you');
+      expect(feGate.evaluation.blockingReasons).toContain(
+        'Client due diligence is not complete for one or more clients.',
+      );
+    }
+
+    const feOpen = (await runAsActionActor(
+      'P-000006',
+      () => openAction(jointMatterId),
+      { roles: ['fee_earner'], mfaVerified: false },
+    )) as { ok: boolean; message?: string; openingGate?: unknown };
+    expect(feOpen.ok).toBe(false);
+    expect(JSON.stringify(feOpen)).not.toMatch(/Llewellyn|Si[aâ]n/i);
+
+    // 2) Partner P-000045 (holds matter:opening_gate:override & signoff:approve, lacks risk:view / matter:restricted:access)
+    const partnerOverrideEng = (await runAsActionActor(
+      'P-000045',
+      () =>
+        overrideAction({
+          matterId: jointMatterId,
+          preconditionKey: 'engagement_signed',
+          reason: 'Partner engagement override on masked joint matter',
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok: boolean; evaluation?: unknown };
+    expect(partnerOverrideEng.ok).toBe(true);
+    expect(JSON.stringify(partnerOverrideEng)).not.toMatch(/Llewellyn|Si[aâ]n/i);
+
+    const partnerOverrideCdd = (await runAsActionActor(
+      'P-000045',
+      () =>
+        overrideAction({
+          matterId: jointMatterId,
+          preconditionKey: 'cdd_complete',
+          reason: 'Partner attempting override of hidden employee CDD',
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok: boolean; code?: string; message?: string; evaluation?: unknown };
+    expect(partnerOverrideCdd.ok).toBe(false);
+    expect(partnerOverrideCdd.code).toBe('OPENING_GATE_OVERRIDE_FORBIDDEN');
+    expect(JSON.stringify(partnerOverrideCdd)).not.toMatch(/Llewellyn|Si[aâ]n/i);
+
+    const partnerSignOff = (await runAsActionActor(
+      'P-000045',
+      () => signOffAction(jointMatterId, 'Partner cost sign-off on masked CDD joint matter'),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok?: boolean; matter?: Matter | null; warnings?: string[]; message?: string };
+    expect(
+      JSON.stringify({
+        warnings: partnerSignOff.warnings ?? [],
+        message: partnerSignOff.message ?? '',
+      }),
+    ).not.toMatch(/Llewellyn|Si[aâ]n/i);
+    expect(partnerSignOff.warnings ?? []).toContain(
+      'Client due diligence is not complete for one or more clients.',
+    );
+
+    const persistedMatter = await matterRepo.getMatterById<Matter>(
+      testTenantCtx('P-000001'),
+      jointMatterId,
+    );
+    expect(persistedMatter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+  }, 30_000);
+
+  it('14. R793 (Should fix): excludes matter leadFeeEarnerId and responsiblePartnerId from HRO compliance_approve', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000004');
+    const partyRepo = new TenantPartyRepository();
+    const regRepo = new TenantRegisterRepository();
+    const transitionRegAction = getDynamicAction('transitionRegisterRecordAction')!;
+
+    const basePartner = (await partyRepo.getPersonById<Person>(ctx, 'P-000005'))!;
+    const dualRp: Person = {
+      ...basePartner,
+      id: 'P-S105-DUAL-RP',
+      entraObjectId: undefined,
+      firstName: 'Dual',
+      surname: 'Compliance',
+      roles: ['partner', 'risk_compliance'],
+      employeeRoleId: 'employee_role.partner',
+    };
+    await partyRepo.putPerson(ctx, dualRp);
+
+    // Sub-case A: responsiblePartnerId holding risk_compliance attempts compliance_approve
+    let hroMatterId = '';
+    await runAsActionActor(
+      'P-000002',
+      async () => {
+        const res = await saveMatterRecord(
+          {
+            title: 'R793 Dual-Role Responsible Partner HRO Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: dualRp.id,
+            supervisingPartnerId: dualRp.id,
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: [dualRp.id, 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Cleared'),
+            riskAssessment: { answers: HIGH_RISK_ANSWERS, followUps: HIGH_RISK_FOLLOW_UPS },
+          },
+          { byId: 'P-000002', saveMode: 'submit_cleared' },
+        );
+        expect(res.matter).not.toBeNull();
+        hroMatterId = res.matter!.id;
+      },
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+
+    const hroList = await regRepo.listVisibleRegisterRecords(testTenantCtx('P-000001'), 'P-000001', {
+      includeRestricted: true,
+      registerTypeKey: 'high_risk_opening',
+      matterId: hroMatterId,
+    });
+    expect(hroList).toHaveLength(1);
+    const hroId = hroList[0]!.id;
+
+    // Independent partner P-000001 gives Stage 1 approval
+    const stage1 = (await runAsActionActor(
+      'P-000001',
+      () =>
+        transitionRegAction({
+          recordId: hroId,
+          transitionKey: 'partner_approve',
+          comment: 'Independent stage 1 partner approval',
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    )) as { ok: boolean };
+    expect(stage1.ok).toBe(true);
+
+    // Responsible partner dualRp (also holding risk_compliance) is refused Stage 2 compliance_approve
+    const stage2SelfRp = (await runAsActionActor(
+      dualRp.id,
+      () =>
+        transitionRegAction({
+          recordId: hroId,
+          transitionKey: 'compliance_approve',
+          comment: 'Responsible partner attempting stage 2 compliance approval',
+        }),
+      { roles: ['partner', 'risk_compliance'], mfaVerified: false },
+    )) as { ok: boolean; code?: string; message?: string };
+    expect(stage2SelfRp.ok).toBe(false);
+    expect(stage2SelfRp.code).toBe('REGISTER_SELF_APPROVAL_FORBIDDEN');
+
+    // Independent Risk & Compliance officer P-000003 succeeds
+    const stage2Clean = (await runAsActionActor(
+      'P-000003',
+      () =>
+        transitionRegAction({
+          recordId: hroId,
+          transitionKey: 'compliance_approve',
+          comment: 'Independent MLRO stage 2 approval',
+        }),
+      { roles: ['risk_compliance'], mfaVerified: false },
+    )) as { ok: boolean };
+    expect(stage2Clean.ok).toBe(true);
+  }, 30_000);
+
+  it('15. R794 (Should fix): enforces allowConflictOverride work-type policy and inherits firm default', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const matterRepo = getMatterRepository();
+    const overrideAction = getDynamicAction('overrideMatterOpeningPreconditionAction')!;
+    const openAction = getDynamicAction('openProspectiveMatterAction')!;
+
+    // Complete CDD for O-000001 so conflict check is the sole blocker
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const cddStart = await startOrLoadClientCddRecord(
+          { subjectType: 'organisation', subjectId: 'O-000001', createIfMissing: true },
+          'P-000001',
+        );
+        if (cddStart.ok && cddStart.summary.record && cddStart.summary.status !== 'recorded') {
+          for (const item of cddStart.summary.checklistItems) {
+            if (item.status !== 'recorded') {
+              await recordCddChecklistItemRecord(
+                { recordId: cddStart.summary.record.id, itemKey: item.itemKey, status: 'recorded', note: 'OK' },
+                'P-000001',
+              );
+            }
+          }
+          await completeClientCddRecord({ recordId: cddStart.summary.record.id }, 'P-000001');
+        }
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const baseWorkTypes = (notALawFirmBaseConfig as unknown as {
+      workTypes: {
+        defaults: Record<string, unknown>;
+        items: Array<Record<string, unknown>>;
+      };
+    }).workTypes;
+    setActiveTenantConfigForTesting(
+      {
+        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+        workTypes: {
+          ...baseWorkTypes,
+          items: [
+            ...baseWorkTypes.items,
+            {
+              workTypeId: 'work_type.general_practice_advisory',
+              practiceAreaId: 'work_type.general_practice',
+              active: true,
+              autoTaskTemplates: [],
+              riskQuestions: [],
+              openingGate: {
+                allowConflictOverride: false,
+              },
+            },
+          ],
+        },
+      },
+      {},
+    );
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const disallowedSave = await saveMatterRecord(
+          {
+            title: 'R794 Disallowed Conflict Override Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.general_practice',
+            workTypeSubcategoryId: 'work_type.general_practice_advisory',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Referred'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_referred' },
+        );
+        expect(disallowedSave.matter).not.toBeNull();
+        const disallowedId = disallowedSave.matter!.id;
+
+        await matterRepo.updateMatter(
+          testTenantCtx('P-000001'),
+          {
+            ...disallowedSave.matter!,
+            conflictCheckStatus: 'Not started',
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Not started'),
+          },
+          disallowedSave.matter!.rowVersion ?? 1,
+        );
+
+        const ovrDenied = (await overrideAction({
+          matterId: disallowedId,
+          preconditionKey: 'conflict_cleared',
+          reason: 'Attempting partner conflict override where policy forbids it',
+        })) as { ok: boolean; code?: string };
+        expect(ovrDenied.ok).toBe(false);
+        expect(ovrDenied.code).toBe('OPENING_GATE_OVERRIDE_FORBIDDEN');
+
+        const stillBlocked = (await openAction(disallowedId)) as { ok: boolean };
+        expect(stillBlocked.ok).toBe(false);
+        const afterDisallowed = await matterRepo.getMatterById<Matter>(
+          testTenantCtx('P-000001'),
+          disallowedId,
+        );
+        expect(afterDisallowed?.matterStatusId).toBe('matter_status.prospective_enquiry');
+
+        // Work type inheriting firm default allowConflictOverride: true allows overriding Not started
+        const inheritedSave = await saveMatterRecord(
+          {
+            title: 'R794 Inherited Firm Default Conflict Override Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.corporate_and_commercial',
+            workTypeSubcategoryId: 'work_type.corporate_and_commercial_commercial_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Referred'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_referred' },
+        );
+        const inheritedId = inheritedSave.matter!.id;
+        await matterRepo.updateMatter(
+          testTenantCtx('P-000001'),
+          {
+            ...inheritedSave.matter!,
+            conflictCheckStatus: 'Not started',
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Not started'),
+          },
+          inheritedSave.matter!.rowVersion ?? 1,
+        );
+        const inheritedOvr = (await overrideAction({
+          matterId: inheritedId,
+          preconditionKey: 'conflict_cleared',
+          reason: 'Partner override allowed under firm default policy',
+        })) as { ok: boolean };
+        expect(inheritedOvr.ok).toBe(true);
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
+
+  it('16. R795 (Should fix): openProspectiveMatterRecord aborts with MATTER_CONCURRENCY_CONFLICT when matter changes between read and FOR UPDATE', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const matterRepo = getMatterRepository();
+
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const baseSave = await saveMatterRecord(
+          {
+            title: 'R795 Open Matter Stale Read Race',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: 'work_type.dispute_resolution_pre_action_correspondence',
+            matterTypeId: 'matter_type.contentious',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(baseSave.matter).not.toBeNull();
+        const raceId = baseSave.matter!.id;
+
+        const origWithTx = matterRepo.withTenantTransaction.bind(matterRepo);
+        let injectedOpenRace = false;
+        try {
+          matterRepo.withTenantTransaction = (async (txCtx, fn, opts) => {
+            if (!injectedOpenRace && opts === undefined && txCtx.tenantId === 'not-a-law-firm') {
+              const current = await matterRepo.getMatterById<Matter>(txCtx, raceId, {
+                includeRestricted: true,
+              });
+              if (current && current.riskRatingId !== 'risk_rating.high') {
+                injectedOpenRace = true;
+                await matterRepo.updateMatter(
+                  txCtx,
+                  { ...current, riskRatingId: 'risk_rating.high' },
+                  current.rowVersion ?? 1,
+                );
+              }
+            }
+            return origWithTx(txCtx, fn, opts);
+          }) as typeof matterRepo.withTenantTransaction;
+
+          const raceRes = (await openProspectiveMatterRecord(raceId, 'P-000001')) as {
+            ok: boolean;
+            code?: string;
+          };
+          expect(injectedOpenRace).toBe(true);
+          expect(raceRes.ok).toBe(false);
+          expect(raceRes.code).toBe('MATTER_CONCURRENCY_CONFLICT');
+        } finally {
+          matterRepo.withTenantTransaction = origWithTx;
+        }
+
+        const afterRace = await matterRepo.getMatterById<Matter>(testTenantCtx('P-000001'), raceId);
+        expect(afterRace?.riskRatingId).toBe('risk_rating.high');
+        expect(afterRace?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+  }, 30_000);
+
+  it('17. R797, Suggestion 5 & Suggestion 11: missing approver/override person returns null, revoking on aborted matter says no longer prospective, and saveMatterNumberingConfigAction refuses mismatched scope', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const matterRepo = getMatterRepository();
+    const overrideAction = getDynamicAction('overrideMatterOpeningPreconditionAction')!;
+    const revokeAction = getDynamicAction('revokeMatterOpeningOverrideAction')!;
+    const saveNumAction = getDynamicAction('saveMatterNumberingConfigAction')!;
+    const transitionRegAction = getDynamicAction('transitionRegisterRecordAction')!;
+
+    // Suggestion 11: saveMatterNumberingConfigAction refuses mismatched pattern and scope
+    const badNumRes = (await runAsActionActor(
+      'P-000004',
+      () =>
+        saveNumAction(
+          {
+            pattern: '{CLIENT_REF}-{SEQ:4}',
+            sequenceScope: 'year',
+            emptyTokenFallback: 'MAT',
+          },
+          'Invalid mismatched numbering test',
+        ),
+      { roles: ['admin'], mfaVerified: true },
+    )) as { ok: boolean; message?: string };
+    expect(badNumRes.ok).toBe(false);
+    expect(badNumRes.message ?? '').toMatch(/YYYY|YY/);
+
+    // R797 & Suggestion 5: High-risk prospective matter with override & approved HRO whose actors are missing from people list
+    await runAsActionActor(
+      'P-000002',
+      async () => {
+        const mSave = await saveMatterRecord(
+          {
+            title: 'R797 Null Name & Aborted Revoke Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: 'work_type.dispute_resolution_arbitration',
+            matterTypeId: 'matter_type.contentious',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Cleared'),
+            riskAssessment: { answers: HIGH_RISK_ANSWERS, followUps: HIGH_RISK_FOLLOW_UPS },
+          },
+          { byId: 'P-000002', saveMode: 'submit_cleared' },
+        );
+        const mId = mSave.matter!.id;
+
+        const ovr = (await runAsActionActor(
+          'P-000045',
+          () =>
+            overrideAction({
+              matterId: mId,
+              preconditionKey: 'engagement_signed',
+              reason: 'Override before missing person name check',
+            }),
+          { roles: ['partner'], mfaVerified: false },
+        )) as { ok: boolean; override?: { id: string } };
+        expect(ovr.ok).toBe(true);
+
+        const regRepo = new TenantRegisterRepository();
+        const hroRecs = await regRepo.listVisibleRegisterRecords(testTenantCtx('P-000001'), 'P-000001', {
+          includeRestricted: true,
+          registerTypeKey: 'high_risk_opening',
+          matterId: mId,
+        });
+        const hroId = hroRecs[0]!.id;
+
+        await runAsActionActor(
+          'P-000045',
+          () =>
+            transitionRegAction({
+              recordId: hroId,
+              transitionKey: 'partner_approve',
+              comment: 'Stage 1 partner approve',
+            }),
+          { roles: ['partner'], mfaVerified: false },
+        );
+        await runAsActionActor(
+          'P-000003',
+          () =>
+            transitionRegAction({
+              recordId: hroId,
+              transitionKey: 'compliance_approve',
+              comment: 'Stage 2 compliance approve',
+            }),
+          { roles: ['risk_compliance'], mfaVerified: false },
+        );
+
+        // Rewrite transition/override actor IDs in DB to an unknown ID so people lookup misses
+        const ctx = testTenantCtx('P-000001');
+        await regRepo.withTenantTransaction(ctx, async (tx) => {
+          await tx.query(
+            `UPDATE public.register_transitions SET actor_id = 'P-UNKNOWN-R797' WHERE tenant_id = $1 AND register_record_id = $2`,
+            [ctx.tenantId, hroId],
+          );
+          await tx.query(
+            `UPDATE public.matter_opening_gate_overrides SET overridden_by_person_id = 'P-UNKNOWN-R797' WHERE tenant_id = $1 AND id = $2`,
+            [ctx.tenantId, ovr.override!.id],
+          );
+        });
+
+        const gateWithUnknownActors = await getMatterOpeningGateStateRecord(mId, 'P-000002');
+        expect(gateWithUnknownActors.ok).toBe(true);
+        if (gateWithUnknownActors.ok) {
+          expect(gateWithUnknownActors.highRiskRecord?.partnerApproverName).toBeNull();
+          expect(gateWithUnknownActors.highRiskRecord?.complianceApproverName).toBeNull();
+          expect(gateWithUnknownActors.evaluation.highRisk.partnerApproverName).toBeNull();
+          expect(gateWithUnknownActors.evaluation.activeOverrides[0]?.overriddenByName).toBeNull();
+          expect(
+            gateWithUnknownActors.evaluation.preconditions
+              .find((p) => p.key === 'engagement_signed')
+              ?.activeOverride?.overriddenByName,
+          ).toBeNull();
+          expect(gateWithUnknownActors.evaluation.blockingReasons.join(' ')).not.toContain(
+            'P-UNKNOWN-R797',
+          );
+          expect(
+            gateWithUnknownActors.evaluation.preconditions.map((p) => p.statusSummary).join(' '),
+          ).not.toContain('P-UNKNOWN-R797');
+        }
+
+        // Suggestion 5: Create an aborted prospective matter with override -> revoke refuses with "no longer prospective"
+        const abortedSave = await saveMatterRecord(
+          {
+            title: 'Suggestion 5 Aborted Override Revoke Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.dispute_resolution',
+            workTypeSubcategoryId: 'work_type.dispute_resolution_arbitration',
+            matterTypeId: 'matter_type.contentious',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000002', 'Dafydd Evans', 'Cleared'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000002', saveMode: 'submit_cleared' },
+        );
+        const abortedId = abortedSave.matter!.id;
+        const abOvr = (await runAsActionActor(
+          'P-000045',
+          () =>
+            overrideAction({
+              matterId: abortedId,
+              preconditionKey: 'engagement_signed',
+              reason: 'Override prior to prospective abandonment',
+            }),
+          { roles: ['partner'], mfaVerified: false },
+        )) as { ok: boolean; override?: { id: string } };
+        expect(abOvr.ok).toBe(true);
+
+        const catRepo = new TenantCatalogueRepository();
+        const choiceVals = await catRepo.listChoiceValuesForList(ctx, 'matter_status');
+        const abortedChoice = choiceVals.find((v) => v.systemKey === 'aborted')!;
+        const loadedAborted = (await matterRepo.getMatterById<Matter>(ctx, abortedId))!;
+        await matterRepo.updateMatter(
+          ctx,
+          { ...loadedAborted, matterStatusId: abortedChoice.id, recordStatusId: abortedChoice.id },
+          loadedAborted.rowVersion ?? 1,
+        );
+
+        const revokeAborted = (await runAsActionActor(
+          'P-000045',
+          () =>
+            revokeAction({
+              matterId: abortedId,
+              overrideId: abOvr.override!.id,
+              reason: 'Attempting revoke after matter aborted',
+            }),
+          { roles: ['partner'], mfaVerified: false },
+        )) as { ok: boolean; message?: string };
+        expect(revokeAborted.ok).toBe(false);
+        expect(revokeAborted.message ?? '').toMatch(/no longer prospective/i);
+      },
+      { roles: ['fee_earner'], mfaVerified: false },
     );
   }, 30_000);
 });

@@ -1679,17 +1679,17 @@
               "additionalProperties": false,
               "description": "Firm-wide fallback pre-conditions evaluated transactionally before opening a prospective matter (ADR 0040, S1-05)",
               "default": {
-                "requireConflictCleared": false,
+                "allowConflictOverride": true,
                 "requireCddComplete": false,
                 "allowCddOverride": true,
                 "requireEngagementSigned": false,
                 "requireFundsOnAccount": false
               },
               "properties": {
-                "requireConflictCleared": {
+                "allowConflictOverride": {
                   "type": "boolean",
-                  "default": false,
-                  "description": "Requires a Cleared or Approved conflict check before matter opening"
+                  "default": true,
+                  "description": "Whether a partner/managing partner may record an audited override when a conflict check is Not started or In progress"
                 },
                 "requireCddComplete": {
                   "type": "boolean",
@@ -1924,9 +1924,9 @@
                 "additionalProperties": false,
                 "description": "Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults per setting (ADR 0040, S1-05, R768)",
                 "properties": {
-                  "requireConflictCleared": {
+                  "allowConflictOverride": {
                     "type": "boolean",
-                    "description": "Overrides conflict-clearance requirement for this work type"
+                    "description": "Overrides whether a partner/managing partner may record an audited conflict override for Not started or In progress checks on this work type"
                   },
                   "requireCddComplete": {
                     "type": "boolean",

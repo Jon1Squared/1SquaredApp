@@ -23,6 +23,9 @@ import type {
   OrgStructureCatalogue,
 } from '@/domain/types';
 import {
+  clearWorkTypeOpeningGateSetting,
+  DEFAULT_WORK_TYPE_OPENING_GATE,
+  resolveInheritedOpeningGateSetting,
   resolveWorkTypeAutoTaskTemplates,
   resolveWorkTypeOpeningGateWithProvenance,
   resolveWorkTypeRetention,
@@ -487,7 +490,7 @@ export function WorkTypesAdminPanel({
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
               {(
                 [
-                  ['requireConflictCleared', 'Require conflict check cleared'],
+                  ['allowConflictOverride', 'Allow partner override for incomplete conflict check'],
                   ['requireCddComplete', 'Require CDD complete'],
                   ['allowCddOverride', 'Allow partner CDD override'],
                   ['requireEngagementSigned', 'Require engagement letter signed'],
@@ -495,11 +498,7 @@ export function WorkTypesAdminPanel({
                 ] as Array<[keyof WorkTypeOpeningGateConfig, string]>
               ).map(([fieldKey, label]) => {
                 const baseGate: WorkTypeOpeningGateConfig = {
-                  requireConflictCleared: false,
-                  requireCddComplete: false,
-                  allowCddOverride: true,
-                  requireEngagementSigned: false,
-                  requireFundsOnAccount: false,
+                  ...DEFAULT_WORK_TYPE_OPENING_GATE,
                   ...(draft.defaults.openingGate ?? {}),
                 };
                 return (
@@ -1083,7 +1082,7 @@ export function WorkTypesAdminPanel({
                     practiceAreaId: selectedChoice.parentId ?? undefined,
                   });
                   const gateFields: Array<[WorkTypeOpeningGateSettingKey, string]> = [
-                    ['requireConflictCleared', 'Conflict check cleared'],
+                    ['allowConflictOverride', 'Allow partner conflict override'],
                     ['requireCddComplete', 'Client Due Diligence (CDD) complete'],
                     ['allowCddOverride', 'Allow partner CDD override'],
                     ['requireEngagementSigned', 'Signed engagement letter'],
@@ -1094,35 +1093,83 @@ export function WorkTypesAdminPanel({
                     practice_area: 'Practice area',
                     firm_default: 'Firm default',
                   } as const;
+                  const inheritedSourceLabels = {
+                    practice_area: 'Practice area',
+                    firm_default: 'Firm default',
+                    core_default: 'Core default',
+                  } as const;
                   return (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {gateFields.map(([fieldKey, label]) => {
                         const provenance = resolvedGate.settingSources[fieldKey];
+                        const isExplicitOnItem =
+                          typeof selectedItem?.openingGate?.[fieldKey] === 'boolean';
+                        const inherited = resolveInheritedOpeningGateSetting(
+                          draft,
+                          { practiceAreaId: selectedChoice.parentId ?? undefined },
+                          fieldKey,
+                        );
                         return (
-                          <label
+                          <div
                             key={fieldKey}
-                            style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              alignItems: 'center',
+                              gap: 8,
+                              fontSize: 13,
+                            }}
                           >
-                            <input
-                              type="checkbox"
-                              disabled={!canEdit}
-                              checked={Boolean(resolvedGate[fieldKey])}
-                              onChange={(e) =>
-                                updateSelectedItem(selectedChoice, (item) => ({
-                                  ...item,
-                                  openingGate: {
-                                    ...(item.openingGate ?? {}),
-                                    [fieldKey]: e.target.checked,
-                                  },
-                                }))
-                              }
-                            />
-                            <span>{label}</span>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <input
+                                type="checkbox"
+                                disabled={!canEdit}
+                                checked={Boolean(resolvedGate[fieldKey])}
+                                onChange={(e) =>
+                                  updateSelectedItem(selectedChoice, (item) => ({
+                                    ...item,
+                                    openingGate: {
+                                      ...(item.openingGate ?? {}),
+                                      [fieldKey]: e.target.checked,
+                                    },
+                                  }))
+                                }
+                              />
+                              <span>{label}</span>
+                            </label>
                             <StatusPill
                               label={sourceLabels[provenance]}
                               tone={provenance === 'work_type' ? 'warning' : 'neutral'}
                             />
-                          </label>
+                            <span className="muted" style={{ fontSize: 12 }}>
+                              Inherited: {inherited.value ? 'On' : 'Off'} ({inheritedSourceLabels[inherited.source]})
+                            </span>
+                            {isExplicitOnItem ? (
+                              <button
+                                type="button"
+                                className="btn btn--ghost btn--sm"
+                                disabled={!canEdit}
+                                data-testid={`opening-gate-use-inherited-${fieldKey}`}
+                                onClick={() =>
+                                  updateSelectedItem(selectedChoice, (item) => {
+                                    const nextGate = clearWorkTypeOpeningGateSetting(
+                                      item.openingGate,
+                                      fieldKey,
+                                    );
+                                    const nextItem = { ...item };
+                                    if (nextGate) {
+                                      nextItem.openingGate = nextGate;
+                                    } else {
+                                      delete nextItem.openingGate;
+                                    }
+                                    return nextItem;
+                                  })
+                                }
+                              >
+                                Use inherited
+                              </button>
+                            ) : null}
+                          </div>
                         );
                       })}
                     </div>

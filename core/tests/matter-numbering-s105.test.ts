@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MATTER_NUMBERING_CONFIG,
   DEFAULT_WORK_TYPE_OPENING_GATE,
+  TenantMatterRepository,
   cleanLegacyClientRefPrefix,
   formatMatterNumberFromSequence,
   loadAndValidateTenantConfig,
   resolveEffectiveMatterNumberingConfig,
   resolveMatterNumberSequenceKey,
+  resolveTenantFromVerifiedToken,
   validateMatterNumberPattern,
 } from '../src/index';
 import {
@@ -173,7 +175,7 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
         defaults: {
           ...rawWorkTypes?.defaults,
           openingGate: {
-            requireConflictCleared: true,
+            allowConflictOverride: true,
             requireCddComplete: false,
           },
         },
@@ -190,7 +192,7 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
             workTypeId: 'work_type.test_sub',
             practiceAreaId: 'work_type.test_pa',
             openingGate: {
-              requireConflictCleared: true,
+              allowConflictOverride: false,
               requireEngagementSigned: true,
             },
           },
@@ -225,14 +227,19 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
       sequenceScope: 'client_ref_prefix',
       emptyTokenFallback: 'GEN',
     });
-    expect(resolveEffectiveMatterNumberingConfig(loaded, { pattern: '{YYYY}-{SEQ:5}' })).toEqual({
+    expect(
+      resolveEffectiveMatterNumberingConfig(loaded, {
+        pattern: '{YYYY}-{SEQ:5}',
+        sequenceScope: 'year',
+      }),
+    ).toEqual({
       pattern: '{YYYY}-{SEQ:5}',
-      sequenceScope: 'client_ref_prefix',
+      sequenceScope: 'year',
       emptyTokenFallback: 'GEN',
     });
 
     expect(loaded.workTypes?.defaults.openingGate).toEqual({
-      requireConflictCleared: true,
+      allowConflictOverride: true,
       requireCddComplete: false,
       allowCddOverride: true,
       requireEngagementSigned: false,
@@ -244,7 +251,7 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
       practiceAreaId: 'work_type.test_pa',
     });
     expect(subResolved).toEqual({
-      requireConflictCleared: true,
+      allowConflictOverride: false,
       requireCddComplete: true,
       allowCddOverride: false,
       requireEngagementSigned: true,
@@ -260,7 +267,7 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
     });
   });
 
-  it('5. R769: rejects mismatched sequenceScope/pattern tokens and missing {SEQ} in tenant config schema', () => {
+  it('5. R769: rejects mismatched sequenceScope/pattern tokens and missing {SEQ} in tenant config schema', async () => {
     const cases: Array<{ sequenceScope: string; pattern: string; label: string }> = [
       { sequenceScope: 'year', pattern: 'MAT-{SEQ:4}', label: 'year without YYYY/YY' },
       { sequenceScope: 'department', pattern: '{YYYY}-{SEQ:4}', label: 'department without DEPT' },
@@ -283,5 +290,29 @@ describe('S1-05 B2 (ADR 0040): configurable matter numbering engine, R745 parity
         ),
       ).toThrow();
     }
+
+    // Suggestion 2: allocateNextMatterNumberWithConfig re-validates full config and fails closed on invalid pattern/scope
+    const dummyCtx = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Test Actor',
+        email: 'p1@notalawfirm.example',
+        tenantId: 'not-a-law-firm',
+        roles: ['partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'corr-s105-num-invalid',
+    });
+    const matterRepo = new TenantMatterRepository();
+    await expect(
+      matterRepo.allocateNextMatterNumberWithConfig(dummyCtx, {
+        sequenceScope: 'client_ref_prefix',
+        pattern: '{YYYY}-{SEQ:5}',
+        emptyTokenFallback: 'MAT',
+      }),
+    ).rejects.toThrow(/MATTER_NUMBERING_VALIDATION_ERROR/);
   });
 });
