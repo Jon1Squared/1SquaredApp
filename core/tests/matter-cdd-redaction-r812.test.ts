@@ -6,6 +6,7 @@ import {
   TenantMatterRepository,
   TenantPartyRepository,
   TenantTaskWorkflowRepository,
+  type KeyDate,
 } from '../src/index';
 import {
   liftMatterRestrictionAction,
@@ -26,7 +27,6 @@ import type {
 import type {
   ConflictCheckRecordInput,
   Enquiry,
-  KeyDate,
   Matter,
   Person,
   Quote,
@@ -322,12 +322,14 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
           employeeNumber: 'EMP-8121',
           jobTitle: 'Enquiries Coordinator (R812)',
           departmentId: 'DEPT-BD',
-          systems: {
-            ...baseEmp!.employment.systems,
-            networkLogin: 'nadia.evans',
-            buildingPassNumber: 'BP-8121',
-            firmWorkEmail: 'nadia.evans@notalawfirm.example',
-          },
+          systems: baseEmp!.employment.systems
+            ? {
+                ...baseEmp!.employment.systems,
+                networkLogin: 'nadia.evans',
+                buildingPassNumber: 'BP-8121',
+                firmWorkEmail: 'nadia.evans@notalawfirm.example',
+              }
+            : null,
         }
       : null,
   };
@@ -359,12 +361,14 @@ async function seedR812Fixture(): Promise<TestFixtureIds> {
           employeeNumber: 'EMP-8122',
           jobTitle: 'System Administrator (R812)',
           departmentId: 'DEPT-IT',
-          systems: {
-            ...baseEmp!.employment.systems,
-            networkLogin: 'tudur.pritchard',
-            buildingPassNumber: 'BP-8122',
-            firmWorkEmail: 'tudur.pritchard@notalawfirm.example',
-          },
+          systems: baseEmp!.employment.systems
+            ? {
+                ...baseEmp!.employment.systems,
+                networkLogin: 'tudur.pritchard',
+                buildingPassNumber: 'BP-8122',
+                firmWorkEmail: 'tudur.pritchard@notalawfirm.example',
+              }
+            : null,
         }
       : null,
   };
@@ -1024,6 +1028,7 @@ describe('R812: Shared CDD redaction choke point across all page loaders & serve
           currentMatterId: fx.verifiedMatterId,
           parties: [
             {
+              id: 'party-r812-search',
               name: 'Pembroke Search Target',
               role: 'Client',
               entityType: 'organisation',
@@ -1062,7 +1067,7 @@ describe('R812: Shared CDD redaction choke point across all page loaders & serve
             supervisingPartnerId: latest!.supervisingPartnerId,
             leadFeeEarnerId: latest!.leadFeeEarnerId,
             teamMemberIds: latest!.teamMemberIds,
-            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            fieldValues: latest!.fieldValues,
           },
           {
             id: fx.verifiedMatterId,
