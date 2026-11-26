@@ -31,6 +31,9 @@ import {
   poundsToMinorUnits,
   subtractMinorUnits,
   sumMinorUnits,
+  type CommunicationChaseEventRecord,
+  type CommunicationChaseRecord,
+  type EngagementDispatchRecord,
 } from '@platform/core-api';
 import {
   addNoteAction,
@@ -41,6 +44,8 @@ import {
   revokeMatterOpeningOverrideAction,
   saveMatterAction,
   saveTaskAction,
+  sendEngagementLetterAction,
+  stopCommunicationChaseAction,
   transitionRegisterRecordAction,
   updateMatterConflictRecordAction,
   updateMatterLifecycleStatusAction,
@@ -79,7 +84,7 @@ import {
   resolveMatterOpeningSnapshot,
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
-import { hrefForId, personDisplayName } from '@/domain/names';
+import { hrefForId, personDisplayName, primaryEmail } from '@/domain/names';
 import { resolvePmsPence } from '@/domain/pms';
 import type {
   AppRole,
@@ -149,6 +154,13 @@ interface MatterProfileClientProps {
   canLiftRestriction?: boolean;
   canEditMatter?: boolean;
   pmsView?: MatterPmsViewBundle;
+  engagementDispatches?: EngagementDispatchRecord[];
+  engagementChases?: Array<{
+    chase: CommunicationChaseRecord;
+    events: readonly CommunicationChaseEventRecord[];
+  }>;
+  signedEngagementDownloadUrl?: string | null;
+  emailProviderDisabled?: boolean;
   firmName?: string;
   notes: Note[];
   audit: AuditEntry[];
@@ -289,10 +301,7 @@ export function resolveMatterIntakeComplianceRows(
           ? `Verified ${formatShortDayMonth(matter.amlCompletedAt)}`
           : matter.amlStatus || 'Not recorded';
 
-  const engagementSigned =
-    Boolean(matter.engagementLetterSignedAt) ||
-    matter.engagementLetterStatus === 'Signed' ||
-    matter.engagementLetterStatus === 'Signed & returned';
+  const engagementSigned = isMatterEngagementSignedForGate(matter);
   const engagementLabel = engagementSigned ? 'Engagement letter signed' : 'Engagement letter';
   const engagementDetail = matter.engagementLetterSignedAt
     ? formatShortDayMonth(matter.engagementLetterSignedAt)
@@ -377,6 +386,10 @@ export function MatterProfileClient({
   canLiftRestriction = false,
   canEditMatter = false,
   pmsView,
+  engagementDispatches = [],
+  engagementChases = [],
+  signedEngagementDownloadUrl = null,
+  emailProviderDisabled = false,
   firmName,
   notes,
   audit,
@@ -444,6 +457,45 @@ export function MatterProfileClient({
   const [revokeReason, setRevokeReason] = useState('');
   const [hroRejectOpen, setHroRejectOpen] = useState(false);
   const [hroRejectComment, setHroRejectComment] = useState('');
+  const engagementPanelRef = useRef<HTMLElement | null>(null);
+  const engagementFileInputRef = useRef<HTMLInputElement | null>(null);
+  const defaultEngagementContact = useMemo(() => {
+    const instPerson = matter.instructingContactId
+      ? people.find((p) => p.id === matter.instructingContactId)
+      : undefined;
+    const clientPerson = people.find((p) => p.id === matter.clientId);
+    const clientOrg = organisations.find((o) => o.id === matter.clientId);
+    const sourceEnq = matter.sourceEnquiryId
+      ? enquiries.find((e) => e.id === matter.sourceEnquiryId)
+      : enquiries.find((e) => e.convertedMatterId === matter.id);
+    const email =
+      (instPerson ? primaryEmail(instPerson) : '') ||
+      (clientPerson ? primaryEmail(clientPerson) : '') ||
+      clientOrg?.generalEmail ||
+      sourceEnq?.email ||
+      '';
+    const name =
+      (instPerson ? personDisplayName(instPerson) : '') ||
+      (clientPerson ? personDisplayName(clientPerson) : '') ||
+      clientOrg?.legalName ||
+      (sourceEnq ? `${sourceEnq.firstName} ${sourceEnq.lastName}`.trim() : '') ||
+      '';
+    return { email, name };
+  }, [matter.instructingContactId, matter.clientId, matter.sourceEnquiryId, matter.id, people, organisations, enquiries]);
+  const [engagementRecipientEmail, setEngagementRecipientEmail] = useState(
+    defaultEngagementContact.email,
+  );
+  const [engagementRecipientName, setEngagementRecipientName] = useState(
+    defaultEngagementContact.name,
+  );
+  const [engagementIntroNote, setEngagementIntroNote] = useState('');
+  const [engagementSignedNote, setEngagementSignedNote] = useState('');
+  const [engagementSelectedFile, setEngagementSelectedFile] = useState<File | null>(null);
+  const [engagementBusy, setEngagementBusy] = useState(false);
+  const activeEngagementChase = useMemo(
+    () => engagementChases.find((c) => c.chase.status === 'active') ?? null,
+    [engagementChases],
+  );
   const canApproveReg = userPermissions.includes('register:approve');
   const isPartnerOrMpRole =
     canApproveReg &&
@@ -1657,32 +1709,16 @@ export function MatterProfileClient({
                     <button
                       type="button"
                       className="btn btn--secondary btn--sm"
-                      data-testid="mark-engagement-signed-btn"
-                      disabled={openingBusy}
-                      onClick={async () => {
-                        setOpeningBusy(true);
-                        try {
-                          const res = await recordEngagementLetterSignedAction({
-                            matterId: matter.id,
-                            status: 'Signed & returned',
-                          });
-                          if (isActionDenied(res) || !res.ok) {
-                            showToast(
-                              formatOpeningGateActionError(
-                                res,
-                                'Could not mark engagement letter signed.',
-                              ),
-                            );
-                            return;
-                          }
-                          showToast('Engagement letter marked signed.');
-                          router.refresh();
-                        } finally {
-                          setOpeningBusy(false);
-                        }
+                      data-testid="scroll-engagement-upload-btn"
+                      disabled={openingBusy || engagementBusy}
+                      onClick={() => {
+                        engagementPanelRef.current?.scrollIntoView?.({
+                          behavior: 'smooth',
+                          block: 'start',
+                        });
                       }}
                     >
-                      Mark engagement signed
+                      Upload signed copy
                     </button>
                   ) : null}
                   {openingGateState.isProspective && openingGateState.canEditMatter ? (
@@ -2188,6 +2224,366 @@ export function MatterProfileClient({
               </div>
             </section>
           ) : null}
+
+          <section
+            ref={engagementPanelRef}
+            className="home-panel"
+            style={{ marginBottom: 16 }}
+            data-testid="matter-engagement-panel"
+            aria-label="Client Care and engagement letter"
+          >
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2 className="panel-title">Client Care &amp; engagement letter</h2>
+                <StatusPill
+                  label={matter.engagementLetterStatus || 'Not sent'}
+                  tone={
+                    isMatterEngagementSignedForGate(matter)
+                      ? 'positive'
+                      : matter.engagementLetterStatus === 'Sent' ||
+                          matter.engagementLetterStatus === 'Sent to client'
+                        ? 'warning'
+                        : 'neutral'
+                  }
+                />
+              </div>
+              <div className="panel-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                {matter.engagementLetterSentAt ? (
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    Sent {formatDateTime(matter.engagementLetterSentAt)}
+                  </span>
+                ) : null}
+                {matter.engagementLetterSignedAt ? (
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    · Signed {formatDateTime(matter.engagementLetterSignedAt)}
+                  </span>
+                ) : null}
+                {signedEngagementDownloadUrl ? (
+                  <a
+                    href={signedEngagementDownloadUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn btn--secondary btn--sm"
+                    data-testid="signed-engagement-download-link"
+                  >
+                    Download signed copy
+                  </a>
+                ) : null}
+              </div>
+            </div>
+            <div className="panel-body padded" style={{ display: 'grid', gap: 14 }}>
+              {emailProviderDisabled ? (
+                <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
+                  <span className="muted" style={{ fontSize: 12.5 }}>
+                    Outbound email delivery is currently paused on this environment. Sent Client Care letters are queued in{' '}
+                    <strong>Administration &rarr; Email Outbox</strong> with their PDF attached for review.
+                  </span>
+                </div>
+              ) : null}
+
+              {canEditMatter && !isMatterCurrentlyClosed ? (
+                <div
+                  style={{
+                    display: 'grid',
+                    gap: 14,
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                  }}
+                >
+                  <div className="subcard" style={{ display: 'grid', gap: 8 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                      Send Client Care letter (PDF)
+                    </div>
+                    <div className="form-grid" style={{ gap: 8 }}>
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="engagement-recipient-email">
+                          Recipient email *
+                        </label>
+                        <input
+                          id="engagement-recipient-email"
+                          type="email"
+                          className="field-input"
+                          data-testid="engagement-recipient-email-input"
+                          placeholder="client@example.test"
+                          value={engagementRecipientEmail}
+                          onChange={(e) => setEngagementRecipientEmail(e.target.value)}
+                          disabled={engagementBusy}
+                        />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="engagement-recipient-name">
+                          Recipient name
+                        </label>
+                        <input
+                          id="engagement-recipient-name"
+                          type="text"
+                          className="field-input"
+                          data-testid="engagement-recipient-name-input"
+                          value={engagementRecipientName}
+                          onChange={(e) => setEngagementRecipientName(e.target.value)}
+                          disabled={engagementBusy}
+                        />
+                      </div>
+                    </div>
+                    <div className="field-group">
+                      <label className="field-label" htmlFor="engagement-intro-note">
+                        Covering note (optional)
+                      </label>
+                      <input
+                        id="engagement-intro-note"
+                        type="text"
+                        className="field-input"
+                        data-testid="engagement-intro-note-input"
+                        placeholder="Optional message included in the letter and email"
+                        value={engagementIntroNote}
+                        onChange={(e) => setEngagementIntroNote(e.target.value)}
+                        disabled={engagementBusy}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="btn btn--primary btn--sm"
+                        data-testid="send-client-care-btn"
+                        disabled={engagementBusy || !engagementRecipientEmail.trim()}
+                        onClick={async () => {
+                          setEngagementBusy(true);
+                          try {
+                            const res = await sendEngagementLetterAction({
+                              matterId: matter.id,
+                              recipientEmail: engagementRecipientEmail.trim(),
+                              recipientName: engagementRecipientName.trim() || undefined,
+                              customIntroNote: engagementIntroNote.trim() || undefined,
+                            });
+                            if (isActionDenied(res) || !res.ok) {
+                              showToast(
+                                formatOpeningGateActionError(
+                                  res,
+                                  'Could not send Client Care letter.',
+                                ),
+                              );
+                              return;
+                            }
+                            showToast(
+                              res.emailProviderDisabled
+                                ? 'Client Care letter generated and queued in Email Outbox.'
+                                : 'Client Care letter sent.',
+                            );
+                            setEngagementIntroNote('');
+                            router.refresh();
+                          } finally {
+                            setEngagementBusy(false);
+                          }
+                        }}
+                      >
+                        Send Client Care letter
+                      </button>
+                    </div>
+                  </div>
+
+                  {!isMatterEngagementSignedForGate(matter) ? (
+                    <div className="subcard" style={{ display: 'grid', gap: 8 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                        Record signed Client Care letter
+                      </div>
+                      <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                        Upload the client&rsquo;s signed copy (PDF, JPEG or PNG) to mark the engagement letter signed and unlock the opening gate.
+                      </p>
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="engagement-signed-file">
+                          Signed copy (PDF, JPEG or PNG) *
+                        </label>
+                        <input
+                          ref={engagementFileInputRef}
+                          id="engagement-signed-file"
+                          type="file"
+                          accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                          className="field-input"
+                          data-testid="engagement-signed-file-input"
+                          disabled={engagementBusy}
+                          onChange={(e) =>
+                            setEngagementSelectedFile(e.target.files?.[0] ?? null)
+                          }
+                        />
+                      </div>
+                      <div className="field-group">
+                        <label className="field-label" htmlFor="engagement-signed-note">
+                          Verification note (optional)
+                        </label>
+                        <input
+                          id="engagement-signed-note"
+                          type="text"
+                          className="field-input"
+                          data-testid="engagement-signed-note-input"
+                          placeholder="e.g. Returned signed by instructing contact"
+                          value={engagementSignedNote}
+                          onChange={(e) => setEngagementSignedNote(e.target.value)}
+                          disabled={engagementBusy}
+                        />
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          data-testid="upload-engagement-signed-btn"
+                          disabled={engagementBusy || !engagementSelectedFile}
+                          onClick={async () => {
+                            if (!engagementSelectedFile) return;
+                            setEngagementBusy(true);
+                            try {
+                              const formData = new FormData();
+                              formData.set('subjectType', 'matter');
+                              formData.set('subjectId', matter.id);
+                              formData.set('purpose', 'engagement_signed');
+                              formData.set('file', engagementSelectedFile);
+
+                              const uploadRes = await fetch('/api/evidence/upload', {
+                                method: 'POST',
+                                body: formData,
+                              });
+                              const uploadPayload = (await uploadRes.json()) as {
+                                ok?: boolean;
+                                error?: string;
+                                artifact?: { id: string };
+                              };
+                              if (
+                                !uploadRes.ok ||
+                                !uploadPayload.ok ||
+                                !uploadPayload.artifact?.id
+                              ) {
+                                showToast(
+                                  uploadPayload.error ||
+                                    'Signed engagement copy upload failed.',
+                                );
+                                return;
+                              }
+
+                              const res = await recordEngagementLetterSignedAction({
+                                matterId: matter.id,
+                                evidenceArtifactId: uploadPayload.artifact.id,
+                                status: 'Signed & returned',
+                                note: engagementSignedNote.trim() || undefined,
+                              });
+                              if (isActionDenied(res) || !res.ok) {
+                                showToast(
+                                  formatOpeningGateActionError(
+                                    res,
+                                    'Could not mark engagement letter signed.',
+                                  ),
+                                );
+                                return;
+                              }
+                              setEngagementSelectedFile(null);
+                              setEngagementSignedNote('');
+                              if (engagementFileInputRef.current) {
+                                engagementFileInputRef.current.value = '';
+                              }
+                              showToast('Signed engagement copy recorded.');
+                              router.refresh();
+                            } finally {
+                              setEngagementBusy(false);
+                            }
+                          }}
+                        >
+                          Upload signed copy &amp; mark signed
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {activeEngagementChase ? (
+                <div
+                  className="subcard"
+                  data-testid="matter-engagement-chase-summary"
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>
+                      Automated follow-up active
+                    </div>
+                    <div className="muted" style={{ fontSize: 12.5 }}>
+                      Chasing {activeEngagementChase.chase.recipientEmail || 'client'} &middot;{' '}
+                      {activeEngagementChase.events.length} reminder step(s) completed &middot;{' '}
+                      {activeEngagementChase.chase.nextActionAt
+                        ? `Next action due ${formatDateTime(activeEngagementChase.chase.nextActionAt)}`
+                        : 'Final escalation stage'}
+                    </div>
+                  </div>
+                  {canEditMatter && !isMatterCurrentlyClosed ? (
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      data-testid="stop-engagement-chase-btn"
+                      disabled={engagementBusy}
+                      onClick={async () => {
+                        setEngagementBusy(true);
+                        try {
+                          const res = await stopCommunicationChaseAction({
+                            chaseId: activeEngagementChase.chase.id,
+                            reason: 'manual_stop',
+                          });
+                          if (isActionDenied(res) || !res.ok) {
+                            showToast(
+                              formatOpeningGateActionError(
+                                res,
+                                'Could not stop engagement chasing.',
+                              ),
+                            );
+                            return;
+                          }
+                          showToast('Automated engagement chasing stopped.');
+                          router.refresh();
+                        } finally {
+                          setEngagementBusy(false);
+                        }
+                      }}
+                    >
+                      Stop chasing
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {engagementDispatches.length > 0 ? (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <div style={{ fontWeight: 600, fontSize: 12.5 }}>
+                    Client Care dispatch history
+                  </div>
+                  <ul className="worklist">
+                    {engagementDispatches.map((disp) => (
+                      <li key={disp.id} className="worklist-row" data-testid={`engagement-dispatch-${disp.id}`}>
+                        <div className="worklist-main">
+                          <div className="worklist-title">
+                            <span>{disp.recipientEmail}</span>
+                            {disp.recipientName ? (
+                              <span className="muted"> ({disp.recipientName})</span>
+                            ) : null}
+                          </div>
+                          <div className="worklist-meta">
+                            Sent {formatDateTime(disp.sentAt)}
+                            {disp.signedAt ? ` · Signed ${formatDateTime(disp.signedAt)}` : ''}
+                          </div>
+                        </div>
+                        <div className="worklist-right">
+                          <StatusPill
+                            label={disp.status === 'signed' ? 'Signed' : disp.status === 'withdrawn' ? 'Withdrawn' : 'Sent'}
+                            tone={disp.status === 'signed' ? 'positive' : 'neutral'}
+                          />
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          </section>
           <div className="home-grid">
           {/* LEFT MAIN COLUMN */}
           <div className="home-col">
@@ -4176,6 +4572,10 @@ export function MatterProfileClient({
                 <div className="kv-item">
                   <span className="kv-label">Engagement letter status (CORE-041)</span>
                   <span className="kv-value">{matter.engagementLetterStatus}</span>
+                </div>
+                <div className="kv-item">
+                  <span className="kv-label">Engagement letter sent (CORE-042)</span>
+                  <span className="kv-value">{formatDateTime(matter.engagementLetterSentAt)}</span>
                 </div>
                 <div className="kv-item">
                   <span className="kv-label">Engagement letter signed (CORE-043)</span>

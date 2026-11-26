@@ -37025,7 +37025,7 @@ export async function openProspectiveMatterRecord(
 export async function recordEngagementLetterSignedRecord(
   input: {
     matterId: string;
-    evidenceArtifactId?: string;
+    evidenceArtifactId: string;
     status?: 'Signed' | 'Signed & returned';
     note?: string;
   },

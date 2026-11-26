@@ -18,7 +18,12 @@ import {
   resolveEffectiveMatterNumberingConfig,
   resolveEffectiveRegisterTypes,
   type CddConfiguration,
+  type ChasingConfiguration,
   type ClientRateOverrideRecord,
+  type CommunicationChaseEventRecord,
+  type CommunicationChaseRecord,
+  type EngagementConfiguration,
+  type EngagementDispatchRecord,
   type MatterNumberingConfig,
   type ParentChainNodeSummary,
   type RbacConfiguration,
@@ -70,6 +75,7 @@ import { applyQuoteEffectiveLifecycle } from '@/domain/quotes';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
 import { resolveSuggestedConflictReviewer } from './conflictReview';
+import { getDocumentStorage } from './documentGenerationServices';
 import { getEntraEnvStatus, getEntraSession } from './entraAuth';
 import {
   redactMatterCddForUnpermittedViewer,
@@ -137,6 +143,8 @@ import {
   requireAuthenticatedActor,
   resolveApplicableRatesRecord,
   resolveDefaultServiceTenantContext,
+  resolveEffectiveChasingConfig,
+  resolveEffectiveEngagementConfig,
   resolveMatterSignOffEstimateGbp,
   getKeyDateExceptionsReportRecord,
   type AuthenticatedActorContext,
@@ -147,6 +155,9 @@ import {
 } from './services';
 import {
   getActiveTenantConfiguration,
+  getChasingRepository,
+  getEngagementRepository,
+  getEvidenceArtifactRepository,
   getOutboxRepository,
   isNonLiveDemoEnvironment,
 } from '@/platform/tenantRuntime';
@@ -2490,6 +2501,13 @@ export async function loadMatterDetailPageData(
       canViewClientCdd: boolean;
       pmsView?: MatterPmsViewBundle;
       canTakeByTaskId: Record<string, boolean>;
+      engagementDispatches: EngagementDispatchRecord[];
+      engagementChases: Array<{
+        chase: CommunicationChaseRecord;
+        events: readonly CommunicationChaseEventRecord[];
+      }>;
+      signedEngagementDownloadUrl: string | null;
+      emailProviderDisabled: boolean;
     }
   | null
 > {
@@ -2712,6 +2730,8 @@ export async function loadMatterDetailPageData(
     quotesById,
     quotesByConverted,
     registersMeta,
+    engagementDispatchesRaw,
+    engagementChasesRaw,
   ] = await Promise.all([
     shell.finance.canViewMatter
       ? getMatterPmsViewBundle(matter.id, currentUserId)
@@ -2749,6 +2769,8 @@ export async function loadMatterDetailPageData(
         })
       : Promise.resolve<Quote[]>([]),
     resolveRegistersSummary(ctx, shell.activeTenantCfg),
+    getEngagementRepository().listDispatchesForMatter(ctx, matter.id),
+    getChasingRepository().listChasesForMatter(ctx, matter.id),
   ]);
 
   const openingGateState: MatterOpeningGateView | undefined =
@@ -2802,6 +2824,40 @@ export async function loadMatterDetailPageData(
     );
   }
 
+  let signedEngagementDownloadUrl: string | null = null;
+  const canDownloadSignedEngagement =
+    shell.currentUserPermissions.includes('matter:edit') ||
+    shell.currentUserPermissions.includes('document:view');
+  const latestSignedDispatch = engagementDispatchesRaw.find(
+    (d) => d.kind === 'client_care' && d.status === 'signed' && Boolean(d.signedEvidenceArtifactId),
+  );
+  if (canDownloadSignedEngagement && latestSignedDispatch?.signedEvidenceArtifactId) {
+    try {
+      const signedArtifact = await getEvidenceArtifactRepository().getArtifactById(
+        ctx,
+        latestSignedDispatch.signedEvidenceArtifactId,
+      );
+      if (
+        signedArtifact &&
+        signedArtifact.purpose === 'engagement_signed' &&
+        signedArtifact.subjectType === 'matter' &&
+        signedArtifact.subjectId === matter.id &&
+        signedArtifact.scanStatus === 'clean'
+      ) {
+        const token = await getDocumentStorage(
+          shell.activeTenantCfg,
+        ).issueScopedDownloadToken(ctx, {
+          blobKey: signedArtifact.blobKey,
+          fileName: signedArtifact.fileName,
+          documentId: signedArtifact.id,
+        });
+        signedEngagementDownloadUrl = `/api/evidence/download?token=${encodeURIComponent(token.token)}`;
+      }
+    } catch {
+      signedEngagementDownloadUrl = null;
+    }
+  }
+
   return {
     kind: 'profile',
     shell,
@@ -2833,6 +2889,14 @@ export async function loadMatterDetailPageData(
     pmsView:
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined,
     canTakeByTaskId,
+    engagementDispatches: [...engagementDispatchesRaw],
+    engagementChases: engagementChasesRaw.map((c) => ({
+      chase: c.chase,
+      events: [...c.events],
+    })),
+    signedEngagementDownloadUrl,
+    emailProviderDisabled:
+      shell.activeTenantCfg.integrations.email?.provider === 'disabled',
   };
   });
 }
@@ -3422,6 +3486,9 @@ export async function loadEnquiryDetailPageData(
   keyDateReminderStates: KeyDateReminderState[];
   keyDateCalendarSyncs: KeyDateCalendarSync[];
   canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
+  nonEngagementDispatches: EngagementDispatchRecord[];
+  emailProviderDisabled: boolean;
+  canSendNonEngagement: boolean;
 } | null> {
   return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
@@ -3436,7 +3503,7 @@ export async function loadEnquiryDetailPageData(
   });
   if (!enquiry) return null;
 
-  const [quotes, tasks, audit, convertedMatter, keyDates] = await Promise.all([
+  const [quotes, tasks, audit, convertedMatter, keyDates, nonEngagementDispatchesRaw] = await Promise.all([
     shell.canViewQuotes
       ? intakeRepo.listVisibleQuotes<Quote>(ctx, currentUserId, {
           sourceEnquiryId: enquiry.id,
@@ -3458,6 +3525,7 @@ export async function loadEnquiryDetailPageData(
         })
       : Promise.resolve<Matter | null>(null),
     keyDateRepo.listKeyDatesForEnquiry(ctx, enquiry.id, currentUserId),
+    getEngagementRepository().listDispatchesForEnquiry(ctx, enquiry.id),
   ]);
   for (const q of quotes) {
     applyQuoteEffectiveLifecycle(q, new Date(), { appendExpiredTimeline: false });
@@ -3519,6 +3587,12 @@ export async function loadEnquiryDetailPageData(
     keyDateReminderStates,
     keyDateCalendarSyncs,
     canVerifyByKeyDateId,
+    nonEngagementDispatches: [...nonEngagementDispatchesRaw],
+    emailProviderDisabled:
+      shell.activeTenantCfg.integrations.email?.provider === 'disabled',
+    canSendNonEngagement: shell.currentUserPermissions.some(
+      (p) => p === 'enquiry:edit' || p === 'enquiry:close' || p === 'matter:edit',
+    ),
   };
   });
 }
@@ -4264,6 +4338,9 @@ export async function loadAdminPageData(
       cddConfig: CddConfiguration;
       workTypesConfig: WorkTypesConfiguration;
       matterNumberingConfig: MatterNumberingConfig;
+      effectiveChasingConfig: ChasingConfiguration;
+      effectiveEngagementConfig: EngagementConfiguration;
+      emailProviderDisabled: boolean;
       entraEnvStatus: ReturnType<typeof getEntraEnvStatus>;
       firmAuditPage: Awaited<ReturnType<typeof listFirmAuditEntriesPage>>;
     }
@@ -4304,6 +4381,7 @@ export async function loadAdminPageData(
             first === 'enquiry-settings' ||
             first === 'task-settings' ||
             first === 'employees' ||
+            first === 'email-outbox' ||
             first === 'demo-data' ||
             first === 'pms-links'
           ? (first as AdminTab)
@@ -4323,6 +4401,8 @@ export async function loadAdminPageData(
     dbMatterNumberingOverride,
     expiredUnconvertedEnquiriesCount,
     matterPartyUsageCounts,
+    effectiveChasingConfig,
+    effectiveEngagementConfig,
   ] = await Promise.all([
     listFirmAuditEntriesPage(actorId, {
       limit: 250,
@@ -4338,6 +4418,8 @@ export async function loadAdminPageData(
       retentionCutoffIso,
     ),
     getMatterRepository().getMatterPartyUsageSummary(ctx),
+    resolveEffectiveChasingConfig(ctx, activeTenantCfg),
+    resolveEffectiveEngagementConfig(ctx, activeTenantCfg),
   ]);
 
   const pmsAdmin = isActionDenied(pmsAdminResult) ? undefined : pmsAdminResult;
@@ -4438,6 +4520,10 @@ export async function loadAdminPageData(
       activeTenantCfg,
       dbMatterNumberingOverride,
     ),
+    effectiveChasingConfig,
+    effectiveEngagementConfig,
+    emailProviderDisabled:
+      activeTenantCfg.integrations.email?.provider === 'disabled',
     entraEnvStatus: getEntraEnvStatus(),
     firmAuditPage,
   };

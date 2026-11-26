@@ -423,7 +423,7 @@ describe('S0-26: Email & Notifications (ADR 0027 Outbox, Graph Cert Auth, Allow-
       vaultName: 'kvnotalawfi2cdo3cw7vuafm',
       vaultUri: 'https://kvnotalawfi2cdo3cw7vuafm.vault.azure.net/',
     });
-    expect(demoCfg.integrations.email?.provider).toBe('graph');
+    expect(demoCfg.integrations.email?.provider).toBe('disabled');
     expect(demoCfg.integrations.email?.senderAddress).toBe(
       'notifications@1squared.co.uk',
     );

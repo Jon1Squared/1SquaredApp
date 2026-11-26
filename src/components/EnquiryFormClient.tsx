@@ -13,7 +13,9 @@ import {
   saveEnquiryAction,
   saveTaskAction,
   sendEnquiryEmailAction,
+  sendNonEngagementLetterAction,
 } from '@/app/actions';
+import type { EngagementDispatchRecord } from '@platform/core-api';
 import { isActionDenied } from '@/domain/actionResult';
 import { enquiryStatusTone, urgencyTone } from '@/domain/badges';
 import {
@@ -127,6 +129,9 @@ interface Props {
   currentUserId: string;
   canReopen?: boolean;
   canAnonymise?: boolean;
+  nonEngagementDispatches?: EngagementDispatchRecord[];
+  emailProviderDisabled?: boolean;
+  canSendNonEngagement?: boolean;
   firmName?: string;
   tenantId: string;
   initialErrors?: Record<string, string>;
@@ -151,6 +156,9 @@ export function EnquiryFormClient({
   currentUserId,
   canReopen: canReopenProp = false,
   canAnonymise = false,
+  nonEngagementDispatches = [],
+  emailProviderDisabled = false,
+  canSendNonEngagement = false,
   firmName = 'the firm',
   tenantId: _tenantId,
   initialErrors = {},
@@ -443,6 +451,24 @@ export function EnquiryFormClient({
   const [taskPriorityId, setTaskPriorityId] = useState(
     () => taskPriorities.find((p) => p.label === 'Normal')?.id ?? taskPriorities[0]?.id ?? '',
   );
+  const [nonEngRecipientEmail, setNonEngRecipientEmail] = useState(() => {
+    const linkedP = enquiry?.linkedPersonId
+      ? people.find((p) => p.id === enquiry.linkedPersonId)
+      : undefined;
+    const linkedO = enquiry?.linkedOrganisationId
+      ? organisations.find((o) => o.id === enquiry.linkedOrganisationId)
+      : undefined;
+    return (
+      enquiry?.email ||
+      (linkedP ? primaryEmail(linkedP) : '') ||
+      linkedO?.generalEmail ||
+      ''
+    );
+  });
+  const [nonEngRecipientName, setNonEngRecipientName] = useState(() =>
+    enquiry ? enquiryDisplayName(enquiry) : '',
+  );
+  const [nonEngSending, setNonEngSending] = useState(false);
 
   const currentFormState: EnquiryFormState = useMemo(
     () => ({
@@ -2173,6 +2199,163 @@ export function EnquiryFormClient({
             Close — no response
           </button>
         </div>
+      ) : null}
+
+      {isSavedEnquiry &&
+      enquiry &&
+      (enquiry.status === 'Declined' ||
+        enquiry.status === 'Referred out' ||
+        enquiry.status === 'No response' ||
+        enquiryTasks.some((t) => t.autoTrigger === 'non_engagement_letter') ||
+        nonEngagementDispatches.length > 0) ? (
+        <section
+          className="new-enquiry-card"
+          style={{ marginBottom: 14 }}
+          data-testid="enquiry-non-engagement-panel"
+          aria-label="Non-Engagement letter"
+        >
+          <div className="new-enquiry-card__top">
+            <h2 className="new-enquiry-card__label">NON-ENGAGEMENT LETTER</h2>
+            {(() => {
+              const nonEngTasks = enquiryTasks.filter(
+                (t) => t.autoTrigger === 'non_engagement_letter',
+              );
+              const openTask = nonEngTasks.find(
+                (t) => t.status !== 'Done' && t.status !== 'Cancelled',
+              );
+              if (openTask) {
+                return (
+                  <StatusPill
+                    label="Task open: Send non-engagement letter"
+                    tone="warning"
+                  />
+                );
+              }
+              if (nonEngTasks.some((t) => t.status === 'Done')) {
+                return (
+                  <StatusPill
+                    label="Non-engagement task completed"
+                    tone="positive"
+                  />
+                );
+              }
+              return null;
+            })()}
+          </div>
+
+          {emailProviderDisabled ? (
+            <div className="banner banner--warning" style={{ marginBottom: 4 }}>
+              <span>
+                Outbound email delivery is currently paused on this environment. Sent Non-Engagement letters are generated as PDFs and queued in{' '}
+                <strong>Administration &rarr; Email Outbox</strong>.
+              </span>
+            </div>
+          ) : null}
+
+          {canSendNonEngagement ? (
+            <div className="form-grid-3" style={{ alignItems: 'end' }}>
+              <div className="field-group">
+                <label className="field-label" htmlFor="non-eng-recipient-email">
+                  Recipient email *
+                </label>
+                <input
+                  id="non-eng-recipient-email"
+                  type="email"
+                  className="field-input"
+                  data-testid="non-engagement-recipient-email-input"
+                  placeholder="enquirer@example.test"
+                  value={nonEngRecipientEmail}
+                  onChange={(e) => setNonEngRecipientEmail(e.target.value)}
+                  disabled={nonEngSending}
+                />
+              </div>
+              <div className="field-group">
+                <label className="field-label" htmlFor="non-eng-recipient-name">
+                  Recipient name
+                </label>
+                <input
+                  id="non-eng-recipient-name"
+                  type="text"
+                  className="field-input"
+                  data-testid="non-engagement-recipient-name-input"
+                  value={nonEngRecipientName}
+                  onChange={(e) => setNonEngRecipientName(e.target.value)}
+                  disabled={nonEngSending}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn--primary btn--sm"
+                  data-testid="send-non-engagement-btn"
+                  disabled={nonEngSending || !nonEngRecipientEmail.trim()}
+                  onClick={async () => {
+                    setNonEngSending(true);
+                    try {
+                      const res = await sendNonEngagementLetterAction({
+                        enquiryId: enquiry.id,
+                        recipientEmail: nonEngRecipientEmail.trim(),
+                        recipientName: nonEngRecipientName.trim() || undefined,
+                      });
+                      if (isActionDenied(res) || !res.ok) {
+                        showToast(
+                          isActionDenied(res)
+                            ? res.message
+                            : res.message || 'Could not send Non-Engagement letter.',
+                        );
+                        return;
+                      }
+                      showToast(
+                        res.closedTaskIds.length > 0
+                          ? 'Non-Engagement letter queued and follow-up task marked Done.'
+                          : res.emailProviderDisabled
+                            ? 'Non-Engagement letter PDF queued in Email Outbox.'
+                            : 'Non-Engagement letter sent.',
+                      );
+                      router.refresh();
+                    } finally {
+                      setNonEngSending(false);
+                    }
+                  }}
+                >
+                  {nonEngSending ? 'Sending…' : 'Send Non-Engagement letter'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {nonEngagementDispatches.length > 0 ? (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 4 }}>
+                Non-Engagement dispatch history
+              </div>
+              <ul className="worklist">
+                {nonEngagementDispatches.map((disp) => (
+                  <li
+                    key={disp.id}
+                    className="worklist-row"
+                    data-testid={`non-engagement-dispatch-${disp.id}`}
+                  >
+                    <div className="worklist-main">
+                      <div className="worklist-title">
+                        <span>{disp.recipientEmail}</span>
+                        {disp.recipientName ? (
+                          <span className="muted"> ({disp.recipientName})</span>
+                        ) : null}
+                      </div>
+                      <div className="worklist-meta">
+                        Sent {formatDateTime(disp.sentAt)}
+                      </div>
+                    </div>
+                    <div className="worklist-right">
+                      <StatusPill label="Sent" tone="positive" />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
       ) : null}
 
       <form

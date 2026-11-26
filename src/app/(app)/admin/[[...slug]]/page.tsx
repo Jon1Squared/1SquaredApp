@@ -81,6 +81,9 @@ export default async function AdminCatchAllPage({
         cddConfig={data.cddConfig}
         workTypesConfig={data.workTypesConfig}
         matterNumberingConfig={data.matterNumberingConfig}
+        effectiveChasingConfig={data.effectiveChasingConfig}
+        effectiveEngagementConfig={data.effectiveEngagementConfig}
+        emailProviderDisabled={data.emailProviderDisabled}
         hasMfaVerified={actor.mfaVerified}
         entraSession={actor.session}
         entraEnvStatus={data.entraEnvStatus}

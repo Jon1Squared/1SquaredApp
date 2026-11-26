@@ -14678,7 +14678,12 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
 
       const bravoEng = await runAsTestActor(
         'P-000001',
-        () => recordEngagementLetterSignedAction({ matterId: alphaMatterId, note: 'Cross tenant tamper' }),
+        () =>
+          recordEngagementLetterSignedAction({
+            matterId: alphaMatterId,
+            evidenceArtifactId: 'EVD-CROSS-TENANT',
+            note: 'Cross tenant tamper',
+          }),
         { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
       );
       expect(bravoEng).toMatchObject({ ok: false, code: 'FORBIDDEN' });

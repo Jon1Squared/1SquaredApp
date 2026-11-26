@@ -17,7 +17,7 @@
     "companiesHouseApiKeyVaultRef": "kv://kvnotalawfi2cdo3cw7vuafm/companies-house-api-key",
     "aiProviderChoice": "anthropic",
     "email": {
-      "provider": "graph",
+      "provider": "disabled",
       "senderAddress": "notifications@1squared.co.uk",
       "recipientAllowList": [
         "@1squared.co.uk"

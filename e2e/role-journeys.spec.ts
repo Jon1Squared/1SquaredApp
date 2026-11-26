@@ -1152,6 +1152,155 @@ test.describe('S1-04: Client Due Diligence (CDD) workflow, evidence upload & R74
   });
 });
 
+async function submitNewMatterAsFeeEarner(
+  page: Page,
+  opts: {
+    clientId: string;
+    instructingSearch: string;
+    instructingPersonId: string;
+    title: string;
+    practiceAreaId: string;
+    workTypeSubcategoryId: string;
+    responsiblePartnerId?: string;
+    highRisk?: boolean;
+  },
+): Promise<string> {
+  await page.goto(`/matters/new?clientId=${encodeURIComponent(opts.clientId)}`);
+  await expect(page.locator('#nm-description')).toBeVisible({ timeout: 20_000 });
+
+  const instructingSearch = page.getByRole('searchbox', {
+    name: 'Search instructing contacts',
+  });
+  await expect(instructingSearch).toBeVisible({ timeout: 10_000 });
+  await instructingSearch.fill(opts.instructingSearch);
+  const instructingSelect = page.locator('#nm-instructing');
+  await expect(
+    instructingSelect.locator(`option[value="${opts.instructingPersonId}"]`),
+  ).toHaveCount(1, { timeout: 10_000 });
+  await instructingSelect.selectOption(opts.instructingPersonId);
+
+  await page.locator('#nm-description').fill(opts.title);
+  await page.locator('#nm-department').selectOption(opts.practiceAreaId);
+  await page.locator('#nm-worktype').selectOption(opts.workTypeSubcategoryId);
+  if (opts.responsiblePartnerId) {
+    const partnerSelect = page.locator('#nm-partner');
+    await expect(
+      partnerSelect.locator(`option[value="${opts.responsiblePartnerId}"]`),
+    ).toHaveCount(1, { timeout: 10_000 });
+    await partnerSelect.selectOption(opts.responsiblePartnerId);
+  }
+
+  if (opts.highRisk) {
+    const riskSection = page.locator('section[aria-labelledby="card-risk-heading"]');
+    const riskMaxBtn = riskSection.getByRole('button', { name: 'Maximise' });
+    if ((await riskMaxBtn.count()) > 0 && (await riskMaxBtn.first().isVisible())) {
+      await riskMaxBtn.first().click();
+    }
+    await riskSection.getByRole('button', { name: 'One long list' }).click();
+    const sanctionGroup = riskSection.getByRole('radiogroup', {
+      name: /high-risk third country/i,
+    });
+    await expect(sanctionGroup).toBeVisible({ timeout: 10_000 });
+    await sanctionGroup.getByRole('radio', { name: 'Yes', exact: true }).click();
+    await riskSection
+      .locator('input[placeholder*="Which country"]')
+      .fill('Jersey escrow holding entity');
+    await expect(riskSection).toContainText('Risk: High', { timeout: 10_000 });
+  }
+
+  const partiesSection = page.locator('section[aria-labelledby="card-2-heading"]');
+  const addPartyBtn = partiesSection.getByRole('button', { name: 'Add party' });
+  if (!(await addPartyBtn.isVisible())) {
+    await page.locator('#card-2-heading').click();
+  }
+  const clientCapSelect = partiesSection.locator(
+    'select[aria-label="Client\'s role in this matter"]',
+  );
+  if ((await clientCapSelect.count()) > 0) {
+    await clientCapSelect.first().selectOption({ index: 1 });
+  }
+
+  await addPartyBtn.click();
+  await expect(page.locator('#nm-party-relationship')).toBeVisible({ timeout: 10_000 });
+  await page.locator('#nm-party-relationship').selectOption('OP');
+  const partyCapSelect = page.locator('#nm-party-capacity-select');
+  await expect(partyCapSelect).toBeEnabled({ timeout: 10_000 });
+  await partyCapSelect.selectOption({ index: 1 });
+
+  const orgSearch = page.getByRole('searchbox', {
+    name: 'Search existing organisations',
+  });
+  await orgSearch.fill('Ty Glas Development Limited');
+  const existingOrgSelect = page.locator('#nm-party-existing-search');
+  await expect(existingOrgSelect.locator('option[value="O-000016"]')).toHaveCount(
+    1,
+    { timeout: 10_000 },
+  );
+  await existingOrgSelect.selectOption('O-000016');
+  await page
+    .getByRole('button', { name: /Add Ty Glas Development Limited as party/i })
+    .click();
+  await expect(partiesSection).toContainText('Ty Glas Development Limited');
+
+  const conflictSearchSection = page.getByRole('region', {
+    name: '5 · CONFLICT SEARCH',
+  });
+  const conflictMaxBtn = conflictSearchSection.getByRole('button', {
+    name: 'Maximise',
+  });
+  if ((await conflictMaxBtn.count()) > 0 && (await conflictMaxBtn.first().isVisible())) {
+    await conflictMaxBtn.first().click();
+  }
+  await page.getByRole('button', { name: 'Run conflict search' }).first().click();
+  await expect(conflictSearchSection).toContainText('Last run', {
+    timeout: 15_000,
+  });
+
+  const sameNoConflictBtns = conflictSearchSection.getByRole('button', {
+    name: 'Same – no conflict',
+  });
+  const matchBtnCount = await sameNoConflictBtns.count();
+  for (let i = 0; i < matchBtnCount; i++) {
+    const btn = sameNoConflictBtns.nth(i);
+    if (await btn.isEnabled()) {
+      await btn.click();
+    }
+  }
+  const noteInputs = conflictSearchSection.locator(
+    'input[placeholder*="Explain why there is no conflict"]',
+  );
+  const noteCount = await noteInputs.count();
+  for (let i = 0; i < noteCount; i++) {
+    await noteInputs.nth(i).fill('Client prior instruction checked and unrelated.');
+  }
+
+  const outcomeSection = page.getByRole('region', {
+    name: '6 · OUTCOME AND DECLARATION',
+  });
+  const outcomeMaxBtn = outcomeSection.getByRole('button', {
+    name: 'Maximise',
+  });
+  if ((await outcomeMaxBtn.count()) > 0 && (await outcomeMaxBtn.first().isVisible())) {
+    await outcomeMaxBtn.first().click();
+  }
+  await expect(outcomeSection).toContainText('Cleared by fee earner', {
+    timeout: 15_000,
+  });
+  await page
+    .getByLabel(/I confirm the parties listed are complete/)
+    .check();
+
+  const submitBtn = page.getByRole('button', { name: 'Submit', exact: true });
+  await expect(submitBtn).toBeEnabled({ timeout: 10_000 });
+  await submitBtn.click();
+
+  await expect(page.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
+  await expect(page).toHaveURL(/\/matters\/(M-\d+)$/, { timeout: 25_000 });
+  const match = /\/matters\/(M-\d+)$/.exec(page.url());
+  expect(match?.[1]).toBeTruthy();
+  return match![1]!;
+}
+
 test.describe.serial('S1-05: High-risk opening sign-off, opening gate & overrides', () => {
   function e2eS105TenantContext() {
     process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
@@ -1173,155 +1322,6 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       environment: 'test',
       correlationId: 'e2e-s105-opening-gate',
     });
-  }
-
-  async function submitNewMatterAsFeeEarner(
-    page: Page,
-    opts: {
-      clientId: string;
-      instructingSearch: string;
-      instructingPersonId: string;
-      title: string;
-      practiceAreaId: string;
-      workTypeSubcategoryId: string;
-      responsiblePartnerId?: string;
-      highRisk?: boolean;
-    },
-  ): Promise<string> {
-    await page.goto(`/matters/new?clientId=${encodeURIComponent(opts.clientId)}`);
-    await expect(page.locator('#nm-description')).toBeVisible({ timeout: 20_000 });
-
-    const instructingSearch = page.getByRole('searchbox', {
-      name: 'Search instructing contacts',
-    });
-    await expect(instructingSearch).toBeVisible({ timeout: 10_000 });
-    await instructingSearch.fill(opts.instructingSearch);
-    const instructingSelect = page.locator('#nm-instructing');
-    await expect(
-      instructingSelect.locator(`option[value="${opts.instructingPersonId}"]`),
-    ).toHaveCount(1, { timeout: 10_000 });
-    await instructingSelect.selectOption(opts.instructingPersonId);
-
-    await page.locator('#nm-description').fill(opts.title);
-    await page.locator('#nm-department').selectOption(opts.practiceAreaId);
-    await page.locator('#nm-worktype').selectOption(opts.workTypeSubcategoryId);
-    if (opts.responsiblePartnerId) {
-      const partnerSelect = page.locator('#nm-partner');
-      await expect(
-        partnerSelect.locator(`option[value="${opts.responsiblePartnerId}"]`),
-      ).toHaveCount(1, { timeout: 10_000 });
-      await partnerSelect.selectOption(opts.responsiblePartnerId);
-    }
-
-    if (opts.highRisk) {
-      const riskSection = page.locator('section[aria-labelledby="card-risk-heading"]');
-      const riskMaxBtn = riskSection.getByRole('button', { name: 'Maximise' });
-      if ((await riskMaxBtn.count()) > 0 && (await riskMaxBtn.first().isVisible())) {
-        await riskMaxBtn.first().click();
-      }
-      await riskSection.getByRole('button', { name: 'One long list' }).click();
-      const sanctionGroup = riskSection.getByRole('radiogroup', {
-        name: /high-risk third country/i,
-      });
-      await expect(sanctionGroup).toBeVisible({ timeout: 10_000 });
-      await sanctionGroup.getByRole('radio', { name: 'Yes', exact: true }).click();
-      await riskSection
-        .locator('input[placeholder*="Which country"]')
-        .fill('Jersey escrow holding entity');
-      await expect(riskSection).toContainText('Risk: High', { timeout: 10_000 });
-    }
-
-    const partiesSection = page.locator('section[aria-labelledby="card-2-heading"]');
-    const addPartyBtn = partiesSection.getByRole('button', { name: 'Add party' });
-    if (!(await addPartyBtn.isVisible())) {
-      await page.locator('#card-2-heading').click();
-    }
-    const clientCapSelect = partiesSection.locator(
-      'select[aria-label="Client\'s role in this matter"]',
-    );
-    if ((await clientCapSelect.count()) > 0) {
-      await clientCapSelect.first().selectOption({ index: 1 });
-    }
-
-    await addPartyBtn.click();
-    await expect(page.locator('#nm-party-relationship')).toBeVisible({ timeout: 10_000 });
-    await page.locator('#nm-party-relationship').selectOption('OP');
-    const partyCapSelect = page.locator('#nm-party-capacity-select');
-    await expect(partyCapSelect).toBeEnabled({ timeout: 10_000 });
-    await partyCapSelect.selectOption({ index: 1 });
-
-    const orgSearch = page.getByRole('searchbox', {
-      name: 'Search existing organisations',
-    });
-    await orgSearch.fill('Ty Glas Development Limited');
-    const existingOrgSelect = page.locator('#nm-party-existing-search');
-    await expect(existingOrgSelect.locator('option[value="O-000016"]')).toHaveCount(
-      1,
-      { timeout: 10_000 },
-    );
-    await existingOrgSelect.selectOption('O-000016');
-    await page
-      .getByRole('button', { name: /Add Ty Glas Development Limited as party/i })
-      .click();
-    await expect(partiesSection).toContainText('Ty Glas Development Limited');
-
-    const conflictSearchSection = page.getByRole('region', {
-      name: '5 · CONFLICT SEARCH',
-    });
-    const conflictMaxBtn = conflictSearchSection.getByRole('button', {
-      name: 'Maximise',
-    });
-    if ((await conflictMaxBtn.count()) > 0 && (await conflictMaxBtn.first().isVisible())) {
-      await conflictMaxBtn.first().click();
-    }
-    await page.getByRole('button', { name: 'Run conflict search' }).first().click();
-    await expect(conflictSearchSection).toContainText('Last run', {
-      timeout: 15_000,
-    });
-
-    const sameNoConflictBtns = conflictSearchSection.getByRole('button', {
-      name: 'Same – no conflict',
-    });
-    const matchBtnCount = await sameNoConflictBtns.count();
-    for (let i = 0; i < matchBtnCount; i++) {
-      const btn = sameNoConflictBtns.nth(i);
-      if (await btn.isEnabled()) {
-        await btn.click();
-      }
-    }
-    const noteInputs = conflictSearchSection.locator(
-      'input[placeholder*="Explain why there is no conflict"]',
-    );
-    const noteCount = await noteInputs.count();
-    for (let i = 0; i < noteCount; i++) {
-      await noteInputs.nth(i).fill('Client prior instruction checked and unrelated.');
-    }
-
-    const outcomeSection = page.getByRole('region', {
-      name: '6 · OUTCOME AND DECLARATION',
-    });
-    const outcomeMaxBtn = outcomeSection.getByRole('button', {
-      name: 'Maximise',
-    });
-    if ((await outcomeMaxBtn.count()) > 0 && (await outcomeMaxBtn.first().isVisible())) {
-      await outcomeMaxBtn.first().click();
-    }
-    await expect(outcomeSection).toContainText('Cleared by fee earner', {
-      timeout: 15_000,
-    });
-    await page
-      .getByLabel(/I confirm the parties listed are complete/)
-      .check();
-
-    const submitBtn = page.getByRole('button', { name: 'Submit', exact: true });
-    await expect(submitBtn).toBeEnabled({ timeout: 10_000 });
-    await submitBtn.click();
-
-    await expect(page.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
-    await expect(page).toHaveURL(/\/matters\/(M-\d+)$/, { timeout: 25_000 });
-    const match = /\/matters\/(M-\d+)$/.exec(page.url());
-    expect(match?.[1]).toBeTruthy();
-    return match![1]!;
   }
 
   test('1. High-risk matter receives permanent number, stays Prospective through Stage 1 Partner & Stage 2 Risk approvals, then opens Active', async ({
@@ -1656,6 +1656,187 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
     } finally {
       await partnerContext.close();
       await getGlobalTenantPostgresPoolManager().closeAllPools();
+    }
+  });
+});
+
+test.describe.serial('S1-06: Client Care dispatch, Admin Email Outbox viewer, signed copy upload & Non-Engagement letter', () => {
+  test('1. Fee earner sends Client Care PDF, MFA Admin inspects outbox message & PDF, Fee earner uploads signed PDF to unlock opening gate', async ({
+    browser,
+  }) => {
+    const uniqueEmail = `client.care.e2e.${Date.now()}@example.test`;
+    let matterId = '';
+
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+    try {
+      matterId = await submitNewMatterAsFeeEarner(fePage, {
+        clientId: 'O-000001',
+        instructingSearch: 'Alun Davies',
+        instructingPersonId: 'P-000017',
+        title: `S1-06 Client Care E2E ${Date.now()}`,
+        practiceAreaId: 'work_type.employment_and_hr',
+        workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+      });
+
+      const engPanel = fePage.getByTestId('matter-engagement-panel');
+      await expect(engPanel).toBeVisible({ timeout: 15_000 });
+      await expect(fePage.getByTestId('opening-precondition-engagement_signed')).toContainText(
+        'Blocked',
+      );
+
+      await fePage.getByTestId('engagement-recipient-email-input').fill(uniqueEmail);
+      await fePage.getByTestId('engagement-recipient-name-input').fill('Alun Davies');
+      await fePage
+        .getByTestId('engagement-intro-note-input')
+        .fill('Please find enclosed your Client Care letter.');
+      await fePage.getByTestId('send-client-care-btn').click();
+
+      await expect(engPanel).toContainText('Sent', { timeout: 20_000 });
+      await expect(engPanel).toContainText(uniqueEmail, { timeout: 15_000 });
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+
+    // MFA Admin opens Email Outbox, inspects queued message, and downloads PDF attachment
+    const adminContext = await browser.newContext({
+      storageState: storageStatePathFor('admin'),
+    });
+    const adminPage = await adminContext.newPage();
+    const adminErrors = attachPageErrorCollector(adminPage);
+    try {
+      await adminPage.goto('/admin/email-outbox');
+      await expect(adminPage.getByTestId('admin-email-outbox-panel')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(adminPage.getByTestId('outbox-messages-table')).toContainText(
+        uniqueEmail,
+        { timeout: 15_000 },
+      );
+
+      const targetRow = adminPage
+        .locator('tr', { hasText: uniqueEmail })
+        .first();
+      await expect(targetRow).toContainText('pending');
+      await targetRow.locator('[data-testid^="inspect-outbox-btn-"]').click();
+
+      const detail = adminPage.getByTestId('outbox-message-detail');
+      await expect(detail).toBeVisible({ timeout: 15_000 });
+      await expect(detail).toContainText(uniqueEmail);
+      await expect(adminPage.getByTestId('outbox-message-text-body')).toContainText(
+        'Client Care',
+      );
+
+      const attLink = adminPage.getByTestId('outbox-attachment-link-0');
+      await expect(attLink).toBeVisible();
+      const attHref = await attLink.getAttribute('href');
+      expect(attHref).toBeTruthy();
+
+      const attResponse = await adminPage.request.get(attHref!);
+      expect(attResponse.status()).toBe(200);
+      const pdfBytes = Buffer.from(await attResponse.body());
+      expect(pdfBytes.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+      expect(adminErrors).toEqual([]);
+    } finally {
+      await adminContext.close();
+    }
+
+    // Fee earner uploads signed PDF copy -> status moves to Signed & returned and engagement gate unlocks
+    const fe2Context = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fe2Page = await fe2Context.newPage();
+    const fe2Errors = attachPageErrorCollector(fe2Page);
+    try {
+      await fe2Page.goto(`/matters/${matterId}`);
+      const engPanel = fe2Page.getByTestId('matter-engagement-panel');
+      await expect(engPanel).toBeVisible({ timeout: 15_000 });
+
+      await fe2Page.getByTestId('engagement-signed-file-input').setInputFiles({
+        name: 'e2e-signed-client-care.pdf',
+        mimeType: 'application/pdf',
+        buffer: Buffer.from('%PDF-1.4\n% S1-06 E2E signed copy\n%%EOF\n'),
+      });
+      await fe2Page
+        .getByTestId('engagement-signed-note-input')
+        .fill('Signed copy returned by client contact.');
+      await fe2Page.getByTestId('upload-engagement-signed-btn').click();
+
+      await expect(engPanel).toContainText('Signed & returned', { timeout: 20_000 });
+      await expect(fe2Page.getByTestId('signed-engagement-download-link')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(fe2Page.getByTestId('opening-precondition-engagement_signed')).toContainText(
+        'Met',
+        { timeout: 15_000 },
+      );
+      expect(fe2Errors).toEqual([]);
+    } finally {
+      await fe2Context.close();
+    }
+  });
+
+  test('2. Enquiries coordinator declines an enquiry, sends Non-Engagement letter, and sees task completed', async ({
+    browser,
+  }) => {
+    const uniqueEmail = `noneng.e2e.${Date.now()}@example.test`;
+    const coordContext = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const coordPage = await coordContext.newPage();
+    const coordErrors = attachPageErrorCollector(coordPage);
+
+    try {
+      await coordPage.goto('/enquiries/new');
+      await coordPage.locator('#enq-first-name').fill('Tudur');
+      await coordPage.locator('#enq-last-name').fill('Prys');
+      await coordPage.locator('#enq-phone').fill('029 2010 9900');
+      await coordPage
+        .locator('#enq-practice-area')
+        .selectOption('work_type.employment_and_hr');
+      await coordPage
+        .locator('#enq-subcat')
+        .selectOption('work_type.employment_and_hr_tribunal_claims');
+      await coordPage
+        .locator('#enq-summary')
+        .fill('Out-of-scope criminal representation request');
+      await coordPage.locator('#enq-privacy-notice').selectOption('yes');
+      await coordPage.getByRole('button', { name: 'Send to Team' }).first().click();
+
+      await expect(coordPage).toHaveURL(/\/enquiries\/(ENQ-\d+)$/, { timeout: 20_000 });
+
+      await coordPage.getByRole('button', { name: 'More ▾' }).click();
+      await coordPage.getByRole('menuitem', { name: 'Decline' }).click();
+      await coordPage
+        .locator('#close-reason-select')
+        .selectOption({ label: 'Outside our expertise' });
+      await coordPage
+        .locator('#close-notes-input')
+        .fill('Criminal law instructions are outside practice scope.');
+      await coordPage.getByRole('button', { name: 'Decline enquiry' }).click();
+
+      const nonEngPanel = coordPage.getByTestId('enquiry-non-engagement-panel');
+      await expect(nonEngPanel).toBeVisible({ timeout: 20_000 });
+      await expect(nonEngPanel).toContainText('Task open: Send non-engagement letter', {
+        timeout: 15_000,
+      });
+
+      await coordPage
+        .getByTestId('non-engagement-recipient-email-input')
+        .fill(uniqueEmail);
+      await coordPage.getByTestId('send-non-engagement-btn').click();
+
+      await expect(nonEngPanel).toContainText('Non-engagement task completed', {
+        timeout: 20_000,
+      });
+      await expect(nonEngPanel).toContainText(uniqueEmail, { timeout: 15_000 });
+      expect(coordErrors).toEqual([]);
+    } finally {
+      await coordContext.close();
     }
   });
 });

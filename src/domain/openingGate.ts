@@ -33,6 +33,22 @@ export const ENGAGEMENT_SIGNED_STATUSES = [
 
 export type EngagementSignedStatus = (typeof ENGAGEMENT_SIGNED_STATUSES)[number];
 
+export function getEngagementLetterStatusRank(
+  status: string | null | undefined,
+): 0 | 1 | 2 | 3 {
+  const normalized = (status ?? '').trim().toLowerCase();
+  if (normalized === 'signed' || normalized === 'signed & returned') {
+    return 3;
+  }
+  if (normalized === 'sent' || normalized === 'sent to client') {
+    return 2;
+  }
+  if (normalized === 'drafted') {
+    return 1;
+  }
+  return 0;
+}
+
 export function isEngagementLetterSignedStatus(
   status: string | null | undefined,
 ): status is EngagementSignedStatus {

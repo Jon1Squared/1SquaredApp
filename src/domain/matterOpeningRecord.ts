@@ -7,7 +7,7 @@ import {
 import { formatDate, formatDateTime } from './dates';
 import { resolveLabel, valueBySystemKey } from './lists';
 import { personDisplayName } from './names';
-import { isMatterEngagementSignedForGate } from './openingGate';
+import { isEngagementLetterSignedStatus } from './openingGate';
 import type {
   EntityPickerOrganisationSummary,
   EntityPickerPersonSummary,
@@ -945,10 +945,7 @@ export function computeMatterOpeningChecklistProgress(
     matter.amlStatus === 'Verified' ||
     matter.amlStatus === 'Cleared' ||
     matter.amlStatus === 'Not required';
-  const engDone = isMatterEngagementSignedForGate({
-    engagementLetterStatus: matter.engagementLetterStatus,
-    engagementLetterSignedAt: matter.engagementLetterSignedAt ?? null,
-  });
+  const engDone = isEngagementLetterSignedStatus(matter.engagementLetterStatus);
   const retainerDone =
     matter.retainerMoniesOnAccountGbp !== null && matter.retainerMoniesOnAccountGbp > 0;
   const completedSteps = [conflictDone, amlDone, engDone, retainerDone].filter(Boolean).length;

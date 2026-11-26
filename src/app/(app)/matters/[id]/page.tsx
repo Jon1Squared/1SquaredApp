@@ -102,6 +102,10 @@ export default async function MatterProfilePage({
         )}
         canEditMatter={shell.currentUserPermissions.includes('matter:edit')}
         pmsView={data.pmsView}
+        engagementDispatches={data.engagementDispatches}
+        engagementChases={data.engagementChases}
+        signedEngagementDownloadUrl={data.signedEngagementDownloadUrl}
+        emailProviderDisabled={data.emailProviderDisabled}
         firmName={shell.firm.name}
         notes={data.notes}
         audit={data.audit}

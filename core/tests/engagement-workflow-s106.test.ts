@@ -401,6 +401,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       () =>
         recordEngagementLetterSignedAction({
           matterId,
+          evidenceArtifactId: '',
           status: 'Signed & returned',
         }),
       { roles: ['fee_earner'], mfaVerified: false },

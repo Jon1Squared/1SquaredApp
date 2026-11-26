@@ -70,6 +70,7 @@ import type {
 import type { PmsAdminSnapshot } from '@/server/services';
 import { DocumentStoresAdminPanel } from './DocumentStoresAdminPanel';
 import { DocumentTemplatesAdminPanel } from './DocumentTemplatesAdminPanel';
+import { AdminEmailOutboxPanel } from './AdminEmailOutboxPanel';
 import { HomePagesAdminSection } from './HomePagesAdminSection';
 import { MatterCostsAdminSection } from './MatterCostsAdminSection';
 import { MatterPartiesAdminSection } from './MatterPartiesAdminSection';
@@ -77,6 +78,8 @@ import { PmsLinksAdminSection } from './PmsLinksAdminSection';
 import { RbacAdminSection } from './RbacAdminSection';
 import type {
   CddConfiguration,
+  ChasingConfiguration,
+  EngagementConfiguration,
   RegistersConfiguration,
   RegisterTypeDefinition,
   WorkTypesConfiguration,
@@ -105,6 +108,7 @@ export type AdminTab =
   | 'enquiry-settings'
   | 'task-settings'
   | 'employees'
+  | 'email-outbox'
   | 'pms-links'
   | 'demo-data';
 
@@ -209,6 +213,9 @@ interface Props {
   cddConfig?: CddConfiguration;
   workTypesConfig?: WorkTypesConfiguration;
   matterNumberingConfig?: import('@platform/core-api').MatterNumberingConfig;
+  effectiveChasingConfig?: ChasingConfiguration;
+  effectiveEngagementConfig?: EngagementConfiguration;
+  emailProviderDisabled?: boolean;
   hasMfaVerified?: boolean;
   currentUserKeyDatePermissions?: KeyDatePermission[];
   entraSession?: import('@/server/entraAuth').EntraSessionPayload | null;
@@ -260,6 +267,9 @@ export function AdminClient({
   cddConfig,
   workTypesConfig,
   matterNumberingConfig,
+  effectiveChasingConfig,
+  effectiveEngagementConfig,
+  emailProviderDisabled = false,
   hasMfaVerified = false,
   currentUserKeyDatePermissions = [],
   entraSession,
@@ -1547,6 +1557,18 @@ export function AdminClient({
             onClick={() => setTab('pms-links')}
           >
             PMS links ({livePmsLinksCount})
+          </button>
+        ) : null}
+        {currentUserPermissions?.includes('admin:access') && hasMfaVerified ? (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'email-outbox'}
+            className={`tab-btn ${tab === 'email-outbox' ? 'tab-btn--active' : ''}`}
+            data-testid="admin-tab-email-outbox"
+            onClick={() => setTab('email-outbox')}
+          >
+            Email Outbox
           </button>
         ) : null}
         <button
@@ -4655,6 +4677,18 @@ export function AdminClient({
           onPmsLinksCountChange={setLivePmsLinksCount}
         />
       )}
+
+      {/* TAB: EMAIL OUTBOX */}
+      {tab === 'email-outbox' &&
+        currentUserPermissions?.includes('admin:access') &&
+        hasMfaVerified && (
+          <AdminEmailOutboxPanel
+            effectiveChasingConfig={effectiveChasingConfig}
+            effectiveEngagementConfig={effectiveEngagementConfig}
+            emailProviderDisabled={emailProviderDisabled}
+            hasMfaVerified={hasMfaVerified}
+          />
+        )}
 
       {/* TAB: DEMO DATA */}
       {tab === 'demo-data' && (

@@ -92,6 +92,7 @@ import {
   type ResolvedRateTier,
   type WorkTypesConfiguration,
 } from '@platform/core-api';
+import { getEngagementLetterStatusRank } from '@/domain/openingGate';
 import {
   isWorkTypeChoiceActive,
   resolveDepartmentForPracticeArea,
@@ -12145,24 +12146,55 @@ export function MatterFormClient({
                         </select>
                       ) : (
                         <>
-                          <select
-                            className="field-select"
-                            value={
-                              engagementLetterStatus === 'Signed' ||
-                              engagementLetterStatus === 'Signed & returned'
-                                ? 'Sent'
-                                : engagementLetterStatus
-                            }
-                            onChange={(e) => setEngagementLetterStatus(e.target.value)}
-                          >
-                            <option value="">Unknown value</option>
-                            <option value="Drafting">Drafting</option>
-                            <option value="Drafted">Drafted</option>
-                            <option value="Sent">Sent</option>
-                            <option value="Sent to client">Sent to client</option>
-                          </select>
+                          {(() => {
+                            const currentRank = getEngagementLetterStatusRank(
+                              existing?.engagementLetterStatus,
+                            );
+                            return (
+                              <select
+                                className="field-select"
+                                value={
+                                  engagementLetterStatus === 'Signed' ||
+                                  engagementLetterStatus === 'Signed & returned'
+                                    ? 'Sent'
+                                    : engagementLetterStatus
+                                }
+                                onChange={(e) => setEngagementLetterStatus(e.target.value)}
+                              >
+                                <option value="" disabled={getEngagementLetterStatusRank('') < currentRank}>
+                                  Unknown value
+                                </option>
+                                <option
+                                  value="Drafting"
+                                  disabled={getEngagementLetterStatusRank('Drafting') < currentRank}
+                                >
+                                  Drafting
+                                </option>
+                                <option
+                                  value="Drafted"
+                                  disabled={getEngagementLetterStatusRank('Drafted') < currentRank}
+                                >
+                                  Drafted
+                                </option>
+                                <option
+                                  value="Sent"
+                                  disabled={getEngagementLetterStatusRank('Sent') < currentRank}
+                                >
+                                  Sent
+                                </option>
+                                <option
+                                  value="Sent to client"
+                                  disabled={
+                                    getEngagementLetterStatusRank('Sent to client') < currentRank
+                                  }
+                                >
+                                  Sent to client
+                                </option>
+                              </select>
+                            );
+                          })()}
                           <span className="muted" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
-                            Use &ldquo;Mark engagement signed&rdquo; on the matter profile once a signed letter is returned.
+                            Upload the client&rsquo;s signed copy on the matter profile once returned.
                           </span>
                         </>
                       )}

@@ -445,7 +445,7 @@ describe('S0-29: Teams Activity Notifier, Daily/Weekly Digests & Self-Service No
       'kv://kvnotalawfi2cdo3cw7vuafm/companies-house-api-key',
     );
     expect(demoCfg.integrations.email).toMatchObject({
-      provider: 'graph',
+      provider: 'disabled',
       senderAddress: 'notifications@1squared.co.uk',
       recipientAllowList: ['@1squared.co.uk'],
       recipientAllowListVaultRef:

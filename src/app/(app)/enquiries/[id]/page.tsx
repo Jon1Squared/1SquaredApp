@@ -39,6 +39,9 @@ export default async function EnquiryDetailPage({
           currentUserId={shell.currentUserId}
           canReopen={data.canReopen}
           canAnonymise={data.canAnonymise}
+          nonEngagementDispatches={data.nonEngagementDispatches}
+          emailProviderDisabled={data.emailProviderDisabled}
+          canSendNonEngagement={data.canSendNonEngagement}
           firmName={shell.firm.name}
           tenantId={shell.tenantId}
           supervisingPartnerByEmployeeId={shell.supervisingPartnerByEmployeeId}
