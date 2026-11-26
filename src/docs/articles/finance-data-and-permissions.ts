@@ -5,8 +5,8 @@ export const financeDataAndPermissionsArticle: DocArticle = {
   title: 'Finance data and permissions',
   section: 'architecture-security',
   summary:
-    'Which roles can view matter-level and firm-wide Practice Management System (PMS) finance figures, how unlinked and restricted matters are handled, how credit-control actions are gated, and how quotes and matter cost VAT snapshots are calculated.',
-  updated: '2026-11-24',
+    'Which roles can view matter-level and firm-wide Practice Management System (PMS) finance figures, how unlinked and restricted matters are handled, how credit-control actions are gated, and how quotes, matter costs, and PMS figures reconcile to the exact penny.',
+  updated: '2026-11-26',
   body: `
 1Squared delivers Practice Management System (PMS) financial figures through dedicated, permission-checked views backed by your firm’s isolated database. Each firm’s database stores its own PMS extract datasets, credit-control history, and record links separately from every other firm; your 1Squared support contact can provide technical notes on the import tool. Financial figures are never loaded on unrelated pages or in the shared navigation bar, which checks only whether you hold permission to view firm finance, matter finance, or credit-control features.
 
@@ -44,6 +44,11 @@ When a user cannot access a restricted matter, all time entries, invoices, aged-
 - **Cash received**: current-month and previous-month payment receipts and receipt counts (derived from the PMS extract \`asAtDate\`).
 - **Department financials & firm total**: open matters, billed this year, unbilled WIP, outstanding debt, overdue debt, and current-month chargeable hours.
 - **Client & corporate-group financials**: unbilled WIP, fees billed, invoiced total, paid total, outstanding debt, aged-debt buckets, unbilled disbursements, client-account balance, and parent/subsidiary corporate-group totals (\`getClientPmsViewBundle\`).
+
+### Legacy “CMI incomplete” status and exact-penny reconciliation
+
+- **Consistent matter status badges**: Active matters opened before the current client due diligence opening gate came into use — where initial client checks have not yet been completed — appear with a consistent **“CMI incomplete”** status badge for both fee earners and Finance users, and appear under the **CMI incomplete** filter in the Matters list. For roles that do not hold permission to view client due diligence records, confidential verification statuses, completion dates, and evidence files remain hidden as **Not available to you**.
+- **Exact-penny figures**: All Practice Management System balances (including unbilled work in progress, invoices, credit notes, aged debt, disbursements, and client-account ledgers) and matter monies-on-account figures are stored and totalled to the exact penny rather than rounded floating-point pounds, ensuring matter, client, corporate-group, and firm-wide totals reconcile cleanly across every screen.
 
 ## 3. Credit-control and billing actions
 

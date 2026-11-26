@@ -243,6 +243,11 @@ foreach ($JobName in @("caj-provision-demo", "caj-migrate-demo", "caj-seed-demo-
   az containerapp job update --name "caj-seed-demo-demo" --resource-group $RG --remove-env-vars "SEED_DEMO_FORCE" | Out-Null
   ```
 
+### In-Place Upgrade & Rollback Rule for Migration `0027` (`S1-12`, `R821` Option B)
+
+- **In-place demo conversion:** Deploying `S1-12` upgrades the existing demo tenant in place via `caj-migrate-demo` (`0027_pms_money_and_retainer_pence_expand`, zero automatic re-seeding). After `caj-migrate-demo` finishes, inspect `ContainerAppConsoleLogs_CL` (and Application Insights) for `job.migrate.pms_pence_verified` and confirm `mismatchCount: 0` across all 21 verified monetary columns (`maxColumnTotalDiffPence: 0`; logs contain counts and per-column differences only). Re-seeding is used only as a manual fallback if conversion verification fails and only with owner approval.
+- **Mandatory `0027` rollback rule (`R821` Option (b)):** While `S1-12` reads solely from integer-pence columns, it still dual-writes the legacy floating-point columns so rollback stays reversible. **Rolling the application back to a pre-`S1-12` release after `0027` has been applied always requires running migration `0027` down** (`downSql`, dropping the 20 `*_pence` PMS columns and `matters.retainer_monies_on_account_pence` while leaving the legacy columns intact). Pre-`S1-12` code writes only to the legacy columns; rolling back the app without running `0027` down would leave stale pence values behind if `S1-12` were later redeployed, whereas running `0027` down allows the subsequent re-deployment to re-run `0027` `upSql`, re-backfill from the live legacy columns, and re-verify every row cleanly.
+
 ---
 
 ## 3. Post-Deployment Verification Checklist
