@@ -373,6 +373,43 @@ export async function runMigrateJobSweep(options?: {
         async ({ tenantContext }) => {
           const applied = await runner.applyUp(tenantContext, tenantMigrations);
           succeededTenants.push(entry.tenantId);
+          for (const rec of applied) {
+            const pmsVerify = rec.verificationMetadata?.pmsPenceVerification as
+              | {
+                  readonly tablesVerified: number;
+                  readonly totalRowsChecked: number;
+                  readonly totalNonNullChecked: number;
+                  readonly totalColumnsVerified: number;
+                  readonly mismatchCount: number;
+                  readonly maxColumnTotalDiffPence: number;
+                  readonly columns: ReadonlyArray<{
+                    readonly table: string;
+                    readonly column: string;
+                    readonly sourceColumn: string;
+                    readonly rowCount: number;
+                    readonly nonNullCount: number;
+                    readonly totalDiffPence: number;
+                  }>;
+                }
+              | undefined;
+            if (pmsVerify) {
+              emitTenantTelemetryEvent({
+                eventName: 'job.migrate.pms_pence_verified',
+                tenantId: entry.tenantId,
+                correlationId: tenantContext.correlationId,
+                properties: {
+                  databaseName: entry.postgresDatabaseName,
+                  tablesVerified: pmsVerify.tablesVerified,
+                  totalRowsChecked: pmsVerify.totalRowsChecked,
+                  totalNonNullChecked: pmsVerify.totalNonNullChecked,
+                  totalColumnsVerified: pmsVerify.totalColumnsVerified,
+                  mismatchCount: pmsVerify.mismatchCount,
+                  maxColumnTotalDiffPence: pmsVerify.maxColumnTotalDiffPence,
+                  columns: pmsVerify.columns,
+                },
+              });
+            }
+          }
           emitTenantTelemetryEvent({
             eventName: 'job.migrate.tenant_succeeded',
             tenantId: entry.tenantId,
