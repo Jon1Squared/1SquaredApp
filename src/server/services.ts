@@ -28912,6 +28912,7 @@ export async function listRegistersWorkspaceDataRecord(
       {
         viewerId: actor.id,
         hasRestrictedMatterAccess,
+        canViewCdd,
       },
     );
     const visibleMatters = candidateMatters.filter((m) =>
@@ -35515,7 +35516,7 @@ export async function listClientPriorMattersRecord(
     getMatterRepository().listVisibleMattersForEntity<Matter>(
       ctx,
       { clientIds: cleanIds, includeMerged: false },
-      { viewerId: actor.id, hasRestrictedMatterAccess },
+      { viewerId: actor.id, hasRestrictedMatterAccess, canViewCdd },
     ),
     partyRepo.listPeopleByIds<Person>(ctx, cleanIds),
     partyRepo.listOrganisationsByIds<Organisation>(ctx, cleanIds),
@@ -35635,7 +35636,15 @@ export async function listClientPriorMattersRecord(
   }
 
   return {
-    matters: visible.map(toClientPriorMatterSummary),
+    matters: visible.map((m) => {
+      const hasHiddenEmployeeClient = [
+        m.clientId,
+        ...(m.additionalClientIds ?? []),
+      ].some((cid) => cddSummaries[cid]?.visible === false);
+      return toClientPriorMatterSummary(m, {
+        canViewCdd: canViewCdd && !hasHiddenEmployeeClient,
+      });
+    }),
     cddSummaries,
   };
 }

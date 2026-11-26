@@ -49,6 +49,7 @@ import {
 } from './actionPermissions';
 import { createVerifiedSessionActorFromEntraSession } from './entraAuth';
 import { resolveRequestCorrelationId } from './correlationId';
+import { redactMatterCddInBrowserPayload } from './matterCddBoundary';
 import {
   emitTenantTelemetryEvent,
   emitTenantTelemetryException,
@@ -388,6 +389,7 @@ export async function guardedAction<R>(
     },
     async () => {
       const guardedActor = await buildGuardedActorContext(actor, correlationId);
+      const canViewCdd = guardedActor.permissions.has('cdd:view');
 
       if (isEnforcedByAction) {
         try {
@@ -396,7 +398,8 @@ export async function guardedAction<R>(
             policy.key,
             name,
           );
-          return await fn(guardedActor);
+          const result = await fn(guardedActor);
+          return redactMatterCddInBrowserPayload(result, canViewCdd);
         } catch (err) {
           if (err instanceof AuthorisationError) {
             logAuthorisationDenial({
@@ -443,7 +446,8 @@ export async function guardedAction<R>(
         }
       }
 
-      return await fn(guardedActor);
+      const result = await fn(guardedActor);
+      return redactMatterCddInBrowserPayload(result, canViewCdd);
     },
   );
 }

@@ -2387,7 +2387,9 @@ export function toClientPriorMatterSummary(
   matter: Pick<Matter, 'id' | 'clientId' | 'conflictCheckStatus' | 'amlStatus'> & {
     readonly additionalClientIds?: readonly string[];
   },
+  options?: { readonly canViewCdd?: boolean },
 ): ClientPriorMatterSummary {
+  const includeCddStatus = options?.canViewCdd !== false;
   return {
     id: matter.id,
     clientId: matter.clientId,
@@ -2395,7 +2397,7 @@ export function toClientPriorMatterSummary(
       ? { additionalClientIds: [...matter.additionalClientIds] }
       : {}),
     ...(matter.conflictCheckStatus ? { conflictCheckStatus: matter.conflictCheckStatus } : {}),
-    ...(matter.amlStatus ? { amlStatus: matter.amlStatus } : {}),
+    ...(includeCddStatus && matter.amlStatus ? { amlStatus: matter.amlStatus } : {}),
   };
 }
 

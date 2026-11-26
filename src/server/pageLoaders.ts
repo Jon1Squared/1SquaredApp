@@ -62,7 +62,6 @@ import type { MatterPartyUsageCounts } from '@/domain/matterParties';
 import {
   toClientPriorMatterSummary,
   type ClientPriorMatterSummary,
-  type MatterOpeningSnapshot,
 } from '@/domain/matterOpeningRecord';
 import type { PmsLinksAdminPageData } from '@/domain/pms';
 import { buildDefaultOrgStructure } from '@/domain/orgStructure';
@@ -72,6 +71,10 @@ import { mainLinkFor } from '@/domain/searchIndex';
 import { userTeams } from '@/domain/tasks';
 import { resolveSuggestedConflictReviewer } from './conflictReview';
 import { getEntraEnvStatus, getEntraSession } from './entraAuth';
+import {
+  redactMatterCddForUnpermittedViewer,
+  redactMatterCddInBrowserPayload,
+} from './matterCddBoundary';
 import {
   getFirmFinance,
   getMatterFinanceRows,
@@ -338,6 +341,7 @@ export interface ShellContextData {
   readonly currentUserKeyDatePermissions: KeyDatePermission[];
   readonly hasRestrictedMatterAccess: boolean;
   readonly canViewQuotes: boolean;
+  readonly canViewCdd: boolean;
   readonly leftRailVisibility: LeftRailVisibility;
   readonly finance: AppFinanceCapabilities;
   readonly homePagesConfig: HomePagesConfig;
@@ -713,6 +717,7 @@ async function loadShellContextUncached(
     'matter:restricted:access',
   );
   const canViewQuotes = currentUserPermissions.includes('quote:view');
+  const canViewCdd = currentUserPermissions.includes('cdd:view');
   const finance: AppFinanceCapabilities = {
     canViewFirm: currentUserPermissions.includes('finance:view'),
     canViewMatter: currentUserPermissions.includes('finance:view_matter'),
@@ -866,7 +871,7 @@ async function loadShellContextUncached(
       ? matterRepo.listVisibleMattersForEntity<Matter>(
           ctx,
           { ownerPersonId: effectiveWorkPerson.id, includeMerged: false },
-          { viewerId: rawUser.id, hasRestrictedMatterAccess },
+          { viewerId: rawUser.id, hasRestrictedMatterAccess, canViewCdd },
         )
       : Promise.resolve<Matter[]>([]),
     finance.canViewMatter
@@ -960,6 +965,7 @@ async function loadShellContextUncached(
     currentUserKeyDatePermissions,
     hasRestrictedMatterAccess,
     canViewQuotes,
+    canViewCdd,
     leftRailVisibility,
     finance,
     homePagesConfig,
@@ -998,6 +1004,21 @@ export async function loadShellContext(
     : loadShellContextCached(actorId);
 }
 
+/**
+ * Shared browser-boundary wrapper (`R812`): loads `ShellContextData` once per
+ * request and ensures every page loader payload returned to a caller without
+ * `cdd:view` has all `Matter` and `ClientPriorMatterSummary` CDD fields redacted.
+ */
+async function withPageShell<T>(
+  actorId: string,
+  options: LoaderOptions | undefined,
+  build: (shell: ShellContextData) => Promise<T>,
+): Promise<T> {
+  const shell = await loadShellContext(actorId, options);
+  const data = await build(shell);
+  return redactMatterCddInBrowserPayload(data, shell.canViewCdd);
+}
+
 // ============================================================================
 // Route 1: Home (`/`)
 // ============================================================================
@@ -1023,7 +1044,7 @@ export async function loadHomePageData(
   myFinance?: MyFinanceFiguresResult;
   firmFinance?: FirmFinanceResult;
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess, activeTenantCfg, currentUserPermissions } =
     shell;
   const matterRepo = getMatterRepository();
@@ -1069,6 +1090,7 @@ export async function loadHomePageData(
     matterRepo.listVisibleMatters<Matter>(ctx, {
       viewerId: currentUserId,
       hasRestrictedMatterAccess,
+      canViewCdd,
     }),
     intakeRepo.listVisibleEnquiries<Enquiry>(ctx, currentUserId, {
       hasRestrictedMatterAccess,
@@ -1162,6 +1184,7 @@ export async function loadHomePageData(
         ? firmFinanceRes
         : undefined,
   };
+  });
 }
 
 // ============================================================================
@@ -1199,7 +1222,7 @@ export async function loadPeopleListPageData(
     readonly sortDir: SortDirection | null;
   };
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const partyRepo = getPartyRepository();
   const intakeRepo = getIntakeQuoteRepository();
   const { page, pageSize, offset, query } = normaliseListPagination(options);
@@ -1335,6 +1358,7 @@ export async function loadPeopleListPageData(
       sortDir: parsedSort?.direction ?? null,
     },
   };
+  });
 }
 
 export async function loadPersonDetailPageData(
@@ -1372,7 +1396,7 @@ export async function loadPersonDetailPageData(
     }
   | null
 > {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -1456,7 +1480,7 @@ export async function loadPersonDetailPageData(
         contactIds: [person.id],
         ownerPersonId: isEmployeeOrLeaver ? person.id : undefined,
       },
-      { viewerId: currentUserId, hasRestrictedMatterAccess },
+      { viewerId: currentUserId, hasRestrictedMatterAccess, canViewCdd },
     ),
     taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
       linkedRecordType: 'person',
@@ -1503,7 +1527,7 @@ export async function loadPersonDetailPageData(
     ? await matterRepo.listVisibleMattersForEntity<Matter>(
         ctx,
         { clientIds: [mainLink.organisationId], includeMerged: false },
-        { viewerId: currentUserId, hasRestrictedMatterAccess },
+        { viewerId: currentUserId, hasRestrictedMatterAccess, canViewCdd },
       )
     : [];
   const matters = dedupeById([...directMatters, ...mainOrgMatters]);
@@ -1618,6 +1642,7 @@ export async function loadPersonDetailPageData(
     canTakeByTaskId,
     cddSummary,
   };
+  });
 }
 
 export async function loadPersonFormPageData(
@@ -1637,7 +1662,7 @@ export async function loadPersonFormPageData(
     }
   | null
 > {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -1700,7 +1725,11 @@ export async function loadPersonFormPageData(
           contactIds: [existing.id],
           ...(canViewEmploymentAndHandover ? { ownerPersonId: existing.id } : {}),
         },
-        { viewerId: currentUserId, hasRestrictedMatterAccess },
+        {
+          viewerId: currentUserId,
+          hasRestrictedMatterAccess,
+          canViewCdd: shell.canViewCdd,
+        },
       ),
       canViewEmploymentAndHandover
         ? taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
@@ -1761,6 +1790,7 @@ export async function loadPersonFormPageData(
     enquiries: ownedEnquiries,
     leaverOwnedRecords,
   };
+  });
 }
 
 // ============================================================================
@@ -1808,7 +1838,7 @@ export async function loadOrganisationsListPageData(
     readonly sortDir: SortDirection | null;
   };
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const { pageSize, offset, query } = normaliseListPagination(options);
@@ -1943,6 +1973,7 @@ export async function loadOrganisationsListPageData(
       sortDir: parsedSort?.direction ?? null,
     },
   };
+  });
 }
 
 export async function loadOrganisationDetailPageData(
@@ -1976,7 +2007,7 @@ export async function loadOrganisationDetailPageData(
     }
   | null
 > {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
@@ -2030,7 +2061,7 @@ export async function loadOrganisationDetailPageData(
         partyEntityIds: [organisation.id],
         contactIds: [organisation.id],
       },
-      { viewerId: currentUserId, hasRestrictedMatterAccess },
+      { viewerId: currentUserId, hasRestrictedMatterAccess, canViewCdd },
     ),
     taskRepo.listVisibleTasks<Task>(ctx, currentUserId, {
       linkedRecordType: 'organisation',
@@ -2153,6 +2184,7 @@ export async function loadOrganisationDetailPageData(
     canTakeByTaskId,
     cddSummary,
   };
+  });
 }
 
 export async function loadOrganisationFormPageData(
@@ -2168,7 +2200,7 @@ export async function loadOrganisationFormPageData(
     }
   | null
 > {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const partyRepo = getPartyRepository();
   if (!id) {
     return { shell, existing: null, allOrganisations: [] };
@@ -2188,6 +2220,7 @@ export async function loadOrganisationFormPageData(
     existing,
     allOrganisations: dedupeById([existing, ...parentOrgs]),
   };
+  });
 }
 
 // ============================================================================
@@ -2244,7 +2277,7 @@ export async function loadMattersListPageData(
     readonly sortDir: SortDirection | null;
   };
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const matterRepo = getMatterRepository();
   const taskRepo = getTaskWorkflowRepository();
   const { pageSize, offset, query } = normaliseListPagination(options);
@@ -2303,6 +2336,7 @@ export async function loadMattersListPageData(
     {
       viewerId: shell.currentUserId,
       hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+      canViewCdd: shell.canViewCdd,
       includeMerged: false,
       sortOrder: 'id_asc',
       sortBy: parsedSort?.columnId,
@@ -2375,31 +2409,7 @@ export async function loadMattersListPageData(
       sortDir: parsedSort?.direction ?? null,
     },
   };
-}
-
-function redactMatterCddForUnpermittedViewer(matter: Matter): Matter {
-  const existingSnapshot = matter.fieldValues?.['matterOpeningSnapshot'] as
-    | MatterOpeningSnapshot
-    | undefined;
-  const redactedFieldValues =
-    existingSnapshot && existingSnapshot.version === '1.0'
-      ? {
-          ...(matter.fieldValues ?? {}),
-          matterOpeningSnapshot: {
-            ...existingSnapshot,
-            complianceOnboarding: {
-              ...existingSnapshot.complianceOnboarding,
-              amlStatus: 'Not available to you',
-            },
-          },
-        }
-      : matter.fieldValues;
-  return {
-    ...matter,
-    amlStatus: 'Not available to you',
-    amlCompletedAt: null,
-    fieldValues: redactedFieldValues,
-  };
+  });
 }
 
 export async function loadMatterDetailPageData(
@@ -2457,7 +2467,7 @@ export async function loadMatterDetailPageData(
     }
   | null
 > {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const matterRepo = getMatterRepository();
   const partyRepo = getPartyRepository();
@@ -2467,6 +2477,7 @@ export async function loadMatterDetailPageData(
   const matter = await matterRepo.getMatterById<Matter>(ctx, id, {
     viewerId: currentUserId,
     hasRestrictedMatterAccess,
+    canViewCdd: shell.canViewCdd,
   });
   if (!matter) return null;
 
@@ -2557,11 +2568,14 @@ export async function loadMatterDetailPageData(
         ? matterRepo.listVisibleMattersForEntity<Matter>(
             ctx,
             { clientIds: initialClientIds, includeMerged: false },
-            { viewerId: currentUserId, hasRestrictedMatterAccess },
+            {
+              viewerId: currentUserId,
+              hasRestrictedMatterAccess,
+              canViewCdd: shell.canViewCdd,
+            },
           )
         : Promise.resolve<Matter[]>([]),
     ]);
-    const clientMatters = clientMattersRaw.map(toClientPriorMatterSummary);
     const { people, organisations } = await collectReferencedParties({
       ctx,
       shell,
@@ -2609,6 +2623,9 @@ export async function loadMatterDetailPageData(
         canViewClientCdd = false;
       }
     }
+    const clientMatters = clientMattersRaw.map((m) =>
+      toClientPriorMatterSummary(m, { canViewCdd: canViewClientCdd }),
+    );
 
     return {
       kind: 'form',
@@ -2788,6 +2805,7 @@ export async function loadMatterDetailPageData(
       pmsViewRes && !isActionDenied(pmsViewRes) ? pmsViewRes : undefined,
     canTakeByTaskId,
   };
+  });
 }
 
 function resolveInitialMatterClientIds(params: {
@@ -2851,7 +2869,7 @@ export async function loadMatterFormPageData(
     practiceManagerId: string | null;
   };
 } | null> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const matterRepo = getMatterRepository();
   const partyRepo = getPartyRepository();
@@ -2863,6 +2881,7 @@ export async function loadMatterFormPageData(
       ? matterRepo.getMatterById<Matter>(ctx, targetMatterId, {
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
+          canViewCdd: shell.canViewCdd,
         })
       : Promise.resolve<Matter | null>(null),
     params.quoteId && shell.canViewQuotes
@@ -3038,6 +3057,7 @@ export async function loadMatterFormPageData(
       practiceManagerId: practiceManager?.id ?? null,
     },
   };
+  });
 }
 
 // ============================================================================
@@ -3097,7 +3117,7 @@ export async function loadEnquiriesListPageData(
     readonly sortDir: SortDirection | null;
   };
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
@@ -3290,6 +3310,7 @@ export async function loadEnquiriesListPageData(
       ? matterRepo.listMattersByIds<Matter>(ctx, convertedMatterIds, {
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
+          canViewCdd: shell.canViewCdd,
         })
       : Promise.resolve<Matter[]>([]),
   ]);
@@ -3348,6 +3369,7 @@ export async function loadEnquiriesListPageData(
       sortDir: parsedSort?.direction ?? null,
     },
   };
+  });
 }
 
 export async function loadEnquiryDetailPageData(
@@ -3370,7 +3392,7 @@ export async function loadEnquiryDetailPageData(
   keyDateCalendarSyncs: KeyDateCalendarSync[];
   canVerifyByKeyDateId: Record<string, { allowed: boolean; reason?: string }>;
 } | null> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const intakeRepo = getIntakeQuoteRepository();
   const taskRepo = getTaskWorkflowRepository();
@@ -3400,6 +3422,7 @@ export async function loadEnquiryDetailPageData(
       ? matterRepo.getMatterById<Matter>(ctx, enquiry.convertedMatterId, {
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
+          canViewCdd: shell.canViewCdd,
         })
       : Promise.resolve<Matter | null>(null),
     keyDateRepo.listKeyDatesForEnquiry(ctx, enquiry.id, currentUserId),
@@ -3465,14 +3488,16 @@ export async function loadEnquiryDetailPageData(
     keyDateCalendarSyncs,
     canVerifyByKeyDateId,
   };
+  });
 }
 
 export async function loadEnquiryFormPageData(
   actorId: string,
   options?: LoaderOptions,
 ): Promise<{ shell: ShellContextData }> {
-  const shell = await loadShellContext(actorId, options);
-  return { shell };
+  return withPageShell(actorId, options, async (shell) => {
+    return { shell };
+  });
 }
 
 // ============================================================================
@@ -3493,7 +3518,7 @@ export async function loadQuoteDetailPageData(
   links: PersonOrganisationLink[];
   initialResolvedRates: ResolvedApplicableRatesResult | null;
 } | null> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   if (!shell.canViewQuotes) return null;
   const { ctx, currentUserId, hasRestrictedMatterAccess } = shell;
   const intakeRepo = getIntakeQuoteRepository();
@@ -3525,6 +3550,7 @@ export async function loadQuoteDetailPageData(
       ? matterRepo.getMatterById<Matter>(ctx, quote.convertedMatterId, {
           viewerId: currentUserId,
           hasRestrictedMatterAccess,
+          canViewCdd: shell.canViewCdd,
         })
       : Promise.resolve<Matter | null>(null),
     rateClientId || quote.practiceAreaId
@@ -3567,6 +3593,7 @@ export async function loadQuoteDetailPageData(
     initialResolvedRates:
       ratesRes && !isActionDenied(ratesRes) ? (ratesRes.resolved ?? null) : null,
   };
+  });
 }
 
 export async function loadQuoteFormPageData(
@@ -3582,7 +3609,7 @@ export async function loadQuoteFormPageData(
   organisations: Organisation[];
   links: PersonOrganisationLink[];
 } | null> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   if (
     !shell.currentUserPermissions.includes('quote:view') ||
     !shell.currentUserPermissions.includes('quote:edit')
@@ -3648,6 +3675,7 @@ export async function loadQuoteFormPageData(
     organisations,
     links,
   };
+  });
 }
 
 // ============================================================================
@@ -3659,6 +3687,7 @@ async function hydrateLinkedRecordsForTasks(
   viewerId: string,
   hasRestrictedMatterAccess: boolean,
   canViewQuotes: boolean,
+  canViewCdd: boolean,
   tasks: readonly Task[],
   extraLinkedRecord?: { recordType: string; recordId: string } | null,
 ): Promise<{
@@ -3699,6 +3728,7 @@ async function hydrateLinkedRecordsForTasks(
       ? matterRepo.listMattersByIds<Matter>(ctx, Array.from(matterIds), {
           viewerId,
           hasRestrictedMatterAccess,
+          canViewCdd,
         })
       : Promise.resolve<Matter[]>([]),
     enquiryIds.size > 0
@@ -3787,7 +3817,7 @@ export async function loadTasksListPageData(
     readonly sortDir: SortDirection | null;
   };
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const taskRepo = getTaskWorkflowRepository();
   const { pageSize, offset, query } = normaliseListPagination(options);
   const tab: TasksListTabFilter = options?.tab ?? 'all';
@@ -3855,6 +3885,7 @@ export async function loadTasksListPageData(
       shell.currentUserId,
       shell.hasRestrictedMatterAccess,
       shell.canViewQuotes,
+      shell.canViewCdd,
       tasks,
     );
   const { people, organisations } = await collectReferencedParties({
@@ -3893,6 +3924,7 @@ export async function loadTasksListPageData(
       sortDir: parsedSort?.direction ?? null,
     },
   };
+  });
 }
 
 export async function loadTaskDetailPageData(
@@ -3911,7 +3943,7 @@ export async function loadTaskDetailPageData(
   canTake: boolean;
   canReassign: boolean;
 } | null> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const taskRepo = getTaskWorkflowRepository();
   const task = await taskRepo.getTaskById<Task>(shell.ctx, id, {
     viewerId: shell.currentUserId,
@@ -3926,6 +3958,7 @@ export async function loadTaskDetailPageData(
       shell.currentUserId,
       shell.hasRestrictedMatterAccess,
       shell.canViewQuotes,
+      shell.canViewCdd,
       [task],
     ),
   ]);
@@ -3969,6 +4002,7 @@ export async function loadTaskDetailPageData(
     canTake,
     canReassign,
   };
+  });
 }
 
 export async function loadTaskFormPageData(
@@ -3983,12 +4017,13 @@ export async function loadTaskFormPageData(
   enquiries: Enquiry[];
   quotes: Quote[];
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const hydrated = await hydrateLinkedRecordsForTasks(
     shell.ctx,
     shell.currentUserId,
     shell.hasRestrictedMatterAccess,
     shell.canViewQuotes,
+    shell.canViewCdd,
     [],
     initialLinkedRecord,
   );
@@ -4010,6 +4045,7 @@ export async function loadTaskFormPageData(
     enquiries: hydrated.enquiries,
     quotes: hydrated.quotes,
   };
+  });
 }
 
 // ============================================================================
@@ -4028,7 +4064,7 @@ export async function loadKeyDatesPageData(
   enquiries: Enquiry[];
   people: Person[];
 }> {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const userDefaultTeamIds = userTeams(shell.effectiveWorkPerson.id, shell.teams).map(
     (t) => t.id,
   );
@@ -4069,6 +4105,7 @@ export async function loadKeyDatesPageData(
       ? matterRepo.listMattersByIds<Matter>(shell.ctx, matterIds, {
           viewerId: shell.currentUserId,
           hasRestrictedMatterAccess: shell.hasRestrictedMatterAccess,
+          canViewCdd: shell.canViewCdd,
         })
       : Promise.resolve<Matter[]>([]),
     enquiryIds.length > 0
@@ -4095,6 +4132,7 @@ export async function loadKeyDatesPageData(
     enquiries,
     people,
   };
+  });
 }
 
 // ============================================================================
@@ -4105,7 +4143,7 @@ export async function loadRegistersPageData(
   actorId: string,
   options?: LoaderOptions,
 ) {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const data = await listRegistersWorkspaceDataRecord({}, shell.currentUserId);
   const clientLabelsById: Record<string, string> = {};
   if (!isActionDenied(data) && data.ok) {
@@ -4134,6 +4172,7 @@ export async function loadRegistersPageData(
     }
   }
   return { shell, data, clientLabelsById };
+  });
 }
 
 // ============================================================================
@@ -4188,7 +4227,7 @@ export async function loadAdminPageData(
       firmAuditPage: Awaited<ReturnType<typeof listFirmAuditEntriesPage>>;
     }
 > {
-  const shell = await loadShellContext(actorId, options);
+  return withPageShell(actorId, options, async (shell) => {
   const { ctx, currentUser, teams, rbacConfig, activeTenantCfg } = shell;
 
   const canAccessAdmin = hasPersonPermission(currentUser, 'admin:access', {
@@ -4361,4 +4400,5 @@ export async function loadAdminPageData(
     entraEnvStatus: getEntraEnvStatus(),
     firmAuditPage,
   };
+  });
 }
