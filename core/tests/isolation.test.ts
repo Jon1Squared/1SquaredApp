@@ -14707,4 +14707,237 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
       await poolManager.closeAllPools();
     }
   }, 45_000);
+
+  it('R814: listVisibleMattersPageWithCount omits hard-coded matter_status.active fallback when activeStatusIds is empty and isolates custom status filters across tenants', async () => {
+    const { provisionPostgresClusterRolesAndDatabases } = await import(
+      '../src/tenancy/postgresAdminBootstrap'
+    );
+    const { TenantMatterRepository } = await import('@platform/core');
+    const { importFirmStoreModulesToPostgres } = await import(
+      '../../src/server/storePostgresImport'
+    );
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [
+        { tenantId: 'tenant-alpha', environment: 'test' },
+        { tenantId: 'tenant-bravo', environment: 'test' },
+      ],
+    });
+    const poolManager = new TenantPostgresPoolManager();
+    const runner = new TenantMigrationRunner();
+    const alphaRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'tenant-alpha',
+    };
+    const bravoRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'tenant-bravo',
+    };
+    const ctxAlpha = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Partner Alpha',
+        email: 'partner@tenant-alpha.example',
+        tenantId: 'tenant-alpha',
+        roles: ['partner', 'fee_earner', 'risk_compliance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'iso-r814-alpha',
+    });
+    const ctxBravo = resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000001',
+        name: 'Partner Bravo',
+        email: 'partner@tenant-bravo.example',
+        tenantId: 'tenant-bravo',
+        roles: ['partner', 'fee_earner', 'risk_compliance'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'iso-r814-bravo',
+    });
+
+    try {
+      await runner.applyUp(ctxAlpha, CORE_TENANT_MIGRATIONS);
+      await runner.applyUp(ctxBravo, CORE_TENANT_MIGRATIONS);
+      const alphaCfg = loadAndValidateTenantConfig(
+        alphaRaw,
+        { tenantId: 'tenant-alpha', environment: 'test' },
+        'test',
+        'multi_tenant',
+      );
+      const bravoCfg = loadAndValidateTenantConfig(
+        bravoRaw,
+        { tenantId: 'tenant-bravo', environment: 'test' },
+        'test',
+        'multi_tenant',
+      );
+      const alphaStore = createSeedStore(new Date());
+      const bravoStore = createSeedStore(new Date());
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxAlpha,
+        tenantConfig: alphaCfg,
+        store: alphaStore,
+        clearFirst: true,
+      });
+      await importFirmStoreModulesToPostgres({
+        ctx: ctxBravo,
+        tenantConfig: bravoCfg,
+        store: bravoStore,
+        clearFirst: true,
+      });
+
+      const matterRepo = new TenantMatterRepository({ poolManager });
+      const baseMatter = alphaStore.matters[0]!;
+      const makeTestMatter = (
+        id: string,
+        title: string,
+        statusId: string,
+        amlStatus: string,
+        openedViaGate: boolean,
+      ): Matter => ({
+        ...structuredClone(baseMatter),
+        id,
+        matterNumber: id,
+        title,
+        matterStatusId: statusId,
+        recordStatusId: statusId,
+        amlStatus,
+        isStaffMatter: false,
+        hasEthicalWall: false,
+        restrictedAccessUserIds: [],
+        fieldValues: {
+          ...(baseMatter.fieldValues ?? {}),
+          matterOpeningGate: {
+            allowProceed: openedViaGate,
+            estimatedFeeGbp: 5000,
+            checkedAt: '2026-11-26T00:00:00.000Z',
+            openedViaGate,
+          },
+        },
+      });
+
+      // Seed custom-status + legacy seed-status matters in Alpha and Bravo
+      await matterRepo.putMatter(
+        ctxAlpha,
+        makeTestMatter(
+          'M-R814-ALPHA-CMI',
+          'Alpha Custom CMI Incomplete',
+          'custom_status.cmi_incomplete',
+          'CMI incomplete',
+          false,
+        ),
+      );
+      await matterRepo.putMatter(
+        ctxAlpha,
+        makeTestMatter(
+          'M-R814-ALPHA-CUST-ACT',
+          'Alpha Custom Active Legacy CMI',
+          'custom_status.active',
+          'Pending',
+          false,
+        ),
+      );
+      await matterRepo.putMatter(
+        ctxAlpha,
+        makeTestMatter(
+          'M-R814-ALPHA-SEED-ACT',
+          'Alpha Seed Active Legacy CMI (Must Not Match Empty activeStatusIds)',
+          'matter_status.active',
+          'Pending',
+          false,
+        ),
+      );
+      await matterRepo.putMatter(
+        ctxAlpha,
+        makeTestMatter(
+          'M-R814-ALPHA-GATE-ACT',
+          'Alpha Custom Active Gate Opened (Must Not Match CMI Filter)',
+          'custom_status.active',
+          'Pending',
+          true,
+        ),
+      );
+
+      await matterRepo.putMatter(
+        ctxBravo,
+        makeTestMatter(
+          'M-R814-BRAVO-CMI',
+          'Bravo Custom CMI Incomplete',
+          'custom_status.cmi_incomplete',
+          'CMI incomplete',
+          false,
+        ),
+      );
+      await matterRepo.putMatter(
+        ctxBravo,
+        makeTestMatter(
+          'M-R814-BRAVO-CUST-ACT',
+          'Bravo Custom Active Legacy CMI',
+          'custom_status.active',
+          'Pending',
+          false,
+        ),
+      );
+
+      // 1. With activeStatusIds: [], ONLY exact status_id matches (no matter_status.active fallback!)
+      const emptyActivePage = await matterRepo.listVisibleMattersPageWithCount<Matter>(
+        ctxAlpha,
+        {
+          viewerId: 'P-000001',
+          includeRestricted: true,
+          statusId: 'custom_status.cmi_incomplete',
+          cmiIncompleteStatusIds: ['custom_status.cmi_incomplete'],
+          activeStatusIds: [],
+          limit: 200,
+        },
+      );
+      expect(emptyActivePage.items.map((m) => m.id)).toEqual(['M-R814-ALPHA-CMI']);
+      expect(emptyActivePage.totalCount).toBe(1);
+
+      // 2. With non-seed activeStatusIds, matches custom CMI + custom active legacy rows strictly within Alpha
+      const customActivePage = await matterRepo.listVisibleMattersPageWithCount<Matter>(
+        ctxAlpha,
+        {
+          viewerId: 'P-000001',
+          includeRestricted: true,
+          statusId: 'custom_status.cmi_incomplete',
+          cmiIncompleteStatusIds: ['custom_status.cmi_incomplete'],
+          activeStatusIds: ['custom_status.active'],
+          limit: 200,
+        },
+      );
+      expect(customActivePage.items.map((m) => m.id).sort()).toEqual([
+        'M-R814-ALPHA-CMI',
+        'M-R814-ALPHA-CUST-ACT',
+      ]);
+      expect(customActivePage.totalCount).toBe(2);
+
+      // 3. Bravo query sees only Bravo rows and zero Alpha rows
+      const bravoPage = await matterRepo.listVisibleMattersPageWithCount<Matter>(
+        ctxBravo,
+        {
+          viewerId: 'P-000001',
+          includeRestricted: true,
+          statusId: 'custom_status.cmi_incomplete',
+          cmiIncompleteStatusIds: ['custom_status.cmi_incomplete'],
+          activeStatusIds: ['custom_status.active'],
+          limit: 200,
+        },
+      );
+      expect(bravoPage.items.map((m) => m.id).sort()).toEqual([
+        'M-R814-BRAVO-CMI',
+        'M-R814-BRAVO-CUST-ACT',
+      ]);
+      expect(bravoPage.totalCount).toBe(2);
+    } finally {
+      setTestActorSession(null);
+      setActiveTenantConfigForTesting(null);
+      await poolManager.closeAllPools();
+    }
+  }, 45_000);
 });

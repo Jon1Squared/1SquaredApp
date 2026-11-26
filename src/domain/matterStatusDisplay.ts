@@ -19,19 +19,6 @@ export function resolveMatterStatusSystemKey(
   if (match?.systemKey?.trim()) {
     return match.systemKey.trim().toLowerCase();
   }
-  if (
-    id === 'matter_status.prospective_enquiry' ||
-    id === 'matter_status.prospective'
-  ) {
-    return 'prospective';
-  }
-  if (id === 'matter_status.cmi_incomplete') return 'cmi_incomplete';
-  if (id === 'matter_status.active') return 'active';
-  if (id === 'matter_status.on_hold') return 'on_hold';
-  if (id === 'matter_status.completed') return 'completed';
-  if (id === 'matter_status.closed') return 'closed';
-  if (id === 'matter_status.archived') return 'archived';
-  if (id === 'matter_status.aborted_lost') return 'aborted';
   return null;
 }
 

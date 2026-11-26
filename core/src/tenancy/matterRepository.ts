@@ -2739,19 +2739,14 @@ export class TenantMatterRepository extends TenantScopedRepository {
       if (statusId) {
         params.push(statusId);
         const sIdx = params.length;
-        if (cmiIncompleteStatusIds.includes(statusId)) {
-          const legacyActiveClause =
-            activeStatusIds.length > 0
-              ? (() => {
-                  params.push(activeStatusIds);
-                  return `m.status_id = ANY($${params.length}::text[])`;
-                })()
-              : "m.status_id = 'matter_status.active'";
+        if (cmiIncompleteStatusIds.includes(statusId) && activeStatusIds.length > 0) {
+          params.push(activeStatusIds);
+          const activeIdx = params.length;
           clauses.push(
             `(
               m.status_id = $${sIdx}
               OR (
-                ${legacyActiveClause}
+                m.status_id = ANY($${activeIdx}::text[])
                 AND COALESCE(m.fields_json->'matterOpeningGate'->>'openedViaGate', 'false') <> 'true'
                 AND m.opening_record_json->>'amlStatus' IN ('Pending', 'CMI incomplete')
               )
