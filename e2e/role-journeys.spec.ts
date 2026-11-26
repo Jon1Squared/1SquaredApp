@@ -1804,6 +1804,9 @@ test.describe.serial('S1-06: Client Care dispatch, Admin Email Outbox viewer, si
       await coordPage
         .locator('#enq-summary')
         .fill('Out-of-scope criminal representation request');
+      await coordPage
+        .locator('#enq-notes')
+        .fill('Caller asked for magistrates court criminal defence representation.');
       await coordPage.locator('#enq-privacy-notice').selectOption('yes');
       await coordPage.getByRole('button', { name: 'Send to Team' }).first().click();
 
