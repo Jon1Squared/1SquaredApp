@@ -2,6 +2,8 @@ import { expect, test, type Page } from '@playwright/test';
 import { createDefaultRbacConfig } from '../core/src/domain/rbac/registry';
 import { resolveTenantFromVerifiedToken } from '../core/src/tenancy/index';
 import { TenantMatterRepository } from '../core/src/tenancy/matterRepository';
+import { TenantMoneyOnAccountRepository } from '../core/src/tenancy/moneyOnAccountRepository';
+import { TenantOutboxRepository } from '../core/src/tenancy/outboxRepository';
 import { TenantRegisterRepository } from '../core/src/tenancy/registerRepository';
 import { getGlobalTenantPostgresPoolManager } from '../core/src/tenancy/postgresPoolManager';
 import {
@@ -1511,6 +1513,7 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
     }
 
     // Partner sees zero Override button for Residential Conveyancing CDD (allowCddOverride: false)
+    // and grants an audited override for Funds on Account so Fee Earner can open once CDD completes.
     const partnerContext = await browser.newContext({
       storageState: storageStatePathFor('partner'),
     });
@@ -1524,6 +1527,16 @@ test.describe.serial('S1-05: High-risk opening sign-off, opening gate & override
       await expect(
         partnerPage.getByTestId('override-precondition-cdd_complete-btn'),
       ).toHaveCount(0);
+      await partnerPage
+        .getByTestId('override-precondition-funds_on_account-btn')
+        .click();
+      await partnerPage
+        .getByTestId('opening-override-reason-input')
+        .fill('Partner undertaking confirmed pending conveyancing search funds.');
+      await partnerPage.getByTestId('confirm-opening-override-btn').click();
+      await expect(
+        partnerPage.getByTestId('opening-precondition-funds_on_account'),
+      ).toContainText('Overridden', { timeout: 15_000 });
       expect(partnerErrors).toEqual([]);
     } finally {
       await partnerContext.close();
@@ -1927,6 +1940,393 @@ test.describe.serial('S1-07: Quote POA, Price Transparency, PDF download, email 
       expect(feErrors).toEqual([]);
     } finally {
       await feContext.close();
+    }
+  });
+});
+
+test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD -> Client Care -> Money on Account -> Open Matter', () => {
+  function e2eS108AdminTenantContext() {
+    process.env.PLATFORM_TENANT_PACKAGE_DIR ??= 'client-not-a-law-firm';
+    process.env.PLATFORM_ENVIRONMENT ??= 'test';
+    process.env.PLATFORM_POSTGRES_HOST ??= '127.0.0.1';
+    process.env.PLATFORM_POSTGRES_PORT ??= '5432';
+    process.env.PLATFORM_POSTGRES_RUNTIME_PASSWORD ??= 'onesquared_local_runtime';
+    return resolveTenantFromVerifiedToken({
+      verifiedToken: {
+        __verifiedByOidcMiddleware: true,
+        sub: 'P-000004',
+        tenantId: 'not-a-law-firm',
+        email: 'huw.pritchard@notalawfirm.example',
+        name: 'Huw Pritchard',
+        roles: ['admin', 'partner'],
+        mfaVerified: true,
+      },
+      hostingMode: 'multi_tenant',
+      environment: 'test',
+      correlationId: 'e2e-s108-stage1-journey',
+    });
+  }
+
+  test('1. Full joined Stage 1 journey across Enquiry, Quote POA, CDD, Engagement Letter, Money on Account & Finance receipt opens matter and persists 3 PDF outbox rows', async ({
+    browser,
+  }) => {
+    const suffix = Date.now();
+    const uniqueEmail = `stage1.s108.${suffix}@example.test`;
+    const firstName = 'Gwilym';
+    const surname = `Humphreys${suffix}`;
+    let enquiryId = '';
+    let quoteId = '';
+    let clientId = '';
+    let matterId = '';
+    let moaPaymentRef = '';
+
+    // 1. Enquiries Coordinator creates a Dispute Resolution Pre-Action enquiry and sends to team
+    const coordContext = await browser.newContext({
+      storageState: storageStatePathFor('enquiries_coordinator'),
+    });
+    const coordPage = await coordContext.newPage();
+    const coordErrors = attachPageErrorCollector(coordPage);
+    try {
+      await coordPage.goto('/enquiries/new');
+      await expect(coordPage.locator('#enq-first-name')).toBeVisible({ timeout: 15_000 });
+      await coordPage.locator('#enq-first-name').fill(firstName);
+      await coordPage.locator('#enq-last-name').fill(surname);
+      await coordPage.locator('#enq-phone').fill('029 2010 9944');
+      await coordPage.locator('#enq-email').fill(uniqueEmail);
+      await coordPage
+        .locator('#enq-practice-area')
+        .selectOption('work_type.dispute_resolution');
+      await coordPage
+        .locator('#enq-subcat')
+        .selectOption('work_type.dispute_resolution_pre_action_correspondence');
+      await coordPage
+        .locator('#enq-summary')
+        .fill(`Pre-action commercial debt claim ${suffix}`);
+      await coordPage
+        .locator('#enq-notes')
+        .fill('Client seeks formal Letter Before Claim for unpaid commercial invoice.');
+      await coordPage.locator('#enq-privacy-notice').selectOption('yes');
+      await coordPage.getByRole('button', { name: 'Send to Team' }).first().click();
+
+      await expect(coordPage).toHaveURL(/\/enquiries\/(ENQ-\d+)$/, { timeout: 20_000 });
+      enquiryId = coordPage.url().match(/\/enquiries\/(ENQ-\d+)$/)?.[1] ?? '';
+      expect(enquiryId).toMatch(/^ENQ-\d+$/);
+      expect(coordErrors).toEqual([]);
+    } finally {
+      await coordContext.close();
+    }
+
+    // 2. Fee Earner creates Quote from Enquiry (Dispute Resolution, £500 POA), emails it, records Accepted, and converts to prospective matter
+    const feContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const fePage = await feContext.newPage();
+    const feErrors = attachPageErrorCollector(fePage);
+    try {
+      await fePage.goto(`/enquiries/${enquiryId}`);
+      await expect(fePage.getByRole('link', { name: 'Create quote' })).toBeVisible({
+        timeout: 15_000,
+      });
+      await fePage.getByRole('link', { name: 'Create quote' }).click();
+      await expect(fePage).toHaveURL(
+        new RegExp(`/quotes/new\\?enquiryId=${enquiryId}`),
+        { timeout: 15_000 },
+      );
+
+      await expect(fePage.locator('#qte-practice-area')).toHaveValue(
+        'work_type.dispute_resolution',
+        { timeout: 10_000 },
+      );
+      await expect(fePage.locator('#qte-work-type')).toHaveValue(
+        'work_type.dispute_resolution_pre_action_correspondence',
+        { timeout: 10_000 },
+      );
+      await expect(fePage.locator('#qte-prospect-email')).toHaveValue(uniqueEmail);
+      await expect(fePage.getByTestId('quote-price-transparency-preview')).toContainText(
+        'Pre-Action Protocol',
+        { timeout: 10_000 },
+      );
+      await fePage
+        .locator('#qte-scope')
+        .fill('Draft Letter Before Claim and negotiate pre-action settlement.');
+      await fePage.locator('#qte-fee-amount').fill('1500');
+      await fePage.getByTestId('quote-poa-toggle').check();
+      await fePage.getByTestId('quote-poa-amount-input').fill('500');
+      await fePage.getByRole('button', { name: 'Save as draft' }).click();
+
+      await expect(fePage).toHaveURL(/\/quotes\/(Q-\d{4}-\d+)$/, { timeout: 20_000 });
+      quoteId = fePage.url().match(/\/quotes\/(Q-\d{4}-\d+)$/)?.[1] ?? '';
+      expect(quoteId).toMatch(/^Q-\d{4}-\d+$/);
+
+      await fePage.getByTestId('quote-send-email-open-btn').click();
+      await fePage.getByTestId('quote-send-email-submit-btn').click();
+      await expect(fePage.getByTestId('quote-outbox-queued-banner')).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await fePage.getByRole('button', { name: 'Record outcome' }).click();
+      await fePage.getByRole('button', { name: 'Save outcome' }).click();
+      await expect(
+        fePage.getByRole('button', { name: 'Convert to matter' }),
+      ).toBeVisible({ timeout: 15_000 });
+      await fePage.getByRole('button', { name: 'Convert to matter' }).click();
+
+      await expect(fePage).toHaveURL(/\/matters\/new\?/, { timeout: 20_000 });
+      const clientIdMatch = fePage.url().match(/[?&]clientId=([^&]+)/);
+      clientId = clientIdMatch?.[1] ? decodeURIComponent(clientIdMatch[1]) : '';
+      expect(clientId).toMatch(/^P-\d+$/);
+
+      const partnerSelect = fePage.locator('#nm-partner');
+      if ((await partnerSelect.count()) > 0 && !(await partnerSelect.inputValue())) {
+        await partnerSelect.selectOption('P-000001');
+      }
+
+      const partiesSection = fePage.locator('section[aria-labelledby="card-2-heading"]');
+      const clientCapSelect = partiesSection.locator(
+        'select[aria-label="Client\'s role in this matter"]',
+      );
+      if ((await clientCapSelect.count()) > 0 && !(await clientCapSelect.first().inputValue())) {
+        await clientCapSelect.first().selectOption({ index: 1 });
+      }
+      const addPartyBtn = partiesSection.getByRole('button', { name: 'Add party' });
+      if (!(await addPartyBtn.isVisible())) {
+        await fePage.locator('#card-2-heading').click();
+      }
+      await addPartyBtn.click();
+      await expect(fePage.locator('#nm-party-relationship')).toBeVisible({ timeout: 10_000 });
+      await fePage.locator('#nm-party-relationship').selectOption('OP');
+      const partyCapSelect = fePage.locator('#nm-party-capacity-select');
+      await expect(partyCapSelect).toBeEnabled({ timeout: 10_000 });
+      await partyCapSelect.selectOption({ index: 1 });
+      const orgSearch = fePage.getByRole('searchbox', {
+        name: /Search existing people or organisations/i,
+      });
+      await orgSearch.fill('Ty Glas Development Limited');
+      await fePage
+        .getByRole('button', { name: /Add Ty Glas Development Limited as party/i })
+        .click();
+      await expect(partiesSection).toContainText('Ty Glas Development Limited');
+
+      const conflictSearchSection = fePage.getByRole('region', {
+        name: '5 · CONFLICT SEARCH',
+      });
+      const conflictMaxBtn = conflictSearchSection.getByRole('button', { name: 'Maximise' });
+      if ((await conflictMaxBtn.count()) > 0 && (await conflictMaxBtn.first().isVisible())) {
+        await conflictMaxBtn.first().click();
+      }
+      await fePage.getByRole('button', { name: 'Run conflict search' }).first().click();
+      await expect(conflictSearchSection).toContainText('Last run', { timeout: 15_000 });
+
+      const outcomeSection = fePage.getByRole('region', {
+        name: '6 · OUTCOME AND DECLARATION',
+      });
+      const outcomeMaxBtn = outcomeSection.getByRole('button', { name: 'Maximise' });
+      if ((await outcomeMaxBtn.count()) > 0 && (await outcomeMaxBtn.first().isVisible())) {
+        await outcomeMaxBtn.first().click();
+      }
+      await expect(outcomeSection).toContainText('Cleared by fee earner', { timeout: 15_000 });
+      await fePage
+        .getByLabel(/I confirm the parties listed are complete/)
+        .check();
+      const submitBtn = fePage.getByRole('button', { name: 'Submit', exact: true });
+      await expect(submitBtn).toBeEnabled({ timeout: 10_000 });
+      await submitBtn.click();
+
+      await expect(fePage.locator('[data-testid="matter-error-summary"]')).toHaveCount(0);
+      await expect(fePage).toHaveURL(/\/matters\/(M-\d+)$/, { timeout: 25_000 });
+      matterId = fePage.url().match(/\/matters\/(M-\d+)$/)?.[1] ?? '';
+      expect(matterId).toMatch(/^M-\d+$/);
+
+      // Opening gate blocks all three preconditions initially
+      await expect(fePage.getByTestId('opening-precondition-cdd_complete')).toContainText(
+        'Blocked',
+        { timeout: 15_000 },
+      );
+      await expect(fePage.getByTestId('opening-precondition-engagement_signed')).toContainText(
+        'Blocked',
+      );
+      await expect(fePage.getByTestId('opening-precondition-funds_on_account')).toContainText(
+        'Blocked',
+      );
+
+      // 3. Complete Client CDD for newly created Person client
+      await fePage.goto(`/people/${clientId}?tab=compliance`);
+      const cddCard = fePage.getByTestId('cdd-checklist-card');
+      await expect(cddCard).toBeVisible({ timeout: 15_000 });
+      await cddCard.getByRole('button', { name: 'Start CDD' }).click();
+      await expect(cddCard.locator('[data-testid^="cdd-item-"]').first()).toBeVisible({
+        timeout: 15_000,
+      });
+      const items = cddCard.locator('[data-testid^="cdd-item-"]');
+      const itemCount = await items.count();
+      expect(itemCount).toBeGreaterThan(0);
+      for (let i = 0; i < itemCount; i++) {
+        const item = items.nth(i);
+        await item.locator('input[type="text"]').fill(`Stage 1 CDD check ${i + 1}`);
+        await item.getByRole('button', { name: 'Mark recorded' }).click();
+        await expect(item).toContainText('Recorded', { timeout: 15_000 });
+      }
+      await cddCard.getByRole('button', { name: 'Complete CDD' }).click();
+      await expect(cddCard).toContainText('Recorded manually by Dafydd Evans', {
+        timeout: 15_000,
+      });
+
+      // 4. Send Client Care engagement letter PDF & upload signed copy
+      await fePage.goto(`/matters/${matterId}`);
+      await expect(fePage.getByTestId('opening-precondition-cdd_complete')).toContainText('Met', {
+        timeout: 15_000,
+      });
+      await fePage.getByTestId('engagement-recipient-email-input').fill(uniqueEmail);
+      await fePage.getByTestId('send-client-care-btn').click();
+      await expect(fePage.getByTestId('matter-engagement-panel')).toContainText('Sent', {
+        timeout: 15_000,
+      });
+      await fePage.getByTestId('engagement-signed-file-input').setInputFiles({
+        name: 'stage1-signed-engagement.pdf',
+        mimeType: 'application/pdf',
+        buffer: Buffer.from('%PDF-1.4\n% Stage 1 signed Client Care copy\n%%EOF\n'),
+      });
+      await fePage.getByTestId('upload-engagement-signed-btn').click();
+      await expect(fePage.getByTestId('opening-precondition-engagement_signed')).toContainText(
+        'Met',
+        { timeout: 20_000 },
+      );
+
+      // 5. Fee earner sends £500 Money on Account request (pre-filled from Quote); cannot record receipt
+      const moaPanel = fePage.getByTestId('matter-moa-panel');
+      await expect(moaPanel).toBeVisible({ timeout: 15_000 });
+      await expect(fePage.getByTestId('moa-record-receipt-panel')).toHaveCount(0);
+      await expect(fePage.getByTestId('moa-amount-input')).toHaveValue('500.00');
+      await fePage.getByTestId('moa-recipient-email-input').fill(uniqueEmail);
+      await fePage.getByTestId('moa-send-request-btn').dblclick();
+
+      await expect(fePage.getByTestId('moa-requests-list')).toContainText('£500.00', {
+        timeout: 20_000,
+      });
+      const reqText = (await fePage.getByTestId('moa-requests-list').textContent()) ?? '';
+      moaPaymentRef = reqText.match(/\b[A-Z0-9]{2,6}-[A-Z0-9-]+-\d{2}\b/)?.[0] ?? '';
+      expect(moaPaymentRef).toBeTruthy();
+      expect(moaPaymentRef.length).toBeLessThanOrEqual(18);
+      expect(feErrors).toEqual([]);
+    } finally {
+      await feContext.close();
+    }
+
+    // 6. Finance opens matter, verifies no CDD leakage (R812), uploads proof & records £500 receipt
+    const finContext = await browser.newContext({
+      storageState: storageStatePathFor('finance'),
+    });
+    const finPage = await finContext.newPage();
+    const finErrors = attachPageErrorCollector(finPage);
+    try {
+      await finPage.goto(`/matters/${matterId}`);
+      await expect(finPage.getByTestId('matter-opening-gate-panel')).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(finPage.getByTestId('opening-precondition-cdd_complete')).toContainText(
+        'Not available',
+      );
+      await expect(finPage.getByTestId('moa-record-receipt-panel')).toBeVisible();
+
+      await finPage.getByTestId('moa-receipt-file-input').setInputFiles({
+        name: 'stage1-remittance-advice.pdf',
+        mimeType: 'application/pdf',
+        buffer: Buffer.from('%PDF-1.4\n% Stage 1 bank remittance advice\n%%EOF\n'),
+      });
+      await finPage.getByTestId('moa-receipt-bank-ref-input').fill(`FPS-${moaPaymentRef}`);
+      await finPage.getByTestId('moa-record-receipt-btn').click();
+
+      await expect(finPage.getByTestId('opening-precondition-funds_on_account')).toContainText(
+        'Met',
+        { timeout: 20_000 },
+      );
+      await expect(
+        finPage.locator('[data-testid^="moa-receipt-download-link-"]').first(),
+      ).toBeVisible({ timeout: 15_000 });
+
+      await finPage.getByRole('tab', { name: 'Time & billing' }).click();
+      await expect(finPage.getByTestId('finance-tab-moa-banner')).toContainText(
+        'Funds cleared',
+        { timeout: 15_000 },
+      );
+      expect(finErrors).toEqual([]);
+    } finally {
+      await finContext.close();
+    }
+
+    // 7. Fee Earner clicks Open matter -> matter opens cleanly as Active with permanent number
+    const feOpenContext = await browser.newContext({
+      storageState: storageStatePathFor('fee_earner'),
+    });
+    const feOpenPage = await feOpenContext.newPage();
+    const feOpenErrors = attachPageErrorCollector(feOpenPage);
+    try {
+      await feOpenPage.goto(`/matters/${matterId}`);
+      await expect(feOpenPage.getByTestId('matter-opening-gate-panel')).toContainText(
+        'Ready to open',
+        { timeout: 15_000 },
+      );
+      await feOpenPage.getByTestId('open-prospective-matter-btn').click();
+      await expect(feOpenPage.getByTestId('matter-opening-gate-panel')).toHaveCount(0, {
+        timeout: 20_000,
+      });
+      expect(feOpenErrors).toEqual([]);
+    } finally {
+      await feOpenContext.close();
+    }
+
+    // 8. Admin inspects MOA config summary (masked bank details) & verifies all 3 PDF outbox emails in PG
+    const adminContext = await browser.newContext({
+      storageState: storageStatePathFor('admin'),
+    });
+    const adminPage = await adminContext.newPage();
+    const adminErrors = attachPageErrorCollector(adminPage);
+    try {
+      await adminPage.goto('/admin/email-outbox');
+      const moaAdminCard = adminPage.getByTestId('admin-moa-config-summary');
+      await expect(moaAdminCard).toBeVisible({ timeout: 15_000 });
+      await expect(moaAdminCard).toContainText('**-**-00');
+      await expect(moaAdminCard).toContainText('******00');
+      await expect(moaAdminCard).toContainText('multi-factor authentication');
+      expect(adminErrors).toEqual([]);
+    } finally {
+      await adminContext.close();
+    }
+
+    const adminCtx = e2eS108AdminTenantContext();
+    const matterRepo = new TenantMatterRepository();
+    const moaRepo = new TenantMoneyOnAccountRepository();
+    const outboxRepo = new TenantOutboxRepository();
+    try {
+      const openedMatter = await matterRepo.getMatterById<Matter>(adminCtx, matterId, {
+        includeRestricted: true,
+      });
+      expect(openedMatter?.matterStatusId).toBe('matter_status.active');
+      expect(openedMatter?.matterNumber).toMatch(/^[A-Z0-9_-]+-\d{4}$/);
+
+      const storedRequests = await moaRepo.listRequestsForMatter(adminCtx, matterId);
+      expect(storedRequests.length).toBe(1);
+      expect(storedRequests[0]!.status).toBe('received');
+
+      const outboxList = await outboxRepo.listOutboxRecords(adminCtx, { limit: 100 });
+      const matchingOutbox = outboxList.filter((r) =>
+        r.recipients.to.includes(uniqueEmail),
+      );
+      expect(matchingOutbox.length).toBe(3);
+      for (const row of matchingOutbox) {
+        const att = await outboxRepo.getVisibleOutboxAttachmentForAdmin(adminCtx, {
+          outboxId: row.id,
+          ordinal: 0,
+          viewerId: 'P-000004',
+        });
+        expect(att).not.toBeNull();
+        expect(
+          Buffer.from(att!.contentBytes).subarray(0, 5).toString('ascii'),
+        ).toBe('%PDF-');
+      }
+      expect(JSON.stringify(matchingOutbox)).not.toMatch(/amlStatus|clientCddStatus/);
+    } finally {
+      await getGlobalTenantPostgresPoolManager().closeAllPools();
     }
   });
 });

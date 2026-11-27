@@ -35,14 +35,22 @@ import {
   type CommunicationChaseEventRecord,
   type CommunicationChaseRecord,
   type EngagementDispatchRecord,
+  type MoneyOnAccountConfiguration,
+  type MoneyOnAccountReceiptRecord,
+  type MoneyOnAccountRequestRecord,
 } from '@platform/core-api';
 import {
   addNoteAction,
+  cancelMoneyOnAccountRequestAction,
+  createAndSendMoneyOnAccountRequestAction,
   liftMatterRestrictionAction,
+  matchPmsClientLedgerReceiptAction,
   openProspectiveMatterAction,
   overrideMatterOpeningPreconditionAction,
   recordEngagementLetterSignedAction,
+  recordMoneyOnAccountReceiptAction,
   retryCommunicationChaseAction,
+  reverseMoneyOnAccountReceiptAction,
   revokeMatterOpeningOverrideAction,
   saveMatterAction,
   saveTaskAction,
@@ -87,7 +95,8 @@ import {
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
 import { hrefForId, personDisplayName, primaryEmail } from '@/domain/names';
-import { resolvePmsPence } from '@/domain/pms';
+import { formatGbp, resolvePmsPence } from '@/domain/pms';
+import type { PmsClientAccountEntry } from '@/pms/types';
 import type {
   AppRole,
   AuditEntry,
@@ -162,6 +171,21 @@ interface MatterProfileClientProps {
     events: readonly CommunicationChaseEventRecord[];
   }>;
   signedEngagementDownloadUrl?: string | null;
+  effectiveMoneyOnAccountConfig?: MoneyOnAccountConfiguration;
+  moneyOnAccountRequests?: MoneyOnAccountRequestRecord[];
+  moneyOnAccountReceipts?: MoneyOnAccountReceiptRecord[];
+  moneyOnAccountChases?: Array<{
+    chase: CommunicationChaseRecord;
+    events: readonly CommunicationChaseEventRecord[];
+  }>;
+  unmatchedPmsClientReceipts?: PmsClientAccountEntry[];
+  moaReceiptDownloadUrls?: Record<string, string>;
+  moneyOnAccountAgreedPence?: number | null;
+  moneyOnAccountBankConfigured?: boolean;
+  canViewMoneyOnAccount?: boolean;
+  canRequestMoneyOnAccount?: boolean;
+  canRecordMoneyOnAccountReceipt?: boolean;
+  canMatchPmsClientLedgerReceipt?: boolean;
   emailProviderDisabled?: boolean;
   firmName?: string;
   notes: Note[];
@@ -391,6 +415,18 @@ export function MatterProfileClient({
   engagementDispatches = [],
   engagementChases = [],
   signedEngagementDownloadUrl = null,
+  effectiveMoneyOnAccountConfig,
+  moneyOnAccountRequests = [],
+  moneyOnAccountReceipts = [],
+  moneyOnAccountChases = [],
+  unmatchedPmsClientReceipts = [],
+  moaReceiptDownloadUrls = {},
+  moneyOnAccountAgreedPence = null,
+  moneyOnAccountBankConfigured = false,
+  canViewMoneyOnAccount = false,
+  canRequestMoneyOnAccount = false,
+  canRecordMoneyOnAccountReceipt = false,
+  canMatchPmsClientLedgerReceipt = false,
   emailProviderDisabled = false,
   firmName,
   notes,
@@ -516,6 +552,115 @@ export function MatterProfileClient({
         : null),
     [engagementChases],
   );
+  const moaPanelRef = useRef<HTMLElement | null>(null);
+  const moaReceiptFileInputRef = useRef<HTMLInputElement | null>(null);
+  const moaSendControllerRef = useRef<ReturnType<
+    typeof createSendIdempotencyController
+  > | null>(null);
+  const getMoaSendController = () => {
+    if (!moaSendControllerRef.current) {
+      moaSendControllerRef.current = createSendIdempotencyController();
+    }
+    return moaSendControllerRef.current;
+  };
+  useEffect(() => {
+    moaSendControllerRef.current?.reset();
+  }, [matter.id]);
+  const [moaRequestAmountGbp, setMoaRequestAmountGbp] = useState<string>(() =>
+    typeof moneyOnAccountAgreedPence === 'number' && moneyOnAccountAgreedPence > 0
+      ? minorUnitsToPounds(moneyOnAccountAgreedPence).toFixed(2)
+      : '',
+  );
+  const [moaRecipientEmail, setMoaRecipientEmail] = useState(
+    () => defaultEngagementContact.email,
+  );
+  const [moaRecipientName, setMoaRecipientName] = useState(
+    () => defaultEngagementContact.name,
+  );
+  const [moaRequestNotes, setMoaRequestNotes] = useState('');
+  const [moaBusy, setMoaBusy] = useState(false);
+  const [cancelTargetRequestId, setCancelTargetRequestId] = useState<string | null>(null);
+  const [cancelRequestReason, setCancelRequestReason] = useState('');
+  const [reverseTargetReceiptId, setReverseTargetReceiptId] = useState<string | null>(null);
+  const [reverseReceiptReason, setReverseReceiptReason] = useState('');
+
+  const moaSummaryMetrics = useMemo(() => {
+    const unreversedByRequestId = new Map<string, number>();
+    const receiptsByRequestId = new Map<string, MoneyOnAccountReceiptRecord[]>();
+    for (const rcpt of moneyOnAccountReceipts) {
+      const list = receiptsByRequestId.get(rcpt.requestId) ?? [];
+      list.push(rcpt);
+      receiptsByRequestId.set(rcpt.requestId, list);
+      if (!rcpt.reversedAt) {
+        unreversedByRequestId.set(
+          rcpt.requestId,
+          (unreversedByRequestId.get(rcpt.requestId) ?? 0) + rcpt.amountPence,
+        );
+      }
+    }
+    const nonCancelledRequests = moneyOnAccountRequests.filter(
+      (r) => r.status !== 'cancelled',
+    );
+    const activeOpenRequests = moneyOnAccountRequests.filter(
+      (r) => r.status === 'requested' || r.status === 'part_received',
+    );
+    const requestedPence = nonCancelledRequests.reduce(
+      (sum, r) => sum + r.requestedAmountPence,
+      0,
+    );
+    const receivedPence = nonCancelledRequests.reduce(
+      (sum, r) => sum + (unreversedByRequestId.get(r.id) ?? 0),
+      0,
+    );
+    const fundsPre = openingGateState?.evaluation.preconditions.find(
+      (p) => p.key === 'funds_on_account',
+    );
+    return {
+      unreversedByRequestId,
+      receiptsByRequestId,
+      nonCancelledRequests,
+      activeOpenRequests,
+      requestedPence,
+      receivedPence,
+      fundsPre: fundsPre ?? null,
+    };
+  }, [moneyOnAccountRequests, moneyOnAccountReceipts, openingGateState]);
+
+  const [moaReceiptRequestId, setMoaReceiptRequestId] = useState<string>('');
+  const selectedReceiptRequestId = moaSummaryMetrics.activeOpenRequests.some(
+    (r) => r.id === moaReceiptRequestId,
+  )
+    ? moaReceiptRequestId
+    : (moaSummaryMetrics.activeOpenRequests[0]?.id ?? '');
+  const [moaReceiptAmountGbp, setMoaReceiptAmountGbp] = useState<string>(() => {
+    const firstOpen = moneyOnAccountRequests.find(
+      (r) => r.status === 'requested' || r.status === 'part_received',
+    );
+    if (!firstOpen) return '';
+    const rec = moneyOnAccountReceipts
+      .filter((x) => x.requestId === firstOpen.id && !x.reversedAt)
+      .reduce((s, x) => s + x.amountPence, 0);
+    const remaining = Math.max(0, firstOpen.requestedAmountPence - rec);
+    return remaining > 0 ? minorUnitsToPounds(remaining).toFixed(2) : '';
+  });
+  const [moaReceiptDate, setMoaReceiptDate] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [moaReceiptBankRef, setMoaReceiptBankRef] = useState('');
+  const [moaReceiptNotes, setMoaReceiptNotes] = useState('');
+  const [moaReceiptFile, setMoaReceiptFile] = useState<File | null>(null);
+  const [selectedPmsMoaTxId, setSelectedPmsMoaTxId] = useState<string>('');
+  const effectiveSelectedPmsMoaTxId = unmatchedPmsClientReceipts.some(
+    (tx) => tx.transaction_id === selectedPmsMoaTxId,
+  )
+    ? selectedPmsMoaTxId
+    : (unmatchedPmsClientReceipts[0]?.transaction_id ?? '');
+  const [pmsMatchRequestId, setPmsMatchRequestId] = useState<string>('');
+  const effectivePmsMatchRequestId = moaSummaryMetrics.activeOpenRequests.some(
+    (r) => r.id === pmsMatchRequestId,
+  )
+    ? pmsMatchRequestId
+    : (moaSummaryMetrics.activeOpenRequests[0]?.id ?? '');
   const canApproveReg = userPermissions.includes('register:approve');
   const isPartnerOrMpRole =
     canApproveReg &&
@@ -1741,6 +1886,25 @@ export function MatterProfileClient({
                       Upload signed copy
                     </button>
                   ) : null}
+                  {openingGateState.isProspective &&
+                  canViewMoneyOnAccount &&
+                  moaSummaryMetrics.fundsPre?.required &&
+                  !moaSummaryMetrics.fundsPre.satisfied ? (
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      data-testid="scroll-moa-panel-btn"
+                      disabled={openingBusy || moaBusy}
+                      onClick={() => {
+                        moaPanelRef.current?.scrollIntoView?.({
+                          behavior: 'smooth',
+                          block: 'start',
+                        });
+                      }}
+                    >
+                      Manage Money on Account
+                    </button>
+                  ) : null}
                   {openingGateState.isProspective && openingGateState.canEditMatter ? (
                     <button
                       type="button"
@@ -2669,6 +2833,964 @@ export function MatterProfileClient({
               ) : null}
             </div>
           </section>
+
+          {canViewMoneyOnAccount ? (
+            <section
+              ref={moaPanelRef}
+              className="home-panel"
+              style={{ marginBottom: 16 }}
+              data-testid="matter-moa-panel"
+              aria-label="Money on Account"
+            >
+              <div className="panel-header">
+                <div className="panel-title-group">
+                  <h2 className="panel-title">Money on Account</h2>
+                  <StatusPill
+                    label={
+                      moaSummaryMetrics.fundsPre?.satisfied ||
+                      ((moneyOnAccountAgreedPence ?? 0) > 0 &&
+                        moaSummaryMetrics.receivedPence >= (moneyOnAccountAgreedPence ?? 0))
+                        ? 'Funds cleared'
+                        : moaSummaryMetrics.receivedPence > 0
+                          ? 'Part received'
+                          : moaSummaryMetrics.nonCancelledRequests.length > 0
+                            ? 'Requested'
+                            : 'Not requested'
+                    }
+                    tone={
+                      moaSummaryMetrics.fundsPre?.satisfied ||
+                      ((moneyOnAccountAgreedPence ?? 0) > 0 &&
+                        moaSummaryMetrics.receivedPence >= (moneyOnAccountAgreedPence ?? 0))
+                        ? 'positive'
+                        : moaSummaryMetrics.nonCancelledRequests.length > 0
+                          ? 'warning'
+                          : 'neutral'
+                    }
+                  />
+                </div>
+                <div
+                  className="panel-actions"
+                  style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}
+                >
+                  {typeof moneyOnAccountAgreedPence === 'number' &&
+                  moneyOnAccountAgreedPence > 0 ? (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      Agreed payment on account:{' '}
+                      <strong>
+                        {formatGbp(minorUnitsToPounds(moneyOnAccountAgreedPence))}
+                      </strong>
+                    </span>
+                  ) : null}
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    Cleared receipts:{' '}
+                    <strong>
+                      {formatGbp(minorUnitsToPounds(moaSummaryMetrics.receivedPence))}
+                    </strong>
+                  </span>
+                </div>
+              </div>
+              <div className="panel-body padded" style={{ display: 'grid', gap: 14 }}>
+                {!effectiveMoneyOnAccountConfig?.enabled || !moneyOnAccountBankConfigured ? (
+                  <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
+                    <span className="muted" style={{ fontSize: 12.5 }}>
+                      If your firm has turned on Money on Account and configured client account bank details in Administration, payment requests and client transfer details appear here.
+                    </span>
+                  </div>
+                ) : null}
+
+                {emailProviderDisabled && effectiveMoneyOnAccountConfig?.enabled ? (
+                  <div
+                    className="subcard"
+                    data-testid="moa-outbox-queued-banner"
+                    style={{ background: 'var(--bg-subtle)' }}
+                  >
+                    <span className="muted" style={{ fontSize: 12.5 }}>
+                      Outbound email delivery is currently paused on this environment. Sent payment requests are queued in{' '}
+                      <strong>Administration &rarr; Email Outbox</strong> with their PDF attached for review.
+                    </span>
+                  </div>
+                ) : null}
+
+                {(canRequestMoneyOnAccount || canRecordMoneyOnAccountReceipt) &&
+                !isMatterCurrentlyClosed ? (
+                  <div
+                    style={{
+                      display: 'grid',
+                      gap: 14,
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                    }}
+                  >
+                    {canRequestMoneyOnAccount ? (
+                      <div className="subcard" style={{ display: 'grid', gap: 8 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                          Send Money on Account request (PDF)
+                        </div>
+                        <div className="form-grid" style={{ gap: 8 }}>
+                          <div className="field-group">
+                            <label className="field-label" htmlFor="moa-request-amount">
+                              Requested amount (£) *
+                            </label>
+                            <input
+                              id="moa-request-amount"
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              className="field-input"
+                              data-testid="moa-amount-input"
+                              placeholder="500.00"
+                              value={moaRequestAmountGbp}
+                              onChange={(e) => setMoaRequestAmountGbp(e.target.value)}
+                              disabled={
+                                moaBusy ||
+                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountBankConfigured
+                              }
+                            />
+                          </div>
+                          <div className="field-group">
+                            <label className="field-label" htmlFor="moa-recipient-email">
+                              Recipient email *
+                            </label>
+                            <input
+                              id="moa-recipient-email"
+                              type="email"
+                              className="field-input"
+                              data-testid="moa-recipient-email-input"
+                              placeholder="client@example.test"
+                              value={moaRecipientEmail}
+                              onChange={(e) => setMoaRecipientEmail(e.target.value)}
+                              disabled={
+                                moaBusy ||
+                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountBankConfigured
+                              }
+                            />
+                          </div>
+                        </div>
+                        <div className="form-grid" style={{ gap: 8 }}>
+                          <div className="field-group">
+                            <label className="field-label" htmlFor="moa-recipient-name">
+                              Recipient name
+                            </label>
+                            <input
+                              id="moa-recipient-name"
+                              type="text"
+                              className="field-input"
+                              data-testid="moa-recipient-name-input"
+                              value={moaRecipientName}
+                              onChange={(e) => setMoaRecipientName(e.target.value)}
+                              disabled={
+                                moaBusy ||
+                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountBankConfigured
+                              }
+                            />
+                          </div>
+                          <div className="field-group">
+                            <label className="field-label" htmlFor="moa-request-notes">
+                              Internal note (optional)
+                            </label>
+                            <input
+                              id="moa-request-notes"
+                              type="text"
+                              className="field-input"
+                              data-testid="moa-request-notes-input"
+                              placeholder="e.g. Initial search fees on account"
+                              value={moaRequestNotes}
+                              onChange={(e) => setMoaRequestNotes(e.target.value)}
+                              disabled={
+                                moaBusy ||
+                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountBankConfigured
+                              }
+                            />
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            data-testid="moa-send-request-btn"
+                            disabled={
+                              moaBusy ||
+                              !effectiveMoneyOnAccountConfig?.enabled ||
+                              !moneyOnAccountBankConfigured ||
+                              !moaRecipientEmail.trim() ||
+                              !moaRequestAmountGbp.trim()
+                            }
+                            onClick={async () => {
+                              const parsedGbp = Number(moaRequestAmountGbp);
+                              if (!Number.isFinite(parsedGbp) || parsedGbp <= 0) {
+                                showToast('Please enter a valid positive amount in pounds.');
+                                return;
+                              }
+                              const amountPence = poundsToMinorUnits(parsedGbp);
+                              const sendCtrl = getMoaSendController();
+                              await sendCtrl.runGuarded(async (idempotencyKey) => {
+                                setMoaBusy(true);
+                                try {
+                                  const res = await createAndSendMoneyOnAccountRequestAction({
+                                    matterId: matter.id,
+                                    requestedAmountPence: amountPence,
+                                    recipientEmail: moaRecipientEmail.trim(),
+                                    recipientName: moaRecipientName.trim() || undefined,
+                                    notes: moaRequestNotes.trim() || undefined,
+                                    idempotencyKey,
+                                  });
+                                  if (isActionDenied(res) || !res.ok) {
+                                    showToast(
+                                      formatOpeningGateActionError(
+                                        res,
+                                        'Could not send Money on Account request.',
+                                      ),
+                                    );
+                                    return;
+                                  }
+                                  sendCtrl.reset();
+                                  showToast(
+                                    res.emailProviderDisabled
+                                      ? `Payment request ${res.request.paymentReference} generated and queued in Email Outbox.`
+                                      : `Payment request ${res.request.paymentReference} sent.`,
+                                  );
+                                  setMoaRequestNotes('');
+                                  router.refresh();
+                                } finally {
+                                  setMoaBusy(false);
+                                }
+                              });
+                            }}
+                          >
+                            Send payment request
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {canRecordMoneyOnAccountReceipt ? (
+                      <div
+                        className="subcard"
+                        data-testid="moa-record-receipt-panel"
+                        style={{ display: 'grid', gap: 10 }}
+                      >
+                        <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                          Record Money on Account receipt
+                        </div>
+                        {moaSummaryMetrics.activeOpenRequests.length === 0 ? (
+                          <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                            Send a Money on Account request first before recording a receipt or matching a client ledger entry.
+                          </p>
+                        ) : (
+                          <>
+                            <div className="form-grid" style={{ gap: 8 }}>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="moa-receipt-req">
+                                  Request reference *
+                                </label>
+                                <select
+                                  id="moa-receipt-req"
+                                  className="field-select"
+                                  data-testid="moa-receipt-request-select"
+                                  value={selectedReceiptRequestId}
+                                  disabled={moaBusy}
+                                  onChange={(e) => {
+                                    const nextId = e.target.value;
+                                    setMoaReceiptRequestId(nextId);
+                                    const picked = moaSummaryMetrics.activeOpenRequests.find(
+                                      (r) => r.id === nextId,
+                                    );
+                                    if (picked) {
+                                      const rec =
+                                        moaSummaryMetrics.unreversedByRequestId.get(picked.id) ?? 0;
+                                      const rem = Math.max(0, picked.requestedAmountPence - rec);
+                                      setMoaReceiptAmountGbp(
+                                        rem > 0 ? minorUnitsToPounds(rem).toFixed(2) : '',
+                                      );
+                                    }
+                                  }}
+                                >
+                                  {moaSummaryMetrics.activeOpenRequests.map((req) => (
+                                    <option key={req.id} value={req.id}>
+                                      {req.paymentReference} —{' '}
+                                      {formatGbp(minorUnitsToPounds(req.requestedAmountPence))}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="moa-receipt-amount">
+                                  Amount received (£) *
+                                </label>
+                                <input
+                                  id="moa-receipt-amount"
+                                  type="number"
+                                  min="0.01"
+                                  step="0.01"
+                                  className="field-input"
+                                  data-testid="moa-receipt-amount-input"
+                                  placeholder="500.00"
+                                  value={moaReceiptAmountGbp}
+                                  onChange={(e) => setMoaReceiptAmountGbp(e.target.value)}
+                                  disabled={moaBusy}
+                                />
+                              </div>
+                            </div>
+                            <div className="form-grid" style={{ gap: 8 }}>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="moa-receipt-date">
+                                  Date received *
+                                </label>
+                                <input
+                                  id="moa-receipt-date"
+                                  type="date"
+                                  className="field-input"
+                                  data-testid="moa-receipt-date-input"
+                                  value={moaReceiptDate}
+                                  onChange={(e) => setMoaReceiptDate(e.target.value)}
+                                  disabled={moaBusy}
+                                />
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="moa-receipt-bank-ref">
+                                  Bank transfer reference (optional)
+                                </label>
+                                <input
+                                  id="moa-receipt-bank-ref"
+                                  type="text"
+                                  className="field-input"
+                                  data-testid="moa-receipt-bank-ref-input"
+                                  placeholder="e.g. FPS credit reference"
+                                  value={moaReceiptBankRef}
+                                  onChange={(e) => setMoaReceiptBankRef(e.target.value)}
+                                  disabled={moaBusy}
+                                />
+                              </div>
+                            </div>
+                            <div className="form-grid" style={{ gap: 8 }}>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="moa-receipt-file">
+                                  Remittance advice / bank proof (PDF, JPEG or PNG, optional)
+                                </label>
+                                <input
+                                  ref={moaReceiptFileInputRef}
+                                  id="moa-receipt-file"
+                                  type="file"
+                                  accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                                  className="field-input"
+                                  data-testid="moa-receipt-file-input"
+                                  disabled={moaBusy}
+                                  onChange={(e) =>
+                                    setMoaReceiptFile(e.target.files?.[0] ?? null)
+                                  }
+                                />
+                              </div>
+                              <div className="field-group">
+                                <label className="field-label" htmlFor="moa-receipt-notes">
+                                  Finance note (optional)
+                                </label>
+                                <input
+                                  id="moa-receipt-notes"
+                                  type="text"
+                                  className="field-input"
+                                  data-testid="moa-receipt-notes-input"
+                                  placeholder="e.g. Verified on client account statement"
+                                  value={moaReceiptNotes}
+                                  onChange={(e) => setMoaReceiptNotes(e.target.value)}
+                                  disabled={moaBusy}
+                                />
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <button
+                                type="button"
+                                className="btn btn--secondary btn--sm"
+                                data-testid="moa-record-receipt-btn"
+                                disabled={
+                                  moaBusy ||
+                                  !selectedReceiptRequestId ||
+                                  !moaReceiptAmountGbp.trim() ||
+                                  !moaReceiptDate
+                                }
+                                onClick={async () => {
+                                  const parsedGbp = Number(moaReceiptAmountGbp);
+                                  if (!Number.isFinite(parsedGbp) || parsedGbp <= 0) {
+                                    showToast('Please enter a valid positive receipt amount.');
+                                    return;
+                                  }
+                                  setMoaBusy(true);
+                                  try {
+                                    let evidenceArtifactId: string | undefined;
+                                    if (moaReceiptFile) {
+                                      const formData = new FormData();
+                                      formData.set('subjectType', 'matter');
+                                      formData.set('subjectId', matter.id);
+                                      formData.set('purpose', 'moa_receipt');
+                                      formData.set('file', moaReceiptFile);
+
+                                      const uploadRes = await fetch('/api/evidence/upload', {
+                                        method: 'POST',
+                                        body: formData,
+                                      });
+                                      const uploadPayload = (await uploadRes.json()) as {
+                                        ok?: boolean;
+                                        error?: string;
+                                        artifact?: { id: string };
+                                      };
+                                      if (
+                                        !uploadRes.ok ||
+                                        !uploadPayload.ok ||
+                                        !uploadPayload.artifact?.id
+                                      ) {
+                                        showToast(
+                                          uploadPayload.error ||
+                                            'Receipt proof upload failed.',
+                                        );
+                                        return;
+                                      }
+                                      evidenceArtifactId = uploadPayload.artifact.id;
+                                    }
+
+                                    const res = await recordMoneyOnAccountReceiptAction({
+                                      requestId: selectedReceiptRequestId,
+                                      amountPence: poundsToMinorUnits(parsedGbp),
+                                      receivedDate: moaReceiptDate,
+                                      bankReference: moaReceiptBankRef.trim() || undefined,
+                                      notes: moaReceiptNotes.trim() || undefined,
+                                      evidenceArtifactId,
+                                    });
+                                    if (isActionDenied(res) || !res.ok) {
+                                      showToast(
+                                        formatOpeningGateActionError(
+                                          res,
+                                          'Could not record receipt.',
+                                        ),
+                                      );
+                                      return;
+                                    }
+                                    setMoaReceiptFile(null);
+                                    setMoaReceiptBankRef('');
+                                    setMoaReceiptNotes('');
+                                    if (moaReceiptFileInputRef.current) {
+                                      moaReceiptFileInputRef.current.value = '';
+                                    }
+                                    showToast('Money on Account receipt recorded.');
+                                    router.refresh();
+                                  } finally {
+                                    setMoaBusy(false);
+                                  }
+                                }}
+                              >
+                                Record receipt
+                              </button>
+                            </div>
+
+                            {canMatchPmsClientLedgerReceipt &&
+                            unmatchedPmsClientReceipts.length > 0 ? (
+                              <div
+                                data-testid="moa-pms-match-panel"
+                                style={{
+                                  borderTop: '1px solid var(--color-divider)',
+                                  paddingTop: 10,
+                                  display: 'grid',
+                                  gap: 8,
+                                }}
+                              >
+                                <div style={{ fontWeight: 700, fontSize: 13 }}>
+                                  Match unmatched PMS client account receipt
+                                </div>
+                                <div className="form-grid" style={{ gap: 8 }}>
+                                  <div className="field-group">
+                                    <label className="field-label" htmlFor="moa-pms-tx">
+                                      PMS client account receipt
+                                    </label>
+                                    <select
+                                      id="moa-pms-tx"
+                                      className="field-select"
+                                      data-testid="moa-pms-tx-select"
+                                      value={effectiveSelectedPmsMoaTxId}
+                                      disabled={moaBusy}
+                                      onChange={(e) => setSelectedPmsMoaTxId(e.target.value)}
+                                    >
+                                      {unmatchedPmsClientReceipts.map((tx) => {
+                                        const txPence = resolvePmsPence(tx.amount_pence, tx.amount);
+                                        return (
+                                          <option key={tx.transaction_id} value={tx.transaction_id}>
+                                            {tx.date} · {tx.transaction_id} ·{' '}
+                                            {formatGbp(minorUnitsToPounds(txPence))} —{' '}
+                                            {tx.description}
+                                          </option>
+                                        );
+                                      })}
+                                    </select>
+                                  </div>
+                                  <div className="field-group">
+                                    <label className="field-label" htmlFor="moa-pms-req">
+                                      Apply to request
+                                    </label>
+                                    <select
+                                      id="moa-pms-req"
+                                      className="field-select"
+                                      data-testid="moa-pms-request-select"
+                                      value={effectivePmsMatchRequestId}
+                                      disabled={moaBusy}
+                                      onChange={(e) => setPmsMatchRequestId(e.target.value)}
+                                    >
+                                      {moaSummaryMetrics.activeOpenRequests.map((req) => (
+                                        <option key={req.id} value={req.id}>
+                                          {req.paymentReference} (
+                                          {formatGbp(minorUnitsToPounds(req.requestedAmountPence))})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  <button
+                                    type="button"
+                                    className="btn btn--secondary btn--sm"
+                                    data-testid="moa-pms-match-btn"
+                                    disabled={
+                                      moaBusy ||
+                                      !effectiveSelectedPmsMoaTxId ||
+                                      !effectivePmsMatchRequestId
+                                    }
+                                    onClick={async () => {
+                                      setMoaBusy(true);
+                                      try {
+                                        const res = await matchPmsClientLedgerReceiptAction({
+                                          requestId: effectivePmsMatchRequestId,
+                                          pmsTransactionId: effectiveSelectedPmsMoaTxId,
+                                        });
+                                        if (isActionDenied(res) || !res.ok) {
+                                          showToast(
+                                            formatOpeningGateActionError(
+                                              res,
+                                              'Could not match PMS client account receipt.',
+                                            ),
+                                          );
+                                          return;
+                                        }
+                                        showToast('PMS client account receipt matched.');
+                                        router.refresh();
+                                      } finally {
+                                        setMoaBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    Match PMS receipt
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {moneyOnAccountRequests.length > 0 ? (
+                  <div style={{ display: 'grid', gap: 8 }} data-testid="moa-requests-list">
+                    <div style={{ fontWeight: 600, fontSize: 12.5 }}>
+                      Payment requests &amp; receipts
+                    </div>
+                    <ul className="worklist">
+                      {moneyOnAccountRequests.map((req) => {
+                        const reqCleared =
+                          moaSummaryMetrics.unreversedByRequestId.get(req.id) ?? 0;
+                        const reqReceipts =
+                          moaSummaryMetrics.receiptsByRequestId.get(req.id) ?? [];
+                        const reqChase = moneyOnAccountChases.find(
+                          (c) => c.chase.entityId === req.id,
+                        );
+                        const canCancelThisRequest =
+                          canRequestMoneyOnAccount &&
+                          !isMatterCurrentlyClosed &&
+                          (req.status === 'requested' || req.status === 'part_received') &&
+                          reqCleared === 0;
+                        const reqTone =
+                          req.status === 'received'
+                            ? 'positive'
+                            : req.status === 'cancelled'
+                              ? 'neutral'
+                              : 'warning';
+                        const reqStatusLabel =
+                          req.status === 'received'
+                            ? 'Received'
+                            : req.status === 'part_received'
+                              ? 'Part received'
+                              : req.status === 'cancelled'
+                                ? 'Cancelled'
+                                : 'Requested';
+                        return (
+                          <li
+                            key={req.id}
+                            className="worklist-row"
+                            data-testid={`moa-request-${req.id}`}
+                            style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'flex-start',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <div className="worklist-main">
+                                <div className="worklist-title">
+                                  <strong>{req.paymentReference}</strong> &middot;{' '}
+                                  <span>
+                                    {formatGbp(minorUnitsToPounds(req.requestedAmountPence))}
+                                  </span>{' '}
+                                  <span className="muted">
+                                    (Cleared: {formatGbp(minorUnitsToPounds(reqCleared))})
+                                  </span>
+                                </div>
+                                <div className="worklist-meta">
+                                  Sent to {req.recipientEmail}
+                                  {req.requestedAt ? ` · ${formatDateTime(req.requestedAt)}` : ''}
+                                  {req.requestedByPersonId
+                                    ? ` · Requested by ${nameMap.get(req.requestedByPersonId) ?? req.requestedByPersonId}`
+                                    : ''}
+                                </div>
+                                <div className="muted" style={{ fontSize: 12 }}>
+                                  Client account snapshot: {req.bankDetailsSnapshot.accountName} (
+                                  {req.bankDetailsSnapshot.bankName}, sort code{' '}
+                                  {req.bankDetailsSnapshot.sortCode}, account{' '}
+                                  {req.bankDetailsSnapshot.accountNumber})
+                                </div>
+                              </div>
+                              <div
+                                className="worklist-right"
+                                style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}
+                              >
+                                <StatusPill label={reqStatusLabel} tone={reqTone} />
+                                {canCancelThisRequest ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn--secondary btn--sm"
+                                    data-testid={`moa-cancel-request-btn-${req.id}`}
+                                    disabled={moaBusy}
+                                    onClick={() => {
+                                      setCancelTargetRequestId(
+                                        cancelTargetRequestId === req.id ? null : req.id,
+                                      );
+                                      setCancelRequestReason('');
+                                    }}
+                                  >
+                                    Cancel request
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+
+                            {cancelTargetRequestId === req.id ? (
+                              <div
+                                className="subcard"
+                                style={{ background: 'var(--bg-subtle)', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}
+                              >
+                                <input
+                                  type="text"
+                                  className="field-input"
+                                  data-testid={`moa-cancel-reason-input-${req.id}`}
+                                  placeholder="Reason for cancelling this payment request"
+                                  value={cancelRequestReason}
+                                  onChange={(e) => setCancelRequestReason(e.target.value)}
+                                  disabled={moaBusy}
+                                  style={{ flex: '1 1 240px' }}
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn--primary btn--sm"
+                                  data-testid={`moa-confirm-cancel-btn-${req.id}`}
+                                  disabled={moaBusy || cancelRequestReason.trim().length < 3}
+                                  onClick={async () => {
+                                    setMoaBusy(true);
+                                    try {
+                                      const res = await cancelMoneyOnAccountRequestAction({
+                                        requestId: req.id,
+                                        reason: cancelRequestReason.trim(),
+                                      });
+                                      if (isActionDenied(res) || !res.ok) {
+                                        showToast(
+                                          formatOpeningGateActionError(
+                                            res,
+                                            'Could not cancel request.',
+                                          ),
+                                        );
+                                        return;
+                                      }
+                                      setCancelTargetRequestId(null);
+                                      setCancelRequestReason('');
+                                      showToast('Money on Account request cancelled.');
+                                      router.refresh();
+                                    } finally {
+                                      setMoaBusy(false);
+                                    }
+                                  }}
+                                >
+                                  Confirm cancel
+                                </button>
+                              </div>
+                            ) : null}
+
+                            {reqChase &&
+                            (reqChase.chase.status === 'active' ||
+                              reqChase.chase.status === 'needs_owner' ||
+                              reqChase.chase.status === 'failed') ? (
+                              <div
+                                className="subcard"
+                                data-testid={`moa-chase-summary-${req.id}`}
+                                style={{
+                                  background: 'var(--bg-subtle)',
+                                  display: 'flex',
+                                  justifyContent: 'space-between',
+                                  alignItems: 'center',
+                                  gap: 8,
+                                  flexWrap: 'wrap',
+                                }}
+                              >
+                                <div className="muted" style={{ fontSize: 12.5 }}>
+                                  {reqChase.chase.status === 'needs_owner'
+                                    ? 'Payment reminder needs an owner.'
+                                    : reqChase.chase.status === 'failed'
+                                      ? 'Automated payment reminders stopped after repeated errors.'
+                                      : `Automated reminder active (${reqChase.events.length} step(s) completed${
+                                          reqChase.chase.nextActionAt
+                                            ? `, next due ${formatDateTime(reqChase.chase.nextActionAt)}`
+                                            : ''
+                                        })`}
+                                </div>
+                                {canRequestMoneyOnAccount && !isMatterCurrentlyClosed ? (
+                                  <div style={{ display: 'flex', gap: 8 }}>
+                                    {reqChase.chase.status === 'needs_owner' ||
+                                    reqChase.chase.status === 'failed' ? (
+                                      <button
+                                        type="button"
+                                        className="btn btn--secondary btn--sm"
+                                        data-testid={`retry-moa-chase-btn-${req.id}`}
+                                        disabled={moaBusy}
+                                        onClick={async () => {
+                                          setMoaBusy(true);
+                                          try {
+                                            const res = await retryCommunicationChaseAction({
+                                              chaseId: reqChase.chase.id,
+                                            });
+                                            if (isActionDenied(res) || !res.ok) {
+                                              showToast(
+                                                formatOpeningGateActionError(
+                                                  res,
+                                                  'Could not retry follow-up.',
+                                                ),
+                                              );
+                                              return;
+                                            }
+                                            showToast('Follow-up updated.');
+                                            router.refresh();
+                                          } finally {
+                                            setMoaBusy(false);
+                                          }
+                                        }}
+                                      >
+                                        Retry follow-up
+                                      </button>
+                                    ) : null}
+                                    {reqChase.chase.status === 'active' ||
+                                    reqChase.chase.status === 'needs_owner' ? (
+                                      <button
+                                        type="button"
+                                        className="btn btn--secondary btn--sm"
+                                        data-testid={`stop-moa-chase-btn-${req.id}`}
+                                        disabled={moaBusy}
+                                        onClick={async () => {
+                                          setMoaBusy(true);
+                                          try {
+                                            const res = await stopCommunicationChaseAction({
+                                              chaseId: reqChase.chase.id,
+                                            });
+                                            if (isActionDenied(res) || !res.ok) {
+                                              showToast(
+                                                formatOpeningGateActionError(
+                                                  res,
+                                                  'Could not stop follow-up.',
+                                                ),
+                                              );
+                                              return;
+                                            }
+                                            showToast('Automated payment chasing stopped.');
+                                            router.refresh();
+                                          } finally {
+                                            setMoaBusy(false);
+                                          }
+                                        }}
+                                      >
+                                        Stop chasing
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+
+                            {reqReceipts.length > 0 ? (
+                              <div style={{ display: 'grid', gap: 6, paddingLeft: 10 }}>
+                                {reqReceipts.map((rcpt) => {
+                                  const evidenceUrl = moaReceiptDownloadUrls[rcpt.id];
+                                  return (
+                                    <div
+                                      key={rcpt.id}
+                                      className="subcard"
+                                      data-testid={`moa-receipt-${rcpt.id}`}
+                                      style={{
+                                        background: 'var(--bg-subtle)',
+                                        display: 'grid',
+                                        gap: 6,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          display: 'flex',
+                                          justifyContent: 'space-between',
+                                          alignItems: 'center',
+                                          gap: 8,
+                                          flexWrap: 'wrap',
+                                        }}
+                                      >
+                                        <div style={{ fontSize: 12.5 }}>
+                                          <strong>
+                                            {formatGbp(minorUnitsToPounds(rcpt.amountPence))}
+                                          </strong>{' '}
+                                          received {formatDate(rcpt.receivedDate)} &middot;{' '}
+                                          {rcpt.source === 'pms_ledger'
+                                            ? `Matched from PMS (${rcpt.pmsTransactionId ?? ''})`
+                                            : 'Recorded manually'}
+                                          {rcpt.bankReference
+                                            ? ` · Ref: ${rcpt.bankReference}`
+                                            : ''}
+                                          {rcpt.recordedByPersonId
+                                            ? ` · By ${nameMap.get(rcpt.recordedByPersonId) ?? rcpt.recordedByPersonId}`
+                                            : ''}
+                                          {rcpt.reversedAt ? (
+                                            <span className="muted">
+                                              {' '}
+                                              · Reversed {formatDateTime(rcpt.reversedAt)} (
+                                              {rcpt.reversalReason})
+                                            </span>
+                                          ) : null}
+                                        </div>
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                          {rcpt.reversedAt ? (
+                                            <StatusPill label="Reversed" tone="neutral" />
+                                          ) : (
+                                            <StatusPill label="Cleared" tone="positive" />
+                                          )}
+                                          {evidenceUrl ? (
+                                            <a
+                                              href={evidenceUrl}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="btn btn--secondary btn--sm"
+                                              data-testid={`moa-receipt-download-link-${rcpt.id}`}
+                                            >
+                                              Download proof
+                                            </a>
+                                          ) : null}
+                                          {!rcpt.reversedAt &&
+                                          canRecordMoneyOnAccountReceipt &&
+                                          !isMatterCurrentlyClosed ? (
+                                            <button
+                                              type="button"
+                                              className="btn btn--secondary btn--sm"
+                                              data-testid={`moa-reverse-receipt-btn-${rcpt.id}`}
+                                              disabled={moaBusy}
+                                              onClick={() => {
+                                                setReverseTargetReceiptId(
+                                                  reverseTargetReceiptId === rcpt.id
+                                                    ? null
+                                                    : rcpt.id,
+                                                );
+                                                setReverseReceiptReason('');
+                                              }}
+                                            >
+                                              Reverse
+                                            </button>
+                                          ) : null}
+                                        </div>
+                                      </div>
+
+                                      {reverseTargetReceiptId === rcpt.id ? (
+                                        <div
+                                          style={{
+                                            display: 'flex',
+                                            gap: 8,
+                                            flexWrap: 'wrap',
+                                            alignItems: 'center',
+                                          }}
+                                        >
+                                          <input
+                                            type="text"
+                                            className="field-input"
+                                            data-testid={`moa-reverse-reason-input-${rcpt.id}`}
+                                            placeholder="Reason for reversal (minimum 5 characters)"
+                                            value={reverseReceiptReason}
+                                            onChange={(e) =>
+                                              setReverseReceiptReason(e.target.value)
+                                            }
+                                            disabled={moaBusy}
+                                            style={{ flex: '1 1 240px' }}
+                                          />
+                                          <button
+                                            type="button"
+                                            className="btn btn--primary btn--sm"
+                                            data-testid={`moa-confirm-reverse-btn-${rcpt.id}`}
+                                            disabled={
+                                              moaBusy || reverseReceiptReason.trim().length < 5
+                                            }
+                                            onClick={async () => {
+                                              setMoaBusy(true);
+                                              try {
+                                                const res =
+                                                  await reverseMoneyOnAccountReceiptAction({
+                                                    receiptId: rcpt.id,
+                                                    reason: reverseReceiptReason.trim(),
+                                                  });
+                                                if (isActionDenied(res) || !res.ok) {
+                                                  showToast(
+                                                    formatOpeningGateActionError(
+                                                      res,
+                                                      'Could not reverse receipt.',
+                                                    ),
+                                                  );
+                                                  return;
+                                                }
+                                                setReverseTargetReceiptId(null);
+                                                setReverseReceiptReason('');
+                                                showToast('Receipt reversed.');
+                                                router.refresh();
+                                              } finally {
+                                                setMoaBusy(false);
+                                              }
+                                            }}
+                                          >
+                                            Confirm reversal
+                                          </button>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
           <div className="home-grid">
           {/* LEFT MAIN COLUMN */}
           <div className="home-col">
@@ -3830,6 +4952,13 @@ export function MatterProfileClient({
               matterNumber={matter.matterNumber}
               pmsView={pmsView}
               currentUserRole={currentUserRole}
+              moaSummary={{
+                agreedPence: moneyOnAccountAgreedPence ?? null,
+                requestedPence: moaSummaryMetrics.requestedPence,
+                receivedPence: moaSummaryMetrics.receivedPence,
+                requestCount: moaSummaryMetrics.nonCancelledRequests.length,
+                gateRequired: Boolean(moaSummaryMetrics.fundsPre?.required),
+              }}
             />
           ) : (
             <section className="home-panel">

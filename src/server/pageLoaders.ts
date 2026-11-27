@@ -25,6 +25,9 @@ import {
   type EngagementConfiguration,
   type EngagementDispatchRecord,
   type MatterNumberingConfig,
+  type MoneyOnAccountConfiguration,
+  type MoneyOnAccountReceiptRecord,
+  type MoneyOnAccountRequestRecord,
   type ParentChainNodeSummary,
   type RbacConfiguration,
   type RegistersConfiguration,
@@ -63,6 +66,10 @@ import {
   normaliseConversionConflictWarnings,
 } from '@/domain/matterConflicts';
 import type { MatterOpeningGateView } from '@/domain/openingGate';
+import {
+  areClientBankDetailsConfigured,
+  resolveMatterAgreedPaymentOnAccountPence,
+} from '@/domain/moneyOnAccount';
 import type { MatterPartyUsageCounts } from '@/domain/matterParties';
 import {
   toClientPriorMatterSummary,
@@ -145,6 +152,7 @@ import {
   resolveDefaultServiceTenantContext,
   resolveEffectiveChasingConfig,
   resolveEffectiveEngagementConfig,
+  resolveEffectiveMoneyOnAccountConfigRecord,
   resolveMatterSignOffEstimateGbp,
   getKeyDateExceptionsReportRecord,
   type AuthenticatedActorContext,
@@ -158,6 +166,7 @@ import {
   getChasingRepository,
   getEngagementRepository,
   getEvidenceArtifactRepository,
+  getMoneyOnAccountRepository,
   getOutboxRepository,
   isNonLiveDemoEnvironment,
 } from '@/platform/tenantRuntime';
@@ -202,7 +211,7 @@ import type {
   KeyDatesConfig,
 } from '@/domain/keyDates.types';
 import type { TeamDiaryEntry } from '@/domain/keyDateDiary';
-import type { PmsMatterFinancials } from '@/pms/types';
+import type { PmsClientAccountEntry, PmsMatterFinancials } from '@/pms/types';
 import type { AdminTab } from '@/components/AdminClient';
 
 type LoadedStoreView = Awaited<ReturnType<typeof loadTenantCatalogueStoreView>>;
@@ -2507,6 +2516,21 @@ export async function loadMatterDetailPageData(
         events: readonly CommunicationChaseEventRecord[];
       }>;
       signedEngagementDownloadUrl: string | null;
+      effectiveMoneyOnAccountConfig: MoneyOnAccountConfiguration;
+      moneyOnAccountRequests: MoneyOnAccountRequestRecord[];
+      moneyOnAccountReceipts: MoneyOnAccountReceiptRecord[];
+      moneyOnAccountChases: Array<{
+        chase: CommunicationChaseRecord;
+        events: readonly CommunicationChaseEventRecord[];
+      }>;
+      unmatchedPmsClientReceipts: PmsClientAccountEntry[];
+      moaReceiptDownloadUrls: Record<string, string>;
+      moneyOnAccountAgreedPence: number | null;
+      moneyOnAccountBankConfigured: boolean;
+      canViewMoneyOnAccount: boolean;
+      canRequestMoneyOnAccount: boolean;
+      canRecordMoneyOnAccountReceipt: boolean;
+      canMatchPmsClientLedgerReceipt: boolean;
       emailProviderDisabled: boolean;
     }
   | null
@@ -2717,6 +2741,18 @@ export async function loadMatterDetailPageData(
     };
   }
 
+  const canViewMoneyOnAccount = shell.currentUserPermissions.includes(
+    'money_on_account:view',
+  );
+  const canRequestMoneyOnAccount = shell.currentUserPermissions.includes(
+    'money_on_account:request',
+  );
+  const canRecordMoneyOnAccountReceipt = shell.currentUserPermissions.includes(
+    'money_on_account:record_receipt',
+  );
+  const canMatchPmsClientLedgerReceipt =
+    shell.finance.canViewMatter && canRecordMoneyOnAccountReceipt;
+
   const [
     pmsViewRes,
     matterKeyDates,
@@ -2731,7 +2767,11 @@ export async function loadMatterDetailPageData(
     quotesByConverted,
     registersMeta,
     engagementDispatchesRaw,
-    engagementChasesRaw,
+    matterChasesRaw,
+    effectiveMoneyOnAccountConfig,
+    moneyOnAccountRequestsRaw,
+    moneyOnAccountReceiptsRaw,
+    unmatchedPmsClientReceiptsRaw,
   ] = await Promise.all([
     shell.finance.canViewMatter
       ? getMatterPmsViewBundle(matter.id, currentUserId)
@@ -2771,7 +2811,27 @@ export async function loadMatterDetailPageData(
     resolveRegistersSummary(ctx, shell.activeTenantCfg),
     getEngagementRepository().listDispatchesForMatter(ctx, matter.id),
     getChasingRepository().listChasesForMatter(ctx, matter.id),
+    resolveEffectiveMoneyOnAccountConfigRecord(ctx, shell.activeTenantCfg),
+    canViewMoneyOnAccount
+      ? getMoneyOnAccountRepository().listRequestsForMatter(ctx, matter.id)
+      : Promise.resolve<MoneyOnAccountRequestRecord[]>([]),
+    canViewMoneyOnAccount
+      ? getMoneyOnAccountRepository().listReceiptsForMatter(ctx, matter.id)
+      : Promise.resolve<MoneyOnAccountReceiptRecord[]>([]),
+    canMatchPmsClientLedgerReceipt
+      ? getPmsRepository().listUnmatchedPositiveClientLedgerReceiptsForMatter(
+          ctx,
+          matter.id,
+        )
+      : Promise.resolve<PmsClientAccountEntry[]>([]),
   ]);
+
+  const engagementChasesRaw = matterChasesRaw.filter(
+    (c) => c.chase.entityKind === 'engagement_letter',
+  );
+  const moneyOnAccountChasesRaw = canViewMoneyOnAccount
+    ? matterChasesRaw.filter((c) => c.chase.entityKind === 'money_on_account')
+    : [];
 
   const openingGateState: MatterOpeningGateView | undefined =
     openingGateRes && !isActionDenied(openingGateRes) && openingGateRes.ok
@@ -2810,6 +2870,14 @@ export async function loadMatterDetailPageData(
     extraPersonIds: [
       ...notes.map((n) => n.authorId),
       openingGateState?.evaluation.highRisk.partnerApproverId,
+      ...moneyOnAccountRequestsRaw.flatMap((r) => [
+        r.requestedByPersonId,
+        r.cancelledByPersonId,
+      ]),
+      ...moneyOnAccountReceiptsRaw.flatMap((r) => [
+        r.recordedByPersonId,
+        r.reversedByPersonId,
+      ]),
     ],
   });
   const canTakeByTaskId: Record<string, boolean> = {};
@@ -2858,6 +2926,57 @@ export async function loadMatterDetailPageData(
     }
   }
 
+  const moaReceiptDownloadUrls: Record<string, string> = {};
+  if (canViewMoneyOnAccount) {
+    const receiptWithEvidence = moneyOnAccountReceiptsRaw.filter((r) =>
+      Boolean(r.evidenceArtifactId),
+    );
+    await Promise.all(
+      receiptWithEvidence.map(async (rcpt) => {
+        if (!rcpt.evidenceArtifactId) return;
+        try {
+          const art = await getEvidenceArtifactRepository().getArtifactById(
+            ctx,
+            rcpt.evidenceArtifactId,
+          );
+          if (
+            art &&
+            art.purpose === 'moa_receipt' &&
+            art.subjectType === 'matter' &&
+            art.subjectId === matter.id &&
+            art.scanStatus === 'clean'
+          ) {
+            const token = await getDocumentStorage(
+              shell.activeTenantCfg,
+            ).issueScopedDownloadToken(ctx, {
+              blobKey: art.blobKey,
+              fileName: art.fileName,
+              documentId: art.id,
+            });
+            moaReceiptDownloadUrls[rcpt.id] =
+              `/api/evidence/download?token=${encodeURIComponent(token.token)}`;
+          }
+        } catch {
+          // Omit download URL if artifact or token issuance fails.
+        }
+      }),
+    );
+  }
+
+  const sourceQuote =
+    (matter.sourceQuoteId
+      ? quotes.find((q) => q.id === matter.sourceQuoteId)
+      : undefined) ??
+    quotes.find((q) => q.convertedMatterId === matter.id) ??
+    null;
+  const moneyOnAccountAgreedPence = resolveMatterAgreedPaymentOnAccountPence({
+    matter: visibleMatter,
+    sourceQuote,
+  });
+  const moneyOnAccountBankConfigured = areClientBankDetailsConfigured(
+    effectiveMoneyOnAccountConfig,
+  );
+
   return {
     kind: 'profile',
     shell,
@@ -2895,6 +3014,21 @@ export async function loadMatterDetailPageData(
       events: [...c.events],
     })),
     signedEngagementDownloadUrl,
+    effectiveMoneyOnAccountConfig,
+    moneyOnAccountRequests: [...moneyOnAccountRequestsRaw],
+    moneyOnAccountReceipts: [...moneyOnAccountReceiptsRaw],
+    moneyOnAccountChases: moneyOnAccountChasesRaw.map((c) => ({
+      chase: c.chase,
+      events: [...c.events],
+    })),
+    unmatchedPmsClientReceipts: [...unmatchedPmsClientReceiptsRaw],
+    moaReceiptDownloadUrls,
+    moneyOnAccountAgreedPence,
+    moneyOnAccountBankConfigured,
+    canViewMoneyOnAccount,
+    canRequestMoneyOnAccount,
+    canRecordMoneyOnAccountReceipt,
+    canMatchPmsClientLedgerReceipt,
     emailProviderDisabled:
       shell.activeTenantCfg.integrations.email?.provider === 'disabled',
   };
@@ -4358,6 +4492,7 @@ export async function loadAdminPageData(
       matterNumberingConfig: MatterNumberingConfig;
       effectiveChasingConfig: ChasingConfiguration;
       effectiveEngagementConfig: EngagementConfiguration;
+      effectiveMoneyOnAccountConfig: MoneyOnAccountConfiguration;
       emailProviderDisabled: boolean;
       entraEnvStatus: ReturnType<typeof getEntraEnvStatus>;
       firmAuditPage: Awaited<ReturnType<typeof listFirmAuditEntriesPage>>;
@@ -4421,6 +4556,7 @@ export async function loadAdminPageData(
     matterPartyUsageCounts,
     effectiveChasingConfig,
     effectiveEngagementConfig,
+    effectiveMoneyOnAccountConfig,
   ] = await Promise.all([
     listFirmAuditEntriesPage(actorId, {
       limit: 250,
@@ -4438,6 +4574,7 @@ export async function loadAdminPageData(
     getMatterRepository().getMatterPartyUsageSummary(ctx),
     resolveEffectiveChasingConfig(ctx, activeTenantCfg),
     resolveEffectiveEngagementConfig(ctx, activeTenantCfg),
+    resolveEffectiveMoneyOnAccountConfigRecord(ctx, activeTenantCfg),
   ]);
 
   const pmsAdmin = isActionDenied(pmsAdminResult) ? undefined : pmsAdminResult;
@@ -4540,6 +4677,8 @@ export async function loadAdminPageData(
     ),
     effectiveChasingConfig,
     effectiveEngagementConfig,
+    effectiveMoneyOnAccountConfig:
+      effectiveMoneyOnAccountConfig as MoneyOnAccountConfiguration,
     emailProviderDisabled:
       activeTenantCfg.integrations.email?.provider === 'disabled',
     entraEnvStatus: getEntraEnvStatus(),

@@ -7,6 +7,7 @@ import type {
   EmailOutboxAdminListItem,
   EmailOutboxStatus,
   EngagementConfiguration,
+  MoneyOnAccountConfiguration,
 } from '@platform/core-api';
 import {
   getOutboxMessageForAdminAction,
@@ -14,12 +15,17 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDateTime } from '@/domain/dates';
+import {
+  areClientBankDetailsConfigured,
+  maskBankDetailForAudit,
+} from '@/domain/moneyOnAccount';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
 interface AdminEmailOutboxPanelProps {
   effectiveChasingConfig?: ChasingConfiguration;
   effectiveEngagementConfig?: EngagementConfiguration;
+  effectiveMoneyOnAccountConfig?: MoneyOnAccountConfiguration;
   emailProviderDisabled?: boolean;
   hasMfaVerified?: boolean;
 }
@@ -41,6 +47,7 @@ function outboxStatusTone(status: EmailOutboxStatus) {
 export function AdminEmailOutboxPanel({
   effectiveChasingConfig,
   effectiveEngagementConfig,
+  effectiveMoneyOnAccountConfig,
   emailProviderDisabled = false,
   hasMfaVerified = false,
 }: AdminEmailOutboxPanelProps) {
@@ -340,6 +347,54 @@ export function AdminEmailOutboxPanel({
               {effectiveEngagementConfig.clientCareTermsSummary
                 ? 'Client Care introduction, terms summary, signature instruction, and non-engagement wording (conflict, outside expertise, not viable, referred out, default).'
                 : 'Using platform fallback wording.'}
+            </div>
+          ) : null}
+          {effectiveMoneyOnAccountConfig ? (
+            <div
+              className="subcard"
+              data-testid="admin-moa-config-summary"
+              style={{ background: 'var(--bg-subtle)', marginTop: 12 }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>
+                  Money on account settings (read-only summary)
+                </div>
+                <StatusPill
+                  label={
+                    effectiveMoneyOnAccountConfig.enabled
+                      ? areClientBankDetailsConfigured(effectiveMoneyOnAccountConfig)
+                        ? 'Enabled · Bank configured'
+                        : 'Enabled · Bank not set'
+                      : 'Disabled'
+                  }
+                  tone={
+                    effectiveMoneyOnAccountConfig.enabled &&
+                    areClientBankDetailsConfigured(effectiveMoneyOnAccountConfig)
+                      ? 'positive'
+                      : 'warning'
+                  }
+                />
+              </div>
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+                <strong>Reference prefix:</strong> {effectiveMoneyOnAccountConfig.paymentReferencePrefix} &middot;{' '}
+                <strong>Bank:</strong>{' '}
+                {effectiveMoneyOnAccountConfig.clientAccount.bankName || 'Not set'} &middot;{' '}
+                <strong>Sort code:</strong>{' '}
+                {maskBankDetailForAudit(effectiveMoneyOnAccountConfig.clientAccount.sortCode, 'sortCode')}{' '}
+                &middot; <strong>Account:</strong>{' '}
+                {maskBankDetailForAudit(effectiveMoneyOnAccountConfig.clientAccount.accountNumber, 'accountNumber')}
+                {effectiveMoneyOnAccountConfig.clientAccount.iban
+                  ? ` · IBAN: ${maskBankDetailForAudit(effectiveMoneyOnAccountConfig.clientAccount.iban, 'iban')}`
+                  : ''}
+              </div>
+              {effectiveMoneyOnAccountConfig.clientAccount.allowDemoPlaceholderDetails ? (
+                <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  Demonstration placeholder bank details are allowed in this non-live environment and are automatically blocked in live client deployments.
+                </div>
+              ) : null}
+              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                Changes to client account bank details require administrator multi-factor authentication and are recorded (masked) in the firm audit log.
+              </div>
             </div>
           ) : null}
         </section>

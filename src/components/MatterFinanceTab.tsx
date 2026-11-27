@@ -21,14 +21,29 @@ import type { MatterPmsViewBundle } from '@/server/services';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
+export interface MatterMoneyOnAccountFinanceSummary {
+  agreedPence: number | null;
+  requestedPence: number;
+  receivedPence: number;
+  requestCount: number;
+  gateRequired: boolean;
+}
+
 interface Props {
   matterId: string;
   matterNumber: string;
   pmsView: MatterPmsViewBundle;
   currentUserRole: AppRole;
+  moaSummary?: MatterMoneyOnAccountFinanceSummary;
 }
 
-export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserRole }: Props) {
+export function MatterFinanceTab({
+  matterId,
+  matterNumber,
+  pmsView,
+  currentUserRole,
+  moaSummary,
+}: Props) {
   const { showToast } = useToast();
   const [pending, startTransition] = useTransition();
   const [selectedPmsCode, setSelectedPmsCode] = useState(
@@ -124,10 +139,67 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
     setExpandedInvoices((prev) => ({ ...prev, [invNo]: !prev[invNo] }));
   };
 
+  const shouldShowMoaBanner =
+    moaSummary &&
+    (moaSummary.requestCount > 0 ||
+      moaSummary.gateRequired ||
+      (moaSummary.agreedPence ?? 0) > 0);
+
+  const moaStatusPill = (() => {
+    if (!moaSummary) return null;
+    const required = moaSummary.agreedPence ?? 0;
+    if (required > 0 && moaSummary.receivedPence >= required) {
+      return { label: 'Funds cleared', tone: 'positive' as const };
+    }
+    if (moaSummary.receivedPence > 0) {
+      return { label: 'Part received', tone: 'warning' as const };
+    }
+    if (moaSummary.requestCount > 0) {
+      return { label: 'Requested', tone: 'warning' as const };
+    }
+    return { label: 'Not requested', tone: 'neutral' as const };
+  })();
+
+  const moaSummaryBanner =
+    shouldShowMoaBanner && moaSummary && moaStatusPill ? (
+      <div
+        className="subcard"
+        data-testid="finance-tab-moa-banner"
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+          padding: '12px 16px',
+          marginBottom: 12,
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <strong style={{ fontSize: 13.5 }}>Money on account</strong>
+            <StatusPill label={moaStatusPill.label} tone={moaStatusPill.tone} />
+          </div>
+          <div className="muted" style={{ fontSize: 12.5 }}>
+            {moaSummary.agreedPence !== null && moaSummary.agreedPence > 0
+              ? `Agreed payment on account: ${formatGbp(minorUnitsToPounds(moaSummary.agreedPence))} · `
+              : ''}
+            Requested: {formatGbp(minorUnitsToPounds(moaSummary.requestedPence))} &middot; Cleared
+            receipts: {formatGbp(minorUnitsToPounds(moaSummary.receivedPence))} (
+            {moaSummary.requestCount} request{moaSummary.requestCount === 1 ? '' : 's'})
+          </div>
+        </div>
+        <div className="muted" style={{ fontSize: 12 }}>
+          Manage requests and receipts on the Overview tab.
+        </div>
+      </div>
+    ) : null;
+
   // Unlinked state — never show £0.00
   if (!pmsView.link || !bundle || !fin) {
     return (
       <section className="profile-section">
+        {moaSummaryBanner}
         <div className="profile-section__header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span className="section-label">PMS Financial Position</span>
@@ -249,6 +321,7 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {moaSummaryBanner}
       {/* Top source attribution bar */}
       <div
         className="subcard"
