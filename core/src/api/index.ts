@@ -2875,6 +2875,7 @@ export interface MoneyOnAccountReceiptRecord {
   readonly reversedAt: string | null;
   readonly reversedByPersonId: string | null;
   readonly reversalReason: string | null;
+  readonly idempotencyKey?: string | null;
 }
 
 export interface RecordManualPaymentCancellationInput {

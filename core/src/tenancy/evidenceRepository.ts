@@ -292,6 +292,22 @@ export class TenantEvidenceArtifactRepository extends TenantScopedRepository {
     });
   }
 
+  public async deleteArtifactById(
+    ctx: TenantContext,
+    artifactId: string,
+  ): Promise<boolean> {
+    const cleanId = artifactId.trim();
+    if (!cleanId) return false;
+    return this.withTenantTransaction(ctx, async (tx) => {
+      const res = await tx.query(
+        `DELETE FROM public.evidence_artifacts
+         WHERE tenant_id = $1 AND id = $2`,
+        [ctx.tenantId, cleanId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    });
+  }
+
   public async clearTenantData(ctx: TenantContext): Promise<void> {
     await this.withTenantTransaction(ctx, async (tx) => {
       await tx.query(

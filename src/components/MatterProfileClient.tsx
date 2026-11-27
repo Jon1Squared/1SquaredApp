@@ -35,7 +35,6 @@ import {
   type CommunicationChaseEventRecord,
   type CommunicationChaseRecord,
   type EngagementDispatchRecord,
-  type MoneyOnAccountConfiguration,
   type MoneyOnAccountReceiptRecord,
   type MoneyOnAccountRequestRecord,
 } from '@platform/core-api';
@@ -95,6 +94,7 @@ import {
   resolveMatterRiskAssessment,
 } from '@/domain/matterOpeningRecord';
 import { hrefForId, personDisplayName, primaryEmail } from '@/domain/names';
+import type { MoneyOnAccountDisplaySummary } from '@/domain/moneyOnAccount';
 import { formatGbp, resolvePmsPence } from '@/domain/pms';
 import type { PmsClientAccountEntry } from '@/pms/types';
 import type {
@@ -171,7 +171,7 @@ interface MatterProfileClientProps {
     events: readonly CommunicationChaseEventRecord[];
   }>;
   signedEngagementDownloadUrl?: string | null;
-  effectiveMoneyOnAccountConfig?: MoneyOnAccountConfiguration;
+  moneyOnAccountSummary?: MoneyOnAccountDisplaySummary | null;
   moneyOnAccountRequests?: MoneyOnAccountRequestRecord[];
   moneyOnAccountReceipts?: MoneyOnAccountReceiptRecord[];
   moneyOnAccountChases?: Array<{
@@ -415,7 +415,7 @@ export function MatterProfileClient({
   engagementDispatches = [],
   engagementChases = [],
   signedEngagementDownloadUrl = null,
-  effectiveMoneyOnAccountConfig,
+  moneyOnAccountSummary = null,
   moneyOnAccountRequests = [],
   moneyOnAccountReceipts = [],
   moneyOnAccountChases = [],
@@ -566,6 +566,18 @@ export function MatterProfileClient({
   useEffect(() => {
     moaSendControllerRef.current?.reset();
   }, [matter.id]);
+  const moaReceiptControllerRef = useRef<ReturnType<
+    typeof createSendIdempotencyController
+  > | null>(null);
+  const getMoaReceiptController = () => {
+    if (!moaReceiptControllerRef.current) {
+      moaReceiptControllerRef.current = createSendIdempotencyController();
+    }
+    return moaReceiptControllerRef.current;
+  };
+  useEffect(() => {
+    moaReceiptControllerRef.current?.reset();
+  }, [matter.id]);
   const [moaRequestAmountGbp, setMoaRequestAmountGbp] = useState<string>(() =>
     typeof moneyOnAccountAgreedPence === 'number' && moneyOnAccountAgreedPence > 0
       ? minorUnitsToPounds(moneyOnAccountAgreedPence).toFixed(2)
@@ -632,6 +644,9 @@ export function MatterProfileClient({
   )
     ? moaReceiptRequestId
     : (moaSummaryMetrics.activeOpenRequests[0]?.id ?? '');
+  useEffect(() => {
+    moaReceiptControllerRef.current?.reset();
+  }, [matter.id, selectedReceiptRequestId]);
   const [moaReceiptAmountGbp, setMoaReceiptAmountGbp] = useState<string>(() => {
     const firstOpen = moneyOnAccountRequests.find(
       (r) => r.status === 'requested' || r.status === 'part_received',
@@ -2890,7 +2905,7 @@ export function MatterProfileClient({
                 </div>
               </div>
               <div className="panel-body padded" style={{ display: 'grid', gap: 14 }}>
-                {!effectiveMoneyOnAccountConfig?.enabled || !moneyOnAccountBankConfigured ? (
+                {!moneyOnAccountSummary?.enabled || !moneyOnAccountBankConfigured ? (
                   <div className="subcard" style={{ background: 'var(--bg-subtle)' }}>
                     <span className="muted" style={{ fontSize: 12.5 }}>
                       If your firm has turned on Money on Account and configured client account bank details in Administration, payment requests and client transfer details appear here.
@@ -2898,7 +2913,7 @@ export function MatterProfileClient({
                   </div>
                 ) : null}
 
-                {emailProviderDisabled && effectiveMoneyOnAccountConfig?.enabled ? (
+                {emailProviderDisabled && moneyOnAccountSummary?.enabled ? (
                   <div
                     className="subcard"
                     data-testid="moa-outbox-queued-banner"
@@ -2942,7 +2957,7 @@ export function MatterProfileClient({
                               onChange={(e) => setMoaRequestAmountGbp(e.target.value)}
                               disabled={
                                 moaBusy ||
-                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountSummary?.enabled ||
                                 !moneyOnAccountBankConfigured
                               }
                             />
@@ -2961,7 +2976,7 @@ export function MatterProfileClient({
                               onChange={(e) => setMoaRecipientEmail(e.target.value)}
                               disabled={
                                 moaBusy ||
-                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountSummary?.enabled ||
                                 !moneyOnAccountBankConfigured
                               }
                             />
@@ -2981,7 +2996,7 @@ export function MatterProfileClient({
                               onChange={(e) => setMoaRecipientName(e.target.value)}
                               disabled={
                                 moaBusy ||
-                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountSummary?.enabled ||
                                 !moneyOnAccountBankConfigured
                               }
                             />
@@ -3000,7 +3015,7 @@ export function MatterProfileClient({
                               onChange={(e) => setMoaRequestNotes(e.target.value)}
                               disabled={
                                 moaBusy ||
-                                !effectiveMoneyOnAccountConfig?.enabled ||
+                                !moneyOnAccountSummary?.enabled ||
                                 !moneyOnAccountBankConfigured
                               }
                             />
@@ -3013,7 +3028,7 @@ export function MatterProfileClient({
                             data-testid="moa-send-request-btn"
                             disabled={
                               moaBusy ||
-                              !effectiveMoneyOnAccountConfig?.enabled ||
+                              !moneyOnAccountSummary?.enabled ||
                               !moneyOnAccountBankConfigured ||
                               !moaRecipientEmail.trim() ||
                               !moaRequestAmountGbp.trim()
@@ -3216,67 +3231,73 @@ export function MatterProfileClient({
                                     showToast('Please enter a valid positive receipt amount.');
                                     return;
                                   }
-                                  setMoaBusy(true);
-                                  try {
-                                    let evidenceArtifactId: string | undefined;
-                                    if (moaReceiptFile) {
-                                      const formData = new FormData();
-                                      formData.set('subjectType', 'matter');
-                                      formData.set('subjectId', matter.id);
-                                      formData.set('purpose', 'moa_receipt');
-                                      formData.set('file', moaReceiptFile);
+                                  const amountPence = poundsToMinorUnits(parsedGbp);
+                                  const receiptCtrl = getMoaReceiptController();
+                                  await receiptCtrl.runGuarded(async (idempotencyKey) => {
+                                    setMoaBusy(true);
+                                    try {
+                                      let evidenceArtifactId: string | undefined;
+                                      if (moaReceiptFile) {
+                                        const formData = new FormData();
+                                        formData.set('subjectType', 'matter');
+                                        formData.set('subjectId', matter.id);
+                                        formData.set('purpose', 'moa_receipt');
+                                        formData.set('file', moaReceiptFile);
 
-                                      const uploadRes = await fetch('/api/evidence/upload', {
-                                        method: 'POST',
-                                        body: formData,
+                                        const uploadRes = await fetch('/api/evidence/upload', {
+                                          method: 'POST',
+                                          body: formData,
+                                        });
+                                        const uploadPayload = (await uploadRes.json()) as {
+                                          ok?: boolean;
+                                          error?: string;
+                                          artifact?: { id: string };
+                                        };
+                                        if (
+                                          !uploadRes.ok ||
+                                          !uploadPayload.ok ||
+                                          !uploadPayload.artifact?.id
+                                        ) {
+                                          showToast(
+                                            uploadPayload.error ||
+                                              'Receipt proof upload failed.',
+                                          );
+                                          return;
+                                        }
+                                        evidenceArtifactId = uploadPayload.artifact.id;
+                                      }
+
+                                      const res = await recordMoneyOnAccountReceiptAction({
+                                        requestId: selectedReceiptRequestId,
+                                        amountPence,
+                                        receivedDate: moaReceiptDate,
+                                        bankReference: moaReceiptBankRef.trim() || undefined,
+                                        notes: moaReceiptNotes.trim() || undefined,
+                                        evidenceArtifactId,
+                                        idempotencyKey,
                                       });
-                                      const uploadPayload = (await uploadRes.json()) as {
-                                        ok?: boolean;
-                                        error?: string;
-                                        artifact?: { id: string };
-                                      };
-                                      if (
-                                        !uploadRes.ok ||
-                                        !uploadPayload.ok ||
-                                        !uploadPayload.artifact?.id
-                                      ) {
+                                      if (isActionDenied(res) || !res.ok) {
                                         showToast(
-                                          uploadPayload.error ||
-                                            'Receipt proof upload failed.',
+                                          formatOpeningGateActionError(
+                                            res,
+                                            'Could not record receipt.',
+                                          ),
                                         );
                                         return;
                                       }
-                                      evidenceArtifactId = uploadPayload.artifact.id;
+                                      receiptCtrl.reset();
+                                      setMoaReceiptFile(null);
+                                      setMoaReceiptBankRef('');
+                                      setMoaReceiptNotes('');
+                                      if (moaReceiptFileInputRef.current) {
+                                        moaReceiptFileInputRef.current.value = '';
+                                      }
+                                      showToast('Money on Account receipt recorded.');
+                                      router.refresh();
+                                    } finally {
+                                      setMoaBusy(false);
                                     }
-
-                                    const res = await recordMoneyOnAccountReceiptAction({
-                                      requestId: selectedReceiptRequestId,
-                                      amountPence: poundsToMinorUnits(parsedGbp),
-                                      receivedDate: moaReceiptDate,
-                                      bankReference: moaReceiptBankRef.trim() || undefined,
-                                      notes: moaReceiptNotes.trim() || undefined,
-                                      evidenceArtifactId,
-                                    });
-                                    if (isActionDenied(res) || !res.ok) {
-                                      showToast(
-                                        formatOpeningGateActionError(
-                                          res,
-                                          'Could not record receipt.',
-                                        ),
-                                      );
-                                      return;
-                                    }
-                                    setMoaReceiptFile(null);
-                                    setMoaReceiptBankRef('');
-                                    setMoaReceiptNotes('');
-                                    if (moaReceiptFileInputRef.current) {
-                                      moaReceiptFileInputRef.current.value = '';
-                                    }
-                                    showToast('Money on Account receipt recorded.');
-                                    router.refresh();
-                                  } finally {
-                                    setMoaBusy(false);
-                                  }
+                                  });
                                 }}
                               >
                                 Record receipt

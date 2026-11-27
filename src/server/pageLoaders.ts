@@ -25,7 +25,6 @@ import {
   type EngagementConfiguration,
   type EngagementDispatchRecord,
   type MatterNumberingConfig,
-  type MoneyOnAccountConfiguration,
   type MoneyOnAccountReceiptRecord,
   type MoneyOnAccountRequestRecord,
   type ParentChainNodeSummary,
@@ -68,7 +67,10 @@ import {
 import type { MatterOpeningGateView } from '@/domain/openingGate';
 import {
   areClientBankDetailsConfigured,
+  buildMoneyOnAccountDisplaySummary,
+  maskMoneyOnAccountRequestForDisplay,
   resolveMatterAgreedPaymentOnAccountPence,
+  type MoneyOnAccountDisplaySummary,
 } from '@/domain/moneyOnAccount';
 import type { MatterPartyUsageCounts } from '@/domain/matterParties';
 import {
@@ -2516,7 +2518,7 @@ export async function loadMatterDetailPageData(
         events: readonly CommunicationChaseEventRecord[];
       }>;
       signedEngagementDownloadUrl: string | null;
-      effectiveMoneyOnAccountConfig: MoneyOnAccountConfiguration;
+      moneyOnAccountSummary: MoneyOnAccountDisplaySummary | null;
       moneyOnAccountRequests: MoneyOnAccountRequestRecord[];
       moneyOnAccountReceipts: MoneyOnAccountReceiptRecord[];
       moneyOnAccountChases: Array<{
@@ -2768,7 +2770,7 @@ export async function loadMatterDetailPageData(
     registersMeta,
     engagementDispatchesRaw,
     matterChasesRaw,
-    effectiveMoneyOnAccountConfig,
+    effectiveMoneyOnAccountConfigRaw,
     moneyOnAccountRequestsRaw,
     moneyOnAccountReceiptsRaw,
     unmatchedPmsClientReceiptsRaw,
@@ -2811,7 +2813,9 @@ export async function loadMatterDetailPageData(
     resolveRegistersSummary(ctx, shell.activeTenantCfg),
     getEngagementRepository().listDispatchesForMatter(ctx, matter.id),
     getChasingRepository().listChasesForMatter(ctx, matter.id),
-    resolveEffectiveMoneyOnAccountConfigRecord(ctx, shell.activeTenantCfg),
+    canViewMoneyOnAccount
+      ? resolveEffectiveMoneyOnAccountConfigRecord(ctx, shell.activeTenantCfg)
+      : Promise.resolve(null),
     canViewMoneyOnAccount
       ? getMoneyOnAccountRepository().listRequestsForMatter(ctx, matter.id)
       : Promise.resolve<MoneyOnAccountRequestRecord[]>([]),
@@ -2969,13 +2973,20 @@ export async function loadMatterDetailPageData(
       : undefined) ??
     quotes.find((q) => q.convertedMatterId === matter.id) ??
     null;
-  const moneyOnAccountAgreedPence = resolveMatterAgreedPaymentOnAccountPence({
-    matter: visibleMatter,
-    sourceQuote,
-  });
-  const moneyOnAccountBankConfigured = areClientBankDetailsConfigured(
-    effectiveMoneyOnAccountConfig,
-  );
+  const moneyOnAccountAgreedPence = canViewMoneyOnAccount
+    ? resolveMatterAgreedPaymentOnAccountPence({
+        matter: visibleMatter,
+        sourceQuote,
+      })
+    : null;
+  const moneyOnAccountBankConfigured =
+    canViewMoneyOnAccount && effectiveMoneyOnAccountConfigRaw
+      ? areClientBankDetailsConfigured(effectiveMoneyOnAccountConfigRaw)
+      : false;
+  const moneyOnAccountSummary: MoneyOnAccountDisplaySummary | null =
+    canViewMoneyOnAccount && effectiveMoneyOnAccountConfigRaw
+      ? buildMoneyOnAccountDisplaySummary(effectiveMoneyOnAccountConfigRaw)
+      : null;
 
   return {
     kind: 'profile',
@@ -3014,8 +3025,10 @@ export async function loadMatterDetailPageData(
       events: [...c.events],
     })),
     signedEngagementDownloadUrl,
-    effectiveMoneyOnAccountConfig,
-    moneyOnAccountRequests: [...moneyOnAccountRequestsRaw],
+    moneyOnAccountSummary,
+    moneyOnAccountRequests: canViewMoneyOnAccount
+      ? moneyOnAccountRequestsRaw.map(maskMoneyOnAccountRequestForDisplay)
+      : [],
     moneyOnAccountReceipts: [...moneyOnAccountReceiptsRaw],
     moneyOnAccountChases: moneyOnAccountChasesRaw.map((c) => ({
       chase: c.chase,
@@ -4492,7 +4505,7 @@ export async function loadAdminPageData(
       matterNumberingConfig: MatterNumberingConfig;
       effectiveChasingConfig: ChasingConfiguration;
       effectiveEngagementConfig: EngagementConfiguration;
-      effectiveMoneyOnAccountConfig: MoneyOnAccountConfiguration;
+      moneyOnAccountSummary: MoneyOnAccountDisplaySummary | null;
       emailProviderDisabled: boolean;
       entraEnvStatus: ReturnType<typeof getEntraEnvStatus>;
       firmAuditPage: Awaited<ReturnType<typeof listFirmAuditEntriesPage>>;
@@ -4677,8 +4690,9 @@ export async function loadAdminPageData(
     ),
     effectiveChasingConfig,
     effectiveEngagementConfig,
-    effectiveMoneyOnAccountConfig:
-      effectiveMoneyOnAccountConfig as MoneyOnAccountConfiguration,
+    moneyOnAccountSummary: buildMoneyOnAccountDisplaySummary(
+      effectiveMoneyOnAccountConfig,
+    ),
     emailProviderDisabled:
       activeTenantCfg.integrations.email?.provider === 'disabled',
     entraEnvStatus: getEntraEnvStatus(),

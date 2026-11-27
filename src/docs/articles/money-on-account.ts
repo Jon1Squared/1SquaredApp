@@ -18,7 +18,7 @@ Authorised matter staff (fee earners, supervisors, partners, legal secretaries, 
 
 1. **Check the requested amount:** If the matter was converted from an accepted quote carrying a Payment on Account (or has a retainer amount entered on the matter), that agreed amount is pre-filled automatically in pounds and pence.
 2. **Confirm the recipient:** The client’s email address and name are pre-filled from the instructing contact, client record, or originating enquiry.
-3. **Click Send payment request:** 1Squared generates a Payment on Account PDF showing your firm’s client account details, the requested amount, and a unique short transfer reference (for example \`MOA-MAT0010004-01\`, formatted to fit UK Faster Payments and CHAPS reference limits without exposing personal names).
+3. **Click Send payment request:** 1Squared generates a Payment on Account PDF showing your firm’s client account details, the requested amount, and a unique short transfer reference (for example MOA-MAT0010004-01, formatted to fit UK Faster Payments and CHAPS reference limits without exposing personal names).
 4. **Frozen bank details snapshot:** Each request freezes the client account bank details in force at the moment it was sent, queues the PDF email (within the 3 MB total email attachment limit), and records an immutable audit entry.
 
 - **Cancelling an unpaid request:** While a request has no unreversed receipts, authorised staff can cancel it with a written reason. Cancelling a request stops its automated payment reminders straight away, and cancelled requests do not count towards cleared funds.
@@ -56,14 +56,14 @@ When a matter is linked to your firm’s Practice Management System and positive
 
 If a payment bounces, was entered against the wrong matter, or was recorded in error, Finance, Partners, or Managing Partners can click **Reverse** next to that receipt and enter a written reason (minimum 5 characters):
 
-- Reversing a receipt reduces the cleared balance on the request, reopens a matched Practice Management System ledger entry so it can be matched accurately elsewhere, and updates the **Money on Account** summary.
+- Reversing a receipt reduces the cleared balance on the request, reopens a matched Practice Management System ledger entry so it can be matched accurately elsewhere, and updates the **Money on Account** summary (reversing a receipt on a request that was already marked paid does not automatically restart its reminders).
 - **Important — after a matter has opened:** Reversing a receipt **after** a matter has already moved to **Open** updates the financial record and audit trail cleanly, **but does not reopen or rewind the matter opening gate**. Once a matter is **Open**, it remains open unless closed through the normal closure workflow.
 
 ## 4. The Funds on account opening check
 
 Work types configured by your firm to require cleared funds upfront (such as **Residential Conveyancing** and **Dispute Resolution** matters) display **Funds on account** inside **Matter opening checklist & gate**:
 
-- **How the check is satisfied:** Cleared unreversed receipts across non-cancelled Money on Account requests must cover the required agreed amount (taken from the accepted quote’s Payment on Account or the matter’s agreed payment on account, defaulting to the requested amount if no upfront figure was set). Partial payments or smaller requests than the agreed amount keep the gate **Blocked**.
+- **How the check is satisfied:** Cleared unreversed receipts across non-cancelled Money on Account requests must cover the required agreed amount (taken from the accepted quote’s Payment on Account or the matter’s agreed payment on account). Partial payments or smaller requests than the agreed amount keep the gate **Blocked**.
 - **Client privacy for Finance staff:** While Finance users can inspect **Funds on account**, **Conflict check**, and **Signed engagement letter** progress on the opening checklist for accessible matters, confidential **Client Due Diligence** verdicts and identity documents remain hidden as **Not available to you**.
 - **Partner override:** Partners and Managing Partners can record an audited override for **Funds on account** with a written reason of at least 10 characters where firm policy permits opening ahead of cleared funds.
 

@@ -80,11 +80,11 @@ import type {
   CddConfiguration,
   ChasingConfiguration,
   EngagementConfiguration,
-  MoneyOnAccountConfiguration,
   RegistersConfiguration,
   RegisterTypeDefinition,
   WorkTypesConfiguration,
 } from '@platform/core-api';
+import type { MoneyOnAccountDisplaySummary } from '@/domain/moneyOnAccount';
 import { KeyDatesAdminPanel } from './KeyDatesAdminPanel';
 import { RegistersAdminPanel } from './RegistersAdminPanel';
 import { WorkTypesAdminPanel } from './WorkTypesAdminPanel';
@@ -216,7 +216,7 @@ interface Props {
   matterNumberingConfig?: import('@platform/core-api').MatterNumberingConfig;
   effectiveChasingConfig?: ChasingConfiguration;
   effectiveEngagementConfig?: EngagementConfiguration;
-  effectiveMoneyOnAccountConfig?: MoneyOnAccountConfiguration;
+  moneyOnAccountSummary?: MoneyOnAccountDisplaySummary | null;
   emailProviderDisabled?: boolean;
   hasMfaVerified?: boolean;
   currentUserKeyDatePermissions?: KeyDatePermission[];
@@ -271,7 +271,7 @@ export function AdminClient({
   matterNumberingConfig,
   effectiveChasingConfig,
   effectiveEngagementConfig,
-  effectiveMoneyOnAccountConfig,
+  moneyOnAccountSummary,
   emailProviderDisabled = false,
   hasMfaVerified = false,
   currentUserKeyDatePermissions = [],
@@ -4688,7 +4688,7 @@ export function AdminClient({
           <AdminEmailOutboxPanel
             effectiveChasingConfig={effectiveChasingConfig}
             effectiveEngagementConfig={effectiveEngagementConfig}
-            effectiveMoneyOnAccountConfig={effectiveMoneyOnAccountConfig}
+            moneyOnAccountSummary={moneyOnAccountSummary}
             emailProviderDisabled={emailProviderDisabled}
             hasMfaVerified={hasMfaVerified}
           />

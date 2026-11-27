@@ -4553,6 +4553,61 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
         return r2;
       });
 
+      // Verify R873 (5-char min reversal reason on server) & R874 (uq_moa_receipts_idempotency_key)
+      await expect(
+        moaRepo.withTenantTransaction(ctxAlpha, async (tx) =>
+          moaRepo.reverseReceiptInTx(tx, ctxAlpha, {
+            receiptId: rcpt1.id,
+            reversedByPersonId: 'P-000002',
+            reversalReason: 'bad',
+          }),
+        ),
+      ).rejects.toThrow(/VALIDATION_ERROR/);
+
+      const idemRcpt = await moaRepo.withTenantTransaction(ctxAlpha, async (tx) =>
+        moaRepo.insertReceiptInTx(tx, ctxAlpha, {
+          requestId: req1.id,
+          matterId: 'M-S108-MIG-01',
+          source: 'manual',
+          amountPence: 10000 as import('@platform/core').MinorUnits,
+          receivedDate: '2026-11-27',
+          idempotencyKey: 'mig-idem-1',
+          recordedByPersonId: 'P-000002',
+        }),
+      );
+      expect(idemRcpt.idempotencyKey).toBe('mig-idem-1');
+
+      await expect(
+        moaRepo.withTenantTransaction(ctxAlpha, async (tx) =>
+          moaRepo.insertReceiptInTx(tx, ctxAlpha, {
+            requestId: req1.id,
+            matterId: 'M-S108-MIG-01',
+            source: 'manual',
+            amountPence: 10000 as import('@platform/core').MinorUnits,
+            receivedDate: '2026-11-27',
+            idempotencyKey: 'mig-idem-1',
+            recordedByPersonId: 'P-000002',
+          }),
+        ),
+      ).rejects.toThrow(/MOA_RECEIPT_IDEMPOTENCY_CONFLICT/);
+
+      // Verify R872 ON DELETE RESTRICT on both matter FKs (cannot cascade-delete matter while MoA rows exist)
+      const delMatterRes = await alphaDirect.query<{ conname: string; confdeltype: string }>(
+        `SELECT conname, confdeltype
+           FROM pg_constraint
+          WHERE contype = 'f'
+            AND conrelid IN (
+              'public.money_on_account_requests'::regclass,
+              'public.money_on_account_receipts'::regclass
+            )
+            AND confrelid = 'public.matters'::regclass
+          ORDER BY conname ASC`,
+      );
+      expect(delMatterRes.rows).toHaveLength(2);
+      for (const fk of delMatterRes.rows) {
+        expect(fk.confdeltype).toBe('r');
+      }
+
       expect(req1.id).toMatch(/^MOA-/);
       expect(rcpt1.id).toMatch(/^MOAR-/);
       expect(await moaRepo.getRequestById(ctxBravo, req1.id)).toBeNull();

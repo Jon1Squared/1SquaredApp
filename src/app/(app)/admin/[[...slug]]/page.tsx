@@ -83,7 +83,7 @@ export default async function AdminCatchAllPage({
         matterNumberingConfig={data.matterNumberingConfig}
         effectiveChasingConfig={data.effectiveChasingConfig}
         effectiveEngagementConfig={data.effectiveEngagementConfig}
-        effectiveMoneyOnAccountConfig={data.effectiveMoneyOnAccountConfig}
+        moneyOnAccountSummary={data.moneyOnAccountSummary}
         emailProviderDisabled={data.emailProviderDisabled}
         hasMfaVerified={actor.mfaVerified}
         entraSession={actor.session}

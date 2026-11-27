@@ -3545,6 +3545,25 @@ export class TenantMatterRepository extends TenantScopedRepository {
     id: string,
   ): Promise<boolean> {
     return this.withTenantTransaction(ctx, async (tx) => {
+      const moaCheck = await tx.query<{ exists_flag: number }>(
+        `SELECT 1 AS exists_flag
+           FROM public.money_on_account_requests
+          WHERE tenant_id = $1 AND matter_id = $2
+         UNION ALL
+         SELECT 1 AS exists_flag
+           FROM public.money_on_account_receipts
+          WHERE tenant_id = $1 AND matter_id = $2
+          LIMIT 1`,
+        [ctx.tenantId, id],
+      );
+      if (moaCheck.rows.length > 0) {
+        const err = new Error(
+          'This matter has client money records and cannot be deleted.',
+        ) as Error & { code: string };
+        err.code = 'MATTER_HAS_CLIENT_MONEY_RECORDS';
+        throw err;
+      }
+
       // R752: Auto-withdraw any pending High-Risk opening approvals when a prospective matter is deleted/abandoned
       // (approved records are historical and never withdrawn).
       const pendingHroRes = await tx.query<{

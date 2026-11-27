@@ -119,15 +119,50 @@ export function assertBankDetailsSafeForEnvironment(
   assertMoneyOnAccountSafeForEnvironment(config, environment);
 }
 
+function fnv1aHash32(input: string, seed = 0x811c9dc5): number {
+  let hash = seed >>> 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function buildCompactMatterToken(
+  matterId: string,
+  cleanMatterNo: string,
+  maxTokenLen: number,
+): string {
+  const mSeq = /^M-0*(\d+)$/i.exec(matterId.trim());
+  if (mSeq) {
+    const encoded = `M${BigInt(mSeq[1]!).toString(36).toUpperCase()}`;
+    if (encoded.length <= maxTokenLen) {
+      return encoded;
+    }
+  }
+  const h1 = fnv1aHash32(`${matterId}|${cleanMatterNo}`, 0x811c9dc5).toString(36).toUpperCase();
+  const h2 = fnv1aHash32(`${cleanMatterNo}|${matterId}`, 0x9e3779b1).toString(36).toUpperCase();
+  const combined = `${h1}${h2}`.replace(/[^A-Z0-9]/g, '');
+  if (combined.length >= maxTokenLen) {
+    return combined.slice(0, maxTokenLen);
+  }
+  return combined.padStart(maxTokenLen, '0');
+}
+
 /**
  * Generates a UK Faster Payments / CHAPS-compatible payment reference:
  * `<PREFIX>-<MATTER_TOKEN_MAX10>-<NN>` strictly <= 18 uppercase ASCII chars with zero PII.
+ *
+ * When a formatted matter number fits cleanly inside `maxTokenLen`, it is preserved verbatim.
+ * Otherwise (`R866`), or when `useMatterIdToken` is requested to resolve a collision, a full-entropy
+ * base-36 matter identifier / dual-hash token is used rather than truncating `matterNumber`.
  */
 export function buildMoneyOnAccountPaymentReference(params: {
   readonly prefix?: string | null;
   readonly matterNumber?: string | null;
   readonly matterId: string;
   readonly sequenceNumber: number;
+  readonly useMatterIdToken?: boolean;
 }): string {
   const cleanedPrefix = (params.prefix ?? 'MOA')
     .trim()
@@ -147,12 +182,84 @@ export function buildMoneyOnAccountPaymentReference(params: {
   const trimmedMatterNo = (params.matterNumber ?? '').trim();
   const useMatterNo =
     Boolean(trimmedMatterNo) && !/^DRAFT/i.test(trimmedMatterNo);
-  const rawToken = useMatterNo ? trimmedMatterNo : params.matterId.trim();
-  const cleanToken =
-    rawToken.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'MATTER';
-  const matterToken = cleanToken.slice(0, maxTokenLen);
+  const cleanMatterNo = useMatterNo
+    ? trimmedMatterNo.toUpperCase().replace(/[^A-Z0-9]/g, '')
+    : '';
+  const cleanMatterIdToken = params.matterId
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+  const preferredToken = cleanMatterNo || cleanMatterIdToken || 'MATTER';
+
+  let matterToken: string;
+  if (
+    !params.useMatterIdToken &&
+    preferredToken.length >= 1 &&
+    preferredToken.length <= maxTokenLen
+  ) {
+    matterToken = preferredToken;
+  } else {
+    matterToken = buildCompactMatterToken(
+      params.matterId,
+      preferredToken,
+      maxTokenLen,
+    );
+  }
 
   return `${prefix}-${matterToken}-${seqStr}`;
+}
+
+export interface MoneyOnAccountDisplaySummary {
+  readonly enabled: boolean;
+  readonly bankConfigured: boolean;
+  readonly paymentReferencePrefix: string;
+  readonly accountName: string;
+  readonly bankName: string;
+  readonly maskedSortCode: string;
+  readonly maskedAccountNumber: string;
+  readonly maskedIban: string | null;
+  readonly bic: string | null;
+  readonly allowDemoPlaceholderDetails: boolean;
+}
+
+/**
+ * Builds a browser-safe summary of the tenant's Money on Account configuration (`R864`).
+ * Sort code, account number, and IBAN are always masked to their last 2 characters on the server.
+ */
+export function buildMoneyOnAccountDisplaySummary(
+  config: MoneyOnAccountConfiguration,
+): MoneyOnAccountDisplaySummary {
+  const ca = config.clientAccount;
+  return {
+    enabled: config.enabled,
+    bankConfigured: areClientBankDetailsConfigured(config),
+    paymentReferencePrefix: config.paymentReferencePrefix,
+    accountName: ca.accountName,
+    bankName: ca.bankName,
+    maskedSortCode: maskBankDetailForAudit(ca.sortCode, 'sortCode'),
+    maskedAccountNumber: maskBankDetailForAudit(ca.accountNumber, 'accountNumber'),
+    maskedIban: ca.iban?.trim() ? maskBankDetailForAudit(ca.iban, 'iban') : null,
+    bic: ca.bic?.trim() || null,
+    allowDemoPlaceholderDetails: ca.allowDemoPlaceholderDetails,
+  };
+}
+
+/**
+ * Masks sensitive bank snapshot fields on a request DTO before passing it to client components (`R864`).
+ */
+export function maskMoneyOnAccountRequestForDisplay(
+  req: MoneyOnAccountRequestRecord,
+): MoneyOnAccountRequestRecord {
+  const snap = req.bankDetailsSnapshot;
+  return {
+    ...req,
+    bankDetailsSnapshot: {
+      ...snap,
+      sortCode: maskBankDetailForAudit(snap.sortCode, 'sortCode'),
+      accountNumber: maskBankDetailForAudit(snap.accountNumber, 'accountNumber'),
+      iban: snap.iban?.trim() ? maskBankDetailForAudit(snap.iban, 'iban') : '',
+    },
+  };
 }
 
 /**

@@ -1228,7 +1228,12 @@ export class TenantOutboxRepository extends TenantScopedRepository {
 
   public async listOutboxRecords(
     ctx: TenantContext,
-    filter?: { readonly status?: EmailOutboxStatus; readonly limit?: number },
+    filter?: {
+      readonly status?: EmailOutboxStatus;
+      readonly matterId?: string;
+      readonly quoteId?: string;
+      readonly limit?: number;
+    },
   ): Promise<readonly EmailOutboxRecord[]> {
     const limit = Math.max(1, Math.min(200, Math.floor(filter?.limit ?? 100)));
     return this.withTenantReadTransaction(ctx, async (tx) => {
@@ -1237,6 +1242,14 @@ export class TenantOutboxRepository extends TenantScopedRepository {
       if (filter?.status) {
         params.push(filter.status);
         where += ` AND status = $${params.length}`;
+      }
+      if (filter?.matterId?.trim()) {
+        params.push(filter.matterId.trim());
+        where += ` AND matter_id = $${params.length}`;
+      }
+      if (filter?.quoteId?.trim()) {
+        params.push(filter.quoteId.trim());
+        where += ` AND quote_id = $${params.length}`;
       }
       params.push(limit);
       const res = await tx.query<DbEmailOutboxRow>(

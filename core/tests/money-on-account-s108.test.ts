@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CORE_API_VERSION,
   CORE_TENANT_MIGRATIONS,
   MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
+  TenantAuditRepository,
   TenantCatalogueRepository,
   TenantChasingRepository,
+  TenantEvidenceArtifactRepository,
   TenantIntakeCheckRepository,
   TenantMatterRepository,
   TenantMigrationRunner,
@@ -35,6 +37,7 @@ import {
   openProspectiveMatterAction,
   overrideMatterOpeningPreconditionAction,
   recordMoneyOnAccountReceiptAction,
+  retryCommunicationChaseAction,
   reverseMoneyOnAccountReceiptAction,
   saveMoneyOnAccountConfigAction,
   stopCommunicationChaseAction,
@@ -44,6 +47,7 @@ import * as evidenceUploadRoute from '@/app/api/evidence/upload/route';
 import { isActionDenied } from '@/domain/actionResult';
 import { addDays } from '@/domain/dates';
 import {
+  buildMoneyOnAccountDisplaySummary,
   buildMoneyOnAccountPaymentReference,
   evaluateMatterFundsOnAccountGate,
   formatMaskedMoaConfigAuditSummary,
@@ -53,6 +57,8 @@ import {
 import type { ConflictCheckRecordInput, Matter, Person, Task } from '@/domain/types';
 import { setActiveTenantConfigForTesting } from '@/platform/tenantRuntime';
 import { createSeedStore } from '@/seed/seedStoreBuilder';
+import { getDocumentStorage } from '@/server/documentGenerationServices';
+import { loadAdminPageData, loadMatterDetailPageData } from '@/server/pageLoaders';
 import { importFirmStoreModulesToPostgres } from '@/server/storePostgresImport';
 import {
   completeClientCddRecord,
@@ -60,9 +66,12 @@ import {
   downloadOutboxAttachmentForAdminRecord,
   executeCommunicationChasesForTenant,
   getMatterOpeningGateStateRecord,
+  matchPmsClientLedgerReceiptRecord,
+  openProspectiveMatterRecord,
   prepareQuoteConversionRecord,
   recordCddChecklistItemRecord,
   resetAllDemoData,
+  reverseMoneyOnAccountReceiptRecord,
   saveMatterRecord,
   saveQuoteRecord,
   signOffMatterCostsRecord,
@@ -372,8 +381,13 @@ async function createConveyancingProspectiveMatter(params?: {
   responsiblePartnerId?: string;
   leadFeeEarnerId?: string;
   signedEngagement?: boolean;
+  conflictStatus?: ConflictCheckRecordInput['status'];
+  saveMode?: 'submit_cleared' | 'submit_referred';
+  isStaffMatter?: boolean;
+  restrictedAccessUserIds?: string[];
 }) {
   const actorId = params?.leadFeeEarnerId ?? 'P-000002';
+  const conflictStatus = params?.conflictStatus ?? 'Cleared';
   const saved = await runAsActionActor(
     actorId,
     () =>
@@ -395,13 +409,17 @@ async function createConveyancingProspectiveMatter(params?: {
                 : params.retainerMoniesOnAccountPence / 100
               : null,
           retainerMoniesOnAccountPence: params?.retainerMoniesOnAccountPence ?? null,
-          conflictCheckRecord: makeConflictRecord(actorId, 'Dafydd Evans', 'Cleared'),
+          ...(params?.isStaffMatter !== undefined ? { isStaffMatter: params.isStaffMatter } : {}),
+          ...(params?.restrictedAccessUserIds !== undefined
+            ? { restrictedAccessUserIds: params.restrictedAccessUserIds }
+            : {}),
+          conflictCheckRecord: makeConflictRecord(actorId, 'Dafydd Evans', conflictStatus),
           riskAssessment: {
             answers: params?.riskAnswers ?? BASE_LOW_RISK_ANSWERS,
             ...(params?.riskFollowUps ? { followUps: params.riskFollowUps } : {}),
           },
         },
-        { byId: actorId, saveMode: 'submit_cleared' },
+        { byId: actorId, saveMode: params?.saveMode ?? 'submit_cleared' },
       ),
     { roles: ['fee_earner', 'partner'], mfaVerified: false },
   );
@@ -431,7 +449,7 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     setActiveTenantConfigForTesting(null);
   });
 
-  it('1. Unit & Core API contracts: payment ref <= 18 ASCII zero-PII, live placeholder refusal, safe core defaults & R824 masking', () => {
+  it('1. Unit & Core API contracts: payment ref <= 18 ASCII zero-PII (no R866 clashes), live placeholder refusal, safe core defaults & R824/R864 masking', () => {
     expect(isCoreApiRangeCompatible(CORE_API_VERSION, '^2.6.0')).toBe(true);
 
     // Safe core defaults: enabled=false, empty client account
@@ -463,6 +481,40 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     expect(refFromDraftMatter).toBe('MOA-M000099-02');
     expect(refFromDraftMatter.length).toBeLessThanOrEqual(18);
 
+    // R866: 6-char prefix with MAT0010004 and MAT0010005 must NOT truncate to collide; >10-char matter number works
+    const ref6A = buildMoneyOnAccountPaymentReference({
+      prefix: 'ABCDEF',
+      matterNumber: 'MAT001-0004',
+      matterId: 'M-000004',
+      sequenceNumber: 1,
+    });
+    const ref6B = buildMoneyOnAccountPaymentReference({
+      prefix: 'ABCDEF',
+      matterNumber: 'MAT001-0005',
+      matterId: 'M-000005',
+      sequenceNumber: 1,
+    });
+    expect(ref6A).not.toBe(ref6B);
+    expect(ref6A.length).toBeLessThanOrEqual(18);
+    expect(ref6B.length).toBeLessThanOrEqual(18);
+    expect(ref6A).toMatch(/^[A-Z0-9-]+$/);
+
+    const refLong1 = buildMoneyOnAccountPaymentReference({
+      prefix: 'MOA',
+      matterNumber: 'LONGCLIENT2026-0001',
+      matterId: 'M-001001',
+      sequenceNumber: 1,
+    });
+    const refLong2 = buildMoneyOnAccountPaymentReference({
+      prefix: 'MOA',
+      matterNumber: 'LONGCLIENT2026-0002',
+      matterId: 'M-001002',
+      sequenceNumber: 1,
+    });
+    expect(refLong1).not.toBe(refLong2);
+    expect(refLong1.length).toBeLessThanOrEqual(18);
+    expect(refLong2.length).toBeLessThanOrEqual(18);
+
     // Placeholder detection & live refusal
     const effectiveDemo = resolveEffectiveMoneyOnAccountConfig(
       notALawFirmBaseConfig as never,
@@ -475,13 +527,13 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       assertMoneyOnAccountSafeForEnvironment(effectiveDemo, 'live'),
     ).toThrow(/MOA_LIVE_PLACEHOLDER_BANK_DETAILS_FORBIDDEN/);
 
-    // R824 bank detail masking (only last 2 chars preserved)
+    // R824 bank detail masking (only last 2 chars preserved) & R864 browser summary DTO
     expect(maskBankDetailForAudit('12-34-56', 'sortCode')).toBe('**-**-56');
     expect(maskBankDetailForAudit('87654321', 'accountNumber')).toBe('******21');
     expect(maskBankDetailForAudit('GB29NWBK60161331926819', 'iban')).toBe(
       '********************19',
     );
-    const auditSummary = formatMaskedMoaConfigAuditSummary({
+    const fullRealConfig = {
       ...effectiveDemo,
       clientAccount: {
         accountName: 'Real Firm Client Account',
@@ -492,13 +544,23 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
         bic: 'NWBKGB2L',
         allowDemoPlaceholderDetails: false,
       },
-    });
+    };
+    const auditSummary = formatMaskedMoaConfigAuditSummary(fullRealConfig);
     expect(auditSummary).not.toContain('12-34-56');
     expect(auditSummary).not.toContain('87654321');
     expect(auditSummary).not.toContain('GB29NWBK60161331926819');
     expect(auditSummary).toContain('**-**-56');
     expect(auditSummary).toContain('******21');
     expect(auditSummary).toContain('19');
+
+    const displaySummaryJson = JSON.stringify(
+      buildMoneyOnAccountDisplaySummary(fullRealConfig),
+    );
+    expect(displaySummaryJson).not.toContain('12-34-56');
+    expect(displaySummaryJson).not.toContain('87654321');
+    expect(displaySummaryJson).not.toContain('GB29NWBK60161331926819');
+    expect(displaySummaryJson).toContain('**-**-56');
+    expect(displaySummaryJson).toContain('******21');
   });
 
   it('2. Request dispatch builds PDF outside TX (<= 3 MB), enqueues outbox (matter_id/quote_id) + ADR 0038 check, enforces Lesson 3 idempotency, and blocks unconfigured/live placeholder', async () => {
@@ -738,7 +800,160 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       expect(send2.deduplicated).toBe(false);
       expect(send2.request.paymentReference).toMatch(/^MOA-[A-Z0-9]{1,10}-02$/);
     }
-  }, 45_000);
+
+    // R876 item 7: off-client email flags offClientEmail=true (zero PII); client email does not
+    const send2Audits = await auditEntriesForRecord('money_on_account_request', send2.ok ? send2.request.id : '');
+    const offClientAudit = send2Audits.find((a) => a.field === 'Money on account requested');
+    expect(offClientAudit?.newValue).toContain('; offClientEmail=true');
+    expect(offClientAudit?.newValue).not.toContain('accounts@oakridge.test');
+
+    const org1 = await new TenantPartyRepository().getOrganisationById(ctx, 'O-000001');
+    const matchedClientEmail = org1?.generalEmail?.trim() || '';
+    expect(matchedClientEmail).toBeTruthy();
+    const sendMatched = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: convMatterId,
+          requestedAmountPence: 10_000,
+          recipientEmail: matchedClientEmail,
+          idempotencyKey: 'moa-send-matched-email',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(sendMatched.ok).toBe(true);
+    if (sendMatched.ok) {
+      const matchedAudits = await auditEntriesForRecord('money_on_account_request', sendMatched.request.id);
+      const matchedEntry = matchedAudits.find((a) => a.field === 'Money on account requested');
+      expect(matchedEntry?.newValue).not.toContain('offClientEmail=true');
+    }
+
+    // R866: Concurrent request sends on same matter retry and produce strictly consecutive -01, -02
+    await ensureOrgValidCdd('O-000001', 'P-000001');
+    const concMatter = await createConveyancingProspectiveMatter({
+      title: 'S1-08 Concurrent Ref Seq Matter',
+      retainerMoniesOnAccountPence: 50_000,
+      signedEngagement: true,
+    });
+    const [c1, c2] = await Promise.all([
+      runAsTestActor(
+        'P-000002',
+        () =>
+          createAndSendMoneyOnAccountRequestRecord(
+            {
+              matterId: concMatter.id,
+              requestedAmountPence: 20_000,
+              recipientEmail: 'accounts@oakridge.test',
+              idempotencyKey: 'conc-seq-a',
+            },
+            'P-000002',
+            {
+              tenantCtx: testTenantCtx('P-000002', {
+                roles: ['fee_earner'],
+                mfaVerified: false,
+              }),
+            },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      ),
+      runAsTestActor(
+        'P-000002',
+        () =>
+          createAndSendMoneyOnAccountRequestRecord(
+            {
+              matterId: concMatter.id,
+              requestedAmountPence: 30_000,
+              recipientEmail: 'accounts@oakridge.test',
+              idempotencyKey: 'conc-seq-b',
+            },
+            'P-000002',
+            {
+              tenantCtx: testTenantCtx('P-000002', {
+                roles: ['fee_earner'],
+                mfaVerified: false,
+              }),
+            },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      ),
+    ]);
+    expect(c1.ok).toBe(true);
+    expect(c2.ok).toBe(true);
+    if (c1.ok && c2.ok) {
+      const seqSuffixes = [c1.request.paymentReference, c2.request.paymentReference]
+        .map((ref) => ref.split('-').pop()!)
+        .sort();
+      expect(seqSuffixes).toEqual(['01', '02']);
+    }
+
+    // R871: Requesting £1,000 on a matter with no agreed POA does NOT backfill retainer_monies_on_account_pence;
+    // cancelling £1,000 and sending + paying £500 satisfies funds_on_account and opens cleanly.
+    const noAgreedMatter = await createConveyancingProspectiveMatter({
+      title: 'S1-08 R871 No Agreed POA Matter',
+      retainerMoniesOnAccountPence: null,
+      feeEstimateGbp: 400,
+      signedEngagement: true,
+    });
+    const r871WrongReq = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: noAgreedMatter.id,
+          requestedAmountPence: 100_000,
+          recipientEmail: 'accounts@oakridge.test',
+          idempotencyKey: 'r871-wrong-1000',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r871WrongReq.ok).toBe(true);
+    if (!r871WrongReq.ok) return;
+    const matterAfterWrongReq = await new TenantMatterRepository().getMatterById<Matter>(
+      ctx,
+      noAgreedMatter.id,
+    );
+    expect(matterAfterWrongReq?.retainerMoniesOnAccountPence ?? null).toBeNull();
+
+    const r871Cancel = await runAsActionActor(
+      'P-000002',
+      () =>
+        cancelMoneyOnAccountRequestAction({
+          requestId: r871WrongReq.request.id,
+          reason: 'Requested £1,000 in error',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r871Cancel.ok).toBe(true);
+
+    const r871RightReq = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: noAgreedMatter.id,
+          requestedAmountPence: 50_000,
+          recipientEmail: 'accounts@oakridge.test',
+          idempotencyKey: 'r871-right-500',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    if (!r871RightReq.ok) throw new Error(String(r871RightReq.error));
+    const r871Paid = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: r871RightReq.request.id,
+          amountPence: 50_000,
+          receivedDate: '2026-11-27',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r871Paid.ok).toBe(true);
+    const r871Open = await runAsActionActor(
+      'P-000002',
+      () => openProspectiveMatterAction(noAgreedMatter.id),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(r871Open.ok).toBe(true);
+  }, 60_000);
 
   it('3. Chasing 7/14/21 lifecycle, Lesson 1 adapter & R818 re-send key, Lesson 2 same-TX stop + oldValue audit, and R824 MFA + masked bank details audit', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
@@ -816,6 +1031,39 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     expect(latestAudit.oldValue).not.toContain('00-00-00');
     expect(latestAudit.oldValue).not.toContain('00000000');
 
+    // R867: saveMoneyOnAccountConfigAction validates merged config against MoneyOnAccountConfigSchema
+    const badEnabledSave = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMoneyOnAccountConfigAction(
+          { enabled: 'yes' as unknown as boolean },
+          'Invalid enabled boolean type',
+        ),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(badEnabledSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
+    if (!badEnabledSave.ok && !isActionDenied(badEnabledSave)) {
+      expect(badEnabledSave.message.toLowerCase()).toContain('enabled');
+    }
+
+    const longWordingSave = await runAsActionActor(
+      'P-000004',
+      () =>
+        saveMoneyOnAccountConfigAction(
+          {
+            requestWordings: {
+              introductoryParagraph: 'W'.repeat(4001),
+            } as unknown as MoneyOnAccountConfiguration['requestWordings'],
+          },
+          'Excessive wording length test',
+        ),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    expect(longWordingSave).toMatchObject({ ok: false, code: 'MOA_CONFIG_VALIDATION_ERROR' });
+    if (!longWordingSave.ok && !isActionDenied(longWordingSave)) {
+      expect(longWordingSave.message).toContain('requestWordings.introductoryParagraph');
+    }
+
     // Create matter and send request -> verify Day 7, Day 14, Day 21 execution
     const matter = await createConveyancingProspectiveMatter({
       title: 'S1-08 Chasing Lifecycle Matter',
@@ -835,6 +1083,73 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     );
     if (!sent1.ok) throw new Error(String(sent1.error));
     expect(sent1.request.paymentReference).toMatch(/^NALF-/);
+
+    // R864: Admin & matter loaders never pass raw bank details (sortCode/accountNumber/IBAN) to browser,
+    // and Enquiries/Intake users receive no MOA config/requests/receipts at all.
+    const adminPageData = await runAsActionActor(
+      'P-000004',
+      () => loadAdminPageData('P-000004', { mfaVerified: true }),
+      { roles: ['admin'], mfaVerified: true },
+    );
+    if ('redirectTo' in adminPageData) throw new Error('Unexpected redirect');
+    const adminClientPayload = { ...adminPageData, shell: undefined };
+    expect('effectiveMoneyOnAccountConfig' in adminPageData).toBe(false);
+    expect(adminClientPayload.moneyOnAccountSummary?.maskedSortCode).toBe('**-**-56');
+    expect(adminClientPayload.moneyOnAccountSummary?.maskedAccountNumber).toBe('******21');
+    const adminSerialised = JSON.stringify(adminClientPayload);
+    expect(adminSerialised).not.toContain('12-34-56');
+    expect(adminSerialised).not.toContain('87654321');
+    expect(adminSerialised).not.toContain('GB29NWBK60161331926819');
+
+    const feMatterData = await runAsActionActor(
+      'P-000002',
+      () => loadMatterDetailPageData('P-000002', matter.id),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(feMatterData?.kind).toBe('profile');
+    if (feMatterData && feMatterData.kind === 'profile') {
+      const feClientPayload = { ...feMatterData, shell: undefined };
+      expect('effectiveMoneyOnAccountConfig' in feMatterData).toBe(false);
+      expect(feClientPayload.moneyOnAccountSummary?.maskedSortCode).toBe('**-**-56');
+      expect(feClientPayload.moneyOnAccountRequests[0]?.bankDetailsSnapshot.sortCode).toBe('**-**-56');
+      expect(feClientPayload.moneyOnAccountRequests[0]?.bankDetailsSnapshot.accountNumber).toBe('******21');
+      const feSerialised = JSON.stringify(feClientPayload);
+      expect(feSerialised).not.toContain('12-34-56');
+      expect(feSerialised).not.toContain('87654321');
+      expect(feSerialised).not.toContain('GB29NWBK60161331926819');
+    }
+
+    // Enquiries Coordinator (P-000008 narrowed to pure enquiries_coordinator without fee_earner)
+    // has no money_on_account:view and receives ZERO MOA config/requests/receipts.
+    const enqPartyRepo = new TenantPartyRepository();
+    const p8Before = await enqPartyRepo.getPersonById<Person>(ctx, 'P-000008');
+    if (p8Before) {
+      await enqPartyRepo.putPerson(ctx, { ...p8Before, roles: ['enquiries_coordinator'] });
+    }
+    try {
+      const enqMatterData = await runAsActionActor(
+        'P-000008',
+        () => loadMatterDetailPageData('P-000008', matter.id),
+        { roles: ['enquiries_coordinator'], mfaVerified: false },
+      );
+      expect(enqMatterData?.kind).toBe('profile');
+      if (enqMatterData && enqMatterData.kind === 'profile') {
+        const enqClientPayload = { ...enqMatterData, shell: undefined };
+        expect(enqClientPayload.moneyOnAccountSummary).toBeNull();
+        expect(enqClientPayload.moneyOnAccountBankConfigured).toBe(false);
+        expect(enqClientPayload.moneyOnAccountAgreedPence).toBeNull();
+        expect(enqClientPayload.moneyOnAccountRequests).toEqual([]);
+        expect(enqClientPayload.moneyOnAccountReceipts).toEqual([]);
+        const enqSerialised = JSON.stringify(enqClientPayload);
+        expect(enqSerialised).not.toContain('12-34-56');
+        expect(enqSerialised).not.toContain('87654321');
+        expect(enqSerialised).not.toContain('GB29NWBK60161331926819');
+      }
+    } finally {
+      if (p8Before) {
+        await enqPartyRepo.putPerson(ctx, p8Before);
+      }
+    }
     const chase1Id = sent1.chase!.id;
     const sentAtDate = new Date(sent1.chase!.sentAt);
 
@@ -901,6 +1216,33 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       { roles: ['fee_earner'], mfaVerified: false },
     );
     if (!sent2.ok) throw new Error(String(sent2.error));
+
+    // R865: Risk & Compliance (has matter:edit, lacks money_on_account:request) gets opaque NOT_FOUND on stop & retry; Fee Earner succeeds
+    const p3PartyRepo = new TenantPartyRepository();
+    const p3Before = await p3PartyRepo.getPersonById<Person>(ctx, 'P-000003');
+    if (p3Before) {
+      await p3PartyRepo.putPerson(ctx, { ...p3Before, roles: ['risk_compliance'] });
+    }
+    try {
+      const riskStopRes = await runAsActionActor(
+        'P-000003',
+        () => stopCommunicationChaseAction({ chaseId: sent2.chase!.id }),
+        { roles: ['risk_compliance'], mfaVerified: false },
+      );
+      expect(riskStopRes).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      const riskRetryRes = await runAsActionActor(
+        'P-000003',
+        () => retryCommunicationChaseAction({ chaseId: sent2.chase!.id }),
+        { roles: ['risk_compliance'], mfaVerified: false },
+      );
+      expect(riskRetryRes).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+    } finally {
+      if (p3Before) {
+        await p3PartyRepo.putPerson(ctx, p3Before);
+      }
+    }
+
     const stopRes = await runAsActionActor(
       'P-000002',
       () => stopCommunicationChaseAction({ chaseId: sent2.chase!.id }),
@@ -1187,8 +1529,39 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     );
     expect(wrongPurposeRes.ok).toBe(false);
     if (!wrongPurposeRes.ok && !isActionDenied(wrongPurposeRes)) {
-      expect(wrongPurposeRes.code).toBe('VALIDATION_ERROR');
+      expect(wrongPurposeRes.code).toBe('NOT_FOUND');
     }
+
+    // R857 & R868: stored 'cdd' artifact on the same accessible matter is also refused with opaque NOT_FOUND
+    const cddUpload = await runAsActionActor(
+      'P-000001',
+      () =>
+        uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: matter.id,
+            purpose: 'cdd',
+            fileName: 'passport-check.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% CDD Passport\n%%EOF\n'),
+          },
+          'P-000001',
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    if (!cddUpload.ok) throw new Error(cddUpload.message);
+    const cddPurposeRes = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqId,
+          amountPence: 20_000,
+          receivedDate: '2026-11-27',
+          evidenceArtifactId: cddUpload.artifact.id,
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(cddPurposeRes).toMatchObject({ ok: false, code: 'NOT_FOUND' });
 
     // Invalid calendar date rejected cleanly (Lesson 4)
     const badDateRes = await runAsActionActor(
@@ -1235,7 +1608,7 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     );
     expect(blockedCancel.ok).toBe(false);
 
-    // Fee earner cannot reverse; Finance reverses and request reverts to 'requested'
+    // Fee earner cannot reverse; R873 enforces 5-char min on server; Finance reverses cleanly
     const feeReverse = await runAsActionActor(
       'P-000002',
       () =>
@@ -1246,6 +1619,19 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       { roles: ['fee_earner'], mfaVerified: false },
     );
     expect(isActionDenied(feeReverse)).toBe(true);
+
+    for (const shortReason of ['x', 'abcd']) {
+      const shortRev = await runAsActionActor(
+        'P-000009',
+        () =>
+          reverseMoneyOnAccountReceiptAction({
+            receiptId: okPartRes.ok ? okPartRes.receipt.id : '',
+            reason: shortReason,
+          }),
+        { roles: ['finance'], mfaVerified: false },
+      );
+      expect(shortRev).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+    }
 
     const finReverse = await runAsActionActor(
       'P-000009',
@@ -1277,7 +1663,156 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       expect(cancelledAfterRev.stoppedChase?.status).toBe('stopped');
       expect(cancelledAfterRev.stoppedChase?.stoppedReason).toBe('cancelled');
     }
-  }, 45_000);
+
+    // R872: Deleting a matter that has client money requests fails cleanly (never raw 23503), leaving records intact
+    const matterRepo = new TenantMatterRepository();
+    const moaRepo = new TenantMoneyOnAccountRepository();
+    await expect(matterRepo.deleteMatterById(adminCtx, matter.id)).rejects.toMatchObject({
+      code: 'MATTER_HAS_CLIENT_MONEY_RECORDS',
+      message: 'This matter has client money records and cannot be deleted.',
+    });
+    expect(await matterRepo.getMatterById<Matter>(adminCtx, matter.id)).not.toBeNull();
+    expect(await moaRepo.getRequestById(adminCtx, reqId)).not.toBeNull();
+
+    // R874: Idempotent manual receipt recording & orphan proof cleanup on failure
+    const reqIdempRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: matter.id,
+          requestedAmountPence: 30_000,
+          recipientEmail: 'accounts@oakridge.test',
+          idempotencyKey: 'rbac-req-idemp-test',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    if (!reqIdempRes.ok) throw new Error(String(reqIdempRes.error));
+    const reqIdempId = reqIdempRes.request.id;
+
+    // Upload a proof file for a receipt call that fails date validation -> blob + artifact row must be cleaned up
+    const finCtx = testTenantCtx('P-000009');
+    const orphanUpload = await runAsActionActor(
+      'P-000009',
+      () =>
+        uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: matter.id,
+            purpose: 'moa_receipt',
+            fileName: 'orphan-proof.pdf',
+            contentType: 'application/pdf',
+            bytes: Buffer.from('%PDF-1.4\n% Orphan proof\n%%EOF\n'),
+          },
+          'P-000009',
+        ),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    if (!orphanUpload.ok) throw new Error(orphanUpload.message);
+    const failedWithProof = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 10_000,
+          receivedDate: '2026-02-31',
+          evidenceArtifactId: orphanUpload.artifact.id,
+          idempotencyKey: 'rcpt-fail-clean',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(failedWithProof).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+    expect(
+      await new TenantEvidenceArtifactRepository().getArtifactById(finCtx, orphanUpload.artifact.id),
+    ).toBeNull();
+    const validatedCfg = loadAndValidateTenantConfig(
+      raw,
+      { tenantId: 'not-a-law-firm', environment: 'test' },
+      'test',
+      'multi_tenant',
+    );
+    await expect(
+      getDocumentStorage(validatedCfg).getObjectBytes(finCtx, {
+        blobKey: orphanUpload.artifact.blobKey,
+      }),
+    ).rejects.toThrow();
+
+    // Double submit with SAME idempotencyKey records ONCE; distinct key records second part-payment
+    const r1 = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 10_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'IDEM-1',
+          idempotencyKey: 'rcpt-idem-k1',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r1.ok).toBe(true);
+    const r1Replay = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 10_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'IDEM-1',
+          idempotencyKey: 'rcpt-idem-k1',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r1Replay.ok).toBe(true);
+    if (r1.ok && r1Replay.ok) {
+      expect(r1.deduplicated).toBe(false);
+      expect(r1Replay.deduplicated).toBe(true);
+      expect(r1Replay.receipt.id).toBe(r1.receipt.id);
+    }
+
+    const r2 = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqIdempId,
+          amountPence: 10_000,
+          receivedDate: '2026-11-27',
+          bankReference: 'IDEM-2',
+          idempotencyKey: 'rcpt-idem-k2',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(r2.ok).toBe(true);
+    if (r1.ok && r2.ok) {
+      expect(r2.deduplicated).toBe(false);
+      expect(r2.receipt.id).not.toBe(r1.receipt.id);
+    }
+    const receiptsOnIdemp = (await moaRepo.listReceiptsForMatter(finCtx, matter.id)).filter(
+      (r) => r.requestId === reqIdempId,
+    );
+    expect(receiptsOnIdemp).toHaveLength(2);
+
+    // R873: exact 5-character reversal reason succeeds
+    if (r2.ok) {
+      const fiveCharRev = await runAsActionActor(
+        'P-000009',
+        () =>
+          reverseMoneyOnAccountReceiptAction({
+            receiptId: r2.receipt.id,
+            reason: 'Error',
+          }),
+        { roles: ['finance'], mfaVerified: false },
+      );
+      expect(fiveCharRev.ok).toBe(true);
+    }
+
+    // R872: Deleting a matter with receipts also fails cleanly and preserves receipts & matter
+    await expect(matterRepo.deleteMatterById(adminCtx, matter.id)).rejects.toMatchObject({
+      code: 'MATTER_HAS_CLIENT_MONEY_RECORDS',
+      message: 'This matter has client money records and cannot be deleted.',
+    });
+    expect(await matterRepo.getMatterById<Matter>(adminCtx, matter.id)).not.toBeNull();
+    expect(await moaRepo.listReceiptsForMatter(finCtx, matter.id)).toHaveLength(3);
+  }, 60_000);
 
   it('5. PMS client ledger matching rejects negative outflows, enforces uq_moa_receipts_tenant_pms_tx on Promise.all race, stops chase on received, and allows rematch after reversal', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
@@ -1325,6 +1860,14 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
           amount: -100.5,
           amount_pence: -10_050,
         },
+        {
+          transaction_id: 'TX-ZERO-PENCE',
+          date: '2026-11-27',
+          type: 'Receipt',
+          description: 'Receipt with zero integer pence despite float amount',
+          amount: 150,
+          amount_pence: 0,
+        },
       ]),
     );
     await pmsRepo.putPmsLink(ctx, {
@@ -1349,6 +1892,44 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     if (!sendRes.ok) throw new Error(String(sendRes.error));
     const reqId = sendRes.request.id;
 
+    // R876 item 2: Missing/non-positive amount_pence fails closed with VALIDATION_ERROR (never float Math.round(amount * 100))
+    const zeroPenceMatch = await runAsActionActor(
+      'P-000009',
+      () =>
+        matchPmsClientLedgerReceiptAction({
+          requestId: reqId,
+          pmsTransactionId: 'TX-ZERO-PENCE',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(zeroPenceMatch).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+
+    const realPmsRow = await pmsRepo.withTenantReadTransaction(ctx, (tx) =>
+      pmsRepo.getClientLedgerEntryByTransactionIdInTx(tx, ctx, 'TX-POS-PART-300'),
+    );
+    expect(realPmsRow).not.toBeNull();
+    const pmsSpy = vi
+      .spyOn(TenantPmsRepository.prototype, 'getClientLedgerEntryByTransactionIdInTx')
+      .mockResolvedValueOnce({
+        ...realPmsRow!,
+        amount: 300,
+        amount_pence: undefined as unknown as MinorUnits,
+      });
+    try {
+      const undefinedPenceMatch = await runAsActionActor(
+        'P-000009',
+        () =>
+          matchPmsClientLedgerReceiptAction({
+            requestId: reqId,
+            pmsTransactionId: 'TX-POS-PART-300',
+          }),
+        { roles: ['finance'], mfaVerified: false },
+      );
+      expect(undefinedPenceMatch).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+    } finally {
+      pmsSpy.mockRestore();
+    }
+
     // Negative Payment & Transfer to office rejected cleanly
     for (const negId of ['TX-NEG-PAY', 'TX-NEG-XFER']) {
       const negRes = await runAsActionActor(
@@ -1368,22 +1949,40 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
 
     // Promise.all race against same TX-POS-PART-300 -> exactly 1 succeeds, 1 hits uq_moa_receipts_tenant_pms_tx
     const raceResults = await Promise.all([
-      runAsActionActor(
+      runAsTestActor(
         'P-000009',
         () =>
-          matchPmsClientLedgerReceiptAction({
-            requestId: reqId,
-            pmsTransactionId: 'TX-POS-PART-300',
-          }),
+          matchPmsClientLedgerReceiptRecord(
+            {
+              requestId: reqId,
+              pmsTransactionId: 'TX-POS-PART-300',
+            },
+            'P-000009',
+            {
+              tenantCtx: testTenantCtx('P-000009', {
+                roles: ['finance'],
+                mfaVerified: false,
+              }),
+            },
+          ),
         { roles: ['finance'], mfaVerified: false },
       ),
-      runAsActionActor(
+      runAsTestActor(
         'P-000001',
         () =>
-          matchPmsClientLedgerReceiptAction({
-            requestId: reqId,
-            pmsTransactionId: 'TX-POS-PART-300',
-          }),
+          matchPmsClientLedgerReceiptRecord(
+            {
+              requestId: reqId,
+              pmsTransactionId: 'TX-POS-PART-300',
+            },
+            'P-000001',
+            {
+              tenantCtx: testTenantCtx('P-000001', {
+                roles: ['partner'],
+                mfaVerified: false,
+              }),
+            },
+          ),
         { roles: ['partner'], mfaVerified: false },
       ),
     ]);
@@ -1392,9 +1991,9 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     expect(successes).toHaveLength(1);
     expect(failures).toHaveLength(1);
     const failObj = failures[0]!;
-    if (!failObj.ok && !isActionDenied(failObj)) {
-      expect(failObj.code).toBe('MOA_PMS_RECEIPT_ALREADY_MATCHED');
-    }
+    expect(failObj.ok).toBe(false);
+    expect(isActionDenied(failObj)).toBe(false);
+    expect((failObj as { code?: string }).code).toBe('MOA_PMS_RECEIPT_ALREADY_MATCHED');
 
     // Second positive Receipt completes request -> 'received' + stops chase immediately in same TX
     const completeMatch = await runAsActionActor(
@@ -1454,296 +2053,17 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     expect(rematchRes.ok).toBe(true);
   }, 45_000);
 
-  it('6. R822 / Q8 canonical gate rule: tests all 6 cases across all 5 opening paths, reversal vs open race, and reversal after opening', async () => {
+  it('6. R822 / Q8 canonical gate rule: table-driven 6+ cases across all 5 opening paths, reversal vs open race, sibling chase isolation & reversal after opening', async () => {
     await resetAllDemoData('P-000004', testDataResetContext());
     const { raw } = makeMoaTestConfig();
     setActiveTenantConfigForTesting(raw, {});
-    await ensureOrgValidCdd('O-000001', 'P-000001');
+    const ctxFee = testTenantCtx('P-000002');
+    const auditRepo = new TenantAuditRepository();
+    const matterRepo = new TenantMatterRepository();
+    const regRepo = new TenantRegisterRepository();
+    const chasingRepo = new TenantChasingRepository();
 
-    // Pure unit verification of Case 4(b): no agreed POA, single request paid in full
-    const case4bEval = evaluateMatterFundsOnAccountGate({
-      requests: [{ id: 'R1', status: 'received', requestedAmountPence: 20_000 }],
-      receipts: [{ requestId: 'R1', amountPence: 20_000, reversedAt: null }],
-      agreedAmountPence: null,
-    });
-    expect(case4bEval.fundsOnAccountSatisfied).toBe(true);
-
-    // Pure unit verification of Case 5(a): cancelled request only -> blocked
-    const case5aEval = evaluateMatterFundsOnAccountGate({
-      requests: [{ id: 'R1', status: 'cancelled', requestedAmountPence: 50_000 }],
-      receipts: [],
-      agreedAmountPence: 50_000,
-    });
-    expect(case5aEval.fundsOnAccountSatisfied).toBe(false);
-
-    // Path 1: saveMatterRecord (Residential Conveyancing, 0 requests -> Case 1 blocked)
-    const mCase = await createConveyancingProspectiveMatter({
-      title: 'S1-08 Gate 6-Case Matter',
-      retainerMoniesOnAccountPence: 50_000,
-      signedEngagement: true,
-    });
-    expect(mCase.matterStatusId).toBe('matter_status.prospective_enquiry');
-
-    const gateStateInitial = await runAsActionActor(
-      'P-000009',
-      () => getMatterOpeningGateStateRecord(mCase.id, 'P-000009'),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    expect(gateStateInitial.ok).toBe(true);
-    if (gateStateInitial.ok) {
-      const fundsPre = gateStateInitial.evaluation.preconditions.find(
-        (p) => p.key === 'funds_on_account',
-      );
-      expect(fundsPre?.required).toBe(true);
-      expect(fundsPre?.satisfied).toBe(false);
-      // R812: Finance gate state hides CDD verdict cleanly
-      const cddPre = gateStateInitial.evaluation.preconditions.find(
-        (p) => p.key === 'cdd_complete',
-      );
-      expect(cddPre?.statusSummary).toBe('Not available to you');
-    }
-
-    // Open fails on Case 1 (no request)
-    const openCase1 = await runAsActionActor(
-      'P-000002',
-      () => openProspectiveMatterAction(mCase.id),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    expect(openCase1.ok).toBe(false);
-
-    // Path 2: updateMatterConflictRecord remains prospective when funds missing
-    await runAsActionActor(
-      'P-000003',
-      () =>
-        updateMatterConflictRecord(
-          mCase.id,
-          makeConflictRecord('P-000003', 'Bethan Rees', 'Approved'),
-          'P-000003',
-        ),
-      { roles: ['risk_compliance'], mfaVerified: true },
-    );
-    expect(
-      (await new TenantMatterRepository().getMatterById<Matter>(testTenantCtx('P-000002'), mCase.id))
-        ?.matterStatusId,
-    ).toBe('matter_status.prospective_enquiry');
-
-    // Path 3: signOffMatterCostsRecord remains prospective when funds missing
-    const costsRes = await runAsActionActor(
-      'P-000001',
-      () => signOffMatterCostsRecord(mCase.id, 'P-000001', 'Partner costs approved'),
-      { roles: ['partner'], mfaVerified: false },
-    );
-    expect(costsRes.matter?.matterStatusId).toBe('matter_status.prospective_enquiry');
-
-    // Case 3: £100 request created & paid in full while agreed POA is £500 -> STILL blocked!
-    const smallReq = await runAsActionActor(
-      'P-000002',
-      () =>
-        createAndSendMoneyOnAccountRequestAction({
-          matterId: mCase.id,
-          requestedAmountPence: 10_000,
-          idempotencyKey: 'gate-small-req',
-        }),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    if (!smallReq.ok) throw new Error(String(smallReq.error));
-    const smallPaid = await runAsActionActor(
-      'P-000009',
-      () =>
-        recordMoneyOnAccountReceiptAction({
-          requestId: smallReq.request.id,
-          amountPence: 10_000,
-          receivedDate: '2026-11-27',
-        }),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    if (!smallPaid.ok) throw new Error(String(smallPaid.error));
-    expect(smallPaid.request.status).toBe('received');
-
-    const openCase3 = await runAsActionActor(
-      'P-000002',
-      () => openProspectiveMatterAction(mCase.id),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    expect(openCase3.ok).toBe(false);
-
-    // Case 5: Create a cancelled request alongside -> cancelled never blocks once remaining £400 request is paid
-    const cancelMe = await runAsActionActor(
-      'P-000002',
-      () =>
-        createAndSendMoneyOnAccountRequestAction({
-          matterId: mCase.id,
-          requestedAmountPence: 40_000,
-          idempotencyKey: 'gate-cancel-me',
-        }),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    if (!cancelMe.ok) throw new Error(String(cancelMe.error));
-    await runAsActionActor(
-      'P-000002',
-      () =>
-        cancelMoneyOnAccountRequestAction({
-          requestId: cancelMe.request.id,
-          reason: 'Duplicate request cancelled',
-        }),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-
-    // Case 2: Request remaining £400, pay £250 (part_received -> blocked)
-    const remReq = await runAsActionActor(
-      'P-000002',
-      () =>
-        createAndSendMoneyOnAccountRequestAction({
-          matterId: mCase.id,
-          requestedAmountPence: 40_000,
-          idempotencyKey: 'gate-rem-req',
-        }),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    if (!remReq.ok) throw new Error(String(remReq.error));
-    const partPaid = await runAsActionActor(
-      'P-000009',
-      () =>
-        recordMoneyOnAccountReceiptAction({
-          requestId: remReq.request.id,
-          amountPence: 25_000,
-          receivedDate: '2026-11-27',
-        }),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    if (!partPaid.ok) throw new Error(String(partPaid.error));
-    const openCase2 = await runAsActionActor(
-      'P-000002',
-      () => openProspectiveMatterAction(mCase.id),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    expect(openCase2.ok).toBe(false);
-
-    // Pay remaining £150 -> £500 total across non-cancelled requests -> gate satisfies!
-    const balPaid = await runAsActionActor(
-      'P-000009',
-      () =>
-        recordMoneyOnAccountReceiptAction({
-          requestId: remReq.request.id,
-          amountPence: 15_000,
-          receivedDate: '2026-11-27',
-        }),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    if (!balPaid.ok) throw new Error(String(balPaid.error));
-    expect(balPaid.request.status).toBe('received');
-
-    // Case 6: Reversing before opening blocks the gate again; concurrent reversal vs open never violates invariant
-    const revBeforeOpen = await runAsActionActor(
-      'P-000009',
-      () =>
-        reverseMoneyOnAccountReceiptAction({
-          receiptId: balPaid.receipt.id,
-          reason: 'Cheque bounced before matter opening',
-        }),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    expect(revBeforeOpen.ok).toBe(true);
-    const blockedAfterRev = await runAsActionActor(
-      'P-000002',
-      () => openProspectiveMatterAction(mCase.id),
-      { roles: ['fee_earner'], mfaVerified: false },
-    );
-    expect(blockedAfterRev.ok).toBe(false);
-
-    // Re-pay replacement £150 and test concurrent reverse vs open race cleanly inside TX
-    const replPaid = await runAsActionActor(
-      'P-000009',
-      () =>
-        recordMoneyOnAccountReceiptAction({
-          requestId: remReq.request.id,
-          amountPence: 15_000,
-          receivedDate: '2026-11-27',
-        }),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    if (!replPaid.ok) throw new Error(String(replPaid.error));
-
-    await Promise.all([
-      runAsActionActor(
-        'P-000009',
-        () =>
-          reverseMoneyOnAccountReceiptAction({
-            receiptId: replPaid.receipt.id,
-            reason: 'Concurrent reversal vs open check',
-          }),
-        { roles: ['finance'], mfaVerified: false },
-      ),
-      runAsActionActor(
-        'P-000002',
-        () => openProspectiveMatterAction(mCase.id),
-        { roles: ['fee_earner'], mfaVerified: false },
-      ),
-    ]);
-    // After Promise.all finishes, verify matter status & receipt state are strictly consistent:
-    const postRaceMatter = await new TenantMatterRepository().getMatterById<Matter>(
-      testTenantCtx('P-000002'),
-      mCase.id,
-    );
-    if (postRaceMatter?.matterStatusId === 'matter_status.prospective_enquiry') {
-      // Pay final £150 and open cleanly (Case 4(a))
-      await runAsActionActor(
-        'P-000009',
-        () =>
-          recordMoneyOnAccountReceiptAction({
-            requestId: remReq.request.id,
-            amountPence: 15_000,
-            receivedDate: '2026-11-27',
-          }),
-        { roles: ['finance'], mfaVerified: false },
-      );
-      const openCase4a = await runAsActionActor(
-        'P-000002',
-        () => openProspectiveMatterAction(mCase.id),
-        { roles: ['fee_earner'], mfaVerified: false },
-      );
-      expect(openCase4a.ok).toBe(true);
-    }
-
-    const activeCheck = await new TenantMatterRepository().getMatterById<Matter>(
-      testTenantCtx('P-000002'),
-      mCase.id,
-    );
-    expect(activeCheck?.matterStatusId).toBe('matter_status.active');
-
-    // Reversal AFTER opening leaves matter Open and does NOT reopen the opening gate!
-    const allReceiptsAfterOpen = await new TenantMoneyOnAccountRepository().listReceiptsForMatter(
-      testTenantCtx('P-000009'),
-      mCase.id,
-    );
-    const activeRcpt = allReceiptsAfterOpen.find((r) => !r.reversedAt)!;
-    const revAfterOpen = await runAsActionActor(
-      'P-000009',
-      () =>
-        reverseMoneyOnAccountReceiptAction({
-          receiptId: activeRcpt.id,
-          reason: 'Post-opening reversal test',
-        }),
-      { roles: ['finance'], mfaVerified: false },
-    );
-    expect(revAfterOpen.ok).toBe(true);
-    const stillActiveMatter = await new TenantMatterRepository().getMatterById<Matter>(
-      testTenantCtx('P-000002'),
-      mCase.id,
-    );
-    expect(stillActiveMatter?.matterStatusId).toBe('matter_status.active');
-
-    // Path 4 & Path 5: high_risk_opening compliance_approve blocks without funds, then opens via override / cleared funds
-    const hroMatter = await createConveyancingProspectiveMatter({
-      title: 'S1-08 High Risk Path 5 Matter',
-      retainerMoniesOnAccountPence: 50_000,
-      riskAnswers: HIGH_RISK_ANSWERS,
-      riskFollowUps: HIGH_RISK_FOLLOW_UPS,
-      responsiblePartnerId: 'P-000005',
-      leadFeeEarnerId: 'P-000002',
-      signedEngagement: true,
-    });
-    // Upgrade O-000001 CDD to High-risk tier after hroMatter exists, and sign off costs
+    // Upgrade O-000001 CDD to High-risk completed once up front so both Low-risk and High-risk gate paths never fail on CDD
     await runAsActionActor(
       'P-000001',
       async () => {
@@ -1765,7 +2085,7 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
                   recordId: o1Upgraded.summary.record.id,
                   itemKey: item.itemKey,
                   status: 'recorded',
-                  note: 'Verified High-risk CDD item for S1-08',
+                  note: 'Verified High-risk CDD item for S1-08 matrix',
                 },
                 'P-000001',
               );
@@ -1778,48 +2098,558 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
           );
           expect(compRes.ok).toBe(true);
         }
-        await signOffMatterCostsRecord(hroMatter.id, 'P-000001', 'High risk costs approved');
       },
       { roles: ['partner'], mfaVerified: false },
     );
-    const ctxAdmin = testTenantCtx('P-000004');
-    const hroList = await new TenantRegisterRepository().listVisibleRegisterRecords(
-      ctxAdmin,
-      'P-000004',
-      { includeRestricted: true, registerTypeKey: 'high_risk_opening', matterId: hroMatter.id },
+
+    // Pure unit verification of Case 4(b) & Case 5(a)
+    expect(
+      evaluateMatterFundsOnAccountGate({
+        requests: [{ id: 'R1', status: 'received', requestedAmountPence: 20_000 }],
+        receipts: [{ requestId: 'R1', amountPence: 20_000, reversedAt: null }],
+        agreedAmountPence: null,
+      }).fundsOnAccountSatisfied,
+    ).toBe(true);
+    expect(
+      evaluateMatterFundsOnAccountGate({
+        requests: [{ id: 'R1', status: 'cancelled', requestedAmountPence: 50_000 }],
+        receipts: [],
+        agreedAmountPence: 50_000,
+      }).fundsOnAccountSatisfied,
+    ).toBe(false);
+
+    // R870: Table-driven matrix of all 6 gate cases (Cases 1, 2, 3, 4a, 4b, 5a, 5b, 6) across all 5 real opening paths
+    type GateOpeningPath =
+      | 'open_prospective_matter'
+      | 'save_matter'
+      | 'conflict_approve'
+      | 'costs_sign_off'
+      | 'high_risk_compliance_approve';
+    type GateCaseKey =
+      | 'case1_no_request'
+      | 'case2_part_received'
+      | 'case3_paid_below_agreed'
+      | 'case4a_paid_to_agreed'
+      | 'case4b_no_agreed_single_paid'
+      | 'case5a_cancelled_only'
+      | 'case5b_cancelled_plus_paid'
+      | 'case6_reversed_before_open';
+
+    const GATE_PATHS: readonly GateOpeningPath[] = [
+      'open_prospective_matter',
+      'save_matter',
+      'conflict_approve',
+      'costs_sign_off',
+      'high_risk_compliance_approve',
+    ];
+    const GATE_CASES: ReadonlyArray<{
+      readonly key: GateCaseKey;
+      readonly agreedPence: number | null;
+      readonly expectedAllowed: boolean;
+    }> = [
+      { key: 'case1_no_request', agreedPence: 50_000, expectedAllowed: false },
+      { key: 'case2_part_received', agreedPence: 50_000, expectedAllowed: false },
+      { key: 'case3_paid_below_agreed', agreedPence: 50_000, expectedAllowed: false },
+      { key: 'case4a_paid_to_agreed', agreedPence: 50_000, expectedAllowed: true },
+      { key: 'case4b_no_agreed_single_paid', agreedPence: null, expectedAllowed: true },
+      { key: 'case5a_cancelled_only', agreedPence: 50_000, expectedAllowed: false },
+      { key: 'case5b_cancelled_plus_paid', agreedPence: 50_000, expectedAllowed: true },
+      { key: 'case6_reversed_before_open', agreedPence: 50_000, expectedAllowed: false },
+    ];
+
+    let cellSeq = 0;
+    for (const pathKind of GATE_PATHS) {
+      for (const gateCase of GATE_CASES) {
+        cellSeq += 1;
+        const isConflictPath = pathKind === 'conflict_approve';
+        const isHroPath = pathKind === 'high_risk_compliance_approve';
+        const created = await createConveyancingProspectiveMatter({
+          title: `Gate ${pathKind} ${gateCase.key} #${cellSeq}`,
+          retainerMoniesOnAccountPence: gateCase.agreedPence,
+          feeEstimateGbp: 1200,
+          conflictStatus: isConflictPath ? 'Referred' : 'Cleared',
+          saveMode: isConflictPath ? 'submit_referred' : 'submit_cleared',
+          signedEngagement: true,
+          ...(isHroPath
+            ? {
+                riskAnswers: HIGH_RISK_ANSWERS,
+                riskFollowUps: HIGH_RISK_FOLLOW_UPS,
+                responsiblePartnerId: 'P-000005',
+                leadFeeEarnerId: 'P-000002',
+              }
+            : {}),
+        });
+
+        let hroIdForCell: string | null = null;
+        if (isHroPath) {
+          const hroList = await regRepo.listVisibleRegisterRecords(
+            testTenantCtx('P-000004'),
+            'P-000004',
+            {
+              includeRestricted: true,
+              registerTypeKey: 'high_risk_opening',
+              matterId: created.id,
+            },
+          );
+          hroIdForCell = hroList[0]!.id;
+          const pAppr = await runAsActionActor(
+            'P-000001',
+            () =>
+              transitionRegisterRecordService(
+                { recordId: hroIdForCell!, transitionKey: 'partner_approve', comment: 'Partner stage approved' },
+                'P-000001',
+              ),
+            { roles: ['partner'], mfaVerified: false },
+          );
+          expect(pAppr.ok).toBe(true);
+        }
+
+        const sendCellReq = async (amt: number, tag: string) => {
+          const r = await runAsActionActor(
+            'P-000002',
+            () =>
+              createAndSendMoneyOnAccountRequestAction({
+                matterId: created.id,
+                requestedAmountPence: amt,
+                idempotencyKey: `cell-${cellSeq}-${tag}`,
+              }),
+            { roles: ['fee_earner'], mfaVerified: false },
+          );
+          if (!r.ok) throw new Error(String(r.error));
+          return r.request.id;
+        };
+        const payCellReq = async (reqId: string, amt: number, tag: string) => {
+          const rc = await runAsActionActor(
+            'P-000009',
+            () =>
+              recordMoneyOnAccountReceiptAction({
+                requestId: reqId,
+                amountPence: amt,
+                receivedDate: '2026-11-27',
+                idempotencyKey: `rcpt-${cellSeq}-${tag}`,
+              }),
+            { roles: ['finance'], mfaVerified: false },
+          );
+          if (!rc.ok) throw new Error(String(rc.error));
+          return rc.receipt.id;
+        };
+
+        switch (gateCase.key) {
+          case 'case1_no_request':
+            break;
+          case 'case2_part_received': {
+            const rq = await sendCellReq(50_000, 'c2');
+            await payCellReq(rq, 25_000, 'c2p');
+            break;
+          }
+          case 'case3_paid_below_agreed': {
+            const rq = await sendCellReq(10_000, 'c3');
+            await payCellReq(rq, 10_000, 'c3p');
+            break;
+          }
+          case 'case4a_paid_to_agreed': {
+            const rq1 = await sendCellReq(10_000, 'c4a1');
+            await payCellReq(rq1, 10_000, 'c4a1p');
+            const rq2 = await sendCellReq(40_000, 'c4a2');
+            await payCellReq(rq2, 40_000, 'c4a2p');
+            break;
+          }
+          case 'case4b_no_agreed_single_paid': {
+            const rq = await sendCellReq(20_000, 'c4b');
+            await payCellReq(rq, 20_000, 'c4bp');
+            break;
+          }
+          case 'case5a_cancelled_only': {
+            const rq = await sendCellReq(50_000, 'c5a');
+            await runAsActionActor(
+              'P-000002',
+              () => cancelMoneyOnAccountRequestAction({ requestId: rq, reason: 'Cancelled request only' }),
+              { roles: ['fee_earner'], mfaVerified: false },
+            );
+            break;
+          }
+          case 'case5b_cancelled_plus_paid': {
+            const rqCan = await sendCellReq(50_000, 'c5b-can');
+            await runAsActionActor(
+              'P-000002',
+              () => cancelMoneyOnAccountRequestAction({ requestId: rqCan, reason: 'Superseded request' }),
+              { roles: ['fee_earner'], mfaVerified: false },
+            );
+            const rqOk = await sendCellReq(50_000, 'c5b-ok');
+            await payCellReq(rqOk, 50_000, 'c5b-okp');
+            break;
+          }
+          case 'case6_reversed_before_open': {
+            const rq = await sendCellReq(50_000, 'c6');
+            const rcId = await payCellReq(rq, 50_000, 'c6p');
+            const rev = await runAsActionActor(
+              'P-000009',
+              () => reverseMoneyOnAccountReceiptAction({ receiptId: rcId, reason: 'Bounced before opening' }),
+              { roles: ['finance'], mfaVerified: false },
+            );
+            expect(rev.ok).toBe(true);
+            break;
+          }
+        }
+
+        if (!gateCase.expectedAllowed) {
+          const preState = await runAsActionActor(
+            'P-000002',
+            () => getMatterOpeningGateStateRecord(created.id, 'P-000002'),
+            { roles: ['fee_earner'], mfaVerified: false },
+          );
+          expect(preState.ok).toBe(true);
+          if (preState.ok) {
+            const unmetKeys = preState.evaluation.preconditions
+              .filter((p) => p.required && !p.satisfied)
+              .map((p) => p.key);
+            expect(unmetKeys).toEqual(
+              pathKind === 'conflict_approve'
+                ? ['conflict_cleared', 'funds_on_account']
+                : ['funds_on_account'],
+            );
+          }
+        }
+
+        if (pathKind === 'open_prospective_matter') {
+          const openRes = await runAsActionActor(
+            'P-000002',
+            () => openProspectiveMatterAction(created.id),
+            { roles: ['fee_earner'], mfaVerified: false },
+          );
+          if (gateCase.expectedAllowed) {
+            expect(openRes.ok).toBe(true);
+            if (openRes.ok) {
+              expect(openRes.matter.matterStatusId).toBe('matter_status.active');
+            }
+          } else {
+            expect(openRes.ok).toBe(false);
+            if (!openRes.ok && !isActionDenied(openRes)) {
+              expect(openRes.code).toBe('MATTER_OPENING_GATE_BLOCKED');
+            }
+          }
+        } else if (pathKind === 'save_matter') {
+          const latestBeforeSave = await matterRepo.getMatterById<Matter>(ctxFee, created.id);
+          const saveOpenRes = await runAsActionActor(
+            'P-000001',
+            () =>
+              saveMatterRecord(
+                {
+                  id: created.id,
+                  title: latestBeforeSave!.title,
+                  clientId: latestBeforeSave!.clientId,
+                  practiceAreaId: latestBeforeSave!.practiceAreaId,
+                  workTypeSubcategoryId: latestBeforeSave!.workTypeSubcategoryId,
+                  responsiblePartnerId: latestBeforeSave!.responsiblePartnerId,
+                  supervisingPartnerId: latestBeforeSave!.supervisingPartnerId,
+                  leadFeeEarnerId: latestBeforeSave!.leadFeeEarnerId,
+                  teamMemberIds: latestBeforeSave!.teamMemberIds,
+                  feeEstimateGbp: latestBeforeSave!.feeEstimateGbp,
+                  retainerMoniesOnAccountPence: latestBeforeSave!.retainerMoniesOnAccountPence,
+                  retainerMoniesOnAccountGbp: latestBeforeSave!.retainerMoniesOnAccountGbp,
+                  matterStatusId: 'matter_status.active',
+                  conflictCheckRecord: latestBeforeSave!.conflictCheckRecord,
+                  riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+                },
+                { id: created.id, byId: 'P-000001', saveMode: 'submit_cleared' },
+              ),
+            { roles: ['partner'], mfaVerified: false },
+          );
+          expect(saveOpenRes.errors).toBeUndefined();
+          expect(saveOpenRes.matter).not.toBeNull();
+          if (gateCase.expectedAllowed) {
+            expect(saveOpenRes.matter?.matterStatusId).toBe('matter_status.active');
+          } else {
+            expect(saveOpenRes.matter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+            const unmet = (saveOpenRes.openingGate?.preconditions ?? [])
+              .filter((p) => p.required && !p.satisfied)
+              .map((p) => p.key);
+            expect(unmet).toEqual(['funds_on_account']);
+          }
+        } else if (pathKind === 'conflict_approve') {
+          const confRes = await runAsActionActor(
+            'P-000003',
+            () =>
+              updateMatterConflictRecord(
+                created.id,
+                makeConflictRecord('P-000003', 'Bethan Rees', 'Approved'),
+                'P-000003',
+              ),
+            { roles: ['risk_compliance'], mfaVerified: true },
+          );
+          expect(confRes.matter).not.toBeNull();
+          expect(confRes.matter?.matterStatusId).toBe(
+            gateCase.expectedAllowed ? 'matter_status.active' : 'matter_status.prospective_enquiry',
+          );
+        } else if (pathKind === 'costs_sign_off') {
+          const costsRes = await runAsActionActor(
+            'P-000001',
+            () => signOffMatterCostsRecord(created.id, 'P-000001', 'Partner costs approved'),
+            { roles: ['partner'], mfaVerified: false },
+          );
+          expect(costsRes.matter).not.toBeNull();
+          expect(costsRes.matter?.matterStatusId).toBe(
+            gateCase.expectedAllowed ? 'matter_status.active' : 'matter_status.prospective_enquiry',
+          );
+        } else if (pathKind === 'high_risk_compliance_approve') {
+          const compRes = await runAsActionActor(
+            'P-000003',
+            () =>
+              transitionRegisterRecordService(
+                { recordId: hroIdForCell!, transitionKey: 'compliance_approve', comment: 'Compliance stage approved' },
+                'P-000003',
+              ),
+            { roles: ['risk_compliance'], mfaVerified: false },
+          );
+          expect(compRes.ok).toBe(true);
+          const afterCompMatter = await matterRepo.getMatterById<Matter>(ctxFee, created.id);
+          expect(afterCompMatter?.matterStatusId).toBe(
+            gateCase.expectedAllowed ? 'matter_status.active' : 'matter_status.prospective_enquiry',
+          );
+        }
+
+        if (!gateCase.expectedAllowed) {
+          const postState = await runAsActionActor(
+            'P-000002',
+            () => getMatterOpeningGateStateRecord(created.id, 'P-000002'),
+            { roles: ['fee_earner'], mfaVerified: false },
+          );
+          expect(postState.ok).toBe(true);
+          if (postState.ok) {
+            expect(
+              postState.evaluation.preconditions
+                .filter((p) => p.required && !p.satisfied)
+                .map((p) => p.key),
+            ).toEqual(['funds_on_account']);
+          }
+        }
+      }
+    }
+
+    // Sibling chase isolation + Finance CDD redaction + Concurrent reversal vs open race + Post-opening reversal + Partner HRO override
+    const raceMatter = await createConveyancingProspectiveMatter({
+      title: 'S1-08 Race & Sibling Chase Matter',
+      retainerMoniesOnAccountPence: 50_000,
+      signedEngagement: true,
+    });
+    const finGateInitial = await runAsActionActor(
+      'P-000009',
+      () => getMatterOpeningGateStateRecord(raceMatter.id, 'P-000009'),
+      { roles: ['finance'], mfaVerified: false },
     );
-    const hroId = hroList[0]!.id;
+    expect(finGateInitial.ok).toBe(true);
+    if (finGateInitial.ok) {
+      expect(
+        finGateInitial.evaluation.preconditions.find((p) => p.key === 'cdd_complete')?.statusSummary,
+      ).toBe('Not available to you');
+      expect(
+        finGateInitial.evaluation.preconditions
+          .filter((p) => p.required && !p.satisfied)
+          .map((p) => p.key),
+      ).toEqual(['funds_on_account']);
+    }
+
+    const reqSiblingA = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: raceMatter.id,
+          requestedAmountPence: 25_000,
+          idempotencyKey: 'race-sib-a',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const reqSiblingB = await runAsActionActor(
+      'P-000002',
+      () =>
+        createAndSendMoneyOnAccountRequestAction({
+          matterId: raceMatter.id,
+          requestedAmountPence: 25_000,
+          idempotencyKey: 'race-sib-b',
+        }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    if (!reqSiblingA.ok || !reqSiblingB.ok) throw new Error('Failed sending sibling requests');
+    expect(reqSiblingA.chase?.status).toBe('active');
+    expect(reqSiblingB.chase?.status).toBe('active');
+
+    const payA = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqSiblingA.request.id,
+          amountPence: 25_000,
+          receivedDate: '2026-11-27',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(payA.ok).toBe(true);
+    expect((await chasingRepo.getChaseById(ctxFee, reqSiblingA.chase!.id))?.status).toBe('stopped');
+    expect((await chasingRepo.getChaseById(ctxFee, reqSiblingB.chase!.id))?.status).toBe('active');
+
+    const payB = await runAsActionActor(
+      'P-000009',
+      () =>
+        recordMoneyOnAccountReceiptAction({
+          requestId: reqSiblingB.request.id,
+          amountPence: 25_000,
+          receivedDate: '2026-11-27',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    if (!payB.ok) throw new Error(String(payB.error));
+    expect((await chasingRepo.getChaseById(ctxFee, reqSiblingB.chase!.id))?.status).toBe('stopped');
+
+    // Race test: reverse vs open running concurrently must produce a strictly consistent commit order
+    const [raceRevRes, raceOpenRes] = await Promise.all([
+      runAsTestActor(
+        'P-000009',
+        () =>
+          reverseMoneyOnAccountReceiptRecord(
+            {
+              receiptId: payB.receipt.id,
+              reason: 'Concurrent reversal vs open check',
+            },
+            'P-000009',
+            {
+              tenantCtx: testTenantCtx('P-000009', {
+                roles: ['finance'],
+                mfaVerified: false,
+              }),
+            },
+          ),
+        { roles: ['finance'], mfaVerified: false },
+      ),
+      runAsTestActor(
+        'P-000002',
+        () =>
+          openProspectiveMatterRecord(raceMatter.id, 'P-000002', {
+            tenantCtx: testTenantCtx('P-000002', {
+              roles: ['fee_earner'],
+              mfaVerified: false,
+            }),
+          }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      ),
+    ]);
+    expect(raceRevRes.ok).toBe(true);
+    const postRaceMatter = await matterRepo.getMatterById<Matter>(ctxFee, raceMatter.id);
+    if (!raceOpenRes.ok) {
+      expect(isActionDenied(raceOpenRes)).toBe(false);
+      if (!isActionDenied(raceOpenRes)) {
+        expect(raceOpenRes.code).toBe('MATTER_OPENING_GATE_BLOCKED');
+      }
+      expect(postRaceMatter?.matterStatusId).toBe('matter_status.prospective_enquiry');
+      const gateAfterLostRace = await runAsActionActor(
+        'P-000002',
+        () => getMatterOpeningGateStateRecord(raceMatter.id, 'P-000002'),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(gateAfterLostRace.ok).toBe(true);
+      if (gateAfterLostRace.ok) {
+        expect(
+          gateAfterLostRace.evaluation.preconditions
+            .filter((p) => p.required && !p.satisfied)
+            .map((p) => p.key),
+        ).toEqual(['funds_on_account']);
+      }
+      // Replace reversed £250 and open cleanly
+      await runAsActionActor(
+        'P-000009',
+        () =>
+          recordMoneyOnAccountReceiptAction({
+            requestId: reqSiblingB.request.id,
+            amountPence: 25_000,
+            receivedDate: '2026-11-27',
+          }),
+        { roles: ['finance'], mfaVerified: false },
+      );
+      const openClean = await runAsActionActor(
+        'P-000002',
+        () => openProspectiveMatterAction(raceMatter.id),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(openClean.ok).toBe(true);
+    } else {
+      expect(postRaceMatter?.matterStatusId).toBe('matter_status.active');
+      const [matterAudits, receiptAudits] = await Promise.all([
+        auditRepo.listAuditEntriesForRecord(ctxFee, 'matter', raceMatter.id),
+        auditRepo.listAuditEntriesForRecord(ctxFee, 'money_on_account_receipt', payB.receipt.id),
+      ]);
+      const openAudit = matterAudits.find((a) => a.field === 'Matter opening (Open matter)');
+      const revAudit = receiptAudits.find((a) => a.field === 'Money on account receipt reversed');
+      expect(openAudit).toBeDefined();
+      expect(revAudit).toBeDefined();
+      expect(openAudit!.seq).toBeTypeOf('number');
+      expect(revAudit!.seq).toBeTypeOf('number');
+      expect(openAudit!.seq!).toBeLessThan(revAudit!.seq!);
+    }
+
+    const activeCheck = await matterRepo.getMatterById<Matter>(ctxFee, raceMatter.id);
+    expect(activeCheck?.matterStatusId).toBe('matter_status.active');
+
+    // Reversal AFTER opening leaves matter Open and does NOT reopen the opening gate
+    const allReceiptsAfterOpen = await new TenantMoneyOnAccountRepository().listReceiptsForMatter(
+      testTenantCtx('P-000009'),
+      raceMatter.id,
+    );
+    const activeRcpt = allReceiptsAfterOpen.find((r) => !r.reversedAt)!;
+    const revAfterOpen = await runAsActionActor(
+      'P-000009',
+      () =>
+        reverseMoneyOnAccountReceiptAction({
+          receiptId: activeRcpt.id,
+          reason: 'Post-opening reversal test',
+        }),
+      { roles: ['finance'], mfaVerified: false },
+    );
+    expect(revAfterOpen.ok).toBe(true);
+    expect((await matterRepo.getMatterById<Matter>(ctxFee, raceMatter.id))?.matterStatusId).toBe(
+      'matter_status.active',
+    );
+
+    // High-risk matter blocked on funds_on_account -> Partner funds_on_account override -> explicit Open matter (R751)
+    const hroOvrMatter = await createConveyancingProspectiveMatter({
+      title: 'S1-08 High Risk Override Path',
+      retainerMoniesOnAccountPence: 50_000,
+      riskAnswers: HIGH_RISK_ANSWERS,
+      riskFollowUps: HIGH_RISK_FOLLOW_UPS,
+      responsiblePartnerId: 'P-000005',
+      leadFeeEarnerId: 'P-000002',
+      signedEngagement: true,
+    });
+    const hroList = await regRepo.listVisibleRegisterRecords(
+      testTenantCtx('P-000004'),
+      'P-000004',
+      { includeRestricted: true, registerTypeKey: 'high_risk_opening', matterId: hroOvrMatter.id },
+    );
+    const hroOvrId = hroList[0]!.id;
     await runAsActionActor(
       'P-000001',
       () =>
         transitionRegisterRecordService(
-          { recordId: hroId, transitionKey: 'partner_approve', comment: 'Partner stage approved' },
+          { recordId: hroOvrId, transitionKey: 'partner_approve', comment: 'Partner stage approved' },
           'P-000001',
         ),
       { roles: ['partner'], mfaVerified: false },
     );
-    const compBlocked = await runAsActionActor(
+    await runAsActionActor(
       'P-000003',
       () =>
         transitionRegisterRecordService(
-          { recordId: hroId, transitionKey: 'compliance_approve', comment: 'Compliance stage approved' },
+          { recordId: hroOvrId, transitionKey: 'compliance_approve', comment: 'Compliance stage approved' },
           'P-000003',
         ),
       { roles: ['risk_compliance'], mfaVerified: false },
     );
-    expect(compBlocked.ok).toBe(true);
-    // HRO approved, but matter stays Prospective because funds_on_account is unmet
-    expect(
-      (await new TenantMatterRepository().getMatterById<Matter>(ctxAdmin, hroMatter.id))
-        ?.matterStatusId,
-    ).toBe('matter_status.prospective_enquiry');
-
-    // Partner grants audited 'funds_on_account' override (R751: does not auto-open), then Open matter succeeds cleanly!
+    expect((await matterRepo.getMatterById<Matter>(ctxFee, hroOvrMatter.id))?.matterStatusId).toBe(
+      'matter_status.prospective_enquiry',
+    );
     const ovrRes = await runAsActionActor(
       'P-000001',
       () =>
         overrideMatterOpeningPreconditionAction({
-          matterId: hroMatter.id,
+          matterId: hroOvrMatter.id,
           preconditionKey: 'funds_on_account',
           reason: 'Partner undertaking received pending same-day CHAPS transfer.',
         }),
@@ -1831,15 +2661,14 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
     }
     const openHro = await runAsActionActor(
       'P-000002',
-      () => openProspectiveMatterAction(hroMatter.id),
+      () => openProspectiveMatterAction(hroOvrMatter.id),
       { roles: ['fee_earner'], mfaVerified: false },
     );
     expect(openHro.ok).toBe(true);
-    expect(
-      (await new TenantMatterRepository().getMatterById<Matter>(ctxAdmin, hroMatter.id))
-        ?.matterStatusId,
-    ).toBe('matter_status.active');
-  }, 45_000);
+    expect((await matterRepo.getMatterById<Matter>(ctxFee, hroOvrMatter.id))?.matterStatusId).toBe(
+      'matter_status.active',
+    );
+  }, 120_000);
 
   it('7. Rule 9 two-tenant isolation, forged tenant-bravo claim (TENANCY_FORGERY_DETECTED), and restricted staff-matter refusal (Lesson 5)', async () => {
     await provisionPostgresClusterRolesAndDatabases({
@@ -1885,6 +2714,70 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       });
 
       setActiveTenantConfigForTesting(alphaRaw, {});
+
+      // Create unrestricted control matter & request FIRST in Alpha so the restricted staff matter & its
+      // request/receipt/chase get strictly distinct sequence IDs that do NOT exist in Bravo.
+      const alphaControlSave = await runAsActionActor(
+        'P-000001',
+        () =>
+          saveMatterRecord(
+            {
+              title: 'Alpha Unrestricted Control Matter',
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.real_estate_and_property',
+              workTypeSubcategoryId: 'work_type.real_estate_and_property_residential_conveyancing',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000001',
+              teamMemberIds: ['P-000001', 'P-000009'],
+              isStaffMatter: false,
+              conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          ),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: false },
+      );
+      expect(alphaControlSave.matter?.isStaffMatter).toBe(false);
+      const alphaControlMatterId = alphaControlSave.matter!.id;
+      const alphaControlReq = await runAsActionActor(
+        'P-000001',
+        () =>
+          createAndSendMoneyOnAccountRequestAction({
+            matterId: alphaControlMatterId,
+            requestedAmountPence: 40_000,
+            recipientEmail: 'alpha-control@example.test',
+            idempotencyKey: 'alpha-control-req-1',
+          }),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: false },
+      );
+      if (!alphaControlReq.ok) throw new Error(String(alphaControlReq.error));
+      const finControlRec = await runAsActionActor(
+        'P-000009',
+        () =>
+          recordMoneyOnAccountReceiptAction({
+            requestId: alphaControlReq.request.id,
+            amountPence: 10_000,
+            receivedDate: '2026-11-27',
+            idempotencyKey: 'alpha-control-rcpt-1',
+          }),
+        { tenantId: 'tenant-alpha', roles: ['finance'], mfaVerified: false },
+      );
+      expect(finControlRec.ok).toBe(true);
+      if (finControlRec.ok) {
+        const finControlRev = await runAsActionActor(
+          'P-000009',
+          () =>
+            reverseMoneyOnAccountReceiptAction({
+              receiptId: finControlRec.receipt.id,
+              reason: 'Finance positive control reversal',
+            }),
+          { tenantId: 'tenant-alpha', roles: ['finance'], mfaVerified: false },
+        );
+        expect(finControlRev.ok).toBe(true);
+      }
+
+      // R869: Explicitly staff-restricted matter in Alpha (Finance P-000009 excluded)
       const alphaMatterSave = await runAsActionActor(
         'P-000001',
         () =>
@@ -1898,6 +2791,8 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
               supervisingPartnerId: 'P-000001',
               leadFeeEarnerId: 'P-000001',
               teamMemberIds: ['P-000001'],
+              isStaffMatter: true,
+              restrictedAccessUserIds: ['P-000001'],
               conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
               riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
             },
@@ -1905,9 +2800,13 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
           ),
         { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: false },
       );
+      expect(alphaMatterSave.matter).not.toBeNull();
+      expect(alphaMatterSave.matter?.isStaffMatter).toBe(true);
+      expect(alphaMatterSave.matter?.restrictedAccessUserIds).toContain('P-000001');
+      expect(alphaMatterSave.matter?.restrictedAccessUserIds).not.toContain('P-000009');
       const alphaMatterId = alphaMatterSave.matter!.id;
 
-      // Send MOA request in Alpha as insider P-000001
+      // Send MOA request in Alpha as insider P-000001 on restricted staff matter
       const alphaReq = await runAsActionActor(
         'P-000001',
         () =>
@@ -1921,6 +2820,7 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       );
       if (!alphaReq.ok) throw new Error(String(alphaReq.error));
       const alphaReqId = alphaReq.request.id;
+      const alphaChaseId = alphaReq.chase!.id;
 
       // Insider records receipt so we also have an Alpha receiptId
       const alphaRcpt = await runAsActionActor(
@@ -1935,6 +2835,83 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       );
       if (!alphaRcpt.ok) throw new Error(String(alphaRcpt.error));
       const alphaRcptId = alphaRcpt.receipt.id;
+
+      // R857: Seed Alpha & Bravo PMS data + upload Alpha moa_receipt evidence on control matter for tampered ID checks
+      const alphaPmsRepo = new TenantPmsRepository();
+      await alphaPmsRepo.importExtractDataset(
+        ctxAlpha,
+        buildMinimalPmsDataset('MAT-ALPHA-CTL', [
+          {
+            transaction_id: 'TX-ALPHA-OTHER-MATTER',
+            date: '2026-11-27',
+            type: 'Receipt',
+            description: 'Belongs to control matter, NOT staff matter',
+            amount: 200,
+            amount_pence: 20_000,
+          },
+        ]),
+      );
+      await alphaPmsRepo.putPmsLink(ctxAlpha, {
+        id: 'PMSL-ALPHA-STAFF',
+        entityType: 'matter',
+        onesquaredId: alphaMatterId,
+        pmsCode: 'MAT-ALPHA-STAFF',
+        matchedBy: 'manual',
+        matchedAt: '2026-11-27T08:00:00.000Z',
+      });
+      await alphaPmsRepo.putPmsLink(ctxAlpha, {
+        id: 'PMSL-ALPHA-CTL',
+        entityType: 'matter',
+        onesquaredId: alphaControlMatterId,
+        pmsCode: 'MAT-ALPHA-CTL',
+        matchedBy: 'manual',
+        matchedAt: '2026-11-27T08:00:00.000Z',
+      });
+
+      const alphaControlProof = await runAsActionActor(
+        'P-000001',
+        () =>
+          uploadEvidenceArtifactRecord(
+            {
+              subjectType: 'matter',
+              subjectId: alphaControlMatterId,
+              purpose: 'moa_receipt',
+              fileName: 'alpha-control-proof.pdf',
+              contentType: 'application/pdf',
+              bytes: Buffer.from('%PDF-1.4\n% Alpha Control Proof\n%%EOF\n'),
+            },
+            'P-000001',
+          ),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: false },
+      );
+      if (!alphaControlProof.ok) throw new Error(alphaControlProof.message);
+
+      // R857 tampered IDs within Alpha:
+      // 1) Another matter's PMS transactionId on alphaMatterId -> NOT_FOUND
+      const wrongMatterPms = await runAsActionActor(
+        'P-000001',
+        () =>
+          matchPmsClientLedgerReceiptAction({
+            requestId: alphaReqId,
+            pmsTransactionId: 'TX-ALPHA-OTHER-MATTER',
+          }),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: false },
+      );
+      expect(wrongMatterPms).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+
+      // 2) Another matter's evidenceArtifactId on alphaMatterId -> NOT_FOUND
+      const wrongMatterArt = await runAsActionActor(
+        'P-000001',
+        () =>
+          recordMoneyOnAccountReceiptAction({
+            requestId: alphaReqId,
+            amountPence: 5_000,
+            receivedDate: '2026-11-27',
+            evidenceArtifactId: alphaControlProof.artifact.id,
+          }),
+        { tenantId: 'tenant-alpha', roles: ['partner'], mfaVerified: false },
+      );
+      expect(wrongMatterArt).toMatchObject({ ok: false, code: 'NOT_FOUND' });
 
       // Lesson 5: Unauthorised Finance user P-000009 in Alpha receives uniform NOT_FOUND on staff matter
       const staffAttempts: Array<() => Promise<unknown>> = [
@@ -1975,8 +2952,68 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
         expect(res).toMatchObject({ ok: false, code: 'NOT_FOUND' });
       }
 
-      // Cross-tenant isolation: Bravo actor with Bravo config cannot touch Alpha's IDs -> NOT_FOUND
+      // Cross-tenant setup in Bravo for tampered TX/artifact tests + cross-tenant isolation
       setActiveTenantConfigForTesting(bravoRaw, {});
+      const bravoMatterSave = await runAsActionActor(
+        'P-000001',
+        () =>
+          saveMatterRecord(
+            {
+              title: 'Bravo Matter',
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.real_estate_and_property',
+              workTypeSubcategoryId: 'work_type.real_estate_and_property_residential_conveyancing',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000001',
+              teamMemberIds: ['P-000001', 'P-000009'],
+              conflictCheckRecord: makeConflictRecord('P-000001', 'Rhian Morgan', 'Cleared'),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          ),
+        { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: false },
+      );
+      const bravoMatterId = bravoMatterSave.matter!.id;
+      const bravoReq = await runAsActionActor(
+        'P-000001',
+        () =>
+          createAndSendMoneyOnAccountRequestAction({
+            matterId: bravoMatterId,
+            requestedAmountPence: 50_000,
+            recipientEmail: 'bravo@example.test',
+            idempotencyKey: 'bravo-req-1',
+          }),
+        { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: false },
+      );
+      if (!bravoReq.ok) throw new Error(String(bravoReq.error));
+      expect(alphaMatterId).not.toBe(bravoMatterId);
+      expect(alphaReqId).not.toBe(bravoReq.request.id);
+      expect(alphaChaseId).not.toBe(bravoReq.chase!.id);
+      const bravoPmsRepo = new TenantPmsRepository();
+      await bravoPmsRepo.importExtractDataset(
+        ctxBravo,
+        buildMinimalPmsDataset('MAT-BRAVO-1', [
+          {
+            transaction_id: 'TX-BRAVO-ONLY',
+            date: '2026-11-27',
+            type: 'Receipt',
+            description: 'Bravo client receipt',
+            amount: 300,
+            amount_pence: 30_000,
+          },
+        ]),
+      );
+      await bravoPmsRepo.putPmsLink(ctxBravo, {
+        id: 'PMSL-BRAVO-1',
+        entityType: 'matter',
+        onesquaredId: bravoMatterId,
+        pmsCode: 'MAT-BRAVO-1',
+        matchedBy: 'manual',
+        matchedAt: '2026-11-27T08:00:00.000Z',
+      });
+
+      // R857 cross-tenant tampered IDs & actions: Bravo actor with Bravo config cannot touch Alpha's IDs -> NOT_FOUND
       const crossAttempts: Array<() => Promise<unknown>> = [
         () =>
           createAndSendMoneyOnAccountRequestAction({
@@ -1996,19 +3033,87 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
             receivedDate: '2026-11-27',
           }),
         () =>
+          recordMoneyOnAccountReceiptAction({
+            requestId: bravoReq.request.id,
+            amountPence: 5000,
+            receivedDate: '2026-11-27',
+            evidenceArtifactId: alphaControlProof.artifact.id,
+          }),
+        () =>
+          matchPmsClientLedgerReceiptAction({
+            requestId: alphaReqId,
+            pmsTransactionId: 'TX-ALPHA-OTHER-MATTER',
+          }),
+        () =>
           reverseMoneyOnAccountReceiptAction({
             receiptId: alphaRcptId,
             reason: 'Cross-tenant reverse',
           }),
+        () => stopCommunicationChaseAction({ chaseId: alphaChaseId }),
+        () => retryCommunicationChaseAction({ chaseId: alphaChaseId }),
       ];
       for (const crossAttempt of crossAttempts) {
         const res = await runAsActionActor('P-000001', crossAttempt, {
           tenantId: 'tenant-bravo',
-          roles: ['partner', 'admin'],
+          roles: ['partner', 'admin', 'finance'],
           mfaVerified: true,
         });
         expect(res).toMatchObject({ ok: false, code: 'NOT_FOUND' });
       }
+
+      // R857 cross-tenant upload & download routes for moa_receipt -> 404
+      const makeMoaUploadForm = (targetMatterId: string) => {
+        const f = new FormData();
+        f.append('subjectType', 'matter');
+        f.append('subjectId', targetMatterId);
+        f.append('purpose', 'moa_receipt');
+        f.append(
+          'file',
+          new File([Buffer.from('%PDF-1.4\n% Cross Tenant\n%%EOF\n')], 'cross.pdf', {
+            type: 'application/pdf',
+          }),
+        );
+        return f;
+      };
+      const crossUploadRes = await runAsActionActor(
+        'P-000009',
+        () =>
+          evidenceUploadRoute.POST(
+            new Request('http://localhost/api/evidence/upload', {
+              method: 'POST',
+              headers: { 'content-length': '2048' },
+              body: makeMoaUploadForm(alphaMatterId),
+            }),
+          ),
+        { tenantId: 'tenant-bravo', roles: ['finance'], mfaVerified: false },
+      );
+      expect(crossUploadRes.status).toBe(404);
+
+      const crossDlRes = await runAsActionActor(
+        'P-000009',
+        () =>
+          evidenceDownloadRoute.GET(
+            new Request(`http://localhost${alphaControlProof.downloadUrl}`, {
+              method: 'GET',
+            }),
+          ),
+        { tenantId: 'tenant-bravo', roles: ['finance'], mfaVerified: false },
+      );
+      expect(crossDlRes.status).toBe(404);
+
+      // Also check Alpha trying Bravo's pmsTransactionId -> NOT_FOUND
+      setActiveTenantConfigForTesting(alphaRaw, {});
+      const alphaUsingBravoPms = await runAsActionActor(
+        'P-000009',
+        () =>
+          matchPmsClientLedgerReceiptAction({
+            requestId: alphaControlReq.request.id,
+            pmsTransactionId: 'TX-BRAVO-ONLY',
+          }),
+        { tenantId: 'tenant-alpha', roles: ['finance'], mfaVerified: false },
+      );
+      expect(alphaUsingBravoPms).toMatchObject({ ok: false, code: 'NOT_FOUND' });
+      setActiveTenantConfigForTesting(bravoRaw, {});
 
       // Bank details config isolation: saving Bravo MOA config does not mutate Alpha
       const bravoCfgSave = await runAsActionActor(
@@ -2079,6 +3184,28 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
           'Forged config save',
         ),
       );
+      await expectForged(() =>
+        stopCommunicationChaseAction({ chaseId: alphaChaseId }),
+      );
+      await expectForged(() =>
+        retryCommunicationChaseAction({ chaseId: alphaChaseId }),
+      );
+      await expectForged(() =>
+        evidenceUploadRoute.POST(
+          new Request('http://localhost/api/evidence/upload', {
+            method: 'POST',
+            headers: { 'content-length': '2048' },
+            body: makeMoaUploadForm(alphaMatterId),
+          }),
+        ),
+      );
+      await expectForged(() =>
+        evidenceDownloadRoute.GET(
+          new Request(`http://localhost${alphaControlProof.downloadUrl}`, {
+            method: 'GET',
+          }),
+        ),
+      );
       expect(
         await new TenantMoneyOnAccountRepository().listRequestsForMatter(
           ctxAlpha,
@@ -2090,5 +3217,5 @@ describe('S1-08 (ADR 0043): Money on Account Requests, Chasing, Manual/PMS Recei
       setActiveTenantConfigForTesting(null);
       await poolManager.closeAllPools();
     }
-  }, 45_000);
+  }, 60_000);
 });

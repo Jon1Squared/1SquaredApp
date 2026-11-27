@@ -4309,7 +4309,7 @@ CREATE TABLE IF NOT EXISTS public.money_on_account_requests (
   PRIMARY KEY (tenant_id, id),
   FOREIGN KEY (tenant_id, matter_id)
     REFERENCES public.matters (tenant_id, id)
-    ON DELETE CASCADE,
+    ON DELETE RESTRICT,
   CONSTRAINT uq_moa_requests_payment_ref UNIQUE (tenant_id, payment_reference)
 );
 
@@ -4334,6 +4334,7 @@ CREATE TABLE IF NOT EXISTS public.money_on_account_receipts (
   pms_matter_code TEXT NULL,
   intake_check_record_id TEXT NULL,
   evidence_artifact_id TEXT NULL,
+  idempotency_key TEXT NULL,
   recorded_by_person_id TEXT NOT NULL,
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   reversed_at TIMESTAMPTZ NULL,
@@ -4345,7 +4346,7 @@ CREATE TABLE IF NOT EXISTS public.money_on_account_receipts (
     ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, matter_id)
     REFERENCES public.matters (tenant_id, id)
-    ON DELETE CASCADE
+    ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_moa_receipts_request
@@ -4357,8 +4358,13 @@ CREATE INDEX IF NOT EXISTS idx_moa_receipts_matter
 CREATE UNIQUE INDEX IF NOT EXISTS uq_moa_receipts_tenant_pms_tx
   ON public.money_on_account_receipts (tenant_id, pms_transaction_id)
   WHERE pms_transaction_id IS NOT NULL AND reversed_at IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_moa_receipts_idempotency_key
+  ON public.money_on_account_receipts (tenant_id, request_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 `.trim(),
   downSql: `
+DROP INDEX IF EXISTS uq_moa_receipts_idempotency_key;
 DROP INDEX IF EXISTS uq_moa_receipts_tenant_pms_tx;
 DROP INDEX IF EXISTS idx_moa_receipts_matter;
 DROP INDEX IF EXISTS idx_moa_receipts_request;

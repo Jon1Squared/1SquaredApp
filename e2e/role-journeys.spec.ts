@@ -1981,7 +1981,7 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
     let matterId = '';
     let moaPaymentRef = '';
 
-    // 1. Enquiries Coordinator creates a Dispute Resolution Pre-Action enquiry and sends to team
+    // 1. Enquiries Coordinator creates a Residential Conveyancing enquiry and sends to team
     const coordContext = await browser.newContext({
       storageState: storageStatePathFor('enquiries_coordinator'),
     });
@@ -2017,7 +2017,7 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await coordContext.close();
     }
 
-    // 2. Fee Earner creates Quote from Enquiry (Dispute Resolution, £500 POA), emails it, records Accepted, and converts to prospective matter
+    // 2. Fee Earner creates Quote from Enquiry (Residential Conveyancing, £500 POA), verifies PDF, emails it, records Accepted, and converts to prospective matter
     const feContext = await browser.newContext({
       storageState: storageStatePathFor('fee_earner'),
     });
@@ -2058,6 +2058,15 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await expect(fePage).toHaveURL(/\/quotes\/(QTE-\d{4}-\d+)$/, { timeout: 20_000 });
       quoteId = fePage.url().match(/\/quotes\/(QTE-\d{4}-\d+)$/)?.[1] ?? '';
       expect(quoteId).toMatch(/^QTE-\d{4}-\d+$/);
+
+      const quotePdfRes = await fePage.request.get(
+        `/api/quotes/${encodeURIComponent(quoteId)}/pdf`,
+      );
+      expect(quotePdfRes.status()).toBe(200);
+      expect(quotePdfRes.headers()['content-type']).toBe('application/pdf');
+      const quotePdfBytes = await quotePdfRes.body();
+      expect(quotePdfBytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+      expect(JSON.stringify(quotePdfRes.headers())).not.toMatch(/amlStatus|clientCddStatus/);
 
       await fePage.getByTestId('quote-send-email-open-btn').click();
       await fePage.getByTestId('quote-send-email-submit-btn').click();
@@ -2333,10 +2342,15 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       expect(storedRequests.length).toBe(1);
       expect(storedRequests[0]!.status).toBe('received');
 
-      const outboxList = await outboxRepo.listOutboxRecords(adminCtx, { limit: 100 });
-      const matchingOutbox = outboxList.filter((r) =>
-        r.recipients.to.includes(uniqueEmail),
-      );
+      const [quoteOutbox, matterOutbox] = await Promise.all([
+        outboxRepo.listOutboxRecords(adminCtx, { quoteId }),
+        outboxRepo.listOutboxRecords(adminCtx, { matterId }),
+      ]);
+      const matchingOutbox = Array.from(
+        new Map(
+          [...quoteOutbox, ...matterOutbox].map((r) => [r.id, r]),
+        ).values(),
+      ).filter((r) => r.recipients.to.includes(uniqueEmail));
       expect(matchingOutbox.length).toBe(3);
       for (const row of matchingOutbox) {
         const att = await outboxRepo.getVisibleOutboxAttachmentForAdmin(adminCtx, {

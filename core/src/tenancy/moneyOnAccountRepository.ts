@@ -70,6 +70,7 @@ interface DbMoaReceiptRow {
   pms_matter_code: string | null;
   intake_check_record_id: string | null;
   evidence_artifact_id: string | null;
+  idempotency_key: string | null;
   recorded_by_person_id: string;
   recorded_at: Date | string;
   reversed_at: Date | string | null;
@@ -152,6 +153,7 @@ function mapReceiptRow(row: DbMoaReceiptRow): MoneyOnAccountReceiptRecord {
     reversedAt: toNullableIsoString(row.reversed_at),
     reversedByPersonId: row.reversed_by_person_id ?? null,
     reversalReason: row.reversal_reason ?? null,
+    idempotencyKey: row.idempotency_key ?? null,
   };
 }
 
@@ -231,6 +233,79 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
     return this.withTenantReadTransaction(ctx, async (tx) =>
       this.findRequestByIdempotencyKeyInTx(tx, ctx, matterId, idempotencyKey),
     );
+  }
+
+  public async paymentReferenceExistsInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    paymentReference: string,
+  ): Promise<boolean> {
+    const cleanRef = paymentReference.trim();
+    if (!cleanRef) return false;
+    const res = await tx.query<{ exists_flag: number }>(
+      `SELECT 1 AS exists_flag
+         FROM public.money_on_account_requests
+        WHERE tenant_id = $1
+          AND payment_reference = $2
+        LIMIT 1`,
+      [ctx.tenantId, cleanRef],
+    );
+    return res.rows.length > 0;
+  }
+
+  public async findReceiptByIdempotencyKeyInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    requestId: string,
+    idempotencyKey: string,
+    options?: { readonly forUpdate?: boolean },
+  ): Promise<MoneyOnAccountReceiptRecord | null> {
+    const cleanRequestId = requestId.trim();
+    const cleanKey = idempotencyKey.trim();
+    if (!cleanRequestId || !cleanKey) return null;
+    const lockSql = options?.forUpdate ? ' FOR UPDATE' : '';
+    const res = await tx.query<DbMoaReceiptRow>(
+      `SELECT *
+         FROM public.money_on_account_receipts
+        WHERE tenant_id = $1
+          AND request_id = $2
+          AND idempotency_key = $3
+        LIMIT 1${lockSql}`,
+      [ctx.tenantId, cleanRequestId, cleanKey],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    this.assertRowTenant(ctx, row.tenant_id, 'MoneyOnAccountReceipt');
+    return mapReceiptRow(row);
+  }
+
+  public async findReceiptByIdempotencyKey(
+    ctx: TenantContext,
+    requestId: string,
+    idempotencyKey: string,
+  ): Promise<MoneyOnAccountReceiptRecord | null> {
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.findReceiptByIdempotencyKeyInTx(tx, ctx, requestId, idempotencyKey),
+    );
+  }
+
+  public async isEvidenceArtifactReferencedInReceipts(
+    ctx: TenantContext,
+    artifactId: string,
+  ): Promise<boolean> {
+    const cleanId = artifactId.trim();
+    if (!cleanId) return false;
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<{ exists_flag: number }>(
+        `SELECT 1 AS exists_flag
+           FROM public.money_on_account_receipts
+          WHERE tenant_id = $1
+            AND evidence_artifact_id = $2
+          LIMIT 1`,
+        [ctx.tenantId, cleanId],
+      );
+      return res.rows.length > 0;
+    });
   }
 
   public async getRequestByIdInTx(
@@ -372,7 +447,10 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
       if (code === '23505') {
         if (
           constraint === 'uq_moa_requests_idempotency_key' ||
-          (!constraint && Boolean(input.idempotencyKey?.trim()))
+          String(pgErr).includes('uq_moa_requests_idempotency_key') ||
+          (!constraint &&
+            !String(pgErr).includes('uq_moa_requests_payment_ref') &&
+            Boolean(input.idempotencyKey?.trim()))
         ) {
           throw makeCodedError(
             'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
@@ -576,6 +654,7 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
       readonly pmsMatterCode?: string | null;
       readonly intakeCheckRecordId?: string | null;
       readonly evidenceArtifactId?: string | null;
+      readonly idempotencyKey?: string | null;
       readonly recordedByPersonId: string;
       readonly recordedAt?: string;
     },
@@ -583,6 +662,7 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
     const id = input.id?.trim() || (await this.allocateReceiptIdInTx(tx));
     const amountPenceStr = minorUnitsToPgBigInt(input.amountPence);
     const recordedAt = input.recordedAt?.trim() || new Date().toISOString();
+    const cleanIdempotencyKey = input.idempotencyKey?.trim() || null;
 
     let res: { rows: DbMoaReceiptRow[] };
     try {
@@ -591,13 +671,13 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
            tenant_id, id, request_id, matter_id, source,
            amount_pence, received_date, bank_reference, notes,
            pms_transaction_id, pms_matter_code, intake_check_record_id,
-           evidence_artifact_id, recorded_by_person_id, recorded_at,
+           evidence_artifact_id, idempotency_key, recorded_by_person_id, recorded_at,
            reversed_at, reversed_by_person_id, reversal_reason
          ) VALUES (
            $1, $2, $3, $4, $5,
            $6::bigint, $7, $8, $9,
            $10, $11, $12,
-           $13, $14, $15::timestamptz,
+           $13, $14, $15, $16::timestamptz,
            NULL, NULL, NULL
          )
          RETURNING *`,
@@ -615,6 +695,7 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
           input.pmsMatterCode ?? null,
           input.intakeCheckRecordId ?? null,
           input.evidenceArtifactId ?? null,
+          cleanIdempotencyKey,
           input.recordedByPersonId,
           recordedAt,
         ],
@@ -626,16 +707,30 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
       const constraint = String(
         (pgErr as { constraint?: unknown })?.constraint ?? '',
       );
-      if (
-        code === '23505' &&
-        (constraint === 'uq_moa_receipts_tenant_pms_tx' ||
+      if (code === '23505') {
+        if (
+          constraint === 'uq_moa_receipts_idempotency_key' ||
+          String(pgErr).includes('uq_moa_receipts_idempotency_key') ||
+          (constraint !== 'uq_moa_receipts_tenant_pms_tx' &&
+            !String(pgErr).includes('uq_moa_receipts_tenant_pms_tx') &&
+            Boolean(cleanIdempotencyKey) &&
+            !input.pmsTransactionId?.trim())
+        ) {
+          throw makeCodedError(
+            'MOA_RECEIPT_IDEMPOTENCY_CONFLICT',
+            'Duplicate money on account receipt recording prevented by idempotency key.',
+          );
+        }
+        if (
+          constraint === 'uq_moa_receipts_tenant_pms_tx' ||
           String(pgErr).includes('uq_moa_receipts_tenant_pms_tx') ||
-          Boolean(input.pmsTransactionId?.trim()))
-      ) {
-        throw makeCodedError(
-          'MOA_PMS_RECEIPT_ALREADY_MATCHED',
-          `PMS client ledger transaction "${input.pmsTransactionId ?? ''}" has already been matched to an active Money on Account receipt.`,
-        );
+          Boolean(input.pmsTransactionId?.trim())
+        ) {
+          throw makeCodedError(
+            'MOA_PMS_RECEIPT_ALREADY_MATCHED',
+            `PMS client ledger transaction "${input.pmsTransactionId ?? ''}" has already been matched to an active Money on Account receipt.`,
+          );
+        }
       }
       throw pgErr;
     }
@@ -656,10 +751,10 @@ export class TenantMoneyOnAccountRepository extends TenantScopedRepository {
     },
   ): Promise<MoneyOnAccountReceiptRecord> {
     const cleanReason = input.reversalReason.trim();
-    if (!cleanReason) {
+    if (cleanReason.length < 5) {
       throw makeCodedError(
         'VALIDATION_ERROR',
-        'A reversal reason is required.',
+        'Please provide a reversal reason of at least 5 characters.',
       );
     }
     const existing = await this.getReceiptByIdInTx(tx, ctx, input.receiptId, {

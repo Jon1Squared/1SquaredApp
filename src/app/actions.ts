@@ -2537,6 +2537,7 @@ export async function recordMoneyOnAccountReceiptAction(input: {
   bankReference?: string | null;
   notes?: string | null;
   evidenceArtifactId?: string | null;
+  idempotencyKey?: string | null;
 }) {
   return guardedAction('recordMoneyOnAccountReceiptAction', async (actor) => {
     const res = await recordMoneyOnAccountReceiptRecord(

@@ -1241,7 +1241,7 @@ const createDefaultMoneyOnAccountWordingsValue = () => ({
   clientMoneyComplianceNote: '',
 });
 
-const MoneyOnAccountConfigSchema = z
+export const MoneyOnAccountConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
     clientAccount: BankAccountDetailsSchema.default(

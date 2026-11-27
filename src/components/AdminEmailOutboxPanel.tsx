@@ -7,7 +7,6 @@ import type {
   EmailOutboxAdminListItem,
   EmailOutboxStatus,
   EngagementConfiguration,
-  MoneyOnAccountConfiguration,
 } from '@platform/core-api';
 import {
   getOutboxMessageForAdminAction,
@@ -15,17 +14,14 @@ import {
 } from '@/app/actions';
 import { isActionDenied } from '@/domain/actionResult';
 import { formatDateTime } from '@/domain/dates';
-import {
-  areClientBankDetailsConfigured,
-  maskBankDetailForAudit,
-} from '@/domain/moneyOnAccount';
+import type { MoneyOnAccountDisplaySummary } from '@/domain/moneyOnAccount';
 import { StatusPill } from './SearchBox';
 import { useToast } from './Toast';
 
 interface AdminEmailOutboxPanelProps {
   effectiveChasingConfig?: ChasingConfiguration;
   effectiveEngagementConfig?: EngagementConfiguration;
-  effectiveMoneyOnAccountConfig?: MoneyOnAccountConfiguration;
+  moneyOnAccountSummary?: MoneyOnAccountDisplaySummary | null;
   emailProviderDisabled?: boolean;
   hasMfaVerified?: boolean;
 }
@@ -47,7 +43,7 @@ function outboxStatusTone(status: EmailOutboxStatus) {
 export function AdminEmailOutboxPanel({
   effectiveChasingConfig,
   effectiveEngagementConfig,
-  effectiveMoneyOnAccountConfig,
+  moneyOnAccountSummary,
   emailProviderDisabled = false,
   hasMfaVerified = false,
 }: AdminEmailOutboxPanelProps) {
@@ -349,7 +345,7 @@ export function AdminEmailOutboxPanel({
                 : 'Using platform fallback wording.'}
             </div>
           ) : null}
-          {effectiveMoneyOnAccountConfig ? (
+          {moneyOnAccountSummary ? (
             <div
               className="subcard"
               data-testid="admin-moa-config-summary"
@@ -361,33 +357,33 @@ export function AdminEmailOutboxPanel({
                 </div>
                 <StatusPill
                   label={
-                    effectiveMoneyOnAccountConfig.enabled
-                      ? areClientBankDetailsConfigured(effectiveMoneyOnAccountConfig)
+                    moneyOnAccountSummary.enabled
+                      ? moneyOnAccountSummary.bankConfigured
                         ? 'Enabled · Bank configured'
                         : 'Enabled · Bank not set'
                       : 'Disabled'
                   }
                   tone={
-                    effectiveMoneyOnAccountConfig.enabled &&
-                    areClientBankDetailsConfigured(effectiveMoneyOnAccountConfig)
+                    moneyOnAccountSummary.enabled &&
+                    moneyOnAccountSummary.bankConfigured
                       ? 'positive'
                       : 'warning'
                   }
                 />
               </div>
               <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
-                <strong>Reference prefix:</strong> {effectiveMoneyOnAccountConfig.paymentReferencePrefix} &middot;{' '}
+                <strong>Reference prefix:</strong> {moneyOnAccountSummary.paymentReferencePrefix} &middot;{' '}
                 <strong>Bank:</strong>{' '}
-                {effectiveMoneyOnAccountConfig.clientAccount.bankName || 'Not set'} &middot;{' '}
+                {moneyOnAccountSummary.bankName || 'Not set'} &middot;{' '}
                 <strong>Sort code:</strong>{' '}
-                {maskBankDetailForAudit(effectiveMoneyOnAccountConfig.clientAccount.sortCode, 'sortCode')}{' '}
+                {moneyOnAccountSummary.maskedSortCode}{' '}
                 &middot; <strong>Account:</strong>{' '}
-                {maskBankDetailForAudit(effectiveMoneyOnAccountConfig.clientAccount.accountNumber, 'accountNumber')}
-                {effectiveMoneyOnAccountConfig.clientAccount.iban
-                  ? ` · IBAN: ${maskBankDetailForAudit(effectiveMoneyOnAccountConfig.clientAccount.iban, 'iban')}`
+                {moneyOnAccountSummary.maskedAccountNumber}
+                {moneyOnAccountSummary.maskedIban
+                  ? ` · IBAN: ${moneyOnAccountSummary.maskedIban}`
                   : ''}
               </div>
-              {effectiveMoneyOnAccountConfig.clientAccount.allowDemoPlaceholderDetails ? (
+              {moneyOnAccountSummary.allowDemoPlaceholderDetails ? (
                 <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
                   Demonstration placeholder bank details are allowed in this non-live environment and are automatically blocked in live client deployments.
                 </div>

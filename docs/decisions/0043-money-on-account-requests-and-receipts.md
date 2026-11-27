@@ -23,7 +23,7 @@ Because this defines new per-tenant transactional financial tables, UK Faster Pa
 1. **`public.tenant_moa_request_id_seq`** (`'MOA-000001'`) and **`public.tenant_moa_receipt_id_seq`** (`'MOAR-000001'`).
 2. **`public.money_on_account_requests`:**
    - `tenant_id TEXT NOT NULL`, `id TEXT NOT NULL`
-   - `matter_id TEXT NOT NULL REFERENCES public.matters` (`ON DELETE CASCADE`)
+   - `matter_id TEXT NOT NULL REFERENCES public.matters` (`ON DELETE RESTRICT` — matters with client money records cannot be deleted, `R872`)
    - `quote_id TEXT NULL` *(provenance link if converted from a quote with POA)*
    - `payment_reference TEXT NOT NULL` *(unique per tenant — see §2)*
    - `requested_amount_pence BIGINT NOT NULL CHECK (requested_amount_pence > 0)`
@@ -44,7 +44,7 @@ Because this defines new per-tenant transactional financial tables, UK Faster Pa
 3. **`public.money_on_account_receipts` (append-only financial ledger of matched receipts and explicit reversals):**
    - `tenant_id TEXT NOT NULL`, `id TEXT NOT NULL`
    - `request_id TEXT NOT NULL` (`FOREIGN KEY (tenant_id, request_id) REFERENCES public.money_on_account_requests (tenant_id, id) ON DELETE RESTRICT`)
-   - `matter_id TEXT NOT NULL` (`FOREIGN KEY (tenant_id, matter_id) REFERENCES public.matters (tenant_id, id) ON DELETE CASCADE`)
+   - `matter_id TEXT NOT NULL` (`FOREIGN KEY (tenant_id, matter_id) REFERENCES public.matters (tenant_id, id) ON DELETE RESTRICT`)
    - `source TEXT NOT NULL CHECK (source IN ('manual', 'pms_ledger'))`
    - `amount_pence BIGINT NOT NULL CHECK (amount_pence > 0)`
    - `received_date TEXT NOT NULL` *(YYYY-MM-DD)*
@@ -53,6 +53,7 @@ Because this defines new per-tenant transactional financial tables, UK Faster Pa
    - `pms_matter_code TEXT NULL`
    - `intake_check_record_id TEXT NULL` *(links ADR 0038 `public.intake_check_records.id` for `recordManualReceipt`)*
    - `evidence_artifact_id TEXT NULL` *(optional remittance slip in `public.evidence_artifacts`)*
+   - `idempotency_key TEXT NULL` *(unique per `(tenant_id, request_id, idempotency_key)` where non-null via `uq_moa_receipts_idempotency_key`, preventing duplicate manual receipt submissions `R874`)*
    - `recorded_by_person_id TEXT NOT NULL`, `recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
    - `reversed_at TIMESTAMPTZ NULL`, `reversed_by_person_id TEXT NULL`, `reversal_reason TEXT NULL` *(reversals stamp these columns rather than deleting rows, preserving audit integrity and allowing legitimate un-matching/re-matching if an entry was matched in error)*
    - `PRIMARY KEY (tenant_id, id)`
@@ -73,7 +74,7 @@ UK Faster Payments and CHAPS payment references are typically capped at **18 upp
 ```text
 MOA-<MATTER_TOKEN_MAX10>-<NN>
 ```
-- `<MATTER_TOKEN_MAX10>`: derived from `matter.matterNumber` if permanently assigned (not starting with `'DRAFT'`), else `matter.id`, normalised via `.toUpperCase().replace(/[^A-Z0-9]/g, '')` and truncated/trimmed to at most **10 characters** (for example `MAT0010004` for `MAT001-0004` -> `MOA-MAT0010004-01`, `18` characters total; `M000012` -> `MOA-M000012-01`, `14` characters).
+- `<MATTER_TOKEN_MAX10>`: derived from `matter.matterNumber` if permanently assigned (not starting with `'DRAFT'`) and fitting cleanly within `min(10, 18 - (prefix.length + 2 + seq.length))`; otherwise (`R866`), derived deterministically from a compact base-36 encoding of `matter.id` / hash so prefixes up to 6 characters or longer matter numbers never truncate to collide.
 - `<NN>`: 2-digit per-matter sequence counter (`01`, `02`, ...) derived monotonically from existing requests for that matter inside `FOR UPDATE` on `public.matters`, guaranteeing strict uniqueness via `uq_moa_requests_payment_ref` even if the matter's `matter_number` was allocated on submission.
 
 ### 3. Matching to PMS client ledger lines (`pms_client_account_entries`)

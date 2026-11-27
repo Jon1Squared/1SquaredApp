@@ -396,6 +396,7 @@ import {
   MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
   mergeRegistersConfigurations,
   minorUnitsToPounds,
+  MoneyOnAccountConfigSchema,
   NON_ENGAGEMENT_DOCUMENT_TYPE,
   ORGANISATION_PARENT_CYCLE_CODE,
   poundsToMinorUnits,
@@ -31126,7 +31127,9 @@ const EXPOSED_REGISTER_SERVICE_ERROR_CODES = new Set<string>([
   'MOA_PMS_RECEIPT_ALREADY_MATCHED',
   'MOA_PAYMENT_REFERENCE_CONFLICT',
   'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
+  'MOA_RECEIPT_IDEMPOTENCY_CONFLICT',
   'MOA_CONFIG_VALIDATION_ERROR',
+  'MATTER_HAS_CLIENT_MONEY_RECORDS',
   OPENING_GATE_OVERRIDE_ERROR_CODES.FORBIDDEN,
   OPENING_GATE_OVERRIDE_ERROR_CODES.VALIDATION,
   OPENING_GATE_OVERRIDE_ERROR_CODES.BLOCKED,
@@ -41139,10 +41142,7 @@ async function authorizeCommunicationChaseSubjectAccess(params: {
     );
   }
   if (chase.entityKind === 'money_on_account') {
-    if (
-      !permSet.permissions.has('money_on_account:request') &&
-      !permSet.permissions.has('matter:edit')
-    ) {
+    if (!permSet.permissions.has('money_on_account:request')) {
       return false;
     }
     let resolvedMatterId = chase.matterId?.trim() || '';
@@ -43723,14 +43723,38 @@ export async function saveMoneyOnAccountConfigRecord(
       );
     }
 
-    if (newConfigInput.paymentReferencePrefix !== undefined) {
-      const cleanedPrefix = String(newConfigInput.paymentReferencePrefix).trim();
-      if (!/^[A-Za-z0-9]{2,6}$/.test(cleanedPrefix)) {
-        return registerServiceFailure(
-          'MOA_CONFIG_VALIDATION_ERROR',
-          'Payment reference prefix must be 2 to 6 letters or numbers.',
-        );
-      }
+    if (
+      !newConfigInput ||
+      typeof newConfigInput !== 'object' ||
+      Array.isArray(newConfigInput)
+    ) {
+      return registerServiceFailure(
+        'MOA_CONFIG_VALIDATION_ERROR',
+        'Money on Account settings must be an object.',
+      );
+    }
+    const rawInput = newConfigInput as Record<string, unknown>;
+    if (
+      rawInput.clientAccount !== undefined &&
+      (!rawInput.clientAccount ||
+        typeof rawInput.clientAccount !== 'object' ||
+        Array.isArray(rawInput.clientAccount))
+    ) {
+      return registerServiceFailure(
+        'MOA_CONFIG_VALIDATION_ERROR',
+        'clientAccount: Client account settings must be an object.',
+      );
+    }
+    if (
+      rawInput.requestWordings !== undefined &&
+      (!rawInput.requestWordings ||
+        typeof rawInput.requestWordings !== 'object' ||
+        Array.isArray(rawInput.requestWordings))
+    ) {
+      return registerServiceFailure(
+        'MOA_CONFIG_VALIDATION_ERROR',
+        'requestWordings: Request wording settings must be an object.',
+      );
     }
 
     const catRepo = getCatalogueRepository();
@@ -43743,10 +43767,39 @@ export async function saveMoneyOnAccountConfigRecord(
       prevOverridePre ?? null,
     );
 
-    const nextConfig = resolveEffectiveMoneyOnAccountConfig(
-      { moneyOnAccount: prevEffectivePre },
-      newConfigInput,
-    );
+    const rawCa = rawInput.clientAccount as Record<string, unknown> | undefined;
+    const rawWordings = rawInput.requestWordings as Record<string, unknown> | undefined;
+    const normalizedRawPrefix =
+      rawInput.paymentReferencePrefix !== undefined
+        ? typeof rawInput.paymentReferencePrefix === 'string'
+          ? rawInput.paymentReferencePrefix.trim().toUpperCase()
+          : rawInput.paymentReferencePrefix
+        : prevEffectivePre.paymentReferencePrefix;
+
+    const mergedCandidate: Record<string, unknown> = {
+      ...prevEffectivePre,
+      ...rawInput,
+      paymentReferencePrefix: normalizedRawPrefix,
+      clientAccount: {
+        ...prevEffectivePre.clientAccount,
+        ...(rawCa ?? {}),
+      },
+      requestWordings: {
+        ...prevEffectivePre.requestWordings,
+        ...(rawWordings ?? {}),
+      },
+    };
+    const schemaCheck = MoneyOnAccountConfigSchema.safeParse(mergedCandidate);
+    if (!schemaCheck.success) {
+      const msg = schemaCheck.error.issues
+        .map((issue) => {
+          const path = issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
+          return `${path}${issue.message}`;
+        })
+        .join(' ');
+      return registerServiceFailure('MOA_CONFIG_VALIDATION_ERROR', msg);
+    }
+    const nextConfig: MoneyOnAccountConfiguration = schemaCheck.data;
 
     const ca = nextConfig.clientAccount;
     if (nextConfig.enabled && !areClientBankDetailsConfigured(nextConfig)) {
@@ -43919,12 +43972,6 @@ export async function createAndSendMoneyOnAccountRequestRecord(
         cleanExplicitKey,
       );
       if (existingPre) {
-        if (existingPre.matterId !== matterPre.id) {
-          return registerServiceFailure(
-            'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
-            'Idempotency key belongs to a different matter.',
-          );
-        }
         const [existingOutbox, existingChase] = await Promise.all([
           existingPre.outboxEmailId
             ? outboxRepo.getOutboxRecordById(ctx, existingPre.outboxEmailId)
@@ -44032,6 +44079,54 @@ export async function createAndSendMoneyOnAccountRequestRecord(
         ? partyRepo.getPersonById<Person>(ctx, matterPre.instructingContactId)
         : Promise.resolve(null),
     ]);
+    const additionalClientIds = (matterPre.additionalClientIds ?? [])
+      .map((id) => id?.trim() ?? '')
+      .filter(
+        (id) =>
+          Boolean(id) &&
+          id !== matterPre.clientId &&
+          id !== matterPre.instructingContactId,
+      );
+    const additionalClientParties = await Promise.all(
+      additionalClientIds.map(async (id) => {
+        if (id.startsWith('P-')) {
+          return {
+            kind: 'person' as const,
+            party: await partyRepo.getPersonById<Person>(ctx, id),
+          };
+        }
+        if (id.startsWith('O-')) {
+          return {
+            kind: 'org' as const,
+            party: await partyRepo.getOrganisationById<Organisation>(ctx, id),
+          };
+        }
+        return null;
+      }),
+    );
+    const clientContactEmails = new Set<string>();
+    for (const emailEntry of clientPerson?.emails ?? []) {
+      const addr = emailEntry.address?.trim().toLowerCase();
+      if (addr) clientContactEmails.add(addr);
+    }
+    for (const emailEntry of instructingPerson?.emails ?? []) {
+      const addr = emailEntry.address?.trim().toLowerCase();
+      if (addr) clientContactEmails.add(addr);
+    }
+    if (clientOrg?.generalEmail?.trim()) {
+      clientContactEmails.add(clientOrg.generalEmail.trim().toLowerCase());
+    }
+    for (const extra of additionalClientParties) {
+      if (!extra?.party) continue;
+      if (extra.kind === 'person' && extra.party) {
+        for (const emailEntry of extra.party.emails ?? []) {
+          const addr = emailEntry.address?.trim().toLowerCase();
+          if (addr) clientContactEmails.add(addr);
+        }
+      } else if (extra.kind === 'org' && extra.party?.generalEmail?.trim()) {
+        clientContactEmails.add(extra.party.generalEmail.trim().toLowerCase());
+      }
+    }
     const recipientPerson = instructingPerson ?? clientPerson;
     const resolvedEmail = (
       input.recipientEmail?.trim() ||
@@ -44045,6 +44140,9 @@ export async function createAndSendMoneyOnAccountRequestRecord(
         'A valid client recipient email address is required before sending.',
       );
     }
+    const isOffClientEmail = !clientContactEmails.has(
+      resolvedEmail.toLowerCase(),
+    );
     const resolvedRecipientName = (
       input.recipientName?.trim() ||
       (recipientPerson ? personDisplayName(recipientPerson) : '') ||
@@ -44093,16 +44191,19 @@ export async function createAndSendMoneyOnAccountRequestRecord(
       | RegisterServiceDenialOrError
       | null = null;
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    let seqOffset = 0;
+    let forceMatterIdToken = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       const existingCount = await moaRepo.withTenantReadTransaction(ctx, (tx) =>
         moaRepo.countRequestsForMatterInTx(tx, ctx, matterPre.id),
       );
-      const expectedSeq = existingCount + 1 + attempt;
+      const expectedSeq = existingCount + 1 + seqOffset;
       const paymentReference = buildMoneyOnAccountPaymentReference({
         prefix: effectiveMoa.paymentReferencePrefix,
         matterNumber: matterPre.matterNumber,
         matterId: matterPre.id,
         sequenceNumber: expectedSeq,
+        useMatterIdToken: forceMatterIdToken,
       });
 
       const matterRefDisplay = matterPre.matterNumber || matterPre.id;
@@ -44209,12 +44310,6 @@ export async function createAndSendMoneyOnAccountRequestRecord(
               { forUpdate: true },
             );
             if (existingInTx) {
-              if (existingInTx.matterId !== lockedMatter.id) {
-                return registerServiceFailure(
-                  'MOA_REQUEST_IDEMPOTENCY_CONFLICT',
-                  'Idempotency key belongs to a different matter.',
-                );
-              }
               const [existingOutboxInTx, existingChaseInTx] = await Promise.all(
                 [
                   existingInTx.outboxEmailId
@@ -44250,14 +44345,25 @@ export async function createAndSendMoneyOnAccountRequestRecord(
             prefix: effectiveMoa.paymentReferencePrefix,
             matterNumber: lockedMatter.matterNumber,
             matterId: lockedMatter.id,
-            sequenceNumber: currentCount + 1,
+            sequenceNumber: currentCount + 1 + seqOffset,
+            useMatterIdToken: forceMatterIdToken,
           });
-          if (expectedPaymentRef !== paymentReference && attempt < 2) {
+          if (expectedPaymentRef !== paymentReference && attempt < 3) {
             const retryErr = new Error('MOA_REF_SEQ_RETRY') as Error & {
               code: string;
             };
             retryErr.code = 'MOA_REF_SEQ_RETRY';
             throw retryErr;
+          }
+          if (
+            attempt < 3 &&
+            (await moaRepo.paymentReferenceExistsInTx(tx, ctx, paymentReference))
+          ) {
+            const conflictErr = new Error(
+              'MOA_PAYMENT_REFERENCE_CONFLICT',
+            ) as Error & { code: string };
+            conflictErr.code = 'MOA_PAYMENT_REFERENCE_CONFLICT';
+            throw conflictErr;
           }
 
           const nowIso = nextMonotonicIsoTimestamp(lockedMatter.updatedAt);
@@ -44336,37 +44442,6 @@ export async function createAndSendMoneyOnAccountRequestRecord(
             chaseRecord = chaseRes.chase;
           }
 
-          let savedMatter = lockedMatter;
-          const costsSnapshot = (lockedMatter.fieldValues?.['matterCosts'] ??
-            lockedMatter.fieldValues?.['matterCostsSnapshot']) as
-            | { paymentOnAccountRequired?: string }
-            | undefined;
-          const hasExistingRetainer =
-            (typeof lockedMatter.retainerMoniesOnAccountPence === 'number' &&
-              lockedMatter.retainerMoniesOnAccountPence > 0) ||
-            (typeof lockedMatter.retainerMoniesOnAccountGbp === 'number' &&
-              lockedMatter.retainerMoniesOnAccountGbp > 0);
-          if (
-            !hasExistingRetainer &&
-            costsSnapshot?.paymentOnAccountRequired !== 'No'
-          ) {
-            const backfillPence =
-              agreedAmountPence !== null && agreedAmountPence > 0
-                ? agreedAmountPence
-                : resolvedAmountPence;
-            savedMatter = await putMatterWithInTxRestrictions(
-              ctx,
-              {
-                ...lockedMatter,
-                retainerMoniesOnAccountPence: backfillPence,
-                retainerMoniesOnAccountGbp: minorUnitsToPounds(backfillPence),
-                updatedAt: nowIso,
-                updatedById: actor.id,
-              },
-              { expectedRowVersion: null },
-            );
-          }
-
           await auditRepo.appendAuditEntriesInTx(tx, ctx, [
             {
               recordType: 'money_on_account_request',
@@ -44374,7 +44449,7 @@ export async function createAndSendMoneyOnAccountRequestRecord(
               action: 'create',
               field: 'Money on account requested',
               oldValue: 'none',
-              newValue: `matter=${lockedMatter.id} ref=${insertedRequest.paymentReference} amountPence=${insertedRequest.requestedAmountPence} outbox=${queued.record.id}`,
+              newValue: `matter=${lockedMatter.id} ref=${insertedRequest.paymentReference} amountPence=${insertedRequest.requestedAmountPence} outbox=${queued.record.id}${isOffClientEmail ? '; offClientEmail=true' : ''}`,
               byId: actor.id,
               at: nowIso,
             },
@@ -44383,7 +44458,7 @@ export async function createAndSendMoneyOnAccountRequestRecord(
           return {
             ok: true as const,
             request: insertedRequest,
-            matter: savedMatter,
+            matter: lockedMatter,
             outboxRecord: queued.record,
             chase: chaseRecord,
             deduplicated: false,
@@ -44392,7 +44467,15 @@ export async function createAndSendMoneyOnAccountRequestRecord(
         break;
       } catch (retryOrDbErr) {
         const errCode = (retryOrDbErr as { code?: string })?.code;
-        if (errCode === 'MOA_REF_SEQ_RETRY' && attempt < 2) {
+        if (errCode === 'MOA_REF_SEQ_RETRY' && attempt < 3) {
+          continue;
+        }
+        if (errCode === 'MOA_PAYMENT_REFERENCE_CONFLICT' && attempt < 3) {
+          if (!forceMatterIdToken) {
+            forceMatterIdToken = true;
+          } else {
+            seqOffset += 1;
+          }
           continue;
         }
         throw retryOrDbErr;
@@ -44631,6 +44714,61 @@ export async function cancelMoneyOnAccountRequestRecord(
   }
 }
 
+async function cleanupOrphanMoaProofBestEffort(params: {
+  readonly storage: DocumentStorageProvider;
+  readonly evidenceRepo: ReturnType<typeof getEvidenceArtifactRepository>;
+  readonly moaRepo: ReturnType<typeof getMoneyOnAccountRepository>;
+  readonly ctx: TenantContext;
+  readonly artifact: EvidenceArtifactRecord | null;
+}): Promise<void> {
+  const { storage, evidenceRepo, moaRepo, ctx, artifact } = params;
+  if (!artifact) return;
+  const stillReferenced = await moaRepo
+    .isEvidenceArtifactReferencedInReceipts(ctx, artifact.id)
+    .catch(() => true);
+  if (stillReferenced) return;
+
+  try {
+    await storage.deleteObject(ctx, { blobKey: artifact.blobKey });
+  } catch (err) {
+    const errorCode =
+      err instanceof Error
+        ? (err as { code?: unknown }).code
+          ? String((err as { code?: unknown }).code)
+          : err.name
+        : 'ORPHAN_BLOB_DELETE_FAILED';
+    console.warn(
+      JSON.stringify({
+        event: 'moa.orphan_proof_blob_delete_failed',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        artifactId: artifact.id,
+        errorCode: errorCode.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64),
+      }),
+    );
+  }
+
+  try {
+    await evidenceRepo.deleteArtifactById(ctx, artifact.id);
+  } catch (err) {
+    const errorCode =
+      err instanceof Error
+        ? (err as { code?: unknown }).code
+          ? String((err as { code?: unknown }).code)
+          : err.name
+        : 'ORPHAN_ARTIFACT_ROW_DELETE_FAILED';
+    console.warn(
+      JSON.stringify({
+        event: 'moa.orphan_proof_row_delete_failed',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        artifactId: artifact.id,
+        errorCode: errorCode.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64),
+      }),
+    );
+  }
+}
+
 export async function recordMoneyOnAccountReceiptRecord(
   input: {
     requestId: string;
@@ -44639,6 +44777,7 @@ export async function recordMoneyOnAccountReceiptRecord(
     bankReference?: string | null;
     notes?: string | null;
     evidenceArtifactId?: string | null;
+    idempotencyKey?: string | null;
   },
   byId?: string,
   options?: {
@@ -44651,12 +44790,40 @@ export async function recordMoneyOnAccountReceiptRecord(
       receipt: MoneyOnAccountReceiptRecord;
       request: MoneyOnAccountRequestRecord;
       stoppedChase: CommunicationChaseRecord | null;
+      deduplicated: boolean;
     }
   | RegisterServiceDenialOrError
 > {
+  let ownedMoaArtifact: EvidenceArtifactRecord | null = null;
+  let resolvedStorage: DocumentStorageProvider | null = null;
+  let resolvedCtx: TenantContext | null = null;
+  const moaRepo = getMoneyOnAccountRepository();
+  const evidenceRepo = getEvidenceArtifactRepository();
+
+  const cleanupOwnedOrphanIfUnused = async (
+    referencedArtifactId?: string | null,
+  ) => {
+    if (
+      !ownedMoaArtifact ||
+      !resolvedStorage ||
+      !resolvedCtx ||
+      referencedArtifactId === ownedMoaArtifact.id
+    ) {
+      return;
+    }
+    await cleanupOrphanMoaProofBestEffort({
+      storage: resolvedStorage,
+      evidenceRepo,
+      moaRepo,
+      ctx: resolvedCtx,
+      artifact: ownedMoaArtifact,
+    });
+  };
+
   try {
     const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
       await resolveRegisterActorAndConfig(byId, undefined, options);
+    resolvedCtx = ctx;
     if (!permSet.permissions.has('money_on_account:record_receipt')) {
       return registerServiceFailure(
         'FORBIDDEN',
@@ -44669,11 +44836,10 @@ export async function recordMoneyOnAccountReceiptRecord(
       return registerServiceFailure('VALIDATION_ERROR', 'Request ID is required.');
     }
 
-    const moaRepo = getMoneyOnAccountRepository();
     const matterRepo = getMatterRepository();
     const chasingRepo = getChasingRepository();
     const auditRepo = getAuditRepository();
-    const evidenceRepo = getEvidenceArtifactRepository();
+    resolvedStorage = getDocumentStorage(tenantCfg);
 
     // Lesson 5: Resolve request + matter access FIRST -> uniform NOT_FOUND.
     const requestPre = await moaRepo.getRequestById(ctx, requestIdClean);
@@ -44697,45 +44863,26 @@ export async function recordMoneyOnAccountReceiptRecord(
       );
     }
 
-    if (
-      typeof input.amountPence !== 'number' ||
-      !Number.isSafeInteger(input.amountPence) ||
-      input.amountPence <= 0
-    ) {
-      return registerServiceFailure(
-        'VALIDATION_ERROR',
-        'Receipt amount must be a whole number of pence greater than £0.00.',
-      );
-    }
-    const cleanDate = input.receivedDate?.trim() || '';
-    if (!isValidCalendarYmd(cleanDate)) {
-      return registerServiceFailure(
-        'VALIDATION_ERROR',
-        'A valid calendar receipt date (YYYY-MM-DD) is required.',
-      );
-    }
-
     const cleanArtifactId = input.evidenceArtifactId?.trim() || null;
     let verifiedEvidenceRefs: IntakeEvidenceArtifactRef[] = [];
     if (cleanArtifactId) {
       const artifact = await evidenceRepo.getArtifactById(ctx, cleanArtifactId);
+      // Lesson 5 & Lesson 7 / R868: Missing, cross-matter, unscanned, or wrong-purpose
+      // artifacts all return identical opaque NOT_FOUND.
       if (
         !artifact ||
         artifact.subjectType !== 'matter' ||
         artifact.subjectId !== matterPre.id ||
-        artifact.scanStatus !== 'clean'
+        artifact.scanStatus !== 'clean' ||
+        artifact.purpose !== 'moa_receipt'
       ) {
         return registerServiceFailure(
           'NOT_FOUND',
           'Evidence file not found or access denied.',
         );
       }
-      // Lesson 7 / R817: Stored purpose MUST equal 'moa_receipt'.
-      if (artifact.purpose !== 'moa_receipt') {
-        return registerServiceFailure(
-          'VALIDATION_ERROR',
-          'Attached evidence must be uploaded as a Money on Account receipt document.',
-        );
+      if (artifact.uploadedByPersonId === actor.id) {
+        ownedMoaArtifact = artifact;
       }
       verifiedEvidenceRefs = [
         {
@@ -44751,13 +44898,54 @@ export async function recordMoneyOnAccountReceiptRecord(
       ];
     }
 
-    const storage = getDocumentStorage(tenantCfg);
+    const cleanIdempotencyKey = input.idempotencyKey?.trim() || '';
+    if (cleanIdempotencyKey) {
+      const existingPre = await moaRepo.findReceiptByIdempotencyKey(
+        ctx,
+        requestPre.id,
+        cleanIdempotencyKey,
+      );
+      if (existingPre) {
+        await cleanupOwnedOrphanIfUnused(existingPre.evidenceArtifactId);
+        const latestRequest =
+          (await moaRepo.getRequestById(ctx, requestPre.id)) ?? requestPre;
+        return {
+          ok: true,
+          receipt: existingPre,
+          request: latestRequest,
+          stoppedChase: null,
+          deduplicated: true,
+        };
+      }
+    }
+
+    if (
+      typeof input.amountPence !== 'number' ||
+      !Number.isSafeInteger(input.amountPence) ||
+      input.amountPence <= 0
+    ) {
+      await cleanupOwnedOrphanIfUnused();
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Receipt amount must be a whole number of pence greater than £0.00.',
+      );
+    }
+    const cleanDate = input.receivedDate?.trim() || '';
+    if (!isValidCalendarYmd(cleanDate)) {
+      await cleanupOwnedOrphanIfUnused();
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid calendar receipt date (YYYY-MM-DD) is required.',
+      );
+    }
+
     const paymentProvider = createTenantIntakeCheckProviders({
       tenantConfig: tenantCfg,
       repository: getIntakeCheckRepository(),
-      storageProvider: storage,
+      storageProvider: resolvedStorage,
     }).payments;
     if (!paymentProvider.recordCheckInTx) {
+      await cleanupOwnedOrphanIfUnused();
       return registerServiceFailure(
         'MOA_NOT_CONFIGURED',
         'Payment request provider does not support transactional recording.',
@@ -44767,135 +44955,188 @@ export async function recordMoneyOnAccountReceiptRecord(
     const cleanBankRef = input.bankReference?.trim() || null;
     const cleanNotes = input.notes?.trim() || null;
 
-    return await moaRepo.withTenantTransaction(ctx, async (tx) => {
-      await tx.query(
-        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
-        [ctx.tenantId, matterPre.id],
-      );
-      const lockedRequest = await moaRepo.getRequestByIdInTx(
-        tx,
-        ctx,
-        requestPre.id,
-        { forUpdate: true },
-      );
-      if (!lockedRequest || lockedRequest.matterId !== matterPre.id) {
-        return registerServiceFailure(
-          'NOT_FOUND',
-          'Money on Account request was not found.',
+    try {
+      const txResult = await moaRepo.withTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, matterPre.id],
         );
-      }
-
-      // Lesson 4: Stored state must be 'requested' or 'part_received'.
-      if (
-        lockedRequest.status !== 'requested' &&
-        lockedRequest.status !== 'part_received'
-      ) {
-        return registerServiceFailure(
-          'VALIDATION_ERROR',
-          `Receipts can only be recorded on requested or part-received requests (current status: "${lockedRequest.status}").`,
+        const lockedRequest = await moaRepo.getRequestByIdInTx(
+          tx,
+          ctx,
+          requestPre.id,
+          { forUpdate: true },
         );
-      }
+        if (!lockedRequest || lockedRequest.matterId !== matterPre.id) {
+          return registerServiceFailure(
+            'NOT_FOUND',
+            'Money on Account request was not found.',
+          );
+        }
 
-      const nowIso = new Date().toISOString();
-      const receiptId = await moaRepo.allocateReceiptIdInTx(tx);
+        if (cleanIdempotencyKey) {
+          const existingInTx = await moaRepo.findReceiptByIdempotencyKeyInTx(
+            tx,
+            ctx,
+            lockedRequest.id,
+            cleanIdempotencyKey,
+            { forUpdate: true },
+          );
+          if (existingInTx) {
+            return {
+              ok: true as const,
+              receipt: existingInTx,
+              request: lockedRequest,
+              stoppedChase: null,
+              deduplicated: true,
+            };
+          }
+        }
 
-      const paymentCheck = await paymentProvider.recordCheckInTx!(tx, ctx, {
-        subjectType: 'matter',
-        subjectId: lockedRequest.matterId,
-        amountMinorUnits: BigInt(input.amountPence),
-        currency: 'GBP',
-        clientAccountReference: lockedRequest.paymentReference,
-        referenceCode: receiptId,
-        bankStatementReference: cleanBankRef,
-        notes: cleanNotes,
-        outcome: 'receipt_recorded_manual',
-        evidenceRefs: verifiedEvidenceRefs,
-      });
+        // Lesson 4: Stored state must be 'requested' or 'part_received'.
+        if (
+          lockedRequest.status !== 'requested' &&
+          lockedRequest.status !== 'part_received'
+        ) {
+          return registerServiceFailure(
+            'VALIDATION_ERROR',
+            `Receipts can only be recorded on requested or part-received requests (current status: "${lockedRequest.status}").`,
+          );
+        }
 
-      const insertedReceipt = await moaRepo.insertReceiptInTx(tx, ctx, {
-        id: receiptId,
-        requestId: lockedRequest.id,
-        matterId: lockedRequest.matterId,
-        source: 'manual',
-        amountPence: input.amountPence,
-        receivedDate: cleanDate,
-        bankReference: cleanBankRef,
-        notes: cleanNotes,
-        intakeCheckRecordId: paymentCheck.id,
-        evidenceArtifactId: cleanArtifactId,
-        recordedByPersonId: actor.id,
-        recordedAt: nowIso,
-      });
+        const nowIso = new Date().toISOString();
+        const receiptId = await moaRepo.allocateReceiptIdInTx(tx);
 
-      const allReceipts = await moaRepo.listReceiptsForRequestInTx(
-        tx,
-        ctx,
-        lockedRequest.id,
-      );
-      const totalReceivedPence = sumMinorUnits(
-        allReceipts.filter((r) => !r.reversedAt?.trim()).map((r) => r.amountPence),
-      );
-      const nextStatus: MoneyOnAccountRequestStatus =
-        totalReceivedPence >= lockedRequest.requestedAmountPence
-          ? 'received'
-          : 'part_received';
-
-      const updatedRequest = await moaRepo.updateRequestInTx(
-        tx,
-        ctx,
-        lockedRequest.id,
-        {
-          status: nextStatus,
-          updatedAt: nowIso,
-        },
-      );
-
-      let stoppedChase: StoppedCommunicationChaseRecord | null = null;
-      const auditEntries: FirmAuditEntryInput[] = [
-        {
-          recordType: 'money_on_account_receipt',
-          recordId: insertedReceipt.id,
-          action: 'create',
-          field: 'Money on account receipt recorded',
-          oldValue: lockedRequest.status,
-          newValue: `request=${updatedRequest.id} source=manual amountPence=${insertedReceipt.amountPence} status=${nextStatus}`,
-          byId: actor.id,
-          at: nowIso,
-        },
-      ];
-
-      if (nextStatus === 'received') {
-        stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
-          entityKind: 'money_on_account',
-          entityId: updatedRequest.id,
-          reason: 'received',
-          stoppedByPersonId: actor.id,
-          stoppedAt: nowIso,
+        const paymentCheck = await paymentProvider.recordCheckInTx!(tx, ctx, {
+          subjectType: 'matter',
+          subjectId: lockedRequest.matterId,
+          amountMinorUnits: BigInt(input.amountPence),
+          currency: 'GBP',
+          clientAccountReference: lockedRequest.paymentReference,
+          referenceCode: receiptId,
+          bankStatementReference: cleanBankRef,
+          notes: cleanNotes,
+          outcome: 'receipt_recorded_manual',
+          evidenceRefs: verifiedEvidenceRefs,
         });
-        if (stoppedChase) {
-          auditEntries.push({
-            recordType: 'communication_chase',
-            recordId: stoppedChase.id,
-            action: 'update',
-            field: 'Communication chase stopped',
-            oldValue: stoppedChase.previousStatus,
-            newValue: `stopped (${stoppedChase.stoppedReason ?? 'received'})`,
+
+        const insertedReceipt = await moaRepo.insertReceiptInTx(tx, ctx, {
+          id: receiptId,
+          requestId: lockedRequest.id,
+          matterId: lockedRequest.matterId,
+          source: 'manual',
+          amountPence: input.amountPence,
+          receivedDate: cleanDate,
+          bankReference: cleanBankRef,
+          notes: cleanNotes,
+          intakeCheckRecordId: paymentCheck.id,
+          evidenceArtifactId: cleanArtifactId,
+          idempotencyKey: cleanIdempotencyKey || null,
+          recordedByPersonId: actor.id,
+          recordedAt: nowIso,
+        });
+
+        const allReceipts = await moaRepo.listReceiptsForRequestInTx(
+          tx,
+          ctx,
+          lockedRequest.id,
+        );
+        const totalReceivedPence = sumMinorUnits(
+          allReceipts.filter((r) => !r.reversedAt?.trim()).map((r) => r.amountPence),
+        );
+        const nextStatus: MoneyOnAccountRequestStatus =
+          totalReceivedPence >= lockedRequest.requestedAmountPence
+            ? 'received'
+            : 'part_received';
+
+        const updatedRequest = await moaRepo.updateRequestInTx(
+          tx,
+          ctx,
+          lockedRequest.id,
+          {
+            status: nextStatus,
+            updatedAt: nowIso,
+          },
+        );
+
+        let stoppedChase: StoppedCommunicationChaseRecord | null = null;
+        const auditEntries: FirmAuditEntryInput[] = [
+          {
+            recordType: 'money_on_account_receipt',
+            recordId: insertedReceipt.id,
+            action: 'create',
+            field: 'Money on account receipt recorded',
+            oldValue: lockedRequest.status,
+            newValue: `request=${updatedRequest.id} source=manual amountPence=${insertedReceipt.amountPence} status=${nextStatus}`,
             byId: actor.id,
             at: nowIso,
+          },
+        ];
+
+        if (nextStatus === 'received') {
+          stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+            entityKind: 'money_on_account',
+            entityId: updatedRequest.id,
+            reason: 'received',
+            stoppedByPersonId: actor.id,
+            stoppedAt: nowIso,
           });
+          if (stoppedChase) {
+            auditEntries.push({
+              recordType: 'communication_chase',
+              recordId: stoppedChase.id,
+              action: 'update',
+              field: 'Communication chase stopped',
+              oldValue: stoppedChase.previousStatus,
+              newValue: `stopped (${stoppedChase.stoppedReason ?? 'received'})`,
+              byId: actor.id,
+              at: nowIso,
+            });
+          }
+        }
+
+        await auditRepo.appendAuditEntriesInTx(tx, ctx, auditEntries);
+
+        return {
+          ok: true as const,
+          receipt: insertedReceipt,
+          request: updatedRequest,
+          stoppedChase,
+          deduplicated: false,
+        };
+      });
+
+      if (!txResult.ok) {
+        await cleanupOwnedOrphanIfUnused();
+      } else if (txResult.deduplicated) {
+        await cleanupOwnedOrphanIfUnused(txResult.receipt.evidenceArtifactId);
+      }
+      return txResult;
+    } catch (txErr) {
+      const errCode = (txErr as { code?: string })?.code;
+      if (errCode === 'MOA_RECEIPT_IDEMPOTENCY_CONFLICT' && cleanIdempotencyKey) {
+        const existingAfterConflict = await moaRepo.findReceiptByIdempotencyKey(
+          ctx,
+          requestPre.id,
+          cleanIdempotencyKey,
+        );
+        if (existingAfterConflict) {
+          await cleanupOwnedOrphanIfUnused(existingAfterConflict.evidenceArtifactId);
+          const latestRequest =
+            (await moaRepo.getRequestById(ctx, requestPre.id)) ?? requestPre;
+          return {
+            ok: true,
+            receipt: existingAfterConflict,
+            request: latestRequest,
+            stoppedChase: null,
+            deduplicated: true,
+          };
         }
       }
-
-      await auditRepo.appendAuditEntriesInTx(tx, ctx, auditEntries);
-
-      return {
-        ok: true as const,
-        receipt: insertedReceipt,
-        request: updatedRequest,
-        stoppedChase,
-      };
-    });
+      throw txErr;
+    }
   } catch (err) {
+    await cleanupOwnedOrphanIfUnused();
     return mapRegisterErrorToDenial(err);
   }
 }
@@ -45037,17 +45278,18 @@ export async function matchPmsClientLedgerReceiptRecord(
         );
       }
 
-      const pmsAmountPence =
-        typeof pmsEntry.amount_pence === 'number' &&
-        Number.isSafeInteger(pmsEntry.amount_pence)
-          ? pmsEntry.amount_pence
-          : Math.round(pmsEntry.amount * 100);
-      if (pmsEntry.type !== 'Receipt' || pmsAmountPence <= 0) {
+      if (
+        pmsEntry.type !== 'Receipt' ||
+        typeof pmsEntry.amount_pence !== 'number' ||
+        !Number.isSafeInteger(pmsEntry.amount_pence) ||
+        pmsEntry.amount_pence <= 0
+      ) {
         return registerServiceFailure(
           'VALIDATION_ERROR',
-          'Only positive client account Receipt entries can be matched as Money on Account receipts.',
+          'Only positive client account Receipt entries with a whole-penny amount can be matched as Money on Account receipts.',
         );
       }
+      const pmsAmountPence = pmsEntry.amount_pence;
 
       const nowIso = new Date().toISOString();
       const receiptId = await moaRepo.allocateReceiptIdInTx(tx);
@@ -45221,10 +45463,10 @@ export async function reverseMoneyOnAccountReceiptRecord(
       );
     }
 
-    if (!cleanReason) {
+    if (cleanReason.length < 5) {
       return registerServiceFailure(
         'VALIDATION_ERROR',
-        'A reversal reason is required.',
+        'Please provide a reversal reason of at least 5 characters.',
       );
     }
 

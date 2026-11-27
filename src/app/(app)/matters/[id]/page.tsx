@@ -105,7 +105,7 @@ export default async function MatterProfilePage({
         engagementDispatches={data.engagementDispatches}
         engagementChases={data.engagementChases}
         signedEngagementDownloadUrl={data.signedEngagementDownloadUrl}
-        effectiveMoneyOnAccountConfig={data.effectiveMoneyOnAccountConfig}
+        moneyOnAccountSummary={data.moneyOnAccountSummary}
         moneyOnAccountRequests={data.moneyOnAccountRequests}
         moneyOnAccountReceipts={data.moneyOnAccountReceipts}
         moneyOnAccountChases={data.moneyOnAccountChases}
