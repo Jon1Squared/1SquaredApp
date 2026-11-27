@@ -1882,8 +1882,8 @@ test.describe.serial('S1-07: Quote POA, Price Transparency, PDF download, email 
         .fill('Includes gifted deposit verification.');
 
       await fePage.getByRole('button', { name: 'Save as draft' }).click();
-      await expect(fePage).toHaveURL(/\/quotes\/(Q-\d{4}-\d+)$/, { timeout: 20_000 });
-      const quoteId = fePage.url().match(/\/quotes\/(Q-\d{4}-\d+)$/)?.[1] ?? '';
+      await expect(fePage).toHaveURL(/\/quotes\/(QTE-\d{4}-\d+)$/, { timeout: 20_000 });
+      const quoteId = fePage.url().match(/\/quotes\/(QTE-\d{4}-\d+)$/)?.[1] ?? '';
       expect(quoteId).toBeTruthy();
 
       const pdfRes = await fePage.request.get(`/api/quotes/${encodeURIComponent(quoteId)}/pdf`);
@@ -1916,7 +1916,7 @@ test.describe.serial('S1-07: Quote POA, Price Transparency, PDF download, email 
       await fePage.locator('#qte-scope').fill('Standalone commercial contract advice.');
       await fePage.locator('#qte-fee-amount').fill('950');
       await fePage.getByRole('button', { name: 'Save as draft' }).click();
-      await expect(fePage).toHaveURL(/\/quotes\/(Q-\d{4}-\d+)$/, { timeout: 20_000 });
+      await expect(fePage).toHaveURL(/\/quotes\/(QTE-\d{4}-\d+)$/, { timeout: 20_000 });
 
       await fePage.getByTestId('quote-mark-offline-open-btn').click();
       await fePage.getByTestId('quote-mark-offline-note-input').fill('Posted in envelope');
