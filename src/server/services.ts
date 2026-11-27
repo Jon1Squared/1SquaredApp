@@ -32255,9 +32255,11 @@ function isPurposePermittedForEvidenceUpload(
   if (purpose === 'cdd') {
     return permSet.permissions.has('cdd:record');
   }
-  if (purpose === 'engagement_signed' || purpose === 'moa_receipt') {
+  if (purpose === 'engagement_signed') {
     return permSet.permissions.has('matter:edit');
   }
+  // R843: 'moa_receipt' remains disabled until S1-08 §3 wires
+  // money_on_account:record_receipt / money_on_account:view / document:view permissions.
   return false;
 }
 
@@ -32269,13 +32271,15 @@ function isStoredPurposePermittedForEvidenceDownload(
   if (storedPurpose === 'cdd') {
     return permSet.permissions.has('cdd:view');
   }
-  if (storedPurpose === 'engagement_signed' || storedPurpose === 'moa_receipt') {
+  if (storedPurpose === 'engagement_signed') {
     return (
       subjectType === 'matter' &&
       (permSet.permissions.has('document:view') ||
         permSet.permissions.has('matter:edit'))
     );
   }
+  // R843: 'moa_receipt' downloads stay disabled until S1-08 §3
+  // (money_on_account:view, money_on_account:record_receipt, or document:view).
   return false;
 }
 
@@ -32628,11 +32632,8 @@ export async function uploadEvidenceArtifactRecord(
     const requestedPurpose = (
       input.purpose === undefined ? 'cdd' : input.purpose
     ) as EvidencePurpose;
-    if (
-      requestedPurpose !== 'cdd' &&
-      requestedPurpose !== 'engagement_signed' &&
-      requestedPurpose !== 'moa_receipt'
-    ) {
+    // R843: 'moa_receipt' stays disabled until S1-08 §3; only 'cdd' and 'engagement_signed' are enabled here.
+    if (requestedPurpose !== 'cdd' && requestedPurpose !== 'engagement_signed') {
       return registerServiceFailure(
         'VALIDATION_ERROR',
         `Unsupported evidence purpose "${String(input.purpose)}".`,
@@ -32655,8 +32656,7 @@ export async function uploadEvidenceArtifactRecord(
       );
     }
     if (
-      (requestedPurpose === 'engagement_signed' ||
-        requestedPurpose === 'moa_receipt') &&
+      requestedPurpose === 'engagement_signed' &&
       input.subjectType !== 'matter'
     ) {
       return registerServiceFailure(
@@ -32835,18 +32835,44 @@ export async function downloadEvidenceArtifactRecord(
     };
     try {
       verified = await storage.verifyScopedDownloadToken(ctx, tokenClean);
-    } catch {
-      return registerServiceFailure(
-        'FORBIDDEN',
-        'Invalid, expired, or cross-tenant evidence download token.',
+    } catch (tokenErr) {
+      // R844: Invalid, expired, or cross-tenant tokens collapse to the same opaque 404
+      // as a missing artifact, logging only IDs and reason code.
+      const msg = tokenErr instanceof Error ? tokenErr.message : '';
+      const reason = msg.startsWith('STORAGE_TOKEN_EXPIRED')
+        ? 'token_expired'
+        : msg.startsWith('STORAGE_TOKEN_ACTOR_MISMATCH')
+          ? 'token_actor_mismatch'
+          : msg.startsWith('STORAGE_TENANCY_ISOLATION_ERROR')
+            ? 'token_cross_tenant'
+            : msg.startsWith('STORAGE_TOKEN_FORGERY')
+              ? 'token_forgery'
+              : 'token_invalid';
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'evidence.download_denied',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          actorId: actor.id,
+          reason,
+        }),
       );
+      return opaqueNotFound();
     }
 
     if (verified.sub !== actor.id) {
-      return registerServiceFailure(
-        'FORBIDDEN',
-        'Evidence download token belongs to another signed-in user.',
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'evidence.download_denied',
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+          actorId: actor.id,
+          reason: 'token_actor_mismatch',
+        }),
       );
+      return opaqueNotFound();
     }
 
     try {

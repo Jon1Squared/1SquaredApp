@@ -14421,7 +14421,7 @@ describe('Platform Architecture Standard — Two-Tenant Isolation & Contract Tes
           ),
         { tenantId: 'tenant-bravo', roles: ['fee_earner'], mfaVerified: false },
       );
-      expect(crossDl.status).toBe(403);
+      expect(crossDl.status).toBe(404);
 
       // Forged tenant claim (session claims tenant-bravo while active config is tenant-alpha)
       setActiveTenantConfigForTesting(alphaRaw, {});

@@ -240,7 +240,7 @@ describe('Evidence API routes fault & status handling (R808)', () => {
     );
     expect(unauthDownload.status).toBe(401);
 
-    // 403 forbidden (finance user P-000009 lacks cdd:record and cdd:view)
+    // 403 forbidden on upload (finance lacks cdd:record & matter:edit); opaque 404 NOT_FOUND on invalid download token (R844)
     const financeUpload = await runAsActionActor(
       'P-000009',
       async () => uploadRoute.POST(await buildMultipartUploadRequest(form)),
@@ -257,7 +257,12 @@ describe('Evidence API routes fault & status handling (R808)', () => {
         ),
       { roles: ['finance'], mfaVerified: false },
     );
-    expect(financeDownload.status).toBe(403);
+    expect(financeDownload.status).toBe(404);
+    expect(await financeDownload.json()).toEqual({
+      ok: false,
+      code: 'NOT_FOUND',
+      error: 'Evidence file not found or access denied.',
+    });
 
     // 404, 413, 415, 422 from upload service codes + 403/404 from download service codes
     for (const [code, expectedStatus] of [

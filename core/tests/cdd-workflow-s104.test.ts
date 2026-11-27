@@ -524,7 +524,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     expect(missingEmpUpRes.status).toBe(404);
     expect(await outsiderEmpUpRes.json()).toEqual(await missingEmpUpRes.json());
 
-    // Another user's token fails token-owner check with 403
+    // Another user's token returns opaque 404 matching missing artifact (R844)
     const outsiderEmpDlRes = await runAsActionActor(
       'P-000006',
       () =>
@@ -533,7 +533,12 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
         ),
       { roles: ['fee_earner'], mfaVerified: false },
     );
-    expect(outsiderEmpDlRes.status).toBe(403);
+    expect(outsiderEmpDlRes.status).toBe(404);
+    expect(await outsiderEmpDlRes.json()).toEqual({
+      ok: false,
+      code: 'NOT_FOUND',
+      error: 'Evidence file not found or access denied.',
+    });
 
     // R803: Token owned by P-000006 passes token-owner check and reaches R747 employee check -> 404 NOT_FOUND
     const storageForP6 = getDocumentStorage(getActiveTenantConfiguration());
@@ -694,28 +699,38 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     expect(okDlRes.headers.get('content-disposition')).toContain('passport-scan.pdf');
     expect(okDlRes.headers.get('x-content-type-options')).toBe('nosniff');
 
-    // 4. Token belonging to P-000010 rejected when presented by another actor (P-000002),
-    //    AND admin (P-000004 as admin only) or tampered token rejected
+    // 4. Token belonging to P-000010 rejected with opaque 404 (R844) when presented by another
+    //    actor (P-000002), admin (P-000004 as admin only), or with a tampered token
     const wrongActorDl = await runAsActionActor(
       'P-000002',
       () => downloadRoute!.GET(new Request(dlUrl, { method: 'GET' })),
       { roles: ['fee_earner'], mfaVerified: false },
     );
-    expect(wrongActorDl.status).toBe(403);
+    expect(wrongActorDl.status).toBe(404);
+    expect(await wrongActorDl.json()).toEqual({
+      ok: false,
+      code: 'NOT_FOUND',
+      error: 'Evidence file not found or access denied.',
+    });
 
     const adminDl = await runAsActionActor(
       'P-000004',
       () => downloadRoute!.GET(new Request(dlUrl, { method: 'GET' })),
       { roles: ['admin'], mfaVerified: true },
     );
-    expect(adminDl.status).toBe(403);
+    expect(adminDl.status).toBe(404);
 
     const tamperedRes = await runAsActionActor(
       'P-000010',
       () => downloadRoute!.GET(new Request(`${dlUrl}tampered`, { method: 'GET' })),
       { roles: ['legal_secretary'], mfaVerified: false },
     );
-    expect(tamperedRes.status).toBe(403);
+    expect(tamperedRes.status).toBe(404);
+    expect(await tamperedRes.json()).toEqual({
+      ok: false,
+      code: 'NOT_FOUND',
+      error: 'Evidence file not found or access denied.',
+    });
 
     // 5. R775 upload hardening:
     //    (a) Upload audit uses artifact.id (EVD-...), NOT blobKey / filename
@@ -1005,7 +1020,7 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
     expect(alphaUploadRes.status).toBe(200);
     const alphaUploadJson = (await alphaUploadRes.json()) as { downloadUrl?: string };
 
-    // Alpha download token presented in Bravo -> 403
+    // Alpha download token presented in Bravo returns opaque 404 (R844)
     setActiveTenantConfigForTesting(bravoRaw3, {});
     const crossTenantDlRes = await runAsActionActor(
       'P-000010',
@@ -1015,7 +1030,12 @@ describe('S1-04 (ADR 0039): Client Due Diligence (CDD) workflow, evidence securi
         ),
       { tenantId: 'tenant-bravo', roles: ['legal_secretary'], mfaVerified: false },
     );
-    expect(crossTenantDlRes.status).toBe(403);
+    expect(crossTenantDlRes.status).toBe(404);
+    expect(await crossTenantDlRes.json()).toEqual({
+      ok: false,
+      code: 'NOT_FOUND',
+      error: 'Evidence file not found or access denied.',
+    });
 
     // Upload with Alpha-only subjectId inside Bravo -> 404 (no cross-tenant write)
     const crossTenantUpRes = await runAsActionActor(

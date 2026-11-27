@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CORE_TENANT_MIGRATIONS,
   MAX_EMAIL_TOTAL_ATTACHMENT_BYTES,
@@ -3041,8 +3041,9 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     expect(chaseAfterDelete?.nextActionAt).toBeNull();
 
     // 4. Job backstop: a due active chase pointing to a non-existent matter records entity_missing (never 'withdrawn')
-    const orphanSentAt = new Date('2026-10-01T08:00:00.000Z').toISOString();
-    const orphanDueAt = new Date('2026-10-08T08:00:00.000Z').toISOString();
+    const sweepNow = new Date();
+    const orphanSentAt = addDays(sweepNow, -10).toISOString();
+    const orphanDueAt = addDays(sweepNow, -2).toISOString();
     const { chase: orphanChase } = await chasingRepo.withTenantTransaction(ctx, (tx) =>
       chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
         entityKind: 'engagement_letter',
@@ -3056,9 +3057,8 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       }),
     );
 
-    const sweepNow = new Date('2026-10-10T09:00:00.000Z');
     const sweepRes = await executeCommunicationChasesForTenant(ctx, {
-      triggerSource: 'scheduled',
+      triggerSource: 'manual',
       triggeredById: 'system:communication-chases',
       tenantConfig: chaseEnabledCfg,
       drainAfterCommit: false,
@@ -3071,4 +3071,304 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     expect(orphanAfterJob?.stoppedReason).toBe('entity_missing');
     expect(orphanAfterJob?.nextActionAt).toBeNull();
   }, 60_000);
+
+  it('12. R843 & R844: moa_receipt is refused until S1-08 and invalid/expired/cross-tenant/cross-user download tokens return opaque 404 matching missing artifacts', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const evidenceRepo = new TenantEvidenceArtifactRepository();
+
+    let matterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const m = await saveMatterRecord(
+          {
+            title: 'R843 R844 Evidence Security Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_employment_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'R843 R844'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(m.errors).toBeUndefined();
+        matterId = m.matter!.id;
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const buildUploadReq = async (purpose: string) => {
+      const form = new FormData();
+      form.set('subjectType', 'matter');
+      form.set('subjectId', matterId);
+      form.set('purpose', purpose);
+      form.set(
+        'file',
+        new File(
+          [new TextEncoder().encode('%PDF-1.4\n% Sample\n%%EOF\n')],
+          `${purpose}.pdf`,
+          { type: 'application/pdf' },
+        ),
+      );
+      const tmp = new Response(form);
+      const rawBytes = await tmp.arrayBuffer();
+      return new Request('http://localhost/api/evidence/upload', {
+        method: 'POST',
+        headers: {
+          'content-type': tmp.headers.get('content-type')!,
+          'content-length': String(rawBytes.byteLength),
+        },
+        body: rawBytes,
+      });
+    };
+
+    // R843: moa_receipt upload returns exact same refusal as any other disallowed purpose
+    const moaUploadReq = await buildUploadReq('moa_receipt');
+    const unknownUploadReq = await buildUploadReq('general');
+    const moaUploadRes = await runAsActionActor(
+      'P-000001',
+      () => evidenceUploadRoute.POST(moaUploadReq),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    const unknownUploadRes = await runAsActionActor(
+      'P-000001',
+      () => evidenceUploadRoute.POST(unknownUploadReq),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(moaUploadRes.status).toBe(400);
+    expect(unknownUploadRes.status).toBe(400);
+    const moaUploadJson = (await moaUploadRes.json()) as { ok: boolean; code: string };
+    const unknownUploadJson = (await unknownUploadRes.json()) as {
+      ok: boolean;
+      code: string;
+    };
+    expect(moaUploadJson.code).toBe('VALIDATION_ERROR');
+    expect(unknownUploadJson.code).toBe('VALIDATION_ERROR');
+    expect(
+      await evidenceRepo.listArtifactsForSubject(ctx, {
+        subjectType: 'matter',
+        subjectId: matterId,
+      }),
+    ).toHaveLength(0);
+
+    // Upload a real clean engagement_signed artifact and seed a stored moa_receipt artifact
+    const signedBytes = Buffer.from('%PDF-1.4\n% Valid signed copy\n%%EOF\n');
+    const validUpload = await runAsActionActor(
+      'P-000001',
+      () =>
+        uploadEvidenceArtifactRecord(
+          {
+            subjectType: 'matter',
+            subjectId: matterId,
+            purpose: 'engagement_signed',
+            fileName: 'signed-copy.pdf',
+            contentType: 'application/pdf',
+            bytes: signedBytes,
+          },
+          'P-000001',
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(validUpload.ok).toBe(true);
+    if (!validUpload.ok) return;
+
+    const activeCfg = getActiveTenantConfiguration();
+    const storage = getDocumentStorage(activeCfg);
+
+    const moaBlob = await storage.putObject(ctx, {
+      category: 'evidence',
+      objectId: `moa-r843-${matterId}`,
+      fileName: 'moa-receipt.pdf',
+      contentType: 'application/pdf',
+      bytes: signedBytes,
+    });
+    const moaArtifact = await evidenceRepo.createArtifact(ctx, {
+      blobKey: moaBlob.blobKey,
+      subjectType: 'matter',
+      subjectId: matterId,
+      purpose: 'moa_receipt',
+      fileName: 'moa-receipt.pdf',
+      contentType: 'application/pdf',
+      byteSize: signedBytes.byteLength,
+      sha256: validUpload.artifact.sha256,
+      scanStatus: 'clean',
+      uploadedByPersonId: 'P-000001',
+      uploadedAt: new Date().toISOString(),
+    });
+    const moaToken = await storage.issueScopedDownloadToken(ctx, {
+      blobKey: moaArtifact.blobKey,
+      fileName: moaArtifact.fileName,
+      documentId: moaArtifact.id,
+    });
+
+    // (a) Baseline missing-artifact download (valid signature, non-existent documentId)
+    const missingToken = await storage.issueScopedDownloadToken(ctx, {
+      blobKey: validUpload.artifact.blobKey,
+      fileName: 'missing.pdf',
+      documentId: 'EVD-MISSING-R844',
+    });
+    const missingRes = await runAsActionActor(
+      'P-000001',
+      () =>
+        evidenceDownloadRoute.GET(
+          new Request(
+            `http://localhost/api/evidence/download?token=${encodeURIComponent(missingToken.token)}`,
+            { method: 'GET' },
+          ),
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(missingRes.status).toBe(404);
+    const missingBody = await missingRes.json();
+    expect(missingBody).toEqual({
+      ok: false,
+      code: 'NOT_FOUND',
+      error: 'Evidence file not found or access denied.',
+    });
+
+    // R843: stored moa_receipt artifact returns identical 404 as missing artifact
+    const moaDownloadRes = await runAsActionActor(
+      'P-000001',
+      () =>
+        evidenceDownloadRoute.GET(
+          new Request(
+            `http://localhost/api/evidence/download?token=${encodeURIComponent(moaToken.token)}`,
+            { method: 'GET' },
+          ),
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(moaDownloadRes.status).toBe(404);
+    expect(await moaDownloadRes.json()).toEqual(missingBody);
+
+    // R844: invalid, expired, cross-tenant, and cross-user tokens return identical 404
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // (b) Tampered / invalid token
+      const invalidRes = await runAsActionActor(
+        'P-000001',
+        () =>
+          evidenceDownloadRoute.GET(
+            new Request(
+              `http://localhost/api/evidence/download?token=${encodeURIComponent(`${validUpload.downloadUrl.split('token=')[1]!}tamper`)}`,
+              { method: 'GET' },
+            ),
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(invalidRes.status).toBe(404);
+      expect(await invalidRes.json()).toEqual(missingBody);
+
+      // (c) Expired token
+      const realNow = Date.now();
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(realNow - 30_000);
+      let expiredTokenStr = '';
+      try {
+        const expTok = await storage.issueScopedDownloadToken(
+          ctx,
+          {
+            blobKey: validUpload.artifact.blobKey,
+            fileName: validUpload.artifact.fileName,
+            documentId: validUpload.artifact.id,
+          },
+          10,
+        );
+        expiredTokenStr = expTok.token;
+      } finally {
+        dateSpy.mockRestore();
+      }
+      const expiredRes = await runAsActionActor(
+        'P-000001',
+        () =>
+          evidenceDownloadRoute.GET(
+            new Request(
+              `http://localhost/api/evidence/download?token=${encodeURIComponent(expiredTokenStr)}`,
+              { method: 'GET' },
+            ),
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(expiredRes.status).toBe(404);
+      expect(await expiredRes.json()).toEqual(missingBody);
+
+      // (d) Other-tenant token
+      const otherCtx = resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'P-000001',
+          name: 'Bravo Partner',
+          email: 'partner@tenant-bravo.example',
+          tenantId: 'tenant-bravo',
+          roles: ['partner'],
+          mfaVerified: false,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'r844-other-tenant',
+      });
+      const otherBlob = await storage.putObject(otherCtx, {
+        category: 'evidence',
+        objectId: 'other-tenant-r844',
+        fileName: 'other-secret.pdf',
+        contentType: 'application/pdf',
+        bytes: signedBytes,
+      });
+      const otherTenantToken = await storage.issueScopedDownloadToken(otherCtx, {
+        blobKey: otherBlob.blobKey,
+        fileName: 'other-secret.pdf',
+      });
+      await storage.deleteObject(otherCtx, { blobKey: otherBlob.blobKey });
+      const otherTenantRes = await runAsActionActor(
+        'P-000001',
+        () =>
+          evidenceDownloadRoute.GET(
+            new Request(
+              `http://localhost/api/evidence/download?token=${encodeURIComponent(otherTenantToken.token)}`,
+              { method: 'GET' },
+            ),
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(otherTenantRes.status).toBe(404);
+      expect(await otherTenantRes.json()).toEqual(missingBody);
+
+      // (e) Other-user token (issued to P-000001, presented by P-000002)
+      const otherUserRes = await runAsActionActor(
+        'P-000002',
+        () =>
+          evidenceDownloadRoute.GET(
+            new Request(`http://localhost${validUpload.downloadUrl}`, {
+              method: 'GET',
+            }),
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(otherUserRes.status).toBe(404);
+      expect(await otherUserRes.json()).toEqual(missingBody);
+
+      // Verify IDs-only structured warning logs
+      const warnPayloads = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((s) => s.includes('evidence.download_denied'));
+      expect(warnPayloads).toHaveLength(4);
+      for (const raw of warnPayloads) {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        expect(parsed['tenantId']).toBe('not-a-law-firm');
+        expect(typeof parsed['correlationId']).toBe('string');
+        expect(typeof parsed['actorId']).toBe('string');
+        expect(typeof parsed['reason']).toBe('string');
+        expect(raw).not.toContain('signed-copy.pdf');
+        expect(raw).not.toContain('other-secret.pdf');
+        expect(raw).not.toContain(expiredTokenStr);
+        expect(raw).not.toContain(otherTenantToken.token);
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }, 45_000);
 });
