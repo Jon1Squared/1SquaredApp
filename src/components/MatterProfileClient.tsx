@@ -41,6 +41,7 @@ import {
   openProspectiveMatterAction,
   overrideMatterOpeningPreconditionAction,
   recordEngagementLetterSignedAction,
+  retryCommunicationChaseAction,
   revokeMatterOpeningOverrideAction,
   saveMatterAction,
   saveTaskAction,
@@ -496,7 +497,10 @@ export function MatterProfileClient({
     () =>
       engagementChases.find(
         (c) => c.chase.status === 'active' || c.chase.status === 'needs_owner',
-      ) ?? null,
+      ) ??
+      (engagementChases[0]?.chase.status === 'failed'
+        ? engagementChases[0]
+        : null),
     [engagementChases],
   );
   const canApproveReg = userPermissions.includes('register:approve');
@@ -2511,52 +2515,105 @@ export function MatterProfileClient({
                     <div style={{ fontWeight: 700, fontSize: 13 }}>
                       {activeEngagementChase.chase.status === 'needs_owner'
                         ? 'Follow-up needs an owner'
-                        : 'Automated follow-up active'}
+                        : activeEngagementChase.chase.status === 'failed'
+                          ? 'Follow-up stopped after repeated errors'
+                          : 'Automated follow-up active'}
                     </div>
                     <div className="muted" style={{ fontSize: 12.5 }}>
                       {activeEngagementChase.chase.status === 'needs_owner'
-                        ? 'No eligible team member could be assigned for follow-up. Reassign matter access or stop chasing.'
-                        : (
-                          <>
-                            Chasing {activeEngagementChase.chase.recipientEmail || 'client'} &middot;{' '}
-                            {activeEngagementChase.events.length} reminder step(s) completed &middot;{' '}
-                            {activeEngagementChase.chase.nextActionAt
-                              ? `Next action due ${formatDateTime(activeEngagementChase.chase.nextActionAt)}`
-                              : 'Final escalation stage'}
-                          </>
-                        )}
+                        ? 'Nobody who can see this matter can take the follow-up. Add a fee earner or partner to the matter, then choose Retry follow-up, or stop chasing.'
+                        : activeEngagementChase.chase.status === 'failed'
+                          ? 'Automated reminders stopped after repeated errors. Choose Retry follow-up to reset the error count and resume chasing, or send a fresh Client Care letter.'
+                          : (
+                            <>
+                              Chasing {activeEngagementChase.chase.recipientEmail || 'client'} &middot;{' '}
+                              {activeEngagementChase.events.length} reminder step(s) completed &middot;{' '}
+                              {activeEngagementChase.chase.nextActionAt
+                                ? `Next action due ${formatDateTime(activeEngagementChase.chase.nextActionAt)}`
+                                : 'Final escalation stage'}
+                            </>
+                          )}
                     </div>
                   </div>
                   {canEditMatter && !isMatterCurrentlyClosed ? (
-                    <button
-                      type="button"
-                      className="btn btn--secondary btn--sm"
-                      data-testid="stop-engagement-chase-btn"
-                      disabled={engagementBusy}
-                      onClick={async () => {
-                        setEngagementBusy(true);
-                        try {
-                          const res = await stopCommunicationChaseAction({
-                            chaseId: activeEngagementChase.chase.id,
-                          });
-                          if (isActionDenied(res) || !res.ok) {
-                            showToast(
-                              formatOpeningGateActionError(
-                                res,
-                                'Could not stop engagement chasing.',
-                              ),
-                            );
-                            return;
-                          }
-                          showToast('Automated engagement chasing stopped.');
-                          router.refresh();
-                        } finally {
-                          setEngagementBusy(false);
-                        }
-                      }}
-                    >
-                      Stop chasing
-                    </button>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      {activeEngagementChase.chase.status === 'needs_owner' ||
+                      activeEngagementChase.chase.status === 'failed' ? (
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          data-testid="retry-engagement-chase-btn"
+                          disabled={engagementBusy}
+                          onClick={async () => {
+                            setEngagementBusy(true);
+                            try {
+                              const res = await retryCommunicationChaseAction({
+                                chaseId: activeEngagementChase.chase.id,
+                              });
+                              if (isActionDenied(res) || !res.ok) {
+                                showToast(
+                                  formatOpeningGateActionError(
+                                    res,
+                                    'Could not retry engagement follow-up.',
+                                  ),
+                                );
+                                return;
+                              }
+                              if (res.outcome === 'escalated') {
+                                showToast('Follow-up escalation task created.');
+                              } else if (res.outcome === 'still_needs_owner') {
+                                showToast(
+                                  'Nobody who can access this matter can take the follow-up yet.',
+                                );
+                              } else if (res.outcome === 'reset_to_active') {
+                                showToast('Error count cleared. Automated follow-up resumed.');
+                              } else {
+                                showToast(
+                                  'Follow-up stopped because the matter no longer requires chasing.',
+                                );
+                              }
+                              router.refresh();
+                            } finally {
+                              setEngagementBusy(false);
+                            }
+                          }}
+                        >
+                          Retry follow-up
+                        </button>
+                      ) : null}
+                      {activeEngagementChase.chase.status === 'active' ||
+                      activeEngagementChase.chase.status === 'needs_owner' ? (
+                        <button
+                          type="button"
+                          className="btn btn--secondary btn--sm"
+                          data-testid="stop-engagement-chase-btn"
+                          disabled={engagementBusy}
+                          onClick={async () => {
+                            setEngagementBusy(true);
+                            try {
+                              const res = await stopCommunicationChaseAction({
+                                chaseId: activeEngagementChase.chase.id,
+                              });
+                              if (isActionDenied(res) || !res.ok) {
+                                showToast(
+                                  formatOpeningGateActionError(
+                                    res,
+                                    'Could not stop engagement chasing.',
+                                  ),
+                                );
+                                return;
+                              }
+                              showToast('Automated engagement chasing stopped.');
+                              router.refresh();
+                            } finally {
+                              setEngagementBusy(false);
+                            }
+                          }}
+                        >
+                          Stop chasing
+                        </button>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
               ) : null}

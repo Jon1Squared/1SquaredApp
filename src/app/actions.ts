@@ -180,6 +180,7 @@ import {
   previewIntakeDuplicatesAndConflictsRecord,
   recordCddChecklistItemRecord,
   recordManualSanctionsPepRecord,
+  retryCommunicationChaseRecord,
   saveCddConfigRecord,
   searchEntityPickerRecord,
   sendEngagementLetterRecord,
@@ -2318,6 +2319,22 @@ export async function stopCommunicationChaseAction(input: {
 }) {
   return guardedAction('stopCommunicationChaseAction', async (actor) => {
     const res = await stopCommunicationChaseRecord(
+      { chaseId: input.chaseId },
+      actor.personId,
+      {
+        tenantCtx: actor.tenantContext,
+      },
+    );
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function retryCommunicationChaseAction(input: {
+  chaseId: string;
+}) {
+  return guardedAction('retryCommunicationChaseAction', async (actor) => {
+    const res = await retryCommunicationChaseRecord(
       { chaseId: input.chaseId },
       actor.personId,
       {

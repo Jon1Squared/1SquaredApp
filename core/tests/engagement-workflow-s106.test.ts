@@ -33,6 +33,7 @@ import {
   listOutboxMessagesForAdminAction,
   openProspectiveMatterAction,
   recordEngagementLetterSignedAction,
+  retryCommunicationChaseAction,
   saveChasingConfigAction,
   saveEngagementConfigAction,
   sendEngagementLetterAction,
@@ -4177,6 +4178,475 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       await direct.query(`
         DROP TRIGGER IF EXISTS trg_test_fail_r847_task ON public.tasks;
         DROP FUNCTION IF EXISTS public.test_fail_r847_task_fn();
+      `);
+      await direct.end();
+      setTestActorSession(null);
+      setActiveTenantConfigForTesting(null);
+    }
+  }, 60_000);
+
+  it('15. R850: retryCommunicationChaseAction recovers needs_owner and failed chases, enforces R836 uniform NOT_FOUND, and rejects forged tenant claims', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const matterRepo = new TenantMatterRepository();
+    const chasingRepo = new TenantChasingRepository();
+    const taskRepo = new TenantTaskWorkflowRepository();
+    const auditRepo = new TenantAuditRepository();
+    const partyRepo = new TenantPartyRepository();
+    const hrRepo = new TenantHrAndRbacRepository();
+
+    const chaseCfgRaw: Record<string, unknown> = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'not-a-law-firm',
+      integrations: {
+        ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+          .integrations ?? {}),
+        email: { provider: 'disabled' },
+      },
+      chasing: {
+        engagementLetter: {
+          enabled: true,
+          sendEmails: true,
+          firstChaseDays: 7,
+          secondChaseDays: 14,
+          escalateTaskDays: 21,
+        },
+        quote: {
+          enabled: false,
+          sendEmails: false,
+          firstChaseDays: 7,
+          secondChaseDays: 14,
+          escalateTaskDays: 21,
+        },
+        moneyOnAccount: {
+          enabled: false,
+          sendEmails: false,
+          firstChaseDays: 7,
+          secondChaseDays: 14,
+          escalateTaskDays: 21,
+        },
+      },
+    };
+    const chaseCfg = loadAndValidateTenantConfig(
+      chaseCfgRaw,
+      { tenantId: 'not-a-law-firm', environment: 'test' },
+      'test',
+    );
+    const sendDisabledCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {
+        tenantId: 'not-a-law-firm',
+        integrations: chaseCfg.integrations,
+        chasing: {
+          ...chaseCfg.chasing!,
+          engagementLetter: {
+            ...chaseCfg.chasing!.engagementLetter,
+            sendEmails: false,
+          },
+        },
+      },
+      'test',
+    );
+    setActiveTenantConfigForTesting(chaseCfgRaw, {});
+
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      await direct.query(
+        `DELETE FROM public.job_runs WHERE tenant_id = $1 AND job_key = 'communication-chases'`,
+        [ctx.tenantId],
+      );
+
+      // Ensure employment team lead is P-000006 (not P-000005) so restricting access to P-000005 leaves zero eligible candidates
+      const allTeams = await hrRepo.listAllTeams<{
+        id: string;
+        name: string;
+        description: string;
+        memberIds: string[];
+        leadIds: string[];
+        practiceAreaIds: string[];
+        active: boolean;
+        createdById: string;
+        createdAt: string;
+        updatedById: string;
+        updatedAt: string;
+      }>(ctx);
+      const empTeam =
+        allTeams.find(
+          (t) => t.active && t.practiceAreaIds.includes('work_type.employment_and_hr'),
+        ) ?? allTeams[0]!;
+      await hrRepo.putTeam(ctx, {
+        ...empTeam,
+        memberIds: Array.from(new Set([...empTeam.memberIds, 'P-000001', 'P-000002', 'P-000006'])),
+        leadIds: ['P-000006'],
+        practiceAreaIds: Array.from(
+          new Set([...empTeam.practiceAreaIds, 'work_type.employment_and_hr']),
+        ),
+      });
+
+      // (a) needs_owner recovery: restricted matter where initially only P-000005 (not lead/partner/team lead) has access.
+      // Save failMatterId alongside ownerMatterId before placing hasEthicalWall on ownerMatterId so conflict search sees no hidden record.
+      let ownerMatterId = '';
+      let failMatterId = '';
+      let failMatterRef = '';
+      await runAsActionActor(
+        'P-000001',
+        async () => {
+          const mRes = await saveMatterRecord(
+            {
+              title: 'R850 Needs Owner Secret Matter',
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.employment_and_hr',
+              workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+              responsiblePartnerId: 'P-000002',
+              supervisingPartnerId: 'P-000002',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: makeConflictRecord('P-000001', 'R850 Owner Client'),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          );
+          expect(mRes.errors).toBeUndefined();
+          ownerMatterId = mRes.matter!.id;
+
+          const fRes = await saveMatterRecord(
+            {
+              title: 'R850 Failed Chase Recovery Matter',
+              clientId: 'O-000001',
+              practiceAreaId: 'work_type.employment_and_hr',
+              workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+              responsiblePartnerId: 'P-000001',
+              supervisingPartnerId: 'P-000001',
+              leadFeeEarnerId: 'P-000002',
+              teamMemberIds: ['P-000001', 'P-000002'],
+              conflictCheckRecord: makeConflictRecord('P-000001', 'R850 Failed Client'),
+              riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+            },
+            { byId: 'P-000001', saveMode: 'submit_cleared' },
+          );
+          expect(fRes.errors).toBeUndefined();
+          failMatterId = fRes.matter!.id;
+          failMatterRef = fRes.matter!.matterNumber || fRes.matter!.id;
+        },
+        { roles: ['partner'], mfaVerified: false },
+      );
+
+      const ownerSend = await runAsActionActor(
+        'P-000001',
+        () =>
+          sendEngagementLetterRecord(
+            { matterId: ownerMatterId, recipientEmail: 'r850-owner@example.test' },
+            'P-000001',
+            { tenantConfig: chaseCfg, drainAfterCommit: false },
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(ownerSend.ok).toBe(true);
+      if (!ownerSend.ok || !ownerSend.chase) throw new Error('Expected owner chase');
+      const ownerChaseId = ownerSend.chase.id;
+
+      const ownerMatterLoaded = (await matterRepo.getMatterById<Matter>(ctx, ownerMatterId, {
+        includeRestricted: true,
+      }))!;
+      await matterRepo.withTenantTransaction(ctx, async () => {
+        await matterRepo.putMatter(
+          ctx,
+          { ...ownerMatterLoaded, hasEthicalWall: true, restrictedAccessUserIds: ['P-000005'] },
+          { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000005'] },
+        );
+      });
+
+      const ownerBase = new Date(ownerSend.chase.sentAt);
+      for (const offset of [7, 14, 21]) {
+        await executeCommunicationChasesForTenant(ctx, {
+          triggerSource: 'manual',
+          triggeredById: 'system:communication-chases',
+          tenantConfig: chaseCfg,
+          drainAfterCommit: false,
+          now: addDays(ownerBase, offset),
+        });
+      }
+      expect((await chasingRepo.getChaseById(ctx, ownerChaseId))?.status).toBe('needs_owner');
+
+      // Retry with P-000005 (permitted on wall & holds matter:edit, not in candidate chain): stays needs_owner
+      const stillUnassignedRes = await runAsActionActor(
+        'P-000005',
+        () => retryCommunicationChaseAction({ chaseId: ownerChaseId }),
+        { roles: ['partner', 'fee_earner'], mfaVerified: false },
+      );
+      expect(stillUnassignedRes.ok).toBe(true);
+      if (!stillUnassignedRes.ok) return;
+      expect(stillUnassignedRes.outcome).toBe('still_needs_owner');
+      expect(stillUnassignedRes.chase.status).toBe('needs_owner');
+      const zeroTasks = await taskRepo.listTasksLinkedToRecord<Task>(ctx, 'matter', ownerMatterId);
+      expect(zeroTasks.filter((t) => t.autoTrigger === 'communication_chase_escalation')).toHaveLength(
+        0,
+      );
+
+      const ownerAuditsMid = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'communication_chase',
+        ownerChaseId,
+        { limit: 100 },
+      );
+      const retryUnassigned = ownerAuditsMid.filter(
+        (a) => a.action === 'communication_chase.retry_unassigned',
+      );
+      expect(retryUnassigned).toHaveLength(1);
+      expect(retryUnassigned[0]?.newValue).toContain('outcome=still_needs_owner');
+      expect(retryUnassigned[0]?.newValue).not.toContain('R850 Needs Owner Secret Matter');
+      expect(retryUnassigned[0]?.newValue).not.toContain('r850-owner@example.test');
+
+      // Now verify R836 uniform NOT_FOUND for:
+      // 1) outsider holding matter:edit who is NOT in restrictedAccessUserIds (e.g. P-000002 before being added)
+      // 2) quote:edit-only user (enquiries_coordinator) without matter:edit
+      // against missing chaseId CHS-MISSING-R850, and forged tenant claim rejects with TENANCY_FORGERY_DETECTED.
+      const outsiderRes = await runAsActionActor(
+        'P-000002',
+        () => retryCommunicationChaseAction({ chaseId: ownerChaseId }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      const missingRes = await runAsActionActor(
+        'P-000002',
+        () => retryCommunicationChaseAction({ chaseId: 'CHS-MISSING-R850' }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(outsiderRes).toEqual(missingRes);
+      expect(outsiderRes).toMatchObject({
+        ok: false,
+        code: 'NOT_FOUND',
+        message: 'Communication chase was not found.',
+      });
+
+      const people = await partyRepo.listAllPeople<Person>(ctx, { employeesAndLeaversOnly: true });
+      const quoteOnlyUser = people.find(
+        (p: Person) =>
+          p.isEmployee &&
+          p.roles?.includes('enquiries_coordinator') &&
+          !p.roles?.includes('fee_earner') &&
+          !p.roles?.includes('partner') &&
+          !p.roles?.includes('legal_secretary'),
+      );
+      expect(quoteOnlyUser).toBeDefined();
+      if (quoteOnlyUser) {
+        const quoteRealRefusal = await runAsActionActor(
+          quoteOnlyUser.id,
+          () => retryCommunicationChaseAction({ chaseId: ownerChaseId }),
+          { roles: ['enquiries_coordinator'], mfaVerified: false },
+        );
+        const quoteFakeRefusal = await runAsActionActor(
+          quoteOnlyUser.id,
+          () => retryCommunicationChaseAction({ chaseId: 'CHS-MISSING-R850' }),
+          { roles: ['enquiries_coordinator'], mfaVerified: false },
+        );
+        expect(quoteRealRefusal).toEqual(quoteFakeRefusal);
+        expect(quoteRealRefusal).toMatchObject({
+          ok: false,
+          code: 'NOT_FOUND',
+          message: 'Communication chase was not found.',
+        });
+      }
+
+      await expect(
+        runAsActionActor(
+          'P-000005',
+          () => retryCommunicationChaseAction({ chaseId: ownerChaseId }),
+          { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      expect((await chasingRepo.getChaseById(ctx, ownerChaseId))?.status).toBe('needs_owner');
+
+      // Add eligible lead fee earner P-000002 to restrictedAccessUserIds and retry -> escalation task created & chase completed
+      const currentOwnerMatter = (await matterRepo.getMatterById<Matter>(ctx, ownerMatterId, {
+        includeRestricted: true,
+      }))!;
+      await matterRepo.withTenantTransaction(ctx, async () => {
+        await matterRepo.putMatter(
+          ctx,
+          {
+            ...currentOwnerMatter,
+            hasEthicalWall: true,
+            restrictedAccessUserIds: ['P-000005', 'P-000002'],
+          },
+          { expectedRowVersion: null, sqlRestrictedAccessUserIds: ['P-000005', 'P-000002'] },
+        );
+      });
+
+      const resolvedRes = await runAsActionActor(
+        'P-000002',
+        () => retryCommunicationChaseAction({ chaseId: ownerChaseId }),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(resolvedRes.ok).toBe(true);
+      if (!resolvedRes.ok) return;
+      expect(resolvedRes.outcome).toBe('escalated');
+      expect(resolvedRes.chase.status).toBe('completed');
+      expect(resolvedRes.chase.nextActionAt).toBeNull();
+      expect(resolvedRes.taskId).toBeTruthy();
+
+      const ownerTasksAfter = await taskRepo.listTasksLinkedToRecord<Task>(
+        ctx,
+        'matter',
+        ownerMatterId,
+      );
+      const escTask = ownerTasksAfter.find((t) => t.id === resolvedRes.taskId);
+      expect(escTask).toBeDefined();
+      expect(escTask?.assignedPersonId).toBe('P-000002');
+      expect(escTask?.autoTrigger).toBe('communication_chase_escalation');
+
+      const ownerEvents = await chasingRepo.listChasesForMatter(ctx, ownerMatterId);
+      const resolvedEvent = ownerEvents[0]?.events.find((e) => e.stepIndex === 3);
+      expect(resolvedEvent?.outcome).toBe('executed');
+      expect(resolvedEvent?.taskId).toBe(resolvedRes.taskId);
+
+      const ownerAuditsFinal = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'communication_chase',
+        ownerChaseId,
+        { limit: 100 },
+      );
+      const retryResolved = ownerAuditsFinal.filter(
+        (a) => a.action === 'communication_chase.retry_resolved',
+      );
+      expect(retryResolved).toHaveLength(1);
+      expect(retryResolved[0]?.oldValue).toBe('needs_owner');
+      expect(retryResolved[0]?.newValue).toContain(`task=${resolvedRes.taskId}`);
+
+      // (b) failed chase recovery: push a second chase to 'failed' via trigger, drop trigger, retry resets to active, next sweep completes
+      const failSend = await runAsActionActor(
+        'P-000001',
+        () =>
+          sendEngagementLetterRecord(
+            { matterId: failMatterId, recipientEmail: 'r850-failed@example.test' },
+            'P-000001',
+            { tenantConfig: chaseCfg, drainAfterCommit: false },
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(failSend.ok).toBe(true);
+      if (!failSend.ok || !failSend.chase) throw new Error('Expected failed-path chase');
+      const failChaseId = failSend.chase.id;
+
+      // Advance steps 1 & 2 cleanly while emails are disabled
+      const failBase = new Date(failSend.chase.sentAt);
+      for (const offset of [8, 15]) {
+        await executeCommunicationChasesForTenant(ctx, {
+          triggerSource: 'manual',
+          triggeredById: 'system:communication-chases',
+          tenantConfig: sendDisabledCfg,
+          drainAfterCommit: false,
+          now: addDays(failBase, offset),
+        });
+      }
+      expect((await chasingRepo.getChaseById(ctx, failChaseId))?.nextStepIndex).toBe(3);
+
+      // Force step 3 task insert failure across 3 local days so chase enters 'failed' with a step_failed event
+      await direct.query(`
+        CREATE OR REPLACE FUNCTION public.test_fail_r850_task_fn()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF NEW.auto_trigger = 'communication_chase_escalation'
+             AND position('${failMatterRef}' in NEW.title) > 0 THEN
+            RAISE EXCEPTION 'R850_SIMULATED_TASK_INSERT_FAILURE';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS trg_test_fail_r850_task ON public.tasks;
+        CREATE TRIGGER trg_test_fail_r850_task
+          BEFORE INSERT ON public.tasks
+          FOR EACH ROW EXECUTE FUNCTION public.test_fail_r850_task_fn();
+      `);
+
+      const strike1At = addDays(failBase, 22);
+      strike1At.setUTCHours(9, 0, 0, 0);
+      const strike2At = new Date(
+        new Date(computeNextLocalDayRunTimeIso(strike1At, chaseCfg.timeZone, 8)).getTime() + 300_000,
+      );
+      const strike3At = new Date(
+        new Date(computeNextLocalDayRunTimeIso(strike2At, chaseCfg.timeZone, 8)).getTime() + 300_000,
+      );
+      for (const runAt of [strike1At, strike2At, strike3At]) {
+        await executeCommunicationChasesForTenant(ctx, {
+          triggerSource: 'scheduled',
+          triggeredById: 'system:communication-chases',
+          tenantConfig: chaseCfg,
+          drainAfterCommit: false,
+          now: runAt,
+        });
+      }
+
+      const failedState = await chasingRepo.getChaseById(ctx, failChaseId);
+      expect(failedState?.status).toBe('failed');
+      expect(failedState?.consecutiveFailureCount).toBe(3);
+      expect(failedState?.nextActionAt).toBeNull();
+      const beforeResetEvents = await chasingRepo.listChasesForMatter(ctx, failMatterId);
+      expect(
+        beforeResetEvents[0]?.events.some((e) => e.stepIndex === 3 && e.outcome === 'step_failed'),
+      ).toBe(true);
+
+      await direct.query(`
+        DROP TRIGGER IF EXISTS trg_test_fail_r850_task ON public.tasks;
+        DROP FUNCTION IF EXISTS public.test_fail_r850_task_fn();
+      `);
+
+      // Forged tenant rejection leaves failed chase untouched
+      await expect(
+        runAsActionActor(
+          'P-000001',
+          () => retryCommunicationChaseAction({ chaseId: failChaseId }),
+          { tenantId: 'tenant-bravo', roles: ['partner'], mfaVerified: true },
+        ),
+      ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+
+      const resetRes = await runAsActionActor(
+        'P-000001',
+        () => retryCommunicationChaseAction({ chaseId: failChaseId }),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(resetRes.ok).toBe(true);
+      if (!resetRes.ok) return;
+      expect(resetRes.outcome).toBe('reset_to_active');
+      expect(resetRes.chase.status).toBe('active');
+      expect(resetRes.chase.consecutiveFailureCount).toBe(0);
+      expect(resetRes.chase.lastErrorCode).toBeNull();
+      expect(resetRes.chase.nextActionAt).toBeTruthy();
+
+      const afterResetEvents = await chasingRepo.listChasesForMatter(ctx, failMatterId);
+      expect(
+        afterResetEvents[0]?.events.some((e) => e.stepIndex === 3 && e.outcome === 'step_failed'),
+      ).toBe(false);
+
+      const failAudits = await auditRepo.listAuditEntriesForRecord(
+        ctx,
+        'communication_chase',
+        failChaseId,
+        { limit: 100 },
+      );
+      const resetAudits = failAudits.filter((a) => a.action === 'communication_chase.retry_reset');
+      expect(resetAudits).toHaveLength(1);
+      expect(resetAudits[0]?.oldValue).toBe('failed');
+      expect(resetAudits[0]?.newValue).toBe('active (failures=0)');
+
+      // Next sweep executes step 3 cleanly and creates the escalation task
+      const sweepAfterReset = await executeCommunicationChasesForTenant(ctx, {
+        triggerSource: 'manual',
+        triggeredById: 'system:communication-chases',
+        tenantConfig: chaseCfg,
+        drainAfterCommit: false,
+        now: new Date(Date.now() + 60_000),
+      });
+      expect(sweepAfterReset.outcome).toBe('executed');
+      if (sweepAfterReset.outcome === 'executed') {
+        expect(sweepAfterReset.result.summary.tasksCreatedCount).toBe(1);
+      }
+      expect((await chasingRepo.getChaseById(ctx, failChaseId))?.status).toBe('completed');
+    } finally {
+      await direct.query(`
+        DROP TRIGGER IF EXISTS trg_test_fail_r850_task ON public.tasks;
+        DROP FUNCTION IF EXISTS public.test_fail_r850_task_fn();
       `);
       await direct.end();
       setTestActorSession(null);

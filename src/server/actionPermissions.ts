@@ -855,6 +855,11 @@ export const ACTION_PERMISSIONS = {
     key: { anyOf: ['matter:edit', 'quote:edit'] },
     enforcedBy: 'service',
   },
+  retryCommunicationChaseAction: {
+    kind: 'permission',
+    key: { anyOf: ['matter:edit', 'quote:edit'] },
+    enforcedBy: 'service',
+  },
   sendNonEngagementLetterAction: {
     kind: 'permission',
     key: { anyOf: ['enquiry:edit', 'enquiry:close', 'matter:edit'] },

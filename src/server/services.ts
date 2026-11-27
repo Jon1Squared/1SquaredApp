@@ -38878,6 +38878,55 @@ export async function sendEngagementLetterRecord(
   }
 }
 
+async function authorizeCommunicationChaseSubjectAccess(params: {
+  readonly ctx: TenantContext;
+  readonly actor: Person;
+  readonly people: readonly Person[];
+  readonly teams: readonly Team[];
+  readonly rbacConfig: RbacConfiguration;
+  readonly permSet: ResolvedPermissionSet;
+  readonly chase: CommunicationChaseRecord;
+}): Promise<boolean> {
+  const { ctx, actor, people, teams, rbacConfig, permSet, chase } = params;
+  if (
+    chase.entityKind === 'engagement_letter' ||
+    chase.entityKind === 'money_on_account'
+  ) {
+    if (!permSet.permissions.has('matter:edit')) {
+      return false;
+    }
+    const matter = await getMatterRepository().getMatterById<Matter>(
+      ctx,
+      chase.matterId ?? chase.entityId,
+      { includeRestricted: true },
+    );
+    return Boolean(
+      matter &&
+        canPersonAccessMatter(matter, actor.id, actor, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        }),
+    );
+  }
+  if (chase.entityKind === 'quote') {
+    if (!permSet.permissions.has('quote:edit')) {
+      return false;
+    }
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const quoteHidden = await getIntakeQuoteRepository().isQuoteHiddenFromViewer(
+      ctx,
+      chase.quoteId ?? chase.entityId,
+      actor.id,
+      { hasRestrictedMatterAccess },
+    );
+    return !quoteHidden;
+  }
+  return false;
+}
+
 export async function stopCommunicationChaseRecord(
   input: {
     chaseId: string;
@@ -38917,45 +38966,16 @@ export async function stopCommunicationChaseRecord(
 
     // R836: Subject access and kind-specific permission checks both collapse to identical
     // opaque NOT_FOUND so chase existence or entityKind is never revealed to unauthorised callers.
-    if (
-      chasePre.entityKind === 'engagement_letter' ||
-      chasePre.entityKind === 'money_on_account'
-    ) {
-      if (!permSet.permissions.has('matter:edit')) {
-        return opaqueNotFound();
-      }
-      const matter = await getMatterRepository().getMatterById<Matter>(
-        ctx,
-        chasePre.matterId ?? chasePre.entityId,
-        { includeRestricted: true },
-      );
-      if (
-        !matter ||
-        !canPersonAccessMatter(matter, actor.id, actor, {
-          allPeople: people,
-          teams,
-          config: { rbac: rbacConfig },
-        })
-      ) {
-        return opaqueNotFound();
-      }
-    } else if (chasePre.entityKind === 'quote') {
-      if (!permSet.permissions.has('quote:edit')) {
-        return opaqueNotFound();
-      }
-      const hasRestrictedMatterAccess = permSet.permissions.has(
-        'matter:restricted:access',
-      );
-      const quoteHidden = await getIntakeQuoteRepository().isQuoteHiddenFromViewer(
-        ctx,
-        chasePre.quoteId ?? chasePre.entityId,
-        actor.id,
-        { hasRestrictedMatterAccess },
-      );
-      if (quoteHidden) {
-        return opaqueNotFound();
-      }
-    } else {
+    const authorised = await authorizeCommunicationChaseSubjectAccess({
+      ctx,
+      actor,
+      people,
+      teams,
+      rbacConfig,
+      permSet,
+      chase: chasePre,
+    });
+    if (!authorised) {
       return opaqueNotFound();
     }
 
@@ -39002,6 +39022,254 @@ export async function stopCommunicationChaseRecord(
       return opaqueNotFound();
     }
     return { ok: true, chase: stopped };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function retryCommunicationChaseRecord(
+  input: {
+    chaseId: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<
+  | {
+      ok: true;
+      outcome: 'escalated' | 'still_needs_owner' | 'reset_to_active' | 'stopped';
+      chase: CommunicationChaseRecord;
+      taskId?: string;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, teams, rbacConfig, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (
+      !permSet.permissions.has('matter:edit') &&
+      !permSet.permissions.has('quote:edit')
+    ) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to retry communication chasing.',
+      );
+    }
+
+    const cleanChaseId = input.chaseId?.trim() || '';
+    if (!cleanChaseId) {
+      return registerServiceFailure('VALIDATION_ERROR', 'Chase ID is required.');
+    }
+
+    const opaqueNotFound = () =>
+      registerServiceFailure('NOT_FOUND', 'Communication chase was not found.');
+
+    const chasingRepo = getChasingRepository();
+    const chasePre = await chasingRepo.getChaseById(ctx, cleanChaseId);
+    if (!chasePre) {
+      return opaqueNotFound();
+    }
+
+    const authorised = await authorizeCommunicationChaseSubjectAccess({
+      ctx,
+      actor,
+      people,
+      teams,
+      rbacConfig,
+      permSet,
+      chase: chasePre,
+    });
+    if (!authorised) {
+      return opaqueNotFound();
+    }
+
+    const [store, effectiveChasing] = await Promise.all([
+      loadTenantCatalogueStoreView(ctx, { includePmsLinks: false }),
+      resolveEffectiveChasingConfig(ctx, tenantCfg),
+    ]);
+    const nowIso = new Date().toISOString();
+
+    return await chasingRepo.withTenantTransaction(ctx, async (tx) => {
+      const lockRes = await tx.query<{ status: string }>(
+        `SELECT status
+           FROM public.communication_chases
+          WHERE tenant_id = $1 AND id = $2
+          LIMIT 1
+          FOR UPDATE`,
+        [ctx.tenantId, cleanChaseId],
+      );
+      const lockedStatus = lockRes.rows[0]?.status;
+      if (!lockedStatus) {
+        return opaqueNotFound();
+      }
+      const lockedChase = await chasingRepo.getChaseById(ctx, cleanChaseId);
+      if (!lockedChase) {
+        return opaqueNotFound();
+      }
+
+      const adapter = COMMUNICATION_CHASE_ADAPTERS.get(lockedChase.entityKind);
+      if (!adapter) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'No handler is configured for this follow-up type.',
+        );
+      }
+
+      if (lockedStatus !== 'needs_owner' && lockedStatus !== 'failed') {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          'Only paused or unassigned follow-ups can be retried.',
+        );
+      }
+
+      const stopCheck = await adapter.checkStop({
+        tx,
+        ctx,
+        chase: lockedChase,
+        store,
+        nowIso,
+      });
+      if (stopCheck.stop) {
+        await tx.query(
+          `UPDATE public.communication_chases
+              SET status = 'stopped',
+                  stopped_reason = $3,
+                  stopped_at = $4::timestamptz,
+                  stopped_by_person_id = $5,
+                  next_action_at = NULL,
+                  updated_at = $4::timestamptz
+            WHERE tenant_id = $1 AND id = $2`,
+          [ctx.tenantId, lockedChase.id, stopCheck.reason, nowIso, actor.id],
+        );
+        const stoppedChase = await chasingRepo.getChaseById(ctx, lockedChase.id);
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: lockedChase.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: lockedStatus,
+            newValue: `stopped (${stopCheck.reason})`,
+            byId: actor.id,
+            at: nowIso,
+          },
+        ]);
+        return {
+          ok: true as const,
+          outcome: 'stopped' as const,
+          chase: stoppedChase ?? lockedChase,
+        };
+      }
+
+      if (lockedStatus === 'needs_owner') {
+        const escalationSpec = await adapter.escalationCandidates({
+          tx,
+          ctx,
+          chase: lockedChase,
+          rule: effectiveChasing[adapter.ruleKey],
+          subject: stopCheck.subject,
+          people,
+          teams,
+          rbacConfig,
+          nowIso,
+        });
+        const assignee = resolveEligibleChaseEscalationAssignee({
+          orderedPersonIds: escalationSpec.orderedPersonIds,
+          canPersonAccessSubject: escalationSpec.canPersonAccessSubject,
+          people,
+        });
+        if (!assignee) {
+          await appendTenantAuditEntries(ctx, [
+            {
+              recordType: 'communication_chase',
+              recordId: lockedChase.id,
+              action: 'communication_chase.retry_unassigned',
+              field: 'Follow-up retry unassigned',
+              oldValue: 'needs_owner',
+              newValue: `tenant=${ctx.tenantId} chaseId=${lockedChase.id} outcome=still_needs_owner`,
+              byId: actor.id,
+              at: nowIso,
+            },
+          ]);
+          return {
+            ok: true as const,
+            outcome: 'still_needs_owner' as const,
+            chase: lockedChase,
+          };
+        }
+
+        const taskRes = await createIdempotentChaseEscalationTaskInTx({
+          ctx,
+          chase: lockedChase,
+          assignee,
+          escalationSpec,
+          escalationKey: `chase:${lockedChase.id}:step:3`,
+          title: escalationSpec.taskTitle,
+          description: escalationSpec.taskDescription,
+          notificationDetail: escalationSpec.notificationDetail,
+          auditField: escalationSpec.auditField,
+          store,
+          tenantConfig: tenantCfg,
+          actorId: actor.id,
+          nowIso,
+        });
+        const resolved = await chasingRepo.resolveNeedsOwnerChaseInTx(tx, ctx, {
+          chaseId: lockedChase.id,
+          taskId: taskRes.taskId,
+          executedAt: nowIso,
+        });
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: lockedChase.id,
+            action: 'communication_chase.retry_resolved',
+            field: 'Follow-up retry resolved',
+            oldValue: 'needs_owner',
+            newValue: `completed (task=${taskRes.taskId})`,
+            byId: actor.id,
+            at: nowIso,
+          },
+        ]);
+        return {
+          ok: true as const,
+          outcome: 'escalated' as const,
+          chase: resolved ?? lockedChase,
+          taskId: taskRes.taskId,
+        };
+      }
+
+      const resetRes = await chasingRepo.resetFailedChaseForRetryInTx(tx, ctx, {
+        chaseId: lockedChase.id,
+        nowIso,
+      });
+      if (!resetRes.ok) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          resetRes.reason === 'superseded_by_active'
+            ? 'A newer follow-up schedule is already active for this item.'
+            : 'Follow-up could not be reset.',
+        );
+      }
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'communication_chase',
+          recordId: lockedChase.id,
+          action: 'communication_chase.retry_reset',
+          field: 'Follow-up retry reset',
+          oldValue: 'failed',
+          newValue: 'active (failures=0)',
+          byId: actor.id,
+          at: nowIso,
+        },
+      ]);
+      return {
+        ok: true as const,
+        outcome: 'reset_to_active' as const,
+        chase: resetRes.chase,
+      };
+    });
   } catch (err) {
     return mapRegisterErrorToDenial(err);
   }
