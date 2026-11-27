@@ -2,6 +2,12 @@
 
 All notable changes to `@platform/core` and `@platform/core-api` are documented in this file.
 
+## 2026-11-27 — Extension API v2.5.0 (`S1-07` Quote Price Transparency Configuration)
+
+### Added (Backward Compatible within `^2.0.0`)
+- **`CORE_API_VERSION` bumped from `'2.4.0'` to `'2.5.0'` (`@platform/core-api`, `core/src/api/index.ts`):**
+  - Added `WorkTypePriceTransparencyConfig` (`enabled`, `headlineSummary`, `serviceDescription`, `keyStages`, `typicalTimescales`, `disbursementsGuidance`, `exclusionsAndVatNote`) and optional `priceTransparency` fields on `WorkTypeDefaultsConfig` and `WorkTypeConfigItem` (safe core defaults: `enabled: false`, empty strings `""`).
+
 ## 2026-11-26 — Extension API v2.4.0 (`S1-06` Engagement Letters, Non-Engagement Dispatch, Evidence Purposes & Generic Communication Chasing, ADR 0042)
 
 ### Added (Backward Compatible within `^2.0.0`)

@@ -376,6 +376,98 @@ const DEFAULT_WORK_TYPE_RETENTION = {
   statutoryNote: 'Firm standard limitation and file retention policy',
 };
 
+const DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY = {
+  enabled: false,
+  headlineSummary: '',
+  serviceDescription: '',
+  keyStages: '',
+  typicalTimescales: '',
+  disbursementsGuidance: '',
+  exclusionsAndVatNote: '',
+};
+
+const WorkTypePriceTransparencySchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.enabled)
+      .describe(
+        'Whether Price Transparency guidance is included on quotes by default',
+      ),
+    headlineSummary: z
+      .string()
+      .max(2000)
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.headlineSummary)
+      .describe('Headline fee and pricing basis overview'),
+    serviceDescription: z
+      .string()
+      .max(4000)
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.serviceDescription)
+      .describe('Description of legal work and supervision included'),
+    keyStages: z
+      .string()
+      .max(4000)
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.keyStages)
+      .describe('Key stages of the matter'),
+    typicalTimescales: z
+      .string()
+      .max(2000)
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.typicalTimescales)
+      .describe('Indicative matter timescales'),
+    disbursementsGuidance: z
+      .string()
+      .max(4000)
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.disbursementsGuidance)
+      .describe('Likely third-party disbursements and VAT treatment'),
+    exclusionsAndVatNote: z
+      .string()
+      .max(2000)
+      .default(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.exclusionsAndVatNote)
+      .describe('Exclusions, scope-change assumptions, and VAT rate notice'),
+  })
+  .strict();
+
+const WorkTypePriceTransparencyOverrideSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .optional()
+      .describe(
+        'Optional override controlling whether Price Transparency guidance is shown on quotes for this work type',
+      ),
+    headlineSummary: z
+      .string()
+      .max(2000)
+      .optional()
+      .describe('Optional override for headline fee and pricing basis overview'),
+    serviceDescription: z
+      .string()
+      .max(4000)
+      .optional()
+      .describe('Optional override for description of legal work and supervision'),
+    keyStages: z
+      .string()
+      .max(4000)
+      .optional()
+      .describe('Optional override for key stages of the matter'),
+    typicalTimescales: z
+      .string()
+      .max(2000)
+      .optional()
+      .describe('Optional override for indicative matter timescales'),
+    disbursementsGuidance: z
+      .string()
+      .max(4000)
+      .optional()
+      .describe('Optional override for likely third-party disbursements'),
+    exclusionsAndVatNote: z
+      .string()
+      .max(2000)
+      .optional()
+      .describe('Optional override for exclusions and VAT rate notice'),
+  })
+  .strict();
+
 const WorkTypeOpeningGateSchema = z
   .object({
     allowConflictOverride: z
@@ -468,6 +560,9 @@ const WorkTypeDefaultsSchema = z
     openingGate: WorkTypeOpeningGateSchema.optional().describe(
       'Firm-wide fallback pre-conditions evaluated transactionally before opening a prospective matter (ADR 0040, S1-05)',
     ),
+    priceTransparency: WorkTypePriceTransparencySchema.optional().describe(
+      'Firm-wide fallback SRA-style Price Transparency guidance shown on quotes and quote PDFs (S1-07)',
+    ),
   })
   .strict();
 
@@ -501,6 +596,9 @@ const WorkTypeConfigItemSchema = z
     ),
     openingGate: WorkTypeOpeningGateOverrideSchema.optional().describe(
       'Optional per-work-type or practice-area opening gate pre-conditions overriding firm defaults (ADR 0040, S1-05)',
+    ),
+    priceTransparency: WorkTypePriceTransparencyOverrideSchema.optional().describe(
+      'Optional per-work-type or practice-area Price Transparency guidance overriding firm defaults per setting (S1-07)',
     ),
     feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesSchema.optional().describe(
       'Explicit mapping from CFA and DBA fee bases to statutory cap categories for this work type',
@@ -4305,6 +4403,18 @@ export function loadAndValidateTenantConfig(
       !Array.isArray(overlayDefaults.openingGate)
         ? (overlayDefaults.openingGate as Record<string, unknown>)
         : undefined;
+    const basePriceTransparency =
+      baseDefaults?.priceTransparency &&
+      typeof baseDefaults.priceTransparency === 'object' &&
+      !Array.isArray(baseDefaults.priceTransparency)
+        ? (baseDefaults.priceTransparency as Record<string, unknown>)
+        : undefined;
+    const overlayPriceTransparency =
+      overlayDefaults?.priceTransparency &&
+      typeof overlayDefaults.priceTransparency === 'object' &&
+      !Array.isArray(overlayDefaults.priceTransparency)
+        ? (overlayDefaults.priceTransparency as Record<string, unknown>)
+        : undefined;
 
     const mergedDefaults =
       overlayWorkTypes?.defaults !== undefined && !overlayDefaults
@@ -4331,6 +4441,18 @@ export function loadAndValidateTenantConfig(
                       : {
                           ...(baseOpeningGate ?? {}),
                           ...(overlayOpeningGate ?? {}),
+                        },
+                }
+              : {}),
+            ...(basePriceTransparency || overlayPriceTransparency
+              ? {
+                  priceTransparency:
+                    overlayDefaults?.priceTransparency !== undefined &&
+                    !overlayPriceTransparency
+                      ? overlayDefaults.priceTransparency
+                      : {
+                          ...(basePriceTransparency ?? {}),
+                          ...(overlayPriceTransparency ?? {}),
                         },
                 }
               : {}),
@@ -4431,6 +4553,18 @@ export function loadAndValidateTenantConfig(
               !Array.isArray(itemObj.openingGate)
                 ? (itemObj.openingGate as Record<string, unknown>)
                 : undefined;
+            const basePt =
+              existingObj.priceTransparency &&
+              typeof existingObj.priceTransparency === 'object' &&
+              !Array.isArray(existingObj.priceTransparency)
+                ? (existingObj.priceTransparency as Record<string, unknown>)
+                : undefined;
+            const overPt =
+              itemObj.priceTransparency &&
+              typeof itemObj.priceTransparency === 'object' &&
+              !Array.isArray(itemObj.priceTransparency)
+                ? (itemObj.priceTransparency as Record<string, unknown>)
+                : undefined;
             combinedItems[existingIdx] = {
               ...existingObj,
               ...itemObj,
@@ -4448,6 +4582,14 @@ export function loadAndValidateTenantConfig(
                       itemObj.openingGate !== undefined && !overGate
                         ? itemObj.openingGate
                         : { ...(baseGate ?? {}), ...(overGate ?? {}) },
+                  }
+                : {}),
+              ...(basePt || overPt
+                ? {
+                    priceTransparency:
+                      itemObj.priceTransparency !== undefined && !overPt
+                        ? itemObj.priceTransparency
+                        : { ...(basePt ?? {}), ...(overPt ?? {}) },
                   }
                 : {}),
               ...(baseCapCats || overCapCats

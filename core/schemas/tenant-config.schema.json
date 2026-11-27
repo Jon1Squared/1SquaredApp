@@ -1712,6 +1712,57 @@
                   "description": "Requires verified cleared funds on account before matter opening"
                 }
               }
+            },
+            "priceTransparency": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Firm-wide fallback SRA-style Price Transparency guidance shown on quotes and quote PDFs (S1-07)",
+              "default": {
+                "enabled": false,
+                "headlineSummary": "",
+                "serviceDescription": "",
+                "keyStages": "",
+                "typicalTimescales": "",
+                "disbursementsGuidance": "",
+                "exclusionsAndVatNote": ""
+              },
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Whether Price Transparency guidance is included on quotes by default"
+                },
+                "headlineSummary": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Headline fee and pricing basis overview"
+                },
+                "serviceDescription": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Description of legal work and supervision included"
+                },
+                "keyStages": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Key stages of the matter"
+                },
+                "typicalTimescales": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Indicative matter timescales"
+                },
+                "disbursementsGuidance": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Likely third-party disbursements and VAT treatment"
+                },
+                "exclusionsAndVatNote": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Exclusions, scope-change assumptions, and VAT rate notice"
+                }
+              }
             }
           }
         },
@@ -1943,6 +1994,41 @@
                   "requireFundsOnAccount": {
                     "type": "boolean",
                     "description": "Overrides cleared funds on account requirement for this work type"
+                  }
+                }
+              },
+              "priceTransparency": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Optional per-work-type or practice-area Price Transparency guidance overriding firm defaults per setting (S1-07)",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "description": "Overrides whether Price Transparency guidance is shown on quotes for this work type"
+                  },
+                  "headlineSummary": {
+                    "type": "string",
+                    "description": "Overrides headline fee and pricing basis overview for this work type"
+                  },
+                  "serviceDescription": {
+                    "type": "string",
+                    "description": "Overrides description of legal work and supervision for this work type"
+                  },
+                  "keyStages": {
+                    "type": "string",
+                    "description": "Overrides key stages guidance for this work type"
+                  },
+                  "typicalTimescales": {
+                    "type": "string",
+                    "description": "Overrides typical timescales guidance for this work type"
+                  },
+                  "disbursementsGuidance": {
+                    "type": "string",
+                    "description": "Overrides likely third-party disbursements guidance for this work type"
+                  },
+                  "exclusionsAndVatNote": {
+                    "type": "string",
+                    "description": "Overrides exclusions and VAT note for this work type"
                   }
                 }
               },

@@ -6,6 +6,7 @@ import type {
   WorkTypeFeeArrangementCapCategoriesConfig,
   WorkTypeFeeCapOverrideConfig,
   WorkTypeOpeningGateConfig,
+  WorkTypePriceTransparencyConfig,
   WorkTypeRetentionConfig,
   WorkTypeRiskQuestionConfig,
   WorkTypeRiskQuestionOptionConfig,
@@ -37,6 +38,34 @@ export const DEFAULT_WORK_TYPE_OPENING_GATE: WorkTypeOpeningGateFields = {
   requireFundsOnAccount: false,
 };
 
+export interface WorkTypePriceTransparencyFields {
+  enabled: boolean;
+  headlineSummary: string;
+  serviceDescription: string;
+  keyStages: string;
+  typicalTimescales: string;
+  disbursementsGuidance: string;
+  exclusionsAndVatNote: string;
+}
+
+export type WorkTypePriceTransparencySettingKey =
+  keyof WorkTypePriceTransparencyFields;
+export type WorkTypePriceTransparencySettingSource =
+  | 'work_type'
+  | 'practice_area'
+  | 'firm_default';
+
+export const DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY: WorkTypePriceTransparencyFields =
+  {
+    enabled: false,
+    headlineSummary: '',
+    serviceDescription: '',
+    keyStages: '',
+    typicalTimescales: '',
+    disbursementsGuidance: '',
+    exclusionsAndVatNote: '',
+  };
+
 export const DEFAULT_WORK_TYPES_CONFIG: WorkTypesConfiguration = {
   defaults: {
     autoTaskTemplates: [],
@@ -48,6 +77,7 @@ export const DEFAULT_WORK_TYPES_CONFIG: WorkTypesConfiguration = {
       statutoryNote: 'Firm standard limitation and file retention policy',
     },
     openingGate: { ...DEFAULT_WORK_TYPE_OPENING_GATE },
+    priceTransparency: { ...DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY },
   },
   items: [],
 };
@@ -75,6 +105,20 @@ export interface ResolvedWorkTypeOpeningGateWithProvenance
   >;
 }
 
+export interface ResolvedWorkTypePriceTransparency
+  extends WorkTypePriceTransparencyFields {
+  source: WorkTypePriceTransparencySettingSource;
+  matchedWorkTypeId: string | null;
+}
+
+export interface ResolvedWorkTypePriceTransparencyWithProvenance
+  extends ResolvedWorkTypePriceTransparency {
+  settingSources: Record<
+    WorkTypePriceTransparencySettingKey,
+    WorkTypePriceTransparencySettingSource
+  >;
+}
+
 export interface ResolvedWorkTypeBehaviour {
   effectiveConfig: WorkTypesConfiguration;
   autoTaskTemplates: WorkTypeAutoTaskTemplateConfig[];
@@ -82,6 +126,7 @@ export interface ResolvedWorkTypeBehaviour {
   riskQuestions: WorkTypeRiskQuestionConfig[];
   retention: ResolvedWorkTypeRetention;
   openingGate: ResolvedWorkTypeOpeningGate;
+  priceTransparency: ResolvedWorkTypePriceTransparency;
 }
 
 function cloneAutoTaskTemplate(
@@ -179,6 +224,39 @@ export function resolveEffectiveWorkTypesConfig(
       defaultsGateSource?.requireFundsOnAccount ??
       baseDefaults?.openingGate?.requireFundsOnAccount ??
       DEFAULT_WORK_TYPE_OPENING_GATE.requireFundsOnAccount,
+  };
+
+  const defaultsPtSource =
+    overrideDefaults?.priceTransparency ?? baseDefaults?.priceTransparency;
+  const defaultsPriceTransparency: WorkTypePriceTransparencyFields = {
+    enabled:
+      defaultsPtSource?.enabled ??
+      baseDefaults?.priceTransparency?.enabled ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.enabled,
+    headlineSummary:
+      defaultsPtSource?.headlineSummary ??
+      baseDefaults?.priceTransparency?.headlineSummary ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.headlineSummary,
+    serviceDescription:
+      defaultsPtSource?.serviceDescription ??
+      baseDefaults?.priceTransparency?.serviceDescription ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.serviceDescription,
+    keyStages:
+      defaultsPtSource?.keyStages ??
+      baseDefaults?.priceTransparency?.keyStages ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.keyStages,
+    typicalTimescales:
+      defaultsPtSource?.typicalTimescales ??
+      baseDefaults?.priceTransparency?.typicalTimescales ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.typicalTimescales,
+    disbursementsGuidance:
+      defaultsPtSource?.disbursementsGuidance ??
+      baseDefaults?.priceTransparency?.disbursementsGuidance ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.disbursementsGuidance,
+    exclusionsAndVatNote:
+      defaultsPtSource?.exclusionsAndVatNote ??
+      baseDefaults?.priceTransparency?.exclusionsAndVatNote ??
+      DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.exclusionsAndVatNote,
   };
 
   const rawDefaultTemplates =
@@ -323,6 +401,42 @@ export function resolveEffectiveWorkTypesConfig(
       const itemOpeningGate: WorkTypeOpeningGateConfig | undefined =
         Object.keys(partialGate).length > 0 ? partialGate : undefined;
 
+      const rawPt = item.priceTransparency;
+      const partialPt: {
+        enabled?: boolean;
+        headlineSummary?: string;
+        serviceDescription?: string;
+        keyStages?: string;
+        typicalTimescales?: string;
+        disbursementsGuidance?: string;
+        exclusionsAndVatNote?: string;
+      } = {};
+      if (rawPt) {
+        if (typeof rawPt.enabled === 'boolean') {
+          partialPt.enabled = rawPt.enabled;
+        }
+        if (typeof rawPt.headlineSummary === 'string') {
+          partialPt.headlineSummary = rawPt.headlineSummary;
+        }
+        if (typeof rawPt.serviceDescription === 'string') {
+          partialPt.serviceDescription = rawPt.serviceDescription;
+        }
+        if (typeof rawPt.keyStages === 'string') {
+          partialPt.keyStages = rawPt.keyStages;
+        }
+        if (typeof rawPt.typicalTimescales === 'string') {
+          partialPt.typicalTimescales = rawPt.typicalTimescales;
+        }
+        if (typeof rawPt.disbursementsGuidance === 'string') {
+          partialPt.disbursementsGuidance = rawPt.disbursementsGuidance;
+        }
+        if (typeof rawPt.exclusionsAndVatNote === 'string') {
+          partialPt.exclusionsAndVatNote = rawPt.exclusionsAndVatNote;
+        }
+      }
+      const itemPriceTransparency: WorkTypePriceTransparencyConfig | undefined =
+        Object.keys(partialPt).length > 0 ? partialPt : undefined;
+
       mergedItemsMap.set(item.workTypeId, {
         workTypeId: item.workTypeId,
         practiceAreaId: item.practiceAreaId ?? '',
@@ -331,6 +445,9 @@ export function resolveEffectiveWorkTypesConfig(
         riskQuestions: itemRiskQuestions,
         ...(itemRetention ? { retention: itemRetention } : {}),
         ...(itemOpeningGate ? { openingGate: itemOpeningGate } : {}),
+        ...(itemPriceTransparency
+          ? { priceTransparency: itemPriceTransparency }
+          : {}),
         ...(itemFeeCapCategories
           ? { feeArrangementCapCategories: itemFeeCapCategories }
           : {}),
@@ -350,6 +467,7 @@ export function resolveEffectiveWorkTypesConfig(
       riskQuestions: defaultRiskQuestions,
       retention: defaultsRetention,
       openingGate: defaultsOpeningGate,
+      priceTransparency: defaultsPriceTransparency,
     },
     items: Array.from(mergedItemsMap.values()),
   };
@@ -586,6 +704,190 @@ export function resolveWorkTypeOpeningGate(
   };
 }
 
+export function resolveWorkTypePriceTransparencyWithProvenance(
+  config: WorkTypesConfiguration,
+  input: EffectiveWorkTypesResolutionInput,
+): ResolvedWorkTypePriceTransparencyWithProvenance {
+  const { subItem, paItem } = findMatchingWorkTypeItems(config, input);
+  const defaultsPt =
+    config.defaults.priceTransparency ?? DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY;
+
+  const pickBool = (): {
+    value: boolean;
+    source: WorkTypePriceTransparencySettingSource;
+  } => {
+    if (typeof subItem?.priceTransparency?.enabled === 'boolean') {
+      return { value: subItem.priceTransparency.enabled, source: 'work_type' };
+    }
+    if (typeof paItem?.priceTransparency?.enabled === 'boolean') {
+      return { value: paItem.priceTransparency.enabled, source: 'practice_area' };
+    }
+    return {
+      value:
+        typeof defaultsPt.enabled === 'boolean'
+          ? defaultsPt.enabled
+          : DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.enabled,
+      source: 'firm_default',
+    };
+  };
+
+  const pickText = (
+    key: Exclude<WorkTypePriceTransparencySettingKey, 'enabled'>,
+  ): {
+    value: string;
+    source: WorkTypePriceTransparencySettingSource;
+  } => {
+    const subVal = subItem?.priceTransparency?.[key];
+    if (typeof subVal === 'string') {
+      return { value: subVal, source: 'work_type' };
+    }
+    const paVal = paItem?.priceTransparency?.[key];
+    if (typeof paVal === 'string') {
+      return { value: paVal, source: 'practice_area' };
+    }
+    const defVal = defaultsPt[key];
+    return {
+      value:
+        typeof defVal === 'string'
+          ? defVal
+          : DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY[key],
+      source: 'firm_default',
+    };
+  };
+
+  const enabled = pickBool();
+  const headlineSummary = pickText('headlineSummary');
+  const serviceDescription = pickText('serviceDescription');
+  const keyStages = pickText('keyStages');
+  const typicalTimescales = pickText('typicalTimescales');
+  const disbursementsGuidance = pickText('disbursementsGuidance');
+  const exclusionsAndVatNote = pickText('exclusionsAndVatNote');
+
+  const settingSources: Record<
+    WorkTypePriceTransparencySettingKey,
+    WorkTypePriceTransparencySettingSource
+  > = {
+    enabled: enabled.source,
+    headlineSummary: headlineSummary.source,
+    serviceDescription: serviceDescription.source,
+    keyStages: keyStages.source,
+    typicalTimescales: typicalTimescales.source,
+    disbursementsGuidance: disbursementsGuidance.source,
+    exclusionsAndVatNote: exclusionsAndVatNote.source,
+  };
+
+  const hasSubSource = Object.values(settingSources).some(
+    (s) => s === 'work_type',
+  );
+  const hasPaSource = Object.values(settingSources).some(
+    (s) => s === 'practice_area',
+  );
+  const source: WorkTypePriceTransparencySettingSource = hasSubSource
+    ? 'work_type'
+    : hasPaSource
+      ? 'practice_area'
+      : 'firm_default';
+  const matchedWorkTypeId = hasSubSource
+    ? (subItem?.workTypeId ?? null)
+    : hasPaSource
+      ? (paItem?.workTypeId ?? null)
+      : null;
+
+  return {
+    enabled: enabled.value,
+    headlineSummary: headlineSummary.value,
+    serviceDescription: serviceDescription.value,
+    keyStages: keyStages.value,
+    typicalTimescales: typicalTimescales.value,
+    disbursementsGuidance: disbursementsGuidance.value,
+    exclusionsAndVatNote: exclusionsAndVatNote.value,
+    source,
+    matchedWorkTypeId,
+    settingSources,
+  };
+}
+
+export function resolveWorkTypePriceTransparency(
+  config: WorkTypesConfiguration,
+  input: EffectiveWorkTypesResolutionInput,
+): ResolvedWorkTypePriceTransparency {
+  const {
+    enabled,
+    headlineSummary,
+    serviceDescription,
+    keyStages,
+    typicalTimescales,
+    disbursementsGuidance,
+    exclusionsAndVatNote,
+    source,
+    matchedWorkTypeId,
+  } = resolveWorkTypePriceTransparencyWithProvenance(config, input);
+  return {
+    enabled,
+    headlineSummary,
+    serviceDescription,
+    keyStages,
+    typicalTimescales,
+    disbursementsGuidance,
+    exclusionsAndVatNote,
+    source,
+    matchedWorkTypeId,
+  };
+}
+
+export function clearWorkTypePriceTransparencySetting(
+  itemPt: WorkTypePriceTransparencyConfig | undefined,
+  key: WorkTypePriceTransparencySettingKey,
+): WorkTypePriceTransparencyConfig | undefined {
+  if (!itemPt) return undefined;
+  const next: Record<string, boolean | string> = {};
+  for (const [entryKey, entryVal] of Object.entries(itemPt)) {
+    if (
+      entryKey !== key &&
+      (typeof entryVal === 'boolean' || typeof entryVal === 'string')
+    ) {
+      next[entryKey] = entryVal;
+    }
+  }
+  return Object.keys(next).length > 0
+    ? (next as WorkTypePriceTransparencyConfig)
+    : undefined;
+}
+
+export function resolveInheritedPriceTransparencySetting<
+  K extends WorkTypePriceTransparencySettingKey,
+>(
+  config: WorkTypesConfiguration,
+  input: { readonly practiceAreaId?: string | null },
+  key: K,
+): {
+  value: WorkTypePriceTransparencyFields[K];
+  source: 'practice_area' | 'firm_default' | 'core_default';
+} {
+  const cleanPaId = input.practiceAreaId?.trim() || '';
+  if (cleanPaId) {
+    const paItem = (config.items ?? []).find((i) => i.workTypeId === cleanPaId);
+    const paVal = paItem?.priceTransparency?.[key];
+    if (key === 'enabled' ? typeof paVal === 'boolean' : typeof paVal === 'string') {
+      return {
+        value: paVal as WorkTypePriceTransparencyFields[K],
+        source: 'practice_area',
+      };
+    }
+  }
+  const defVal = config.defaults.priceTransparency?.[key];
+  if (key === 'enabled' ? typeof defVal === 'boolean' : typeof defVal === 'string') {
+    return {
+      value: defVal as WorkTypePriceTransparencyFields[K],
+      source: 'firm_default',
+    };
+  }
+  return {
+    value: DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY[key],
+    source: 'core_default',
+  };
+}
+
 export interface ResolvedWorkTypeFeeArrangementSettings {
   effectiveWorkTypeId: string;
   feeArrangementCapCategories: WorkTypeFeeArrangementCapCategoriesConfig;
@@ -656,6 +958,10 @@ export function resolveWorkTypeBehaviour(
   const riskQuestions = resolveWorkTypeRiskQuestions(effectiveConfig, input);
   const retention = resolveWorkTypeRetention(effectiveConfig, input);
   const openingGate = resolveWorkTypeOpeningGate(effectiveConfig, input);
+  const priceTransparency = resolveWorkTypePriceTransparency(
+    effectiveConfig,
+    input,
+  );
   return {
     effectiveConfig,
     autoTaskTemplates: autoTasks.templates,
@@ -663,6 +969,7 @@ export function resolveWorkTypeBehaviour(
     riskQuestions,
     retention,
     openingGate,
+    priceTransparency,
   };
 }
 

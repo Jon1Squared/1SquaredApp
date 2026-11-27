@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CORE_API_VERSION,
   CORE_REQUIRED_SCHEMA_VERSION,
   HomeRoleKey,
   TenantAuditRepository,
@@ -9,12 +10,14 @@ import {
   TenantPostgresPoolManager,
   TenantTaskWorkflowRepository,
   WorkTypesConfigSchema,
+  isCoreApiRangeCompatible,
   loadAndValidateTenantConfig,
   resolveTenantFromVerifiedToken,
   validateWorkTypesConfig,
   type TenantContext,
   type WorkTypesConfiguration,
 } from '../src/index';
+import notALawFirmBaseConfig from '../../client-not-a-law-firm/config/base.json';
 import { provisionPostgresClusterRolesAndDatabases } from '../src/tenancy/postgresAdminBootstrap';
 import { createDirectMigrationClient } from '../src/tenancy/postgresPoolManager';
 import {
@@ -35,8 +38,12 @@ import {
 } from '@/domain/orgStructure';
 import type { ChoiceValue, Matter, Task } from '@/domain/types';
 import {
+  DEFAULT_WORK_TYPES_CONFIG,
+  DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY,
   calculateDestructionDate,
   formatRetentionPeriodLabel,
+  resolveEffectiveWorkTypesConfig,
+  resolveWorkTypePriceTransparencyWithProvenance,
   resolveWorkTypeRetention,
   resolveWorkTypeRiskQuestions,
 } from '@/domain/workTypeConfig';
@@ -2492,5 +2499,79 @@ describe('S0-22: Departments & Work Types (Schema-Driven Auto-Tasks, Risk Scorin
     expect(
       resolveWorkTypeTaskPriorityId('task_priority.missing', renamedValues),
     ).toBe('task_priority.custom_normal');
+  });
+
+  it('S1-07 Commit 1: exposes ^2.5.0 compatible CORE_API_VERSION, safe off/empty defaults, 3-tier Price Transparency inheritance, and overlay deep-merge', () => {
+    expect(isCoreApiRangeCompatible(CORE_API_VERSION, '^2.5.0')).toBe(true);
+    expect(isCoreApiRangeCompatible(CORE_API_VERSION, '^2.0.0')).toBe(true);
+
+    // Core fallback defaults stay disabled and empty until configured
+    const barePt = resolveWorkTypePriceTransparencyWithProvenance(
+      DEFAULT_WORK_TYPES_CONFIG,
+      { practiceAreaId: 'work_type.private_client' },
+    );
+    expect(barePt.enabled).toBe(false);
+    expect(barePt.headlineSummary).toBe('');
+    expect(barePt.exclusionsAndVatNote).toBe('');
+    expect(DEFAULT_WORK_TYPE_PRICE_TRANSPARENCY.enabled).toBe(false);
+
+    // Demo base config loads approved Appendix A defaults & overrides and deep-merges overlays cleanly
+    const overlayCfg = loadAndValidateTenantConfig(
+      notALawFirmBaseConfig as unknown as Record<string, unknown>,
+      {
+        workTypes: {
+          defaults: {
+            priceTransparency: {
+              typicalTimescales: 'Overridden default timescale.',
+            },
+          },
+          items: [
+            {
+              workTypeId: 'work_type.corporate_and_commercial',
+              priceTransparency: {
+                enabled: false,
+              },
+            },
+          ],
+        },
+      },
+      'test',
+    );
+    const effective = resolveEffectiveWorkTypesConfig(overlayCfg);
+
+    const conveyancingPt = resolveWorkTypePriceTransparencyWithProvenance(
+      effective,
+      {
+        practiceAreaId: 'work_type.real_estate_and_property',
+        workTypeSubcategoryId:
+          'work_type.real_estate_and_property_residential_conveyancing',
+      },
+    );
+    expect(conveyancingPt.enabled).toBe(true);
+    expect(conveyancingPt.source).toBe('work_type');
+    expect(conveyancingPt.settingSources.enabled).toBe('firm_default');
+    expect(conveyancingPt.settingSources.headlineSummary).toBe('work_type');
+    expect(conveyancingPt.headlineSummary).toContain('Residential conveyancing');
+
+    // Practice area override on corporate_and_commercial sets enabled=false while inheriting overlay default timescale on unoverridden areas
+    const corporatePt = resolveWorkTypePriceTransparencyWithProvenance(
+      effective,
+      {
+        practiceAreaId: 'work_type.corporate_and_commercial',
+        workTypeSubcategoryId:
+          'work_type.corporate_and_commercial_shareholder_agreements',
+      },
+    );
+    expect(corporatePt.enabled).toBe(false);
+    expect(corporatePt.settingSources.enabled).toBe('practice_area');
+    expect(corporatePt.serviceDescription).toContain('scoping commercial');
+
+    const familyPt = resolveWorkTypePriceTransparencyWithProvenance(effective, {
+      practiceAreaId: 'work_type.family',
+    });
+    expect(familyPt.enabled).toBe(true);
+    expect(familyPt.source).toBe('firm_default');
+    expect(familyPt.typicalTimescales).toBe('Overridden default timescale.');
+    expect(familyPt.headlineSummary).toContain('clear, upfront pricing');
   });
 });

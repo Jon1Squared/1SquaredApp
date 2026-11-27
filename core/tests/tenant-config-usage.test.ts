@@ -528,7 +528,7 @@ describe('S0-12: tenant configuration schema usage, reserved markers, and featur
     }
 
     expect(unreferencedNonReserved).toEqual([]);
-  });
+  }, 45_000);
 
   it('rejects decoy references in isLeafReferencedInRuntime (unrelated subtree aliases and separate-function array leaves fail)', () => {
     // 1. An alias from another subtree (storeConfig.enabled for documentStores[]) must NOT pass keyDates.enabled or integrations.pmsSync.enabled

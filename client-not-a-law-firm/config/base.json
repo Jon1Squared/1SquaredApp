@@ -980,6 +980,15 @@
         "allowCddOverride": true,
         "requireEngagementSigned": false,
         "requireFundsOnAccount": false
+      },
+      "priceTransparency": {
+        "enabled": true,
+        "headlineSummary": "We believe in clear, upfront pricing. Our quote sets out whether your matter is priced on a fixed fee, estimate, capped fee, or hourly-rate basis, together with anticipated third-party disbursements and VAT.",
+        "serviceDescription": "This matter is handled by an allocated fee earner under partner supervision. All quotes include initial review of your instructions, standard correspondence, and reporting on progress at key milestones.",
+        "keyStages": "Typical stages comprise: (1) Initial instructions, conflict checks, and client due diligence; (2) Scoping, document review, and advice; (3) Negotiation or drafting; and (4) Completion and post-matter wrap-up.",
+        "typicalTimescales": "Timescales depend on matter complexity, third-party response times, and prompt completion of client due diligence and initial payments on account. Your quote and welcome email confirm the expected timeframe for your specific matter.",
+        "disbursementsGuidance": "Disbursements are costs payable to third parties (such as search providers, HM Land Registry, Companies House, court fees, or Counsel's fees). We will obtain your approval before incurring any significant unquoted disbursement.",
+        "exclusionsAndVatNote": "All professional fees quoted exclude VAT (charged at the prevailing UK standard rate, currently 20%, where applicable) unless expressly stated as inclusive. Any material change in scope will be discussed and confirmed in writing before extra charges are incurred."
       }
     },
     "items": [
@@ -994,6 +1003,14 @@
           "allowCddOverride": true,
           "requireEngagementSigned": false,
           "requireFundsOnAccount": false
+        },
+        "priceTransparency": {
+          "headlineSummary": "Corporate and commercial advisory matters are priced using transparent fixed fees for defined deliverables or estimated/capped hourly budgets agreed against seniority rate cards.",
+          "serviceDescription": "Includes scoping commercial objectives, reviewing existing corporate constitutional or contractual documentation, drafting and negotiating transaction documents, and reporting on key legal and commercial risks.",
+          "keyStages": "1. Initial scoping & instruction review; 2. First draft or mark-up; 3. Counterparty negotiation rounds; 4. Execution, filings & completion deliverables.",
+          "typicalTimescales": "Routine commercial agreements usually complete within 2 to 4 weeks; multi-party transactions typically span 6 to 12 weeks subject to third-party responsiveness.",
+          "disbursementsGuidance": "Companies House filing fees, specialist tax/regulatory input, and virtual data room charges (where applicable) are passed through at cost.",
+          "exclusionsAndVatNote": "VAT at 20% applies to UK clients unless zero-rated/exempt; non-UK VAT treatment is confirmed at onboarding."
         }
       },
       {
@@ -1208,6 +1225,14 @@
           "allowCddOverride": false,
           "requireEngagementSigned": false,
           "requireFundsOnAccount": false
+        },
+        "priceTransparency": {
+          "headlineSummary": "Residential conveyancing fees cover standard legal work on a freehold or leasehold sale, purchase, or remortgage, billed on the basis shown above plus statutory searches, Land Registry fees, and VAT.",
+          "serviceDescription": "Includes investigating title, raising and answering pre-contract enquiries, reviewing mortgage offers, preparing transfer/charge documentation, exchanging contracts, completing the transaction, and submitting SDLT/LTT returns and HM Land Registry applications.",
+          "keyStages": "1. Onboarding, ID/source-of-funds checks & contract pack; 2. Property searches, enquiries & mortgage review; 3. Report on title & exchange of contracts; 4. Pre-completion checks & completion; 5. SDLT return & Land Registry registration.",
+          "typicalTimescales": "An average freehold purchase or sale takes approximately 8 to 14 weeks from instruction to completion; leasehold matters commonly take 12 to 18 weeks depending on landlord/management pack turnaround.",
+          "disbursementsGuidance": "Typical third-party costs include local/drainage/environmental searches (£250–£450 plus VAT), HM Land Registry priority and registration fees (band-based by price), bank telegraphic transfer fees, and Stamp Duty Land Tax (where payable). Leasehold transactions also attract landlord notice/management pack fees.",
+          "exclusionsAndVatNote": "Standard fee quotes exclude unexpected title defects, defective lease variations, restrictive covenant indemnity policies, or aborted-transaction surcharges if a chain collapses unexpectedly. VAT at 20% applies to our fees."
         }
       },
       {
@@ -1454,6 +1479,14 @@
           "allowCddOverride": true,
           "requireEngagementSigned": true,
           "requireFundsOnAccount": false
+        },
+        "priceTransparency": {
+          "headlineSummary": "Employment Tribunal representation for unfair or wrongful dismissal claims is quoted based on case complexity (Simple, Medium, or High complexity) and anticipated hearing length.",
+          "serviceDescription": "Covers taking instructions, reviewing employment records and grievance/disciplinary files, preparing claim or response forms (ET1/ET3), disclosure, witness statement drafting, schedule of loss preparation, ACAS/settlement discussions, and advocacy or instructing Counsel for hearings.",
+          "keyStages": "1. Initial merits assessment & ACAS Early Conciliation review; 2. Pleadings (ET1/ET3) & Case Management Preliminary Hearing; 3. Disclosure of documents & witness statements; 4. Without-prejudice settlement negotiations; 5. Final Merits & Remedy Hearing.",
+          "typicalTimescales": "Simple claims resolved before hearing commonly take 3 to 6 months; claims proceeding to a multi-day Final Hearing typically take 9 to 18 months depending on Employment Tribunal listing capacity.",
+          "disbursementsGuidance": "Principal disbursements are Specialist Counsel's brief and refresher fees for preliminary or final hearings (quoted per day plus VAT) and any agreed expert medical/actuarial reports. Currently there is no Employment Tribunal issue fee.",
+          "exclusionsAndVatNote": "VAT at 20% applies to our fees and Counsel's fees. Quotes do not cover appeals to the Employment Appeal Tribunal or unrelated County/High Court litigation."
         }
       },
       {
@@ -1493,6 +1526,14 @@
           "allowCddOverride": true,
           "requireEngagementSigned": true,
           "requireFundsOnAccount": false
+        },
+        "priceTransparency": {
+          "headlineSummary": "Pre-action dispute resolution and uncontested debt recovery services are tailored to claim value, evidence complexity, and whether formal court proceedings are required.",
+          "serviceDescription": "Covers reviewing contracts and correspondence, conducting debtor/insolvency searches, drafting formal Letters Before Claim complying with Pre-Action Protocols, handling without-prejudice correspondence, and advising on next steps if payment is not received.",
+          "keyStages": "1. Document review & solvency checks; 2. Pre-Action Protocol Letter of Claim; 3. Reviewing debtor's response & settlement negotiation; 4. Reporting on litigation options if unresolved.",
+          "typicalTimescales": "Initial Letter Before Claim preparation usually completes within 5 working days of onboarding; statutory pre-action response windows are typically 14 to 30 days depending on debtor type.",
+          "disbursementsGuidance": "Court issue fees apply only if proceedings are later issued (HMCTS fee scale based on claim value, VAT-exempt). Company/insolvency search fees and tracing agent fees may apply where instructed.",
+          "exclusionsAndVatNote": "VAT at 20% applies to our legal fees. Defended litigation, injunctions, or enforcement actions are quoted separately if the matter becomes contested."
         }
       },
       {
@@ -1737,6 +1778,14 @@
           "allowCddOverride": false,
           "requireEngagementSigned": true,
           "requireFundsOnAccount": false
+        },
+        "priceTransparency": {
+          "headlineSummary": "Estate administration costs depend on whether we are assisting solely with applying for the Grant of Representation or handling full estate collection, tax reporting, and distribution.",
+          "serviceDescription": "Full administration typically includes identifying estate assets and liabilities, preparing IHT returns (IHT400/IHT205 equivalents), applying for the Grant of Probate or Letters of Administration, collecting funds, settling estate debts, preparing estate accounts, and distributing to beneficiaries.",
+          "keyStages": "1. Asset & liability valuation; 2. Inheritance Tax reporting & Grant application; 3. Encashment of assets & settlement of liabilities; 4. Statutory creditor notices & final estate accounts; 5. Distribution & closure.",
+          "typicalTimescales": "Obtaining the Grant typically takes 10 to 16 weeks; full uncontested estate administration usually completes within 6 to 12 months depending on HMRC clearance and property sales.",
+          "disbursementsGuidance": "Common third-party costs include the Probate Court application fee, official copies of the Grant, statutory Section 27 Trustee Act notices (London Gazette and local newspaper), bankruptcy searches, and asset valuation fees.",
+          "exclusionsAndVatNote": "Excludes contested probate claims, contentious beneficiary disputes, foreign asset resealing, and property conveyancing (quoted separately). VAT at 20% applies to our legal fees."
         }
       },
       {

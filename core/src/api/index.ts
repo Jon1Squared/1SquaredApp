@@ -5,7 +5,7 @@
  */
 
 export const CORE_VERSION = '1.1.0';
-export const CORE_API_VERSION = '2.4.0';
+export const CORE_API_VERSION = '2.5.0';
 
 import type {
   FeeArrangementCapEntry,
@@ -1110,11 +1110,22 @@ export interface WorkTypeOpeningGateConfig {
   readonly requireFundsOnAccount?: boolean;
 }
 
+export interface WorkTypePriceTransparencyConfig {
+  readonly enabled?: boolean;
+  readonly headlineSummary?: string;
+  readonly serviceDescription?: string;
+  readonly keyStages?: string;
+  readonly typicalTimescales?: string;
+  readonly disbursementsGuidance?: string;
+  readonly exclusionsAndVatNote?: string;
+}
+
 export interface WorkTypeDefaultsConfig {
   autoTaskTemplates: WorkTypeAutoTaskTemplateConfig[];
   riskQuestions: WorkTypeRiskQuestionConfig[];
   retention: WorkTypeRetentionConfig;
   openingGate?: WorkTypeOpeningGateConfig;
+  priceTransparency?: WorkTypePriceTransparencyConfig;
 }
 
 export interface WorkTypeConfigItem {
@@ -1125,6 +1136,7 @@ export interface WorkTypeConfigItem {
   riskQuestions?: WorkTypeRiskQuestionConfig[];
   retention?: WorkTypeRetentionConfig;
   openingGate?: WorkTypeOpeningGateConfig;
+  priceTransparency?: WorkTypePriceTransparencyConfig;
   feeArrangementCapCategories?: WorkTypeFeeArrangementCapCategoriesConfig;
   workTypeCapOverrides?: WorkTypeFeeCapOverrideConfig[];
 }
