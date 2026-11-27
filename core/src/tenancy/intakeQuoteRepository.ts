@@ -23,8 +23,19 @@ import type {
   ResolvedRateSource,
   ResolvedRateTier,
   TenantContext,
+  WorkTypePriceTransparencyConfig,
 } from '../api/index';
-import type { TenantPostgresPoolManager } from './postgresPoolManager';
+import {
+  minorUnitsToPgBigInt,
+  minorUnitsToPounds,
+  pgBigIntToMinorUnits,
+  poundsToMinorUnits,
+  type MinorUnits,
+} from '../domain/money/index';
+import {
+  assertValidPostgresTenantContext,
+  type TenantPostgresPoolManager,
+} from './postgresPoolManager';
 import {
   TenantScopedRepository,
   type TenantSqlClient,
@@ -199,6 +210,12 @@ export interface TenantQuoteDisbursementRecord {
   vatOverridden?: boolean;
 }
 
+export interface TenantQuotePriceTransparencySnapshotRecord
+  extends WorkTypePriceTransparencyConfig {
+  capturedAt?: string;
+  customNote?: string;
+}
+
 export interface TenantQuoteVersionSnapshotRecord {
   version: number;
   status: 'Superseded';
@@ -216,6 +233,10 @@ export interface TenantQuoteVersionSnapshotRecord {
   vatOverridden?: boolean;
   disbursements: TenantQuoteDisbursementRecord[];
   totalIncVat: number;
+  paymentOnAccountRequired?: boolean;
+  paymentOnAccountPence?: MinorUnits | null;
+  paymentOnAccountGbp?: number | null;
+  priceTransparencySnapshot?: TenantQuotePriceTransparencySnapshotRecord | null;
   scope: string;
   assumptions: string;
   validUntil: string;
@@ -283,6 +304,9 @@ export interface TenantQuoteRecord {
   vatOverridden?: boolean;
   disbursements: TenantQuoteDisbursementRecord[];
   totalIncVat: number;
+  paymentOnAccountRequired?: boolean;
+  paymentOnAccountPence?: MinorUnits | null;
+  paymentOnAccountGbp?: number | null;
   capturedAt?: string;
   rateSource?: ResolvedRateSource | 'custom_override';
   rateTier?: ResolvedRateTier;
@@ -302,6 +326,10 @@ export interface TenantQuoteRecord {
   validUntil: string;
   followUpAfterDays: number;
   sentAt: string | null;
+  sentToEmail?: string | null;
+  sentByPersonId?: string | null;
+  lastSentOutboxId?: string | null;
+  priceTransparencySnapshot?: TenantQuotePriceTransparencySnapshotRecord | null;
   nextFollowUpDate: string | null;
   outcomeAt: string | null;
   outcomeNote?: string;
@@ -386,8 +414,14 @@ interface QuoteRow extends Record<string, unknown> {
   fee_total_ex_vat_gbp: string | number;
   total_inc_vat_gbp: string | number;
   payment_on_account_gbp: string | number | null;
+  payment_on_account_pence: string | number | null;
+  payment_on_account_required: boolean | null;
   valid_until: string | null;
   sent_at: Date | string | null;
+  sent_to_email: string | null;
+  sent_by_person_id: string | null;
+  last_sent_outbox_id: string | null;
+  price_transparency_snapshot_json: Record<string, unknown> | null;
   outcome_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -596,6 +630,53 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
       ? structuredClone(row.conflict_decision_json)
       : profile.conflictDecision;
 
+  let poaPence: MinorUnits | null = null;
+  if (
+    row.payment_on_account_pence !== null &&
+    row.payment_on_account_pence !== undefined
+  ) {
+    poaPence = pgBigIntToMinorUnits(
+      row.payment_on_account_pence,
+      'quotes.payment_on_account_pence',
+    );
+  } else if (
+    row.payment_on_account_gbp !== null &&
+    row.payment_on_account_gbp !== undefined &&
+    Number.isFinite(Number(row.payment_on_account_gbp))
+  ) {
+    poaPence = poundsToMinorUnits(Number(row.payment_on_account_gbp));
+  } else if (
+    typeof profile.paymentOnAccountPence === 'number' &&
+    Number.isSafeInteger(profile.paymentOnAccountPence)
+  ) {
+    poaPence = profile.paymentOnAccountPence;
+  } else if (
+    typeof profile.paymentOnAccountGbp === 'number' &&
+    Number.isFinite(profile.paymentOnAccountGbp)
+  ) {
+    poaPence = poundsToMinorUnits(profile.paymentOnAccountGbp);
+  }
+
+  const poaRequired =
+    row.payment_on_account_required !== null &&
+    row.payment_on_account_required !== undefined
+      ? Boolean(row.payment_on_account_required)
+      : Boolean(
+          profile.paymentOnAccountRequired ??
+            (poaPence !== null && poaPence > 0),
+        );
+  const poaGbp = poaPence !== null ? minorUnitsToPounds(poaPence) : null;
+  const priceTransparencySnapshot =
+    row.price_transparency_snapshot_json &&
+    typeof row.price_transparency_snapshot_json === 'object'
+      ? (structuredClone(
+          row.price_transparency_snapshot_json,
+        ) as unknown as TenantQuotePriceTransparencySnapshotRecord)
+      : profile.priceTransparencySnapshot &&
+          typeof profile.priceTransparencySnapshot === 'object'
+        ? structuredClone(profile.priceTransparencySnapshot)
+        : null;
+
   return {
     ...profile,
     id: row.id,
@@ -742,9 +823,25 @@ function mapRowToQuote(row: QuoteRow): TenantQuoteRecord {
       row.assigned_team_id !== undefined
         ? row.assigned_team_id
         : (profile.assignedTeamId ?? null),
+    paymentOnAccountRequired: poaRequired,
+    paymentOnAccountPence: poaPence,
+    paymentOnAccountGbp: poaGbp,
     validUntil: row.valid_until ?? profile.validUntil ?? '',
     followUpAfterDays: Number(profile.followUpAfterDays ?? 7),
     sentAt: toNullableIsoString(row.sent_at, profile.sentAt),
+    sentToEmail:
+      row.sent_to_email !== undefined
+        ? row.sent_to_email
+        : (profile.sentToEmail ?? null),
+    sentByPersonId:
+      row.sent_by_person_id !== undefined
+        ? row.sent_by_person_id
+        : (profile.sentByPersonId ?? null),
+    lastSentOutboxId:
+      row.last_sent_outbox_id !== undefined
+        ? row.last_sent_outbox_id
+        : (profile.lastSentOutboxId ?? null),
+    priceTransparencySnapshot,
     nextFollowUpDate: profile.nextFollowUpDate ?? null,
     outcomeAt: toNullableIsoString(row.outcome_at, profile.outcomeAt),
     ...(profile.outcomeNote !== undefined
@@ -1923,6 +2020,70 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
     const nowIso = new Date().toISOString();
     const createdAt = quote.createdAt || nowIso;
     const updatedAt = quote.updatedAt || nowIso;
+
+    let poaPence: MinorUnits | null = null;
+    if (
+      quote.paymentOnAccountPence !== undefined &&
+      quote.paymentOnAccountPence !== null
+    ) {
+      if (
+        typeof quote.paymentOnAccountPence !== 'number' ||
+        !Number.isSafeInteger(quote.paymentOnAccountPence)
+      ) {
+        throw createIntakeQuoteError(
+          'QUOTE_VALIDATION_ERROR',
+          'Payment on account pence must be a safe integer.',
+        );
+      }
+      if (
+        quote.paymentOnAccountGbp !== undefined &&
+        quote.paymentOnAccountGbp !== null &&
+        Number.isFinite(Number(quote.paymentOnAccountGbp)) &&
+        minorUnitsToPounds(quote.paymentOnAccountPence) !==
+          Number(quote.paymentOnAccountGbp)
+      ) {
+        poaPence = poundsToMinorUnits(Number(quote.paymentOnAccountGbp));
+      } else {
+        poaPence = quote.paymentOnAccountPence;
+      }
+    } else if (
+      quote.paymentOnAccountPence === undefined &&
+      quote.paymentOnAccountGbp !== undefined &&
+      quote.paymentOnAccountGbp !== null &&
+      Number.isFinite(Number(quote.paymentOnAccountGbp))
+    ) {
+      poaPence = poundsToMinorUnits(Number(quote.paymentOnAccountGbp));
+    }
+
+    if (poaPence !== null && poaPence < 0) {
+      throw createIntakeQuoteError(
+        'QUOTE_VALIDATION_ERROR',
+        'Payment on account cannot be negative.',
+      );
+    }
+    const poaGbp = poaPence !== null ? minorUnitsToPounds(poaPence) : null;
+    const poaPenceSql = poaPence !== null ? minorUnitsToPgBigInt(poaPence) : null;
+    const poaRequired = Boolean(
+      quote.paymentOnAccountRequired ?? (poaPence !== null && poaPence > 0),
+    );
+    const normalizedSentToEmail = quote.sentToEmail ?? null;
+    const normalizedSentByPersonId = quote.sentByPersonId ?? null;
+    const normalizedLastSentOutboxId = quote.lastSentOutboxId ?? null;
+    const normalizedTransparencySnapshot =
+      quote.priceTransparencySnapshot !== undefined &&
+      quote.priceTransparencySnapshot !== null
+        ? structuredClone(quote.priceTransparencySnapshot)
+        : null;
+    const normalizedQuoteForProfile: TenantQuoteRecord = {
+      ...quote,
+      paymentOnAccountRequired: poaRequired,
+      paymentOnAccountPence: poaPence,
+      paymentOnAccountGbp: poaGbp,
+      sentToEmail: normalizedSentToEmail,
+      sentByPersonId: normalizedSentByPersonId,
+      lastSentOutboxId: normalizedLastSentOutboxId,
+      priceTransparencySnapshot: normalizedTransparencySnapshot,
+    };
     const pricingBreakdown = {
       scope: quote.scope ?? '',
       assumptions: quote.assumptions ?? '',
@@ -1973,7 +2134,10 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
          payment_on_account_gbp, valid_until, sent_at, outcome_at,
          created_at, updated_at,
          pricing_breakdown_json, follow_ups_json, version_history_json,
-         conflict_decision_json, custom_fields_json, profile_json
+         conflict_decision_json, custom_fields_json, profile_json,
+         payment_on_account_pence, payment_on_account_required,
+         sent_to_email, sent_by_person_id, last_sent_outbox_id,
+         price_transparency_snapshot_json
        )
        VALUES (
          $1, $2, $3, $4, $5, $6,
@@ -1983,7 +2147,10 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
          $19, $20, $21::timestamptz, $22::timestamptz,
          $23::timestamptz, $24::timestamptz,
          $25::jsonb, $26::jsonb, $27::jsonb,
-         $28::jsonb, $29::jsonb, $30::jsonb
+         $28::jsonb, $29::jsonb, $30::jsonb,
+         $31::bigint, $32::boolean,
+         $33, $34, $35,
+         $36::jsonb
        )
        ON CONFLICT (tenant_id, id) DO UPDATE SET
          quote_reference = EXCLUDED.quote_reference,
@@ -2013,7 +2180,13 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
          version_history_json = EXCLUDED.version_history_json,
          conflict_decision_json = EXCLUDED.conflict_decision_json,
          custom_fields_json = EXCLUDED.custom_fields_json,
-         profile_json = EXCLUDED.profile_json`,
+         profile_json = EXCLUDED.profile_json,
+         payment_on_account_pence = EXCLUDED.payment_on_account_pence,
+         payment_on_account_required = EXCLUDED.payment_on_account_required,
+         sent_to_email = EXCLUDED.sent_to_email,
+         sent_by_person_id = EXCLUDED.sent_by_person_id,
+         last_sent_outbox_id = EXCLUDED.last_sent_outbox_id,
+         price_transparency_snapshot_json = EXCLUDED.price_transparency_snapshot_json`,
       [
         ctx.tenantId,
         quote.id,
@@ -2033,7 +2206,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         quote.assignedTeamId ?? null,
         Number(quote.feeAmountExVat ?? 0),
         Number(quote.totalIncVat ?? 0),
-        null,
+        poaGbp,
         quote.validUntil || null,
         quote.sentAt ?? null,
         quote.outcomeAt ?? null,
@@ -2046,7 +2219,15 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
           ? JSON.stringify(quote.conflictDecision)
           : null,
         JSON.stringify({}),
-        JSON.stringify(quote),
+        JSON.stringify(normalizedQuoteForProfile),
+        poaPenceSql,
+        poaRequired,
+        normalizedSentToEmail,
+        normalizedSentByPersonId,
+        normalizedLastSentOutboxId,
+        normalizedTransparencySnapshot !== null
+          ? JSON.stringify(normalizedTransparencySnapshot)
+          : null,
       ],
     );  }
 
@@ -2086,6 +2267,48 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         await this.auditRepo.appendAuditEntries(ctx, options.auditEntries);
       }
     });
+  }
+
+  public async getQuoteByIdForUpdateInTx<T = TenantQuoteRecord>(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    quoteId: string,
+    options?: {
+      viewerId?: string;
+      includeRestricted?: boolean;
+      hasRestrictedMatterAccess?: boolean;
+    },
+  ): Promise<T | null> {
+    assertValidPostgresTenantContext(ctx);
+    const cleanId = quoteId?.trim();
+    if (!cleanId) return null;
+    const includeRestricted = Boolean(options?.includeRestricted);
+    const hasRestrictedMatterAccess = Boolean(
+      options?.hasRestrictedMatterAccess,
+    );
+    const viewerId = options?.viewerId ?? ctx.actorId;
+    const predicate = hasRestrictedMatterAccess
+      ? QUOTE_DRAFT_ONLY_SQL_PREDICATE
+      : QUOTE_VISIBLE_SQL_PREDICATE;
+    const res = includeRestricted
+      ? await tx.query<QuoteRow>(
+          `SELECT * FROM quotes q WHERE q.tenant_id = $1 AND q.id = $2 FOR UPDATE OF q`,
+          [ctx.tenantId, cleanId],
+        )
+      : await tx.query<QuoteRow>(
+          `SELECT * FROM quotes q
+           WHERE q.tenant_id = $1
+             AND q.id = $3
+             AND ${predicate}
+           FOR UPDATE OF q`,
+          [ctx.tenantId, viewerId, cleanId],
+        );
+    const row = res.rows[0];
+    if (!row) {
+      return null;
+    }
+    this.assertRowTenant(ctx, row.tenant_id, 'quotes.getQuoteByIdForUpdateInTx');
+    return mapRowToQuote(row) as unknown as T;
   }
 
   public async getQuoteById<T = TenantQuoteRecord>(
@@ -2830,6 +3053,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
       readonly onPersistedInTx?: (
         expiredQuote: T,
         previousStatus: string,
+        tx: TenantSqlClient,
       ) => Promise<void>;
     },
   ): Promise<{ expired: boolean; previousStatus: string | null; quote: T | null }> {
@@ -2863,7 +3087,7 @@ export class TenantIntakeQuoteRepository extends TenantScopedRepository {
         ctx,
         freshQuote as unknown as TenantQuoteRecord,
       );
-      await options.onPersistedInTx?.(freshQuote, previousStatus);
+      await options.onPersistedInTx?.(freshQuote, previousStatus, tx);
       return { expired: true, previousStatus, quote: freshQuote };
     });
   }

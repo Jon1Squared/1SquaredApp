@@ -4228,6 +4228,45 @@ DROP SEQUENCE IF EXISTS public.tenant_communication_chase_id_seq;
 `.trim(),
 };
 
+export const QUOTES_POA_AND_DISPATCH_MIGRATION_0029: TenantMigrationDefinition = {
+  version: '0029',
+  name: '0029_quotes_poa_and_dispatch_expand',
+  description:
+    'Expand-phase migration adding integer-pence Payment on Account, email dispatch metadata, and Price Transparency snapshot columns to public.quotes (S1-07).',
+  dependsOn: ['0010', '0019', '0028'],
+  tablesChanged: ['quotes'],
+  upSql: `
+ALTER TABLE public.quotes
+  ADD COLUMN IF NOT EXISTS payment_on_account_pence BIGINT NULL CHECK (payment_on_account_pence IS NULL OR payment_on_account_pence >= 0),
+  ADD COLUMN IF NOT EXISTS payment_on_account_required BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS sent_to_email TEXT NULL,
+  ADD COLUMN IF NOT EXISTS sent_by_person_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS last_sent_outbox_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS price_transparency_snapshot_json JSONB NULL;
+
+UPDATE public.quotes
+   SET payment_on_account_pence = ROUND((payment_on_account_gbp::numeric) * 100)::bigint
+ WHERE payment_on_account_gbp IS NOT NULL
+   AND payment_on_account_pence IS NULL
+   AND payment_on_account_gbp >= 0;
+
+UPDATE public.quotes
+   SET payment_on_account_required = TRUE
+ WHERE payment_on_account_pence IS NOT NULL
+   AND payment_on_account_pence > 0
+   AND payment_on_account_required = FALSE;
+`.trim(),
+  downSql: `
+ALTER TABLE public.quotes
+  DROP COLUMN IF EXISTS price_transparency_snapshot_json,
+  DROP COLUMN IF EXISTS last_sent_outbox_id,
+  DROP COLUMN IF EXISTS sent_by_person_id,
+  DROP COLUMN IF EXISTS sent_to_email,
+  DROP COLUMN IF EXISTS payment_on_account_required,
+  DROP COLUMN IF EXISTS payment_on_account_pence;
+`.trim(),
+};
+
 export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   DOCUMENT_GENERATION_MIGRATION_0001,
   DOCUMENT_STORE_INTEGRATION_MIGRATION_0002,
@@ -4257,6 +4296,7 @@ export const CORE_TENANT_MIGRATIONS: readonly TenantMigrationDefinition[] = [
   OPENING_GATE_OVERRIDES_AND_NUMBERING_MIGRATION_0026,
   PMS_MONEY_AND_RETAINER_PENCE_MIGRATION_0027,
   ENGAGEMENT_AND_CHASING_MIGRATION_0028,
+  QUOTES_POA_AND_DISPATCH_MIGRATION_0029,
 ];
 
 export function validateMigrationCatalogueOrder(

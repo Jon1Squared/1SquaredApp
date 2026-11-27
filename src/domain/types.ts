@@ -13,6 +13,7 @@ import type {
   RbacConfiguration,
   ResolvedRateSource,
   ResolvedRateTier,
+  WorkTypePriceTransparencyConfig,
 } from '@platform/core';
 import type { AttentionItem } from './attention';
 import type { LeaverOwnedRecordItem } from './employment';
@@ -1324,6 +1325,12 @@ export interface QuoteFollowUpEntry {
   byId: string;
 }
 
+export interface QuotePriceTransparencySnapshot
+  extends WorkTypePriceTransparencyConfig {
+  capturedAt?: string;
+  customNote?: string;
+}
+
 export interface QuoteVersionSnapshot {
   version: number;
   status: 'Superseded';
@@ -1335,6 +1342,10 @@ export interface QuoteVersionSnapshot {
   vatOverridden?: boolean;
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
+  paymentOnAccountRequired?: boolean;
+  paymentOnAccountPence?: MinorUnits | null;
+  paymentOnAccountGbp?: number | null;
+  priceTransparencySnapshot?: QuotePriceTransparencySnapshot | null;
   scope: string;
   assumptions: string;
   validUntil: string;
@@ -1402,6 +1413,9 @@ export interface Quote {
   vatOverridden?: boolean;
   disbursements: QuoteDisbursement[];
   totalIncVat: number;
+  paymentOnAccountRequired?: boolean;
+  paymentOnAccountPence?: MinorUnits | null;
+  paymentOnAccountGbp?: number | null;
   capturedAt?: string;
   rateSource?: ResolvedRateSource | 'custom_override';
   rateTier?: ResolvedRateTier;
@@ -1421,6 +1435,10 @@ export interface Quote {
   validUntil: string; // YYYY-MM-DD
   followUpAfterDays: number; // default 7
   sentAt: string | null; // ISO datetime
+  sentToEmail?: string | null;
+  sentByPersonId?: string | null;
+  lastSentOutboxId?: string | null;
+  priceTransparencySnapshot?: QuotePriceTransparencySnapshot | null;
   nextFollowUpDate: string | null; // YYYY-MM-DD
   outcomeAt: string | null;
   outcomeNote?: string;
