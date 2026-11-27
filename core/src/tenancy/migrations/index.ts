@@ -4077,11 +4077,11 @@ CREATE TABLE IF NOT EXISTS public.communication_chases (
   recipient_email TEXT NULL,
   recipient_name TEXT NULL,
   sent_at TIMESTAMPTZ NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('active', 'stopped', 'completed')),
+  status TEXT NOT NULL CHECK (status IN ('active', 'stopped', 'completed', 'needs_owner', 'failed')),
   stopped_reason TEXT NULL CHECK (
     stopped_reason IS NULL OR stopped_reason IN (
       'signed', 'accepted', 'declined', 'expired', 'superseded',
-      'received', 'withdrawn', 'cancelled', 'manual_stop', 'entity_missing'
+      'received', 'withdrawn', 'cancelled', 'manual_stop', 'matter_closed', 'entity_missing'
     )
   ),
   stopped_at TIMESTAMPTZ NULL,
@@ -4089,6 +4089,8 @@ CREATE TABLE IF NOT EXISTS public.communication_chases (
   last_chased_at TIMESTAMPTZ NULL,
   next_step_index INTEGER NOT NULL DEFAULT 1 CHECK (next_step_index BETWEEN 1 AND 4),
   next_action_at TIMESTAMPTZ NULL,
+  consecutive_failure_count INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failure_count >= 0),
+  last_error_code TEXT NULL,
   created_by_person_id TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -4097,7 +4099,7 @@ CREATE TABLE IF NOT EXISTS public.communication_chases (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_communication_chases_active
   ON public.communication_chases (tenant_id, entity_kind, entity_id)
-  WHERE status = 'active';
+  WHERE status IN ('active', 'needs_owner');
 
 CREATE INDEX IF NOT EXISTS idx_communication_chases_due
   ON public.communication_chases (tenant_id, status, next_action_at ASC)
@@ -4114,7 +4116,14 @@ CREATE TABLE IF NOT EXISTS public.communication_chase_events (
   step_index INTEGER NOT NULL CHECK (step_index IN (1, 2, 3)),
   action_kind TEXT NOT NULL CHECK (action_kind IN ('chase_email', 'escalation_task')),
   outcome TEXT NOT NULL CHECK (
-    outcome IN ('executed', 'skipped_emails_disabled', 'skipped_no_recipient', 'suppressed_restricted')
+    outcome IN (
+      'executed',
+      'skipped_emails_disabled',
+      'skipped_no_recipient',
+      'suppressed_restricted',
+      'escalation_unassigned',
+      'step_failed'
+    )
   ),
   outbox_email_id TEXT NULL,
   task_id TEXT NULL,

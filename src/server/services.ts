@@ -423,6 +423,7 @@ import type {
   CddRiskTierKey,
   ChasingConfiguration,
   ChasingRuleConfig,
+  ChasingRuleKey,
   ClientRateOverrideClientType,
   CombinedOutboxDrainResult,
   CommunicationChaseEntityKind,
@@ -39386,29 +39387,80 @@ export interface CommunicationChaseExecutionContext {
   readonly nowIso: string;
 }
 
-export interface CommunicationChaseEntityHandler {
-  executeStep(
-    exec: CommunicationChaseExecutionContext,
-  ): Promise<{
-    readonly queuedEmailId?: string | null;
-    readonly createdTaskId?: string | null;
-    readonly stoppedReason?: CommunicationChaseStoppedReason | null;
-  }>;
+export interface CommunicationChaseBuiltEmail {
+  readonly templateKey: string;
+  readonly subject: string;
+  readonly textBody: string;
+  readonly htmlBody: string;
+  readonly recipientName?: string | null;
+  readonly matterId?: string | null;
+  readonly quoteId?: string | null;
+  readonly enquiryId?: string | null;
 }
 
-function resolveEligibleMatterChaseEscalationAssignee(params: {
-  readonly matter: Matter;
-  readonly people: readonly Person[];
-  readonly teams: readonly Team[];
-  readonly rbacConfig: RbacConfiguration;
-}): Person | null {
-  const orderedIds = [
-    params.matter.leadFeeEarnerId,
-    params.matter.responsiblePartnerId,
-    params.matter.supervisingPartnerId,
-  ].filter((id): id is string => Boolean(id?.trim()));
+export interface CommunicationChaseEscalationCandidatesSpec {
+  readonly orderedPersonIds: readonly string[];
+  readonly canPersonAccessSubject: (person: Person) => boolean;
+  readonly taskTitle: string;
+  readonly taskDescription: string;
+  readonly failureTaskTitle?: string;
+  readonly failureTaskDescription?: string;
+  readonly linkedRecords: Task['linkedRecords'];
+  readonly matterId?: string | null;
+  readonly notificationDetail: string;
+  readonly auditField: string;
+  readonly autoTrigger: Task['autoTrigger'];
+}
 
-  for (const candidateId of orderedIds) {
+export interface CommunicationChaseAdapter<TSubject = unknown> {
+  readonly entityKind: CommunicationChaseEntityKind;
+  readonly ruleKey: ChasingRuleKey;
+  checkStop(params: {
+    readonly tx: TenantSqlClient;
+    readonly ctx: TenantContext;
+    readonly chase: CommunicationChaseRecord;
+    readonly store: Awaited<ReturnType<typeof loadTenantCatalogueStoreView>>;
+    readonly nowIso: string;
+  }): Promise<
+    | { readonly stop: true; readonly reason: CommunicationChaseStoppedReason }
+    | { readonly stop: false; readonly subject: TSubject }
+  >;
+  buildEmail(params: {
+    readonly tx: TenantSqlClient;
+    readonly ctx: TenantContext;
+    readonly chase: CommunicationChaseRecord;
+    readonly stepIndex: 1 | 2;
+    readonly rule: ChasingRuleConfig;
+    readonly subject: TSubject;
+    readonly recipientEmail: string;
+    readonly recipientName: string;
+    readonly tenantConfig: TenantConfiguration;
+    readonly store: Awaited<ReturnType<typeof loadTenantCatalogueStoreView>>;
+    readonly nowIso: string;
+  }): Promise<CommunicationChaseBuiltEmail>;
+  escalationCandidates(params: {
+    readonly tx: TenantSqlClient;
+    readonly ctx: TenantContext;
+    readonly chase: CommunicationChaseRecord;
+    readonly rule: ChasingRuleConfig;
+    readonly subject: TSubject;
+    readonly people: readonly Person[];
+    readonly teams: readonly Team[];
+    readonly rbacConfig: RbacConfiguration;
+    readonly nowIso: string;
+  }): Promise<CommunicationChaseEscalationCandidatesSpec>;
+}
+
+function resolveEligibleChaseEscalationAssignee(params: {
+  readonly orderedPersonIds: readonly string[];
+  readonly canPersonAccessSubject: (person: Person) => boolean;
+  readonly people: readonly Person[];
+}): Person | null {
+  const seen = new Set<string>();
+  for (const rawId of params.orderedPersonIds) {
+    const candidateId = rawId?.trim();
+    if (!candidateId || seen.has(candidateId)) continue;
+    seen.add(candidateId);
     const candidate = params.people.find(
       (p) =>
         p.id === candidateId &&
@@ -39417,251 +39469,349 @@ function resolveEligibleMatterChaseEscalationAssignee(params: {
         !isLeaverPerson(p),
     );
     if (!candidate) continue;
-    if (
-      canPersonAccessMatter(params.matter, candidate.id, candidate, {
-        allPeople: params.people,
-        teams: params.teams,
-        config: { rbac: params.rbacConfig },
-      })
-    ) {
+    if (params.canPersonAccessSubject(candidate)) {
       return candidate;
     }
   }
   return null;
 }
 
-export const COMMUNICATION_CHASE_ADAPTERS: Partial<
-  Record<CommunicationChaseEntityKind, CommunicationChaseEntityHandler>
-> = {
-  engagement_letter: {
-    async executeStep(exec) {
-      const {
-        tx,
-        ctx,
-        chase,
-        rule,
-        tenantConfig,
-        store,
-        people,
-        teams,
-        rbacConfig,
-        nowIso,
-      } = exec;
-      const matterId = chase.matterId ?? chase.entityId;
-      const matter = await getMatterRepository().getMatterById<Matter>(
-        ctx,
-        matterId,
-        { includeRestricted: true },
-      );
-      const chasingRepo = getChasingRepository();
-
-      if (
-        !matter ||
-        isClosedOrArchivedMatterStatus(matter.matterStatusId, store.values)
-      ) {
-        await chasingRepo.stopChaseByIdInTx(tx, ctx, {
-          chaseId: chase.id,
-          reason: 'withdrawn',
-          stoppedByPersonId: ctx.actorId,
-          stoppedAt: nowIso,
-        });
-        return { stoppedReason: 'withdrawn' };
-      }
-
-      if (isMatterEngagementSignedForGate(matter)) {
-        await chasingRepo.stopChaseByIdInTx(tx, ctx, {
-          chaseId: chase.id,
-          reason: 'signed',
-          stoppedByPersonId: ctx.actorId,
-          stoppedAt: nowIso,
-        });
-        return { stoppedReason: 'signed' };
-      }
-
-      const stepIndex: 1 | 2 | 3 =
-        chase.nextStepIndex >= 3 ? 3 : chase.nextStepIndex === 2 ? 2 : 1;
-
-      if (stepIndex === 1 || stepIndex === 2) {
-        const nextActionAtIso =
-          stepIndex === 1
-            ? addDays(new Date(chase.sentAt), rule.secondChaseDays).toISOString()
-            : addDays(
-                new Date(chase.sentAt),
-                rule.escalateTaskDays,
-              ).toISOString();
-
-        const recipientEmail = chase.recipientEmail?.trim() || '';
-        const recipientName = chase.recipientName?.trim() || 'Client';
-        if (!rule.sendEmails) {
-          await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
-            chaseId: chase.id,
-            stepIndex,
-            actionKind: 'chase_email',
-            outcome: 'skipped_emails_disabled',
-            executedAt: nowIso,
-            nextActionAt: nextActionAtIso,
-          });
-          return {};
-        }
-        if (!recipientEmail || !isValidEmailAddress(recipientEmail)) {
-          await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
-            chaseId: chase.id,
-            stepIndex,
-            actionKind: 'chase_email',
-            outcome: 'skipped_no_recipient',
-            executedAt: nowIso,
-            nextActionAt: nextActionAtIso,
-          });
-          return {};
-        }
-
-        const firmName =
-          store.firm.name || tenantConfig.displayName || 'the firm';
-        const isSecond = stepIndex === 2;
-        const subject = isSecond
-          ? `Second reminder: Client Care & Engagement Letter (${matter.matterNumber || matter.id})`
-          : `Reminder: Client Care & Engagement Letter (${matter.matterNumber || matter.id})`;
-        const textBody = isSecond
-          ? `Dear ${recipientName},\n\nWe are writing again regarding the Client Care & Engagement Letter for ${matter.title} (${matter.matterNumber || matter.id}). Please sign and return a scanned copy or clear photograph so we can confirm your instructions and begin work.\n\nYours faithfully,\n${firmName}`
-          : `Dear ${recipientName},\n\nThis is a friendly reminder regarding the Client Care & Engagement Letter sent for ${matter.title} (${matter.matterNumber || matter.id}). Please sign and return a scanned copy or clear photograph at your convenience.\n\nYours faithfully,\n${firmName}`;
-        const htmlBody = `<p>Dear ${escapeHtmlTextForEmail(recipientName)},</p><p>${escapeHtmlTextForEmail(textBody.split('\n\n')[1] ?? textBody)}</p><p>Yours faithfully,<br/>${escapeHtmlTextForEmail(firmName)}</p>`;
-
-        // R818: Outbox idempotency key is keyed by chaseId & step so resend creates a fresh chaseId.
-        const outboxKey = `chase:${chase.id}:step:${stepIndex}`;
-        const queued = await getOutboxRepository().enqueueEmailInTx(tx, ctx, {
-          idempotencyKey: outboxKey,
-          templateKey: isSecond
-            ? 'communication.chase.engagement_letter.step2'
-            : 'communication.chase.engagement_letter.step1',
-          recipients: { to: [recipientEmail] },
-          subject: subject.replace(/[\r\n]+/g, ' ').trim(),
-          htmlBody,
-          textBody,
-          matterId: matter.id,
-          createdByPersonId: null,
-          correlationId: ctx.correlationId,
-        });
-
-        await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
-          chaseId: chase.id,
-          stepIndex,
-          actionKind: 'chase_email',
-          outcome: 'executed',
-          outboxEmailId: queued.record.id,
-          executedAt: nowIso,
-          nextActionAt: nextActionAtIso,
-        });
-        return { queuedEmailId: queued.deduplicated ? null : queued.record.id };
-      }
-
-      // Step 3: Raise fee-earner escalation task for an active permitted matter viewer
-      const assignee = resolveEligibleMatterChaseEscalationAssignee({
-        matter,
-        people,
-        teams,
-        rbacConfig,
-      });
-      if (!assignee) {
-        await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
-          chaseId: chase.id,
-          stepIndex: 3,
-          actionKind: 'escalation_task',
-          outcome: 'skipped_no_recipient',
-          executedAt: nowIso,
-          nextActionAt: null,
-        });
-        return {};
-      }
-
-      const taskRepo = getTaskWorkflowRepository();
-      const escalationKey = `chase:${chase.id}:step:3`;
-      const existingLinkedTasks = await taskRepo.listTasksLinkedToRecord<Task>(
-        ctx,
-        'matter',
-        matter.id,
-      );
-      const alreadyExists = existingLinkedTasks.find(
-        (t) =>
-          (t.systemKey === escalationKey || t.idempotencyKey === escalationKey) &&
-          isTaskOpen(t),
-      );
-      let taskId = alreadyExists?.id ?? null;
-
-      if (!alreadyExists) {
-        const taskTypeId =
-          valueBySystemKey(store.values, 'task_type', 'follow_up')?.id ??
-          vid('task_type', 'Follow up');
-        const priorityId =
-          valueBySystemKey(store.values, 'task_priority', 'high')?.id ??
-          valueBySystemKey(store.values, 'task_priority', 'normal')?.id ??
-          vid('task_priority', 'Normal');
-        const newId = await taskRepo.allocateNextTaskId(ctx);
-        const task: Task = {
-          id: newId,
-          reference: newId,
-          title: `Follow up unsigned engagement letter: ${matter.matterNumber || matter.id}`,
-          description: `No signed engagement letter has been recorded after ${rule.escalateTaskDays} days. Please contact the client to confirm instructions.`,
-          taskTypeId,
-          priorityId,
-          dueAt: toIsoDate(new Date(nowIso)),
-          assignedTeamId: null,
-          assignedPersonId: assignee.id,
-          status: 'To do',
-          linkedRecords: [{ recordType: 'matter', recordId: matter.id }],
-          createdById: ctx.actorId,
-          createdAt: nowIso,
-          updatedById: ctx.actorId,
-          updatedAt: nowIso,
-          completedById: null,
-          completedAt: null,
-          comments: [],
-          autoTrigger: 'communication_chase_escalation',
-          idempotencyKey: escalationKey,
-          systemKey: escalationKey,
-        };
-        await taskRepo.putTask(ctx, task);
-        taskId = task.id;
-        await appendTenantAuditEntries(ctx, [
-          {
-            recordType: 'task',
-            recordId: task.id,
-            action: 'create',
-            field: 'Engagement chase escalation task',
-            oldValue: null,
-            newValue: `${task.reference} -> matter ${matter.id}`,
-            byId: ctx.actorId,
-            at: nowIso,
-          },
-        ]);
-        await pushNotification(ctx, {
-          recipientId: assignee.id,
-          kind: 'task_assigned',
-          title: `Task assigned to you: ${task.title}`,
-          detail: `${task.reference} · Engagement letter chase escalated`,
-          href: `/tasks/${task.id}`,
-          recordId: task.id,
-          matterId: matter.id,
-          knownMatterIds: [matter.id],
-          knownTask: task,
-          tenantConfig,
-          byId: ctx.actorId,
-          at: nowIso,
-        });
-      }
-
-      await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
-        chaseId: chase.id,
-        stepIndex: 3,
-        actionKind: 'escalation_task',
-        outcome: 'executed',
-        taskId,
-        executedAt: nowIso,
-        nextActionAt: null,
-      });
-      return { createdTaskId: taskId };
-    },
+const ENGAGEMENT_LETTER_CHASE_ADAPTER: CommunicationChaseAdapter<Matter> = {
+  entityKind: 'engagement_letter',
+  ruleKey: 'engagementLetter',
+  async checkStop({ ctx, chase, store }) {
+    const matterId = chase.matterId ?? chase.entityId;
+    const matter = await getMatterRepository().getMatterById<Matter>(
+      ctx,
+      matterId,
+      { includeRestricted: true },
+    );
+    if (
+      !matter ||
+      isClosedOrArchivedMatterStatus(matter.matterStatusId, store.values)
+    ) {
+      return { stop: true, reason: 'withdrawn' };
+    }
+    if (isMatterEngagementSignedForGate(matter)) {
+      return { stop: true, reason: 'signed' };
+    }
+    return { stop: false, subject: matter };
+  },
+  async buildEmail({
+    stepIndex,
+    subject: matter,
+    recipientName,
+    tenantConfig,
+    store,
+  }) {
+    const firmName = store.firm.name || tenantConfig.displayName || 'the firm';
+    const isSecond = stepIndex === 2;
+    const subject = isSecond
+      ? `Second reminder: Client Care & Engagement Letter (${matter.matterNumber || matter.id})`
+      : `Reminder: Client Care & Engagement Letter (${matter.matterNumber || matter.id})`;
+    const textBody = isSecond
+      ? `Dear ${recipientName},\n\nWe are writing again regarding the Client Care & Engagement Letter for ${matter.title} (${matter.matterNumber || matter.id}). Please sign and return a scanned copy or clear photograph so we can confirm your instructions and begin work.\n\nYours faithfully,\n${firmName}`
+      : `Dear ${recipientName},\n\nThis is a friendly reminder regarding the Client Care & Engagement Letter sent for ${matter.title} (${matter.matterNumber || matter.id}). Please sign and return a scanned copy or clear photograph at your convenience.\n\nYours faithfully,\n${firmName}`;
+    const htmlBody = `<p>Dear ${escapeHtmlTextForEmail(recipientName)},</p><p>${escapeHtmlTextForEmail(textBody.split('\n\n')[1] ?? textBody)}</p><p>Yours faithfully,<br/>${escapeHtmlTextForEmail(firmName)}</p>`;
+    return {
+      templateKey: isSecond
+        ? 'communication.chase.engagement_letter.step2'
+        : 'communication.chase.engagement_letter.step1',
+      subject,
+      textBody,
+      htmlBody,
+      recipientName,
+      matterId: matter.id,
+    };
+  },
+  async escalationCandidates({
+    rule,
+    subject: matter,
+    people,
+    teams,
+    rbacConfig,
+  }) {
+    const orderedPersonIds = [
+      matter.leadFeeEarnerId,
+      matter.responsiblePartnerId,
+      matter.supervisingPartnerId,
+    ].filter((id): id is string => Boolean(id?.trim()));
+    return {
+      orderedPersonIds,
+      canPersonAccessSubject: (candidate) =>
+        canPersonAccessMatter(matter, candidate.id, candidate, {
+          allPeople: people,
+          teams,
+          config: { rbac: rbacConfig },
+        }),
+      taskTitle: `Follow up unsigned engagement letter: ${matter.matterNumber || matter.id}`,
+      taskDescription: `No signed engagement letter has been recorded after ${rule.escalateTaskDays} days. Please contact the client to confirm instructions.`,
+      linkedRecords: [{ recordType: 'matter', recordId: matter.id }],
+      matterId: matter.id,
+      notificationDetail: 'Engagement letter chase escalated',
+      auditField: 'Engagement chase escalation task',
+      autoTrigger: 'communication_chase_escalation',
+    };
   },
 };
+
+export const COMMUNICATION_CHASE_ADAPTERS: ReadonlyMap<
+  CommunicationChaseEntityKind,
+  CommunicationChaseAdapter<unknown>
+> = new Map<CommunicationChaseEntityKind, CommunicationChaseAdapter<unknown>>([
+  [
+    'engagement_letter',
+    ENGAGEMENT_LETTER_CHASE_ADAPTER as CommunicationChaseAdapter<unknown>,
+  ],
+]);
+
+async function executeGenericChaseStep(params: {
+  readonly adapter: CommunicationChaseAdapter<unknown>;
+  readonly tx: TenantSqlClient;
+  readonly ctx: TenantContext;
+  readonly chase: CommunicationChaseRecord;
+  readonly rule: ChasingRuleConfig;
+  readonly tenantConfig: TenantConfiguration;
+  readonly store: Awaited<ReturnType<typeof loadTenantCatalogueStoreView>>;
+  readonly people: readonly Person[];
+  readonly teams: readonly Team[];
+  readonly rbacConfig: RbacConfiguration;
+  readonly nowIso: string;
+}): Promise<{
+  readonly queuedEmailId?: string | null;
+  readonly createdTaskId?: string | null;
+  readonly stoppedReason?: CommunicationChaseStoppedReason | null;
+}> {
+  const {
+    adapter,
+    tx,
+    ctx,
+    chase,
+    rule,
+    tenantConfig,
+    store,
+    people,
+    teams,
+    rbacConfig,
+    nowIso,
+  } = params;
+  const chasingRepo = getChasingRepository();
+
+  const stopDecision = await adapter.checkStop({
+    tx,
+    ctx,
+    chase,
+    store,
+    nowIso,
+  });
+  if (stopDecision.stop) {
+    await chasingRepo.stopChaseByIdInTx(tx, ctx, {
+      chaseId: chase.id,
+      reason: stopDecision.reason,
+      stoppedByPersonId: ctx.actorId,
+      stoppedAt: nowIso,
+    });
+    return { stoppedReason: stopDecision.reason };
+  }
+
+  const subject = stopDecision.subject;
+  const stepIndex: 1 | 2 | 3 =
+    chase.nextStepIndex >= 3 ? 3 : chase.nextStepIndex === 2 ? 2 : 1;
+
+  if (stepIndex === 1 || stepIndex === 2) {
+    const nextActionAtIso =
+      stepIndex === 1
+        ? addDays(new Date(chase.sentAt), rule.secondChaseDays).toISOString()
+        : addDays(new Date(chase.sentAt), rule.escalateTaskDays).toISOString();
+
+    const recipientEmail = chase.recipientEmail?.trim() || '';
+    const recipientName = chase.recipientName?.trim() || 'Client';
+    if (!rule.sendEmails) {
+      await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+        chaseId: chase.id,
+        stepIndex,
+        actionKind: 'chase_email',
+        outcome: 'skipped_emails_disabled',
+        executedAt: nowIso,
+        nextActionAt: nextActionAtIso,
+      });
+      return {};
+    }
+    if (!recipientEmail || !isValidEmailAddress(recipientEmail)) {
+      await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+        chaseId: chase.id,
+        stepIndex,
+        actionKind: 'chase_email',
+        outcome: 'skipped_no_recipient',
+        executedAt: nowIso,
+        nextActionAt: nextActionAtIso,
+      });
+      return {};
+    }
+
+    const emailPayload = await adapter.buildEmail({
+      tx,
+      ctx,
+      chase,
+      stepIndex,
+      rule,
+      subject,
+      recipientEmail,
+      recipientName,
+      tenantConfig,
+      store,
+      nowIso,
+    });
+
+    // R818: Outbox idempotency key is keyed by chaseId & step so resend creates a fresh chaseId.
+    const outboxKey = `chase:${chase.id}:step:${stepIndex}`;
+    const queued = await getOutboxRepository().enqueueEmailInTx(tx, ctx, {
+      idempotencyKey: outboxKey,
+      templateKey: emailPayload.templateKey,
+      recipients: { to: [recipientEmail] },
+      subject: emailPayload.subject.replace(/[\r\n]+/g, ' ').trim(),
+      htmlBody: emailPayload.htmlBody,
+      textBody: emailPayload.textBody,
+      matterId: emailPayload.matterId ?? chase.matterId ?? null,
+      quoteId: emailPayload.quoteId ?? chase.quoteId ?? null,
+      enquiryId: emailPayload.enquiryId ?? null,
+      createdByPersonId: null,
+      correlationId: ctx.correlationId,
+    });
+
+    await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+      chaseId: chase.id,
+      stepIndex,
+      actionKind: 'chase_email',
+      outcome: 'executed',
+      outboxEmailId: queued.record.id,
+      executedAt: nowIso,
+      nextActionAt: nextActionAtIso,
+    });
+    return { queuedEmailId: queued.deduplicated ? null : queued.record.id };
+  }
+
+  // Step 3: Raise fee-earner escalation task for an active permitted participant
+  const escalationSpec = await adapter.escalationCandidates({
+    tx,
+    ctx,
+    chase,
+    rule,
+    subject,
+    people,
+    teams,
+    rbacConfig,
+    nowIso,
+  });
+  const assignee = resolveEligibleChaseEscalationAssignee({
+    orderedPersonIds: escalationSpec.orderedPersonIds,
+    canPersonAccessSubject: escalationSpec.canPersonAccessSubject,
+    people,
+  });
+  if (!assignee) {
+    await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+      chaseId: chase.id,
+      stepIndex: 3,
+      actionKind: 'escalation_task',
+      outcome: 'skipped_no_recipient',
+      executedAt: nowIso,
+      nextActionAt: null,
+    });
+    return {};
+  }
+
+  const taskRepo = getTaskWorkflowRepository();
+  const escalationKey = `chase:${chase.id}:step:3`;
+  const primaryLink = escalationSpec.linkedRecords[0];
+  const existingLinkedTasks = primaryLink
+    ? await taskRepo.listTasksLinkedToRecord<Task>(
+        ctx,
+        primaryLink.recordType,
+        primaryLink.recordId,
+      )
+    : [];
+  const alreadyExists = existingLinkedTasks.find(
+    (t) =>
+      (t.systemKey === escalationKey || t.idempotencyKey === escalationKey) &&
+      isTaskOpen(t),
+  );
+  let taskId = alreadyExists?.id ?? null;
+
+  if (!alreadyExists) {
+    const taskTypeId =
+      valueBySystemKey(store.values, 'task_type', 'follow_up')?.id ??
+      vid('task_type', 'Follow up');
+    const priorityId =
+      valueBySystemKey(store.values, 'task_priority', 'high')?.id ??
+      valueBySystemKey(store.values, 'task_priority', 'normal')?.id ??
+      vid('task_priority', 'Normal');
+    const newId = await taskRepo.allocateNextTaskId(ctx);
+    const task: Task = {
+      id: newId,
+      reference: newId,
+      title: escalationSpec.taskTitle,
+      description: escalationSpec.taskDescription,
+      taskTypeId,
+      priorityId,
+      dueAt: toIsoDate(new Date(nowIso)),
+      assignedTeamId: null,
+      assignedPersonId: assignee.id,
+      status: 'To do',
+      linkedRecords: escalationSpec.linkedRecords,
+      createdById: ctx.actorId,
+      createdAt: nowIso,
+      updatedById: ctx.actorId,
+      updatedAt: nowIso,
+      completedById: null,
+      completedAt: null,
+      comments: [],
+      autoTrigger: escalationSpec.autoTrigger,
+      idempotencyKey: escalationKey,
+      systemKey: escalationKey,
+    };
+    await taskRepo.putTask(ctx, task);
+    taskId = task.id;
+    await appendTenantAuditEntries(ctx, [
+      {
+        recordType: 'task',
+        recordId: task.id,
+        action: 'create',
+        field: escalationSpec.auditField,
+        oldValue: null,
+        newValue: `${task.reference} -> ${primaryLink?.recordType ?? chase.entityKind} ${primaryLink?.recordId ?? chase.entityId}`,
+        byId: ctx.actorId,
+        at: nowIso,
+      },
+    ]);
+    await pushNotification(ctx, {
+      recipientId: assignee.id,
+      kind: 'task_assigned',
+      title: `Task assigned to you: ${task.title}`,
+      detail: `${task.reference} · ${escalationSpec.notificationDetail}`,
+      href: `/tasks/${task.id}`,
+      recordId: task.id,
+      matterId: escalationSpec.matterId ?? null,
+      knownMatterIds: escalationSpec.matterId
+        ? [escalationSpec.matterId]
+        : [],
+      knownTask: task,
+      tenantConfig,
+      byId: ctx.actorId,
+      at: nowIso,
+    });
+  }
+
+  await chasingRepo.recordChaseStepEventAndAdvanceInTx(tx, ctx, {
+    chaseId: chase.id,
+    stepIndex: 3,
+    actionKind: 'escalation_task',
+    outcome: 'executed',
+    taskId,
+    executedAt: nowIso,
+    nextActionAt: null,
+  });
+  return { createdTaskId: taskId };
+}
 
 export interface CommunicationChasesJobSummary {
   readonly tenantId: string;
@@ -39751,22 +39901,20 @@ export async function executeCommunicationChasesForTenant(
               skippedCount += 1;
               continue;
             }
-            const rule =
-              lockedChase.entityKind === 'engagement_letter'
-                ? effectiveChasing.engagementLetter
-                : lockedChase.entityKind === 'quote'
-                  ? effectiveChasing.quote
-                  : effectiveChasing.moneyOnAccount;
+            const adapter = COMMUNICATION_CHASE_ADAPTERS.get(
+              lockedChase.entityKind,
+            );
+            if (!adapter) {
+              skippedCount += 1;
+              continue;
+            }
+            const rule = effectiveChasing[adapter.ruleKey];
             if (!rule.enabled) {
               skippedCount += 1;
               continue;
             }
-            const handler = COMMUNICATION_CHASE_ADAPTERS[lockedChase.entityKind];
-            if (!handler) {
-              skippedCount += 1;
-              continue;
-            }
-            const stepResult = await handler.executeStep({
+            const stepResult = await executeGenericChaseStep({
+              adapter,
               tx,
               ctx,
               chase: lockedChase,

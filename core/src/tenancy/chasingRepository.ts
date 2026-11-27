@@ -43,6 +43,8 @@ interface DbCommunicationChaseRow {
   last_chased_at: Date | string | null;
   next_step_index: number | string;
   next_action_at: Date | string | null;
+  consecutive_failure_count: number | string;
+  last_error_code: string | null;
   created_by_person_id: string;
   created_at: Date | string;
   updated_at: Date | string;
@@ -79,6 +81,8 @@ function mapChaseRow(row: DbCommunicationChaseRow): CommunicationChaseRecord {
     lastChasedAt: toNullableIsoString(row.last_chased_at),
     nextStepIndex: Number(row.next_step_index ?? 1),
     nextActionAt: toNullableIsoString(row.next_action_at),
+    consecutiveFailureCount: Number(row.consecutive_failure_count ?? 0),
+    lastErrorCode: row.last_error_code ?? null,
     createdByPersonId: row.created_by_person_id,
     createdAt: toIsoString(row.created_at),
     updatedAt: toIsoString(row.updated_at),
@@ -156,7 +160,7 @@ export class TenantChasingRepository extends TenantScopedRepository {
         WHERE tenant_id = $1
           AND entity_kind = $2
           AND entity_id = $3
-          AND status = 'active'
+          AND status IN ('active', 'needs_owner')
         RETURNING id`,
       [
         ctx.tenantId,
@@ -237,7 +241,7 @@ export class TenantChasingRepository extends TenantScopedRepository {
         WHERE tenant_id = $1
           AND entity_kind = $2
           AND entity_id = $3
-          AND status = 'active'
+          AND status IN ('active', 'needs_owner')
         RETURNING *`,
       [
         ctx.tenantId,
@@ -252,6 +256,44 @@ export class TenantChasingRepository extends TenantScopedRepository {
     if (!row) return null;
     this.assertRowTenant(ctx, row.tenant_id, 'CommunicationChase');
     return mapChaseRow(row);
+  }
+
+  public async stopActiveChasesForMatterInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    params: {
+      readonly matterId: string;
+      readonly reason: CommunicationChaseStoppedReason;
+      readonly stoppedByPersonId: string;
+      readonly stoppedAt: string;
+    },
+  ): Promise<readonly CommunicationChaseRecord[]> {
+    const cleanMatterId = params.matterId.trim();
+    if (!cleanMatterId) return [];
+    const res = await tx.query<DbCommunicationChaseRow>(
+      `UPDATE public.communication_chases
+          SET status = 'stopped',
+              stopped_reason = $3,
+              stopped_at = $4::timestamptz,
+              stopped_by_person_id = $5,
+              next_action_at = NULL,
+              updated_at = $4::timestamptz
+        WHERE tenant_id = $1
+          AND matter_id = $2
+          AND status IN ('active', 'needs_owner')
+        RETURNING *`,
+      [
+        ctx.tenantId,
+        cleanMatterId,
+        params.reason,
+        params.stoppedAt,
+        params.stoppedByPersonId,
+      ],
+    );
+    return res.rows.map((row) => {
+      this.assertRowTenant(ctx, row.tenant_id, 'CommunicationChase');
+      return mapChaseRow(row);
+    });
   }
 
   public async stopChaseByIdInTx(
@@ -278,7 +320,7 @@ export class TenantChasingRepository extends TenantScopedRepository {
       return null;
     }
     this.assertRowTenant(ctx, existing.tenant_id, 'CommunicationChase');
-    if (existing.status !== 'active') {
+    if (existing.status !== 'active' && existing.status !== 'needs_owner') {
       return mapChaseRow(existing);
     }
     const upd = await tx.query<DbCommunicationChaseRow>(
@@ -338,7 +380,7 @@ export class TenantChasingRepository extends TenantScopedRepository {
           WHERE tenant_id = $1
             AND entity_kind = $2
             AND entity_id = $3
-            AND status = 'active'
+            AND status IN ('active', 'needs_owner')
           LIMIT 1`,
         [ctx.tenantId, params.entityKind, params.entityId],
       );
@@ -503,6 +545,8 @@ export class TenantChasingRepository extends TenantScopedRepository {
               last_chased_at = $4::timestamptz,
               next_step_index = $5,
               next_action_at = $6::timestamptz,
+              consecutive_failure_count = 0,
+              last_error_code = NULL,
               updated_at = $4::timestamptz
         WHERE tenant_id = $1
           AND id = $2
@@ -524,6 +568,156 @@ export class TenantChasingRepository extends TenantScopedRepository {
       event: mapChaseEventRow(eventRow),
       chase: mapChaseRow(updatedChaseRow),
     };
+  }
+
+  public async markChaseNeedsOwnerInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    params: {
+      readonly chaseId: string;
+      readonly stepIndex: 1 | 2 | 3;
+      readonly executedAt: string;
+    },
+  ): Promise<{
+    readonly alreadyRecorded: boolean;
+    readonly event: CommunicationChaseEventRecord | null;
+    readonly chase: CommunicationChaseRecord;
+  }> {
+    const seqRes = await tx.query<{ seq: string }>(
+      `SELECT nextval('public.tenant_communication_chase_event_id_seq')::text AS seq`,
+    );
+    const eventId = `CHE-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
+
+    const eventInsertRes = await tx.query<DbCommunicationChaseEventRow>(
+      `INSERT INTO public.communication_chase_events (
+         tenant_id, id, chase_id, step_index, action_kind, outcome,
+         outbox_email_id, task_id, executed_at
+       ) VALUES (
+         $1, $2, $3, $4, 'escalation_task', 'escalation_unassigned',
+         NULL, NULL, $5::timestamptz
+       )
+       ON CONFLICT (tenant_id, chase_id, step_index) DO NOTHING
+       RETURNING *`,
+      [ctx.tenantId, eventId, params.chaseId, params.stepIndex, params.executedAt],
+    );
+
+    if (!eventInsertRes.rows[0]) {
+      const currentRes = await tx.query<DbCommunicationChaseRow>(
+        `SELECT * FROM public.communication_chases WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+        [ctx.tenantId, params.chaseId],
+      );
+      const currentRow = currentRes.rows[0]!;
+      this.assertRowTenant(ctx, currentRow.tenant_id, 'CommunicationChase');
+      return {
+        alreadyRecorded: true,
+        event: null,
+        chase: mapChaseRow(currentRow),
+      };
+    }
+
+    const eventRow = eventInsertRes.rows[0];
+    this.assertRowTenant(ctx, eventRow.tenant_id, 'CommunicationChaseEvent');
+
+    const chaseUpdateRes = await tx.query<DbCommunicationChaseRow>(
+      `UPDATE public.communication_chases
+          SET status = 'needs_owner',
+              last_chased_at = $3::timestamptz,
+              next_step_index = 4,
+              next_action_at = NULL,
+              consecutive_failure_count = 0,
+              last_error_code = NULL,
+              updated_at = $3::timestamptz
+        WHERE tenant_id = $1
+          AND id = $2
+        RETURNING *`,
+      [ctx.tenantId, params.chaseId, params.executedAt],
+    );
+    const updatedChaseRow = chaseUpdateRes.rows[0]!;
+    this.assertRowTenant(ctx, updatedChaseRow.tenant_id, 'CommunicationChase');
+
+    return {
+      alreadyRecorded: false,
+      event: mapChaseEventRow(eventRow),
+      chase: mapChaseRow(updatedChaseRow),
+    };
+  }
+
+  public async recordChaseFailureInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    params: {
+      readonly chaseId: string;
+      readonly stepIndex: 1 | 2 | 3;
+      readonly actionKind: CommunicationChaseActionKind;
+      readonly errorCode: string;
+      readonly executedAt: string;
+      readonly maxConsecutiveFailures?: number;
+    },
+  ): Promise<{
+    readonly chase: CommunicationChaseRecord;
+    readonly markedFailed: boolean;
+  }> {
+    const threshold = Math.max(1, Math.floor(params.maxConsecutiveFailures ?? 3));
+    const safeErrorCode = params.errorCode
+      .replace(/[^A-Za-z0-9_.:-]/g, '_')
+      .slice(0, 64) || 'CHASE_STEP_ERROR';
+    const updRes = await tx.query<DbCommunicationChaseRow>(
+      `UPDATE public.communication_chases
+          SET consecutive_failure_count = consecutive_failure_count + 1,
+              last_error_code = $3,
+              status = CASE
+                WHEN consecutive_failure_count + 1 >= $4 THEN 'failed'
+                ELSE status
+              END,
+              next_action_at = CASE
+                WHEN consecutive_failure_count + 1 >= $4 THEN NULL
+                ELSE next_action_at
+              END,
+              updated_at = $5::timestamptz
+        WHERE tenant_id = $1
+          AND id = $2
+          AND status = 'active'
+        RETURNING *`,
+      [ctx.tenantId, params.chaseId, safeErrorCode, threshold, params.executedAt],
+    );
+    const row = updRes.rows[0];
+    if (!row) {
+      const current = await tx.query<DbCommunicationChaseRow>(
+        `SELECT * FROM public.communication_chases WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+        [ctx.tenantId, params.chaseId],
+      );
+      const existingRow = current.rows[0]!;
+      this.assertRowTenant(ctx, existingRow.tenant_id, 'CommunicationChase');
+      return { chase: mapChaseRow(existingRow), markedFailed: false };
+    }
+    this.assertRowTenant(ctx, row.tenant_id, 'CommunicationChase');
+    const mapped = mapChaseRow(row);
+    const markedFailed = mapped.status === 'failed';
+    if (markedFailed) {
+      const seqRes = await tx.query<{ seq: string }>(
+        `SELECT nextval('public.tenant_communication_chase_event_id_seq')::text AS seq`,
+      );
+      const eventId = `CHE-${String(seqRes.rows[0]?.seq ?? '1').padStart(6, '0')}`;
+      await tx.query(
+        `INSERT INTO public.communication_chase_events (
+           tenant_id, id, chase_id, step_index, action_kind, outcome,
+           outbox_email_id, task_id, executed_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, 'step_failed',
+           NULL, NULL, $6::timestamptz
+         )
+         ON CONFLICT (tenant_id, chase_id, step_index) DO NOTHING`,
+        [
+          ctx.tenantId,
+          eventId,
+          params.chaseId,
+          params.stepIndex,
+          params.actionKind,
+          params.executedAt,
+        ],
+      );
+    }
+    return { chase: mapped, markedFailed };
   }
 
   private async loadEventsByChaseIdsInTx(

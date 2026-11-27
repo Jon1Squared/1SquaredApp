@@ -941,6 +941,8 @@ export interface ChasingConfiguration {
   readonly moneyOnAccount: ChasingRuleConfig;
 }
 
+export type ChasingRuleKey = keyof ChasingConfiguration;
+
 export const NON_ENGAGEMENT_REASON_KEYS = Object.freeze([
   'conflict',
   'outside_expertise',
@@ -2556,7 +2558,12 @@ export const COMMUNICATION_CHASE_ENTITY_KINDS = Object.freeze([
 export type CommunicationChaseEntityKind =
   (typeof COMMUNICATION_CHASE_ENTITY_KINDS)[number];
 
-export type CommunicationChaseStatus = 'active' | 'stopped' | 'completed';
+export type CommunicationChaseStatus =
+  | 'active'
+  | 'stopped'
+  | 'completed'
+  | 'needs_owner'
+  | 'failed';
 
 export type CommunicationChaseStoppedReason =
   | 'signed'
@@ -2568,6 +2575,7 @@ export type CommunicationChaseStoppedReason =
   | 'withdrawn'
   | 'cancelled'
   | 'manual_stop'
+  | 'matter_closed'
   | 'entity_missing';
 
 export type CommunicationChaseActionKind = 'chase_email' | 'escalation_task';
@@ -2576,7 +2584,9 @@ export type CommunicationChaseOutcome =
   | 'executed'
   | 'skipped_emails_disabled'
   | 'skipped_no_recipient'
-  | 'suppressed_restricted';
+  | 'suppressed_restricted'
+  | 'escalation_unassigned'
+  | 'step_failed';
 
 export interface CommunicationChaseRecord {
   readonly id: string;
@@ -2595,6 +2605,8 @@ export interface CommunicationChaseRecord {
   readonly lastChasedAt: string | null;
   readonly nextStepIndex: number;
   readonly nextActionAt: string | null;
+  readonly consecutiveFailureCount: number;
+  readonly lastErrorCode: string | null;
   readonly createdByPersonId: string;
   readonly createdAt: string;
   readonly updatedAt: string;

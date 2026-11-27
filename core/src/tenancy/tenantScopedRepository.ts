@@ -35,6 +35,7 @@ export interface TenantSqlClient {
     sql: string,
     params?: readonly unknown[],
   ): Promise<TenantQueryResult<TRow>>;
+  withSavepoint?<R>(name: string, fn: () => Promise<R>): Promise<R>;
 }
 
 interface ActiveTenantTransactionScope {
@@ -368,6 +369,49 @@ export abstract class TenantScopedRepository {
             () => undefined,
           );
           return next;
+        },
+        withSavepoint: async <R>(
+          name: string,
+          fn: () => Promise<R>,
+        ): Promise<R> => {
+          if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,60}$/.test(name)) {
+            throw new Error(
+              `TENANCY_INVALID_SAVEPOINT_NAME: Invalid savepoint identifier "${name}".`,
+            );
+          }
+          await wrappedTx.query(`SAVEPOINT ${name}`);
+          try {
+            const result = await fn();
+            if (queuedQueryError) {
+              throw buildAbortedTransactionError(queuedQueryError);
+            }
+            await wrappedTx.query(`RELEASE SAVEPOINT ${name}`);
+            return result;
+          } catch (spErr) {
+            const recover = async (): Promise<void> => {
+              await rawClient.query(`ROLLBACK TO SAVEPOINT ${name}`);
+              await rawClient.query(`RELEASE SAVEPOINT ${name}`);
+              queuedQueryError = null;
+            };
+            const recovery = queryQueue.then(recover, recover);
+            queryQueue = recovery.then(
+              () => undefined,
+              () => undefined,
+            );
+            try {
+              await recovery;
+            } catch (rollbackErr) {
+              const sanitizedRollbackErr = sanitizePostgresError(
+                rollbackErr,
+                'savepoint_rollback',
+              );
+              if (!queuedQueryError) {
+                queuedQueryError = sanitizedRollbackErr;
+              }
+              throw sanitizedRollbackErr;
+            }
+            throw spErr;
+          }
         },
       };
 

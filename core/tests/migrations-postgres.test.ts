@@ -3908,10 +3908,13 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
                 (table_name = 'evidence_artifacts' AND column_name = 'purpose')
                 OR (table_name = 'documents' AND column_name = 'primary_enquiry_id')
                 OR (table_name = 'email_outbox' AND column_name IN ('matter_id', 'quote_id', 'enquiry_id'))
+                OR (table_name = 'communication_chases' AND column_name IN ('consecutive_failure_count', 'last_error_code'))
               )
             ORDER BY table_name ASC, column_name ASC`,
         );
         expect(colsRes.rows).toEqual([
+          { table_name: 'communication_chases', column_name: 'consecutive_failure_count' },
+          { table_name: 'communication_chases', column_name: 'last_error_code' },
           { table_name: 'documents', column_name: 'primary_enquiry_id' },
           { table_name: 'email_outbox', column_name: 'enquiry_id' },
           { table_name: 'email_outbox', column_name: 'matter_id' },
@@ -3952,6 +3955,21 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
           nextActionAt: '2026-12-10T08:00:00.000Z',
         });
         expect(dupEvt.alreadyExecuted).toBe(true);
+
+        // Verify R837 needs_owner constraint & uq_communication_chases_active covering ('active', 'needs_owner')
+        const unassigned = await chasingRepo.markChaseNeedsOwnerInTx(tx, ctxAlpha, {
+          chaseId: created.chase.id,
+          stepIndex: 3,
+          executedAt: '2026-12-17T08:00:00.000Z',
+        });
+        expect(unassigned.chase.status).toBe('needs_owner');
+        expect(unassigned.event?.outcome).toBe('escalation_unassigned');
+        await chasingRepo.stopActiveChasesForMatterInTx(tx, ctxAlpha, {
+          matterId: 'M-000001',
+          reason: 'matter_closed',
+          stoppedByPersonId: 'P-000002',
+          stoppedAt: '2026-12-18T08:00:00.000Z',
+        });
         return created.chase;
       });
       expect(startedAlpha.id).toMatch(/^CHS-/);
