@@ -2538,7 +2538,6 @@ export function MatterProfileClient({
                         try {
                           const res = await stopCommunicationChaseAction({
                             chaseId: activeEngagementChase.chase.id,
-                            reason: 'manual_stop',
                           });
                           if (isActionDenied(res) || !res.ok) {
                             showToast(

@@ -38753,7 +38753,6 @@ export async function sendEngagementLetterRecord(
 export async function stopCommunicationChaseRecord(
   input: {
     chaseId: string;
-    reason?: CommunicationChaseStoppedReason;
   },
   byId?: string,
   options?: {
@@ -38779,21 +38778,23 @@ export async function stopCommunicationChaseRecord(
       return registerServiceFailure('VALIDATION_ERROR', 'Chase ID is required.');
     }
 
+    const opaqueNotFound = () =>
+      registerServiceFailure('NOT_FOUND', 'Communication chase was not found.');
+
     const chasingRepo = getChasingRepository();
     const chasePre = await chasingRepo.getChaseById(ctx, cleanChaseId);
     if (!chasePre) {
-      return registerServiceFailure('NOT_FOUND', 'Communication chase was not found.');
+      return opaqueNotFound();
     }
 
+    // R836: Subject access and kind-specific permission checks both collapse to identical
+    // opaque NOT_FOUND so chase existence or entityKind is never revealed to unauthorised callers.
     if (
       chasePre.entityKind === 'engagement_letter' ||
       chasePre.entityKind === 'money_on_account'
     ) {
       if (!permSet.permissions.has('matter:edit')) {
-        return registerServiceFailure(
-          'FORBIDDEN',
-          'Missing permission "matter:edit" to stop this chase.',
-        );
+        return opaqueNotFound();
       }
       const matter = await getMatterRepository().getMatterById<Matter>(
         ctx,
@@ -38808,17 +38809,11 @@ export async function stopCommunicationChaseRecord(
           config: { rbac: rbacConfig },
         })
       ) {
-        return registerServiceFailure(
-          'NOT_FOUND',
-          'Communication chase was not found.',
-        );
+        return opaqueNotFound();
       }
     } else if (chasePre.entityKind === 'quote') {
       if (!permSet.permissions.has('quote:edit')) {
-        return registerServiceFailure(
-          'FORBIDDEN',
-          'Missing permission "quote:edit" to stop quote chasing.',
-        );
+        return opaqueNotFound();
       }
       const hasRestrictedMatterAccess = permSet.permissions.has(
         'matter:restricted:access',
@@ -38830,17 +38825,27 @@ export async function stopCommunicationChaseRecord(
         { hasRestrictedMatterAccess },
       );
       if (quoteHidden) {
-        return registerServiceFailure(
-          'NOT_FOUND',
-          'Communication chase was not found.',
-        );
+        return opaqueNotFound();
       }
+    } else {
+      return opaqueNotFound();
     }
 
-    const stopReason: CommunicationChaseStoppedReason =
-      input.reason ?? 'manual_stop';
+    // R836: User-initiated stops always store 'manual_stop'; already-stopped chases are idempotent no-ops.
+    const stopReason: CommunicationChaseStoppedReason = 'manual_stop';
     const stoppedAt = new Date().toISOString();
     const stopped = await chasingRepo.withTenantTransaction(ctx, async (tx) => {
+      const lockRes = await tx.query<{ status: string }>(
+        `SELECT status
+           FROM public.communication_chases
+          WHERE tenant_id = $1
+            AND id = $2
+          LIMIT 1
+          FOR UPDATE`,
+        [ctx.tenantId, chasePre.id],
+      );
+      const lockedStatus = lockRes.rows[0]?.status;
+      if (!lockedStatus) return null;
       const res = await chasingRepo.stopChaseByIdInTx(tx, ctx, {
         chaseId: chasePre.id,
         reason: stopReason,
@@ -38848,23 +38853,25 @@ export async function stopCommunicationChaseRecord(
         stoppedAt,
       });
       if (!res) return null;
-      await appendTenantAuditEntries(ctx, [
-        {
-          recordType: 'communication_chase',
-          recordId: res.id,
-          action: 'update',
-          field: 'Communication chase stopped',
-          oldValue: chasePre.status,
-          newValue: `${res.status} (${res.stoppedReason ?? stopReason})`,
-          byId: actor.id,
-          at: stoppedAt,
-        },
-      ]);
+      if (lockedStatus === 'active' || lockedStatus === 'needs_owner') {
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'communication_chase',
+            recordId: res.id,
+            action: 'update',
+            field: 'Communication chase stopped',
+            oldValue: lockedStatus,
+            newValue: `${res.status} (${res.stoppedReason ?? stopReason})`,
+            byId: actor.id,
+            at: stoppedAt,
+          },
+        ]);
+      }
       return res;
     });
 
     if (!stopped) {
-      return registerServiceFailure('NOT_FOUND', 'Communication chase was not found.');
+      return opaqueNotFound();
     }
     return { ok: true, chase: stopped };
   } catch (err) {

@@ -8,7 +8,6 @@ import {
   type CddConfiguration,
   type ChasingConfiguration,
   type ClientRateOverrideClientType,
-  type CommunicationChaseStoppedReason,
   type EmailOutboxStatus,
   type EngagementConfiguration,
   type GlobalSearchEntityType,
@@ -2316,12 +2315,15 @@ export async function sendEngagementLetterAction(input: {
 
 export async function stopCommunicationChaseAction(input: {
   chaseId: string;
-  reason?: CommunicationChaseStoppedReason;
 }) {
   return guardedAction('stopCommunicationChaseAction', async (actor) => {
-    const res = await stopCommunicationChaseRecord(input, actor.personId, {
-      tenantCtx: actor.tenantContext,
-    });
+    const res = await stopCommunicationChaseRecord(
+      { chaseId: input.chaseId },
+      actor.personId,
+      {
+        tenantCtx: actor.tenantContext,
+      },
+    );
     revalidateAll();
     return res;
   });

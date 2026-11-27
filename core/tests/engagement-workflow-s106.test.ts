@@ -1100,8 +1100,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
 
     const stopB1 = await runAsActionActor(
       'P-000001',
-      () =>
-        stopCommunicationChaseAction({ chaseId: chaseB1, reason: 'manual_stop' }),
+      () => stopCommunicationChaseAction({ chaseId: chaseB1 }),
       { roles: ['partner'], mfaVerified: false },
     );
     expect(stopB1.ok).toBe(true);
@@ -1751,7 +1750,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         'P-000001',
         () =>
           stopCommunicationChaseRecord(
-            { chaseId: alphaSend.chase!.id, reason: 'manual_stop' },
+            { chaseId: alphaSend.chase!.id },
             'P-000001',
             { tenantCtx: ctxBravo, tenantConfig: bravoCfg },
           ),
@@ -2646,4 +2645,162 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       await direct.end();
     }
   }, 60_000);
+
+  it('10. R836: stopCommunicationChase ignores forged reasons, is idempotent on repeat stop, and returns uniform NOT_FOUND for quote-only callers', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000001');
+    const partyRepo = new TenantPartyRepository();
+    const auditRepo = new TenantAuditRepository();
+    const chasingRepo = new TenantChasingRepository();
+
+    const chaseEnabledCfg = loadAndValidateTenantConfig(
+      {
+        ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+        tenantId: 'not-a-law-firm',
+        integrations: {
+          ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+            .integrations ?? {}),
+          email: { provider: 'disabled' },
+        },
+        chasing: {
+          engagementLetter: {
+            enabled: true,
+            sendEmails: true,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          quote: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+          moneyOnAccount: {
+            enabled: false,
+            sendEmails: false,
+            firstChaseDays: 7,
+            secondChaseDays: 14,
+            escalateTaskDays: 21,
+          },
+        },
+      },
+      { tenantId: 'not-a-law-firm', environment: 'test' },
+      'test',
+    );
+
+    let matterId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const m = await saveMatterRecord(
+          {
+            title: 'R836 Chase Stop Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_tribunal_claims',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'R836 Client'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(m.errors).toBeUndefined();
+        matterId = m.matter!.id;
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const sent = await runAsActionActor(
+      'P-000001',
+      () =>
+        sendEngagementLetterRecord(
+          { matterId, recipientEmail: 'r836@example.test' },
+          'P-000001',
+          { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(sent.ok).toBe(true);
+    if (!sent.ok || !sent.chase) return;
+    const realChaseId = sent.chase.id;
+
+    // 1. User holding quote:edit ONLY (enquiries_coordinator without matter:edit) gets the exact same
+    // opaque NOT_FOUND for a real engagement_letter chase ID as for a made-up chase ID
+    const people = await partyRepo.listAllPeople<Person>(ctx, {
+      employeesAndLeaversOnly: true,
+    });
+    const quoteOnlyUser = people.find(
+      (p: Person) =>
+        p.isEmployee &&
+        p.roles?.includes('enquiries_coordinator') &&
+        !p.roles?.includes('fee_earner') &&
+        !p.roles?.includes('partner') &&
+        !p.roles?.includes('legal_secretary'),
+    );
+    expect(quoteOnlyUser).toBeDefined();
+    if (!quoteOnlyUser) return;
+
+    const realIdRefusal = await runAsActionActor(
+      quoteOnlyUser.id,
+      () => stopCommunicationChaseAction({ chaseId: realChaseId }),
+      { roles: ['enquiries_coordinator'], mfaVerified: false },
+    );
+    const fakeIdRefusal = await runAsActionActor(
+      quoteOnlyUser.id,
+      () => stopCommunicationChaseAction({ chaseId: 'CHS-DOES-NOT-EXIST' }),
+      { roles: ['enquiries_coordinator'], mfaVerified: false },
+    );
+    expect(realIdRefusal).toEqual(fakeIdRefusal);
+    expect(realIdRefusal).toMatchObject({
+      ok: false,
+      code: 'NOT_FOUND',
+      message: 'Communication chase was not found.',
+    });
+
+    // Chase remains active after quote-only probe
+    const stillActive = await chasingRepo.getChaseById(ctx, realChaseId);
+    expect(stillActive?.status).toBe('active');
+
+    // 2. Forged runtime reason='signed' is dropped; stoppedReason is forced to 'manual_stop'
+    const firstStop = await runAsActionActor(
+      'P-000001',
+      () =>
+        stopCommunicationChaseAction({
+          chaseId: realChaseId,
+          reason: 'signed',
+        } as unknown as { chaseId: string }),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(firstStop.ok).toBe(true);
+    if (!firstStop.ok) return;
+    expect(firstStop.chase.status).toBe('stopped');
+    expect(firstStop.chase.stoppedReason).toBe('manual_stop');
+    expect(firstStop.chase.nextActionAt).toBeNull();
+
+    // 3. Second stop returns success with ZERO extra audit entries
+    const secondStop = await runAsActionActor(
+      'P-000001',
+      () => stopCommunicationChaseAction({ chaseId: realChaseId }),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(secondStop.ok).toBe(true);
+    if (!secondStop.ok) return;
+    expect(secondStop.chase.status).toBe('stopped');
+    expect(secondStop.chase.stoppedReason).toBe('manual_stop');
+
+    const chaseAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'communication_chase',
+      realChaseId,
+      { limit: 100 },
+    );
+    expect(
+      chaseAudits.filter((a) => a.field === 'Communication chase stopped'),
+    ).toHaveLength(1);
+  }, 45_000);
 });
