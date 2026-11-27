@@ -3371,4 +3371,335 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       warnSpy.mockRestore();
     }
   }, 45_000);
+
+  it('13. R840 (Rule 9): rejects forged tenant claims across all 7 S1-06 surfaces and hides restricted/ethical-wall engagement_signed copies with opaque 404', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctxP1 = testTenantCtx('P-000001');
+    const matterRepo = new TenantMatterRepository();
+    const engRepo = new TenantEngagementRepository();
+    const chasingRepo = new TenantChasingRepository();
+    const auditRepo = new TenantAuditRepository();
+
+    const chaseEnabledRaw = {
+      ...(notALawFirmBaseConfig as unknown as Record<string, unknown>),
+      tenantId: 'not-a-law-firm',
+      integrations: {
+        ...((notALawFirmBaseConfig as unknown as { integrations: Record<string, unknown> })
+          .integrations ?? {}),
+        email: { provider: 'disabled' },
+      },
+      chasing: {
+        engagementLetter: {
+          enabled: true,
+          sendEmails: true,
+          firstChaseDays: 7,
+          secondChaseDays: 14,
+          escalateTaskDays: 21,
+        },
+        quote: {
+          enabled: false,
+          sendEmails: false,
+          firstChaseDays: 7,
+          secondChaseDays: 14,
+          escalateTaskDays: 21,
+        },
+        moneyOnAccount: {
+          enabled: false,
+          sendEmails: false,
+          firstChaseDays: 7,
+          secondChaseDays: 14,
+          escalateTaskDays: 21,
+        },
+      },
+    };
+    setActiveTenantConfigForTesting(chaseEnabledRaw, {});
+
+    try {
+      // Seed accessible matter + Client Care dispatch + active chase + signed artifact,
+      // closed declined enquiry, staff matter + ethical-wall matter
+      let openMatterId = '';
+      let staffMatterId = '';
+      let wallMatterId = '';
+      await runAsActionActor(
+        'P-000001',
+        async () => {
+          for (const [key, title] of [
+            ['open', 'R840 Open Matter'],
+            ['staff', 'R840 Staff Matter'],
+            ['wall', 'R840 Ethical Wall Matter'],
+          ] as const) {
+            const m = await saveMatterRecord(
+              {
+                title,
+                clientId: 'O-000001',
+                practiceAreaId: 'work_type.employment_and_hr',
+                workTypeSubcategoryId: 'work_type.employment_and_hr_employment_contracts',
+                responsiblePartnerId: 'P-000001',
+                supervisingPartnerId: 'P-000001',
+                leadFeeEarnerId: 'P-000001',
+                teamMemberIds: ['P-000001'],
+                conflictCheckRecord: makeConflictRecord('P-000001', title),
+                riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+              },
+              { byId: 'P-000001', saveMode: 'submit_cleared' },
+            );
+            expect(m.errors).toBeUndefined();
+            if (key === 'open') openMatterId = m.matter!.id;
+            else if (key === 'staff') staffMatterId = m.matter!.id;
+            else wallMatterId = m.matter!.id;
+          }
+        },
+        { roles: ['partner'], mfaVerified: false },
+      );
+
+      // Mark staffMatterId as isStaffMatter and wallMatterId as hasEthicalWall (insider P-000001 only)
+      const staffPre = (await matterRepo.getMatterById<Matter>(ctxP1, staffMatterId, {
+        includeRestricted: true,
+      }))!;
+      const wallPre = (await matterRepo.getMatterById<Matter>(ctxP1, wallMatterId, {
+        includeRestricted: true,
+      }))!;
+      await matterRepo.withTenantTransaction(ctxP1, async () => {
+        await matterRepo.putMatter(
+          ctxP1,
+          {
+            ...staffPre,
+            isStaffMatter: true,
+            restrictedAccessUserIds: ['P-000001'],
+          },
+          {
+            expectedRowVersion: null,
+            sqlRestrictedAccessUserIds: ['P-000001'],
+          },
+        );
+        await matterRepo.putMatter(
+          ctxP1,
+          {
+            ...wallPre,
+            hasEthicalWall: true,
+            restrictedAccessUserIds: ['P-000001'],
+          },
+          {
+            expectedRowVersion: null,
+            sqlRestrictedAccessUserIds: ['P-000001'],
+          },
+        );
+      });
+
+      const sendOpen = await runAsActionActor(
+        'P-000001',
+        () =>
+          sendEngagementLetterAction({
+            matterId: openMatterId,
+            recipientEmail: 'r840-open@example.test',
+          }),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(sendOpen.ok).toBe(true);
+      if (!sendOpen.ok || !sendOpen.chase) return;
+      const openChaseId = sendOpen.chase.id;
+      const openOutboxId = sendOpen.outboxRecord.id;
+
+      const openSignedUp = await runAsActionActor(
+        'P-000001',
+        () => createSignedEngagementPdfArtifact(openMatterId, 'P-000001', ctxP1),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(openSignedUp.ok).toBe(true);
+      if (!openSignedUp.ok) return;
+
+      const enqSave = await runAsActionActor(
+        'P-000002',
+        () =>
+          saveEnquiryRecord(
+            {
+              firstName: 'R840',
+              lastName: 'ForgedClaim',
+              email: 'r840-enq@example.test',
+              phone: '029 2000 0840',
+              channelId: 'enquiry_channel.phone',
+              practiceAreaId: 'work_type.employment_and_hr',
+              summary: 'R840 enquiry',
+              notes: 'Notes for R840 closed enquiry.',
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000002' },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(enqSave.errors).toBeUndefined();
+      const declinedEnquiryId = enqSave.enquiry!.id;
+      const closedEnq = await runAsActionActor(
+        'P-000002',
+        () =>
+          closeEnquiryRecord(
+            declinedEnquiryId,
+            {
+              targetStatus: 'Declined',
+              closeReasonId: vid('enquiry_close_reason', 'Outside our expertise'),
+              closeNotes: 'Not within current expertise.',
+            },
+            'P-000002',
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(closedEnq.error).toBeUndefined();
+
+      // 1. Forged tenant claim (session claims tenant-bravo against active not-a-law-firm IDs)
+      //    must fail closed across ALL 7 S1-06 surfaces without modifying active tenant rows
+      const expectForgedRefused = async (fn: () => Promise<unknown>) => {
+        await expect(
+          runAsActionActor('P-000001', fn, {
+            tenantId: 'tenant-bravo',
+            roles: ['partner', 'admin'],
+            mfaVerified: true,
+          }),
+        ).rejects.toThrow(/TENANCY_FORGERY_DETECTED/);
+      };
+
+      await expectForgedRefused(() =>
+        sendEngagementLetterAction({
+          matterId: openMatterId,
+          recipientEmail: 'forged@example.test',
+        }),
+      );
+      await expectForgedRefused(() =>
+        recordEngagementLetterSignedAction({
+          matterId: openMatterId,
+          evidenceArtifactId: openSignedUp.artifact.id,
+          status: 'Signed & returned',
+        }),
+      );
+      await expectForgedRefused(() =>
+        stopCommunicationChaseAction({ chaseId: openChaseId }),
+      );
+      await expectForgedRefused(() =>
+        sendNonEngagementLetterAction({ enquiryId: declinedEnquiryId }),
+      );
+      await expectForgedRefused(() =>
+        listOutboxMessagesForAdminAction({ limit: 50 }),
+      );
+      await expectForgedRefused(() =>
+        getOutboxMessageForAdminAction({ outboxId: openOutboxId }),
+      );
+      await expectForgedRefused(() =>
+        outboxAttachmentRoute.GET(
+          new Request(
+            `http://localhost/api/admin/outbox/${encodeURIComponent(openOutboxId)}/attachments/0`,
+            { method: 'GET' },
+          ),
+          {
+            params: Promise.resolve({
+              id: openOutboxId,
+              ordinal: '0',
+            }),
+          },
+        ),
+      );
+
+      // Verify zero writes landed in active tenant from any of the 7 forged calls
+      expect(await engRepo.listDispatchesForMatter(ctxP1, openMatterId)).toHaveLength(1);
+      expect(
+        await engRepo.listDispatchesForEnquiry(ctxP1, declinedEnquiryId),
+      ).toHaveLength(0);
+      const chaseUnchanged = await chasingRepo.getChaseById(ctxP1, openChaseId);
+      expect(chaseUnchanged?.status).toBe('active');
+      const matterUnchanged = await matterRepo.getMatterById<Matter>(ctxP1, openMatterId, {
+        includeRestricted: true,
+      });
+      expect(matterUnchanged?.engagementLetterSignedAt).toBeNull();
+      const outboxAudits = await auditRepo.listAuditEntriesForRecord(
+        ctxP1,
+        'email_outbox',
+        openOutboxId,
+        { limit: 50 },
+      );
+      expect(outboxAudits).toHaveLength(0);
+
+      // 2. Staff-matter AND ethical-wall engagement_signed downloads by document:view users NOT in
+      //    restrictedAccessUserIds must return the exact same opaque 404 as a missing artifact
+      const staffSignedUp = await runAsActionActor(
+        'P-000001',
+        () => createSignedEngagementPdfArtifact(staffMatterId, 'P-000001', ctxP1),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      const wallSignedUp = await runAsActionActor(
+        'P-000001',
+        () => createSignedEngagementPdfArtifact(wallMatterId, 'P-000001', ctxP1),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(staffSignedUp.ok).toBe(true);
+      expect(wallSignedUp.ok).toBe(true);
+      if (!staffSignedUp.ok || !wallSignedUp.ok) return;
+
+      const storage = getDocumentStorage(getActiveTenantConfiguration());
+      const missingBaselineToken = await storage.issueScopedDownloadToken(ctxP1, {
+        blobKey: staffSignedUp.artifact.blobKey,
+        fileName: 'missing.pdf',
+        documentId: 'EVD-MISSING-R840',
+      });
+      const baselineRes = await runAsActionActor(
+        'P-000001',
+        () =>
+          evidenceDownloadRoute.GET(
+            new Request(
+              `http://localhost/api/evidence/download?token=${encodeURIComponent(missingBaselineToken.token)}`,
+              { method: 'GET' },
+            ),
+          ),
+        { roles: ['partner'], mfaVerified: false },
+      );
+      expect(baselineRes.status).toBe(404);
+      const baselineBody = await baselineRes.json();
+
+      // Insider P-000001 downloads both cleanly
+      for (const dlUrl of [staffSignedUp.downloadUrl, wallSignedUp.downloadUrl]) {
+        const insiderDl = await runAsActionActor(
+          'P-000001',
+          () =>
+            evidenceDownloadRoute.GET(
+              new Request(`http://localhost${dlUrl}`, { method: 'GET' }),
+            ),
+          { roles: ['partner'], mfaVerified: false },
+        );
+        expect(insiderDl.status).toBe(200);
+      }
+
+      // Outsiders holding document:view (P-000009 finance and P-000006 fee_earner) are NOT on restrictedAccessUserIds
+      for (const [outsiderId, outsiderRole] of [
+        ['P-000009', 'finance'],
+        ['P-000006', 'fee_earner'],
+      ] as const) {
+        const outsiderCtx = makeVerifiedTenantCtx(
+          'not-a-law-firm',
+          outsiderId,
+          [outsiderRole],
+          false,
+        );
+        for (const art of [staffSignedUp.artifact, wallSignedUp.artifact]) {
+          const outsiderToken = await storage.issueScopedDownloadToken(outsiderCtx, {
+            blobKey: art.blobKey,
+            fileName: art.fileName,
+            documentId: art.id,
+          });
+          const res = await runAsActionActor(
+            outsiderId,
+            () =>
+              evidenceDownloadRoute.GET(
+                new Request(
+                  `http://localhost/api/evidence/download?token=${encodeURIComponent(outsiderToken.token)}`,
+                  { method: 'GET' },
+                ),
+              ),
+            { roles: [outsiderRole], mfaVerified: false },
+          );
+          expect(res.status).toBe(404);
+          expect(await res.json()).toEqual(baselineBody);
+        }
+      }
+    } finally {
+      setTestActorSession(null);
+      setActiveTenantConfigForTesting(null);
+    }
+  }, 60_000);
 });
