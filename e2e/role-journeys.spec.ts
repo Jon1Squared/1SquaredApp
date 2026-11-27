@@ -2237,10 +2237,18 @@ test.describe.serial('S1-08: Joined Stage 1 journey — Enquiry -> Quote -> CDD 
       await expect(fePage.getByTestId('moa-requests-list')).toContainText('£500.00', {
         timeout: 20_000,
       });
-      const reqText = (await fePage.getByTestId('moa-requests-list').textContent()) ?? '';
-      moaPaymentRef = reqText.match(/\b[A-Z0-9]{2,6}-[A-Z0-9-]+-\d{2}\b/)?.[0] ?? '';
-      expect(moaPaymentRef).toBeTruthy();
+      moaPaymentRef = (
+        (await fePage
+          .getByTestId('moa-requests-list')
+          .locator('.worklist-title strong')
+          .first()
+          .textContent()) ?? ''
+      ).trim();
+      expect(moaPaymentRef).toMatch(/^[A-Z0-9]{2,6}-[A-Z0-9-]+-\d{2}$/);
       expect(moaPaymentRef.length).toBeLessThanOrEqual(18);
+      await expect(fePage.getByTestId('moa-requests-list')).toContainText('**-**-00');
+      await expect(fePage.getByTestId('moa-requests-list')).toContainText('******00');
+      await expect(fePage.getByTestId('moa-requests-list')).not.toContainText('00-00-00');
       expect(feErrors).toEqual([]);
     } finally {
       await feContext.close();
