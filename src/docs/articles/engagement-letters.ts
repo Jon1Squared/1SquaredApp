@@ -39,8 +39,10 @@ If your firm has turned on engagement reminders, sending a Client Care letter st
 2. **Second reminder (14 days after sending by default):** Queues a second reminder email if the letter is still unsigned.
 3. **Fee-earner escalation task (21 days after sending by default):** Creates an open follow-up task assigned to the matter’s active fee earner (or supervisor, partner, or team lead permitted to access the matter) so the team can contact the client directly. If no authorised owner is available — for example, on a restricted matter where permitted staff are unavailable — the panel displays **Follow-up needs an owner** and records an audit entry instead of disclosing the matter to an unauthorised person.
 
-- **Automatic stop:** Uploading and recording a signed engagement copy, or closing or archiving the matter, stops active reminders automatically.
-- **Manual stop:** While reminders remain active, authorised users can click **Stop chasing** on the **Client Care & engagement letter** panel to halt further reminders at any time.
+- **When follow-up needs an owner:** If no fee earner or partner permitted to access the matter is available to receive the escalation task, the panel displays **Follow-up needs an owner**. Add an authorised fee earner or partner to the matter and choose **Retry follow-up** to create the escalation task, or choose **Stop chasing** if reminders are no longer required.
+- **When follow-up stops after repeated errors:** If automated sending or task creation fails repeatedly across separate days, reminders pause and the panel displays **Follow-up stopped after repeated errors**. Once the underlying issue is fixed, choose **Retry follow-up** to clear the error count and resume the schedule, or send a fresh Client Care letter.
+- **Automatic stop:** Uploading and recording a signed engagement copy, or closing, archiving, or deleting the matter, stops active reminders automatically.
+- **Manual stop:** While reminders remain active or awaiting an owner, authorised users can click **Stop chasing** on the **Client Care & engagement letter** panel to halt further reminders at any time.
 - **Re-sending starts a fresh schedule:** Sending a fresh Client Care letter later starts a clean reminder cycle for the new dispatch without colliding with earlier stopped reminders.
 
 ## 4. Uploading a signed copy to unlock the opening gate
