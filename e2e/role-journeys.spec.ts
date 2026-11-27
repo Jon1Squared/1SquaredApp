@@ -1693,7 +1693,8 @@ test.describe.serial('S1-06: Client Care dispatch, Admin Email Outbox viewer, si
       await fePage
         .getByTestId('engagement-intro-note-input')
         .fill('Please find enclosed your Client Care letter.');
-      await fePage.getByTestId('send-client-care-btn').click();
+      // R848: rapid double-click produces a single idempotent dispatch and outbox row
+      await fePage.getByTestId('send-client-care-btn').dblclick();
 
       await expect(engPanel).toContainText('Sent', { timeout: 20_000 });
       await expect(engPanel).toContainText(uniqueEmail, { timeout: 15_000 });
@@ -1718,9 +1719,9 @@ test.describe.serial('S1-06: Client Care dispatch, Admin Email Outbox viewer, si
         { timeout: 15_000 },
       );
 
-      const targetRow = adminPage
-        .locator('tr', { hasText: uniqueEmail })
-        .first();
+      const matchingRows = adminPage.locator('tr', { hasText: uniqueEmail });
+      await expect(matchingRows).toHaveCount(1);
+      const targetRow = matchingRows.first();
       await expect(targetRow).toContainText('pending');
       await targetRow.locator('[data-testid^="inspect-outbox-btn-"]').click();
 

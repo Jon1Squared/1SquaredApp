@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { createSendIdempotencyController } from './sendIdempotency';
 import {
   AlertCircle,
   Calendar,
@@ -493,6 +494,18 @@ export function MatterProfileClient({
   const [engagementSignedNote, setEngagementSignedNote] = useState('');
   const [engagementSelectedFile, setEngagementSelectedFile] = useState<File | null>(null);
   const [engagementBusy, setEngagementBusy] = useState(false);
+  const engagementSendControllerRef = useRef<ReturnType<
+    typeof createSendIdempotencyController
+  > | null>(null);
+  const getEngagementSendController = () => {
+    if (!engagementSendControllerRef.current) {
+      engagementSendControllerRef.current = createSendIdempotencyController();
+    }
+    return engagementSendControllerRef.current;
+  };
+  useEffect(() => {
+    engagementSendControllerRef.current?.reset();
+  }, [matter.id]);
   const activeEngagementChase = useMemo(
     () =>
       engagementChases.find(
@@ -2353,33 +2366,38 @@ export function MatterProfileClient({
                         data-testid="send-client-care-btn"
                         disabled={engagementBusy || !engagementRecipientEmail.trim()}
                         onClick={async () => {
-                          setEngagementBusy(true);
-                          try {
-                            const res = await sendEngagementLetterAction({
-                              matterId: matter.id,
-                              recipientEmail: engagementRecipientEmail.trim(),
-                              recipientName: engagementRecipientName.trim() || undefined,
-                              customIntroNote: engagementIntroNote.trim() || undefined,
-                            });
-                            if (isActionDenied(res) || !res.ok) {
+                          const sendCtrl = getEngagementSendController();
+                          await sendCtrl.runGuarded(async (idempotencyKey) => {
+                            setEngagementBusy(true);
+                            try {
+                              const res = await sendEngagementLetterAction({
+                                matterId: matter.id,
+                                recipientEmail: engagementRecipientEmail.trim(),
+                                recipientName: engagementRecipientName.trim() || undefined,
+                                customIntroNote: engagementIntroNote.trim() || undefined,
+                                idempotencyKey,
+                              });
+                              if (isActionDenied(res) || !res.ok) {
+                                showToast(
+                                  formatOpeningGateActionError(
+                                    res,
+                                    'Could not send Client Care letter.',
+                                  ),
+                                );
+                                return;
+                              }
+                              sendCtrl.reset();
                               showToast(
-                                formatOpeningGateActionError(
-                                  res,
-                                  'Could not send Client Care letter.',
-                                ),
+                                res.emailProviderDisabled
+                                  ? 'Client Care letter generated and queued in Email Outbox.'
+                                  : 'Client Care letter sent.',
                               );
-                              return;
+                              setEngagementIntroNote('');
+                              router.refresh();
+                            } finally {
+                              setEngagementBusy(false);
                             }
-                            showToast(
-                              res.emailProviderDisabled
-                                ? 'Client Care letter generated and queued in Email Outbox.'
-                                : 'Client Care letter sent.',
-                            );
-                            setEngagementIntroNote('');
-                            router.refresh();
-                          } finally {
-                            setEngagementBusy(false);
-                          }
+                          });
                         }}
                       >
                         Send Client Care letter

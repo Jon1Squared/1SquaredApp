@@ -38208,6 +38208,40 @@ function buildEngagementEmailBodies(params: {
   return { htmlBody, textBody };
 }
 
+async function deleteOrphanDispatchBlobBestEffort(
+  storage: DocumentStorageProvider,
+  ctx: TenantContext,
+  ref: Parameters<DocumentStorageProvider['deleteObject']>[1] | null | undefined,
+  meta: {
+    readonly subjectKind: 'matter' | 'enquiry';
+    readonly subjectId: string;
+    readonly documentId: string;
+  },
+): Promise<void> {
+  if (!ref) return;
+  try {
+    await storage.deleteObject(ctx, ref);
+  } catch (err) {
+    const errorCode =
+      err instanceof Error
+        ? (err as { code?: unknown }).code
+          ? String((err as { code?: unknown }).code)
+          : err.name
+        : 'ORPHAN_BLOB_DELETE_FAILED';
+    console.warn(
+      JSON.stringify({
+        event: 'engagement.orphan_blob_delete_failed',
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+        subjectKind: meta.subjectKind,
+        subjectId: meta.subjectId,
+        documentId: meta.documentId,
+        errorCode: errorCode.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64),
+      }),
+    );
+  }
+}
+
 export async function sendEngagementLetterRecord(
   input: {
     matterId: string;
@@ -38581,6 +38615,8 @@ export async function sendEngagementLetterRecord(
       signatureInstruction: effectiveEngagement.clientCareSignatureInstruction,
     });
 
+    let uploadedDispatchBlob: Parameters<DocumentStorageProvider['deleteObject']>[1] | null =
+      null;
     if (!cleanSourceDocId) {
       const generatedAtPre = new Date().toISOString();
       documentId = `DOC-CCL-${randomUUID().slice(0, 12).toUpperCase()}`;
@@ -38591,6 +38627,7 @@ export async function sendEngagementLetterRecord(
         contentType: 'application/pdf',
         bytes: pdfBytes,
       });
+      uploadedDispatchBlob = storedBlob;
       const sha256 = createHash('sha256').update(pdfBytes).digest('hex');
 
       newlyGeneratedDoc = {
@@ -38624,10 +38661,12 @@ export async function sendEngagementLetterRecord(
 
     const intakeCheckRepo = getIntakeCheckRepository();
 
-    const txResult = await matterRepo.withTenantTransaction(ctx, async (tx) => {
-      await tx.query(
-        'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
-        [ctx.tenantId, matterPre.id],
+    let txResult;
+    try {
+      txResult = await matterRepo.withTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM public.matters WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, matterPre.id],
       );
       const lockedMatter = await matterRepo.getMatterById<Matter>(
         ctx,
@@ -38829,7 +38868,23 @@ export async function sendEngagementLetterRecord(
         outboxRecord: queued.record,
         documentId,
       };
-    });
+      });
+    } catch (txErr) {
+      await deleteOrphanDispatchBlobBestEffort(storage, ctx, uploadedDispatchBlob, {
+        subjectKind: 'matter',
+        subjectId: matterPre.id,
+        documentId,
+      });
+      throw txErr;
+    }
+
+    if (!txResult.ok || txResult.earlyReturn) {
+      await deleteOrphanDispatchBlobBestEffort(storage, ctx, uploadedDispatchBlob, {
+        subjectKind: 'matter',
+        subjectId: matterPre.id,
+        documentId,
+      });
+    }
 
     if (!txResult.ok) {
       return txResult;
@@ -39516,11 +39571,13 @@ export async function sendNonEngagementLetterRecord(
     const sysTplId = `TPL-SYS-NON-ENG-${sanitizeTemplateIdSuffix(ctx.tenantId)}`;
     const sysVerId = `${sysTplId}-V1`;
 
-    const txResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
-      await tx.query(
-        'SELECT id FROM public.enquiries WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
-        [ctx.tenantId, enquiryPre.id],
-      );
+    let txResult;
+    try {
+      txResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+        await tx.query(
+          'SELECT id FROM public.enquiries WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+          [ctx.tenantId, enquiryPre.id],
+        );
 
       const existingInTx = await engagementRepo.getDispatchByIdempotencyKeyInTx(
         tx,
@@ -39684,7 +39741,23 @@ export async function sendNonEngagementLetterRecord(
         documentId: docId,
         closedTaskIds,
       };
-    });
+      });
+    } catch (txErr) {
+      await deleteOrphanDispatchBlobBestEffort(storage, ctx, storedBlob, {
+        subjectKind: 'enquiry',
+        subjectId: enquiryPre.id,
+        documentId: docId,
+      });
+      throw txErr;
+    }
+
+    if (txResult.earlyReturn) {
+      await deleteOrphanDispatchBlobBestEffort(storage, ctx, storedBlob, {
+        subjectKind: 'enquiry',
+        subjectId: enquiryPre.id,
+        documentId: docId,
+      });
+    }
 
     let finalOutboxRecord = txResult.outboxRecord;
     if (

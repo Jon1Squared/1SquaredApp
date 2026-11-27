@@ -2492,7 +2492,42 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         matterAuditsSeq.filter((a) => a.field === 'Engagement letter sent'),
       ).toHaveLength(1);
 
-      // 2. Concurrent race idempotency on Client Care send (in-TX FOR UPDATE + early return)
+      const createRaceSpyStorage = () => {
+        const putRefs: Array<Awaited<ReturnType<DocumentStorageProvider['putObject']>>> = [];
+        const deleteRefs: Array<Parameters<DocumentStorageProvider['deleteObject']>[1]> = [];
+        let arrived = 0;
+        let releaseBoth!: () => void;
+        const bothPutDone = new Promise<void>((resolve) => {
+          releaseBoth = resolve;
+        });
+        const provider: DocumentStorageProvider = {
+          ...spyStorage,
+          putObject: async (c, req) => {
+            const ref = await realStorage.putObject(c, req);
+            putRefs.push(ref);
+            arrived += 1;
+            if (arrived >= 2) {
+              releaseBoth();
+            } else {
+              await Promise.race([
+                bothPutDone,
+                new Promise<void>((_, reject) =>
+                  setTimeout(() => reject(new Error('Race barrier timeout')), 5000),
+                ),
+              ]);
+            }
+            return ref;
+          },
+          deleteObject: async (c, ref) => {
+            deleteRefs.push(ref);
+            return realStorage.deleteObject(c, ref);
+          },
+        };
+        return { provider, putRefs, deleteRefs };
+      };
+
+      // 2. Concurrent race idempotency on Client Care send (in-TX FOR UPDATE + early return + R849 orphan blob deletion)
+      const cclRaceSpy = createRaceSpyStorage();
       const sharedKeyRace = 'r835-race-ccl-key-1';
       const [race1, race2] = await Promise.all([
         runAsActionActor(
@@ -2505,7 +2540,11 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
                 idempotencyKey: sharedKeyRace,
               },
               'P-000001',
-              { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+              {
+                tenantConfig: chaseEnabledCfg,
+                storageProvider: cclRaceSpy.provider,
+                drainAfterCommit: false,
+              },
             ),
           { roles: ['partner'], mfaVerified: false },
         ),
@@ -2519,7 +2558,11 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
                 idempotencyKey: sharedKeyRace,
               },
               'P-000001',
-              { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+              {
+                tenantConfig: chaseEnabledCfg,
+                storageProvider: cclRaceSpy.provider,
+                drainAfterCommit: false,
+              },
             ),
           { roles: ['partner'], mfaVerified: false },
         ),
@@ -2530,6 +2573,21 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
         expect(race2.documentId).toBe(race1.documentId);
         expect(race2.dispatch.id).toBe(race1.dispatch.id);
         expect(race2.outboxRecord.id).toBe(race1.outboxRecord.id);
+
+        // R849: both uploaded pre-TX; loser deleted cleanly so only one stored blob remains
+        expect(cclRaceSpy.putRefs).toHaveLength(2);
+        expect(cclRaceSpy.deleteRefs).toHaveLength(1);
+        const deletedRef = cclRaceSpy.deleteRefs[0]!;
+        const winnerRef = cclRaceSpy.putRefs.find((r) => r.blobKey !== deletedRef.blobKey)!;
+        expect(winnerRef).toBeDefined();
+        const raceDocRow = await direct.query<{ storage_key: string }>(
+          `SELECT storage_key FROM public.documents WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+          [ctx.tenantId, race1.documentId],
+        );
+        expect(raceDocRow.rows[0]?.storage_key).toBe(winnerRef.blobKey);
+        const survivedBytes = await realStorage.getObjectBytes(ctx, winnerRef);
+        expect(survivedBytes.byteLength).toBeGreaterThan(0);
+        await expect(realStorage.getObjectBytes(ctx, deletedRef)).rejects.toThrow();
       }
       expect(await engRepo.listDispatchesForMatter(ctx, matterRaceId)).toHaveLength(1);
       const raceChecks = await checkRepo.listChecksForSubject(ctx, {
@@ -2686,6 +2744,91 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
           (a) => a.field === 'Task completed on non-engagement letter dispatch',
         ),
       ).toHaveLength(1);
+
+      // 4. Concurrent race idempotency on Non-Engagement send + R849 orphan blob cleanup
+      const enqRaceSave = await runAsActionActor(
+        'P-000002',
+        () =>
+          saveEnquiryRecord(
+            {
+              firstName: 'R849',
+              lastName: 'NonEngRace',
+              email: 'r849-noneng-race@example.test',
+              phone: '029 2000 0849',
+              channelId: 'enquiry_channel.phone',
+              practiceAreaId: 'work_type.employment_and_hr',
+              summary: 'Concurrent race non-engagement orphan cleanup',
+              notes: 'Notes for R849 concurrent race non-engagement.',
+              privacyNoticeGiven: true,
+            },
+            { byId: 'P-000002' },
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(enqRaceSave.errors).toBeUndefined();
+      const enqRaceId = enqRaceSave.enquiry!.id;
+
+      const enqRaceClose = await runAsActionActor(
+        'P-000002',
+        () =>
+          closeEnquiryRecord(
+            enqRaceId,
+            {
+              targetStatus: 'Declined',
+              closeReasonId: vid('enquiry_close_reason', 'Outside our expertise'),
+              closeNotes: 'Concurrent race non-engagement close.',
+            },
+            'P-000002',
+          ),
+        { roles: ['fee_earner'], mfaVerified: false },
+      );
+      expect(enqRaceClose.error).toBeUndefined();
+
+      const neRaceSpy = createRaceSpyStorage();
+      const neRaceKey = 'r849-race-noneng-key-1';
+      const [neRace1, neRace2] = await Promise.all([
+        runAsActionActor(
+          'P-000002',
+          () =>
+            sendNonEngagementLetterRecord(
+              { enquiryId: enqRaceId, idempotencyKey: neRaceKey },
+              'P-000002',
+              { storageProvider: neRaceSpy.provider, drainAfterCommit: false },
+            ),
+          { roles: ['fee_earner'], mfaVerified: false },
+        ),
+        runAsActionActor(
+          'P-000002',
+          () =>
+            sendNonEngagementLetterRecord(
+              { enquiryId: enqRaceId, idempotencyKey: neRaceKey },
+              'P-000002',
+              { storageProvider: neRaceSpy.provider, drainAfterCommit: false },
+            ),
+          { roles: ['fee_earner'], mfaVerified: false },
+        ),
+      ]);
+      expect(neRace1.ok).toBe(true);
+      expect(neRace2.ok).toBe(true);
+      if (neRace1.ok && neRace2.ok) {
+        expect(neRace2.documentId).toBe(neRace1.documentId);
+        expect(neRace2.dispatch.id).toBe(neRace1.dispatch.id);
+        expect(neRace2.outboxRecord.id).toBe(neRace1.outboxRecord.id);
+        expect(neRaceSpy.putRefs).toHaveLength(2);
+        expect(neRaceSpy.deleteRefs).toHaveLength(1);
+        const deletedNeRef = neRaceSpy.deleteRefs[0]!;
+        const winnerNeRef = neRaceSpy.putRefs.find((r) => r.blobKey !== deletedNeRef.blobKey)!;
+        expect(winnerNeRef).toBeDefined();
+        const neRaceDocRow = await direct.query<{ storage_key: string }>(
+          `SELECT storage_key FROM public.documents WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+          [ctx.tenantId, neRace1.documentId],
+        );
+        expect(neRaceDocRow.rows[0]?.storage_key).toBe(winnerNeRef.blobKey);
+        const neSurvivedBytes = await realStorage.getObjectBytes(ctx, winnerNeRef);
+        expect(neSurvivedBytes.byteLength).toBeGreaterThan(0);
+        await expect(realStorage.getObjectBytes(ctx, deletedNeRef)).rejects.toThrow();
+      }
+      expect(await engRepo.listDispatchesForEnquiry(ctx, enqRaceId)).toHaveLength(1);
     } finally {
       await direct.end();
     }

@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { createSendIdempotencyController } from './sendIdempotency';
 import {
   anonymiseExpiredEnquiriesAction,
   assignEnquiryAction,
@@ -469,6 +470,18 @@ export function EnquiryFormClient({
     enquiry ? enquiryDisplayName(enquiry) : '',
   );
   const [nonEngSending, setNonEngSending] = useState(false);
+  const nonEngSendControllerRef = useRef<ReturnType<
+    typeof createSendIdempotencyController
+  > | null>(null);
+  const getNonEngSendController = () => {
+    if (!nonEngSendControllerRef.current) {
+      nonEngSendControllerRef.current = createSendIdempotencyController();
+    }
+    return nonEngSendControllerRef.current;
+  };
+  useEffect(() => {
+    nonEngSendControllerRef.current?.reset();
+  }, [enquiry?.id]);
 
   const currentFormState: EnquiryFormState = useMemo(
     () => ({
@@ -2290,32 +2303,37 @@ export function EnquiryFormClient({
                   data-testid="send-non-engagement-btn"
                   disabled={nonEngSending || !nonEngRecipientEmail.trim()}
                   onClick={async () => {
-                    setNonEngSending(true);
-                    try {
-                      const res = await sendNonEngagementLetterAction({
-                        enquiryId: enquiry.id,
-                        recipientEmail: nonEngRecipientEmail.trim(),
-                        recipientName: nonEngRecipientName.trim() || undefined,
-                      });
-                      if (isActionDenied(res) || !res.ok) {
+                    const sendCtrl = getNonEngSendController();
+                    await sendCtrl.runGuarded(async (idempotencyKey) => {
+                      setNonEngSending(true);
+                      try {
+                        const res = await sendNonEngagementLetterAction({
+                          enquiryId: enquiry.id,
+                          recipientEmail: nonEngRecipientEmail.trim(),
+                          recipientName: nonEngRecipientName.trim() || undefined,
+                          idempotencyKey,
+                        });
+                        if (isActionDenied(res) || !res.ok) {
+                          showToast(
+                            isActionDenied(res)
+                              ? res.message
+                              : res.message || 'Could not send Non-Engagement letter.',
+                          );
+                          return;
+                        }
+                        sendCtrl.reset();
                         showToast(
-                          isActionDenied(res)
-                            ? res.message
-                            : res.message || 'Could not send Non-Engagement letter.',
+                          res.closedTaskIds.length > 0
+                            ? 'Non-Engagement letter queued and follow-up task marked Done.'
+                            : res.emailProviderDisabled
+                              ? 'Non-Engagement letter PDF queued in Email Outbox.'
+                              : 'Non-Engagement letter sent.',
                         );
-                        return;
+                        router.refresh();
+                      } finally {
+                        setNonEngSending(false);
                       }
-                      showToast(
-                        res.closedTaskIds.length > 0
-                          ? 'Non-Engagement letter queued and follow-up task marked Done.'
-                          : res.emailProviderDisabled
-                            ? 'Non-Engagement letter PDF queued in Email Outbox.'
-                            : 'Non-Engagement letter sent.',
-                      );
-                      router.refresh();
-                    } finally {
-                      setNonEngSending(false);
-                    }
+                    });
                   }}
                 >
                   {nonEngSending ? 'Sending…' : 'Send Non-Engagement letter'}
