@@ -3648,4 +3648,117 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
     expect(report!.totalRowsChecked).toBeGreaterThan(50);
     console.info(`[DEMO_0027_VERIFICATION] ${JSON.stringify(report)}`);
   }, 45_000);
+
+  it('R828: runs 0027 down through the migrate CLI entry point to 0026, refuses non-newest target, and migrates back up cleanly', async () => {
+    const tenantId = 'mig-s112-down-cli';
+    const slug = 'mig_s112_down_cli';
+    await provisionPostgresClusterRolesAndDatabases({
+      tenants: [{ tenantId, environment: 'test' }],
+    });
+    const ctx = makeTestTenantContext(tenantId);
+    const registry: TenantRegistry = {
+      schemaVersion: '1.0.0',
+      environment: 'test',
+      hostingMode: 'multi_tenant',
+      tenants: [
+        {
+          tenantId,
+          slug,
+          environment: 'test',
+          postgresHost: process.env.PLATFORM_POSTGRES_HOST || '127.0.0.1',
+          postgresDatabaseName: ctx.postgresDatabaseName,
+          postgresRoleName: `role_tenant_${slug}_test`,
+          keyVaultUri: 'https://kv-migs112down-test.vault.azure.net/',
+          packageDir: 'client-not-a-law-firm',
+          timeZone: 'Europe/London',
+          enabled: true,
+        },
+      ],
+    };
+
+    const runner = new TenantMigrationRunner();
+    const { executeCliJobRunner } = await import('../../scripts/run-job');
+
+    const upSweep = await runMigrateJobSweep({ registry, runner });
+    expect(upSweep.exitCode).toBe(0);
+    expect(
+      (await runner.listAppliedMigrations(ctx)).slice(-1)[0]?.version,
+    ).toBe('0027');
+
+    // Non-newest target 0026 is refused cleanly
+    const refusedOut: string[] = [];
+    const refusedCode = await executeCliJobRunner(
+      [
+        'node',
+        'dist/jobs/run-job.mjs',
+        'migrate',
+        '--down',
+        '--target',
+        '0026',
+        '--confirm-rollback',
+      ],
+      { stdout: (l) => refusedOut.push(l), env: {}, registry, runner },
+    );
+    expect(refusedCode).toBe(1);
+    expect(JSON.parse(refusedOut[0]!)).toMatchObject({
+      event: 'job.migrate.down',
+      tenantId,
+      previousVersion: '0027',
+      targetVersion: '0026',
+      resultingVersion: '0027',
+      outcome: 'refused',
+      errorCode: 'MIGRATION_ROLLBACK_NOT_NEWEST',
+    });
+
+    // Valid target 0027 rolls back through the CLI entry point to 0026
+    const downOut: string[] = [];
+    const downCode = await executeCliJobRunner(
+      [
+        'node',
+        'dist/jobs/run-job.mjs',
+        'migrate',
+        '--down',
+        '--target',
+        '0027',
+        '--confirm-rollback',
+      ],
+      { stdout: (l) => downOut.push(l), env: {}, registry, runner },
+    );
+    expect(downCode).toBe(0);
+    expect(JSON.parse(downOut[0]!)).toEqual({
+      event: 'job.migrate.down',
+      tenantId,
+      previousVersion: '0027',
+      targetVersion: '0027',
+      resultingVersion: '0026',
+      outcome: 'rolled_back',
+    });
+
+    const appliedAfterDown = await runner.listAppliedMigrations(ctx);
+    expect(appliedAfterDown.slice(-1)[0]?.version).toBe('0026');
+
+    const direct = await createDirectMigrationClient({ ctx });
+    try {
+      const penceCols = await direct.query<{ cnt: string }>(
+        `SELECT COUNT(*)::text AS cnt
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND ((table_name = 'pms_invoices' AND column_name = 'total_inc_vat_pence')
+              OR (table_name = 'matters' AND column_name = 'retainer_monies_on_account_pence'))`,
+      );
+      expect(penceCols.rows[0]?.cnt).toBe('0');
+    } finally {
+      await direct.end();
+    }
+
+    // Re-applying via migrate CLI returns to 0027 cleanly
+    const reUpCode = await executeCliJobRunner(
+      ['node', 'dist/jobs/run-job.mjs', 'migrate'],
+      { env: {}, registry, runner },
+    );
+    expect(reUpCode).toBe(0);
+    expect(
+      (await runner.listAppliedMigrations(ctx)).slice(-1)[0]?.version,
+    ).toBe('0027');
+  }, 45_000);
 });

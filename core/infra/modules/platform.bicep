@@ -1356,6 +1356,14 @@ resource migrateJob 'Microsoft.App/jobs@2025-07-01' = if (deployApps) {
               value: postgresRuntimeRoleName
             }
             {
+              name: 'PLATFORM_MIGRATE_DOWN_TARGET'
+              value: ''
+            }
+            {
+              name: 'PLATFORM_MIGRATE_DOWN_CONFIRM'
+              value: 'false'
+            }
+            {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
               value: appInsights.properties.ConnectionString
             }

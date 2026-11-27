@@ -344,6 +344,307 @@ export interface MigrateJobRunSummary {
   readonly failedTenants: Array<{ tenantId: string; errorCode?: string }>;
 }
 
+export interface MigrateDownTenantOutcome {
+  readonly tenantId: string;
+  readonly previousVersion: string | null;
+  readonly targetVersion: string;
+  readonly resultingVersion: string | null;
+  readonly outcome: 'rolled_back' | 'refused';
+  readonly errorCode?: string;
+}
+
+export interface MigrateDownJobRunSummary {
+  readonly exitCode: number;
+  readonly targetVersion: string;
+  readonly succeededTenants: string[];
+  readonly failedTenants: Array<{ tenantId: string; errorCode: string }>;
+  readonly results: readonly MigrateDownTenantOutcome[];
+}
+
+export type ParsedMigrateInvocation =
+  | { readonly ok: true; readonly mode: 'up' }
+  | { readonly ok: true; readonly mode: 'down'; readonly targetVersion: string }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+export function parseMigrateInvocation(
+  extraArgs: readonly string[],
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  knownMigrations: readonly TenantMigrationDefinition[] = CORE_TENANT_MIGRATIONS,
+): ParsedMigrateInvocation {
+  let hasDownFlag = false;
+  let cliTarget: string | undefined;
+  let hasConfirmRollbackFlag = false;
+
+  for (let i = 0; i < extraArgs.length; i++) {
+    const token = extraArgs[i]!;
+    if (token === '--down') {
+      hasDownFlag = true;
+    } else if (token === '--confirm-rollback') {
+      hasConfirmRollbackFlag = true;
+    } else if (token === '--target') {
+      const next = extraArgs[i + 1];
+      if (next === undefined || next.startsWith('--') || !next.trim()) {
+        return {
+          ok: false,
+          code: 'MIGRATION_ROLLBACK_TARGET_REQUIRED',
+          message:
+            'JOB_RUNNER_USAGE_ERROR MIGRATION_ROLLBACK_TARGET_REQUIRED: `--target` requires a migration version (for example `0027`).',
+        };
+      }
+      cliTarget = next.trim();
+      i += 1;
+    } else if (token.startsWith('--target=')) {
+      const val = token.slice('--target='.length).trim();
+      if (!val) {
+        return {
+          ok: false,
+          code: 'MIGRATION_ROLLBACK_TARGET_REQUIRED',
+          message:
+            'JOB_RUNNER_USAGE_ERROR MIGRATION_ROLLBACK_TARGET_REQUIRED: `--target=` requires a non-empty migration version.',
+        };
+      }
+      cliTarget = val;
+    } else {
+      return {
+        ok: false,
+        code: 'JOB_RUNNER_USAGE_ERROR',
+        message:
+          'JOB_RUNNER_USAGE_ERROR: Unexpected CLI arguments or flags for `migrate`. Only `--down --target <version> --confirm-rollback` is accepted.',
+      };
+    }
+  }
+
+  const envTarget = env.PLATFORM_MIGRATE_DOWN_TARGET?.trim() ?? '';
+  const envConfirmRaw = env.PLATFORM_MIGRATE_DOWN_CONFIRM?.trim().toLowerCase() ?? '';
+  const downViaEnvRequested =
+    Boolean(envTarget) || (Boolean(envConfirmRaw) && envConfirmRaw !== 'false');
+
+  if (!hasDownFlag && !cliTarget && !hasConfirmRollbackFlag && !downViaEnvRequested) {
+    return { ok: true, mode: 'up' };
+  }
+
+  if (!hasDownFlag && (cliTarget !== undefined || hasConfirmRollbackFlag)) {
+    return {
+      ok: false,
+      code: 'JOB_RUNNER_USAGE_ERROR',
+      message:
+        'JOB_RUNNER_USAGE_ERROR: Migrate-down mode requires `--down` alongside `--target <version>` and `--confirm-rollback`.',
+    };
+  }
+
+  const targetVersion = cliTarget ?? envTarget;
+  if (!targetVersion) {
+    return {
+      ok: false,
+      code: 'MIGRATION_ROLLBACK_TARGET_REQUIRED',
+      message:
+        'JOB_RUNNER_USAGE_ERROR MIGRATION_ROLLBACK_TARGET_REQUIRED: Specify `--target <version>` or `PLATFORM_MIGRATE_DOWN_TARGET`.',
+    };
+  }
+
+  const confirmed = hasConfirmRollbackFlag || envConfirmRaw === 'true';
+  if (!confirmed) {
+    return {
+      ok: false,
+      code: 'MIGRATION_ROLLBACK_CONFIRMATION_REQUIRED',
+      message:
+        'JOB_RUNNER_USAGE_ERROR MIGRATION_ROLLBACK_CONFIRMATION_REQUIRED: Explicit confirmation via `--confirm-rollback` or `PLATFORM_MIGRATE_DOWN_CONFIRM=true` is required.',
+    };
+  }
+
+  if (!knownMigrations.some((m) => m.version === targetVersion)) {
+    return {
+      ok: false,
+      code: 'MIGRATION_ROLLBACK_UNKNOWN_VERSION',
+      message: `JOB_RUNNER_USAGE_ERROR MIGRATION_ROLLBACK_UNKNOWN_VERSION: Target migration "${targetVersion}" is unknown in this image.`,
+    };
+  }
+
+  return {
+    ok: true,
+    mode: 'down',
+    targetVersion,
+  };
+}
+
+export async function runMigrateDownJob(options: {
+  targetVersion: string;
+  confirmRollback: boolean;
+  registry?: TenantRegistry;
+  migrationsByTenant?: Readonly<
+    Record<string, readonly TenantMigrationDefinition[]>
+  >;
+  runner?: TenantMigrationRunner;
+  timeoutMs?: number;
+  guardedJobOptions?: GuardedJobOptions;
+}): Promise<MigrateDownJobRunSummary> {
+  if (!options.confirmRollback) {
+    const err = new Error(
+      'MIGRATION_ROLLBACK_CONFIRMATION_REQUIRED: Explicit rollback confirmation is required.',
+    ) as Error & { code: string };
+    err.code = 'MIGRATION_ROLLBACK_CONFIRMATION_REQUIRED';
+    throw err;
+  }
+
+  const targetVersion = options.targetVersion?.trim() ?? '';
+  if (!targetVersion) {
+    const err = new Error(
+      'MIGRATION_ROLLBACK_TARGET_REQUIRED: Target migration version is required.',
+    ) as Error & { code: string };
+    err.code = 'MIGRATION_ROLLBACK_TARGET_REQUIRED';
+    throw err;
+  }
+
+  const registry = options.registry ?? loadActiveTenantRegistry();
+  const runner = options.runner ?? new TenantMigrationRunner();
+  const succeededTenants: string[] = [];
+  const failedTenants: Array<{ tenantId: string; errorCode: string }> = [];
+  const results: MigrateDownTenantOutcome[] = [];
+
+  for (const entry of registry.tenants) {
+    if (!entry.enabled) {
+      continue;
+    }
+    const correlationId = `job-migrate-down-${entry.slug}-${randomUUID()}`;
+    const tenantMigrations =
+      options.migrationsByTenant?.[entry.tenantId] ?? CORE_TENANT_MIGRATIONS;
+
+    if (!tenantMigrations.some((m) => m.version === targetVersion)) {
+      const unknownErr = new Error(
+        `MIGRATION_ROLLBACK_UNKNOWN_VERSION: Target migration "${targetVersion}" is not defined in the current image.`,
+      ) as Error & { code: string };
+      unknownErr.code = 'MIGRATION_ROLLBACK_UNKNOWN_VERSION';
+      failedTenants.push({
+        tenantId: entry.tenantId,
+        errorCode: unknownErr.code,
+      });
+      results.push({
+        tenantId: entry.tenantId,
+        previousVersion: null,
+        targetVersion,
+        resultingVersion: null,
+        outcome: 'refused',
+        errorCode: unknownErr.code,
+      });
+      emitTenantTelemetryException({
+        eventName: 'job.migrate.down_failed',
+        tenantId: entry.tenantId,
+        correlationId,
+        error: unknownErr,
+        properties: {
+          targetVersion,
+          outcome: 'refused',
+        },
+      });
+      continue;
+    }
+
+    let previousVersion: string | null = null;
+    try {
+      const tenantOutcome = await guardedJob(
+        'migrate',
+        entry,
+        async ({ tenantContext }) => {
+          const appliedBefore = await runner.listAppliedMigrations(tenantContext);
+          const newest = appliedBefore[appliedBefore.length - 1];
+          previousVersion = newest?.version ?? null;
+
+          if (!newest || newest.version !== targetVersion) {
+            const notNewestErr = new Error(
+              `MIGRATION_ROLLBACK_NOT_NEWEST: Refusing to roll back "${targetVersion}" because the newest applied migration is "${previousVersion ?? 'none'}". Only the single newest applied migration may be rolled back.`,
+            ) as Error & { code: string };
+            notNewestErr.code = 'MIGRATION_ROLLBACK_NOT_NEWEST';
+            throw notNewestErr;
+          }
+
+          const rolledBack = await runner.rollbackVersion(
+            tenantContext,
+            targetVersion,
+            tenantMigrations,
+          );
+          if (!rolledBack) {
+            const failErr = new Error(
+              `MIGRATION_ROLLBACK_FAILED: Target migration "${targetVersion}" did not roll back cleanly.`,
+            ) as Error & { code: string };
+            failErr.code = 'MIGRATION_ROLLBACK_FAILED';
+            throw failErr;
+          }
+
+          const appliedAfter = await runner.listAppliedMigrations(tenantContext);
+          const resultingVersion =
+            appliedAfter[appliedAfter.length - 1]?.version ?? null;
+
+          emitTenantTelemetryEvent({
+            eventName: 'job.migrate.down',
+            tenantId: entry.tenantId,
+            correlationId: tenantContext.correlationId,
+            properties: {
+              previousVersion,
+              targetVersion,
+              resultingVersion,
+              outcome: 'rolled_back',
+            },
+          });
+
+          return {
+            status: 'succeeded',
+            summary: { rolledBack: 1 },
+            outcome: {
+              tenantId: entry.tenantId,
+              previousVersion,
+              targetVersion,
+              resultingVersion,
+              outcome: 'rolled_back' as const,
+            },
+          };
+        },
+        {
+          registry,
+          correlationId,
+          timeoutMs: options.timeoutMs,
+          ...options.guardedJobOptions,
+        },
+      );
+
+      succeededTenants.push(entry.tenantId);
+      results.push(tenantOutcome.outcome);
+    } catch (err) {
+      const errorCode =
+        typeof (err as { code?: unknown })?.code === 'string'
+          ? String((err as { code?: unknown }).code)
+          : sanitizeJobErrorCode(err);
+      failedTenants.push({ tenantId: entry.tenantId, errorCode });
+      results.push({
+        tenantId: entry.tenantId,
+        previousVersion,
+        targetVersion,
+        resultingVersion: previousVersion,
+        outcome: 'refused',
+        errorCode,
+      });
+      emitTenantTelemetryException({
+        eventName: 'job.migrate.down_failed',
+        tenantId: entry.tenantId,
+        correlationId,
+        error: err,
+        properties: {
+          previousVersion,
+          targetVersion,
+          outcome: 'refused',
+        },
+      });
+    }
+  }
+
+  return {
+    exitCode: failedTenants.length > 0 ? 1 : 0,
+    targetVersion,
+    succeededTenants,
+    failedTenants,
+    results,
+  };
+}
+
 export async function runMigrateJobSweep(options?: {
   registry?: TenantRegistry;
   migrationsByTenant?: Readonly<
@@ -461,12 +762,16 @@ export async function executeCliJobRunner(
   io: {
     stdout?: (msg: string) => void;
     stderr?: (msg: string) => void;
+    env?: Readonly<Record<string, string | undefined>>;
+    registry?: TenantRegistry;
+    runner?: TenantMigrationRunner;
     telemetryInitOptions?: Parameters<typeof initializeAzureMonitorTelemetry>[0];
     telemetryShutdownOptions?: Parameters<typeof shutdownAzureMonitorTelemetry>[0];
   } = {},
 ): Promise<number> {
   const writeOut = io.stdout ?? ((msg: string) => process.stdout.write(msg));
   const writeErr = io.stderr ?? ((msg: string) => process.stderr.write(msg));
+  const env = io.env ?? process.env;
 
   const args = argv.slice(2);
   if (args.length === 1 && args[0] === '--list') {
@@ -522,7 +827,13 @@ export async function executeCliJobRunner(
     jobName === 'seed-demo' &&
     extraArgs.length === 1 &&
     extraArgs[0] === '--force';
-  if (extraArgs.length > 0 && !isSeedDemoForceFlag) {
+  const parsedMigrate =
+    jobName === 'migrate' ? parseMigrateInvocation(extraArgs, env) : null;
+  if (parsedMigrate && !parsedMigrate.ok) {
+    writeErr(`${parsedMigrate.message}\n`);
+    return 1;
+  }
+  if (jobName !== 'migrate' && extraArgs.length > 0 && !isSeedDemoForceFlag) {
     writeErr(
       'JOB_RUNNER_USAGE_ERROR: Unexpected CLI arguments or flags. Scheduled jobs accept only `--list` or `<job-name>`.\n',
     );
@@ -556,7 +867,33 @@ export async function executeCliJobRunner(
     }
 
     if (jobName === 'migrate') {
-      const summary = await runMigrateJobSweep();
+      if (parsedMigrate && parsedMigrate.ok && parsedMigrate.mode === 'down') {
+        const summary = await runMigrateDownJob({
+          targetVersion: parsedMigrate.targetVersion,
+          confirmRollback: true,
+          ...(io.registry ? { registry: io.registry } : {}),
+          ...(io.runner ? { runner: io.runner } : {}),
+        });
+        for (const r of summary.results) {
+          writeOut(
+            `${JSON.stringify({
+              event: 'job.migrate.down',
+              tenantId: r.tenantId,
+              previousVersion: r.previousVersion,
+              targetVersion: r.targetVersion,
+              resultingVersion: r.resultingVersion,
+              outcome: r.outcome,
+              ...(r.errorCode ? { errorCode: r.errorCode } : {}),
+            })}\n`,
+          );
+        }
+        return summary.exitCode;
+      }
+
+      const summary = await runMigrateJobSweep({
+        ...(io.registry ? { registry: io.registry } : {}),
+        ...(io.runner ? { runner: io.runner } : {}),
+      });
       writeOut(
         `${JSON.stringify({
           event: 'job.migrate.completed',
