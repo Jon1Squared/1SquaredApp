@@ -2793,4 +2793,184 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       warnSpy.mockRestore();
     }
   });
+
+  it('R832 (Rule 9): rejects tampered cross-tenant matter/PMS record IDs and forged tenant claims on retainer and PMS pence reads', async () => {
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const ctxB = makeTenantContext('tenant-b', 'P-000001');
+    const pmsRepo = getPmsRepository();
+    const matterRepo = getMatterRepository();
+    const baseStore = loadCommittedSeedStore();
+
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxA,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxA.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+    await importFirmStoreModulesToPostgres({
+      ctx: ctxB,
+      store: baseStore,
+      tenantConfig: { ...getActiveTenantConfiguration(), tenantId: ctxB.tenantId },
+      modules: ['parties', 'matters', 'intake', 'quotes', 'tasks', 'hr', 'catalogues'],
+      clearFirst: true,
+    });
+
+    const alphaSeedMatter = (
+      await matterRepo.listAllMattersUnfiltered<import('@/domain/types').Matter>(ctxA)
+    )[0]!;
+    const exclusiveMatterId = 'M-R832-A-ONLY';
+    await matterRepo.createMatter(ctxA, {
+      ...alphaSeedMatter,
+      id: exclusiveMatterId,
+      matterNumber: 'R832-A-ONLY-001',
+      title: 'R832 Alpha Exclusive Retainer Matter',
+      retainerMoniesOnAccountGbp: 4321.99,
+      retainerMoniesOnAccountPence: 432199 as import('@platform/core').MinorUnits,
+    });
+
+    const datasetA = buildSyntheticDataset({
+      suffix: 'A',
+      asAtDate: '2026-10-31',
+      wipAmount: 5555.25,
+      invoiceNet: 1200.5,
+      unlinkedWipAmount: 100,
+    });
+    const datasetB = buildSyntheticDataset({
+      suffix: 'B',
+      asAtDate: '2026-11-15',
+      wipAmount: 111.1,
+      invoiceNet: 200,
+      unlinkedWipAmount: 50,
+    });
+    await pmsRepo.clearTenantData(ctxA);
+    await pmsRepo.importExtractDataset(ctxA, datasetA);
+    await pmsRepo.clearTenantData(ctxB);
+    await pmsRepo.importExtractDataset(ctxB, datasetB);
+
+    // Positive control on Tenant A retainer pence and PMS pence reads
+    const alphaExclusive =
+      await matterRepo.getMatterById<import('@/domain/types').Matter>(
+        ctxA,
+        exclusiveMatterId,
+      );
+    expect(alphaExclusive?.retainerMoniesOnAccountPence).toBe(432199);
+    expect(alphaExclusive?.retainerMoniesOnAccountGbp).toBe(4321.99);
+    const alphaPmsMatter = await pmsRepo.getMatterFinancials(ctxA, 'MAT-A001');
+    expect(alphaPmsMatter?.unbilled_wip_pence).toBe(555525);
+
+    // 1. Tampered record ID: Tenant B reading Tenant A's exclusive matter & PMS rows gets nothing
+    expect(await matterRepo.getMatterById(ctxB, exclusiveMatterId)).toBeNull();
+    expect(await matterRepo.listMattersByIds(ctxB, [exclusiveMatterId])).toEqual([]);
+    expect(await pmsRepo.getMatterByCode(ctxB, 'MAT-A001')).toBeNull();
+    expect(await pmsRepo.getMatterFinancials(ctxB, 'MAT-A001')).toBeNull();
+    expect(await pmsRepo.getMatterFullBundle(ctxB, 'MAT-A001')).toBeNull();
+    expect(await pmsRepo.getClientAccountLedger(ctxB, 'MAT-A001')).toEqual([]);
+    expect(await pmsRepo.getInvoiceBalance(ctxB, 'INV-A1001')).toBeNull();
+    expect(await pmsRepo.getClientByCode(ctxB, 'CL-A001')).toBeNull();
+
+    // 2. Forged tenant claims on retainer and PMS pence reads are refused fail-closed
+    expect(() =>
+      resolveTenantFromVerifiedToken({
+        verifiedToken: {
+          __verifiedByOidcMiddleware: true,
+          sub: 'actor-b',
+          tenantId: ctxB.tenantId,
+          name: 'Actor B',
+          email: 'actor@tenant-b.example',
+          roles: ['admin', 'partner', 'finance'],
+          mfaVerified: true,
+        },
+        hostingMode: 'multi_tenant',
+        environment: 'test',
+        correlationId: 'corr-r832-forged-claim',
+        untrustedRequestTenantOverride: ctxA.tenantId,
+      }),
+    ).toThrow(/TENANCY_FORGERY_DETECTED/);
+
+    const forgedEmptyCtx = Object.freeze({
+      ...ctxA,
+      tenantId: '',
+    }) as unknown as TenantContext;
+    await expect(
+      matterRepo.getMatterById(forgedEmptyCtx, exclusiveMatterId),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    await expect(pmsRepo.loadTenantPmsSnapshot(forgedEmptyCtx)).rejects.toThrow(
+      /TENANCY_ISOLATION_ERROR/,
+    );
+    await expect(
+      pmsRepo.getMatterFinancials(forgedEmptyCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+    await expect(
+      pmsRepo.getClientAccountLedger(forgedEmptyCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_ISOLATION_ERROR/);
+
+    // Spoofing tenantId or postgresDatabaseName across tenants is refused fail-closed by PostgreSQL role permissions (42501)
+    const forgedCrossCtx = Object.freeze({
+      ...ctxB,
+      tenantId: ctxA.tenantId,
+    }) as TenantContext;
+    await expect(
+      matterRepo.getMatterById(forgedCrossCtx, exclusiveMatterId),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getMatterFinancials(forgedCrossCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getClientAccountLedger(forgedCrossCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+
+    const forgedDbCtx = Object.freeze({
+      ...ctxB,
+      postgresDatabaseName: ctxA.postgresDatabaseName,
+    }) as TenantContext;
+    await expect(
+      matterRepo.getMatterById(forgedDbCtx, exclusiveMatterId),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getMatterFinancials(forgedDbCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+    await expect(
+      pmsRepo.getClientAccountLedger(forgedDbCtx, 'MAT-A001'),
+    ).rejects.toThrow(/TENANCY_DATABASE_PERMISSION_DENIED/);
+
+    // Forged Entra session claim targeting host service loaders refuses with TENANCY_FORGERY_DETECTED
+    const savedRawCfg = structuredClone(getActiveTenantRawBaseConfig());
+    setActiveTenantConfigForTesting(
+      {
+        ...(savedRawCfg as Record<string, unknown>),
+        tenantId: ctxA.tenantId,
+      },
+      { tenantId: ctxA.tenantId },
+    );
+    try {
+      const forgedCookie = createSignedEntraSessionCookie({
+        personId: 'P-000001',
+        tenantId: ctxB.tenantId,
+        oid: '00000000-0000-4000-8000-000000000001',
+        tid: '22222222-2222-3333-4444-000000000002',
+        sub: 'P-000001',
+        email: 'p1@tenant-b.example',
+        displayName: 'Forged Actor',
+        entraRoles: ['admin', 'partner', 'finance'],
+        mappedRoles: ['admin', 'partner', 'finance'],
+        entraGroups: [],
+        mfaVerified: true,
+        amr: ['pwd', 'mfa'],
+        authenticatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      const verifiedForged = verifySignedEntraSessionCookie(forgedCookie)!;
+      expect(() =>
+        resolveCurrentTenantContext(
+          createVerifiedSessionActorFromEntraSession(verifiedForged, {
+            correlationId: 'corr-r832-forged-session',
+          }),
+          getActiveTenantConfiguration(),
+        ),
+      ).toThrow(/TENANCY_FORGERY_DETECTED/);
+    } finally {
+      setActiveTenantConfigForTesting(savedRawCfg);
+    }
+  });
 });
