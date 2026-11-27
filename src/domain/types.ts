@@ -8,6 +8,7 @@ import type {
   FeeArrangementCapEntry,
   FeeCapLevel,
   GradeRateResolution,
+  MinorUnits,
   NotificationKind as CoreNotificationKind,
   RbacConfiguration,
   ResolvedRateSource,
@@ -1009,6 +1010,7 @@ export interface Matter extends RecordBase {
   feeEstimateGbp: number | null; // CORE-045
   agreedFeeCapGbp: number | null; // CORE-046
   retainerMoniesOnAccountGbp: number | null; // CORE-047
+  retainerMoniesOnAccountPence?: MinorUnits | null;
   // CORE-055..067 Lifecycle
   stageId: string; // CORE-055
   milestoneId: string | null; // CORE-056

@@ -30,7 +30,7 @@ import {
   maskBankDetails,
   maskNationalInsuranceNumber,
 } from '@/domain/employment';
-import { formatGbp } from '@/domain/pms';
+import { formatGbp, resolvePmsPence } from '@/domain/pms';
 import type { ClientCddSummary } from '@/domain/cdd';
 import { mainLinkFor } from '@/domain/searchIndex';
 import { isTaskOpen } from '@/domain/tasks';
@@ -52,7 +52,6 @@ import type {
   Team,
 } from '@/domain/types';
 import {
-  poundsToMinorUnits,
   sumMinorUnits,
   type ClientRateOverrideRecord,
   type UserNotificationPreference,
@@ -637,10 +636,10 @@ export function PersonProfileClient({
       canViewFinance &&
       pmsSummary &&
       sumMinorUnits([
-        poundsToMinorUnits(pmsSummary.aged_1_30),
-        poundsToMinorUnits(pmsSummary.aged_31_60),
-        poundsToMinorUnits(pmsSummary.aged_61_90),
-        poundsToMinorUnits(pmsSummary.aged_90_plus),
+        resolvePmsPence(pmsSummary.aged_1_30_pence, pmsSummary.aged_1_30),
+        resolvePmsPence(pmsSummary.aged_31_60_pence, pmsSummary.aged_31_60),
+        resolvePmsPence(pmsSummary.aged_61_90_pence, pmsSummary.aged_61_90),
+        resolvePmsPence(pmsSummary.aged_90_plus_pence, pmsSummary.aged_90_plus),
       ]) > 0
         ? 1
         : 0;

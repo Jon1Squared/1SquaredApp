@@ -60,6 +60,17 @@ function toSafeMinorUnits(n: number | null | undefined): MinorUnits {
   return poundsToMinorUnits(num);
 }
 
+/** Return pre-computed integer pence when present, falling back to decimal conversion only for unmigrated fixtures. */
+export function resolvePmsPence(
+  pence: MinorUnits | null | undefined,
+  fallbackGbp?: number | null,
+): MinorUnits {
+  if (typeof pence === 'number' && Number.isSafeInteger(pence)) {
+    return pence as MinorUnits;
+  }
+  return toSafeMinorUnits(fallbackGbp);
+}
+
 /** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
 export function formatGbp(amount: number | null | undefined): string {
   const minor = toSafeMinorUnits(amount);
@@ -562,10 +573,8 @@ function roundHours2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-function sumMoneyPence<T>(rows: readonly T[], selector: (row: T) => number): number {
-  return minorUnitsToPounds(
-    sumMinorUnits(rows.map((row) => toSafeMinorUnits(selector(row)))),
-  );
+function sumMoneyPence<T>(rows: readonly T[], selector: (row: T) => MinorUnits): MinorUnits {
+  return sumMinorUnits(rows.map(selector));
 }
 
 function sumHours2<T>(rows: readonly T[], selector: (row: T) => number): number {
@@ -592,41 +601,67 @@ export function buildClientFinancialsFromRows(
     (inv) => inv.client_code === client.client_code && inv.invoice_type !== 'Credit note',
   );
 
-  const unbilled_wip = sumMoneyPence(clientMatters, (m) => m.unbilled_wip);
-  const fees_billed = sumMoneyPence(clientMatters, (m) => m.fees_billed);
-  const fees_billed_ytd = isValidPmsAsAtDate(asAtDate)
+  const unbilled_wip_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.unbilled_wip_pence, m.unbilled_wip),
+  );
+  const fees_billed_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.fees_billed_pence, m.fees_billed),
+  );
+  const fees_billed_ytd_pence = isValidPmsAsAtDate(asAtDate)
     ? sumMoneyPence(visibleInvoices, (inv) =>
         inv.client_code === client.client_code &&
         inv.invoice_date.slice(0, 4) === asAtDate.slice(0, 4) &&
         inv.invoice_date <= asAtDate.slice(0, 10)
-          ? inv.fees_net
-          : 0,
+          ? resolvePmsPence(inv.fees_net_pence, inv.fees_net)
+          : (0 as MinorUnits),
       )
-    : 0;
-  const disbursements_billed = sumMoneyPence(clientMatters, (m) => m.disbursements_billed);
-  const total_invoiced_inc_vat = sumMoneyPence(clientMatters, (m) => m.total_invoiced_inc_vat);
-  const total_paid = sumMoneyPence(clientMatters, (m) => m.total_paid);
-  const outstanding_debt = sumMoneyPence(clientMatters, (m) => m.outstanding_debt);
-  const unbilled_disbursements = sumMoneyPence(clientMatters, (m) => m.unbilled_disbursements);
-  const client_account_balance = sumMoneyPence(clientMatters, (m) => m.client_account_balance);
-
-  const aged_not_yet_due = sumMoneyPence(clientInvoices, (i) =>
-    i.age_bucket === 'Not yet due' ? i.outstanding : 0,
+    : (0 as MinorUnits);
+  const disbursements_billed_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.disbursements_billed_pence, m.disbursements_billed),
   );
-  const aged_1_30 = sumMoneyPence(clientInvoices, (i) =>
-    i.age_bucket === '1-30' ? i.outstanding : 0,
+  const total_invoiced_inc_vat_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.total_invoiced_inc_vat_pence, m.total_invoiced_inc_vat),
   );
-  const aged_31_60 = sumMoneyPence(clientInvoices, (i) =>
-    i.age_bucket === '31-60' ? i.outstanding : 0,
+  const total_paid_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.total_paid_pence, m.total_paid),
   );
-  const aged_61_90 = sumMoneyPence(clientInvoices, (i) =>
-    i.age_bucket === '61-90' ? i.outstanding : 0,
+  const outstanding_debt_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.outstanding_debt_pence, m.outstanding_debt),
   );
-  const aged_90_plus = sumMoneyPence(clientInvoices, (i) =>
-    i.age_bucket === '90+' ? i.outstanding : 0,
+  const unbilled_disbursements_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.unbilled_disbursements_pence, m.unbilled_disbursements),
+  );
+  const client_account_balance_pence = sumMoneyPence(clientMatters, (m) =>
+    resolvePmsPence(m.client_account_balance_pence, m.client_account_balance),
   );
 
-  const credit_limit = minorUnitsToPounds(toSafeMinorUnits(client.credit_limit));
+  const aged_not_yet_due_pence = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === 'Not yet due'
+      ? resolvePmsPence(i.outstanding_pence, i.outstanding)
+      : (0 as MinorUnits),
+  );
+  const aged_1_30_pence = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '1-30'
+      ? resolvePmsPence(i.outstanding_pence, i.outstanding)
+      : (0 as MinorUnits),
+  );
+  const aged_31_60_pence = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '31-60'
+      ? resolvePmsPence(i.outstanding_pence, i.outstanding)
+      : (0 as MinorUnits),
+  );
+  const aged_61_90_pence = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '61-90'
+      ? resolvePmsPence(i.outstanding_pence, i.outstanding)
+      : (0 as MinorUnits),
+  );
+  const aged_90_plus_pence = sumMoneyPence(clientInvoices, (i) =>
+    i.age_bucket === '90+'
+      ? resolvePmsPence(i.outstanding_pence, i.outstanding)
+      : (0 as MinorUnits),
+  );
+
+  const credit_limit_pence = resolvePmsPence(client.credit_limit_pence, client.credit_limit);
 
   return {
     client_code: client.client_code,
@@ -636,24 +671,40 @@ export function buildClientFinancialsFromRows(
     email: client.email,
     client_partner_id: client.client_partner_id,
     credit_terms_days: client.credit_terms_days,
-    credit_limit,
+    credit_limit: minorUnitsToPounds(credit_limit_pence),
+    credit_limit_pence,
     rate_discount_pct: client.rate_discount_pct,
     status: client.status,
-    unbilled_wip,
-    fees_billed,
-    fees_billed_ytd,
-    disbursements_billed,
-    total_invoiced_inc_vat,
-    total_paid,
-    outstanding_debt,
-    unbilled_disbursements,
-    client_account_balance,
-    aged_not_yet_due,
-    aged_1_30,
-    aged_31_60,
-    aged_61_90,
-    aged_90_plus,
-    credit_limit_used_pct: credit_limit > 0 ? outstanding_debt / credit_limit : null,
+    unbilled_wip: minorUnitsToPounds(unbilled_wip_pence),
+    unbilled_wip_pence,
+    fees_billed: minorUnitsToPounds(fees_billed_pence),
+    fees_billed_pence,
+    fees_billed_ytd: minorUnitsToPounds(fees_billed_ytd_pence),
+    fees_billed_ytd_pence,
+    disbursements_billed: minorUnitsToPounds(disbursements_billed_pence),
+    disbursements_billed_pence,
+    total_invoiced_inc_vat: minorUnitsToPounds(total_invoiced_inc_vat_pence),
+    total_invoiced_inc_vat_pence,
+    total_paid: minorUnitsToPounds(total_paid_pence),
+    total_paid_pence,
+    outstanding_debt: minorUnitsToPounds(outstanding_debt_pence),
+    outstanding_debt_pence,
+    unbilled_disbursements: minorUnitsToPounds(unbilled_disbursements_pence),
+    unbilled_disbursements_pence,
+    client_account_balance: minorUnitsToPounds(client_account_balance_pence),
+    client_account_balance_pence,
+    aged_not_yet_due: minorUnitsToPounds(aged_not_yet_due_pence),
+    aged_not_yet_due_pence,
+    aged_1_30: minorUnitsToPounds(aged_1_30_pence),
+    aged_1_30_pence,
+    aged_31_60: minorUnitsToPounds(aged_31_60_pence),
+    aged_31_60_pence,
+    aged_61_90: minorUnitsToPounds(aged_61_90_pence),
+    aged_61_90_pence,
+    aged_90_plus: minorUnitsToPounds(aged_90_plus_pence),
+    aged_90_plus_pence,
+    credit_limit_used_pct:
+      credit_limit_pence > 0 ? outstanding_debt_pence / credit_limit_pence : null,
   };
 }
 
@@ -731,7 +782,10 @@ export function buildFeeEarnerWeeklyTime(params: {
       mtdHours += t.hours;
     }
     if (t.billed_status === 'Unbilled') {
-      unbilledWipPence = sumMinorUnits([unbilledWipPence, toSafeMinorUnits(t.value)]);
+      unbilledWipPence = sumMinorUnits([
+        unbilledWipPence,
+        resolvePmsPence(t.value_pence, t.value),
+      ]);
       unbilledMatters.add(t.matter_code);
       if (!oldestUnbilledDate || t.date < oldestUnbilledDate) {
         oldestUnbilledDate = t.date;
@@ -747,6 +801,7 @@ export function buildFeeEarnerWeeklyTime(params: {
     weekdays,
     monthToDateHours: roundHours2(mtdHours),
     myUnbilledWip: minorUnitsToPounds(unbilledWipPence),
+    myUnbilledWipPence: unbilledWipPence,
     myUnbilledMatterCount: unbilledMatters.size,
     oldestUnbilledDate,
   };
@@ -802,9 +857,13 @@ export function buildFirmFinanceRollups(
           practiceArea: 'Firm total',
           openMatters: 0,
           billedThisYear: 0,
+          billedThisYearPence: 0 as MinorUnits,
           unbilledWip: 0,
+          unbilledWipPence: 0 as MinorUnits,
           outstandingDebt: 0,
+          outstandingDebtPence: 0 as MinorUnits,
           overdueDebt: 0,
+          overdueDebtPence: 0 as MinorUnits,
           currentMonthHours: 0,
         },
       },
@@ -850,12 +909,24 @@ export function buildFirmFinanceRollups(
         ? t.hours
         : 0,
     );
-    const time_value = sumMoneyPence(feYearEntries, (t) => t.value);
-    const unbilled_wip = sumMoneyPence(feEntries, (t) =>
-      t.billed_status === 'Unbilled' ? t.value : 0,
+    const time_value_pence = sumMoneyPence(feYearEntries, (t) =>
+      resolvePmsPence(t.value_pence, t.value),
     );
-    const billed_value = sumMoneyPence(feYearEntries, (t) => t.billed_value);
-    const written_off = sumMoneyPence(feYearEntries, (t) => t.write_off_value);
+    const unbilled_wip_pence = sumMoneyPence(feEntries, (t) =>
+      t.billed_status === 'Unbilled'
+        ? resolvePmsPence(t.value_pence, t.value)
+        : (0 as MinorUnits),
+    );
+    const billed_value_pence = sumMoneyPence(feYearEntries, (t) =>
+      resolvePmsPence(t.billed_value_pence, t.billed_value),
+    );
+    const written_off_pence = sumMoneyPence(feYearEntries, (t) =>
+      resolvePmsPence(t.write_off_value_pence, t.write_off_value),
+    );
+    const standard_hourly_rate_pence = resolvePmsPence(
+      fe.standard_hourly_rate_pence,
+      fe.standard_hourly_rate,
+    );
     const annual_target_hours = Number(fe.annual_target_hours ?? 0);
     const pct_of_annual_target =
       annual_target_hours > 0 ? chargeable_hours / annual_target_hours : 0;
@@ -867,13 +938,18 @@ export function buildFirmFinanceRollups(
       email: fe.email,
       grade: fe.grade,
       department: fe.department,
-      standard_hourly_rate: minorUnitsToPounds(toSafeMinorUnits(fe.standard_hourly_rate)),
+      standard_hourly_rate: minorUnitsToPounds(standard_hourly_rate_pence),
+      standard_hourly_rate_pence,
       chargeable_hours,
       chargeable_hours_this_month,
-      time_value,
-      unbilled_wip,
-      billed_value,
-      written_off,
+      time_value: minorUnitsToPounds(time_value_pence),
+      time_value_pence,
+      unbilled_wip: minorUnitsToPounds(unbilled_wip_pence),
+      unbilled_wip_pence,
+      billed_value: minorUnitsToPounds(billed_value_pence),
+      billed_value_pence,
+      written_off: minorUnitsToPounds(written_off_pence),
+      written_off_pence,
       annual_target_hours,
       pct_of_annual_target,
     };
@@ -900,7 +976,10 @@ export function buildFirmFinanceRollups(
     const ym = inv.invoice_date.slice(0, 7);
     byYmPence.set(
       ym,
-      sumMinorUnits([byYmPence.get(ym) ?? (0 as MinorUnits), toSafeMinorUnits(inv.fees_net)]),
+      sumMinorUnits([
+        byYmPence.get(ym) ?? (0 as MinorUnits),
+        resolvePmsPence(inv.fees_net_pence, inv.fees_net),
+      ]),
     );
   }
   const allMonthNames = [
@@ -926,7 +1005,14 @@ export function buildFirmFinanceRollups(
       feesNet: minorUnitsToPounds(byYmPence.get(monthKey) ?? (0 as MinorUnits)),
     };
   });
-  const yearToDateTotal = sumMoneyPence(months, (m) => m.feesNet);
+  const yearToDateTotalPence = sumMinorUnits(
+    monthNames.map(
+      (_, idx) =>
+        byYmPence.get(`${asAtYear}-${String(idx + 1).padStart(2, '0')}`) ??
+        (0 as MinorUnits),
+    ),
+  );
+  const yearToDateTotal = minorUnitsToPounds(yearToDateTotalPence);
 
   // 4. Cash received summary (derived from asAtDate current & previous month)
   let currentMonthPence = 0 as MinorUnits;
@@ -937,10 +1023,16 @@ export function buildFirmFinanceRollups(
     if (p.receipt_date > asAtIso) continue;
     const ym = p.receipt_date.slice(0, 7);
     if (ym === currentYm) {
-      currentMonthPence = sumMinorUnits([currentMonthPence, toSafeMinorUnits(p.amount)]);
+      currentMonthPence = sumMinorUnits([
+        currentMonthPence,
+        resolvePmsPence(p.amount_pence, p.amount),
+      ]);
       currentMonthReceiptCount += 1;
     } else if (ym === previousYm) {
-      previousMonthPence = sumMinorUnits([previousMonthPence, toSafeMinorUnits(p.amount)]);
+      previousMonthPence = sumMinorUnits([
+        previousMonthPence,
+        resolvePmsPence(p.amount_pence, p.amount),
+      ]);
       previousMonthReceiptCount += 1;
     }
   }
@@ -964,7 +1056,7 @@ export function buildFirmFinanceRollups(
   const departments: PmsDepartmentFinancials[] = [];
   for (const [practiceArea, deptMatters] of mattersByPracticeArea.entries()) {
     const openMatters = deptMatters.filter((m) => m.status === 'Open').length;
-    const billedThisYear = sumMoneyPence(
+    const billedThisYearPence = sumMoneyPence(
       visibleInvoices.filter(
         (inv) =>
           matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
@@ -972,17 +1064,21 @@ export function buildFirmFinanceRollups(
           inv.invoice_date <= asAtIso &&
           inv.exported_status !== 'Draft',
       ),
-      (inv) => inv.fees_net,
+      (inv) => resolvePmsPence(inv.fees_net_pence, inv.fees_net),
     );
-    const unbilledWip = sumMoneyPence(deptMatters, (m) => m.unbilled_wip);
-    const outstandingDebt = sumMoneyPence(deptMatters, (m) => m.outstanding_debt);
-    const overdueDebt = sumMoneyPence(
+    const unbilledWipPence = sumMoneyPence(deptMatters, (m) =>
+      resolvePmsPence(m.unbilled_wip_pence, m.unbilled_wip),
+    );
+    const outstandingDebtPence = sumMoneyPence(deptMatters, (m) =>
+      resolvePmsPence(m.outstanding_debt_pence, m.outstanding_debt),
+    );
+    const overdueDebtPence = sumMoneyPence(
       visibleInvoices.filter(
         (inv) =>
           matterPracticeAreaByCode.get(inv.matter_code) === practiceArea &&
           (inv.days_past_due ?? 0) > 0,
       ),
-      (inv) => inv.outstanding,
+      (inv) => resolvePmsPence(inv.outstanding_pence, inv.outstanding),
     );
     const currentMonthHours = sumHours2(
       visibleTimeEntries.filter(
@@ -997,22 +1093,43 @@ export function buildFirmFinanceRollups(
     departments.push({
       practiceArea,
       openMatters,
-      billedThisYear,
-      unbilledWip,
-      outstandingDebt,
-      overdueDebt,
+      billedThisYear: minorUnitsToPounds(billedThisYearPence),
+      billedThisYearPence,
+      unbilledWip: minorUnitsToPounds(unbilledWipPence),
+      unbilledWipPence,
+      outstandingDebt: minorUnitsToPounds(outstandingDebtPence),
+      outstandingDebtPence,
+      overdueDebt: minorUnitsToPounds(overdueDebtPence),
+      overdueDebtPence,
       currentMonthHours,
     });
   }
   departments.sort((a, b) => b.billedThisYear - a.billedThisYear);
 
+  const firmBilledThisYearPence = sumMoneyPence(departments, (d) =>
+    resolvePmsPence(d.billedThisYearPence, d.billedThisYear),
+  );
+  const firmUnbilledWipPence = sumMoneyPence(departments, (d) =>
+    resolvePmsPence(d.unbilledWipPence, d.unbilledWip),
+  );
+  const firmOutstandingDebtPence = sumMoneyPence(departments, (d) =>
+    resolvePmsPence(d.outstandingDebtPence, d.outstandingDebt),
+  );
+  const firmOverdueDebtPence = sumMoneyPence(departments, (d) =>
+    resolvePmsPence(d.overdueDebtPence, d.overdueDebt),
+  );
+
   const firmTotal: PmsDepartmentFinancials = {
     practiceArea: 'Firm total',
     openMatters: departments.reduce((s, d) => s + d.openMatters, 0),
-    billedThisYear: sumMoneyPence(departments, (d) => d.billedThisYear),
-    unbilledWip: sumMoneyPence(departments, (d) => d.unbilledWip),
-    outstandingDebt: sumMoneyPence(departments, (d) => d.outstandingDebt),
-    overdueDebt: sumMoneyPence(departments, (d) => d.overdueDebt),
+    billedThisYear: minorUnitsToPounds(firmBilledThisYearPence),
+    billedThisYearPence: firmBilledThisYearPence,
+    unbilledWip: minorUnitsToPounds(firmUnbilledWipPence),
+    unbilledWipPence: firmUnbilledWipPence,
+    outstandingDebt: minorUnitsToPounds(firmOutstandingDebtPence),
+    outstandingDebtPence: firmOutstandingDebtPence,
+    overdueDebt: minorUnitsToPounds(firmOverdueDebtPence),
+    overdueDebtPence: firmOverdueDebtPence,
     currentMonthHours:
       Math.round(departments.reduce((s, d) => s + d.currentMonthHours, 0) * 10) / 10,
   };

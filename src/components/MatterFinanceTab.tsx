@@ -6,12 +6,16 @@ import { ChevronDown, ChevronRight, Link2, Unlink } from 'lucide-react';
 import { linkPmsRecordAction, unlinkPmsRecordAction } from '@/app/actions';
 import {
   minorUnitsToPounds,
-  poundsToMinorUnits,
   subtractMinorUnits,
   sumMinorUnits,
 } from '@platform/core-api';
 import { formatDate } from '@/domain/dates';
-import { formatGbp, formatPmsAsAtLabel, formatWholePct } from '@/domain/pms';
+import {
+  formatGbp,
+  formatPmsAsAtLabel,
+  formatWholePct,
+  resolvePmsPence,
+} from '@/domain/pms';
 import type { AppRole } from '@/domain/types';
 import type { MatterPmsViewBundle } from '@/server/services';
 import { StatusPill } from './SearchBox';
@@ -77,7 +81,7 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
       hours += te.hours;
     }
     const valuePence = sumMinorUnits(
-      filteredTimeEntries.map((te) => poundsToMinorUnits(te.value)),
+      filteredTimeEntries.map((te) => resolvePmsPence(te.value_pence, te.value)),
     );
     return {
       hours: Math.round((hours + Number.EPSILON) * 100) / 100,
@@ -222,8 +226,8 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
   // Stacked bar widths against max(currentEst, fees_billed + unbilled_wip)
   const feesAndWipTotal = minorUnitsToPounds(
     sumMinorUnits([
-      poundsToMinorUnits(fin.fees_billed),
-      poundsToMinorUnits(fin.unbilled_wip),
+      resolvePmsPence(fin.fees_billed_pence, fin.fees_billed),
+      resolvePmsPence(fin.unbilled_wip_pence, fin.unbilled_wip),
     ]),
   );
   const barScaleBase =
@@ -421,8 +425,14 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
                 ? ` — ${formatGbp(
                     minorUnitsToPounds(
                       subtractMinorUnits(
-                        poundsToMinorUnits(fin.time_value_recorded),
-                        poundsToMinorUnits(fin.fixed_fee_amount),
+                        resolvePmsPence(
+                          fin.time_value_recorded_pence,
+                          fin.time_value_recorded,
+                        ),
+                        resolvePmsPence(
+                          fin.fixed_fee_amount_pence,
+                          fin.fixed_fee_amount,
+                        ),
                       ),
                     ),
                   )} over the cap.`
@@ -1072,7 +1082,9 @@ export function MatterFinanceTab({ matterId, matterNumber, pmsView, currentUserR
                                         {formatGbp(
                                           minorUnitsToPounds(
                                             sumMinorUnits(
-                                              invTime.map((t) => poundsToMinorUnits(t.value)),
+                                              invTime.map((t) =>
+                                                resolvePmsPence(t.value_pence, t.value),
+                                              ),
                                             ),
                                           ),
                                         )}

@@ -86,9 +86,19 @@ function toSafeMinorUnits(n: unknown): MinorUnits {
   return poundsToMinorUnits(num);
 }
 
-function parsePayloadMoneyText(text: unknown): number {
-  if (text === null || text === undefined) return 0;
-  return minorUnitsToPounds(toSafeMinorUnits(String(text)));
+function parsePayloadMoneyPence(text: unknown): MinorUnits {
+  if (text === null || text === undefined) return 0 as MinorUnits;
+  return toSafeMinorUnits(String(text));
+}
+
+function resolvePenceField(
+  pence: MinorUnits | undefined,
+  fallbackGbp: number,
+): MinorUnits {
+  if (typeof pence === 'number' && Number.isSafeInteger(pence)) {
+    return pence;
+  }
+  return toSafeMinorUnits(fallbackGbp);
 }
 
 const PMS_FEE_EARNERS_SELECT =
@@ -167,8 +177,10 @@ export interface TenantPmsFeeEarner {
   grade: string;
   department: string;
   standard_hourly_rate: number;
+  standard_hourly_rate_pence?: MinorUnits;
   annual_target_hours: number;
   annual_target_fees: number;
+  annual_target_fees_pence?: MinorUnits;
   active: string;
 }
 
@@ -184,6 +196,7 @@ export interface TenantPmsClient {
   client_partner_id: string;
   credit_terms_days: number;
   credit_limit: number;
+  credit_limit_pence?: MinorUnits;
   rate_discount_pct: number;
   date_opened: string;
   sector: string;
@@ -205,7 +218,9 @@ export interface TenantPmsMatter {
     | 'Capped Fee'
     | 'Retainer / Subscription';
   fixed_fee_amount: number;
+  fixed_fee_amount_pence?: MinorUnits;
   fee_estimate: number;
+  fee_estimate_pence?: MinorUnits;
   estimate_alert_pct: number;
   date_opened: string;
   date_closed: string | null;
@@ -221,7 +236,9 @@ export interface TenantPmsFeeEstimate {
   date_given: string;
   estimate_type: 'Initial' | 'Revised';
   fees_estimate: number;
+  fees_estimate_pence?: MinorUnits;
   disbursements_estimate: number;
+  disbursements_estimate_pence?: MinorUnits;
   given_by: string;
   given_by_name?: string;
   accepted_by_client: 'Yes' | 'No' | 'Pending';
@@ -241,12 +258,16 @@ export interface TenantPmsTimeEntry {
   units: number;
   hours: number;
   rate: number;
+  rate_pence?: MinorUnits;
   value: number;
+  value_pence?: MinorUnits;
   chargeable: 'Y' | 'N';
   billed_status: 'Unbilled' | 'Billed' | 'Written off' | 'Non-chargeable';
   invoice_number: string | null;
   billed_value: number;
+  billed_value_pence?: MinorUnits;
   write_off_value: number;
+  write_off_value_pence?: MinorUnits;
 }
 
 export interface TenantPmsDisbursement {
@@ -257,8 +278,11 @@ export interface TenantPmsDisbursement {
   supplier: string;
   description: string;
   net_amount: number;
+  net_amount_pence?: MinorUnits;
   vat_amount: number;
+  vat_amount_pence?: MinorUnits;
   gross_amount: number;
+  gross_amount_pence?: MinorUnits;
   paid_from: 'Office' | 'Client account';
   billed_status: 'Unbilled' | 'Billed';
   invoice_number: string | null;
@@ -286,6 +310,7 @@ export interface TenantPmsPayment {
   client_code: string;
   receipt_date: string;
   amount: number;
+  amount_pence?: MinorUnits;
   method: string;
   reference: string;
 }
@@ -300,9 +325,13 @@ export interface TenantPmsInvoiceRow {
   period_from: string | null;
   period_to: string | null;
   fees_net: number;
+  fees_net_pence?: MinorUnits;
   disbursements_net: number;
+  disbursements_net_pence?: MinorUnits;
   vat: number;
+  vat_pence?: MinorUnits;
   total: number;
+  total_pence?: MinorUnits;
   status: string;
   credit_note_for: string | null;
 }
@@ -317,14 +346,21 @@ export interface TenantPmsInvoiceBalance {
   period_from: string | null;
   period_to: string | null;
   fees_net: number;
+  fees_net_pence?: MinorUnits;
   disbursements_net: number;
+  disbursements_net_pence?: MinorUnits;
   vat: number;
+  vat_pence?: MinorUnits;
   total: number;
+  total_pence?: MinorUnits;
   exported_status: string;
   credit_note_for: string | null;
   paid: number;
+  paid_pence?: MinorUnits;
   credit_notes: number;
+  credit_notes_pence?: MinorUnits;
   outstanding: number;
+  outstanding_pence?: MinorUnits;
   days_past_due: number | null;
   age_bucket: TenantPmsAgeBucket;
   recalculated_status: TenantPmsRecalculatedInvoiceStatus;
@@ -345,7 +381,9 @@ export interface TenantPmsClientAccountEntry {
   type: 'Receipt' | 'Payment' | 'Transfer to office';
   description: string;
   amount: number;
+  amount_pence?: MinorUnits;
   running_balance: number;
+  running_balance_pence?: MinorUnits;
 }
 
 export interface TenantPmsMatterFinancials {
@@ -365,6 +403,7 @@ export interface TenantPmsMatterFinancials {
     | 'Capped Fee'
     | 'Retainer / Subscription';
   fixed_fee_amount: number;
+  fixed_fee_amount_pence?: MinorUnits;
   estimate_alert_pct: number;
   date_opened: string;
   date_closed: string | null;
@@ -373,17 +412,28 @@ export interface TenantPmsMatterFinancials {
   client_reference: string;
   third_party_payer: string;
   fee_estimate: number;
+  fee_estimate_pence?: MinorUnits;
   time_value_recorded: number;
+  time_value_recorded_pence?: MinorUnits;
   unbilled_wip: number;
+  unbilled_wip_pence?: MinorUnits;
   fees_billed: number;
+  fees_billed_pence?: MinorUnits;
   disbursements_billed: number;
+  disbursements_billed_pence?: MinorUnits;
   total_invoiced_inc_vat: number;
+  total_invoiced_inc_vat_pence?: MinorUnits;
   total_paid: number;
+  total_paid_pence?: MinorUnits;
   outstanding_debt: number;
+  outstanding_debt_pence?: MinorUnits;
   unbilled_disbursements: number;
+  unbilled_disbursements_pence?: MinorUnits;
   estimate_used_pct: number;
   written_off: number;
+  written_off_pence?: MinorUnits;
   client_account_balance: number;
+  client_account_balance_pence?: MinorUnits;
   has_pending_estimate_revision: boolean;
   oldest_unbilled_wip_days: number | null;
   max_invoice_days_past_due: number | null;
@@ -397,12 +447,17 @@ export interface TenantPmsMatterWipBreakdown {
     grade: string;
     hours: number;
     wip_value: number;
+    wip_value_pence?: MinorUnits;
   }[];
   byAgeBucket: {
     bucket_0_30: number;
+    bucket_0_30_pence?: MinorUnits;
     bucket_31_60: number;
+    bucket_31_60_pence?: MinorUnits;
     bucket_61_90: number;
+    bucket_61_90_pence?: MinorUnits;
     bucket_90_plus: number;
+    bucket_90_plus_pence?: MinorUnits;
   };
 }
 
@@ -577,7 +632,7 @@ export function computeDerivedInvoiceBalances(params: {
       p.invoice_number,
       sumMinorUnits([
         paidPenceByInv.get(p.invoice_number) ?? (0 as MinorUnits),
-        toSafeMinorUnits(p.amount),
+        resolvePenceField(p.amount_pence, p.amount),
       ]),
     );
   }
@@ -590,7 +645,7 @@ export function computeDerivedInvoiceBalances(params: {
         target,
         sumMinorUnits([
           cnPenceByInv.get(target) ?? (0 as MinorUnits),
-          toSafeMinorUnits(inv.total),
+          resolvePenceField(inv.total_pence, inv.total),
         ]),
       );
     }
@@ -599,7 +654,13 @@ export function computeDerivedInvoiceBalances(params: {
   const balances: TenantPmsInvoiceBalance[] = params.invoices.map((inv) => {
     const paidPence = paidPenceByInv.get(inv.invoice_number) ?? (0 as MinorUnits);
     const creditNotesPence = cnPenceByInv.get(inv.invoice_number) ?? (0 as MinorUnits);
-    const totalPence = toSafeMinorUnits(inv.total);
+    const feesNetPence = resolvePenceField(inv.fees_net_pence, inv.fees_net);
+    const disbursementsNetPence = resolvePenceField(
+      inv.disbursements_net_pence,
+      inv.disbursements_net,
+    );
+    const vatPence = resolvePenceField(inv.vat_pence, inv.vat);
+    const totalPence = resolvePenceField(inv.total_pence, inv.total);
     const paid = minorUnitsToPounds(paidPence);
     const creditNotes = minorUnitsToPounds(creditNotesPence);
     const isCreditNote = inv.invoice_type === 'Credit note';
@@ -655,15 +716,22 @@ export function computeDerivedInvoiceBalances(params: {
       invoice_type: inv.invoice_type,
       period_from: inv.period_from ?? null,
       period_to: inv.period_to ?? null,
-      fees_net: minorUnitsToPounds(toSafeMinorUnits(inv.fees_net)),
-      disbursements_net: minorUnitsToPounds(toSafeMinorUnits(inv.disbursements_net)),
-      vat: minorUnitsToPounds(toSafeMinorUnits(inv.vat)),
+      fees_net: minorUnitsToPounds(feesNetPence),
+      fees_net_pence: feesNetPence,
+      disbursements_net: minorUnitsToPounds(disbursementsNetPence),
+      disbursements_net_pence: disbursementsNetPence,
+      vat: minorUnitsToPounds(vatPence),
+      vat_pence: vatPence,
       total: minorUnitsToPounds(totalPence),
+      total_pence: totalPence,
       exported_status: inv.status,
       credit_note_for: inv.credit_note_for ?? null,
       paid,
+      paid_pence: paidPence,
       credit_notes: creditNotes,
+      credit_notes_pence: creditNotesPence,
       outstanding,
+      outstanding_pence: outstandingPence,
       days_past_due: daysPastDue,
       age_bucket: ageBucket,
       recalculated_status: recalculatedStatus,
@@ -688,10 +756,16 @@ export function computeDerivedMatterFinancials(params: {
   invoiceBalances: readonly TenantPmsInvoiceBalance[];
   timeEntries: readonly TenantPmsTimeEntry[];
   disbursements: readonly TenantPmsDisbursement[];
-  clientAccount: readonly Pick<
+  clientAccount: readonly (Pick<
     TenantPmsClientAccountEntry,
     'matter_code' | 'amount'
-  >[];
+  > &
+    Partial<
+      Pick<
+        TenantPmsClientAccountEntry,
+        'amount_pence' | 'running_balance' | 'running_balance_pence' | 'date' | 'transaction_id'
+      >
+    >)[];
 }): TenantPmsMatterFinancials[] {
   const validAsAt = isValidTenantPmsAsAtDate(params.asAtDate)
     ? params.asAtDate.trim()
@@ -727,15 +801,36 @@ export function computeDerivedMatterFinancials(params: {
     disbByMatter.set(d.matter_code, list);
   }
 
-  const caPenceByMatter = new Map<string, MinorUnits>();
+  // Prefer persisted running_balance_pence (`balance_after_pence`) on the latest entry
+  // per matter; only accumulate amount_pence when importing fresh entries with no balance_after.
+  const caEntriesByMatter = new Map<
+    string,
+    (typeof params.clientAccount)[number][]
+  >();
   for (const ca of params.clientAccount) {
-    caPenceByMatter.set(
-      ca.matter_code,
-      sumMinorUnits([
-        caPenceByMatter.get(ca.matter_code) ?? (0 as MinorUnits),
-        toSafeMinorUnits(ca.amount),
-      ]),
-    );
+    const list = caEntriesByMatter.get(ca.matter_code) ?? [];
+    list.push(ca);
+    caEntriesByMatter.set(ca.matter_code, list);
+  }
+  const caPenceByMatter = new Map<string, MinorUnits>();
+  for (const [mCode, entries] of caEntriesByMatter.entries()) {
+    const lastEntry = entries[entries.length - 1];
+    if (
+      lastEntry &&
+      typeof lastEntry.running_balance_pence === 'number' &&
+      Number.isSafeInteger(lastEntry.running_balance_pence)
+    ) {
+      caPenceByMatter.set(mCode, lastEntry.running_balance_pence);
+    } else if (lastEntry && typeof lastEntry.running_balance === 'number') {
+      caPenceByMatter.set(mCode, toSafeMinorUnits(lastEntry.running_balance));
+    } else {
+      caPenceByMatter.set(
+        mCode,
+        sumMinorUnits(
+          entries.map((ca) => resolvePenceField(ca.amount_pence, ca.amount)),
+        ),
+      );
+    }
   }
 
   const sortedMatters = [...params.matters].sort((a, b) =>
@@ -755,8 +850,13 @@ export function computeDerivedMatterFinancials(params: {
       },
     );
     const latestEst = mEstimates[0];
-    const feeEstimate = minorUnitsToPounds(
-      toSafeMinorUnits(latestEst ? latestEst.fees_estimate : m.fee_estimate),
+    const feeEstimatePence = latestEst
+      ? resolvePenceField(latestEst.fees_estimate_pence, latestEst.fees_estimate)
+      : resolvePenceField(m.fee_estimate_pence, m.fee_estimate);
+    const feeEstimate = minorUnitsToPounds(feeEstimatePence);
+    const fixedFeeAmountPence = resolvePenceField(
+      m.fixed_fee_amount_pence,
+      m.fixed_fee_amount,
     );
     const hasPendingRevision = mEstimates.some(
       (e) => e.accepted_by_client === 'Pending',
@@ -769,11 +869,11 @@ export function computeDerivedMatterFinancials(params: {
     let oldestUnbilledWipDays: number | null = null;
 
     for (const te of mTimes) {
-      const valPence = toSafeMinorUnits(te.value);
+      const valPence = resolvePenceField(te.value_pence, te.value);
       timeRecordedPence = sumMinorUnits([timeRecordedPence, valPence]);
       writtenOffPence = sumMinorUnits([
         writtenOffPence,
-        toSafeMinorUnits(te.write_off_value),
+        resolvePenceField(te.write_off_value_pence, te.write_off_value),
       ]);
       if (te.billed_status === 'Unbilled') {
         unbilledWipPence = sumMinorUnits([unbilledWipPence, valPence]);
@@ -800,21 +900,25 @@ export function computeDerivedMatterFinancials(params: {
     for (const ib of mInvoices) {
       feesBilledPence = sumMinorUnits([
         feesBilledPence,
-        toSafeMinorUnits(ib.fees_net),
+        resolvePenceField(ib.fees_net_pence, ib.fees_net),
       ]);
       disbBilledPence = sumMinorUnits([
         disbBilledPence,
-        toSafeMinorUnits(ib.disbursements_net),
+        resolvePenceField(ib.disbursements_net_pence, ib.disbursements_net),
       ]);
       totalInvoicedPence = sumMinorUnits([
         totalInvoicedPence,
-        toSafeMinorUnits(ib.total),
+        resolvePenceField(ib.total_pence, ib.total),
       ]);
       totalPaidPence = sumMinorUnits([
         totalPaidPence,
-        toSafeMinorUnits(ib.paid),
+        resolvePenceField(ib.paid_pence, ib.paid),
       ]);
-      if (toSafeMinorUnits(ib.outstanding) > 0 && ib.days_past_due !== null) {
+      const outstandingInvPence = resolvePenceField(
+        ib.outstanding_pence,
+        ib.outstanding,
+      );
+      if (outstandingInvPence > 0 && ib.days_past_due !== null) {
         if (
           maxInvoiceDaysPastDue === null ||
           ib.days_past_due > maxInvoiceDaysPastDue
@@ -828,9 +932,11 @@ export function computeDerivedMatterFinancials(params: {
     const disbursementsBilled = minorUnitsToPounds(disbBilledPence);
     const totalInvoicedIncVat = minorUnitsToPounds(totalInvoicedPence);
     const totalPaid = minorUnitsToPounds(totalPaidPence);
-    const outstandingDebt = minorUnitsToPounds(
-      subtractMinorUnits(totalInvoicedPence, totalPaidPence),
+    const outstandingDebtPence = subtractMinorUnits(
+      totalInvoicedPence,
+      totalPaidPence,
     );
+    const outstandingDebt = minorUnitsToPounds(outstandingDebtPence);
 
     const mDisbs = disbByMatter.get(m.matter_code) ?? [];
     let unbilledDisbPence = 0 as MinorUnits;
@@ -838,18 +944,16 @@ export function computeDerivedMatterFinancials(params: {
       if (d.billed_status === 'Unbilled') {
         unbilledDisbPence = sumMinorUnits([
           unbilledDisbPence,
-          toSafeMinorUnits(d.net_amount),
+          resolvePenceField(d.net_amount_pence, d.net_amount),
         ]);
       }
     }
     const unbilledDisbursements = minorUnitsToPounds(unbilledDisbPence);
-    const clientAccountBalance = minorUnitsToPounds(
-      caPenceByMatter.get(m.matter_code) ?? (0 as MinorUnits),
-    );
+    const clientAccountPence = caPenceByMatter.get(m.matter_code) ?? (0 as MinorUnits);
+    const clientAccountBalance = minorUnitsToPounds(clientAccountPence);
     const estimateUsedPct =
-      feeEstimate > 0
-        ? minorUnitsToPounds(sumMinorUnits([feesBilledPence, unbilledWipPence])) /
-          feeEstimate
+      feeEstimatePence > 0
+        ? sumMinorUnits([feesBilledPence, unbilledWipPence]) / feeEstimatePence
         : 0;
 
     return {
@@ -864,7 +968,8 @@ export function computeDerivedMatterFinancials(params: {
       fee_earner_id: m.fee_earner_id,
       fee_earner_name: fe ? `${fe.first_name} ${fe.last_name}` : '',
       billing_basis: m.billing_basis,
-      fixed_fee_amount: minorUnitsToPounds(toSafeMinorUnits(m.fixed_fee_amount)),
+      fixed_fee_amount: minorUnitsToPounds(fixedFeeAmountPence),
+      fixed_fee_amount_pence: fixedFeeAmountPence,
       estimate_alert_pct: Number(m.estimate_alert_pct ?? 0.75),
       date_opened: m.date_opened,
       date_closed: m.date_closed ?? null,
@@ -873,17 +978,28 @@ export function computeDerivedMatterFinancials(params: {
       client_reference: m.client_reference ?? '',
       third_party_payer: m.third_party_payer ?? '',
       fee_estimate: feeEstimate,
+      fee_estimate_pence: feeEstimatePence,
       time_value_recorded: timeValueRecorded,
+      time_value_recorded_pence: timeRecordedPence,
       unbilled_wip: unbilledWip,
+      unbilled_wip_pence: unbilledWipPence,
       fees_billed: feesBilled,
+      fees_billed_pence: feesBilledPence,
       disbursements_billed: disbursementsBilled,
+      disbursements_billed_pence: disbBilledPence,
       total_invoiced_inc_vat: totalInvoicedIncVat,
+      total_invoiced_inc_vat_pence: totalInvoicedPence,
       total_paid: totalPaid,
+      total_paid_pence: totalPaidPence,
       outstanding_debt: outstandingDebt,
+      outstanding_debt_pence: outstandingDebtPence,
       unbilled_disbursements: unbilledDisbursements,
+      unbilled_disbursements_pence: unbilledDisbPence,
       estimate_used_pct: estimateUsedPct,
       written_off: writtenOff,
+      written_off_pence: writtenOffPence,
       client_account_balance: clientAccountBalance,
+      client_account_balance_pence: clientAccountPence,
       has_pending_estimate_revision: hasPendingRevision,
       oldest_unbilled_wip_days: oldestUnbilledWipDays,
       max_invoice_days_past_due: maxInvoiceDaysPastDue,
@@ -932,7 +1048,7 @@ export function computeDerivedMatterWipBreakdown(params: {
       hoursHund: 0,
       wipPence: 0 as MinorUnits,
     };
-    const valPence = toSafeMinorUnits(te.value);
+    const valPence = resolvePenceField(te.value_pence, te.value);
     existing.hoursHund += Math.round(te.hours * 100);
     existing.wipPence = sumMinorUnits([existing.wipPence, valPence]);
     feAgg.set(te.fee_earner_id, existing);
@@ -957,6 +1073,7 @@ export function computeDerivedMatterWipBreakdown(params: {
       grade: item.grade,
       hours: roundHours2(item.hoursHund / 100),
       wip_value: minorUnitsToPounds(item.wipPence),
+      wip_value_pence: item.wipPence,
     }))
     .sort((a, b) => {
       if (b.wip_value !== a.wip_value) return b.wip_value - a.wip_value;
@@ -967,9 +1084,13 @@ export function computeDerivedMatterWipBreakdown(params: {
     byFeeEarner,
     byAgeBucket: {
       bucket_0_30: minorUnitsToPounds(bucket0_30Pence),
+      bucket_0_30_pence: bucket0_30Pence,
       bucket_31_60: minorUnitsToPounds(bucket31_60Pence),
+      bucket_31_60_pence: bucket31_60Pence,
       bucket_61_90: minorUnitsToPounds(bucket61_90Pence),
+      bucket_61_90_pence: bucket61_90Pence,
       bucket_90_plus: minorUnitsToPounds(bucket90PlusPence),
+      bucket_90_plus_pence: bucket90PlusPence,
     },
   };
 }
@@ -1560,7 +1681,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         dataset.feeEarners,
         (fe) => {
-          const ratePence = toSafeMinorUnits(fe.standard_hourly_rate);
+          const ratePence = resolvePenceField(
+            fe.standard_hourly_rate_pence,
+            fe.standard_hourly_rate,
+          );
           return [
             ctx.tenantId,
             fe.fee_earner_id,
@@ -1622,7 +1746,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         dataset.matters,
         (matter) => {
-          const estPence = toSafeMinorUnits(matter.fee_estimate);
+          const estPence = resolvePenceField(
+            matter.fee_estimate_pence,
+            matter.fee_estimate,
+          );
           return [
             ctx.tenantId,
             matter.matter_code,
@@ -1701,20 +1828,50 @@ export class TenantPmsRepository extends TenantScopedRepository {
           const wipHours = roundHours2(
             (wipHoursByMatter.get(mf.matter_code) ?? 0) / 100,
           );
-          const feeEstimatePence = toSafeMinorUnits(mf.fee_estimate);
-          const unbilledWipPence = toSafeMinorUnits(mf.unbilled_wip);
-          const timeRecordedPence = toSafeMinorUnits(mf.time_value_recorded);
-          const feesBilledPence = toSafeMinorUnits(mf.fees_billed);
-          const disbBilledPence = toSafeMinorUnits(mf.disbursements_billed);
-          const totalInvoicedPence = toSafeMinorUnits(mf.total_invoiced_inc_vat);
+          const feeEstimatePence = resolvePenceField(
+            mf.fee_estimate_pence,
+            mf.fee_estimate,
+          );
+          const unbilledWipPence = resolvePenceField(
+            mf.unbilled_wip_pence,
+            mf.unbilled_wip,
+          );
+          const timeRecordedPence = resolvePenceField(
+            mf.time_value_recorded_pence,
+            mf.time_value_recorded,
+          );
+          const feesBilledPence = resolvePenceField(
+            mf.fees_billed_pence,
+            mf.fees_billed,
+          );
+          const disbBilledPence = resolvePenceField(
+            mf.disbursements_billed_pence,
+            mf.disbursements_billed,
+          );
+          const totalInvoicedPence = resolvePenceField(
+            mf.total_invoiced_inc_vat_pence,
+            mf.total_invoiced_inc_vat,
+          );
           const billedVatPence = subtractMinorUnits(
             subtractMinorUnits(totalInvoicedPence, feesBilledPence),
             disbBilledPence,
           );
-          const totalPaidPence = toSafeMinorUnits(mf.total_paid);
-          const outstandingDebtPence = toSafeMinorUnits(mf.outstanding_debt);
-          const unbilledDisbPence = toSafeMinorUnits(mf.unbilled_disbursements);
-          const clientAccountPence = toSafeMinorUnits(mf.client_account_balance);
+          const totalPaidPence = resolvePenceField(
+            mf.total_paid_pence,
+            mf.total_paid,
+          );
+          const outstandingDebtPence = resolvePenceField(
+            mf.outstanding_debt_pence,
+            mf.outstanding_debt,
+          );
+          const unbilledDisbPence = resolvePenceField(
+            mf.unbilled_disbursements_pence,
+            mf.unbilled_disbursements,
+          );
+          const clientAccountPence = resolvePenceField(
+            mf.client_account_balance_pence,
+            mf.client_account_balance,
+          );
           return [
             ctx.tenantId,
             mf.matter_code,
@@ -1788,7 +1945,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
         (est) => {
           const nextVer = (estVersionByMatter.get(est.matter_code) ?? 0) + 1;
           estVersionByMatter.set(est.matter_code, nextVer);
-          const estPence = toSafeMinorUnits(est.fees_estimate);
+          const estPence = resolvePenceField(
+            est.fees_estimate_pence,
+            est.fees_estimate,
+          );
           return [
             ctx.tenantId,
             est.estimate_id,
@@ -1820,7 +1980,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         dataset.invoices,
         (inv) => {
-          const totalPence = toSafeMinorUnits(inv.total);
+          const totalPence = resolvePenceField(inv.total_pence, inv.total);
           return [
             ctx.tenantId,
             inv.invoice_number,
@@ -1853,7 +2013,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         dataset.payments,
         (pay) => {
-          const amtPence = toSafeMinorUnits(pay.amount);
+          const amtPence = resolvePenceField(pay.amount_pence, pay.amount);
           return [
             ctx.tenantId,
             pay.receipt_id,
@@ -1887,7 +2047,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         dataset.timeEntries,
         (te) => {
-          const valPence = toSafeMinorUnits(te.value);
+          const valPence = resolvePenceField(te.value_pence, te.value);
           return [
             ctx.tenantId,
             te.time_id,
@@ -1921,7 +2081,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         dataset.disbursements,
         (d) => {
-          const netPence = toSafeMinorUnits(d.net_amount);
+          const netPence = resolvePenceField(d.net_amount_pence, d.net_amount);
           return [
             ctx.tenantId,
             d.disbursement_id,
@@ -1963,7 +2123,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         ],
         sortedCa,
         (ca) => {
-          const amtPence = toSafeMinorUnits(ca.amount);
+          const amtPence = resolvePenceField(ca.amount_pence, ca.amount);
           const amt = minorUnitsToPounds(amtPence);
           const nextPence = sumMinorUnits([
             runningPenceByMatter.get(ca.matter_code) ?? (0 as MinorUnits),
@@ -1974,7 +2134,9 @@ export class TenantPmsRepository extends TenantScopedRepository {
           const fullEntry: TenantPmsClientAccountEntry = {
             ...ca,
             amount: amt,
+            amount_pence: amtPence,
             running_balance: runningBalance,
+            running_balance_pence: nextPence,
           };
           return [
             ctx.tenantId,
@@ -2018,6 +2180,12 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_earners');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEarner>;
+      const hourlyRatePence = pgBigIntToMinorUnits(
+        row.charge_out_rate_pence as string | number | bigint,
+      );
+      const annualTargetFeesPence = parsePayloadMoneyPence(
+        row.payload_annual_target_fees_text,
+      );
       return {
         fee_earner_id: String(row.fee_earner_id),
         initials: String(p.initials ?? ''),
@@ -2026,13 +2194,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
         email: String(p.email ?? ''),
         grade: String(row.grade ?? p.grade ?? ''),
         department: String(row.department ?? p.department ?? ''),
-        standard_hourly_rate: minorUnitsToPounds(
-          pgBigIntToMinorUnits(row.charge_out_rate_pence as string | number | bigint),
-        ),
+        standard_hourly_rate: minorUnitsToPounds(hourlyRatePence),
+        standard_hourly_rate_pence: hourlyRatePence,
         annual_target_hours: Number(p.annual_target_hours ?? 0),
-        annual_target_fees: parsePayloadMoneyText(
-          row.payload_annual_target_fees_text,
-        ),
+        annual_target_fees: minorUnitsToPounds(annualTargetFeesPence),
+        annual_target_fees_pence: annualTargetFeesPence,
         active: String(p.active ?? row.status ?? 'Yes'),
       };
     });
@@ -2045,6 +2211,9 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_clients');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsClient>;
+      const creditLimitPence = parsePayloadMoneyPence(
+        row.payload_credit_limit_text,
+      );
       return {
         client_code: String(row.client_code),
         client_name: String(row.client_name ?? p.client_name ?? ''),
@@ -2058,7 +2227,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
         postcode: String(p.postcode ?? ''),
         client_partner_id: String(p.client_partner_id ?? ''),
         credit_terms_days: Number(p.credit_terms_days ?? 0),
-        credit_limit: parsePayloadMoneyText(row.payload_credit_limit_text),
+        credit_limit: minorUnitsToPounds(creditLimitPence),
+        credit_limit_pence: creditLimitPence,
         rate_discount_pct: Number(p.rate_discount_pct ?? 0),
         date_opened: String(p.date_opened ?? ''),
         sector: String(p.sector ?? ''),
@@ -2076,6 +2246,12 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_matters');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsMatter>;
+      const fixedFeePence = parsePayloadMoneyPence(
+        row.payload_fixed_fee_amount_text,
+      );
+      const feeEstimatePence = pgBigIntToMinorUnits(
+        row.fee_estimate_pence as string | number | bigint,
+      );
       return {
         matter_code: String(row.matter_code),
         client_code: String(row.client_code),
@@ -2093,12 +2269,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
         billing_basis: (row.billing_basis ??
           p.billing_basis ??
           'Hourly Rate') as TenantPmsMatter['billing_basis'],
-        fixed_fee_amount: parsePayloadMoneyText(
-          row.payload_fixed_fee_amount_text,
-        ),
-        fee_estimate: minorUnitsToPounds(
-          pgBigIntToMinorUnits(row.fee_estimate_pence as string | number | bigint),
-        ),
+        fixed_fee_amount: minorUnitsToPounds(fixedFeePence),
+        fixed_fee_amount_pence: fixedFeePence,
+        fee_estimate: minorUnitsToPounds(feeEstimatePence),
+        fee_estimate_pence: feeEstimatePence,
         estimate_alert_pct: Number(p.estimate_alert_pct ?? 0.75),
         date_opened: String(row.open_date ?? p.date_opened ?? ''),
         date_closed:
@@ -2125,20 +2299,22 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEstimate>;
       const givenBy = String(p.given_by ?? '');
       const fe = feById.get(givenBy);
+      const feesEstimatePence = pgBigIntToMinorUnits(
+        row.estimated_fees_ex_vat_pence as string | number | bigint,
+      );
+      const disbEstimatePence = parsePayloadMoneyPence(
+        row.payload_disbursements_estimate_text,
+      );
       return {
         estimate_id: String(row.estimate_id),
         matter_code: String(row.matter_code),
         date_given: String(row.estimate_date ?? p.date_given ?? ''),
         estimate_type: (p.estimate_type ??
           'Initial') as TenantPmsFeeEstimate['estimate_type'],
-        fees_estimate: minorUnitsToPounds(
-          pgBigIntToMinorUnits(
-            row.estimated_fees_ex_vat_pence as string | number | bigint,
-          ),
-        ),
-        disbursements_estimate: parsePayloadMoneyText(
-          row.payload_disbursements_estimate_text,
-        ),
+        fees_estimate: minorUnitsToPounds(feesEstimatePence),
+        fees_estimate_pence: feesEstimatePence,
+        disbursements_estimate: minorUnitsToPounds(disbEstimatePence),
+        disbursements_estimate_pence: disbEstimatePence,
         given_by: givenBy,
         given_by_name: fe
           ? `${fe.first_name} ${fe.last_name}`
@@ -2157,6 +2333,14 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_invoices');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsInvoiceRow>;
+      const feesNetPence = parsePayloadMoneyPence(row.payload_fees_net_text);
+      const disbNetPence = parsePayloadMoneyPence(
+        row.payload_disbursements_net_text,
+      );
+      const vatPence = parsePayloadMoneyPence(row.payload_vat_text);
+      const totalPence = pgBigIntToMinorUnits(
+        row.total_inc_vat_pence as string | number | bigint,
+      );
       return {
         invoice_number: String(row.invoice_number),
         matter_code: String(row.matter_code),
@@ -2166,14 +2350,14 @@ export class TenantPmsRepository extends TenantScopedRepository {
         invoice_type: String(p.invoice_type ?? 'Interim'),
         period_from: p.period_from ? String(p.period_from) : null,
         period_to: p.period_to ? String(p.period_to) : null,
-        fees_net: parsePayloadMoneyText(row.payload_fees_net_text),
-        disbursements_net: parsePayloadMoneyText(
-          row.payload_disbursements_net_text,
-        ),
-        vat: parsePayloadMoneyText(row.payload_vat_text),
-        total: minorUnitsToPounds(
-          pgBigIntToMinorUnits(row.total_inc_vat_pence as string | number | bigint),
-        ),
+        fees_net: minorUnitsToPounds(feesNetPence),
+        fees_net_pence: feesNetPence,
+        disbursements_net: minorUnitsToPounds(disbNetPence),
+        disbursements_net_pence: disbNetPence,
+        vat: minorUnitsToPounds(vatPence),
+        vat_pence: vatPence,
+        total: minorUnitsToPounds(totalPence),
+        total_pence: totalPence,
         status: String(row.status ?? p.status ?? ''),
         credit_note_for: p.credit_note_for ? String(p.credit_note_for) : null,
       };
@@ -2187,15 +2371,17 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_payments');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsPayment>;
+      const amountPence = pgBigIntToMinorUnits(
+        row.amount_pence as string | number | bigint,
+      );
       return {
         receipt_id: String(row.receipt_id),
         invoice_number: String(row.invoice_number),
         matter_code: String(row.matter_code),
         client_code: String(row.client_code),
         receipt_date: String(row.payment_date ?? p.receipt_date ?? ''),
-        amount: minorUnitsToPounds(
-          pgBigIntToMinorUnits(row.amount_pence as string | number | bigint),
-        ),
+        amount: minorUnitsToPounds(amountPence),
+        amount_pence: amountPence,
         method: String(p.method ?? ''),
         reference: String(p.reference ?? ''),
       };
@@ -2212,6 +2398,16 @@ export class TenantPmsRepository extends TenantScopedRepository {
       const p = (row.payload_json ?? {}) as Partial<TenantPmsTimeEntry>;
       const feId = String(row.fee_earner_id);
       const fe = feById.get(feId);
+      const ratePence = parsePayloadMoneyPence(row.payload_rate_text);
+      const valuePence = pgBigIntToMinorUnits(
+        row.value_pence as string | number | bigint,
+      );
+      const billedValuePence = parsePayloadMoneyPence(
+        row.payload_billed_value_text,
+      );
+      const writeOffValuePence = parsePayloadMoneyPence(
+        row.payload_write_off_value_text,
+      );
       return {
         time_id: String(row.time_id),
         matter_code: String(row.matter_code),
@@ -2226,10 +2422,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
         minutes: Number(p.minutes ?? 0),
         units: Number(p.units ?? 0),
         hours: Number(row.hours ?? p.hours ?? 0),
-        rate: parsePayloadMoneyText(row.payload_rate_text),
-        value: minorUnitsToPounds(
-          pgBigIntToMinorUnits(row.value_pence as string | number | bigint),
-        ),
+        rate: minorUnitsToPounds(ratePence),
+        rate_pence: ratePence,
+        value: minorUnitsToPounds(valuePence),
+        value_pence: valuePence,
         chargeable: (p.chargeable ?? 'Y') as 'Y' | 'N',
         billed_status: (row.billing_status ??
           p.billed_status ??
@@ -2238,8 +2434,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
           row.invoice_number || p.invoice_number
             ? String(row.invoice_number ?? p.invoice_number)
             : null,
-        billed_value: parsePayloadMoneyText(row.payload_billed_value_text),
-        write_off_value: parsePayloadMoneyText(row.payload_write_off_value_text),
+        billed_value: minorUnitsToPounds(billedValuePence),
+        billed_value_pence: billedValuePence,
+        write_off_value: minorUnitsToPounds(writeOffValuePence),
+        write_off_value_pence: writeOffValuePence,
       };
     });
   }
@@ -2251,6 +2449,15 @@ export class TenantPmsRepository extends TenantScopedRepository {
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_disbursements');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsDisbursement>;
+      const netAmountPence = pgBigIntToMinorUnits(
+        row.amount_ex_vat_pence as string | number | bigint,
+      );
+      const vatAmountPence = parsePayloadMoneyPence(
+        row.payload_vat_amount_text,
+      );
+      const grossAmountPence = parsePayloadMoneyPence(
+        row.payload_gross_amount_text,
+      );
       return {
         disbursement_id: String(row.disbursement_id),
         matter_code: String(row.matter_code),
@@ -2258,13 +2465,12 @@ export class TenantPmsRepository extends TenantScopedRepository {
         type: String(p.type ?? ''),
         supplier: String(p.supplier ?? ''),
         description: String(p.description ?? ''),
-        net_amount: minorUnitsToPounds(
-          pgBigIntToMinorUnits(
-            row.amount_ex_vat_pence as string | number | bigint,
-          ),
-        ),
-        vat_amount: parsePayloadMoneyText(row.payload_vat_amount_text),
-        gross_amount: parsePayloadMoneyText(row.payload_gross_amount_text),
+        net_amount: minorUnitsToPounds(netAmountPence),
+        net_amount_pence: netAmountPence,
+        vat_amount: minorUnitsToPounds(vatAmountPence),
+        vat_amount_pence: vatAmountPence,
+        gross_amount: minorUnitsToPounds(grossAmountPence),
+        gross_amount_pence: grossAmountPence,
         paid_from: (p.paid_from ??
           'Office') as TenantPmsDisbursement['paid_from'],
         billed_status: (row.billing_status ??
@@ -2282,23 +2488,19 @@ export class TenantPmsRepository extends TenantScopedRepository {
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsClientAccountEntry[] {
-    const runningByMatter = new Map<string, MinorUnits>();
     return rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_client_account_entries');
       const p = (row.payload_json ??
         {}) as Partial<TenantPmsClientAccountEntry>;
-      const mCode = String(row.matter_code);
       const amtPence = pgBigIntToMinorUnits(
         row.amount_pence as string | number | bigint,
       );
-      const nextPence = sumMinorUnits([
-        runningByMatter.get(mCode) ?? (0 as MinorUnits),
-        amtPence,
-      ]);
-      runningByMatter.set(mCode, nextPence);
+      const balanceAfterPence = pgBigIntToMinorUnits(
+        row.balance_after_pence as string | number | bigint,
+      );
       return {
         transaction_id: String(row.transaction_id),
-        matter_code: mCode,
+        matter_code: String(row.matter_code),
         client_code: String(row.client_code),
         date: String(row.entry_date ?? p.date ?? ''),
         type: (row.direction ??
@@ -2306,7 +2508,9 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'Receipt') as TenantPmsClientAccountEntry['type'],
         description: String(p.description ?? ''),
         amount: minorUnitsToPounds(amtPence),
-        running_balance: minorUnitsToPounds(nextPence),
+        amount_pence: amtPence,
+        running_balance: minorUnitsToPounds(balanceAfterPence),
+        running_balance_pence: balanceAfterPence,
       };
     });
   }

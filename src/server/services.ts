@@ -173,6 +173,7 @@ import {
   findPmsCodeForRecord,
   isValidPmsAsAtDate,
   PMS_AS_AT_UNAVAILABLE_LABEL,
+  resolvePmsPence,
   suggestMatterMatches,
   type PmsAdminSnapshot,
   type PmsLinkedRecordSummary,
@@ -408,6 +409,7 @@ import {
   type MatterNumberAllocationResult,
   type MatterNumberingConfig,
   type MatterOpeningGateOverrideRecord,
+  type MinorUnits,
   type NotificationChannelFrequency,
   type RegisterChecklistItemStatus,
   type RegisterChecklistItemValue,
@@ -8562,10 +8564,34 @@ export async function saveMatterRecord(
       : existing?.engagementLetterSignedAt ?? null,
     feeEstimateGbp: input.feeEstimateGbp !== undefined ? input.feeEstimateGbp : existing?.feeEstimateGbp ?? null,
     agreedFeeCapGbp: input.agreedFeeCapGbp !== undefined ? input.agreedFeeCapGbp : existing?.agreedFeeCapGbp ?? null,
+    retainerMoniesOnAccountPence: (() => {
+      const explicitPence = input.retainerMoniesOnAccountPence;
+      const explicitGbp = input.retainerMoniesOnAccountGbp;
+      if (explicitGbp === null) return null;
+      if (typeof explicitPence === 'number' && Number.isSafeInteger(explicitPence)) {
+        if (explicitGbp !== undefined && minorUnitsToPounds(explicitPence) !== explicitGbp) {
+          return poundsToMinorUnits(explicitGbp);
+        }
+        return explicitPence;
+      }
+      if (explicitGbp !== undefined && Number.isFinite(Number(explicitGbp))) {
+        return poundsToMinorUnits(explicitGbp);
+      }
+      if (existing?.retainerMoniesOnAccountPence !== undefined) {
+        return existing.retainerMoniesOnAccountPence;
+      }
+      return existing?.retainerMoniesOnAccountGbp !== null &&
+        existing?.retainerMoniesOnAccountGbp !== undefined
+        ? poundsToMinorUnits(existing.retainerMoniesOnAccountGbp)
+        : null;
+    })(),
     retainerMoniesOnAccountGbp:
       input.retainerMoniesOnAccountGbp !== undefined
         ? input.retainerMoniesOnAccountGbp
-        : existing?.retainerMoniesOnAccountGbp ?? null,
+        : input.retainerMoniesOnAccountPence !== undefined &&
+            input.retainerMoniesOnAccountPence !== null
+          ? minorUnitsToPounds(input.retainerMoniesOnAccountPence)
+          : existing?.retainerMoniesOnAccountGbp ?? null,
     stageId: input.stageId ?? existing?.stageId ?? vid('matter_stage', 'Stage 1 — Inception & Onboarding'),
     milestoneId: input.milestoneId !== undefined ? input.milestoneId : existing?.milestoneId ?? null,
     enquiryReceivedAt:
@@ -18086,17 +18112,29 @@ export interface PmsGroupFinancials {
   companies: PmsGroupCompanyRow[];
   totals: {
     unbilled_wip: number;
+    unbilled_wip_pence?: MinorUnits;
     fees_billed: number;
+    fees_billed_pence?: MinorUnits;
     total_invoiced_inc_vat: number;
+    total_invoiced_inc_vat_pence?: MinorUnits;
     total_paid: number;
+    total_paid_pence?: MinorUnits;
     outstanding_debt: number;
+    outstanding_debt_pence?: MinorUnits;
     aged_not_yet_due: number;
+    aged_not_yet_due_pence?: MinorUnits;
     aged_1_30: number;
+    aged_1_30_pence?: MinorUnits;
     aged_31_60: number;
+    aged_31_60_pence?: MinorUnits;
     aged_61_90: number;
+    aged_61_90_pence?: MinorUnits;
     aged_90_plus: number;
+    aged_90_plus_pence?: MinorUnits;
     client_account_balance: number;
+    client_account_balance_pence?: MinorUnits;
     credit_limit: number;
+    credit_limit_pence?: MinorUnits;
     credit_limit_used_pct: number | null;
   };
 }
@@ -18337,36 +18375,81 @@ export async function getClientPmsViewBundle(
           };
         });
 
-        const sumField = (fn: (f: PmsClientFinancials) => number) =>
-          minorUnitsToPounds(
-            sumMinorUnits(
-              companies.map((c) =>
-                c.financials ? poundsToMinorUnits(fn(c.financials)) : 0,
-              ),
-            ),
+        const sumFieldPence = (fn: (f: PmsClientFinancials) => MinorUnits) =>
+          sumMinorUnits(
+            companies.map((c) => (c.financials ? fn(c.financials) : (0 as MinorUnits))),
           );
 
-        const outstanding_debt = sumField((f) => f.outstanding_debt);
-        const credit_limit = sumField((f) => f.credit_limit);
+        const unbilled_wip_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.unbilled_wip_pence, f.unbilled_wip),
+        );
+        const fees_billed_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.fees_billed_pence, f.fees_billed),
+        );
+        const total_invoiced_inc_vat_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.total_invoiced_inc_vat_pence, f.total_invoiced_inc_vat),
+        );
+        const total_paid_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.total_paid_pence, f.total_paid),
+        );
+        const outstanding_debt_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.outstanding_debt_pence, f.outstanding_debt),
+        );
+        const aged_not_yet_due_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.aged_not_yet_due_pence, f.aged_not_yet_due),
+        );
+        const aged_1_30_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.aged_1_30_pence, f.aged_1_30),
+        );
+        const aged_31_60_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.aged_31_60_pence, f.aged_31_60),
+        );
+        const aged_61_90_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.aged_61_90_pence, f.aged_61_90),
+        );
+        const aged_90_plus_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.aged_90_plus_pence, f.aged_90_plus),
+        );
+        const client_account_balance_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.client_account_balance_pence, f.client_account_balance),
+        );
+        const credit_limit_pence = sumFieldPence((f) =>
+          resolvePmsPence(f.credit_limit_pence, f.credit_limit),
+        );
 
         groupView = {
           parentOrganisationId: org.id,
           parentOrganisationName: org.legalName,
           companies,
           totals: {
-            unbilled_wip: sumField((f) => f.unbilled_wip),
-            fees_billed: sumField((f) => f.fees_billed),
-            total_invoiced_inc_vat: sumField((f) => f.total_invoiced_inc_vat),
-            total_paid: sumField((f) => f.total_paid),
-            outstanding_debt,
-            aged_not_yet_due: sumField((f) => f.aged_not_yet_due),
-            aged_1_30: sumField((f) => f.aged_1_30),
-            aged_31_60: sumField((f) => f.aged_31_60),
-            aged_61_90: sumField((f) => f.aged_61_90),
-            aged_90_plus: sumField((f) => f.aged_90_plus),
-            client_account_balance: sumField((f) => f.client_account_balance),
-            credit_limit,
-            credit_limit_used_pct: credit_limit > 0 ? outstanding_debt / credit_limit : null,
+            unbilled_wip: minorUnitsToPounds(unbilled_wip_pence),
+            unbilled_wip_pence,
+            fees_billed: minorUnitsToPounds(fees_billed_pence),
+            fees_billed_pence,
+            total_invoiced_inc_vat: minorUnitsToPounds(total_invoiced_inc_vat_pence),
+            total_invoiced_inc_vat_pence,
+            total_paid: minorUnitsToPounds(total_paid_pence),
+            total_paid_pence,
+            outstanding_debt: minorUnitsToPounds(outstanding_debt_pence),
+            outstanding_debt_pence,
+            aged_not_yet_due: minorUnitsToPounds(aged_not_yet_due_pence),
+            aged_not_yet_due_pence,
+            aged_1_30: minorUnitsToPounds(aged_1_30_pence),
+            aged_1_30_pence,
+            aged_31_60: minorUnitsToPounds(aged_31_60_pence),
+            aged_31_60_pence,
+            aged_61_90: minorUnitsToPounds(aged_61_90_pence),
+            aged_61_90_pence,
+            aged_90_plus: minorUnitsToPounds(aged_90_plus_pence),
+            aged_90_plus_pence,
+            client_account_balance: minorUnitsToPounds(client_account_balance_pence),
+            client_account_balance_pence,
+            credit_limit: minorUnitsToPounds(credit_limit_pence),
+            credit_limit_pence,
+            credit_limit_used_pct:
+              credit_limit_pence > 0
+                ? outstanding_debt_pence / credit_limit_pence
+                : null,
           },
         };
     }

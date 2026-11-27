@@ -22,7 +22,6 @@ import {
 } from '@/app/actions';
 import {
   minorUnitsToPounds,
-  poundsToMinorUnits,
   sumMinorUnits,
 } from '@platform/core-api';
 import { isActionDenied } from '@/domain/actionResult';
@@ -56,6 +55,7 @@ import {
   formatPmsAsAtLabel,
   isValidPmsAsAtDate,
   PMS_AS_AT_UNAVAILABLE_LABEL,
+  resolvePmsPence,
 } from '@/domain/pms';
 import type { SearchDoc } from '@/domain/search';
 import { isComplianceOrOnboardingTask, isTaskOpen } from '@/domain/tasks';
@@ -465,14 +465,22 @@ export function HomeClient({
   const firmWipTotal = useMemo(
     () =>
       minorUnitsToPounds(
-        sumMinorUnits(allMatterFins.map((m) => poundsToMinorUnits(m.unbilled_wip))),
+        sumMinorUnits(
+          allMatterFins.map((m) =>
+            resolvePmsPence(m.unbilled_wip_pence, m.unbilled_wip),
+          ),
+        ),
       ),
     [allMatterFins],
   );
   const firmTotalDebt = useMemo(
     () =>
       minorUnitsToPounds(
-        sumMinorUnits(allMatterFins.map((m) => poundsToMinorUnits(m.outstanding_debt))),
+        sumMinorUnits(
+          allMatterFins.map((m) =>
+            resolvePmsPence(m.outstanding_debt_pence, m.outstanding_debt),
+          ),
+        ),
       ),
     [allMatterFins],
   );
@@ -482,7 +490,9 @@ export function HomeClient({
         sumMinorUnits(
           pmsAgedDebt
             .filter((inv) => (inv.days_past_due ?? 0) > 0)
-            .map((inv) => poundsToMinorUnits(inv.outstanding)),
+            .map((inv) =>
+              resolvePmsPence(inv.outstanding_pence, inv.outstanding),
+            ),
         ),
       ),
     [pmsAgedDebt],
@@ -491,7 +501,12 @@ export function HomeClient({
     () =>
       minorUnitsToPounds(
         sumMinorUnits(
-          allMatterFins.map((m) => poundsToMinorUnits(m.client_account_balance)),
+          allMatterFins.map((m) =>
+            resolvePmsPence(
+              m.client_account_balance_pence,
+              m.client_account_balance,
+            ),
+          ),
         ),
       ),
     [allMatterFins],
@@ -500,7 +515,12 @@ export function HomeClient({
     () =>
       minorUnitsToPounds(
         sumMinorUnits(
-          allMatterFins.map((m) => poundsToMinorUnits(m.unbilled_disbursements)),
+          allMatterFins.map((m) =>
+            resolvePmsPence(
+              m.unbilled_disbursements_pence,
+              m.unbilled_disbursements,
+            ),
+          ),
         ),
       ),
     [allMatterFins],
@@ -1032,7 +1052,9 @@ export function HomeClient({
           sumMinorUnits(
             pmsAgedDebt
               .filter((inv) => (inv.days_past_due ?? 0) <= 0)
-              .map((inv) => poundsToMinorUnits(inv.outstanding)),
+              .map((inv) =>
+                resolvePmsPence(inv.outstanding_pence, inv.outstanding),
+              ),
           ),
         );
         return (
@@ -4069,22 +4091,27 @@ export function HomeClient({
           (i) => (i.days_past_due ?? 0) >= 61 && (i.days_past_due ?? 0) <= 90,
         );
         const band90Plus = pmsAgedDebt.filter((i) => (i.days_past_due ?? 0) > 90);
-        const sumBand = (list: PmsInvoiceBalance[]) =>
-          minorUnitsToPounds(
-            sumMinorUnits(list.map((x) => poundsToMinorUnits(x.outstanding))),
+        const sumBandPence = (list: PmsInvoiceBalance[]) =>
+          sumMinorUnits(
+            list.map((x) => resolvePmsPence(x.outstanding_pence, x.outstanding)),
           );
-        const valNotDue = sumBand(bandNotDue);
-        const val1To30 = sumBand(band1To30);
-        const val31To60 = sumBand(band31To60);
-        const val61To90 = sumBand(band61To90);
-        const val90Plus = sumBand(band90Plus);
+        const valNotDuePence = sumBandPence(bandNotDue);
+        const val1To30Pence = sumBandPence(band1To30);
+        const val31To60Pence = sumBandPence(band31To60);
+        const val61To90Pence = sumBandPence(band61To90);
+        const val90PlusPence = sumBandPence(band90Plus);
+        const valNotDue = minorUnitsToPounds(valNotDuePence);
+        const val1To30 = minorUnitsToPounds(val1To30Pence);
+        const val31To60 = minorUnitsToPounds(val31To60Pence);
+        const val61To90 = minorUnitsToPounds(val61To90Pence);
+        const val90Plus = minorUnitsToPounds(val90PlusPence);
         const totalBandDebt = minorUnitsToPounds(
           sumMinorUnits([
-            poundsToMinorUnits(valNotDue),
-            poundsToMinorUnits(val1To30),
-            poundsToMinorUnits(val31To60),
-            poundsToMinorUnits(val61To90),
-            poundsToMinorUnits(val90Plus),
+            valNotDuePence,
+            val1To30Pence,
+            val31To60Pence,
+            val61To90Pence,
+            val90PlusPence,
           ]),
         );
         const pctOf = (v: number) =>

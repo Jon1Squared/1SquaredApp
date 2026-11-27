@@ -2553,40 +2553,70 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
     // Reads come SOLELY from *_pence + payload_json->>'<key>', completely ignoring tampered floats
     const snapA = await pmsRepo.loadTenantPmsSnapshot(ctxA);
     expect(snapA.feeEarners[0]?.standard_hourly_rate).toBe(325.5);
+    expect(snapA.feeEarners[0]?.standard_hourly_rate_pence).toBe(32550);
     expect(snapA.feeEarners[0]?.annual_target_fees).toBe(245000.75);
+    expect(snapA.feeEarners[0]?.annual_target_fees_pence).toBe(24500075);
     expect(snapA.clients[0]?.credit_limit).toBe(50000.25);
+    expect(snapA.clients[0]?.credit_limit_pence).toBe(5000025);
     expect(snapA.matters[0]?.fee_estimate).toBe(10000.1);
+    expect(snapA.matters[0]?.fee_estimate_pence).toBe(1000010);
     expect(snapA.matters[0]?.fixed_fee_amount).toBe(12500.5);
+    expect(snapA.matters[0]?.fixed_fee_amount_pence).toBe(1250050);
     expect(snapA.feeEstimates[0]?.fees_estimate).toBe(1500.25);
+    expect(snapA.feeEstimates[0]?.fees_estimate_pence).toBe(150025);
     expect(snapA.feeEstimates[0]?.disbursements_estimate).toBe(300.75);
+    expect(snapA.feeEstimates[0]?.disbursements_estimate_pence).toBe(30075);
     expect(snapA.timeEntries[0]?.rate).toBe(325.5);
+    expect(snapA.timeEntries[0]?.rate_pence).toBe(32550);
     expect(snapA.timeEntries[0]?.value).toBe(325.5);
+    expect(snapA.timeEntries[0]?.value_pence).toBe(32550);
     expect(snapA.timeEntries[0]?.write_off_value).toBe(15.25);
+    expect(snapA.timeEntries[0]?.write_off_value_pence).toBe(1525);
     expect(snapA.disbursements[0]?.net_amount).toBe(42.1);
+    expect(snapA.disbursements[0]?.net_amount_pence).toBe(4210);
     expect(snapA.disbursements[0]?.vat_amount).toBe(8.42);
+    expect(snapA.disbursements[0]?.vat_amount_pence).toBe(842);
     expect(snapA.disbursements[0]?.gross_amount).toBe(50.52);
+    expect(snapA.disbursements[0]?.gross_amount_pence).toBe(5052);
 
     const invBal = snapA.invoiceBalances.find((i) => i.invoice_number === 'INV-S112-1')!;
     const cnBal = snapA.invoiceBalances.find((i) => i.invoice_number === 'CN-S112-1')!;
     expect(invBal.fees_net).toBe(1000.1);
+    expect(invBal.fees_net_pence).toBe(100010);
     expect(invBal.disbursements_net).toBe(100.2);
+    expect(invBal.disbursements_net_pence).toBe(10020);
     expect(invBal.vat).toBe(220.06);
+    expect(invBal.vat_pence).toBe(22006);
     expect(invBal.total).toBe(1320.36);
+    expect(invBal.total_pence).toBe(132036);
     expect(invBal.paid).toBe(500.11);
+    expect(invBal.paid_pence).toBe(50011);
     expect(invBal.credit_notes).toBe(-24);
+    expect(invBal.credit_notes_pence).toBe(-2400);
     expect(invBal.outstanding).toBe(796.25); // 1320.36 - 500.11 - 24.00 exact pence
+    expect(invBal.outstanding_pence).toBe(79625);
     expect(cnBal.total).toBe(-24);
+    expect(cnBal.total_pence).toBe(-2400);
 
     expect(snapA.clientAccount.map((c) => [c.amount, c.running_balance])).toEqual([
       [1000.5, 1000.5],
       [-250.25, 750.25],
     ]);
+    expect(
+      snapA.clientAccount.map((c) => [c.amount_pence, c.running_balance_pence]),
+    ).toEqual([
+      [100050, 100050],
+      [-25025, 75025],
+    ]);
     expect(snapA.matterFinancials[0]?.client_account_balance).toBe(750.25);
+    expect(snapA.matterFinancials[0]?.client_account_balance_pence).toBe(75025);
 
     const reloadedA = await matterRepo.getMatterById(ctxA, matterA!.id);
     const reloadedB = await matterRepo.getMatterById(ctxB, matterB!.id);
     expect(reloadedA?.retainerMoniesOnAccountGbp).toBe(765.43);
+    expect(reloadedA?.retainerMoniesOnAccountPence).toBe(76543);
     expect(reloadedB?.retainerMoniesOnAccountGbp).toBe(111.22);
+    expect(reloadedB?.retainerMoniesOnAccountPence).toBe(11122);
 
     // Null vs zero preservation check
     await matterRepo.updateMatter(
@@ -2594,13 +2624,40 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       { ...reloadedA!, retainerMoniesOnAccountGbp: null },
       reloadedA!.rowVersion ?? 2,
     );
-    expect((await matterRepo.getMatterById(ctxA, matterA!.id))?.retainerMoniesOnAccountGbp).toBeNull();
-    const afterNull = (await matterRepo.getMatterById(ctxA, matterA!.id))!;
+    const reloadedAfterNull = await matterRepo.getMatterById(ctxA, matterA!.id);
+    expect(reloadedAfterNull?.retainerMoniesOnAccountGbp).toBeNull();
+    expect(reloadedAfterNull?.retainerMoniesOnAccountPence).toBeNull();
     await matterRepo.updateMatter(
       ctxA,
-      { ...afterNull, retainerMoniesOnAccountGbp: 0 },
-      afterNull.rowVersion ?? 3,
+      { ...reloadedAfterNull!, retainerMoniesOnAccountGbp: 0 },
+      reloadedAfterNull!.rowVersion ?? 3,
     );
-    expect((await matterRepo.getMatterById(ctxA, matterA!.id))?.retainerMoniesOnAccountGbp).toBe(0);
+    const reloadedAfterZero = await matterRepo.getMatterById(ctxA, matterA!.id);
+    expect(reloadedAfterZero?.retainerMoniesOnAccountGbp).toBe(0);
+    expect(reloadedAfterZero?.retainerMoniesOnAccountPence).toBe(0);
+
+    // R829: mapClientAccountRows and computeDerivedMatterFinancials read stored balance_after_pence directly without recomputing from amount_pence
+    const directBalanceCheck = await createDirectMigrationClient({ ctx: ctxA });
+    try {
+      await directBalanceCheck.query(
+        `UPDATE public.pms_client_account_entries
+            SET balance_after_pence = 99999
+          WHERE tenant_id = $1 AND transaction_id = 'CA-S112-2'`,
+        [ctxA.tenantId],
+      );
+    } finally {
+      await directBalanceCheck.end();
+    }
+
+    const ledgerStored = await pmsRepo.getClientAccountLedger(ctxA, 'MAT-S112-A');
+    expect(ledgerStored.map((c) => c.running_balance_pence)).toEqual([
+      100050,
+      99999,
+    ]);
+    expect(ledgerStored.map((c) => c.running_balance)).toEqual([1000.5, 999.99]);
+
+    const mfStored = await pmsRepo.getMatterFinancials(ctxA, 'MAT-S112-A');
+    expect(mfStored?.client_account_balance_pence).toBe(99999);
+    expect(mfStored?.client_account_balance).toBe(999.99);
   });
 });

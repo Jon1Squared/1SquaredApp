@@ -22,6 +22,7 @@ import {
   minorUnitsToPounds,
   pgBigIntToMinorUnits,
   poundsToMinorUnits,
+  type MinorUnits,
 } from '../domain/money/index';
 import {
   DEFAULT_MATTER_NUMBERING_CONFIG,
@@ -231,6 +232,7 @@ export interface TenantMatterRecord {
   feeEstimateGbp: number | null;
   agreedFeeCapGbp: number | null;
   retainerMoniesOnAccountGbp: number | null;
+  retainerMoniesOnAccountPence?: MinorUnits | null;
   stageId: string;
   milestoneId: string | null;
   enquiryReceivedAt: string | null;
@@ -423,6 +425,12 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
         ? structuredClone(opening.partiesFallback as TenantMatterPartyRecord[])
         : [];
 
+  const retainerPence =
+    row.retainer_monies_on_account_pence !== null &&
+    row.retainer_monies_on_account_pence !== undefined
+      ? pgBigIntToMinorUnits(row.retainer_monies_on_account_pence)
+      : null;
+
   const out: TenantMatterRecord = {
     id: row.id,
     rowVersion: Math.max(1, Number(row.row_version ?? 1)),
@@ -515,13 +523,9 @@ function mapMatterRow<TMatter extends TenantMatterRecord = TenantMatterRecord>(
       costs.agreedFeeCapGbp !== undefined
         ? (costs.agreedFeeCapGbp as number | null)
         : ((opening.agreedFeeCapGbp as number | null) ?? null),
+    retainerMoniesOnAccountPence: retainerPence,
     retainerMoniesOnAccountGbp:
-      row.retainer_monies_on_account_pence !== null &&
-      row.retainer_monies_on_account_pence !== undefined
-        ? minorUnitsToPounds(
-            pgBigIntToMinorUnits(row.retainer_monies_on_account_pence),
-          )
-        : null,
+      retainerPence !== null ? minorUnitsToPounds(retainerPence) : null,
     stageId: row.current_stage_id ?? ((milestones.stageId as string) ?? ''),
     milestoneId: (milestones.milestoneId as string | null) ?? null,
     enquiryReceivedAt: (milestones.enquiryReceivedAt as string | null) ?? null,
@@ -635,12 +639,32 @@ function buildMatterDbParameters(
       : null;
 
   const rawRetainerGbp = matter.retainerMoniesOnAccountGbp;
-  const retainerPence =
-    rawRetainerGbp !== null &&
+  const rawRetainerPence = matter.retainerMoniesOnAccountPence;
+  let retainerPence: MinorUnits | null = null;
+  if (rawRetainerGbp === null) {
+    // Explicit null always clears retainer even if spread from an object carrying retainerMoniesOnAccountPence.
+    retainerPence = null;
+  } else if (
+    rawRetainerPence !== undefined &&
+    rawRetainerPence !== null &&
+    typeof rawRetainerPence === 'number' &&
+    Number.isSafeInteger(rawRetainerPence)
+  ) {
+    if (
+      rawRetainerGbp !== undefined &&
+      Number.isFinite(Number(rawRetainerGbp)) &&
+      minorUnitsToPounds(rawRetainerPence) !== rawRetainerGbp
+    ) {
+      retainerPence = poundsToMinorUnits(rawRetainerGbp);
+    } else {
+      retainerPence = rawRetainerPence;
+    }
+  } else if (
     rawRetainerGbp !== undefined &&
     Number.isFinite(Number(rawRetainerGbp))
-      ? poundsToMinorUnits(rawRetainerGbp)
-      : null;
+  ) {
+    retainerPence = poundsToMinorUnits(rawRetainerGbp);
+  }
   const normalizedRetainerGbp =
     retainerPence !== null ? minorUnitsToPounds(retainerPence) : null;
   const retainerMoniesOnAccountPence =
