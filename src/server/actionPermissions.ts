@@ -635,6 +635,16 @@ export const ACTION_PERMISSIONS = {
     key: 'quote:edit',
     enforcedBy: 'action',
   },
+  sendQuoteEmailAction: {
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
+  },
+  markQuoteSentOfflineAction: {
+    kind: 'permission',
+    key: 'quote:edit',
+    enforcedBy: 'action',
+  },
   logQuoteFollowUpAction: {
     kind: 'permission',
     key: 'quote:edit',
@@ -990,6 +1000,11 @@ export const ROUTE_PERMISSIONS = {
     kind: 'permission',
     key: 'admin:access',
     enforcedBy: 'service',
+  },
+  'GET /api/quotes/[id]/pdf': {
+    kind: 'permission',
+    key: 'quote:view',
+    enforcedBy: 'action',
   },
 } as const satisfies Record<string, ActionPolicy>;
 

@@ -1183,6 +1183,40 @@ export class TenantOutboxRepository extends TenantScopedRepository {
     return mapOutboxRow(row);
   }
 
+  public async getOutboxRecordByIdempotencyKeyInTx(
+    tx: TenantSqlClient,
+    ctx: TenantContext,
+    idempotencyKey: string,
+  ): Promise<EmailOutboxRecord | null> {
+    const cleanKey = idempotencyKey.trim();
+    if (!cleanKey) return null;
+    const res = await tx.query<DbEmailOutboxRow>(
+      `SELECT *
+         FROM public.email_outbox
+        WHERE tenant_id = $1
+          AND idempotency_key = $2
+        LIMIT 1`,
+      [ctx.tenantId, cleanKey],
+    );
+    const row = res.rows[0];
+    if (!row) {
+      return null;
+    }
+    this.assertRowTenant(ctx, row.tenant_id, 'EmailOutbox');
+    return mapOutboxRow(row);
+  }
+
+  public async getOutboxRecordByIdempotencyKey(
+    ctx: TenantContext,
+    idempotencyKey: string,
+  ): Promise<EmailOutboxRecord | null> {
+    const cleanKey = idempotencyKey.trim();
+    if (!cleanKey) return null;
+    return this.withTenantReadTransaction(ctx, async (tx) =>
+      this.getOutboxRecordByIdempotencyKeyInTx(tx, ctx, cleanKey),
+    );
+  }
+
   public async getOutboxRecordById(
     ctx: TenantContext,
     id: string,

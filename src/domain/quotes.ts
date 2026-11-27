@@ -6,6 +6,7 @@
 import {
   calculateVatMinorUnits,
   type FeeArrangementBasis,
+  type MinorUnits,
   minorUnitsToPounds,
   percentToBasisPoints,
   poundsToMinorUnits,
@@ -85,6 +86,121 @@ export function roundCurrency(value: number): number {
     return minorUnitsToPounds(poundsToMinorUnits(num.toFixed(4)));
   }
   return minorUnitsToPounds(poundsToMinorUnits(raw));
+}
+
+export type NormalizedQuotePaymentOnAccountResult =
+  | {
+      readonly ok: true;
+      readonly paymentOnAccountRequired: boolean;
+      readonly paymentOnAccountPence: MinorUnits | null;
+      readonly paymentOnAccountGbp: number | null;
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+    };
+
+/**
+ * Pure minor-unit validation and normalisation for Payment on Account on quotes (`S1-07`).
+ * Rejects negative/fractional pence and enforces > £0.00 whenever POA is required.
+ */
+export function validateAndNormalizeQuotePoa(input: {
+  readonly paymentOnAccountRequired?: boolean;
+  readonly paymentOnAccountPence?: number | null;
+  readonly paymentOnAccountGbp?: number | string | null;
+}): NormalizedQuotePaymentOnAccountResult {
+  if (input.paymentOnAccountRequired === false) {
+    return {
+      ok: true,
+      paymentOnAccountRequired: false,
+      paymentOnAccountPence: null,
+      paymentOnAccountGbp: null,
+    };
+  }
+
+  let pence: MinorUnits | null = null;
+  if (
+    input.paymentOnAccountPence !== undefined &&
+    input.paymentOnAccountPence !== null
+  ) {
+    if (
+      typeof input.paymentOnAccountPence !== 'number' ||
+      !Number.isFinite(input.paymentOnAccountPence) ||
+      !Number.isSafeInteger(input.paymentOnAccountPence)
+    ) {
+      return {
+        ok: false,
+        error: 'Payment on Account amount must be a whole number of pence.',
+      };
+    }
+    if (input.paymentOnAccountPence < 0) {
+      return {
+        ok: false,
+        error: 'Payment on Account amount cannot be negative.',
+      };
+    }
+    pence = input.paymentOnAccountPence;
+  } else if (
+    input.paymentOnAccountGbp !== undefined &&
+    input.paymentOnAccountGbp !== null &&
+    String(input.paymentOnAccountGbp).trim() !== ''
+  ) {
+    const raw =
+      typeof input.paymentOnAccountGbp === 'string'
+        ? input.paymentOnAccountGbp.trim()
+        : input.paymentOnAccountGbp;
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric)) {
+      return {
+        ok: false,
+        error: 'Payment on Account amount must be a valid number.',
+      };
+    }
+    if (numeric < 0) {
+      return {
+        ok: false,
+        error: 'Payment on Account amount cannot be negative.',
+      };
+    }
+    try {
+      pence =
+        typeof raw === 'number' && /[eE]/.test(String(raw))
+          ? poundsToMinorUnits(numeric.toFixed(4))
+          : poundsToMinorUnits(raw);
+    } catch {
+      return {
+        ok: false,
+        error: 'Payment on Account amount must be a valid GBP amount.',
+      };
+    }
+  }
+
+  const required = Boolean(
+    input.paymentOnAccountRequired ?? (pence !== null && pence > 0),
+  );
+  if (!required) {
+    if (pence === null || pence === 0) {
+      return {
+        ok: true,
+        paymentOnAccountRequired: false,
+        paymentOnAccountPence: null,
+        paymentOnAccountGbp: null,
+      };
+    }
+  }
+  if (required && (pence === null || pence <= 0)) {
+    return {
+      ok: false,
+      error: 'Please enter a Payment on Account amount greater than £0.00.',
+    };
+  }
+
+  return {
+    ok: true,
+    paymentOnAccountRequired: true,
+    paymentOnAccountPence: pence,
+    paymentOnAccountGbp: pence !== null ? minorUnitsToPounds(pence) : null,
+  };
 }
 
 export function formatGbp(amount: number | null | undefined, includePence = false): string {

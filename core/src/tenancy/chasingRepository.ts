@@ -462,6 +462,49 @@ export class TenantChasingRepository extends TenantScopedRepository {
     });
   }
 
+  public async listChasesForEntity(
+    ctx: TenantContext,
+    params: {
+      readonly entityKind: CommunicationChaseEntityKind;
+      readonly entityId: string;
+      readonly limit?: number;
+    },
+  ): Promise<readonly CommunicationChaseWithEvents[]> {
+    const cleanEntityId = params.entityId?.trim() ?? '';
+    if (!cleanEntityId) {
+      return [];
+    }
+    const cleanLimit = Math.max(1, Math.min(100, Math.floor(params.limit ?? 50)));
+    return this.withTenantReadTransaction(ctx, async (tx) => {
+      const res = await tx.query<DbCommunicationChaseRow>(
+        `SELECT *
+           FROM public.communication_chases
+          WHERE tenant_id = $1
+            AND entity_kind = $2
+            AND entity_id = $3
+          ORDER BY sent_at DESC, id DESC
+          LIMIT $4`,
+        [ctx.tenantId, params.entityKind, cleanEntityId, cleanLimit],
+      );
+      const chases = res.rows.map((row) => {
+        this.assertRowTenant(ctx, row.tenant_id, 'CommunicationChase');
+        return mapChaseRow(row);
+      });
+      if (chases.length === 0) {
+        return [];
+      }
+      const eventsMap = await this.loadEventsByChaseIdsInTx(
+        tx,
+        ctx,
+        chases.map((c) => c.id),
+      );
+      return chases.map((chase) => ({
+        chase,
+        events: eventsMap.get(chase.id) ?? [],
+      }));
+    });
+  }
+
   public async listDueActiveChases(
     ctx: TenantContext,
     params: { readonly nowIso: string; readonly limit?: number },

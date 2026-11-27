@@ -92,10 +92,14 @@ import {
 import {
   applyQuoteEffectiveLifecycle,
   calculateQuoteTotals,
+  evaluateQuoteEffectiveStatus,
   mapQuoteFeeBasisToArrangementBasis,
   quoteClientDisplayName,
+  quoteWorkTypeSummary,
   roundCurrency,
+  validateAndNormalizeQuotePoa,
 } from '@/domain/quotes';
+import { renderQuotePdfBytes } from '@/domain/quotePdf';
 import {
   buildMatterRiskAssessmentSnapshot,
   conflictStatusPillFromLegacy,
@@ -221,6 +225,7 @@ import {
   resolveMatterLifecycleTargetStatusId,
   resolveWorkTypeFeeArrangementSettings,
   resolveWorkTypeOpeningGate,
+  resolveWorkTypePriceTransparency,
   resolveWorkTypeRiskQuestions,
   validateMatterClosureDate,
 } from '@/domain/workTypeConfig';
@@ -356,6 +361,7 @@ import {
   FEE_CAP_CONFIG_EXCEEDS_STATUTORY_CODE,
   FeeCapValidationError,
   findEffectiveRegisterType,
+  formatMinorUnitsGbp,
   getActiveTenantTransactionState,
   getEffectiveReminderHourLocal,
   getEngagementStatusRank,
@@ -604,6 +610,7 @@ import type {
   QuoteDeclineReason,
   QuoteDisbursement,
   QuoteFeeBasis,
+  QuotePriceTransparencySnapshot,
   QuoteStatus,
   RecordType,
   RoleHomeConfig,
@@ -21282,6 +21289,10 @@ export interface SaveQuoteInput {
   vatAmount?: number;
   vatOverridden?: boolean;
   disbursements?: QuoteDisbursement[];
+  paymentOnAccountRequired?: boolean;
+  paymentOnAccountPence?: number | null;
+  paymentOnAccountGbp?: number | null;
+  priceTransparencyCustomNote?: string | null;
   validUntil?: string;
   feeEarnerId?: string;
   followUpAfterDays?: number;
@@ -21291,6 +21302,930 @@ export interface SaveQuoteInput {
   feeArrangementCapCategoryKey?: string;
   feeArrangementPercent?: number | null;
   feeArrangementCapBaseKey?: string;
+}
+
+function buildQuotePriceTransparencySnapshot(params: {
+  readonly workTypesConfig: WorkTypesConfiguration;
+  readonly practiceAreaId: string;
+  readonly workTypeSubcategoryId?: string | null;
+  readonly customNote?: string | null;
+  readonly capturedAt?: string;
+}): QuotePriceTransparencySnapshot {
+  const resolved = resolveWorkTypePriceTransparency(params.workTypesConfig, {
+    practiceAreaId: params.practiceAreaId,
+    workTypeSubcategoryId: params.workTypeSubcategoryId ?? null,
+  });
+  const cleanCustom = params.customNote?.trim();
+  return {
+    enabled: resolved.enabled,
+    headlineSummary: resolved.headlineSummary,
+    serviceDescription: resolved.serviceDescription,
+    keyStages: resolved.keyStages,
+    typicalTimescales: resolved.typicalTimescales,
+    disbursementsGuidance: resolved.disbursementsGuidance,
+    exclusionsAndVatNote: resolved.exclusionsAndVatNote,
+    ...(params.capturedAt ? { capturedAt: params.capturedAt } : {}),
+    ...(cleanCustom ? { customNote: cleanCustom } : {}),
+  };
+}
+
+function resolveQuoteRecipientFromRelated(params: {
+  readonly explicitEmail?: string | null;
+  readonly explicitName?: string | null;
+  readonly quoteProspectEmail?: string | null;
+  readonly quoteProspectName?: string | null;
+  readonly linkedPerson?: Person | null;
+  readonly linkedOrg?: Organisation | null;
+  readonly linkedEnquiry?: Enquiry | null;
+}): {
+  readonly recipientEmail: string;
+  readonly recipientName: string;
+} {
+  const recipientEmail = (
+    params.explicitEmail?.trim() ||
+    params.quoteProspectEmail?.trim() ||
+    (params.linkedPerson ? primaryEmail(params.linkedPerson) : '') ||
+    params.linkedOrg?.generalEmail?.trim() ||
+    params.linkedEnquiry?.email?.trim() ||
+    ''
+  ).trim();
+  const recipientName = (
+    params.explicitName?.trim() ||
+    params.quoteProspectName?.trim() ||
+    (params.linkedPerson ? personDisplayName(params.linkedPerson) : '') ||
+    params.linkedOrg?.legalName ||
+    (params.linkedEnquiry
+      ? `${params.linkedEnquiry.firstName} ${params.linkedEnquiry.lastName}`.trim()
+      : '') ||
+    'Client'
+  ).trim();
+  return { recipientEmail, recipientName };
+}
+
+function buildQuoteEmailBodies(params: {
+  readonly firmName: string;
+  readonly recipientName: string;
+  readonly quote: Quote;
+  readonly workTypeLabel: string;
+  readonly senderName: string;
+  readonly customNote?: string | null;
+}): { readonly htmlBody: string; readonly textBody: string } {
+  const { quote } = params;
+  const totalPence = poundsToMinorUnits(
+    Number.isFinite(Number(quote.totalIncVat)) ? String(quote.totalIncVat) : '0',
+  );
+  const totalFormatted = formatMinorUnitsGbp(totalPence);
+  const poaPence =
+    quote.paymentOnAccountRequired &&
+    typeof quote.paymentOnAccountPence === 'number' &&
+    Number.isSafeInteger(quote.paymentOnAccountPence) &&
+    quote.paymentOnAccountPence > 0
+      ? quote.paymentOnAccountPence
+      : 0;
+
+  const lines: string[] = [
+    `Dear ${params.recipientName},`,
+    '',
+    `Please find attached our fee quote and costs information (${quote.reference}, Version ${quote.version}) for ${params.workTypeLabel}.`,
+    `Total estimated charges (inc. VAT): ${totalFormatted} (${quote.feeBasis}).`,
+  ];
+  if (poaPence > 0) {
+    lines.push(
+      `Payment on Account required before work starts: ${formatMinorUnitsGbp(poaPence)}.`,
+    );
+  }
+  if (quote.validUntil) {
+    lines.push(`This quote remains open until ${quote.validUntil}.`);
+  }
+  if (params.customNote?.trim()) {
+    lines.push('', params.customNote.trim());
+  }
+  lines.push(
+    '',
+    'If you have any questions or would like us to proceed, please reply to this email or contact your fee earner directly.',
+    '',
+    'Yours faithfully,',
+    params.senderName,
+    params.firmName,
+  );
+
+  const htmlParagraphs = [
+    `<p>Dear ${escapeHtmlTextForEmail(params.recipientName)},</p>`,
+    `<p>Please find attached our fee quote and costs information (<strong>${escapeHtmlTextForEmail(quote.reference)}</strong>, Version ${quote.version}) for ${escapeHtmlTextForEmail(params.workTypeLabel)}.</p>`,
+    `<p>Total estimated charges (inc. VAT): <strong>${escapeHtmlTextForEmail(totalFormatted)}</strong> (${escapeHtmlTextForEmail(quote.feeBasis)}).</p>`,
+  ];
+  if (poaPence > 0) {
+    htmlParagraphs.push(
+      `<p>Payment on Account required before work starts: <strong>${escapeHtmlTextForEmail(formatMinorUnitsGbp(poaPence))}</strong>.</p>`,
+    );
+  }
+  if (quote.validUntil) {
+    htmlParagraphs.push(
+      `<p>This quote remains open until <strong>${escapeHtmlTextForEmail(quote.validUntil)}</strong>.</p>`,
+    );
+  }
+  if (params.customNote?.trim()) {
+    htmlParagraphs.push(`<p>${escapeHtmlTextForEmail(params.customNote.trim())}</p>`);
+  }
+  htmlParagraphs.push(
+    `<p>If you have any questions or would like us to proceed, please reply to this email or contact your fee earner directly.</p>`,
+    `<p>Yours faithfully,<br/><strong>${escapeHtmlTextForEmail(params.senderName)}</strong> — ${escapeHtmlTextForEmail(params.firmName)}</p>`,
+  );
+  return {
+    textBody: lines.join('\n'),
+    htmlBody: htmlParagraphs.join(''),
+  };
+}
+
+const QUOTE_TERMINAL_STATUSES = new Set<QuoteStatus>([
+  'Accepted',
+  'Declined',
+  'Expired',
+  'Superseded',
+]);
+
+async function enqueueQuoteOutboxAndChaseInTx(params: {
+  readonly tx: TenantSqlClient;
+  readonly ctx: TenantContext;
+  readonly actorId: string;
+  readonly quote: Quote;
+  readonly outboxIdempotencyKey: string;
+  readonly resolvedEmail: string;
+  readonly resolvedRecipientName: string;
+  readonly firmName: string;
+  readonly workTypeLabel: string;
+  readonly senderName: string;
+  readonly subject?: string | null;
+  readonly customNote?: string | null;
+  readonly pdfBytes: Uint8Array;
+  readonly pdfFileName: string;
+  readonly transparencySnapshot: QuotePriceTransparencySnapshot;
+  readonly chasingConfig: ChasingConfiguration;
+  readonly nowIso: string;
+}): Promise<{
+  readonly outboxRecord: EmailOutboxRecord;
+  readonly chase: CommunicationChaseRecord | null;
+}> {
+  const {
+    tx,
+    ctx,
+    actorId,
+    quote,
+    outboxIdempotencyKey,
+    resolvedEmail,
+    resolvedRecipientName,
+    firmName,
+    workTypeLabel,
+    senderName,
+    customNote,
+    pdfBytes,
+    pdfFileName,
+    transparencySnapshot,
+    chasingConfig,
+    nowIso,
+  } = params;
+  const outboxRepo = getOutboxRepository();
+  const chasingRepo = getChasingRepository();
+  const intakeRepo = getIntakeQuoteRepository();
+
+  const rawSubject =
+    customNote !== undefined
+      ? params.subject?.trim() ||
+        `Fee Quote ${quote.reference} (v${quote.version}) — ${workTypeLabel}`
+      : params.subject?.trim() ||
+        `Fee Quote ${quote.reference} (v${quote.version}) — ${workTypeLabel}`;
+  const safeSubject = rawSubject.replace(/[\r\n]+/g, ' ').trim();
+  const { htmlBody, textBody } = buildQuoteEmailBodies({
+    firmName,
+    recipientName: resolvedRecipientName,
+    quote,
+    workTypeLabel,
+    senderName,
+    customNote,
+  });
+
+  const queued = await outboxRepo.enqueueEmailInTx(tx, ctx, {
+    idempotencyKey: outboxIdempotencyKey,
+    templateKey: 'quote.send',
+    recipients: { to: [resolvedEmail] },
+    subject: safeSubject,
+    htmlBody,
+    textBody,
+    attachments: [
+      {
+        kind: 'inline',
+        fileName: pdfFileName,
+        contentType: 'application/pdf',
+        contentBytes: pdfBytes,
+      },
+    ],
+    matterId: quote.convertedMatterId ?? null,
+    quoteId: quote.id,
+    enquiryId: quote.linkedEnquiryId ?? null,
+    createdByPersonId: actorId,
+    correlationId: ctx.correlationId,
+  });
+
+  const followUpDays = Math.max(1, quote.followUpAfterDays || 7);
+  const nextFollowUpDate = toIsoDate(addDays(new Date(nowIso), followUpDays));
+  quote.status = 'Sent';
+  quote.sentAt = nowIso;
+  quote.sentToEmail = resolvedEmail;
+  quote.sentByPersonId = actorId;
+  quote.lastSentOutboxId = queued.record.id;
+  quote.priceTransparencySnapshot = transparencySnapshot;
+  quote.nextFollowUpDate = nextFollowUpDate;
+  quote.updatedAt = nowIso;
+  quote.updatedById = actorId;
+  quote.timeline.push({
+    id: `QT-${Date.now()}-${quote.version}-sent`,
+    kind: 'sent',
+    at: nowIso,
+    byId: actorId,
+    title: `v${quote.version} sent by email`,
+    detail: `Sent to ${resolvedEmail}; follow-up due ${nextFollowUpDate}`,
+  });
+
+  await intakeRepo.upsertQuoteInTx(tx, ctx, quote);
+
+  let chase: CommunicationChaseRecord | null = null;
+  if (chasingConfig.quote.enabled) {
+    const firstChaseAt = addDays(
+      new Date(nowIso),
+      chasingConfig.quote.firstChaseDays,
+    ).toISOString();
+    const createdChase = await chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
+      entityKind: 'quote',
+      entityId: quote.id,
+      quoteId: quote.id,
+      matterId: quote.convertedMatterId ?? null,
+      recipientEmail: resolvedEmail,
+      recipientName: resolvedRecipientName,
+      sentAt: nowIso,
+      nextActionAt: firstChaseAt,
+      createdByPersonId: actorId,
+    });
+    chase = createdChase.chase;
+  }
+
+  return { outboxRecord: queued.record, chase };
+}
+
+async function drainQuoteOutboxBestEffort(params: {
+  readonly ctx: TenantContext;
+  readonly tenantCfg: TenantConfiguration;
+  readonly outboxRecord: EmailOutboxRecord;
+  readonly actorId: string;
+  readonly emailProviderDisabled: boolean;
+  readonly drainAfterCommit?: boolean;
+  readonly emailSender?: EmailSender;
+  readonly secretReader?: KeyVaultSecretReader;
+  readonly storageProvider?: DocumentStorageProvider;
+}): Promise<EmailOutboxRecord> {
+  let finalOutboxRecord = params.outboxRecord;
+  if (
+    params.drainAfterCommit !== false &&
+    !params.emailProviderDisabled &&
+    !hasActiveTenantTransaction(params.ctx)
+  ) {
+    const outboxRepo = getOutboxRepository();
+    const storage =
+      params.storageProvider ?? getDocumentStorage(params.tenantCfg);
+    try {
+      await drainEmailOutboxForTenant(params.ctx, {
+        tenantConfig: params.tenantCfg,
+        outboxRepository: outboxRepo,
+        emailSender: params.emailSender,
+        secretReader: params.secretReader,
+        storageProvider: storage,
+        actorId: params.actorId,
+        batchSize: 10,
+      });
+      const refreshed = await outboxRepo.getOutboxRecordById(
+        params.ctx,
+        params.outboxRecord.id,
+      );
+      if (refreshed) {
+        finalOutboxRecord = refreshed;
+      }
+    } catch {
+      // Best-effort post-commit drain; outbox row stays pending for outbox-drain job.
+    }
+  }
+  return finalOutboxRecord;
+}
+
+export async function generateQuotePdfDownloadRecord(
+  quoteId: string,
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+  },
+): Promise<
+  | { readonly ok: true; readonly pdfBytes: Uint8Array; readonly fileName: string }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('quote:view')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission to view quotes.',
+      );
+    }
+
+    const cleanQuoteId = quoteId?.trim() || '';
+    if (!cleanQuoteId) {
+      return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+    }
+
+    const intakeRepo = getIntakeQuoteRepository();
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const quote = await intakeRepo.getQuoteById<Quote>(ctx, cleanQuoteId, {
+      viewerId: actor.id,
+      hasRestrictedMatterAccess,
+    });
+    if (!quote) {
+      return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+    }
+
+    const partyRepo = getPartyRepository();
+    const [store, linkedOrg, linkedPerson] = await Promise.all([
+      loadTenantCatalogueStoreView(ctx, { includePmsLinks: false }),
+      quote.linkedOrganisationId
+        ? partyRepo.getOrganisationById<Organisation>(
+            ctx,
+            quote.linkedOrganisationId,
+          )
+        : Promise.resolve(null),
+      quote.linkedPersonId
+        ? partyRepo.getPersonById<Person>(ctx, quote.linkedPersonId)
+        : Promise.resolve(null),
+    ]);
+
+    const workTypesConfig =
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        store.workTypeConfigsOverride ?? null,
+      );
+    const transparency =
+      quote.priceTransparencySnapshot &&
+      typeof quote.priceTransparencySnapshot.enabled === 'boolean'
+        ? quote.priceTransparencySnapshot
+        : buildQuotePriceTransparencySnapshot({
+            workTypesConfig,
+            practiceAreaId: quote.practiceAreaId,
+            workTypeSubcategoryId: quote.workTypeSubcategoryId,
+          });
+
+    const feeEarner =
+      people.find((p) => p.id === quote.feeEarnerId) ?? actor;
+    const converter =
+      options?.pdfConverter ??
+      selectDocumentPdfConverter(tenantCfg, {
+        converterUrl: process.env.DOC_CONVERTER_URL,
+      });
+    const rendered = await renderQuotePdfBytes({
+      docxInput: {
+        quote,
+        firmName: store.firm.name || tenantCfg.displayName || 'Law Firm',
+        contactEmail:
+          tenantCfg.firm?.contactEmail || tenantCfg.branding.contactEmail,
+        feeEarnerName: personDisplayName(feeEarner),
+        people: linkedPerson ? [...people, linkedPerson] : [...people],
+        organisations: linkedOrg ? [linkedOrg] : [],
+        values: store.values,
+        priceTransparency: transparency,
+      },
+      converter,
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+    });
+    if (!rendered.ok) {
+      return registerServiceFailure(rendered.code, rendered.error);
+    }
+    return {
+      ok: true,
+      pdfBytes: rendered.pdfBytes,
+      fileName: rendered.fileName,
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function sendQuoteEmailRecord(
+  input: {
+    quoteId: string;
+    recipientEmail?: string;
+    recipientName?: string;
+    subject?: string;
+    customNote?: string;
+    idempotencyKey?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  },
+): Promise<
+  | {
+      readonly ok: true;
+      readonly quote: Quote;
+      readonly outboxRecord: EmailOutboxRecord;
+      readonly chase: CommunicationChaseRecord | null;
+      readonly emailProviderDisabled: boolean;
+      readonly earlyReturn?: boolean;
+    }
+  | RegisterServiceDenialOrError
+> {
+  try {
+    const { ctx, tenantCfg, actor, people, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('quote:edit')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission (quote:edit) to send quotes.',
+      );
+    }
+
+    const cleanQuoteId = input.quoteId?.trim() || '';
+    if (!cleanQuoteId) {
+      return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+    }
+
+    const intakeRepo = getIntakeQuoteRepository();
+    const outboxRepo = getOutboxRepository();
+    const chasingRepo = getChasingRepository();
+    const partyRepo = getPartyRepository();
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const quotePre = await intakeRepo.getQuoteById<Quote>(ctx, cleanQuoteId, {
+      viewerId: actor.id,
+      hasRestrictedMatterAccess,
+    });
+    if (!quotePre) {
+      return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+    }
+
+    const now = new Date();
+    const effectiveStatus = evaluateQuoteEffectiveStatus(quotePre, now);
+    if (
+      QUOTE_TERMINAL_STATUSES.has(quotePre.status) ||
+      QUOTE_TERMINAL_STATUSES.has(effectiveStatus)
+    ) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        `Quote ${quotePre.reference} cannot be sent because its status is ${effectiveStatus}. Revise the quote to create a new version first.`,
+      );
+    }
+
+    const [linkedPerson, linkedOrg, linkedEnq] = await Promise.all([
+      quotePre.linkedPersonId
+        ? partyRepo.getPersonById<Person>(ctx, quotePre.linkedPersonId)
+        : Promise.resolve(null),
+      quotePre.linkedOrganisationId
+        ? partyRepo.getOrganisationById<Organisation>(
+            ctx,
+            quotePre.linkedOrganisationId,
+          )
+        : Promise.resolve(null),
+      quotePre.linkedEnquiryId
+        ? intakeRepo.getEnquiryById<Enquiry>(ctx, quotePre.linkedEnquiryId, {
+            includeRestricted: true,
+          })
+        : Promise.resolve(null),
+    ]);
+
+    const { recipientEmail, recipientName } = resolveQuoteRecipientFromRelated({
+      explicitEmail: input.recipientEmail,
+      explicitName: input.recipientName,
+      quoteProspectEmail: quotePre.prospectEmail,
+      quoteProspectName: quotePre.prospectName,
+      linkedPerson,
+      linkedOrg,
+      linkedEnquiry: linkedEnq,
+    });
+    if (!recipientEmail || !isValidEmailAddress(recipientEmail)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid client recipient email address is required before sending the quote.',
+      );
+    }
+
+    const cleanExplicitKey = input.idempotencyKey?.trim() || '';
+    const dispatchKey = cleanExplicitKey || randomUUID();
+    const outboxIdempotencyKey = `quote:send:${quotePre.id}:v${quotePre.version}:${dispatchKey}`;
+    const emailProviderDisabled =
+      (resolveEmailIntegrationConfig(tenantCfg).provider ?? 'disabled') ===
+      'disabled';
+
+    if (cleanExplicitKey) {
+      const existingOutbox = await outboxRepo.getOutboxRecordByIdempotencyKey(
+        ctx,
+        outboxIdempotencyKey,
+      );
+      if (existingOutbox) {
+        const existingChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+          entityKind: 'quote',
+          entityId: quotePre.id,
+        });
+        return {
+          ok: true,
+          quote: quotePre,
+          outboxRecord: existingOutbox,
+          chase: existingChase,
+          emailProviderDisabled,
+          earlyReturn: true,
+        };
+      }
+    }
+
+    const [store, chasingConfig] = await Promise.all([
+      loadTenantCatalogueStoreView(ctx, { includePmsLinks: false }),
+      resolveEffectiveChasingConfig(ctx, tenantCfg),
+    ]);
+    const workTypesConfig =
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        store.workTypeConfigsOverride ?? null,
+      );
+    const nowPreIso = now.toISOString();
+    const transparencySnapshot = buildQuotePriceTransparencySnapshot({
+      workTypesConfig,
+      practiceAreaId: quotePre.practiceAreaId,
+      workTypeSubcategoryId: quotePre.workTypeSubcategoryId,
+      customNote:
+        input.customNote ?? quotePre.priceTransparencySnapshot?.customNote,
+      capturedAt: nowPreIso,
+    });
+
+    const feeEarner =
+      people.find((p) => p.id === quotePre.feeEarnerId) ?? actor;
+    const converter =
+      options?.pdfConverter ??
+      selectDocumentPdfConverter(tenantCfg, {
+        converterUrl: process.env.DOC_CONVERTER_URL,
+      });
+    const renderedPdf = await renderQuotePdfBytes({
+      docxInput: {
+        quote: quotePre,
+        firmName: store.firm.name || tenantCfg.displayName || 'Law Firm',
+        contactEmail:
+          tenantCfg.firm?.contactEmail || tenantCfg.branding.contactEmail,
+        feeEarnerName: personDisplayName(feeEarner),
+        people: linkedPerson ? [...people, linkedPerson] : [...people],
+        organisations: linkedOrg ? [linkedOrg] : [],
+        values: store.values,
+        priceTransparency: transparencySnapshot,
+      },
+      converter,
+      tenantId: ctx.tenantId,
+      correlationId: ctx.correlationId,
+    });
+    if (!renderedPdf.ok) {
+      return registerServiceFailure(renderedPdf.code, renderedPdf.error);
+    }
+
+    const workTypeLabel = quoteWorkTypeSummary(quotePre, store.values);
+    const firmName = store.firm.name || tenantCfg.displayName || 'Law Firm';
+    const senderName = personDisplayName(actor);
+
+    const txResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+      const lockedQuote = await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(
+        tx,
+        ctx,
+        cleanQuoteId,
+        {
+          viewerId: actor.id,
+          hasRestrictedMatterAccess,
+        },
+      );
+      if (!lockedQuote) {
+        return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+      }
+
+      if (cleanExplicitKey) {
+        const lockedIdempotencyKey = `quote:send:${lockedQuote.id}:v${lockedQuote.version}:${cleanExplicitKey}`;
+        const existingInTx =
+          await outboxRepo.getOutboxRecordByIdempotencyKeyInTx(
+            tx,
+            ctx,
+            lockedIdempotencyKey,
+          );
+        if (existingInTx) {
+          const existingChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+            entityKind: 'quote',
+            entityId: lockedQuote.id,
+          });
+          return {
+            ok: true as const,
+            earlyReturn: true as const,
+            quote: lockedQuote,
+            outboxRecord: existingInTx,
+            chase: existingChase,
+          };
+        }
+        const vMatchedKey =
+          await outboxRepo.getOutboxRecordByIdempotencyKeyInTx(
+            tx,
+            ctx,
+            outboxIdempotencyKey,
+          );
+        if (vMatchedKey) {
+          const existingChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+            entityKind: 'quote',
+            entityId: lockedQuote.id,
+          });
+          return {
+            ok: true as const,
+            earlyReturn: true as const,
+            quote: lockedQuote,
+            outboxRecord: vMatchedKey,
+            chase: existingChase,
+          };
+        }
+      }
+
+      const nowTxIso = nextMonotonicIsoTimestamp(lockedQuote.updatedAt);
+      const lockedEffective = evaluateQuoteEffectiveStatus(
+        lockedQuote,
+        new Date(nowTxIso),
+      );
+      if (
+        QUOTE_TERMINAL_STATUSES.has(lockedQuote.status) ||
+        QUOTE_TERMINAL_STATUSES.has(lockedEffective)
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          `Quote ${lockedQuote.reference} cannot be sent because its status is ${lockedEffective}. Revise the quote to create a new version first.`,
+        );
+      }
+
+      const prevStatus = lockedQuote.status;
+      if (
+        !lockedQuote.prospectEmail?.trim() &&
+        input.recipientEmail?.trim() &&
+        lockedQuote.clientType === 'prospect'
+      ) {
+        lockedQuote.prospectEmail = recipientEmail;
+      }
+
+      const finalKey = `quote:send:${lockedQuote.id}:v${lockedQuote.version}:${dispatchKey}`;
+      const dispatched = await enqueueQuoteOutboxAndChaseInTx({
+        tx,
+        ctx,
+        actorId: actor.id,
+        quote: lockedQuote,
+        outboxIdempotencyKey: finalKey,
+        resolvedEmail: recipientEmail,
+        resolvedRecipientName: recipientName,
+        firmName,
+        workTypeLabel,
+        senderName,
+        subject: input.subject,
+        customNote: input.customNote,
+        pdfBytes: renderedPdf.pdfBytes,
+        pdfFileName: renderedPdf.fileName,
+        transparencySnapshot: {
+          ...transparencySnapshot,
+          capturedAt: nowTxIso,
+        },
+        chasingConfig,
+        nowIso: nowTxIso,
+      });
+
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'quote',
+          recordId: lockedQuote.id,
+          action: 'status-change',
+          field: 'Quote sent',
+          oldValue: prevStatus,
+          newValue: `Sent v${lockedQuote.version} (outbox ${dispatched.outboxRecord.id}${dispatched.chase ? `, chase ${dispatched.chase.id}` : ''})`,
+          byId: actor.id,
+          at: nowTxIso,
+        },
+      ]);
+
+      return {
+        ok: true as const,
+        earlyReturn: false as const,
+        quote: lockedQuote,
+        outboxRecord: dispatched.outboxRecord,
+        chase: dispatched.chase,
+      };
+    });
+
+    if (!txResult.ok) {
+      return txResult;
+    }
+
+    const finalOutboxRecord = txResult.earlyReturn
+      ? txResult.outboxRecord
+      : await drainQuoteOutboxBestEffort({
+          ctx,
+          tenantCfg,
+          outboxRecord: txResult.outboxRecord,
+          actorId: actor.id,
+          emailProviderDisabled,
+          drainAfterCommit: options?.drainAfterCommit,
+          emailSender: options?.emailSender,
+          secretReader: options?.secretReader,
+          storageProvider: options?.storageProvider,
+        });
+
+    return {
+      ok: true,
+      quote: txResult.quote,
+      outboxRecord: finalOutboxRecord,
+      chase: txResult.chase,
+      emailProviderDisabled,
+      ...(txResult.earlyReturn ? { earlyReturn: true } : {}),
+    };
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
+}
+
+export async function markQuoteSentOfflineRecord(
+  input: {
+    quoteId: string;
+    sentDate?: string;
+    note?: string;
+  },
+  byId?: string,
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+  },
+): Promise<{ readonly ok: true; readonly quote: Quote } | RegisterServiceDenialOrError> {
+  try {
+    const { ctx, tenantCfg, actor, permSet } =
+      await resolveRegisterActorAndConfig(byId, undefined, options);
+    if (!permSet.permissions.has('quote:edit')) {
+      return registerServiceFailure(
+        'FORBIDDEN',
+        'You do not have permission (quote:edit) to record quotes as sent.',
+      );
+    }
+
+    const cleanQuoteId = input.quoteId?.trim() || '';
+    if (!cleanQuoteId) {
+      return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+    }
+
+    const cleanDate = input.sentDate?.trim() || '';
+
+    const intakeRepo = getIntakeQuoteRepository();
+    const chasingRepo = getChasingRepository();
+    const hasRestrictedMatterAccess = permSet.permissions.has(
+      'matter:restricted:access',
+    );
+    const store = await loadTenantCatalogueStoreView(ctx, {
+      includePmsLinks: false,
+    });
+    const workTypesConfig =
+      store.workTypesConfig ??
+      resolveEffectiveWorkTypesConfig(
+        tenantCfg,
+        store.workTypeConfigsOverride ?? null,
+      );
+
+    return intakeRepo.withTenantTransaction(ctx, async (tx) => {
+      const lockedQuote = await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(
+        tx,
+        ctx,
+        cleanQuoteId,
+        {
+          viewerId: actor.id,
+          hasRestrictedMatterAccess,
+        },
+      );
+      if (!lockedQuote) {
+        return registerServiceFailure('NOT_FOUND', 'Quote not found.');
+      }
+
+      if (cleanDate) {
+        const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(cleanDate);
+        const parsed = match ? new Date(`${cleanDate}T00:00:00.000Z`) : null;
+        if (
+          !match ||
+          !parsed ||
+          Number.isNaN(parsed.getTime()) ||
+          parsed.toISOString().slice(0, 10) !== cleanDate
+        ) {
+          return registerServiceFailure(
+            'VALIDATION_ERROR',
+            'Sent date must be a valid YYYY-MM-DD calendar date.',
+          );
+        }
+      }
+
+      const nowIso = nextMonotonicIsoTimestamp(lockedQuote.updatedAt);
+      const effectiveStatus = evaluateQuoteEffectiveStatus(
+        lockedQuote,
+        new Date(nowIso),
+      );
+      if (
+        QUOTE_TERMINAL_STATUSES.has(lockedQuote.status) ||
+        QUOTE_TERMINAL_STATUSES.has(effectiveStatus)
+      ) {
+        return registerServiceFailure(
+          'VALIDATION_ERROR',
+          `Quote ${lockedQuote.reference} cannot be marked as sent because its status is ${effectiveStatus}.`,
+        );
+      }
+
+      const sentAtIso = cleanDate ? `${cleanDate}T09:00:00.000Z` : nowIso;
+      const followUpDays = Math.max(1, lockedQuote.followUpAfterDays || 7);
+      const nextFollowUpDate = toIsoDate(
+        addDays(new Date(sentAtIso), followUpDays),
+      );
+      const prevStatus = lockedQuote.status;
+
+      lockedQuote.status = 'Sent';
+      lockedQuote.sentAt = sentAtIso;
+      lockedQuote.sentToEmail = null;
+      lockedQuote.sentByPersonId = actor.id;
+      lockedQuote.lastSentOutboxId = null;
+      lockedQuote.priceTransparencySnapshot =
+        buildQuotePriceTransparencySnapshot({
+          workTypesConfig,
+          practiceAreaId: lockedQuote.practiceAreaId,
+          workTypeSubcategoryId: lockedQuote.workTypeSubcategoryId,
+          customNote: lockedQuote.priceTransparencySnapshot?.customNote,
+          capturedAt: nowIso,
+        });
+      lockedQuote.nextFollowUpDate = nextFollowUpDate;
+      lockedQuote.updatedAt = nowIso;
+      lockedQuote.updatedById = actor.id;
+      const cleanNote = input.note?.trim();
+      lockedQuote.timeline.push({
+        id: `QT-${Date.now()}-offline`,
+        kind: 'sent',
+        at: nowIso,
+        byId: actor.id,
+        title: `v${lockedQuote.version} recorded as sent offline`,
+        detail: cleanNote
+          ? `${cleanNote} (follow-up due ${nextFollowUpDate})`
+          : `First follow-up scheduled for ${nextFollowUpDate} (${followUpDays} days)`,
+      });
+
+      const stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+        entityKind: 'quote',
+        entityId: lockedQuote.id,
+        reason: 'superseded',
+        stoppedByPersonId: actor.id,
+        stoppedAt: nowIso,
+      });
+
+      await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
+      await appendTenantAuditEntries(ctx, [
+        ...(stoppedChase
+          ? [
+              {
+                recordType: 'communication_chase' as const,
+                recordId: stoppedChase.id,
+                action: 'update' as const,
+                field: 'Communication chase stopped',
+                oldValue: stoppedChase.previousStatus,
+                newValue: `stopped (${stoppedChase.stoppedReason ?? 'superseded'})`,
+                byId: actor.id,
+                at: nowIso,
+              },
+            ]
+          : []),
+        {
+          recordType: 'quote',
+          recordId: lockedQuote.id,
+          action: 'status-change',
+          field: 'Quote marked as sent offline',
+          oldValue: prevStatus,
+          newValue: `Sent offline (v${lockedQuote.version}, follow-up due ${nextFollowUpDate})`,
+          byId: actor.id,
+          at: nowIso,
+        },
+      ]);
+
+      return { ok: true, quote: lockedQuote };
+    });
+  } catch (err) {
+    return mapRegisterErrorToDenial(err);
+  }
 }
 
 function normalizeQuoteDisbursements(
@@ -21347,17 +22282,54 @@ function hourlyGbpMatchesMinorUnits(
 
 export async function saveQuoteRecord(
   input: SaveQuoteInput,
-  opts: { id?: string; byId: string; markAsSent?: boolean; refreshVatRate?: boolean },
+  opts: {
+    id?: string;
+    byId: string;
+    markAsSent?: boolean;
+    sendMode?: 'email' | 'offline';
+    recipientEmail?: string | null;
+    recipientName?: string | null;
+    idempotencyKey?: string | null;
+    refreshVatRate?: boolean;
+  },
+  serviceOptions?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  },
 ): Promise<
-  { quote?: Quote; error?: string } & Partial<Omit<ActionDenied, 'code'>> & {
-    code?: ActionDenialCode | FeeCapErrorCode;
+  {
+    quote?: Quote;
+    outboxRecord?: EmailOutboxRecord;
+    chase?: CommunicationChaseRecord | null;
+    emailProviderDisabled?: boolean;
+    earlyReturn?: boolean;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>> & {
+    code?:
+      | ActionDenialCode
+      | FeeCapErrorCode
+      | 'VALIDATION_ERROR'
+      | 'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED';
   }
 > {
   return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, opts.byId);
+  const ctx = resolveDefaultServiceTenantContext(null, opts.byId, {
+    tenantCtx: serviceOptions?.tenantCtx,
+  });
+  const tenantCfgResolved = resolveVerifiedTenantConfiguration(
+    ctx,
+    serviceOptions?.tenantConfig,
+  );
   const partyRepo = getPartyRepository();
   const matterRepo = getMatterRepository();
   const intakeRepo = getIntakeQuoteRepository();
+  const outboxRepo = getOutboxRepository();
+  const chasingRepo = getChasingRepository();
   const [
     catalogueStore,
     staffPeople,
@@ -21509,8 +22481,112 @@ export async function saveQuoteRecord(
   const defaultValidUntil = toIsoDate(addDays(now, 30));
   const validUntil = input.validUntil || existing?.validUntil || defaultValidUntil;
 
+  const hasPoaInput =
+    input.paymentOnAccountRequired !== undefined ||
+    input.paymentOnAccountPence !== undefined ||
+    input.paymentOnAccountGbp !== undefined;
+  const poaValidation = hasPoaInput
+    ? validateAndNormalizeQuotePoa({
+        paymentOnAccountRequired: input.paymentOnAccountRequired,
+        paymentOnAccountPence: input.paymentOnAccountPence,
+        paymentOnAccountGbp: input.paymentOnAccountGbp,
+      })
+    : validateAndNormalizeQuotePoa({
+        paymentOnAccountRequired: existing?.paymentOnAccountRequired ?? false,
+        paymentOnAccountPence: existing?.paymentOnAccountPence ?? null,
+        paymentOnAccountGbp: existing?.paymentOnAccountGbp ?? null,
+      });
+  if (!poaValidation.ok) {
+    return {
+      code: 'VALIDATION_ERROR',
+      error: poaValidation.error,
+    };
+  }
+
   const markSent = Boolean(opts.markAsSent);
-  const sentAt = markSent ? nowIso : existing?.sentAt ?? null;
+  const { recipientEmail: resolvedEmail, recipientName: resolvedRecipientName } =
+    resolveQuoteRecipientFromRelated({
+      explicitEmail: opts.recipientEmail,
+      explicitName: opts.recipientName,
+      quoteProspectEmail: prospectEmail || existing?.prospectEmail,
+      quoteProspectName: prospectName || existing?.prospectName,
+      linkedPerson: linkedPersonDirect,
+      linkedOrg: linkedOrgDirect,
+      linkedEnquiry: linkedEnqDirect,
+    });
+
+  if (markSent && opts.sendMode === 'email' && (!resolvedEmail || !isValidEmailAddress(resolvedEmail))) {
+    return {
+      code: 'VALIDATION_ERROR',
+      error: 'A valid client recipient email address is required before sending the quote.',
+    };
+  }
+
+  const shouldDispatchEmail =
+    markSent &&
+    opts.sendMode !== 'offline' &&
+    Boolean(resolvedEmail) &&
+    isValidEmailAddress(resolvedEmail);
+  const emailProviderDisabled =
+    (resolveEmailIntegrationConfig(tenantCfgResolved).provider ?? 'disabled') ===
+    'disabled';
+  const cleanExplicitKey = opts.idempotencyKey?.trim() || '';
+  const createOutboxKey = cleanExplicitKey
+    ? `quote:send:create:${ctx.actorId}:${cleanExplicitKey}`
+    : `quote:send:create:${randomUUID()}`;
+  const updateOutboxKey = existing
+    ? cleanExplicitKey
+      ? `quote:send:${existing.id}:v${existing.version}:${cleanExplicitKey}`
+      : `quote:send:${existing.id}:v${existing.version}:${randomUUID()}`
+    : createOutboxKey;
+
+  if (shouldDispatchEmail && cleanExplicitKey) {
+    const existingOutbox = await outboxRepo.getOutboxRecordByIdempotencyKey(
+      ctx,
+      existing ? updateOutboxKey : createOutboxKey,
+    );
+    if (existingOutbox) {
+      const earlierQuote =
+        existing ??
+        (existingOutbox.quoteId
+          ? await intakeRepo.getQuoteById<Quote>(ctx, existingOutbox.quoteId, {
+              includeRestricted: true,
+            })
+          : null);
+      if (earlierQuote) {
+        const earlierChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+          entityKind: 'quote',
+          entityId: earlierQuote.id,
+        });
+        return {
+          quote: earlierQuote,
+          outboxRecord: existingOutbox,
+          chase: earlierChase,
+          emailProviderDisabled,
+          earlyReturn: true,
+        };
+      }
+    }
+  }
+
+  const effectiveWorkTypesConfig =
+    catalogueStore.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      tenantCfgResolved,
+      catalogueStore.workTypeConfigsOverride ?? null,
+    );
+  const customTransparencyNote =
+    input.priceTransparencyCustomNote !== undefined
+      ? input.priceTransparencyCustomNote?.trim() || undefined
+      : existing?.priceTransparencySnapshot?.customNote;
+  const draftTransparencySnapshot = buildQuotePriceTransparencySnapshot({
+    workTypesConfig: effectiveWorkTypesConfig,
+    practiceAreaId: input.practiceAreaId,
+    workTypeSubcategoryId: input.workTypeSubcategoryId || null,
+    customNote: customTransparencyNote,
+    ...(markSent ? { capturedAt: nowIso } : {}),
+  });
+
   const nextFollowUpDate = markSent
     ? toIsoDate(addDays(now, followUpAfterDays))
     : existing?.nextFollowUpDate ?? null;
@@ -21521,239 +22597,21 @@ export async function saveQuoteRecord(
   }
 
   if (!existing) {
-    return intakeRepo.withTenantTransaction(ctx, async () => {
-      const tenantCfg = getActiveTenantConfiguration();
-      const dbCostsOverride =
-        await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
-      const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-        tenantCfg,
-        dbCostsOverride,
-      );
-      const quoteAsAtDate = resolveTenantLocalDateAndHour(
-        now,
-        tenantCfg.timeZone || 'Europe/London',
-      ).localDate;
-
-      const arrangementBasis = mapQuoteFeeBasisToArrangementBasis(
-        input.feeBasis,
-      );
-      let validatedFeeArrangement:
-        | {
-            feeArrangementCapCategoryKey: string;
-            feeArrangementPercent: number;
-            feeArrangementCapBaseKey: string;
-            feeArrangementCapBaseDescription: string;
-            feeArrangementAppliedCapPercent: number;
-            feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
-          }
-        | undefined;
-      if (arrangementBasis) {
-        const capCheck = await validateInTxFeeArrangementForRecord({
-          ctx,
-          feeBasis: arrangementBasis,
-          workTypeSubcategoryId: input.workTypeSubcategoryId ?? null,
-          practiceAreaId: input.practiceAreaId,
-          submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
-          submittedPercent: input.feeArrangementPercent,
-          submittedCapBaseKey: input.feeArrangementCapBaseKey,
-          effectiveCostsConfig,
-          asAtDate: quoteAsAtDate,
-        });
-        if (!capCheck.ok) {
-          return {
-            code: capCheck.code,
-            message: capCheck.message,
-            error: capCheck.message,
-          };
-        }
-        validatedFeeArrangement = {
-          feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
-          feeArrangementPercent: capCheck.acceptedPercent,
-          feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
-          feeArrangementCapBaseDescription:
-            capCheck.resolution.capBaseDescription,
-          feeArrangementAppliedCapPercent:
-            capCheck.resolution.appliedCapPercent,
-          feeArrangementCapLevel: capCheck.resolution.capLevel,
-        };
-      }
-
-      const rateOverrideRepo = getRateOverrideRepository();
-      const targetClientId =
-        clientType === 'existing' ? (linkedOrganisationId ?? linkedPersonId ?? null) : null;
-      const targetClientType: ClientRateOverrideClientType | undefined = linkedOrganisationId
-        ? 'organisation'
-        : linkedPersonId
-          ? 'person'
-          : undefined;
-      const resolvedRates = await rateOverrideRepo.resolveApplicableRates(ctx, {
-        clientId: targetClientId,
-        clientType: targetClientType ?? null,
-        practiceAreaId: input.practiceAreaId,
-        asAtDate: quoteAsAtDate,
-        baseMatterCostsConfig: tenantCfg.matterCosts,
-        fallbackRateCardConfig: effectiveCostsConfig,
-        timeZone: tenantCfg.timeZone,
-      });
-      const rateGradeKey = input.rateGradeKey?.trim() || 'associate';
-      const gradeRes =
-        resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
-      const submittedHourly =
-        input.feeBasis === 'Hourly rate with estimate' &&
-        input.hourlyRateGbp !== undefined &&
-        input.hourlyRateGbp !== null &&
-        Number(input.hourlyRateGbp) > 0
-          ? Number(input.hourlyRateGbp)
-          : null;
-      const effectiveHourlyRateGbp =
-        input.feeBasis === 'Hourly rate with estimate'
-          ? (submittedHourly ?? ((gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null))
-          : null;
-      const hourlyMatchesResolved =
-        effectiveHourlyRateGbp === null ||
-        !gradeRes ||
-        hourlyGbpMatchesMinorUnits(effectiveHourlyRateGbp, gradeRes.rateMinorUnits);
-      const resolvedRateSource: Quote['rateSource'] =
-        input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
-          ? 'custom_override'
-          : (gradeRes?.source ?? resolvedRates.dominantSource);
-      const resolvedRateTier =
-        resolvedRateSource === 'custom_override'
-          ? undefined
-          : (gradeRes?.tier ?? resolvedRates.dominantTier);
-
-      const vatRatePercent = effectiveCostsConfig.vatRatePercent;
-      const totals = calculateQuoteTotals(
-        input.feeAmountExVat,
-        input.vatOverridden ? input.vatAmount : null,
-        disbursements,
-        vatRatePercent,
-      );
-
-      const reference = await intakeRepo.allocateNextQuoteReference(ctx, now.getFullYear());
-      const timeline: Quote['timeline'] = [
-        {
-          id: `QT-${Date.now()}-1`,
-          kind: 'created',
-          at: nowIso,
-          byId: opts.byId,
-          title: 'Quote created (v1)',
-          detail: `${input.feeBasis} — £${totals.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
-        },
-      ];
-      if (markSent) {
-        timeline.push({
-          id: `QT-${Date.now()}-2`,
-          kind: 'sent',
-          at: nowIso,
-          byId: opts.byId,
-          title: 'Marked as sent',
-          detail: `First follow-up scheduled for ${nextFollowUpDate}`,
-        });
-      }
-
-      const created: Quote = {
-        id: reference,
-        reference,
-        version: 1,
-        status,
-        clientType,
-        linkedOrganisationId,
-        linkedPersonId,
-        prospectName,
-        prospectOrganisationName,
-        prospectEmail,
-        prospectPhone,
-        linkedEnquiryId: input.linkedEnquiryId || null,
-        convertedMatterId: null,
-        practiceAreaId: input.practiceAreaId,
-        workTypeSubcategoryId: input.workTypeSubcategoryId || null,
-        scope: input.scope.trim(),
-        assumptions: (input.assumptions ?? '').trim(),
-        feeBasis: input.feeBasis,
-        feeAmountExVat: totals.feeAmountExVat,
-        hourlyRateGbp: effectiveHourlyRateGbp,
-        vatRatePercent,
-        vatAmount: totals.vatOnFee,
-        vatOverridden: Boolean(input.vatOverridden),
-        disbursements,
-        totalIncVat: totals.totalIncVat,
-        capturedAt: nowIso,
-        rateSource: resolvedRateSource,
-        ...(resolvedRateTier !== undefined ? { rateTier: resolvedRateTier } : {}),
-        rateAsAtDate: resolvedRates.asAtDate,
-        rateCardId: resolvedRates.rateCardId,
-        rateCardName: resolvedRates.rateCardName,
-        rateGradeKey,
-        rateProvenanceByGrade: resolvedRates.grades,
-        ...(validatedFeeArrangement ?? {}),
-        feeEarnerId,
-        assignedTeamId,
-        validUntil,
-        followUpAfterDays,
-        sentAt,
-        nextFollowUpDate,
-        outcomeAt: null,
-        declineReason: null,
-        followUps: [],
-        versionHistory: [],
-        timeline,
-        createdById: opts.byId,
-        createdAt: nowIso,
-        updatedById: opts.byId,
-        updatedAt: nowIso,
-      };
-
-      await intakeRepo.putQuote(ctx, created);
-      writeAudit(null, {
-        recordType: 'quote',
-        recordId: created.id,
-        action: 'create',
-        field: markSent ? 'Quote created and marked as sent' : 'Quote saved as draft',
-        oldValue: null,
-        newValue: `${created.reference} — ${quoteClientDisplayName(created, people, organisations)}`,
-        byId: opts.byId,
-        at: nowIso,
-      });
-      await flushStagedAuditEntries(ctx);
-      if (validatedFeeArrangement) {
-        await appendTenantAuditEntries(ctx, [
-          {
-            recordType: 'quote',
-            recordId: created.id,
-            action: 'create',
-            field: 'Fee arrangement & cap',
-            oldValue: null,
-            newValue: formatFeeArrangementAuditSummary(created),
-            byId: opts.byId,
-            at: nowIso,
-          },
-        ]);
-      }
-      return { quote: created };
-    });
-  }
-
-  // Update existing quote inside transaction with live matter_costs VAT, rate & CFA/DBA cap check
-  const wasSentNow = markSent && existing.status === 'Draft';
-  const prevFeeSummary = formatFeeArrangementAuditSummary(existing);
-  const updateTxOutcome = await intakeRepo.withTenantTransaction(ctx, async () => {
-    const tenantCfg = getActiveTenantConfiguration();
-    const dbCostsOverride =
+    const dbCostsOverridePre =
       await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
-    const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-      tenantCfg,
-      dbCostsOverride,
+    const effectiveCostsConfigPre = resolveEffectiveMatterCostsConfig(
+      tenantCfgResolved,
+      dbCostsOverridePre,
     );
-    const quoteAsAtDate = resolveTenantLocalDateAndHour(
+    const quoteAsAtDatePre = resolveTenantLocalDateAndHour(
       now,
-      tenantCfg.timeZone || 'Europe/London',
+      tenantCfgResolved.timeZone || 'Europe/London',
     ).localDate;
 
-    const arrangementBasis = mapQuoteFeeBasisToArrangementBasis(
+    const arrangementBasisPre = mapQuoteFeeBasisToArrangementBasis(
       input.feeBasis,
     );
-    let validatedFeeArrangement:
+    let validatedFeeArrangementPre:
       | {
           feeArrangementCapCategoryKey: string;
           feeArrangementPercent: number;
@@ -21763,17 +22621,17 @@ export async function saveQuoteRecord(
           feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
         }
       | undefined;
-    if (arrangementBasis) {
+    if (arrangementBasisPre) {
       const capCheck = await validateInTxFeeArrangementForRecord({
         ctx,
-        feeBasis: arrangementBasis,
+        feeBasis: arrangementBasisPre,
         workTypeSubcategoryId: input.workTypeSubcategoryId ?? null,
         practiceAreaId: input.practiceAreaId,
         submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
         submittedPercent: input.feeArrangementPercent,
         submittedCapBaseKey: input.feeArrangementCapBaseKey,
-        effectiveCostsConfig,
-        asAtDate: quoteAsAtDate,
+        effectiveCostsConfig: effectiveCostsConfigPre,
+        asAtDate: quoteAsAtDatePre,
       });
       if (!capCheck.ok) {
         return {
@@ -21782,184 +22640,747 @@ export async function saveQuoteRecord(
           error: capCheck.message,
         };
       }
-      validatedFeeArrangement = {
+      validatedFeeArrangementPre = {
         feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
         feeArrangementPercent: capCheck.acceptedPercent,
         feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
         feeArrangementCapBaseDescription:
           capCheck.resolution.capBaseDescription,
-        feeArrangementAppliedCapPercent:
-          capCheck.resolution.appliedCapPercent,
+        feeArrangementAppliedCapPercent: capCheck.resolution.appliedCapPercent,
         feeArrangementCapLevel: capCheck.resolution.capLevel,
       };
     }
 
-    const existingVatRate =
-      typeof existing.vatRatePercent === 'number' &&
-      Number.isFinite(existing.vatRatePercent)
-        ? existing.vatRatePercent
-        : 20;
-    const shouldRefreshVat = Boolean(input.refreshVatRate ?? opts.refreshVatRate);
-    const vatRatePercent = shouldRefreshVat
-      ? effectiveCostsConfig.vatRatePercent
-      : existingVatRate;
-    const shouldRefreshRates = Boolean(input.refreshRates) || !existing.rateSource;
-    const rateGradeKey = input.rateGradeKey?.trim() || existing.rateGradeKey || 'associate';
-    let nextHourlyRateGbp =
-      input.feeBasis === 'Hourly rate with estimate'
-        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+    const rateOverrideRepo = getRateOverrideRepository();
+    const targetClientId =
+      clientType === 'existing' ? (linkedOrganisationId ?? linkedPersonId ?? null) : null;
+    const targetClientType: ClientRateOverrideClientType | undefined = linkedOrganisationId
+      ? 'organisation'
+      : linkedPersonId
+        ? 'person'
+        : undefined;
+    const resolvedRatesPre = await rateOverrideRepo.resolveApplicableRates(ctx, {
+      clientId: targetClientId,
+      clientType: targetClientType ?? null,
+      practiceAreaId: input.practiceAreaId,
+      asAtDate: quoteAsAtDatePre,
+      baseMatterCostsConfig: tenantCfgResolved.matterCosts,
+      fallbackRateCardConfig: effectiveCostsConfigPre,
+      timeZone: tenantCfgResolved.timeZone,
+    });
+    const rateGradeKeyPre = input.rateGradeKey?.trim() || 'associate';
+    const gradeResPre =
+      resolvedRatesPre.grades[rateGradeKeyPre] ?? resolvedRatesPre.grades['associate'];
+    const submittedHourly =
+      input.feeBasis === 'Hourly rate with estimate' &&
+      input.hourlyRateGbp !== undefined &&
+      input.hourlyRateGbp !== null &&
+      Number(input.hourlyRateGbp) > 0
+        ? Number(input.hourlyRateGbp)
         : null;
-    if (shouldRefreshRates) {
-      const quoteAsAtDate = resolveTenantLocalDateAndHour(
-        now,
-        tenantCfg.timeZone || 'Europe/London',
-      ).localDate;
-      const targetClientId =
-        clientType === 'existing' ? (linkedOrganisationId ?? linkedPersonId ?? null) : null;
-      const targetClientType: ClientRateOverrideClientType | undefined = linkedOrganisationId
+    const effectiveHourlyRateGbp =
+      input.feeBasis === 'Hourly rate with estimate'
+        ? (submittedHourly ?? ((gradeResPre?.rateGbp ?? resolvedRatesPre.associateRateGbp) || null))
+        : null;
+    const hourlyMatchesResolved =
+      effectiveHourlyRateGbp === null ||
+      !gradeResPre ||
+      hourlyGbpMatchesMinorUnits(effectiveHourlyRateGbp, gradeResPre.rateMinorUnits);
+    const resolvedRateSource: Quote['rateSource'] =
+      input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
+        ? 'custom_override'
+        : (gradeResPre?.source ?? resolvedRatesPre.dominantSource);
+    const resolvedRateTier =
+      resolvedRateSource === 'custom_override'
+        ? undefined
+        : (gradeResPre?.tier ?? resolvedRatesPre.dominantTier);
+
+    const vatRatePercentPre = effectiveCostsConfigPre.vatRatePercent;
+    const totalsPre = calculateQuoteTotals(
+      input.feeAmountExVat,
+      input.vatOverridden ? input.vatAmount : null,
+      disbursements,
+      vatRatePercentPre,
+    );
+
+    const allocatedReference = await intakeRepo.allocateNextQuoteReference(
+      ctx,
+      now.getFullYear(),
+    );
+    const createdPre: Quote = {
+      id: allocatedReference,
+      reference: allocatedReference,
+      version: 1,
+      status,
+      clientType,
+      linkedOrganisationId,
+      linkedPersonId,
+      prospectName,
+      prospectOrganisationName,
+      prospectEmail: prospectEmail || (shouldDispatchEmail ? resolvedEmail : ''),
+      prospectPhone,
+      linkedEnquiryId: input.linkedEnquiryId || null,
+      convertedMatterId: null,
+      practiceAreaId: input.practiceAreaId,
+      workTypeSubcategoryId: input.workTypeSubcategoryId || null,
+      scope: input.scope.trim(),
+      assumptions: (input.assumptions ?? '').trim(),
+      feeBasis: input.feeBasis,
+      feeAmountExVat: totalsPre.feeAmountExVat,
+      hourlyRateGbp: effectiveHourlyRateGbp,
+      vatRatePercent: vatRatePercentPre,
+      vatAmount: totalsPre.vatOnFee,
+      vatOverridden: Boolean(input.vatOverridden),
+      disbursements,
+      totalIncVat: totalsPre.totalIncVat,
+      paymentOnAccountRequired: poaValidation.paymentOnAccountRequired,
+      paymentOnAccountPence: poaValidation.paymentOnAccountPence,
+      paymentOnAccountGbp: poaValidation.paymentOnAccountGbp,
+      capturedAt: nowIso,
+      rateSource: resolvedRateSource,
+      ...(resolvedRateTier !== undefined ? { rateTier: resolvedRateTier } : {}),
+      rateAsAtDate: resolvedRatesPre.asAtDate,
+      rateCardId: resolvedRatesPre.rateCardId,
+      rateCardName: resolvedRatesPre.rateCardName,
+      rateGradeKey: rateGradeKeyPre,
+      rateProvenanceByGrade: resolvedRatesPre.grades,
+      ...(validatedFeeArrangementPre ?? {}),
+      feeEarnerId,
+      assignedTeamId,
+      validUntil,
+      followUpAfterDays,
+      sentAt: markSent && !shouldDispatchEmail ? nowIso : null,
+      sentToEmail: null,
+      sentByPersonId: markSent && !shouldDispatchEmail ? opts.byId : null,
+      lastSentOutboxId: null,
+      priceTransparencySnapshot:
+        markSent || customTransparencyNote
+          ? draftTransparencySnapshot
+          : null,
+      nextFollowUpDate: markSent ? nextFollowUpDate : null,
+      outcomeAt: null,
+      declineReason: null,
+      followUps: [],
+      versionHistory: [],
+      timeline: [
+        {
+          id: `QT-${Date.now()}-1`,
+          kind: 'created',
+          at: nowIso,
+          byId: opts.byId,
+          title: 'Quote created (v1)',
+          detail: `${input.feeBasis} — £${totalsPre.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
+        },
+        ...(markSent && !shouldDispatchEmail
+          ? [
+              {
+                id: `QT-${Date.now()}-2`,
+                kind: 'sent' as const,
+                at: nowIso,
+                byId: opts.byId,
+                title:
+                  opts.sendMode === 'offline'
+                    ? 'v1 recorded as sent offline'
+                    : 'Marked as sent',
+                detail: `First follow-up scheduled for ${nextFollowUpDate}`,
+              },
+            ]
+          : []),
+      ],
+      createdById: opts.byId,
+      createdAt: nowIso,
+      updatedById: opts.byId,
+      updatedAt: nowIso,
+    };
+
+    const chasingConfigPre = shouldDispatchEmail
+      ? await resolveEffectiveChasingConfig(ctx, tenantCfgResolved)
+      : null;
+    const feeEarnerPerson =
+      people.find((p) => p.id === feeEarnerId) ?? actor!;
+    const renderedCreatePdf = shouldDispatchEmail
+      ? await renderQuotePdfBytes({
+          docxInput: {
+            quote: createdPre,
+            firmName:
+              catalogueStore.firm.name ||
+              tenantCfgResolved.displayName ||
+              'Law Firm',
+            contactEmail:
+              tenantCfgResolved.firm?.contactEmail ||
+              tenantCfgResolved.branding.contactEmail,
+            feeEarnerName: personDisplayName(feeEarnerPerson),
+            people,
+            organisations,
+            values: catalogueStore.values,
+            priceTransparency: draftTransparencySnapshot,
+          },
+          converter:
+            serviceOptions?.pdfConverter ??
+            selectDocumentPdfConverter(tenantCfgResolved, {
+              converterUrl: process.env.DOC_CONVERTER_URL,
+            }),
+          tenantId: ctx.tenantId,
+          correlationId: ctx.correlationId,
+        })
+      : null;
+    if (renderedCreatePdf && !renderedCreatePdf.ok) {
+      return {
+        code: renderedCreatePdf.code,
+        error: renderedCreatePdf.error,
+      };
+    }
+
+    const createResult = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+      if (shouldDispatchEmail && cleanExplicitKey) {
+        await tx.query(
+          `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+          [ctx.tenantId, createOutboxKey],
+        );
+        const existingInTx =
+          await outboxRepo.getOutboxRecordByIdempotencyKeyInTx(
+            tx,
+            ctx,
+            createOutboxKey,
+          );
+        if (existingInTx?.quoteId) {
+          const earlierQuote = await intakeRepo.getQuoteById<Quote>(
+            ctx,
+            existingInTx.quoteId,
+            { includeRestricted: true },
+          );
+          if (earlierQuote) {
+            const earlierChase = await chasingRepo.getActiveChaseForEntity(
+              ctx,
+              {
+                entityKind: 'quote',
+                entityId: earlierQuote.id,
+              },
+            );
+            return {
+              quote: earlierQuote,
+              outboxRecord: existingInTx,
+              chase: earlierChase,
+              emailProviderDisabled,
+              earlyReturn: true,
+            };
+          }
+        }
+      }
+
+      if (shouldDispatchEmail && renderedCreatePdf?.ok && chasingConfigPre) {
+        const dispatched = await enqueueQuoteOutboxAndChaseInTx({
+          tx,
+          ctx,
+          actorId: opts.byId,
+          quote: createdPre,
+          outboxIdempotencyKey: createOutboxKey,
+          resolvedEmail,
+          resolvedRecipientName,
+          firmName:
+            catalogueStore.firm.name ||
+            tenantCfgResolved.displayName ||
+            'Law Firm',
+          workTypeLabel: quoteWorkTypeSummary(createdPre, catalogueStore.values),
+          senderName: personDisplayName(actor!),
+          pdfBytes: renderedCreatePdf.pdfBytes,
+          pdfFileName: renderedCreatePdf.fileName,
+          transparencySnapshot: draftTransparencySnapshot,
+          chasingConfig: chasingConfigPre,
+          nowIso,
+        });
+        writeAudit(null, {
+          recordType: 'quote',
+          recordId: createdPre.id,
+          action: 'create',
+          field: 'Quote created and sent by email',
+          oldValue: null,
+          newValue: `${createdPre.reference} — ${quoteClientDisplayName(createdPre, people, organisations)} (outbox ${dispatched.outboxRecord.id})`,
+          byId: opts.byId,
+          at: nowIso,
+        });
+        await flushStagedAuditEntries(ctx);
+        if (validatedFeeArrangementPre) {
+          await appendTenantAuditEntries(ctx, [
+            {
+              recordType: 'quote',
+              recordId: createdPre.id,
+              action: 'create',
+              field: 'Fee arrangement & cap',
+              oldValue: null,
+              newValue: formatFeeArrangementAuditSummary(createdPre),
+              byId: opts.byId,
+              at: nowIso,
+            },
+          ]);
+        }
+        return {
+          quote: createdPre,
+          outboxRecord: dispatched.outboxRecord,
+          chase: dispatched.chase,
+          emailProviderDisabled,
+        };
+      }
+
+      await intakeRepo.putQuote(ctx, createdPre);
+      writeAudit(null, {
+        recordType: 'quote',
+        recordId: createdPre.id,
+        action: 'create',
+        field: markSent ? 'Quote created and marked as sent' : 'Quote saved as draft',
+        oldValue: null,
+        newValue: `${createdPre.reference} — ${quoteClientDisplayName(createdPre, people, organisations)}`,
+        byId: opts.byId,
+        at: nowIso,
+      });
+      await flushStagedAuditEntries(ctx);
+      if (validatedFeeArrangementPre) {
+        await appendTenantAuditEntries(ctx, [
+          {
+            recordType: 'quote',
+            recordId: createdPre.id,
+            action: 'create',
+            field: 'Fee arrangement & cap',
+            oldValue: null,
+            newValue: formatFeeArrangementAuditSummary(createdPre),
+            byId: opts.byId,
+            at: nowIso,
+          },
+        ]);
+      }
+      return { quote: createdPre };
+    });
+
+    if (
+      createResult.outboxRecord &&
+      !createResult.earlyReturn
+    ) {
+      createResult.outboxRecord = await drainQuoteOutboxBestEffort({
+        ctx,
+        tenantCfg: tenantCfgResolved,
+        outboxRecord: createResult.outboxRecord,
+        actorId: opts.byId,
+        emailProviderDisabled,
+        drainAfterCommit: serviceOptions?.drainAfterCommit,
+        emailSender: serviceOptions?.emailSender,
+        secretReader: serviceOptions?.secretReader,
+        storageProvider: serviceOptions?.storageProvider,
+      });
+    }
+    return createResult;
+  }
+
+  // Update existing quote: pre-compute rates/totals/PDF outside TX when sending by email
+  const wasSentNow = markSent && existing.status === 'Draft';
+  const prevFeeSummary = formatFeeArrangementAuditSummary(existing);
+
+  const dbCostsOverrideUpd =
+    await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
+  const effectiveCostsConfigUpd = resolveEffectiveMatterCostsConfig(
+    tenantCfgResolved,
+    dbCostsOverrideUpd,
+  );
+  const quoteAsAtDateUpd = resolveTenantLocalDateAndHour(
+    now,
+    tenantCfgResolved.timeZone || 'Europe/London',
+  ).localDate;
+
+  const arrangementBasisUpd = mapQuoteFeeBasisToArrangementBasis(input.feeBasis);
+  let validatedFeeArrangementUpd:
+    | {
+        feeArrangementCapCategoryKey: string;
+        feeArrangementPercent: number;
+        feeArrangementCapBaseKey: string;
+        feeArrangementCapBaseDescription: string;
+        feeArrangementAppliedCapPercent: number;
+        feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
+      }
+    | undefined;
+  if (arrangementBasisUpd) {
+    const capCheck = await validateInTxFeeArrangementForRecord({
+      ctx,
+      feeBasis: arrangementBasisUpd,
+      workTypeSubcategoryId: input.workTypeSubcategoryId ?? null,
+      practiceAreaId: input.practiceAreaId,
+      submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
+      submittedPercent: input.feeArrangementPercent,
+      submittedCapBaseKey: input.feeArrangementCapBaseKey,
+      effectiveCostsConfig: effectiveCostsConfigUpd,
+      asAtDate: quoteAsAtDateUpd,
+    });
+    if (!capCheck.ok) {
+      return {
+        code: capCheck.code,
+        message: capCheck.message,
+        error: capCheck.message,
+      };
+    }
+    validatedFeeArrangementUpd = {
+      feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+      feeArrangementPercent: capCheck.acceptedPercent,
+      feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+      feeArrangementCapBaseDescription: capCheck.resolution.capBaseDescription,
+      feeArrangementAppliedCapPercent: capCheck.resolution.appliedCapPercent,
+      feeArrangementCapLevel: capCheck.resolution.capLevel,
+    };
+  }
+
+  const existingVatRate =
+    typeof existing.vatRatePercent === 'number' &&
+    Number.isFinite(existing.vatRatePercent)
+      ? existing.vatRatePercent
+      : 20;
+  const shouldRefreshVat = Boolean(input.refreshVatRate ?? opts.refreshVatRate);
+  const vatRatePercentUpd = shouldRefreshVat
+    ? effectiveCostsConfigUpd.vatRatePercent
+    : existingVatRate;
+  const shouldRefreshRates = Boolean(input.refreshRates) || !existing.rateSource;
+  const rateGradeKeyUpd =
+    input.rateGradeKey?.trim() || existing.rateGradeKey || 'associate';
+  let nextHourlyRateGbp =
+    input.feeBasis === 'Hourly rate with estimate'
+      ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+      : null;
+  let updatedRateSource = existing.rateSource;
+  let updatedRateTier = existing.rateTier;
+  let updatedRateAsAtDate = existing.rateAsAtDate;
+  let updatedRateCardId = existing.rateCardId;
+  let updatedRateCardName = existing.rateCardName;
+  let updatedRateGradeKey = existing.rateGradeKey;
+  let updatedRateProvenance = existing.rateProvenanceByGrade;
+
+  if (shouldRefreshRates) {
+    const targetClientId =
+      clientType === 'existing'
+        ? (linkedOrganisationId ?? linkedPersonId ?? null)
+        : null;
+    const targetClientType: ClientRateOverrideClientType | undefined =
+      linkedOrganisationId
         ? 'organisation'
         : linkedPersonId
           ? 'person'
           : undefined;
-      const resolvedRates = await getRateOverrideRepository().resolveApplicableRates(ctx, {
+    const resolvedRates = await getRateOverrideRepository().resolveApplicableRates(
+      ctx,
+      {
         clientId: targetClientId,
         clientType: targetClientType ?? null,
         practiceAreaId: input.practiceAreaId,
-        asAtDate: quoteAsAtDate,
-        baseMatterCostsConfig: tenantCfg.matterCosts,
-        fallbackRateCardConfig: effectiveCostsConfig,
-        timeZone: tenantCfg.timeZone,
-      });
-      const gradeRes =
-        resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
-      if (input.feeBasis === 'Hourly rate with estimate' && nextHourlyRateGbp === null) {
-        nextHourlyRateGbp = (gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null;
-      }
-      const hourlyMatchesResolved =
-        nextHourlyRateGbp === null ||
-        !gradeRes ||
-        hourlyGbpMatchesMinorUnits(nextHourlyRateGbp, gradeRes.rateMinorUnits);
-      existing.rateSource =
-        input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
-          ? 'custom_override'
-          : (gradeRes?.source ?? resolvedRates.dominantSource);
-      existing.rateTier =
-        existing.rateSource === 'custom_override'
-          ? undefined
-          : (gradeRes?.tier ?? resolvedRates.dominantTier);
-      existing.rateAsAtDate = resolvedRates.asAtDate;
-      existing.rateCardId = resolvedRates.rateCardId;
-      existing.rateCardName = resolvedRates.rateCardName;
-      existing.rateGradeKey = rateGradeKey;
-      existing.rateProvenanceByGrade = resolvedRates.grades;
-    } else if (
-      input.feeBasis === 'Hourly rate with estimate' &&
-      nextHourlyRateGbp !== existing.hourlyRateGbp
-    ) {
-      const frozenGradeRes = existing.rateProvenanceByGrade?.[rateGradeKey];
-      if (
-        frozenGradeRes &&
-        nextHourlyRateGbp !== null &&
-        hourlyGbpMatchesMinorUnits(nextHourlyRateGbp, frozenGradeRes.rateMinorUnits)
-      ) {
-        existing.rateSource = frozenGradeRes.source;
-        existing.rateTier = frozenGradeRes.tier;
-      } else if (nextHourlyRateGbp !== null) {
-        existing.rateSource = 'custom_override';
-        existing.rateTier = undefined;
-      }
-      existing.rateGradeKey = rateGradeKey;
-    }
-    const totals = calculateQuoteTotals(
-      input.feeAmountExVat,
-      input.vatOverridden ? input.vatAmount : null,
-      disbursements,
-      vatRatePercent,
+        asAtDate: quoteAsAtDateUpd,
+        baseMatterCostsConfig: tenantCfgResolved.matterCosts,
+        fallbackRateCardConfig: effectiveCostsConfigUpd,
+        timeZone: tenantCfgResolved.timeZone,
+      },
     );
-
-    existing.clientType = clientType;
-    existing.linkedOrganisationId = linkedOrganisationId;
-    existing.linkedPersonId = linkedPersonId;
-    existing.prospectName = prospectName;
-    existing.prospectOrganisationName = prospectOrganisationName;
-    existing.prospectEmail = prospectEmail;
-    existing.prospectPhone = prospectPhone;
-    existing.linkedEnquiryId =
-      input.linkedEnquiryId !== undefined ? input.linkedEnquiryId || null : existing.linkedEnquiryId;
-    existing.practiceAreaId = input.practiceAreaId;
-    existing.workTypeSubcategoryId = input.workTypeSubcategoryId || null;
-    existing.scope = input.scope.trim();
-    existing.assumptions = (input.assumptions ?? '').trim();
-    existing.feeBasis = input.feeBasis;
-    existing.feeAmountExVat = totals.feeAmountExVat;
-    existing.hourlyRateGbp = nextHourlyRateGbp;
-    existing.vatRatePercent = vatRatePercent;
-    existing.vatAmount = totals.vatOnFee;
-    existing.vatOverridden = Boolean(input.vatOverridden);
-    existing.disbursements = disbursements;
-    existing.totalIncVat = totals.totalIncVat;
-    existing.capturedAt = shouldRefreshVat
-      ? nowIso
-      : existing.capturedAt ?? existing.updatedAt ?? existing.createdAt;
-    if (validatedFeeArrangement) {
-      existing.feeArrangementCapCategoryKey =
-        validatedFeeArrangement.feeArrangementCapCategoryKey;
-      existing.feeArrangementPercent =
-        validatedFeeArrangement.feeArrangementPercent;
-      existing.feeArrangementCapBaseKey =
-        validatedFeeArrangement.feeArrangementCapBaseKey;
-      existing.feeArrangementCapBaseDescription =
-        validatedFeeArrangement.feeArrangementCapBaseDescription;
-      existing.feeArrangementAppliedCapPercent =
-        validatedFeeArrangement.feeArrangementAppliedCapPercent;
-      existing.feeArrangementCapLevel =
-        validatedFeeArrangement.feeArrangementCapLevel;
-    } else {
-      delete existing.feeArrangementCapCategoryKey;
-      delete existing.feeArrangementPercent;
-      delete existing.feeArrangementCapBaseKey;
-      delete existing.feeArrangementCapBaseDescription;
-      delete existing.feeArrangementAppliedCapPercent;
-      delete existing.feeArrangementCapLevel;
+    const gradeRes =
+      resolvedRates.grades[rateGradeKeyUpd] ?? resolvedRates.grades['associate'];
+    if (
+      input.feeBasis === 'Hourly rate with estimate' &&
+      nextHourlyRateGbp === null
+    ) {
+      nextHourlyRateGbp =
+        (gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null;
     }
-    existing.feeEarnerId = feeEarnerId;
-    existing.assignedTeamId = assignedTeamId;
-    existing.validUntil = validUntil;
-    existing.followUpAfterDays = followUpAfterDays;
-    existing.updatedById = opts.byId;
-    existing.updatedAt = nowIso;
+    const hourlyMatchesResolved =
+      nextHourlyRateGbp === null ||
+      !gradeRes ||
+      hourlyGbpMatchesMinorUnits(nextHourlyRateGbp, gradeRes.rateMinorUnits);
+    updatedRateSource =
+      input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
+        ? 'custom_override'
+        : (gradeRes?.source ?? resolvedRates.dominantSource);
+    updatedRateTier =
+      updatedRateSource === 'custom_override'
+        ? undefined
+        : (gradeRes?.tier ?? resolvedRates.dominantTier);
+    updatedRateAsAtDate = resolvedRates.asAtDate;
+    updatedRateCardId = resolvedRates.rateCardId;
+    updatedRateCardName = resolvedRates.rateCardName;
+    updatedRateGradeKey = rateGradeKeyUpd;
+    updatedRateProvenance = resolvedRates.grades;
+  } else if (
+    input.feeBasis === 'Hourly rate with estimate' &&
+    nextHourlyRateGbp !== existing.hourlyRateGbp
+  ) {
+    const frozenGradeRes = existing.rateProvenanceByGrade?.[rateGradeKeyUpd];
+    if (
+      frozenGradeRes &&
+      nextHourlyRateGbp !== null &&
+      hourlyGbpMatchesMinorUnits(nextHourlyRateGbp, frozenGradeRes.rateMinorUnits)
+    ) {
+      updatedRateSource = frozenGradeRes.source;
+      updatedRateTier = frozenGradeRes.tier;
+    } else if (nextHourlyRateGbp !== null) {
+      updatedRateSource = 'custom_override';
+      updatedRateTier = undefined;
+    }
+    updatedRateGradeKey = rateGradeKeyUpd;
+  }
 
-    if (wasSentNow || markSent) {
-      existing.status = 'Sent';
-      existing.sentAt = nowIso;
-      existing.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
-      existing.timeline.push({
+  const totalsUpd = calculateQuoteTotals(
+    input.feeAmountExVat,
+    input.vatOverridden ? input.vatAmount : null,
+    disbursements,
+    vatRatePercentUpd,
+  );
+
+  const previewUpdatedQuote: Quote = {
+    ...structuredClone(existing),
+    clientType,
+    linkedOrganisationId,
+    linkedPersonId,
+    prospectName,
+    prospectOrganisationName,
+    prospectEmail: prospectEmail || (shouldDispatchEmail ? resolvedEmail : ''),
+    prospectPhone,
+    linkedEnquiryId:
+      input.linkedEnquiryId !== undefined
+        ? input.linkedEnquiryId || null
+        : existing.linkedEnquiryId,
+    practiceAreaId: input.practiceAreaId,
+    workTypeSubcategoryId: input.workTypeSubcategoryId || null,
+    scope: input.scope.trim(),
+    assumptions: (input.assumptions ?? '').trim(),
+    feeBasis: input.feeBasis,
+    feeAmountExVat: totalsUpd.feeAmountExVat,
+    hourlyRateGbp: nextHourlyRateGbp,
+    vatRatePercent: vatRatePercentUpd,
+    vatAmount: totalsUpd.vatOnFee,
+    vatOverridden: Boolean(input.vatOverridden),
+    disbursements,
+    totalIncVat: totalsUpd.totalIncVat,
+    paymentOnAccountRequired: poaValidation.paymentOnAccountRequired,
+    paymentOnAccountPence: poaValidation.paymentOnAccountPence,
+    paymentOnAccountGbp: poaValidation.paymentOnAccountGbp,
+    capturedAt: shouldRefreshVat
+      ? nowIso
+      : existing.capturedAt ?? existing.updatedAt ?? existing.createdAt,
+    rateSource: updatedRateSource,
+    rateTier: updatedRateTier,
+    rateAsAtDate: updatedRateAsAtDate,
+    rateCardId: updatedRateCardId,
+    rateCardName: updatedRateCardName,
+    rateGradeKey: updatedRateGradeKey,
+    rateProvenanceByGrade: updatedRateProvenance,
+    feeEarnerId,
+    assignedTeamId,
+    validUntil,
+    followUpAfterDays,
+    priceTransparencySnapshot:
+      markSent || customTransparencyNote
+        ? draftTransparencySnapshot
+        : existing.priceTransparencySnapshot ?? null,
+    updatedById: opts.byId,
+    updatedAt: nowIso,
+  };
+
+  const chasingConfigUpd = shouldDispatchEmail
+    ? await resolveEffectiveChasingConfig(ctx, tenantCfgResolved)
+    : null;
+  const feeEarnerUpd = people.find((p) => p.id === feeEarnerId) ?? actor!;
+  const renderedUpdatePdf = shouldDispatchEmail
+    ? await renderQuotePdfBytes({
+        docxInput: {
+          quote: previewUpdatedQuote,
+          firmName:
+            catalogueStore.firm.name ||
+            tenantCfgResolved.displayName ||
+            'Law Firm',
+          contactEmail:
+            tenantCfgResolved.firm?.contactEmail ||
+            tenantCfgResolved.branding.contactEmail,
+          feeEarnerName: personDisplayName(feeEarnerUpd),
+          people,
+          organisations,
+          values: catalogueStore.values,
+          priceTransparency: draftTransparencySnapshot,
+        },
+        converter:
+          serviceOptions?.pdfConverter ??
+          selectDocumentPdfConverter(tenantCfgResolved, {
+            converterUrl: process.env.DOC_CONVERTER_URL,
+          }),
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+      })
+    : null;
+  if (renderedUpdatePdf && !renderedUpdatePdf.ok) {
+    return {
+      code: renderedUpdatePdf.code,
+      error: renderedUpdatePdf.error,
+    };
+  }
+
+  let updatedOutboxRecord: EmailOutboxRecord | undefined;
+  let updatedChase: CommunicationChaseRecord | null = null;
+  let updateEarlyReturn = false;
+  let finalUpdatedQuote = previewUpdatedQuote;
+
+  const updateTxOutcome = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+    const lockedExisting =
+      await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(tx, ctx, existing.id, {
+        includeRestricted: true,
+      });
+    if (!lockedExisting) {
+      return {
+        ...buildActionDenied('FORBIDDEN', 'Quote not found.'),
+        error: 'Quote not found.',
+      };
+    }
+    if (shouldDispatchEmail && cleanExplicitKey) {
+      const existingInTx =
+        await outboxRepo.getOutboxRecordByIdempotencyKeyInTx(
+          tx,
+          ctx,
+          updateOutboxKey,
+        );
+      if (existingInTx) {
+        updatedOutboxRecord = existingInTx;
+        updatedChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+          entityKind: 'quote',
+          entityId: lockedExisting.id,
+        });
+        finalUpdatedQuote = lockedExisting;
+        updateEarlyReturn = true;
+        return null;
+      }
+    }
+
+    lockedExisting.clientType = previewUpdatedQuote.clientType;
+    lockedExisting.linkedOrganisationId = previewUpdatedQuote.linkedOrganisationId;
+    lockedExisting.linkedPersonId = previewUpdatedQuote.linkedPersonId;
+    lockedExisting.prospectName = previewUpdatedQuote.prospectName;
+    lockedExisting.prospectOrganisationName =
+      previewUpdatedQuote.prospectOrganisationName;
+    lockedExisting.prospectEmail = previewUpdatedQuote.prospectEmail;
+    lockedExisting.prospectPhone = previewUpdatedQuote.prospectPhone;
+    lockedExisting.linkedEnquiryId = previewUpdatedQuote.linkedEnquiryId;
+    lockedExisting.practiceAreaId = previewUpdatedQuote.practiceAreaId;
+    lockedExisting.workTypeSubcategoryId =
+      previewUpdatedQuote.workTypeSubcategoryId;
+    lockedExisting.scope = previewUpdatedQuote.scope;
+    lockedExisting.assumptions = previewUpdatedQuote.assumptions;
+    lockedExisting.feeBasis = previewUpdatedQuote.feeBasis;
+    lockedExisting.feeAmountExVat = previewUpdatedQuote.feeAmountExVat;
+    lockedExisting.hourlyRateGbp = previewUpdatedQuote.hourlyRateGbp;
+    lockedExisting.vatRatePercent = previewUpdatedQuote.vatRatePercent;
+    lockedExisting.vatAmount = previewUpdatedQuote.vatAmount;
+    lockedExisting.vatOverridden = previewUpdatedQuote.vatOverridden;
+    lockedExisting.disbursements = previewUpdatedQuote.disbursements;
+    lockedExisting.totalIncVat = previewUpdatedQuote.totalIncVat;
+    lockedExisting.paymentOnAccountRequired =
+      previewUpdatedQuote.paymentOnAccountRequired;
+    lockedExisting.paymentOnAccountPence =
+      previewUpdatedQuote.paymentOnAccountPence;
+    lockedExisting.paymentOnAccountGbp =
+      previewUpdatedQuote.paymentOnAccountGbp;
+    lockedExisting.capturedAt = previewUpdatedQuote.capturedAt;
+    lockedExisting.rateSource = updatedRateSource;
+    lockedExisting.rateTier = updatedRateTier;
+    lockedExisting.rateAsAtDate = updatedRateAsAtDate;
+    lockedExisting.rateCardId = updatedRateCardId;
+    lockedExisting.rateCardName = updatedRateCardName;
+    lockedExisting.rateGradeKey = updatedRateGradeKey;
+    lockedExisting.rateProvenanceByGrade = updatedRateProvenance;
+    if (validatedFeeArrangementUpd) {
+      lockedExisting.feeArrangementCapCategoryKey =
+        validatedFeeArrangementUpd.feeArrangementCapCategoryKey;
+      lockedExisting.feeArrangementPercent =
+        validatedFeeArrangementUpd.feeArrangementPercent;
+      lockedExisting.feeArrangementCapBaseKey =
+        validatedFeeArrangementUpd.feeArrangementCapBaseKey;
+      lockedExisting.feeArrangementCapBaseDescription =
+        validatedFeeArrangementUpd.feeArrangementCapBaseDescription;
+      lockedExisting.feeArrangementAppliedCapPercent =
+        validatedFeeArrangementUpd.feeArrangementAppliedCapPercent;
+      lockedExisting.feeArrangementCapLevel =
+        validatedFeeArrangementUpd.feeArrangementCapLevel;
+    } else {
+      delete lockedExisting.feeArrangementCapCategoryKey;
+      delete lockedExisting.feeArrangementPercent;
+      delete lockedExisting.feeArrangementCapBaseKey;
+      delete lockedExisting.feeArrangementCapBaseDescription;
+      delete lockedExisting.feeArrangementAppliedCapPercent;
+      delete lockedExisting.feeArrangementCapLevel;
+    }
+    lockedExisting.feeEarnerId = feeEarnerId;
+    lockedExisting.assignedTeamId = assignedTeamId;
+    lockedExisting.validUntil = validUntil;
+    lockedExisting.followUpAfterDays = followUpAfterDays;
+    lockedExisting.updatedById = opts.byId;
+    lockedExisting.updatedAt = nowIso;
+
+    if (shouldDispatchEmail && renderedUpdatePdf?.ok && chasingConfigUpd) {
+      const dispatched = await enqueueQuoteOutboxAndChaseInTx({
+        tx,
+        ctx,
+        actorId: opts.byId,
+        quote: lockedExisting,
+        outboxIdempotencyKey: updateOutboxKey,
+        resolvedEmail,
+        resolvedRecipientName,
+        firmName:
+          catalogueStore.firm.name ||
+          tenantCfgResolved.displayName ||
+          'Law Firm',
+        workTypeLabel: quoteWorkTypeSummary(lockedExisting, catalogueStore.values),
+        senderName: personDisplayName(actor!),
+        pdfBytes: renderedUpdatePdf.pdfBytes,
+        pdfFileName: renderedUpdatePdf.fileName,
+        transparencySnapshot: draftTransparencySnapshot,
+        chasingConfig: chasingConfigUpd,
+        nowIso,
+      });
+      updatedOutboxRecord = dispatched.outboxRecord;
+      updatedChase = dispatched.chase;
+    } else if (wasSentNow || markSent) {
+      lockedExisting.status = 'Sent';
+      lockedExisting.sentAt = nowIso;
+      lockedExisting.sentToEmail = null;
+      lockedExisting.sentByPersonId = opts.byId;
+      lockedExisting.lastSentOutboxId = null;
+      lockedExisting.priceTransparencySnapshot = draftTransparencySnapshot;
+      lockedExisting.nextFollowUpDate = toIsoDate(
+        addDays(now, followUpAfterDays),
+      );
+      lockedExisting.timeline.push({
         id: `QT-${Date.now()}-sent`,
         kind: 'sent',
         at: nowIso,
         byId: opts.byId,
-        title: `v${existing.version} marked as sent`,
-        detail: `Follow-up scheduled for ${existing.nextFollowUpDate}`,
+        title:
+          opts.sendMode === 'offline'
+            ? `v${lockedExisting.version} recorded as sent offline`
+            : `v${lockedExisting.version} marked as sent`,
+        detail: `Follow-up scheduled for ${lockedExisting.nextFollowUpDate}`,
       });
+      await intakeRepo.putQuote(ctx, lockedExisting);
     } else {
-      applyQuoteEffectiveLifecycle(existing, now, {
+      if (customTransparencyNote !== undefined) {
+        lockedExisting.priceTransparencySnapshot = draftTransparencySnapshot;
+      }
+      applyQuoteEffectiveLifecycle(lockedExisting, now, {
         appendExpiredTimeline: true,
       });
+      await intakeRepo.putQuote(ctx, lockedExisting);
     }
 
-    await intakeRepo.putQuote(ctx, existing);
     writeAudit(null, {
       recordType: 'quote',
-      recordId: existing.id,
+      recordId: lockedExisting.id,
       action: 'update',
-      field: wasSentNow ? 'Quote marked as sent' : 'Quote updated',
+      field: shouldDispatchEmail
+        ? 'Quote sent'
+        : wasSentNow
+          ? 'Quote marked as sent'
+          : 'Quote updated',
       oldValue: null,
-      newValue: `${existing.reference} (v${existing.version})`,
+      newValue: `${lockedExisting.reference} (v${lockedExisting.version})${updatedOutboxRecord ? ` (outbox ${updatedOutboxRecord.id})` : ''}`,
       byId: opts.byId,
       at: nowIso,
     });
     await flushStagedAuditEntries(ctx);
-    const nextFeeSummary = formatFeeArrangementAuditSummary(existing);
+    const nextFeeSummary = formatFeeArrangementAuditSummary(lockedExisting);
     if (
       (nextFeeSummary !== null || prevFeeSummary !== null) &&
       nextFeeSummary !== prevFeeSummary
@@ -21967,7 +23388,7 @@ export async function saveQuoteRecord(
       await appendTenantAuditEntries(ctx, [
         {
           recordType: 'quote',
-          recordId: existing.id,
+          recordId: lockedExisting.id,
           action: 'update',
           field: 'Fee arrangement & cap',
           oldValue: prevFeeSummary,
@@ -21977,12 +23398,32 @@ export async function saveQuoteRecord(
         },
       ]);
     }
+    finalUpdatedQuote = lockedExisting;
     return null;
   });
   if (updateTxOutcome) {
     return updateTxOutcome;
   }
-  return { quote: existing };
+  if (updatedOutboxRecord && !updateEarlyReturn) {
+    updatedOutboxRecord = await drainQuoteOutboxBestEffort({
+      ctx,
+      tenantCfg: tenantCfgResolved,
+      outboxRecord: updatedOutboxRecord,
+      actorId: opts.byId,
+      emailProviderDisabled,
+      drainAfterCommit: serviceOptions?.drainAfterCommit,
+      emailSender: serviceOptions?.emailSender,
+      secretReader: serviceOptions?.secretReader,
+      storageProvider: serviceOptions?.storageProvider,
+    });
+  }
+  return {
+    quote: finalUpdatedQuote,
+    ...(updatedOutboxRecord ? { outboxRecord: updatedOutboxRecord } : {}),
+    ...(updatedOutboxRecord ? { chase: updatedChase } : {}),
+    ...(updatedOutboxRecord ? { emailProviderDisabled } : {}),
+    ...(updateEarlyReturn ? { earlyReturn: true } : {}),
+  };
   });
 }
 
@@ -22062,10 +23503,31 @@ async function loadScopedQuoteForEdit(
 export async function markQuoteSentRecord(
   quoteId: string,
   byId: string,
-): Promise<{ quote?: Quote; error?: string } & Partial<ActionDenied>> {
+  options?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  },
+): Promise<
+  {
+    quote?: Quote;
+    outboxRecord?: EmailOutboxRecord;
+    chase?: CommunicationChaseRecord | null;
+    emailProviderDisabled?: boolean;
+    earlyReturn?: boolean;
+    error?: string;
+  } & Partial<ActionDenied>
+> {
   return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: options?.tenantCtx,
+  });
   const intakeRepo = getIntakeQuoteRepository();
+  const partyRepo = getPartyRepository();
   const scoped = await loadScopedQuoteForEdit(
     ctx,
     byId,
@@ -22075,42 +23537,56 @@ export async function markQuoteSentRecord(
   if (!scoped.ok) return scoped.denied;
   const { quote } = scoped;
 
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const followUpDays = Math.max(1, quote.followUpAfterDays || 7);
-  const nextFollowUpDate = toIsoDate(addDays(now, followUpDays));
-
-  quote.status = 'Sent';
-  quote.sentAt = nowIso;
-  quote.nextFollowUpDate = nextFollowUpDate;
-  quote.updatedAt = nowIso;
-  quote.updatedById = byId;
-
-  quote.timeline.push({
-    id: `QT-${Date.now()}`,
-    kind: 'sent',
-    at: nowIso,
-    byId,
-    title: `v${quote.version} marked as sent`,
-    detail: `First follow-up scheduled for ${nextFollowUpDate} (${followUpDays} days)`,
+  const [linkedPerson, linkedOrg, linkedEnq] = await Promise.all([
+    quote.linkedPersonId
+      ? partyRepo.getPersonById<Person>(ctx, quote.linkedPersonId)
+      : Promise.resolve(null),
+    quote.linkedOrganisationId
+      ? partyRepo.getOrganisationById<Organisation>(
+          ctx,
+          quote.linkedOrganisationId,
+        )
+      : Promise.resolve(null),
+    quote.linkedEnquiryId
+      ? intakeRepo.getEnquiryById<Enquiry>(ctx, quote.linkedEnquiryId, {
+          includeRestricted: true,
+        })
+      : Promise.resolve(null),
+  ]);
+  const { recipientEmail } = resolveQuoteRecipientFromRelated({
+    quoteProspectEmail: quote.prospectEmail,
+    quoteProspectName: quote.prospectName,
+    linkedPerson,
+    linkedOrg,
+    linkedEnquiry: linkedEnq,
   });
-
-  await intakeRepo.withTenantTransaction(ctx, async () => {
-    await intakeRepo.putQuote(ctx, quote);
-    writeAudit(null, {
-      recordType: 'quote',
-      recordId: quote.id,
-      action: 'status-change',
-      field: 'Mark as sent',
-      oldValue: 'Draft',
-      newValue: `Sent (follow-up due ${nextFollowUpDate})`,
+  if (recipientEmail && isValidEmailAddress(recipientEmail)) {
+    const emailRes = await sendQuoteEmailRecord(
+      { quoteId: quote.id, recipientEmail },
       byId,
-      at: nowIso,
-    });
-    await flushStagedAuditEntries(ctx);
-  });
+      options,
+    );
+    if (!emailRes.ok) {
+      return emailRes as { error?: string } & Partial<ActionDenied>;
+    }
+    return {
+      quote: emailRes.quote,
+      outboxRecord: emailRes.outboxRecord,
+      chase: emailRes.chase,
+      emailProviderDisabled: emailRes.emailProviderDisabled,
+      earlyReturn: emailRes.earlyReturn,
+    };
+  }
 
-  return { quote };
+  const offlineRes = await markQuoteSentOfflineRecord(
+    { quoteId: quote.id },
+    byId,
+    options,
+  );
+  if (!offlineRes.ok) {
+    return offlineRes as { error?: string } & Partial<ActionDenied>;
+  }
+  return { quote: offlineRes.quote };
   });
 }
 
@@ -22199,12 +23675,20 @@ export async function reviseQuoteRecord(
     vatAmount?: number;
     vatOverridden?: boolean;
     disbursements?: QuoteDisbursement[];
+    paymentOnAccountRequired?: boolean;
+    paymentOnAccountPence?: number | null;
+    paymentOnAccountGbp?: number | null;
+    priceTransparencyCustomNote?: string | null;
     scope: string;
     assumptions?: string;
     validUntil?: string;
     followUpAfterDays?: number;
     revisionNote?: string;
     markAsSent?: boolean;
+    sendMode?: 'email' | 'offline';
+    recipientEmail?: string | null;
+    recipientName?: string | null;
+    idempotencyKey?: string | null;
     refreshVatRate?: boolean;
     rateGradeKey?: string;
     refreshRates?: boolean;
@@ -22213,14 +23697,43 @@ export async function reviseQuoteRecord(
     feeArrangementCapBaseKey?: string;
   },
   byId: string,
+  serviceOptions?: {
+    readonly tenantCtx?: TenantContext | null;
+    readonly tenantConfig?: TenantConfiguration;
+    readonly pdfConverter?: DocumentPdfConverter;
+    readonly emailSender?: EmailSender;
+    readonly secretReader?: KeyVaultSecretReader;
+    readonly storageProvider?: DocumentStorageProvider;
+    readonly drainAfterCommit?: boolean;
+  },
 ): Promise<
-  { quote?: Quote; error?: string } & Partial<Omit<ActionDenied, 'code'>> & {
-    code?: ActionDenialCode | FeeCapErrorCode;
+  {
+    quote?: Quote;
+    outboxRecord?: EmailOutboxRecord;
+    chase?: CommunicationChaseRecord | null;
+    emailProviderDisabled?: boolean;
+    earlyReturn?: boolean;
+    error?: string;
+  } & Partial<Omit<ActionDenied, 'code'>> & {
+    code?:
+      | ActionDenialCode
+      | FeeCapErrorCode
+      | 'VALIDATION_ERROR'
+      | 'EMAIL_ATTACHMENT_SIZE_LIMIT_EXCEEDED';
   }
 > {
   return runWithAuditStagingScope(async () => {
-  const ctx = resolveDefaultServiceTenantContext(null, byId);
+  const ctx = resolveDefaultServiceTenantContext(null, byId, {
+    tenantCtx: serviceOptions?.tenantCtx,
+  });
+  const tenantCfgResolved = resolveVerifiedTenantConfiguration(
+    ctx,
+    serviceOptions?.tenantConfig,
+  );
   const intakeRepo = getIntakeQuoteRepository();
+  const outboxRepo = getOutboxRepository();
+  const chasingRepo = getChasingRepository();
+  const partyRepo = getPartyRepository();
   const scoped = await loadScopedQuoteForEdit(
     ctx,
     byId,
@@ -22233,7 +23746,6 @@ export async function reviseQuoteRecord(
   const now = new Date();
   const nowIso = now.toISOString();
 
-  // Archive current version as Superseded
   if (!Number.isFinite(Number(input.feeAmountExVat)) || Number(input.feeAmountExVat) < 0) {
     return { error: 'Fee amount must be a non-negative number.' };
   }
@@ -22243,6 +23755,25 @@ export async function reviseQuoteRecord(
   ) {
     return { error: 'VAT amount must be a non-negative number.' };
   }
+  const hasPoaInput =
+    input.paymentOnAccountRequired !== undefined ||
+    input.paymentOnAccountPence !== undefined ||
+    input.paymentOnAccountGbp !== undefined;
+  const poaValidation = hasPoaInput
+    ? validateAndNormalizeQuotePoa({
+        paymentOnAccountRequired: input.paymentOnAccountRequired,
+        paymentOnAccountPence: input.paymentOnAccountPence,
+        paymentOnAccountGbp: input.paymentOnAccountGbp,
+      })
+    : validateAndNormalizeQuotePoa({
+        paymentOnAccountRequired: quote.paymentOnAccountRequired ?? false,
+        paymentOnAccountPence: quote.paymentOnAccountPence ?? null,
+        paymentOnAccountGbp: quote.paymentOnAccountGbp ?? null,
+      });
+  if (!poaValidation.ok) {
+    return { code: 'VALIDATION_ERROR', error: poaValidation.error };
+  }
+
   const normalizedDisbursements = normalizeQuoteDisbursements(
     input.disbursements ?? quote.disbursements,
   );
@@ -22251,260 +23782,495 @@ export async function reviseQuoteRecord(
   }
   const disbursements = normalizedDisbursements.disbursements;
 
+  const markSent = Boolean(input.markAsSent);
+  const [linkedPerson, linkedOrg, linkedEnq] = await Promise.all([
+    quote.linkedPersonId
+      ? partyRepo.getPersonById<Person>(ctx, quote.linkedPersonId)
+      : Promise.resolve(null),
+    quote.linkedOrganisationId
+      ? partyRepo.getOrganisationById<Organisation>(ctx, quote.linkedOrganisationId)
+      : Promise.resolve(null),
+    quote.linkedEnquiryId
+      ? intakeRepo.getEnquiryById<Enquiry>(ctx, quote.linkedEnquiryId, {
+          includeRestricted: true,
+        })
+      : Promise.resolve(null),
+  ]);
+  const { recipientEmail: resolvedEmail, recipientName: resolvedRecipientName } =
+    resolveQuoteRecipientFromRelated({
+      explicitEmail: input.recipientEmail,
+      explicitName: input.recipientName,
+      quoteProspectEmail: quote.prospectEmail,
+      quoteProspectName: quote.prospectName,
+      linkedPerson,
+      linkedOrg,
+      linkedEnquiry: linkedEnq,
+    });
+
+  if (markSent && input.sendMode === 'email' && (!resolvedEmail || !isValidEmailAddress(resolvedEmail))) {
+    return {
+      code: 'VALIDATION_ERROR',
+      error: 'A valid client recipient email address is required before sending the quote.',
+    };
+  }
+  const shouldDispatchEmail =
+    markSent &&
+    input.sendMode !== 'offline' &&
+    Boolean(resolvedEmail) &&
+    isValidEmailAddress(resolvedEmail);
+  const emailProviderDisabled =
+    (resolveEmailIntegrationConfig(tenantCfgResolved).provider ?? 'disabled') ===
+    'disabled';
+  const cleanExplicitKey = input.idempotencyKey?.trim() || '';
+  const reviseOutboxKey = cleanExplicitKey
+    ? `quote:revise_send:${quote.id}:${cleanExplicitKey}`
+    : `quote:revise_send:${quote.id}:${randomUUID()}`;
+
+  if (shouldDispatchEmail && cleanExplicitKey) {
+    const existingOutbox = await outboxRepo.getOutboxRecordByIdempotencyKey(
+      ctx,
+      reviseOutboxKey,
+    );
+    if (existingOutbox) {
+      const existingChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+        entityKind: 'quote',
+        entityId: quote.id,
+      });
+      return {
+        quote,
+        outboxRecord: existingOutbox,
+        chase: existingChase,
+        emailProviderDisabled,
+        earlyReturn: true,
+      };
+    }
+  }
+
   const priorVatRatePercent =
     typeof quote.vatRatePercent === 'number' && Number.isFinite(quote.vatRatePercent)
       ? quote.vatRatePercent
       : 20;
-  const priorCapturedAt = quote.capturedAt ?? quote.updatedAt ?? quote.createdAt;
-  const prevFeeSummary = formatFeeArrangementAuditSummary(quote);
-
-  const prevVersion = quote.version;
-  const nextVersion = prevVersion + 1;
-
   const followUpAfterDays = Math.max(
     1,
     Number(input.followUpAfterDays) || quote.followUpAfterDays || 7,
   );
 
-  const reviseTxOutcome = await intakeRepo.withTenantTransaction(ctx, async () => {
-    const tenantCfg = getActiveTenantConfiguration();
-    const dbCostsOverride =
-      await getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx);
-    const effectiveCostsConfig = resolveEffectiveMatterCostsConfig(
-      tenantCfg,
-      dbCostsOverride,
-    );
-    const quoteAsAtDate = resolveTenantLocalDateAndHour(
-      now,
-      tenantCfg.timeZone || 'Europe/London',
-    ).localDate;
-
-    const arrangementBasis = mapQuoteFeeBasisToArrangementBasis(
-      input.feeBasis,
-    );
-    let validatedFeeArrangement:
-      | {
-          feeArrangementCapCategoryKey: string;
-          feeArrangementPercent: number;
-          feeArrangementCapBaseKey: string;
-          feeArrangementCapBaseDescription: string;
-          feeArrangementAppliedCapPercent: number;
-          feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
-        }
-      | undefined;
-    if (arrangementBasis) {
-      const capCheck = await validateInTxFeeArrangementForRecord({
-        ctx,
-        feeBasis: arrangementBasis,
-        workTypeSubcategoryId: quote.workTypeSubcategoryId ?? null,
-        practiceAreaId: quote.practiceAreaId,
-        submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
-        submittedPercent: input.feeArrangementPercent,
-        submittedCapBaseKey: input.feeArrangementCapBaseKey,
-        effectiveCostsConfig,
-        asAtDate: quoteAsAtDate,
-      });
-      if (!capCheck.ok) {
-        return {
-          code: capCheck.code,
-          message: capCheck.message,
-          error: capCheck.message,
-        };
+  // Pre-compute rates, fee arrangement cap, transparency & PDF outside TX when dispatching email
+  const [storePre, dbCostsOverridePre, staffPeoplePre] = await Promise.all([
+    loadTenantCatalogueStoreView(ctx, { includePmsLinks: false }),
+    getCatalogueRepository().getMatterCostsConfig<MatterCostsConfig>(ctx),
+    loadStaffPeople(ctx),
+  ]);
+  const effectiveCostsConfigPre = resolveEffectiveMatterCostsConfig(
+    tenantCfgResolved,
+    dbCostsOverridePre,
+  );
+  const quoteAsAtDatePre = resolveTenantLocalDateAndHour(
+    now,
+    tenantCfgResolved.timeZone || 'Europe/London',
+  ).localDate;
+  const arrangementBasisPre = mapQuoteFeeBasisToArrangementBasis(input.feeBasis);
+  let validatedFeeArrangementPre:
+    | {
+        feeArrangementCapCategoryKey: string;
+        feeArrangementPercent: number;
+        feeArrangementCapBaseKey: string;
+        feeArrangementCapBaseDescription: string;
+        feeArrangementAppliedCapPercent: number;
+        feeArrangementCapLevel: EffectiveFeeCapResolution['capLevel'];
       }
-      validatedFeeArrangement = {
-        feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
-        feeArrangementPercent: capCheck.acceptedPercent,
-        feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
-        feeArrangementCapBaseDescription:
-          capCheck.resolution.capBaseDescription,
-        feeArrangementAppliedCapPercent:
-          capCheck.resolution.appliedCapPercent,
-        feeArrangementCapLevel: capCheck.resolution.capLevel,
+    | undefined;
+  if (arrangementBasisPre) {
+    const capCheck = await validateInTxFeeArrangementForRecord({
+      ctx,
+      feeBasis: arrangementBasisPre,
+      workTypeSubcategoryId: quote.workTypeSubcategoryId ?? null,
+      practiceAreaId: quote.practiceAreaId,
+      submittedCapCategoryKey: input.feeArrangementCapCategoryKey,
+      submittedPercent: input.feeArrangementPercent,
+      submittedCapBaseKey: input.feeArrangementCapBaseKey,
+      effectiveCostsConfig: effectiveCostsConfigPre,
+      asAtDate: quoteAsAtDatePre,
+    });
+    if (!capCheck.ok) {
+      return {
+        code: capCheck.code,
+        message: capCheck.message,
+        error: capCheck.message,
       };
     }
+    validatedFeeArrangementPre = {
+      feeArrangementCapCategoryKey: capCheck.resolution.capCategoryKey,
+      feeArrangementPercent: capCheck.acceptedPercent,
+      feeArrangementCapBaseKey: capCheck.resolution.capBaseKey,
+      feeArrangementCapBaseDescription: capCheck.resolution.capBaseDescription,
+      feeArrangementAppliedCapPercent: capCheck.resolution.appliedCapPercent,
+      feeArrangementCapLevel: capCheck.resolution.capLevel,
+    };
+  }
 
-    // Archive current version as Superseded only after fee arrangement validation passes
-    quote.versionHistory.push({
-      version: quote.version,
-      status: 'Superseded',
-      feeBasis: quote.feeBasis,
-      feeAmountExVat: quote.feeAmountExVat,
-      hourlyRateGbp: quote.hourlyRateGbp,
-      vatRatePercent: priorVatRatePercent,
-      vatAmount: quote.vatAmount,
-      ...(quote.vatOverridden ? { vatOverridden: true } : {}),
-      disbursements: structuredClone(quote.disbursements),
-      totalIncVat: quote.totalIncVat,
-      scope: quote.scope,
-      assumptions: quote.assumptions,
-      validUntil: quote.validUntil,
-      createdAt: quote.createdAt,
-      sentAt: quote.sentAt,
-      supersededAt: nowIso,
-      capturedAt: priorCapturedAt,
-      byId,
-      revisionNote: input.revisionNote?.trim() || undefined,
-      ...(quote.rateSource ? { rateSource: quote.rateSource } : {}),
-      ...(typeof quote.rateTier === 'number' ? { rateTier: quote.rateTier } : {}),
-      ...(quote.rateAsAtDate ? { rateAsAtDate: quote.rateAsAtDate } : {}),
-      ...(quote.rateCardId !== undefined ? { rateCardId: quote.rateCardId } : {}),
-      ...(quote.rateCardName !== undefined ? { rateCardName: quote.rateCardName } : {}),
-      ...(quote.rateGradeKey ? { rateGradeKey: quote.rateGradeKey } : {}),
-      ...(quote.rateProvenanceByGrade
-        ? { rateProvenanceByGrade: structuredClone(quote.rateProvenanceByGrade) }
-        : {}),
-      ...(quote.feeArrangementCapCategoryKey
-        ? { feeArrangementCapCategoryKey: quote.feeArrangementCapCategoryKey }
-        : {}),
-      ...(quote.feeArrangementPercent !== undefined
-        ? { feeArrangementPercent: quote.feeArrangementPercent }
-        : {}),
-      ...(quote.feeArrangementCapBaseKey
-        ? { feeArrangementCapBaseKey: quote.feeArrangementCapBaseKey }
-        : {}),
-      ...(quote.feeArrangementCapBaseDescription
-        ? {
-            feeArrangementCapBaseDescription:
-              quote.feeArrangementCapBaseDescription,
-          }
-        : {}),
-      ...(quote.feeArrangementAppliedCapPercent !== undefined
-        ? {
-            feeArrangementAppliedCapPercent:
-              quote.feeArrangementAppliedCapPercent,
-          }
-        : {}),
-      ...(quote.feeArrangementCapLevel
-        ? { feeArrangementCapLevel: quote.feeArrangementCapLevel }
-        : {}),
-    });
+  const appliedVatRatePercent =
+    input.refreshVatRate === false
+      ? priorVatRatePercent
+      : effectiveCostsConfigPre.vatRatePercent;
+  let revisedHourlyRateGbp =
+    input.feeBasis === 'Hourly rate with estimate'
+      ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+      : null;
+  const rateGradeKey = input.rateGradeKey?.trim() || quote.rateGradeKey || 'associate';
+  let nextRateSource = quote.rateSource;
+  let nextRateTier = quote.rateTier;
+  let nextRateAsAtDate = quote.rateAsAtDate;
+  let nextRateCardId = quote.rateCardId;
+  let nextRateCardName = quote.rateCardName;
+  let nextRateGradeKey = quote.rateGradeKey;
+  let nextRateProvenance = quote.rateProvenanceByGrade;
 
-    const appliedVatRatePercent =
-      input.refreshVatRate === false
-        ? priorVatRatePercent
-        : effectiveCostsConfig.vatRatePercent;
-
-    let revisedHourlyRateGbp =
-      input.feeBasis === 'Hourly rate with estimate'
-        ? Math.max(0, Number(input.hourlyRateGbp) || 0) || null
+  if (input.refreshRates !== false) {
+    const targetClientId =
+      quote.clientType === 'existing'
+        ? (quote.linkedOrganisationId ?? quote.linkedPersonId ?? null)
         : null;
-    const rateGradeKey = input.rateGradeKey?.trim() || quote.rateGradeKey || 'associate';
-    if (input.refreshRates !== false) {
-      const quoteAsAtDate = resolveTenantLocalDateAndHour(
-        now,
-        tenantCfg.timeZone || 'Europe/London',
-      ).localDate;
-      const targetClientId =
-        quote.clientType === 'existing'
-          ? (quote.linkedOrganisationId ?? quote.linkedPersonId ?? null)
-          : null;
-      const targetClientType: ClientRateOverrideClientType | undefined =
-        quote.linkedOrganisationId
-          ? 'organisation'
-          : quote.linkedPersonId
-            ? 'person'
-            : undefined;
-      const resolvedRates = await getRateOverrideRepository().resolveApplicableRates(ctx, {
+    const targetClientType: ClientRateOverrideClientType | undefined =
+      quote.linkedOrganisationId
+        ? 'organisation'
+        : quote.linkedPersonId
+          ? 'person'
+          : undefined;
+    const resolvedRates = await getRateOverrideRepository().resolveApplicableRates(
+      ctx,
+      {
         clientId: targetClientId,
         clientType: targetClientType ?? null,
         practiceAreaId: quote.practiceAreaId,
-        asAtDate: quoteAsAtDate,
-        baseMatterCostsConfig: tenantCfg.matterCosts,
-        fallbackRateCardConfig: effectiveCostsConfig,
-        timeZone: tenantCfg.timeZone,
-      });
-      const gradeRes =
-        resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
-      if (input.feeBasis === 'Hourly rate with estimate' && revisedHourlyRateGbp === null) {
-        revisedHourlyRateGbp = (gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null;
-      }
-      const hourlyMatchesResolved =
-        revisedHourlyRateGbp === null ||
-        !gradeRes ||
-        hourlyGbpMatchesMinorUnits(revisedHourlyRateGbp, gradeRes.rateMinorUnits);
-      quote.rateSource =
-        input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
-          ? 'custom_override'
-          : (gradeRes?.source ?? resolvedRates.dominantSource);
-      quote.rateTier =
-        quote.rateSource === 'custom_override'
-          ? undefined
-          : (gradeRes?.tier ?? resolvedRates.dominantTier);
-      quote.rateAsAtDate = resolvedRates.asAtDate;
-      quote.rateCardId = resolvedRates.rateCardId;
-      quote.rateCardName = resolvedRates.rateCardName;
-      quote.rateGradeKey = rateGradeKey;
-      quote.rateProvenanceByGrade = resolvedRates.grades;
-    } else if (
-      input.feeBasis === 'Hourly rate with estimate' &&
-      revisedHourlyRateGbp !== quote.hourlyRateGbp
-    ) {
-      quote.rateSource = 'custom_override';
-      quote.rateTier = undefined;
-      quote.rateGradeKey = rateGradeKey;
-    }
-
-    const totals = calculateQuoteTotals(
-      input.feeAmountExVat,
-      input.vatOverridden ? input.vatAmount : null,
-      disbursements,
-      appliedVatRatePercent,
+        asAtDate: quoteAsAtDatePre,
+        baseMatterCostsConfig: tenantCfgResolved.matterCosts,
+        fallbackRateCardConfig: effectiveCostsConfigPre,
+        timeZone: tenantCfgResolved.timeZone,
+      },
     );
-
-    quote.version = nextVersion;
-    quote.feeBasis = input.feeBasis;
-    quote.feeAmountExVat = totals.feeAmountExVat;
-    quote.hourlyRateGbp = revisedHourlyRateGbp;
-    quote.vatRatePercent = appliedVatRatePercent;
-    quote.vatAmount = totals.vatOnFee;
-    quote.vatOverridden = Boolean(input.vatOverridden);
-    quote.disbursements = disbursements;
-    quote.totalIncVat = totals.totalIncVat;
-    quote.capturedAt = nowIso;
-    if (validatedFeeArrangement) {
-      quote.feeArrangementCapCategoryKey =
-        validatedFeeArrangement.feeArrangementCapCategoryKey;
-      quote.feeArrangementPercent =
-        validatedFeeArrangement.feeArrangementPercent;
-      quote.feeArrangementCapBaseKey =
-        validatedFeeArrangement.feeArrangementCapBaseKey;
-      quote.feeArrangementCapBaseDescription =
-        validatedFeeArrangement.feeArrangementCapBaseDescription;
-      quote.feeArrangementAppliedCapPercent =
-        validatedFeeArrangement.feeArrangementAppliedCapPercent;
-      quote.feeArrangementCapLevel =
-        validatedFeeArrangement.feeArrangementCapLevel;
-    } else {
-      delete quote.feeArrangementCapCategoryKey;
-      delete quote.feeArrangementPercent;
-      delete quote.feeArrangementCapBaseKey;
-      delete quote.feeArrangementCapBaseDescription;
-      delete quote.feeArrangementAppliedCapPercent;
-      delete quote.feeArrangementCapLevel;
+    const gradeRes =
+      resolvedRates.grades[rateGradeKey] ?? resolvedRates.grades['associate'];
+    if (
+      input.feeBasis === 'Hourly rate with estimate' &&
+      revisedHourlyRateGbp === null
+    ) {
+      revisedHourlyRateGbp =
+        (gradeRes?.rateGbp ?? resolvedRates.associateRateGbp) || null;
     }
-    quote.scope = input.scope.trim();
-    quote.assumptions = (input.assumptions ?? '').trim();
-    quote.validUntil = input.validUntil || toIsoDate(addDays(now, 30));
-    quote.followUpAfterDays = followUpAfterDays;
-    quote.outcomeAt = null;
-    quote.outcomeNote = undefined;
-    quote.declineReason = null;
-    quote.declineNote = undefined;
-    quote.updatedAt = nowIso;
-    quote.updatedById = byId;
+    const hourlyMatchesResolved =
+      revisedHourlyRateGbp === null ||
+      !gradeRes ||
+      hourlyGbpMatchesMinorUnits(revisedHourlyRateGbp, gradeRes.rateMinorUnits);
+    nextRateSource =
+      input.feeBasis === 'Hourly rate with estimate' && !hourlyMatchesResolved
+        ? 'custom_override'
+        : (gradeRes?.source ?? resolvedRates.dominantSource);
+    nextRateTier =
+      nextRateSource === 'custom_override'
+        ? undefined
+        : (gradeRes?.tier ?? resolvedRates.dominantTier);
+    nextRateAsAtDate = resolvedRates.asAtDate;
+    nextRateCardId = resolvedRates.rateCardId;
+    nextRateCardName = resolvedRates.rateCardName;
+    nextRateGradeKey = rateGradeKey;
+    nextRateProvenance = resolvedRates.grades;
+  } else if (
+    input.feeBasis === 'Hourly rate with estimate' &&
+    revisedHourlyRateGbp !== quote.hourlyRateGbp
+  ) {
+    nextRateSource = 'custom_override';
+    nextRateTier = undefined;
+    nextRateGradeKey = rateGradeKey;
+  }
 
-    const markSent = Boolean(input.markAsSent);
-    if (markSent) {
-      quote.status = 'Sent';
-      quote.sentAt = nowIso;
-      quote.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
-    } else {
-      quote.status = 'Draft';
-      quote.sentAt = null;
-      quote.nextFollowUpDate = null;
+  const totals = calculateQuoteTotals(
+    input.feeAmountExVat,
+    input.vatOverridden ? input.vatAmount : null,
+    disbursements,
+    appliedVatRatePercent,
+  );
+  const workTypesConfigPre =
+    storePre.workTypesConfig ??
+    resolveEffectiveWorkTypesConfig(
+      tenantCfgResolved,
+      storePre.workTypeConfigsOverride ?? null,
+    );
+  const customTransparencyNote =
+    input.priceTransparencyCustomNote !== undefined
+      ? input.priceTransparencyCustomNote?.trim() || undefined
+      : quote.priceTransparencySnapshot?.customNote;
+  const revisedTransparencySnapshot = buildQuotePriceTransparencySnapshot({
+    workTypesConfig: workTypesConfigPre,
+    practiceAreaId: quote.practiceAreaId,
+    workTypeSubcategoryId: quote.workTypeSubcategoryId,
+    customNote: customTransparencyNote,
+    ...(markSent ? { capturedAt: nowIso } : {}),
+  });
+
+  const actorPerson =
+    staffPeoplePre.find((p) => p.id === byId) ??
+    staffPeoplePre[0];
+  const previewRevisedQuote: Quote = {
+    ...structuredClone(quote),
+    version: quote.version + 1,
+    feeBasis: input.feeBasis,
+    feeAmountExVat: totals.feeAmountExVat,
+    hourlyRateGbp: revisedHourlyRateGbp,
+    vatRatePercent: appliedVatRatePercent,
+    vatAmount: totals.vatOnFee,
+    vatOverridden: Boolean(input.vatOverridden),
+    disbursements,
+    totalIncVat: totals.totalIncVat,
+    paymentOnAccountRequired: poaValidation.paymentOnAccountRequired,
+    paymentOnAccountPence: poaValidation.paymentOnAccountPence,
+    paymentOnAccountGbp: poaValidation.paymentOnAccountGbp,
+    scope: input.scope.trim(),
+    assumptions: (input.assumptions ?? '').trim(),
+    validUntil: input.validUntil || toIsoDate(addDays(now, 30)),
+    followUpAfterDays,
+    priceTransparencySnapshot:
+      markSent || customTransparencyNote ? revisedTransparencySnapshot : null,
+  };
+
+  const chasingConfigPre = shouldDispatchEmail
+    ? await resolveEffectiveChasingConfig(ctx, tenantCfgResolved)
+    : null;
+  const feeEarnerRev =
+    staffPeoplePre.find((p) => p.id === quote.feeEarnerId) ?? actorPerson;
+  const renderedRevisePdf = shouldDispatchEmail
+    ? await renderQuotePdfBytes({
+        docxInput: {
+          quote: previewRevisedQuote,
+          firmName:
+            storePre.firm.name || tenantCfgResolved.displayName || 'Law Firm',
+          contactEmail:
+            tenantCfgResolved.firm?.contactEmail ||
+            tenantCfgResolved.branding.contactEmail,
+          feeEarnerName: feeEarnerRev ? personDisplayName(feeEarnerRev) : byId,
+          people: linkedPerson
+            ? [...staffPeoplePre, linkedPerson]
+            : [...staffPeoplePre],
+          organisations: linkedOrg ? [linkedOrg] : [],
+          values: storePre.values,
+          priceTransparency: revisedTransparencySnapshot,
+        },
+        converter:
+          serviceOptions?.pdfConverter ??
+          selectDocumentPdfConverter(tenantCfgResolved, {
+            converterUrl: process.env.DOC_CONVERTER_URL,
+          }),
+        tenantId: ctx.tenantId,
+        correlationId: ctx.correlationId,
+      })
+    : null;
+  if (renderedRevisePdf && !renderedRevisePdf.ok) {
+    return {
+      code: renderedRevisePdf.code,
+      error: renderedRevisePdf.error,
+    };
+  }
+
+  let revisedOutboxRecord: EmailOutboxRecord | undefined;
+  let revisedChase: CommunicationChaseRecord | null = null;
+  let reviseEarlyReturn = false;
+  let finalRevisedQuote = quote;
+
+  const reviseTxOutcome = await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+    const lockedQuote = await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(
+      tx,
+      ctx,
+      quote.id,
+      { includeRestricted: true },
+    );
+    if (!lockedQuote) {
+      return {
+        ...buildActionDenied('FORBIDDEN', 'Quote not found.'),
+        error: 'Quote not found.',
+      };
+    }
+    if (shouldDispatchEmail && cleanExplicitKey) {
+      const existingInTx =
+        await outboxRepo.getOutboxRecordByIdempotencyKeyInTx(
+          tx,
+          ctx,
+          reviseOutboxKey,
+        );
+      if (existingInTx) {
+        revisedOutboxRecord = existingInTx;
+        revisedChase = await chasingRepo.getActiveChaseForEntity(ctx, {
+          entityKind: 'quote',
+          entityId: lockedQuote.id,
+        });
+        finalRevisedQuote = lockedQuote;
+        reviseEarlyReturn = true;
+        return null;
+      }
     }
 
-    quote.timeline.push({
+    const lockedPriorVat =
+      typeof lockedQuote.vatRatePercent === 'number' &&
+      Number.isFinite(lockedQuote.vatRatePercent)
+        ? lockedQuote.vatRatePercent
+        : 20;
+    const lockedCapturedAt =
+      lockedQuote.capturedAt ?? lockedQuote.updatedAt ?? lockedQuote.createdAt;
+    const prevFeeSummary = formatFeeArrangementAuditSummary(lockedQuote);
+    const prevVersion = lockedQuote.version;
+    const nextVersion = prevVersion + 1;
+
+    // Archive current version as Superseded with immutable POA & Price Transparency snapshot
+    lockedQuote.versionHistory.push({
+      version: lockedQuote.version,
+      status: 'Superseded',
+      feeBasis: lockedQuote.feeBasis,
+      feeAmountExVat: lockedQuote.feeAmountExVat,
+      hourlyRateGbp: lockedQuote.hourlyRateGbp,
+      vatRatePercent: lockedPriorVat,
+      vatAmount: lockedQuote.vatAmount,
+      ...(lockedQuote.vatOverridden ? { vatOverridden: true } : {}),
+      disbursements: structuredClone(lockedQuote.disbursements),
+      totalIncVat: lockedQuote.totalIncVat,
+      ...(lockedQuote.paymentOnAccountRequired !== undefined
+        ? { paymentOnAccountRequired: lockedQuote.paymentOnAccountRequired }
+        : {}),
+      ...(lockedQuote.paymentOnAccountPence !== undefined
+        ? { paymentOnAccountPence: lockedQuote.paymentOnAccountPence }
+        : {}),
+      ...(lockedQuote.paymentOnAccountGbp !== undefined
+        ? { paymentOnAccountGbp: lockedQuote.paymentOnAccountGbp }
+        : {}),
+      ...(lockedQuote.priceTransparencySnapshot !== undefined &&
+      lockedQuote.priceTransparencySnapshot !== null
+        ? {
+            priceTransparencySnapshot: structuredClone(
+              lockedQuote.priceTransparencySnapshot,
+            ),
+          }
+        : {}),
+      scope: lockedQuote.scope,
+      assumptions: lockedQuote.assumptions,
+      validUntil: lockedQuote.validUntil,
+      createdAt: lockedQuote.createdAt,
+      sentAt: lockedQuote.sentAt,
+      supersededAt: nowIso,
+      capturedAt: lockedCapturedAt,
+      byId,
+      revisionNote: input.revisionNote?.trim() || undefined,
+      ...(lockedQuote.rateSource ? { rateSource: lockedQuote.rateSource } : {}),
+      ...(typeof lockedQuote.rateTier === 'number'
+        ? { rateTier: lockedQuote.rateTier }
+        : {}),
+      ...(lockedQuote.rateAsAtDate
+        ? { rateAsAtDate: lockedQuote.rateAsAtDate }
+        : {}),
+      ...(lockedQuote.rateCardId !== undefined
+        ? { rateCardId: lockedQuote.rateCardId }
+        : {}),
+      ...(lockedQuote.rateCardName !== undefined
+        ? { rateCardName: lockedQuote.rateCardName }
+        : {}),
+      ...(lockedQuote.rateGradeKey
+        ? { rateGradeKey: lockedQuote.rateGradeKey }
+        : {}),
+      ...(lockedQuote.rateProvenanceByGrade
+        ? {
+            rateProvenanceByGrade: structuredClone(
+              lockedQuote.rateProvenanceByGrade,
+            ),
+          }
+        : {}),
+      ...(lockedQuote.feeArrangementCapCategoryKey
+        ? {
+            feeArrangementCapCategoryKey:
+              lockedQuote.feeArrangementCapCategoryKey,
+          }
+        : {}),
+      ...(lockedQuote.feeArrangementPercent !== undefined
+        ? { feeArrangementPercent: lockedQuote.feeArrangementPercent }
+        : {}),
+      ...(lockedQuote.feeArrangementCapBaseKey
+        ? { feeArrangementCapBaseKey: lockedQuote.feeArrangementCapBaseKey }
+        : {}),
+      ...(lockedQuote.feeArrangementCapBaseDescription
+        ? {
+            feeArrangementCapBaseDescription:
+              lockedQuote.feeArrangementCapBaseDescription,
+          }
+        : {}),
+      ...(lockedQuote.feeArrangementAppliedCapPercent !== undefined
+        ? {
+            feeArrangementAppliedCapPercent:
+              lockedQuote.feeArrangementAppliedCapPercent,
+          }
+        : {}),
+      ...(lockedQuote.feeArrangementCapLevel
+        ? { feeArrangementCapLevel: lockedQuote.feeArrangementCapLevel }
+        : {}),
+    });
+
+    // Stop any active chase on superseded quote version inside the same transaction
+    const stoppedChase = await chasingRepo.stopActiveChaseInTx(tx, ctx, {
+      entityKind: 'quote',
+      entityId: lockedQuote.id,
+      reason: 'superseded',
+      stoppedByPersonId: byId,
+      stoppedAt: nowIso,
+    });
+
+    lockedQuote.version = nextVersion;
+    lockedQuote.feeBasis = input.feeBasis;
+    lockedQuote.feeAmountExVat = totals.feeAmountExVat;
+    lockedQuote.hourlyRateGbp = revisedHourlyRateGbp;
+    lockedQuote.vatRatePercent = appliedVatRatePercent;
+    lockedQuote.vatAmount = totals.vatOnFee;
+    lockedQuote.vatOverridden = Boolean(input.vatOverridden);
+    lockedQuote.disbursements = disbursements;
+    lockedQuote.totalIncVat = totals.totalIncVat;
+    lockedQuote.paymentOnAccountRequired = poaValidation.paymentOnAccountRequired;
+    lockedQuote.paymentOnAccountPence = poaValidation.paymentOnAccountPence;
+    lockedQuote.paymentOnAccountGbp = poaValidation.paymentOnAccountGbp;
+    lockedQuote.capturedAt = nowIso;
+    lockedQuote.rateSource = nextRateSource;
+    lockedQuote.rateTier = nextRateTier;
+    lockedQuote.rateAsAtDate = nextRateAsAtDate;
+    lockedQuote.rateCardId = nextRateCardId;
+    lockedQuote.rateCardName = nextRateCardName;
+    lockedQuote.rateGradeKey = nextRateGradeKey;
+    lockedQuote.rateProvenanceByGrade = nextRateProvenance;
+    if (validatedFeeArrangementPre) {
+      lockedQuote.feeArrangementCapCategoryKey =
+        validatedFeeArrangementPre.feeArrangementCapCategoryKey;
+      lockedQuote.feeArrangementPercent =
+        validatedFeeArrangementPre.feeArrangementPercent;
+      lockedQuote.feeArrangementCapBaseKey =
+        validatedFeeArrangementPre.feeArrangementCapBaseKey;
+      lockedQuote.feeArrangementCapBaseDescription =
+        validatedFeeArrangementPre.feeArrangementCapBaseDescription;
+      lockedQuote.feeArrangementAppliedCapPercent =
+        validatedFeeArrangementPre.feeArrangementAppliedCapPercent;
+      lockedQuote.feeArrangementCapLevel =
+        validatedFeeArrangementPre.feeArrangementCapLevel;
+    } else {
+      delete lockedQuote.feeArrangementCapCategoryKey;
+      delete lockedQuote.feeArrangementPercent;
+      delete lockedQuote.feeArrangementCapBaseKey;
+      delete lockedQuote.feeArrangementCapBaseDescription;
+      delete lockedQuote.feeArrangementAppliedCapPercent;
+      delete lockedQuote.feeArrangementCapLevel;
+    }
+    lockedQuote.scope = input.scope.trim();
+    lockedQuote.assumptions = (input.assumptions ?? '').trim();
+    lockedQuote.validUntil = input.validUntil || toIsoDate(addDays(now, 30));
+    lockedQuote.followUpAfterDays = followUpAfterDays;
+    lockedQuote.outcomeAt = null;
+    lockedQuote.outcomeNote = undefined;
+    lockedQuote.declineReason = null;
+    lockedQuote.declineNote = undefined;
+    lockedQuote.updatedAt = nowIso;
+    lockedQuote.updatedById = byId;
+
+    lockedQuote.timeline.push({
       id: `QT-${Date.now()}-rev`,
       kind: 'revised',
       at: nowIso,
@@ -22512,33 +24278,89 @@ export async function reviseQuoteRecord(
       title: `Revised quote to v${nextVersion} (v${prevVersion} marked Superseded)`,
       detail:
         input.revisionNote?.trim() ||
-        `Updated to ${quote.feeBasis} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
+        `Updated to ${lockedQuote.feeBasis} — £${lockedQuote.feeAmountExVat.toLocaleString('en-GB')} + VAT`,
     });
 
-    if (markSent) {
-      quote.timeline.push({
+    if (shouldDispatchEmail && renderedRevisePdf?.ok && chasingConfigPre) {
+      const dispatched = await enqueueQuoteOutboxAndChaseInTx({
+        tx,
+        ctx,
+        actorId: byId,
+        quote: lockedQuote,
+        outboxIdempotencyKey: reviseOutboxKey,
+        resolvedEmail,
+        resolvedRecipientName,
+        firmName:
+          storePre.firm.name || tenantCfgResolved.displayName || 'Law Firm',
+        workTypeLabel: quoteWorkTypeSummary(lockedQuote, storePre.values),
+        senderName: actorPerson ? personDisplayName(actorPerson) : byId,
+        pdfBytes: renderedRevisePdf.pdfBytes,
+        pdfFileName: renderedRevisePdf.fileName,
+        transparencySnapshot: revisedTransparencySnapshot,
+        chasingConfig: chasingConfigPre,
+        nowIso,
+      });
+      revisedOutboxRecord = dispatched.outboxRecord;
+      revisedChase = dispatched.chase;
+    } else if (markSent) {
+      lockedQuote.status = 'Sent';
+      lockedQuote.sentAt = nowIso;
+      lockedQuote.sentToEmail = null;
+      lockedQuote.sentByPersonId = byId;
+      lockedQuote.lastSentOutboxId = null;
+      lockedQuote.priceTransparencySnapshot = revisedTransparencySnapshot;
+      lockedQuote.nextFollowUpDate = toIsoDate(addDays(now, followUpAfterDays));
+      lockedQuote.timeline.push({
         id: `QT-${Date.now()}-sent`,
         kind: 'sent',
         at: nowIso,
         byId,
-        title: `v${nextVersion} marked as sent`,
-        detail: `Next follow-up scheduled for ${quote.nextFollowUpDate}`,
+        title:
+          input.sendMode === 'offline'
+            ? `v${nextVersion} recorded as sent offline`
+            : `v${nextVersion} marked as sent`,
+        detail: `Next follow-up scheduled for ${lockedQuote.nextFollowUpDate}`,
       });
+      await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
+    } else {
+      lockedQuote.status = 'Draft';
+      lockedQuote.sentAt = null;
+      lockedQuote.sentToEmail = null;
+      lockedQuote.sentByPersonId = null;
+      lockedQuote.lastSentOutboxId = null;
+      lockedQuote.priceTransparencySnapshot = customTransparencyNote
+        ? revisedTransparencySnapshot
+        : null;
+      lockedQuote.nextFollowUpDate = null;
+      await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
     }
 
-    await intakeRepo.putQuote(ctx, quote);
+    if (stoppedChase) {
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'communication_chase',
+          recordId: stoppedChase.id,
+          action: 'update',
+          field: 'Communication chase stopped',
+          oldValue: stoppedChase.previousStatus,
+          newValue: `stopped (${stoppedChase.stoppedReason ?? 'superseded'})`,
+          byId,
+          at: nowIso,
+        },
+      ]);
+    }
     writeAudit(null, {
       recordType: 'quote',
-      recordId: quote.id,
+      recordId: lockedQuote.id,
       action: 'update',
       field: `Quote revised to v${nextVersion}`,
       oldValue: `v${prevVersion} (Superseded)`,
-      newValue: `v${nextVersion} — £${quote.feeAmountExVat.toLocaleString('en-GB')} + VAT (${quote.status})`,
+      newValue: `v${nextVersion} — £${lockedQuote.feeAmountExVat.toLocaleString('en-GB')} + VAT (${lockedQuote.status})${revisedOutboxRecord ? ` (outbox ${revisedOutboxRecord.id})` : ''}`,
       byId,
       at: nowIso,
     });
     await flushStagedAuditEntries(ctx);
-    const nextFeeSummary = formatFeeArrangementAuditSummary(quote);
+    const nextFeeSummary = formatFeeArrangementAuditSummary(lockedQuote);
     if (
       (nextFeeSummary !== null || prevFeeSummary !== null) &&
       nextFeeSummary !== prevFeeSummary
@@ -22546,7 +24368,7 @@ export async function reviseQuoteRecord(
       await appendTenantAuditEntries(ctx, [
         {
           recordType: 'quote',
-          recordId: quote.id,
+          recordId: lockedQuote.id,
           action: 'update',
           field: 'Fee arrangement & cap',
           oldValue: prevFeeSummary,
@@ -22556,13 +24378,33 @@ export async function reviseQuoteRecord(
         },
       ]);
     }
+    finalRevisedQuote = lockedQuote;
     return null;
   });
 
   if (reviseTxOutcome) {
     return reviseTxOutcome;
   }
-  return { quote };
+  if (revisedOutboxRecord && !reviseEarlyReturn) {
+    revisedOutboxRecord = await drainQuoteOutboxBestEffort({
+      ctx,
+      tenantCfg: tenantCfgResolved,
+      outboxRecord: revisedOutboxRecord,
+      actorId: byId,
+      emailProviderDisabled,
+      drainAfterCommit: serviceOptions?.drainAfterCommit,
+      emailSender: serviceOptions?.emailSender,
+      secretReader: serviceOptions?.secretReader,
+      storageProvider: serviceOptions?.storageProvider,
+    });
+  }
+  return {
+    quote: finalRevisedQuote,
+    ...(revisedOutboxRecord ? { outboxRecord: revisedOutboxRecord } : {}),
+    ...(revisedOutboxRecord ? { chase: revisedChase } : {}),
+    ...(revisedOutboxRecord ? { emailProviderDisabled } : {}),
+    ...(reviseEarlyReturn ? { earlyReturn: true } : {}),
+  };
   });
 }
 
@@ -22629,8 +24471,34 @@ export async function recordQuoteOutcomeRecord(
     });
   }
 
-  await intakeRepo.withTenantTransaction(ctx, async () => {
-    await intakeRepo.putQuote(ctx, quote);
+  await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+    await intakeRepo.upsertQuoteInTx(tx, ctx, quote);
+    const stopReason = input.outcome === 'Accepted' ? 'accepted' : 'declined';
+    const stoppedChase = await getChasingRepository().stopActiveChaseInTx(
+      tx,
+      ctx,
+      {
+        entityKind: 'quote',
+        entityId: quote.id,
+        reason: stopReason,
+        stoppedByPersonId: byId,
+        stoppedAt: nowIso,
+      },
+    );
+    if (stoppedChase) {
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'communication_chase',
+          recordId: stoppedChase.id,
+          action: 'update',
+          field: 'Communication chase stopped',
+          oldValue: stoppedChase.previousStatus,
+          newValue: `stopped (${stoppedChase.stoppedReason ?? stopReason})`,
+          byId,
+          at: nowIso,
+        },
+      ]);
+    }
     writeAudit(null, {
       recordType: 'quote',
       recordId: quote.id,
@@ -23261,7 +25129,34 @@ async function finalizeQuoteConversionToMatter(
     });
   }
 
-  await intakeRepo.putQuote(ctx, quote);
+  await intakeRepo.withTenantTransaction(ctx, async (tx) => {
+    await intakeRepo.upsertQuoteInTx(tx, ctx, quote);
+    const stoppedChase = await getChasingRepository().stopActiveChaseInTx(
+      tx,
+      ctx,
+      {
+        entityKind: 'quote',
+        entityId: quote.id,
+        reason: 'accepted',
+        stoppedByPersonId: byId,
+        stoppedAt: now,
+      },
+    );
+    if (stoppedChase) {
+      await appendTenantAuditEntries(ctx, [
+        {
+          recordType: 'communication_chase',
+          recordId: stoppedChase.id,
+          action: 'update',
+          field: 'Communication chase stopped',
+          oldValue: stoppedChase.previousStatus,
+          newValue: `stopped (${stoppedChase.stoppedReason ?? 'accepted'})`,
+          byId,
+          at: now,
+        },
+      ]);
+    }
+  });
 
   // Also close any linked enquiry and link it to the matter
   if (quote.linkedEnquiryId) {
@@ -33571,8 +35466,30 @@ export async function executeQuoteExpiryForTenant(
               freshQuote.updatedAt = nowIso;
               return { shouldPersist: true, previousStatus };
             },
-            onPersistedInTx: async (expiredQuote, previousStatus) => {
+            onPersistedInTx: async (expiredQuote, previousStatus, tx) => {
+              const stoppedChase =
+                await getChasingRepository().stopActiveChaseInTx(tx, ctx, {
+                  entityKind: 'quote',
+                  entityId: expiredQuote.id,
+                  reason: 'expired',
+                  stoppedByPersonId: options.triggeredById,
+                  stoppedAt: nowIso,
+                });
               await appendTenantAuditEntries(ctx, [
+                ...(stoppedChase
+                  ? [
+                      {
+                        recordType: 'communication_chase' as const,
+                        recordId: stoppedChase.id,
+                        action: 'update' as const,
+                        field: 'Communication chase stopped',
+                        oldValue: stoppedChase.previousStatus,
+                        newValue: `stopped (${stoppedChase.stoppedReason ?? 'expired'})`,
+                        byId: options.triggeredById,
+                        at: nowIso,
+                      },
+                    ]
+                  : []),
                 {
                   recordType: 'quote',
                   recordId: expiredQuote.id,
@@ -40068,6 +41985,16 @@ export interface CommunicationChaseAdapter<TSubject = unknown> {
     readonly rbacConfig: RbacConfiguration;
     readonly nowIso: string;
   }): Promise<CommunicationChaseEscalationCandidatesSpec>;
+  onEmailQueuedInTx?(params: {
+    readonly tx: TenantSqlClient;
+    readonly ctx: TenantContext;
+    readonly chase: CommunicationChaseRecord;
+    readonly stepIndex: 1 | 2;
+    readonly outboxEmailId: string;
+    readonly subject: TSubject;
+    readonly triggeredById: string;
+    readonly nowIso: string;
+  }): Promise<void>;
 }
 
 function resolveEligibleChaseEscalationAssignee(params: {
@@ -40192,6 +42119,220 @@ const ENGAGEMENT_LETTER_CHASE_ADAPTER: CommunicationChaseAdapter<Matter> = {
   },
 };
 
+const QUOTE_CHASE_ADAPTER: CommunicationChaseAdapter<Quote> = {
+  entityKind: 'quote',
+  ruleKey: 'quote',
+  async checkStop({ ctx, chase, store, nowIso }) {
+    const quoteId = chase.quoteId ?? chase.entityId;
+    const quote = await getIntakeQuoteRepository().getQuoteById<Quote>(
+      ctx,
+      quoteId,
+      { includeRestricted: true },
+    );
+    if (!quote) {
+      return { stop: true, reason: 'entity_missing' };
+    }
+    if (quote.status === 'Accepted') {
+      return { stop: true, reason: 'accepted' };
+    }
+    if (quote.status === 'Declined') {
+      return { stop: true, reason: 'declined' };
+    }
+    if (quote.status === 'Expired') {
+      return { stop: true, reason: 'expired' };
+    }
+    if (quote.status === 'Superseded' || quote.status === 'Draft') {
+      return { stop: true, reason: 'superseded' };
+    }
+    const effective = evaluateQuoteEffectiveStatus(quote, new Date(nowIso));
+    if (effective === 'Expired') {
+      return { stop: true, reason: 'expired' };
+    }
+    if (quote.convertedMatterId) {
+      const convertedMatter = await getMatterRepository().getMatterById<Matter>(
+        ctx,
+        quote.convertedMatterId,
+        { includeRestricted: true },
+      );
+      if (
+        convertedMatter &&
+        isClosedOrArchivedMatterStatus(
+          convertedMatter.matterStatusId,
+          store.values,
+        )
+      ) {
+        return { stop: true, reason: 'matter_closed' };
+      }
+    }
+    return { stop: false, subject: quote };
+  },
+  async buildEmail({
+    stepIndex,
+    subject: quote,
+    recipientName,
+    tenantConfig,
+    store,
+  }) {
+    const firmName = store.firm.name || tenantConfig.displayName || 'the firm';
+    const workTypeLabel = quoteWorkTypeSummary(quote, store.values);
+    const totalPence = poundsToMinorUnits(
+      Number.isFinite(Number(quote.totalIncVat))
+        ? String(quote.totalIncVat)
+        : '0',
+    );
+    const totalFormatted = formatMinorUnitsGbp(totalPence);
+    const isSecond = stepIndex === 2;
+    const subject = isSecond
+      ? `Second reminder: Fee Quote ${quote.reference} (v${quote.version})`
+      : `Reminder: Fee Quote ${quote.reference} (v${quote.version})`;
+    const validityLine = quote.validUntil
+      ? ` This quote remains valid until ${quote.validUntil}.`
+      : '';
+    const poaNote =
+      quote.paymentOnAccountRequired &&
+      typeof quote.paymentOnAccountPence === 'number' &&
+      quote.paymentOnAccountPence > 0
+        ? ` A Payment on Account of ${formatMinorUnitsGbp(quote.paymentOnAccountPence)} will be required before work begins.`
+        : '';
+    const textBody = isSecond
+      ? `Dear ${recipientName},\n\nWe are following up again regarding your fee quote ${quote.reference} (Version ${quote.version}) for ${workTypeLabel} (${totalFormatted} inc. VAT).${poaNote}${validityLine}\n\nPlease let us know if you would like us to proceed.\n\nYours faithfully,\n${firmName}`
+      : `Dear ${recipientName},\n\nThis is a friendly reminder regarding your fee quote ${quote.reference} (Version ${quote.version}) for ${workTypeLabel} (${totalFormatted} inc. VAT).${poaNote}${validityLine}\n\nPlease let us know if you have any questions or would like us to proceed.\n\nYours faithfully,\n${firmName}`;
+    const bodyPara = textBody.split('\n\n')[1] ?? textBody;
+    const htmlBody = `<p>Dear ${escapeHtmlTextForEmail(recipientName)},</p><p>${escapeHtmlTextForEmail(bodyPara)}</p><p>Please reply to this email or contact your fee earner if you would like to proceed.</p><p>Yours faithfully,<br/>${escapeHtmlTextForEmail(firmName)}</p>`;
+    return {
+      templateKey: isSecond
+        ? 'communication.chase.quote.step2'
+        : 'communication.chase.quote.step1',
+      subject,
+      textBody,
+      htmlBody,
+      recipientName,
+      quoteId: quote.id,
+      matterId: quote.convertedMatterId ?? null,
+      enquiryId: quote.linkedEnquiryId ?? null,
+    };
+  },
+  async onEmailQueuedInTx({
+    tx,
+    ctx,
+    chase,
+    stepIndex,
+    outboxEmailId,
+    subject: quote,
+    triggeredById,
+    nowIso,
+  }) {
+    const intakeRepo = getIntakeQuoteRepository();
+    const lockedQuote = await intakeRepo.getQuoteByIdForUpdateInTx<Quote>(
+      tx,
+      ctx,
+      quote.id,
+      { includeRestricted: true },
+    );
+    if (!lockedQuote) return;
+    lockedQuote.timeline.push({
+      id: `QT-CHS-${chase.id}-S${stepIndex}`,
+      kind: 'follow_up',
+      at: nowIso,
+      byId: triggeredById,
+      title: `Automated follow-up email #${stepIndex} queued`,
+      detail: `Outbox ${outboxEmailId}`,
+    });
+    lockedQuote.updatedAt = nowIso;
+    await intakeRepo.upsertQuoteInTx(tx, ctx, lockedQuote);
+  },
+  async escalationCandidates({
+    ctx,
+    rule,
+    subject: quote,
+    people,
+    teams,
+    rbacConfig,
+  }) {
+    const [convertedMatter, linkedEnq] = await Promise.all([
+      quote.convertedMatterId
+        ? getMatterRepository().getMatterById<Matter>(
+            ctx,
+            quote.convertedMatterId,
+            { includeRestricted: true },
+          )
+        : Promise.resolve(null),
+      quote.linkedEnquiryId
+        ? getIntakeQuoteRepository().getEnquiryById<Enquiry>(
+            ctx,
+            quote.linkedEnquiryId,
+            { includeRestricted: true },
+          )
+        : Promise.resolve(null),
+    ]);
+    const owningTeam =
+      (quote.assignedTeamId
+        ? teams.find((t) => t.active && t.id === quote.assignedTeamId)
+        : undefined) ??
+      (quote.practiceAreaId
+        ? teams.find(
+            (t) => t.active && t.practiceAreaIds.includes(quote.practiceAreaId),
+          )
+        : undefined);
+    const orderedPersonIds = [
+      quote.feeEarnerId,
+      ...(owningTeam?.leadIds ?? []),
+    ].filter((id): id is string => Boolean(id?.trim()));
+
+    const linkedRecords: Task['linkedRecords'] = [
+      { recordType: 'quote', recordId: quote.id },
+      ...(convertedMatter
+        ? [{ recordType: 'matter' as const, recordId: convertedMatter.id }]
+        : []),
+      ...(linkedEnq
+        ? [{ recordType: 'enquiry' as const, recordId: linkedEnq.id }]
+        : []),
+    ];
+
+    return {
+      orderedPersonIds,
+      canPersonAccessSubject: (candidate) => {
+        if (
+          !hasPersonPermission(candidate, 'quote:view', {
+            allPeople: people,
+            teams,
+            config: { rbac: rbacConfig },
+          })
+        ) {
+          return false;
+        }
+        if (
+          convertedMatter &&
+          !canPersonAccessMatter(convertedMatter, candidate.id, candidate, {
+            allPeople: people,
+            teams,
+            config: { rbac: rbacConfig },
+          })
+        ) {
+          return false;
+        }
+        if (
+          linkedEnq?.status === 'Draft' &&
+          linkedEnq.createdById !== candidate.id &&
+          linkedEnq.takenById !== candidate.id
+        ) {
+          return false;
+        }
+        return true;
+      },
+      taskTitle: `Follow up open quote: ${quote.reference} (v${quote.version})`,
+      taskDescription: `No outcome has been recorded for quote ${quote.reference} after ${rule.escalateTaskDays} days. Please follow up with the prospect or client.`,
+      failureTaskTitle: `Follow up failed quote chase: ${quote.reference}`,
+      failureTaskDescription: `Automated quote chasing failed 3 times consecutively for ${quote.reference}. Please review and follow up directly.`,
+      linkedRecords,
+      matterId: quote.convertedMatterId ?? null,
+      notificationDetail: 'Quote chase escalated',
+      auditField: 'Quote chase escalation task',
+      autoTrigger: 'communication_chase_escalation',
+    };
+  },
+};
+
 export const COMMUNICATION_CHASE_ADAPTERS: ReadonlyMap<
   CommunicationChaseEntityKind,
   CommunicationChaseAdapter<unknown>
@@ -40199,6 +42340,10 @@ export const COMMUNICATION_CHASE_ADAPTERS: ReadonlyMap<
   [
     'engagement_letter',
     ENGAGEMENT_LETTER_CHASE_ADAPTER as CommunicationChaseAdapter<unknown>,
+  ],
+  [
+    'quote',
+    QUOTE_CHASE_ADAPTER as CommunicationChaseAdapter<unknown>,
   ],
 ]);
 
@@ -40488,6 +42633,16 @@ async function executeGenericChaseStep(params: {
       nextActionAt: nextActionAtIso,
     });
     if (!adv.alreadyExecuted) {
+      await adapter.onEmailQueuedInTx?.({
+        tx,
+        ctx,
+        chase,
+        stepIndex,
+        outboxEmailId: queued.record.id,
+        subject,
+        triggeredById,
+        nowIso,
+      });
       await appendTenantAuditEntries(ctx, [
         buildZeroPiiChaseStepAuditEntry({
           tenantId: ctx.tenantId,

@@ -84,6 +84,7 @@ import {
   logQuoteFollowUpRecord,
   markAllNotificationsRead,
   markNotificationRead,
+  markQuoteSentOfflineRecord,
   markQuoteSentRecord,
   openProspectiveMatterRecord,
   overrideMatterOpeningPreconditionRecord,
@@ -126,6 +127,7 @@ import {
   updateMatterConflictRecord,
   saveTeamRecord,
   sendEnquiryEmailRecord,
+  sendQuoteEmailRecord,
   switchUserInDemoMode,
   switchViewingRole,
   takeTaskRecord,
@@ -1183,23 +1185,72 @@ export async function updateWorkTypeProfilesAction(
 
 export async function saveQuoteAction(
   input: SaveQuoteInput,
-  opts: { id?: string; markAsSent?: boolean; refreshVatRate?: boolean } = {},
+  opts: {
+    id?: string;
+    markAsSent?: boolean;
+    sendMode?: 'email' | 'offline';
+    recipientEmail?: string | null;
+    recipientName?: string | null;
+    idempotencyKey?: string | null;
+    refreshVatRate?: boolean;
+  } = {},
 ) {
-  return guardedAction('saveQuoteAction', async ({ personId: byId }) => {
-    const res = await saveQuoteRecord(input, {
-      id: opts?.id,
-      markAsSent: opts?.markAsSent,
-      refreshVatRate: opts?.refreshVatRate,
-      byId,
-    });
+  return guardedAction('saveQuoteAction', async (actor) => {
+    const res = await saveQuoteRecord(
+      input,
+      {
+        id: opts?.id,
+        markAsSent: opts?.markAsSent,
+        sendMode: opts?.sendMode,
+        recipientEmail: opts?.recipientEmail,
+        recipientName: opts?.recipientName,
+        idempotencyKey: opts?.idempotencyKey,
+        refreshVatRate: opts?.refreshVatRate,
+        byId: actor.personId,
+      },
+      { tenantCtx: actor.tenantContext },
+    );
     revalidateAll();
     return res;
   });
 }
 
 export async function markQuoteSentAction(quoteId: string) {
-  return guardedAction('markQuoteSentAction', async ({ personId: byId }) => {
-    const res = await markQuoteSentRecord(quoteId, byId);
+  return guardedAction('markQuoteSentAction', async (actor) => {
+    const res = await markQuoteSentRecord(quoteId, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function sendQuoteEmailAction(input: {
+  quoteId: string;
+  recipientEmail?: string;
+  recipientName?: string;
+  subject?: string;
+  customNote?: string;
+  idempotencyKey?: string;
+}) {
+  return guardedAction('sendQuoteEmailAction', async (actor) => {
+    const res = await sendQuoteEmailRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
+    revalidateAll();
+    return res;
+  });
+}
+
+export async function markQuoteSentOfflineAction(input: {
+  quoteId: string;
+  sentDate?: string;
+  note?: string;
+}) {
+  return guardedAction('markQuoteSentOfflineAction', async (actor) => {
+    const res = await markQuoteSentOfflineRecord(input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
     revalidateAll();
     return res;
   });
@@ -1229,12 +1280,20 @@ export async function reviseQuoteAction(
     vatAmount?: number;
     vatOverridden?: boolean;
     disbursements?: QuoteDisbursement[];
+    paymentOnAccountRequired?: boolean;
+    paymentOnAccountPence?: number | null;
+    paymentOnAccountGbp?: number | null;
+    priceTransparencyCustomNote?: string | null;
     scope: string;
     assumptions?: string;
     validUntil?: string;
     followUpAfterDays?: number;
     revisionNote?: string;
     markAsSent?: boolean;
+    sendMode?: 'email' | 'offline';
+    recipientEmail?: string | null;
+    recipientName?: string | null;
+    idempotencyKey?: string | null;
     refreshVatRate?: boolean;
     rateGradeKey?: string;
     refreshRates?: boolean;
@@ -1243,8 +1302,10 @@ export async function reviseQuoteAction(
     feeArrangementCapBaseKey?: string;
   },
 ) {
-  return guardedAction('reviseQuoteAction', async ({ personId: byId }) => {
-    const res = await reviseQuoteRecord(quoteId, input, byId);
+  return guardedAction('reviseQuoteAction', async (actor) => {
+    const res = await reviseQuoteRecord(quoteId, input, actor.personId, {
+      tenantCtx: actor.tenantContext,
+    });
     revalidateAll();
     return res;
   });

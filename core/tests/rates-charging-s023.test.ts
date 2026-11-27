@@ -27,6 +27,7 @@ import {
   createDefaultMatterCostsConfig,
   lookupRatesForMatter,
   resolveEffectiveMatterCostsConfig,
+  resolveMatterCostsSnapshot,
 } from '@/domain/matterCosts';
 import { calculateQuoteTotals, roundCurrency } from '@/domain/quotes';
 import type { Matter, MatterCostsConfig, MatterCostsSnapshot, Quote } from '@/domain/types';
@@ -1264,5 +1265,66 @@ describe('S0-23: Rates & Charging (Money Maths, Configurable VAT Rate & Immutabl
       combinedVatGbp: 0,
       combinedIncVatGbp: 0,
     });
+  });
+
+  it('8. S1-07: preserves Payment on Account snapshots immutably in quote versionHistory across revisions and carries POA to matter costs snapshot', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+
+    await runAsActionActor(
+      'P-000004',
+      async () => {
+        const seed = await getAppSnapshot('P-000004');
+        const created = await saveQuoteAction({
+          clientType: 'prospect',
+          prospectName: 'POA Revision Test Client',
+          prospectEmail: 'poa-rev@example.test',
+          practiceAreaId: 'work_type.corporate_and_commercial',
+          scope: 'Initial corporate retainer and review',
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 2000,
+          paymentOnAccountRequired: true,
+          paymentOnAccountGbp: 650,
+          validUntil: '2026-12-31',
+          feeEarnerId: 'P-000004',
+          followUpAfterDays: 7,
+        });
+        expect(created.error).toBeUndefined();
+        const v1 = created.quote!;
+        expect(v1.paymentOnAccountRequired).toBe(true);
+        expect(v1.paymentOnAccountPence).toBe(65000);
+        expect(v1.paymentOnAccountGbp).toBe(650);
+
+        const revised = await reviseQuoteAction(v1.id, {
+          feeBasis: 'Fixed fee',
+          feeAmountExVat: 2500,
+          scope: 'Expanded corporate retainer and shareholder review',
+          paymentOnAccountRequired: true,
+          paymentOnAccountPence: 90000,
+          revisionNote: 'Increased POA for expanded scope',
+        });
+        expect(revised.error).toBeUndefined();
+        const v2 = revised.quote!;
+        expect(v2.version).toBe(2);
+        expect(v2.paymentOnAccountRequired).toBe(true);
+        expect(v2.paymentOnAccountPence).toBe(90000);
+        expect(v2.paymentOnAccountGbp).toBe(900);
+        expect(v2.versionHistory).toHaveLength(1);
+        expect(v2.versionHistory[0]?.paymentOnAccountRequired).toBe(true);
+        expect(v2.versionHistory[0]?.paymentOnAccountPence).toBe(65000);
+        expect(v2.versionHistory[0]?.paymentOnAccountGbp).toBe(650);
+
+        const matterCfg = createDefaultMatterCostsConfig(seed.values, {
+          clientProfileCode: 'not-a-law-firm',
+        });
+        const carried = resolveMatterCostsSnapshot({
+          initialQuote: v2,
+          config: matterCfg,
+          values: seed.values,
+        });
+        expect(carried.paymentOnAccountRequired).toBe('Yes');
+        expect(carried.paymentOnAccountAmountGbp).toBe(900);
+      },
+      { mfaVerified: true },
+    );
   });
 });

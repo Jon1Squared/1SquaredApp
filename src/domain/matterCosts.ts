@@ -1091,9 +1091,35 @@ export function resolveMatterCostsSnapshot(params: {
       ? initialQuote.feeAmountExVat
       : null);
 
-  const poaAmt = existing?.retainerMoniesOnAccountGbp ?? null;
+  const quotePoaGbp =
+    initialQuote &&
+    (initialQuote.paymentOnAccountRequired ||
+      (typeof initialQuote.paymentOnAccountPence === 'number' &&
+        Number.isSafeInteger(initialQuote.paymentOnAccountPence) &&
+        initialQuote.paymentOnAccountPence > 0) ||
+      (typeof initialQuote.paymentOnAccountGbp === 'number' &&
+        Number.isFinite(initialQuote.paymentOnAccountGbp) &&
+        initialQuote.paymentOnAccountGbp > 0))
+      ? typeof initialQuote.paymentOnAccountPence === 'number' &&
+          Number.isSafeInteger(initialQuote.paymentOnAccountPence) &&
+          initialQuote.paymentOnAccountPence > 0
+        ? minorUnitsToPounds(initialQuote.paymentOnAccountPence)
+        : typeof initialQuote.paymentOnAccountGbp === 'number' &&
+            Number.isFinite(initialQuote.paymentOnAccountGbp) &&
+            initialQuote.paymentOnAccountGbp > 0
+          ? minorUnitsToPounds(
+              poundsToMinorUnits(initialQuote.paymentOnAccountGbp),
+            )
+          : null
+      : null;
+
+  const poaAmt = existing?.retainerMoniesOnAccountGbp ?? quotePoaGbp ?? null;
   const poaReq: 'Yes' | 'No' | '' =
-    poaAmt != null && poaAmt > 0 ? 'Yes' : config.defaultPaymentOnAccount;
+    poaAmt != null && poaAmt > 0
+      ? 'Yes'
+      : initialQuote?.paymentOnAccountRequired === false
+        ? 'No'
+        : config.defaultPaymentOnAccount;
   const computedTotals = calculateMatterSnapshotTotals({
     totalEstimateGbp,
     disbursements,
