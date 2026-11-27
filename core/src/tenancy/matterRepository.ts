@@ -39,6 +39,8 @@ import {
   toIsoString,
   type TenantSqlClient,
 } from './tenantScopedRepository';
+import { TenantAuditRepository } from './auditRepository';
+import type { TenantPostgresPoolManager } from './postgresPoolManager';
 
 export const MATTER_CONCURRENCY_CONFLICT_CODE = 'MATTER_CONCURRENCY_CONFLICT';
 export const MATTER_CONCURRENCY_CONFLICT_MESSAGE =
@@ -842,6 +844,20 @@ function buildMatterDbParameters(
 }
 
 export class TenantMatterRepository extends TenantScopedRepository {
+  private readonly auditRepo: TenantAuditRepository;
+
+  public constructor(
+    options: {
+      poolManager?: TenantPostgresPoolManager;
+      auditRepo?: TenantAuditRepository;
+    } = {},
+  ) {
+    super({ poolManager: options.poolManager });
+    this.auditRepo =
+      options.auditRepo ??
+      new TenantAuditRepository({ poolManager: this.poolManager });
+  }
+
   // ============================================================================
   // Per-Tenant Matter ID (`M-`) & Monotonic Matter Number (`B6`) Allocation
   // ============================================================================
@@ -3600,19 +3616,51 @@ export class TenantMatterRepository extends TenantScopedRepository {
 
       const chaseStopNowIso = new Date().toISOString();
       const chaseStopActorId = ctx.actorId || 'system';
-      await tx.query(
-        `UPDATE public.communication_chases
+      const stoppedChaseRes = await tx.query<{
+        tenant_id: string;
+        id: string;
+        stopped_reason: string | null;
+        previous_status: string;
+      }>(
+        `WITH prior AS (
+           SELECT id, status AS previous_status
+             FROM public.communication_chases
+            WHERE tenant_id = $1
+              AND matter_id = $2
+              AND status IN ('active', 'needs_owner')
+            FOR UPDATE
+         )
+         UPDATE public.communication_chases c
             SET status = 'stopped',
                 stopped_reason = 'entity_missing',
                 stopped_at = $3::timestamptz,
                 stopped_by_person_id = $4,
                 next_action_at = NULL,
                 updated_at = $3::timestamptz
-          WHERE tenant_id = $1
-            AND matter_id = $2
-            AND status IN ('active', 'needs_owner')`,
+           FROM prior
+          WHERE c.tenant_id = $1
+            AND c.id = prior.id
+          RETURNING c.tenant_id, c.id, c.stopped_reason, prior.previous_status`,
         [ctx.tenantId, id, chaseStopNowIso, chaseStopActorId],
       );
+      if (stoppedChaseRes.rows.length > 0) {
+        for (const stoppedRow of stoppedChaseRes.rows) {
+          this.assertRowTenant(ctx, stoppedRow.tenant_id, 'CommunicationChase');
+        }
+        await this.auditRepo.appendAuditEntries(
+          ctx,
+          stoppedChaseRes.rows.map((stoppedRow) => ({
+            recordType: 'communication_chase' as const,
+            recordId: stoppedRow.id,
+            action: 'update' as const,
+            field: 'Communication chase stopped',
+            oldValue: stoppedRow.previous_status,
+            newValue: `stopped (${stoppedRow.stopped_reason ?? 'entity_missing'})`,
+            byId: chaseStopActorId,
+            at: chaseStopNowIso,
+          })),
+        );
+      }
 
       await tx.query(
         'DELETE FROM public.matter_parties WHERE tenant_id = $1 AND matter_id = $2',

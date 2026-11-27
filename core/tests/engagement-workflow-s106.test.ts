@@ -3075,15 +3075,188 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
       ),
     ).toBe(true);
 
-    // 3. Deleting a matter via deleteMatterById stops active chases in the SAME TX with entity_missing
+    // 3. Deleting a matter via deleteMatterById stops active chases in the SAME TX with entity_missing + audit (R854)
     const deleted = await matterRepo.deleteMatterById(ctx, mDeleteId);
     expect(deleted).toBe(true);
     const chaseAfterDelete = await chasingRepo.getChaseById(ctx, cDeleteId);
     expect(chaseAfterDelete?.status).toBe('stopped');
     expect(chaseAfterDelete?.stoppedReason).toBe('entity_missing');
     expect(chaseAfterDelete?.nextActionAt).toBeNull();
+    const deleteAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'communication_chase',
+      cDeleteId,
+      { limit: 50 },
+    );
+    expect(
+      deleteAudits.some(
+        (a) =>
+          a.field === 'Communication chase stopped' &&
+          a.oldValue === 'active' &&
+          a.newValue === 'stopped (entity_missing)',
+      ),
+    ).toBe(true);
 
-    // 4. Job backstop: a due active chase pointing to a non-existent matter records entity_missing (never 'withdrawn')
+    // 4. R851 + R854: Signed paths stop ONLY 'engagement_letter' (preserving 'money_on_account')
+    //    and record accurate oldValue ('needs_owner' vs 'active'); closing stops all remaining kinds.
+    let mMultiId = '';
+    await runAsActionActor(
+      'P-000001',
+      async () => {
+        const m = await saveMatterRecord(
+          {
+            title: 'R851 Multi-Kind Chase Matter',
+            clientId: 'O-000001',
+            practiceAreaId: 'work_type.employment_and_hr',
+            workTypeSubcategoryId: 'work_type.employment_and_hr_employment_contracts',
+            responsiblePartnerId: 'P-000001',
+            supervisingPartnerId: 'P-000001',
+            leadFeeEarnerId: 'P-000002',
+            teamMemberIds: ['P-000001', 'P-000002'],
+            conflictCheckRecord: makeConflictRecord('P-000001', 'R851 Multi-Kind'),
+            riskAssessment: { answers: BASE_LOW_RISK_ANSWERS },
+          },
+          { byId: 'P-000001', saveMode: 'submit_cleared' },
+        );
+        expect(m.errors).toBeUndefined();
+        mMultiId = m.matter!.id;
+      },
+      { roles: ['partner'], mfaVerified: false },
+    );
+
+    const engSend = await runAsActionActor(
+      'P-000001',
+      () =>
+        sendEngagementLetterRecord(
+          { matterId: mMultiId, recipientEmail: 'r851@example.test' },
+          'P-000001',
+          { tenantConfig: chaseEnabledCfg, drainAfterCommit: false },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(engSend.ok).toBe(true);
+    if (!engSend.ok || !engSend.chase) return;
+    const engChaseId = engSend.chase.id;
+
+    // Move engagement chase to 'needs_owner' and insert a 'money_on_account' chase on the same matter
+    const { chase: moaChase } = await chasingRepo.withTenantTransaction(ctx, async (tx) => {
+      await chasingRepo.markChaseNeedsOwnerInTx(tx, ctx, {
+        chaseId: engChaseId,
+        stepIndex: 3,
+        executedAt: new Date().toISOString(),
+      });
+      return chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
+        entityKind: 'money_on_account',
+        entityId: mMultiId,
+        matterId: mMultiId,
+        recipientEmail: 'r851-moa@example.test',
+        recipientName: 'MOA Contact',
+        sentAt: new Date().toISOString(),
+        nextActionAt: addDays(new Date(), 7).toISOString(),
+        createdByPersonId: 'P-000001',
+      });
+    });
+
+    // Signed copy upload stops engagement chase (with oldValue='needs_owner'), leaving money_on_account active
+    const signedArtRes = await runAsActionActor(
+      'P-000001',
+      () => createSignedEngagementPdfArtifact(mMultiId, 'P-000001', ctx),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(signedArtRes.ok).toBe(true);
+    if (!signedArtRes.ok) return;
+
+    const signMultiRes = await runAsActionActor(
+      'P-000001',
+      () =>
+        recordEngagementLetterSignedAction({
+          matterId: mMultiId,
+          evidenceArtifactId: signedArtRes.artifact.id,
+          status: 'Signed & returned',
+        }),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(signMultiRes.ok).toBe(true);
+
+    const engChaseAfterSign = await chasingRepo.getChaseById(ctx, engChaseId);
+    expect(engChaseAfterSign?.status).toBe('stopped');
+    expect(engChaseAfterSign?.stoppedReason).toBe('signed');
+    expect((await chasingRepo.getChaseById(ctx, moaChase.id))?.status).toBe('active');
+
+    const engStopAudits = await auditRepo.listAuditEntriesForRecord(
+      ctx,
+      'communication_chase',
+      engChaseId,
+      { limit: 50 },
+    );
+    expect(
+      engStopAudits.some(
+        (a) =>
+          a.field === 'Communication chase stopped' &&
+          a.oldValue === 'needs_owner' &&
+          a.newValue === 'stopped (signed)',
+      ),
+    ).toBe(true);
+
+    // Re-save signed matter via saveMatterRecord while another engagement_letter chase exists:
+    // stops only engagement_letter, STILL leaving money_on_account active!
+    const { chase: engChase2 } = await chasingRepo.withTenantTransaction(ctx, (tx) =>
+      chasingRepo.startOrReplaceChaseInTx(tx, ctx, {
+        entityKind: 'engagement_letter',
+        entityId: mMultiId,
+        matterId: mMultiId,
+        recipientEmail: 'r851-second@example.test',
+        recipientName: 'Second Eng',
+        sentAt: new Date().toISOString(),
+        nextActionAt: addDays(new Date(), 7).toISOString(),
+        createdByPersonId: 'P-000001',
+      }),
+    );
+    const signedFresh = await matterRepo.getMatterById<Matter>(ctx, mMultiId, {
+      includeRestricted: true,
+    });
+    const signedResave = await runAsActionActor(
+      'P-000001',
+      () =>
+        saveMatterRecord(
+          { ...signedFresh!, title: `${signedFresh!.title} Reviewed` },
+          {
+            id: mMultiId,
+            byId: 'P-000001',
+            expectedRowVersion: signedFresh?.rowVersion ?? undefined,
+          },
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(signedResave.errors).toBeUndefined();
+    expect((await chasingRepo.getChaseById(ctx, engChase2.id))?.status).toBe('stopped');
+    expect((await chasingRepo.getChaseById(ctx, engChase2.id))?.stoppedReason).toBe('signed');
+    expect((await chasingRepo.getChaseById(ctx, moaChase.id))?.status).toBe('active');
+
+    // Closing the matter stops ALL kinds including 'money_on_account' with reason 'matter_closed'
+    const closeMultiFresh = await matterRepo.getMatterById<Matter>(ctx, mMultiId, {
+      includeRestricted: true,
+    });
+    const closeMultiRes = await runAsActionActor(
+      'P-000001',
+      () =>
+        updateMatterLifecycleStatusRecord(
+          mMultiId,
+          'close',
+          {
+            reason: 'Completed multi-kind test matter',
+            expectedRowVersion: closeMultiFresh?.rowVersion ?? null,
+          },
+          'P-000001',
+        ),
+      { roles: ['partner'], mfaVerified: false },
+    );
+    expect(closeMultiRes.errors).toBeUndefined();
+    const moaAfterClose = await chasingRepo.getChaseById(ctx, moaChase.id);
+    expect(moaAfterClose?.status).toBe('stopped');
+    expect(moaAfterClose?.stoppedReason).toBe('matter_closed');
+
+    // 5. Job backstop: a due active chase pointing to a non-existent matter records entity_missing (never 'withdrawn')
     const sweepNow = new Date();
     const orphanSentAt = addDays(sweepNow, -10).toISOString();
     const orphanDueAt = addDays(sweepNow, -2).toISOString();

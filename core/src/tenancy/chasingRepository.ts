@@ -110,6 +110,10 @@ export interface CommunicationChaseWithEvents {
   readonly events: readonly CommunicationChaseEventRecord[];
 }
 
+export type StoppedCommunicationChaseRecord = CommunicationChaseRecord & {
+  readonly previousStatus: CommunicationChaseStatus;
+};
+
 export class TenantChasingRepository extends TenantScopedRepository {
   private readonly auditRepo: TenantAuditRepository;
 
@@ -229,20 +233,28 @@ export class TenantChasingRepository extends TenantScopedRepository {
       readonly stoppedByPersonId: string;
       readonly stoppedAt: string;
     },
-  ): Promise<CommunicationChaseRecord | null> {
-    const res = await tx.query<DbCommunicationChaseRow>(
-      `UPDATE public.communication_chases
+  ): Promise<StoppedCommunicationChaseRecord | null> {
+    const res = await tx.query<DbCommunicationChaseRow & { previous_status: string }>(
+      `WITH prior AS (
+         SELECT id, status AS previous_status
+           FROM public.communication_chases
+          WHERE tenant_id = $1
+            AND entity_kind = $2
+            AND entity_id = $3
+            AND status IN ('active', 'needs_owner')
+          FOR UPDATE
+       )
+       UPDATE public.communication_chases c
           SET status = 'stopped',
               stopped_reason = $4,
               stopped_at = $5::timestamptz,
               stopped_by_person_id = $6,
               next_action_at = NULL,
               updated_at = $5::timestamptz
-        WHERE tenant_id = $1
-          AND entity_kind = $2
-          AND entity_id = $3
-          AND status IN ('active', 'needs_owner')
-        RETURNING *`,
+         FROM prior
+        WHERE c.tenant_id = $1
+          AND c.id = prior.id
+        RETURNING c.*, prior.previous_status`,
       [
         ctx.tenantId,
         params.entityKind,
@@ -255,7 +267,10 @@ export class TenantChasingRepository extends TenantScopedRepository {
     const row = res.rows[0];
     if (!row) return null;
     this.assertRowTenant(ctx, row.tenant_id, 'CommunicationChase');
-    return mapChaseRow(row);
+    return {
+      ...mapChaseRow(row),
+      previousStatus: row.previous_status as CommunicationChaseStatus,
+    };
   }
 
   public async stopActiveChasesForMatterInTx(
@@ -266,33 +281,54 @@ export class TenantChasingRepository extends TenantScopedRepository {
       readonly reason: CommunicationChaseStoppedReason;
       readonly stoppedByPersonId: string;
       readonly stoppedAt: string;
+      readonly entityKinds?: readonly CommunicationChaseEntityKind[];
     },
-  ): Promise<readonly CommunicationChaseRecord[]> {
+  ): Promise<readonly StoppedCommunicationChaseRecord[]> {
     const cleanMatterId = params.matterId.trim();
     if (!cleanMatterId) return [];
-    const res = await tx.query<DbCommunicationChaseRow>(
-      `UPDATE public.communication_chases
+    if (params.entityKinds !== undefined && params.entityKinds.length === 0) {
+      return [];
+    }
+    const sqlParams: unknown[] = [
+      ctx.tenantId,
+      cleanMatterId,
+      params.reason,
+      params.stoppedAt,
+      params.stoppedByPersonId,
+    ];
+    let entityKindClause = '';
+    if (params.entityKinds && params.entityKinds.length > 0) {
+      sqlParams.push([...params.entityKinds]);
+      entityKindClause = `\n            AND entity_kind = ANY($6::text[])`;
+    }
+    const res = await tx.query<DbCommunicationChaseRow & { previous_status: string }>(
+      `WITH prior AS (
+         SELECT id, status AS previous_status
+           FROM public.communication_chases
+          WHERE tenant_id = $1
+            AND matter_id = $2
+            AND status IN ('active', 'needs_owner')${entityKindClause}
+          FOR UPDATE
+       )
+       UPDATE public.communication_chases c
           SET status = 'stopped',
               stopped_reason = $3,
               stopped_at = $4::timestamptz,
               stopped_by_person_id = $5,
               next_action_at = NULL,
               updated_at = $4::timestamptz
-        WHERE tenant_id = $1
-          AND matter_id = $2
-          AND status IN ('active', 'needs_owner')
-        RETURNING *`,
-      [
-        ctx.tenantId,
-        cleanMatterId,
-        params.reason,
-        params.stoppedAt,
-        params.stoppedByPersonId,
-      ],
+         FROM prior
+        WHERE c.tenant_id = $1
+          AND c.id = prior.id
+        RETURNING c.*, prior.previous_status`,
+      sqlParams,
     );
     return res.rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'CommunicationChase');
-      return mapChaseRow(row);
+      return {
+        ...mapChaseRow(row),
+        previousStatus: row.previous_status as CommunicationChaseStatus,
+      };
     });
   }
 
