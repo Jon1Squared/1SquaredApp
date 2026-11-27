@@ -3558,9 +3558,9 @@ describe('S0-14: Real PostgreSQL 16 TenantScopedRepository, SET LOCAL ROLE, R402
           .filter((t) => t.matter_code === m.matter_code)
           .reduce((a, t) => a + t.value, 0) + Number.EPSILON) * 100) / 100;
         const matterInvs = dataset.invoices.filter((i) => i.matter_code === m.matter_code);
-        const billedFees = Math.round((matterInvs.reduce((a, i) => a + i.fees_net, 0) + Number.EPSILON) * 100) / 100;
-        const billedDisb = Math.round((matterInvs.reduce((a, i) => a + i.disbursements_net, 0) + Number.EPSILON) * 100) / 100;
-        const billedVat = Math.round((matterInvs.reduce((a, i) => a + i.vat, 0) + Number.EPSILON) * 100) / 100;
+        const billedFees = Math.round((matterInvs.reduce((a, i) => a + (i.fees_net ?? 0), 0) + Number.EPSILON) * 100) / 100;
+        const billedDisb = Math.round((matterInvs.reduce((a, i) => a + (i.disbursements_net ?? 0), 0) + Number.EPSILON) * 100) / 100;
+        const billedVat = Math.round((matterInvs.reduce((a, i) => a + (i.vat ?? 0), 0) + Number.EPSILON) * 100) / 100;
         const billedTotal = Math.round((matterInvs.reduce((a, i) => a + i.total, 0) + Number.EPSILON) * 100) / 100;
         const cashReceived = Math.round((dataset.payments
           .filter((p) => p.matter_code === m.matter_code)

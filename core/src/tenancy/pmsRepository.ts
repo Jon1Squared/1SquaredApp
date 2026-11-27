@@ -63,42 +63,83 @@ function roundHours2(n: number): number {
   return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 }
 
-function toSafeMinorUnits(n: unknown): MinorUnits {
+export function toSafeMinorUnits(n: unknown): MinorUnits | null {
+  if (n === null || n === undefined) return null;
   if (typeof n === 'string') {
     const trimmed = n.trim();
-    if (!trimmed) return 0 as MinorUnits;
-    if (/^\s*[-+]?\d+(?:\.\d+)?\s*$/.test(trimmed)) {
-      return poundsToMinorUnits(trimmed);
+    if (!trimmed) return null;
+    if (/^[-+]?\d+(?:\.\d+)?$/.test(trimmed)) {
+      try {
+        return poundsToMinorUnits(trimmed);
+      } catch {
+        return null;
+      }
     }
-    const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed) || Math.abs(parsed) < 1e-6) {
-      return 0 as MinorUnits;
+    if (/^[-+]?\d+(?:\.\d+)?[eE][-+]?\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed) && Math.abs(parsed) < 1e-9) {
+        return 0 as MinorUnits;
+      }
+      return null;
     }
-    return poundsToMinorUnits(parsed.toFixed(6));
+    return null;
   }
-  const num = Number(n ?? 0);
-  if (!Number.isFinite(num)) return 0 as MinorUnits;
-  if (/[eE]/.test(String(num))) {
-    return Math.abs(num) < 1e-6
-      ? (0 as MinorUnits)
-      : poundsToMinorUnits(num.toFixed(6));
+  if (typeof n === 'number') {
+    if (!Number.isFinite(n)) return null;
+    if (/[eE]/.test(String(n))) {
+      if (Math.abs(n) < 1e-9) return 0 as MinorUnits;
+      return null;
+    }
+    try {
+      return poundsToMinorUnits(n);
+    } catch {
+      return null;
+    }
   }
-  return poundsToMinorUnits(num);
+  return null;
 }
 
-function parsePayloadMoneyPence(text: unknown): MinorUnits {
+function parsePayloadMoneyPence(
+  text: unknown,
+  corruptTracker: { count: number },
+): MinorUnits | null {
   if (text === null || text === undefined) return 0 as MinorUnits;
-  return toSafeMinorUnits(String(text));
+  const trimmed = String(text).trim();
+  if (!trimmed) return 0 as MinorUnits;
+  const parsed = toSafeMinorUnits(trimmed);
+  if (parsed === null) {
+    corruptTracker.count += 1;
+    return null;
+  }
+  return parsed;
+}
+
+function warnIfCorruptMoneyText(
+  ctx: TenantContext,
+  corruptTracker: { count: number },
+): void {
+  if (corruptTracker.count > 0) {
+    console.warn(
+      JSON.stringify({
+        event: 'pms.corrupt_money_text',
+        tenantId: ctx.tenantId,
+        corruptCount: corruptTracker.count,
+      }),
+    );
+  }
 }
 
 function resolvePenceField(
-  pence: MinorUnits | undefined,
-  fallbackGbp: number,
+  pence: MinorUnits | null | undefined,
+  fallbackGbp: number | null | undefined,
 ): MinorUnits {
   if (typeof pence === 'number' && Number.isSafeInteger(pence)) {
     return pence;
   }
-  return toSafeMinorUnits(fallbackGbp);
+  if (fallbackGbp === null || fallbackGbp === undefined) {
+    return 0 as MinorUnits;
+  }
+  return toSafeMinorUnits(fallbackGbp) ?? (0 as MinorUnits);
 }
 
 const PMS_FEE_EARNERS_SELECT =
@@ -179,8 +220,8 @@ export interface TenantPmsFeeEarner {
   standard_hourly_rate: number;
   standard_hourly_rate_pence?: MinorUnits;
   annual_target_hours: number;
-  annual_target_fees: number;
-  annual_target_fees_pence?: MinorUnits;
+  annual_target_fees: number | null;
+  annual_target_fees_pence?: MinorUnits | null;
   active: string;
 }
 
@@ -195,8 +236,8 @@ export interface TenantPmsClient {
   postcode: string;
   client_partner_id: string;
   credit_terms_days: number;
-  credit_limit: number;
-  credit_limit_pence?: MinorUnits;
+  credit_limit: number | null;
+  credit_limit_pence?: MinorUnits | null;
   rate_discount_pct: number;
   date_opened: string;
   sector: string;
@@ -217,8 +258,8 @@ export interface TenantPmsMatter {
     | 'Fixed Fee'
     | 'Capped Fee'
     | 'Retainer / Subscription';
-  fixed_fee_amount: number;
-  fixed_fee_amount_pence?: MinorUnits;
+  fixed_fee_amount: number | null;
+  fixed_fee_amount_pence?: MinorUnits | null;
   fee_estimate: number;
   fee_estimate_pence?: MinorUnits;
   estimate_alert_pct: number;
@@ -237,8 +278,8 @@ export interface TenantPmsFeeEstimate {
   estimate_type: 'Initial' | 'Revised';
   fees_estimate: number;
   fees_estimate_pence?: MinorUnits;
-  disbursements_estimate: number;
-  disbursements_estimate_pence?: MinorUnits;
+  disbursements_estimate: number | null;
+  disbursements_estimate_pence?: MinorUnits | null;
   given_by: string;
   given_by_name?: string;
   accepted_by_client: 'Yes' | 'No' | 'Pending';
@@ -257,17 +298,17 @@ export interface TenantPmsTimeEntry {
   minutes: number;
   units: number;
   hours: number;
-  rate: number;
-  rate_pence?: MinorUnits;
+  rate: number | null;
+  rate_pence?: MinorUnits | null;
   value: number;
   value_pence?: MinorUnits;
   chargeable: 'Y' | 'N';
   billed_status: 'Unbilled' | 'Billed' | 'Written off' | 'Non-chargeable';
   invoice_number: string | null;
-  billed_value: number;
-  billed_value_pence?: MinorUnits;
-  write_off_value: number;
-  write_off_value_pence?: MinorUnits;
+  billed_value: number | null;
+  billed_value_pence?: MinorUnits | null;
+  write_off_value: number | null;
+  write_off_value_pence?: MinorUnits | null;
 }
 
 export interface TenantPmsDisbursement {
@@ -279,10 +320,10 @@ export interface TenantPmsDisbursement {
   description: string;
   net_amount: number;
   net_amount_pence?: MinorUnits;
-  vat_amount: number;
-  vat_amount_pence?: MinorUnits;
-  gross_amount: number;
-  gross_amount_pence?: MinorUnits;
+  vat_amount: number | null;
+  vat_amount_pence?: MinorUnits | null;
+  gross_amount: number | null;
+  gross_amount_pence?: MinorUnits | null;
   paid_from: 'Office' | 'Client account';
   billed_status: 'Unbilled' | 'Billed';
   invoice_number: string | null;
@@ -324,12 +365,12 @@ export interface TenantPmsInvoiceRow {
   invoice_type: string;
   period_from: string | null;
   period_to: string | null;
-  fees_net: number;
-  fees_net_pence?: MinorUnits;
-  disbursements_net: number;
-  disbursements_net_pence?: MinorUnits;
-  vat: number;
-  vat_pence?: MinorUnits;
+  fees_net: number | null;
+  fees_net_pence?: MinorUnits | null;
+  disbursements_net: number | null;
+  disbursements_net_pence?: MinorUnits | null;
+  vat: number | null;
+  vat_pence?: MinorUnits | null;
   total: number;
   total_pence?: MinorUnits;
   status: string;
@@ -345,12 +386,12 @@ export interface TenantPmsInvoiceBalance {
   invoice_type: string;
   period_from: string | null;
   period_to: string | null;
-  fees_net: number;
-  fees_net_pence?: MinorUnits;
-  disbursements_net: number;
-  disbursements_net_pence?: MinorUnits;
-  vat: number;
-  vat_pence?: MinorUnits;
+  fees_net: number | null;
+  fees_net_pence?: MinorUnits | null;
+  disbursements_net: number | null;
+  disbursements_net_pence?: MinorUnits | null;
+  vat: number | null;
+  vat_pence?: MinorUnits | null;
   total: number;
   total_pence?: MinorUnits;
   exported_status: string;
@@ -822,7 +863,10 @@ export function computeDerivedMatterFinancials(params: {
     ) {
       caPenceByMatter.set(mCode, lastEntry.running_balance_pence);
     } else if (lastEntry && typeof lastEntry.running_balance === 'number') {
-      caPenceByMatter.set(mCode, toSafeMinorUnits(lastEntry.running_balance));
+      caPenceByMatter.set(
+        mCode,
+        toSafeMinorUnits(lastEntry.running_balance) ?? (0 as MinorUnits),
+      );
     } else {
       caPenceByMatter.set(
         mCode,
@@ -2177,7 +2221,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsFeeEarner[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_earners');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEarner>;
       const hourlyRatePence = pgBigIntToMinorUnits(
@@ -2185,6 +2230,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       );
       const annualTargetFeesPence = parsePayloadMoneyPence(
         row.payload_annual_target_fees_text,
+        corruptTracker,
       );
       return {
         fee_earner_id: String(row.fee_earner_id),
@@ -2197,22 +2243,29 @@ export class TenantPmsRepository extends TenantScopedRepository {
         standard_hourly_rate: minorUnitsToPounds(hourlyRatePence),
         standard_hourly_rate_pence: hourlyRatePence,
         annual_target_hours: Number(p.annual_target_hours ?? 0),
-        annual_target_fees: minorUnitsToPounds(annualTargetFeesPence),
+        annual_target_fees:
+          annualTargetFeesPence !== null
+            ? minorUnitsToPounds(annualTargetFeesPence)
+            : null,
         annual_target_fees_pence: annualTargetFeesPence,
         active: String(p.active ?? row.status ?? 'Yes'),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapClientRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsClient[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_clients');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsClient>;
       const creditLimitPence = parsePayloadMoneyPence(
         row.payload_credit_limit_text,
+        corruptTracker,
       );
       return {
         client_code: String(row.client_code),
@@ -2227,7 +2280,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
         postcode: String(p.postcode ?? ''),
         client_partner_id: String(p.client_partner_id ?? ''),
         credit_terms_days: Number(p.credit_terms_days ?? 0),
-        credit_limit: minorUnitsToPounds(creditLimitPence),
+        credit_limit:
+          creditLimitPence !== null ? minorUnitsToPounds(creditLimitPence) : null,
         credit_limit_pence: creditLimitPence,
         rate_discount_pct: Number(p.rate_discount_pct ?? 0),
         date_opened: String(p.date_opened ?? ''),
@@ -2237,17 +2291,21 @@ export class TenantPmsRepository extends TenantScopedRepository {
         status: String(p.status ?? 'Active'),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapMatterRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsMatter[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_matters');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsMatter>;
       const fixedFeePence = parsePayloadMoneyPence(
         row.payload_fixed_fee_amount_text,
+        corruptTracker,
       );
       const feeEstimatePence = pgBigIntToMinorUnits(
         row.fee_estimate_pence as string | number | bigint,
@@ -2269,7 +2327,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
         billing_basis: (row.billing_basis ??
           p.billing_basis ??
           'Hourly Rate') as TenantPmsMatter['billing_basis'],
-        fixed_fee_amount: minorUnitsToPounds(fixedFeePence),
+        fixed_fee_amount:
+          fixedFeePence !== null ? minorUnitsToPounds(fixedFeePence) : null,
         fixed_fee_amount_pence: fixedFeePence,
         fee_estimate: minorUnitsToPounds(feeEstimatePence),
         fee_estimate_pence: feeEstimatePence,
@@ -2287,6 +2346,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
         third_party_payer: String(p.third_party_payer ?? ''),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapFeeEstimateRows(
@@ -2294,7 +2355,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
     rows: readonly DbGenericPayloadRow[],
     feById: ReadonlyMap<string, TenantPmsFeeEarner>,
   ): TenantPmsFeeEstimate[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_fee_estimates');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsFeeEstimate>;
       const givenBy = String(p.given_by ?? '');
@@ -2304,6 +2366,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
       );
       const disbEstimatePence = parsePayloadMoneyPence(
         row.payload_disbursements_estimate_text,
+        corruptTracker,
       );
       return {
         estimate_id: String(row.estimate_id),
@@ -2313,7 +2376,10 @@ export class TenantPmsRepository extends TenantScopedRepository {
           'Initial') as TenantPmsFeeEstimate['estimate_type'],
         fees_estimate: minorUnitsToPounds(feesEstimatePence),
         fees_estimate_pence: feesEstimatePence,
-        disbursements_estimate: minorUnitsToPounds(disbEstimatePence),
+        disbursements_estimate:
+          disbEstimatePence !== null
+            ? minorUnitsToPounds(disbEstimatePence)
+            : null,
         disbursements_estimate_pence: disbEstimatePence,
         given_by: givenBy,
         given_by_name: fe
@@ -2324,20 +2390,30 @@ export class TenantPmsRepository extends TenantScopedRepository {
         notes: String(p.notes ?? ''),
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapInvoiceRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsInvoiceRow[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_invoices');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsInvoiceRow>;
-      const feesNetPence = parsePayloadMoneyPence(row.payload_fees_net_text);
+      const feesNetPence = parsePayloadMoneyPence(
+        row.payload_fees_net_text,
+        corruptTracker,
+      );
       const disbNetPence = parsePayloadMoneyPence(
         row.payload_disbursements_net_text,
+        corruptTracker,
       );
-      const vatPence = parsePayloadMoneyPence(row.payload_vat_text);
+      const vatPence = parsePayloadMoneyPence(
+        row.payload_vat_text,
+        corruptTracker,
+      );
       const totalPence = pgBigIntToMinorUnits(
         row.total_inc_vat_pence as string | number | bigint,
       );
@@ -2350,11 +2426,12 @@ export class TenantPmsRepository extends TenantScopedRepository {
         invoice_type: String(p.invoice_type ?? 'Interim'),
         period_from: p.period_from ? String(p.period_from) : null,
         period_to: p.period_to ? String(p.period_to) : null,
-        fees_net: minorUnitsToPounds(feesNetPence),
+        fees_net: feesNetPence !== null ? minorUnitsToPounds(feesNetPence) : null,
         fees_net_pence: feesNetPence,
-        disbursements_net: minorUnitsToPounds(disbNetPence),
+        disbursements_net:
+          disbNetPence !== null ? minorUnitsToPounds(disbNetPence) : null,
         disbursements_net_pence: disbNetPence,
-        vat: minorUnitsToPounds(vatPence),
+        vat: vatPence !== null ? minorUnitsToPounds(vatPence) : null,
         vat_pence: vatPence,
         total: minorUnitsToPounds(totalPence),
         total_pence: totalPence,
@@ -2362,6 +2439,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
         credit_note_for: p.credit_note_for ? String(p.credit_note_for) : null,
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapPaymentRows(
@@ -2393,20 +2472,26 @@ export class TenantPmsRepository extends TenantScopedRepository {
     rows: readonly DbGenericPayloadRow[],
     feById: ReadonlyMap<string, TenantPmsFeeEarner>,
   ): TenantPmsTimeEntry[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_time_entries');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsTimeEntry>;
       const feId = String(row.fee_earner_id);
       const fe = feById.get(feId);
-      const ratePence = parsePayloadMoneyPence(row.payload_rate_text);
+      const ratePence = parsePayloadMoneyPence(
+        row.payload_rate_text,
+        corruptTracker,
+      );
       const valuePence = pgBigIntToMinorUnits(
         row.value_pence as string | number | bigint,
       );
       const billedValuePence = parsePayloadMoneyPence(
         row.payload_billed_value_text,
+        corruptTracker,
       );
       const writeOffValuePence = parsePayloadMoneyPence(
         row.payload_write_off_value_text,
+        corruptTracker,
       );
       return {
         time_id: String(row.time_id),
@@ -2422,7 +2507,7 @@ export class TenantPmsRepository extends TenantScopedRepository {
         minutes: Number(p.minutes ?? 0),
         units: Number(p.units ?? 0),
         hours: Number(row.hours ?? p.hours ?? 0),
-        rate: minorUnitsToPounds(ratePence),
+        rate: ratePence !== null ? minorUnitsToPounds(ratePence) : null,
         rate_pence: ratePence,
         value: minorUnitsToPounds(valuePence),
         value_pence: valuePence,
@@ -2434,19 +2519,28 @@ export class TenantPmsRepository extends TenantScopedRepository {
           row.invoice_number || p.invoice_number
             ? String(row.invoice_number ?? p.invoice_number)
             : null,
-        billed_value: minorUnitsToPounds(billedValuePence),
+        billed_value:
+          billedValuePence !== null
+            ? minorUnitsToPounds(billedValuePence)
+            : null,
         billed_value_pence: billedValuePence,
-        write_off_value: minorUnitsToPounds(writeOffValuePence),
+        write_off_value:
+          writeOffValuePence !== null
+            ? minorUnitsToPounds(writeOffValuePence)
+            : null,
         write_off_value_pence: writeOffValuePence,
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapDisbursementRows(
     ctx: TenantContext,
     rows: readonly DbGenericPayloadRow[],
   ): TenantPmsDisbursement[] {
-    return rows.map((row) => {
+    const corruptTracker = { count: 0 };
+    const mapped = rows.map((row) => {
       this.assertRowTenant(ctx, row.tenant_id, 'pms_disbursements');
       const p = (row.payload_json ?? {}) as Partial<TenantPmsDisbursement>;
       const netAmountPence = pgBigIntToMinorUnits(
@@ -2454,9 +2548,11 @@ export class TenantPmsRepository extends TenantScopedRepository {
       );
       const vatAmountPence = parsePayloadMoneyPence(
         row.payload_vat_amount_text,
+        corruptTracker,
       );
       const grossAmountPence = parsePayloadMoneyPence(
         row.payload_gross_amount_text,
+        corruptTracker,
       );
       return {
         disbursement_id: String(row.disbursement_id),
@@ -2467,9 +2563,13 @@ export class TenantPmsRepository extends TenantScopedRepository {
         description: String(p.description ?? ''),
         net_amount: minorUnitsToPounds(netAmountPence),
         net_amount_pence: netAmountPence,
-        vat_amount: minorUnitsToPounds(vatAmountPence),
+        vat_amount:
+          vatAmountPence !== null ? minorUnitsToPounds(vatAmountPence) : null,
         vat_amount_pence: vatAmountPence,
-        gross_amount: minorUnitsToPounds(grossAmountPence),
+        gross_amount:
+          grossAmountPence !== null
+            ? minorUnitsToPounds(grossAmountPence)
+            : null,
         gross_amount_pence: grossAmountPence,
         paid_from: (p.paid_from ??
           'Office') as TenantPmsDisbursement['paid_from'],
@@ -2482,6 +2582,8 @@ export class TenantPmsRepository extends TenantScopedRepository {
             : null,
       };
     });
+    warnIfCorruptMoneyText(ctx, corruptTracker);
+    return mapped;
   }
 
   private mapClientAccountRows(

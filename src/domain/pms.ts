@@ -52,7 +52,8 @@ import type {
 } from '@/pms/types';
 
 function toSafeMinorUnits(n: number | null | undefined): MinorUnits {
-  const num = Number(n ?? 0);
+  if (n === null || n === undefined) return 0 as MinorUnits;
+  const num = Number(n);
   if (!Number.isFinite(num)) return 0 as MinorUnits;
   if (/[eE]/.test(String(num))) {
     return Math.abs(num) < 1e-6 ? (0 as MinorUnits) : poundsToMinorUnits(num.toFixed(6));
@@ -71,8 +72,11 @@ export function resolvePmsPence(
   return toSafeMinorUnits(fallbackGbp);
 }
 
-/** Format GBP currency with £ and 2 decimal places; negatives in brackets. */
+/** Format GBP currency with £ and 2 decimal places; negatives in brackets. Corrupt/null amounts render as "Not available". */
 export function formatGbp(amount: number | null | undefined): string {
+  if (amount === null || (typeof amount === 'number' && !Number.isFinite(amount))) {
+    return 'Not available';
+  }
   const minor = toSafeMinorUnits(amount);
   const absPounds = minorUnitsToPounds(Math.abs(minor));
   const formatted = absPounds.toLocaleString('en-GB', {

@@ -23,8 +23,8 @@ export interface PmsFeeEarner {
   standard_hourly_rate: number;
   standard_hourly_rate_pence?: MinorUnits;
   annual_target_hours: number;
-  annual_target_fees: number;
-  annual_target_fees_pence?: MinorUnits;
+  annual_target_fees: number | null;
+  annual_target_fees_pence?: MinorUnits | null;
   active: string; // 'Yes' | 'No'
 }
 
@@ -39,8 +39,8 @@ export interface PmsClient {
   postcode: string;
   client_partner_id: string;
   credit_terms_days: number;
-  credit_limit: number;
-  credit_limit_pence?: MinorUnits;
+  credit_limit: number | null;
+  credit_limit_pence?: MinorUnits | null;
   rate_discount_pct: number;
   date_opened: string;
   sector: string;
@@ -57,8 +57,8 @@ export interface PmsMatter {
   responsible_partner_id: string;
   fee_earner_id: string;
   billing_basis: 'Hourly Rate' | 'Fixed Fee' | 'Capped Fee' | 'Retainer / Subscription';
-  fixed_fee_amount: number;
-  fixed_fee_amount_pence?: MinorUnits;
+  fixed_fee_amount: number | null;
+  fixed_fee_amount_pence?: MinorUnits | null;
   fee_estimate: number;
   fee_estimate_pence?: MinorUnits;
   estimate_alert_pct: number;
@@ -77,8 +77,8 @@ export interface PmsFeeEstimate {
   estimate_type: 'Initial' | 'Revised';
   fees_estimate: number;
   fees_estimate_pence?: MinorUnits;
-  disbursements_estimate: number;
-  disbursements_estimate_pence?: MinorUnits;
+  disbursements_estimate: number | null;
+  disbursements_estimate_pence?: MinorUnits | null;
   given_by: string;
   given_by_name?: string;
   accepted_by_client: 'Yes' | 'No' | 'Pending';
@@ -97,17 +97,17 @@ export interface PmsTimeEntry {
   minutes: number;
   units: number;
   hours: number;
-  rate: number;
-  rate_pence?: MinorUnits;
+  rate: number | null;
+  rate_pence?: MinorUnits | null;
   value: number;
   value_pence?: MinorUnits;
   chargeable: 'Y' | 'N';
   billed_status: 'Unbilled' | 'Billed' | 'Written off' | 'Non-chargeable';
   invoice_number: string | null;
-  billed_value: number;
-  billed_value_pence?: MinorUnits;
-  write_off_value: number;
-  write_off_value_pence?: MinorUnits;
+  billed_value: number | null;
+  billed_value_pence?: MinorUnits | null;
+  write_off_value: number | null;
+  write_off_value_pence?: MinorUnits | null;
 }
 
 export interface PmsDisbursement {
@@ -119,10 +119,10 @@ export interface PmsDisbursement {
   description: string;
   net_amount: number;
   net_amount_pence?: MinorUnits;
-  vat_amount: number;
-  vat_amount_pence?: MinorUnits;
-  gross_amount: number;
-  gross_amount_pence?: MinorUnits;
+  vat_amount: number | null;
+  vat_amount_pence?: MinorUnits | null;
+  gross_amount: number | null;
+  gross_amount_pence?: MinorUnits | null;
   paid_from: 'Office' | 'Client account';
   billed_status: 'Unbilled' | 'Billed';
   invoice_number: string | null;
@@ -158,12 +158,12 @@ export interface PmsInvoiceBalance {
   invoice_type: string;
   period_from: string | null;
   period_to: string | null;
-  fees_net: number;
-  fees_net_pence?: MinorUnits;
-  disbursements_net: number;
-  disbursements_net_pence?: MinorUnits;
-  vat: number;
-  vat_pence?: MinorUnits;
+  fees_net: number | null;
+  fees_net_pence?: MinorUnits | null;
+  disbursements_net: number | null;
+  disbursements_net_pence?: MinorUnits | null;
+  vat: number | null;
+  vat_pence?: MinorUnits | null;
   total: number;
   total_pence?: MinorUnits;
   exported_status: string;

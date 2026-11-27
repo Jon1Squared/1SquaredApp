@@ -1002,5 +1002,46 @@ describe('PMS Demo Database Import & Derived Views vs check_ sheets', () => {
     expect(rollups.allClientFins[0]?.unbilled_wip_pence).toBeTypeOf('number');
     expect(rollups.allFeeEarnerPerformance[0]?.time_value_pence).toBeTypeOf('number');
   });
+
+  it('R831: parseMoneyPence rejects corrupt or exponent money cells with a plain location error and logs no cell values', async () => {
+    const { vi } = await import('vitest');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const badInputs: Array<string | number> = [
+        'CORRUPT_SECRET_TEXT',
+        'NaN',
+        'Infinity',
+        '12.34.56',
+        '1e5',
+        '1e-4',
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ];
+      for (const bad of badInputs) {
+        let caught: Error | null = null;
+        try {
+          parseMoneyPence(bad, {
+            sheet: 'invoices',
+            row: 7,
+            column: 'fees_net',
+          });
+        } catch (e) {
+          caught = e as Error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught!.message).toContain('sheet "invoices"');
+        expect(caught!.message).toContain('row 7');
+        expect(caught!.message).toContain('column "fees_net"');
+        expect(caught!.message).not.toContain('CORRUPT_SECRET_TEXT');
+        expect(caught!.message).not.toContain('12.34.56');
+      }
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
 });
 

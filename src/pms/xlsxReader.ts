@@ -149,33 +149,95 @@ export function excelSerialToIsoDate(serialStr: string | number | null | undefin
   return d.toISOString().slice(0, 10);
 }
 
-/** Parse decimal monetary text or number to exact integer minor units (pence), avoiding floating-point drift. */
+export interface ParseMoneyContext {
+  readonly sheet?: string;
+  readonly row?: number;
+  readonly column?: string;
+}
+
+function formatMoneyLocation(context?: ParseMoneyContext): string {
+  if (!context) return 'money cell';
+  const parts: string[] = [];
+  if (context.sheet) parts.push(`sheet "${context.sheet}"`);
+  if (context.row !== undefined) parts.push(`row ${context.row}`);
+  if (context.column) parts.push(`column "${context.column}"`);
+  return parts.length > 0 ? parts.join(', ') : 'money cell';
+}
+
+export function getXlsxRowNumber(
+  row: Record<string, unknown>,
+  fallbackRowNumber: number,
+): number {
+  const raw = (row as { __xlsxRowNumber?: unknown }).__xlsxRowNumber;
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0
+    ? raw
+    : fallbackRowNumber;
+}
+
+/**
+ * Parse decimal monetary text or number to exact integer minor units (pence), avoiding floating-point drift.
+ * Blank cells return 0; non-numeric / corrupt values throw a plain error naming sheet, row, and column (never logging cell values).
+ */
 export function parseMoneyPence(
   val: string | number | null | undefined,
+  context?: ParseMoneyContext,
 ): MinorUnits {
   if (val === null || val === undefined) return 0 as MinorUnits;
+  const location = formatMoneyLocation(context);
   if (typeof val === 'number') {
-    if (!Number.isFinite(val)) return 0 as MinorUnits;
-    return /[eE]/.test(String(val))
-      ? Math.abs(val) < 1e-6
-        ? (0 as MinorUnits)
-        : poundsToMinorUnits(val.toFixed(6))
-      : poundsToMinorUnits(val);
+    if (!Number.isFinite(val)) {
+      throw new Error(
+        `Invalid monetary value at ${location}: expected a finite decimal amount.`,
+      );
+    }
+    if (/[eE]/.test(String(val))) {
+      // Excel formulas occasionally store residual IEEE-754 zero noise (~1e-14).
+      if (Math.abs(val) < 1e-9) {
+        return 0 as MinorUnits;
+      }
+      throw new Error(
+        `Invalid monetary value at ${location}: scientific notation is not supported.`,
+      );
+    }
+    try {
+      return poundsToMinorUnits(val);
+    } catch {
+      throw new Error(
+        `Invalid monetary value at ${location}: expected a valid decimal amount.`,
+      );
+    }
   }
   const trimmed = String(val).trim();
   if (!trimmed) return 0 as MinorUnits;
-  if (/^\s*[-+]?\d+(?:\.\d+)?\s*$/.test(trimmed)) {
-    return poundsToMinorUnits(trimmed);
+  if (/^[-+]?\d+(?:\.\d+)?$/.test(trimmed)) {
+    try {
+      return poundsToMinorUnits(trimmed);
+    } catch {
+      throw new Error(
+        `Invalid monetary value at ${location}: expected a valid decimal amount.`,
+      );
+    }
   }
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return 0 as MinorUnits;
-  if (Math.abs(parsed) < 1e-6) return 0 as MinorUnits;
-  return poundsToMinorUnits(parsed.toFixed(6));
+  if (/^[-+]?\d+(?:\.\d+)?[eE][-+]?\d+$/.test(trimmed)) {
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed) && Math.abs(parsed) < 1e-9) {
+      return 0 as MinorUnits;
+    }
+    throw new Error(
+      `Invalid monetary value at ${location}: scientific notation is not supported.`,
+    );
+  }
+  throw new Error(
+    `Invalid monetary value at ${location}: expected a valid decimal amount.`,
+  );
 }
 
 /** Round money to exact 2 decimal places via integer-pence conversion, avoiding floating-point drift. */
-export function parseMoney(val: string | number | null | undefined): number {
-  return minorUnitsToPounds(parseMoneyPence(val));
+export function parseMoney(
+  val: string | number | null | undefined,
+  context?: ParseMoneyContext,
+): number {
+  return minorUnitsToPounds(parseMoneyPence(val, context));
 }
 
 export function openXlsxWorkbook(filePath: string): ParsedWorkbook {
@@ -303,6 +365,11 @@ export function openXlsxWorkbook(filePath: string): ParsedWorkbook {
         if (v !== '') hasAnyValue = true;
       }
       if (hasAnyValue) {
+        Object.defineProperty(obj, '__xlsxRowNumber', {
+          value: row.rowNumber,
+          enumerable: false,
+          configurable: true,
+        });
         dataRows.push(obj);
       }
     }

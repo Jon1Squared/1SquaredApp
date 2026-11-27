@@ -2803,7 +2803,11 @@ export function HomeClient({
                       <div className="worklist-right">
                         <strong>
                           {formatGbp(d.net_amount)}{' '}
-                          {d.vat_amount > 0 ? `+ £${d.vat_amount.toFixed(2)} VAT` : '(no VAT)'}
+                          {d.vat_amount === null
+                            ? '(VAT Not available)'
+                            : d.vat_amount > 0
+                              ? `+ £${d.vat_amount.toFixed(2)} VAT`
+                              : '(no VAT)'}
                         </strong>
                       </div>
                     </li>
@@ -4566,7 +4570,11 @@ export function HomeClient({
                       <div className="worklist-right">
                         <strong>
                           {formatGbp(d.net_amount)}{' '}
-                          {d.vat_amount > 0 ? `+ £${d.vat_amount.toFixed(2)} VAT` : '(no VAT)'}
+                          {d.vat_amount === null
+                            ? '(VAT Not available)'
+                            : d.vat_amount > 0
+                              ? `+ £${d.vat_amount.toFixed(2)} VAT`
+                              : '(no VAT)'}
                         </strong>
                       </div>
                     </li>

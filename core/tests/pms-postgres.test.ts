@@ -2727,4 +2727,70 @@ describe('S0-18: PostgreSQL Per-Tenant PMS Data & PMS Links Repository, ADR 0029
       expect(reloaded?.retainerMoniesOnAccountPence).toBe(125050);
     });
   });
+
+  it('R831: toSafeMinorUnits and repository read path return null (displayed as "Not available") and emit a count-only warning for corrupt payload_json money text', async () => {
+    const { vi } = await import('vitest');
+    const { toSafeMinorUnits } = await import('@platform/core');
+    const { formatGbp } = await import('@/domain/pms');
+
+    expect(toSafeMinorUnits('CORRUPT_TEXT_SECRET')).toBeNull();
+    expect(toSafeMinorUnits('NaN')).toBeNull();
+    expect(toSafeMinorUnits('Infinity')).toBeNull();
+    expect(toSafeMinorUnits('12.34.56')).toBeNull();
+    expect(toSafeMinorUnits('1e999')).toBeNull();
+    expect(toSafeMinorUnits(Number.NaN)).toBeNull();
+    expect(toSafeMinorUnits(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(toSafeMinorUnits(null)).toBeNull();
+    expect(toSafeMinorUnits('1.4210854715202004e-14')).toBe(0);
+    expect(formatGbp(null)).toBe('Not available');
+
+    const ctxA = makeTenantContext('tenant-a', 'P-000001');
+    const pmsRepo = getPmsRepository();
+    await pmsRepo.clearTenantData(ctxA);
+    await pmsRepo.importExtractDataset(
+      ctxA,
+      buildSyntheticDataset({
+        suffix: 'A',
+        asAtDate: '2026-10-16',
+        wipAmount: 500,
+        invoiceNet: 1000,
+        unlinkedWipAmount: 100,
+      }),
+    );
+
+    const direct = await createDirectMigrationClient({ ctx: ctxA });
+    try {
+      await direct.query(
+        `UPDATE public.pms_fee_earners
+            SET payload_json = jsonb_set(payload_json, '{annual_target_fees}', '"CORRUPT_TEXT_SECRET_42"'::jsonb)
+          WHERE tenant_id = $1`,
+        [ctxA.tenantId],
+      );
+    } finally {
+      await direct.end();
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const feeEarners = await pmsRepo.listFeeEarnersOnly(ctxA);
+      expect(feeEarners.length).toBeGreaterThan(0);
+      expect(feeEarners[0]?.annual_target_fees).toBeNull();
+      expect(feeEarners[0]?.annual_target_fees_pence).toBeNull();
+      expect(formatGbp(feeEarners[0]?.annual_target_fees)).toBe('Not available');
+
+      const corruptWarns = warnSpy.mock.calls
+        .map((c) => String(c[0] ?? ''))
+        .filter((msg) => msg.includes('pms.corrupt_money_text'));
+      expect(corruptWarns.length).toBe(1);
+      const parsedWarn = JSON.parse(corruptWarns[0]!);
+      expect(parsedWarn).toEqual({
+        event: 'pms.corrupt_money_text',
+        tenantId: ctxA.tenantId,
+        corruptCount: 1,
+      });
+      expect(corruptWarns[0]).not.toContain('CORRUPT_TEXT_SECRET_42');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
