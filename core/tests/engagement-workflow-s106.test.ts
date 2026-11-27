@@ -1550,7 +1550,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
           enquiryId,
           {
             targetStatus: 'Declined',
-            closeReasonId: vid('enquiry_close_reason', 'Conflict of interest'),
+            closeReasonId: vid('enquiry_close_reason', 'Conflict'),
             closeNotes: 'Conflicting existing client Acme Secret Holdings.',
           },
           'P-000002',
@@ -2142,5 +2142,100 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     expect(unassignedAudits[0]?.newValue).toContain('outcome=escalation_unassigned');
     expect(unassignedAudits[0]?.newValue).not.toContain('Confidential Zero Owner Secret Title');
     expect(unassignedAudits[0]?.newValue).not.toContain('none@example.test');
+  }, 45_000);
+
+  it('8. R834: sendNonEngagementLetter refuses open & Converted enquiries and ignores forged closeReasonSystemKey', async () => {
+    await resetAllDemoData('P-000004', testDataResetContext());
+    const ctx = testTenantCtx('P-000002');
+    const intakeRepo = new (await import('../src/tenancy/intakeQuoteRepository')).TenantIntakeQuoteRepository();
+
+    // 1. Open enquiry must be rejected with VALIDATION_ERROR
+    const openRes = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveEnquiryRecord(
+          {
+            firstName: 'Open',
+            lastName: 'Enquirer',
+            email: 'open.enq@1squared.co.uk',
+            phone: '029 2000 0111',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.employment_and_hr',
+            summary: 'Open enquiry test',
+            notes: 'Required intake notes for open enquiry test.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002' },
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(openRes.errors).toBeUndefined();
+    const openEnqId = openRes.enquiry!.id;
+
+    const sendOpen = await runAsActionActor(
+      'P-000002',
+      () => sendNonEngagementLetterAction({ enquiryId: openEnqId }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(sendOpen).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+
+    // 2. Converted enquiry must also be rejected with VALIDATION_ERROR
+    const convSave = await runAsActionActor(
+      'P-000002',
+      () =>
+        saveEnquiryRecord(
+          {
+            firstName: 'Converted',
+            lastName: 'Client',
+            email: 'converted@1squared.co.uk',
+            phone: '029 2000 0222',
+            channelId: 'enquiry_channel.phone',
+            practiceAreaId: 'work_type.employment_and_hr',
+            summary: 'Converted enquiry test',
+            notes: 'Required intake notes for converted enquiry test.',
+            privacyNoticeGiven: true,
+          },
+          { byId: 'P-000002' },
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const convEnq = convSave.enquiry!;
+    await intakeRepo.putEnquiry(ctx, { ...convEnq, status: 'Converted' });
+    const sendConv = await runAsActionActor(
+      'P-000002',
+      () => sendNonEngagementLetterAction({ enquiryId: convEnq.id }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(sendConv).toMatchObject({ ok: false, code: 'VALIDATION_ERROR' });
+
+    // 3. Closed as 'outside_expertise' -> forged closeReasonSystemKey: 'conflict' in input is dropped/ignored
+    await runAsActionActor(
+      'P-000002',
+      () =>
+        closeEnquiryRecord(
+          openEnqId,
+          {
+            targetStatus: 'Declined',
+            closeReasonId: vid('enquiry_close_reason', 'Outside our expertise'),
+            closeNotes: 'Requires maritime specialist.',
+          },
+          'P-000002',
+        ),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    const sendForged = await runAsActionActor(
+      'P-000002',
+      () =>
+        sendNonEngagementLetterAction({
+          enquiryId: openEnqId,
+          closeReasonSystemKey: 'conflict',
+        } as unknown as { enquiryId: string }),
+      { roles: ['fee_earner'], mfaVerified: false },
+    );
+    expect(sendForged.ok).toBe(true);
+    if (!sendForged.ok) return;
+    // Subject comes from stored 'outside_expertise' template, NOT forged 'conflict'
+    expect(sendForged.outboxRecord.subject).not.toContain('unable to act');
+    expect(sendForged.outboxRecord.subject).toContain('Not A Law Firm LLP');
   }, 45_000);
 });

@@ -38811,7 +38811,6 @@ export async function sendNonEngagementLetterRecord(
     enquiryId: string;
     recipientEmail?: string;
     recipientName?: string;
-    closeReasonSystemKey?: string | null;
     idempotencyKey?: string;
   },
   byId?: string,
@@ -38875,6 +38874,31 @@ export async function sendNonEngagementLetterRecord(
     const store = await loadTenantCatalogueStoreView(ctx, {
       includePmsLinks: false,
     });
+    const allowedClosedStatuses = new Set<EnquiryStatus>([
+      'Declined',
+      'Referred out',
+      'No response',
+    ]);
+    if (!allowedClosedStatuses.has(enquiryPre.status)) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'Non-engagement letters can only be sent after an enquiry is closed as Declined, Referred out, or No response.',
+      );
+    }
+    const storedReasonChoice = enquiryPre.closeReasonId
+      ? store.values.find(
+          (v) =>
+            v.listKey === 'enquiry_close_reason' &&
+            v.id === enquiryPre.closeReasonId,
+        )
+      : undefined;
+    if (enquiryPre.status === 'Declined' && !storedReasonChoice) {
+      return registerServiceFailure(
+        'VALIDATION_ERROR',
+        'A valid close reason must be recorded on the closed enquiry before sending a non-engagement letter.',
+      );
+    }
+
     const partyRepo = getPartyRepository();
     const linkedPerson = enquiryPre.linkedPersonId
       ? await partyRepo.getPersonById<Person>(ctx, enquiryPre.linkedPersonId)
@@ -38902,9 +38926,13 @@ export async function sendNonEngagementLetterRecord(
     ).trim();
 
     const closeReasonKey =
-      input.closeReasonSystemKey?.trim() ||
+      storedReasonChoice?.systemKey?.trim() ||
       systemKeyOf(store.values, enquiryPre.closeReasonId) ||
-      null;
+      (enquiryPre.status === 'Referred out'
+        ? 'referred_out'
+        : enquiryPre.status === 'No response'
+          ? 'no_response'
+          : null);
     const matterAreaLabel = resolveLabel(store.values, enquiryPre.practiceAreaId);
     const effectiveEngagement = await resolveEffectiveEngagementConfig(
       ctx,

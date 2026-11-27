@@ -2331,13 +2331,21 @@ export async function sendNonEngagementLetterAction(input: {
   enquiryId: string;
   recipientEmail?: string;
   recipientName?: string;
-  closeReasonSystemKey?: string | null;
   idempotencyKey?: string;
 }) {
   return guardedAction('sendNonEngagementLetterAction', async (actor) => {
-    const res = await sendNonEngagementLetterRecord(input, actor.personId, {
-      tenantCtx: actor.tenantContext,
-    });
+    const res = await sendNonEngagementLetterRecord(
+      {
+        enquiryId: input.enquiryId,
+        recipientEmail: input.recipientEmail,
+        recipientName: input.recipientName,
+        idempotencyKey: input.idempotencyKey,
+      },
+      actor.personId,
+      {
+        tenantCtx: actor.tenantContext,
+      },
+    );
     revalidateAll();
     return res;
   });
