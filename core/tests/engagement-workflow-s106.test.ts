@@ -2284,7 +2284,7 @@ describe('S1-06: Client Care dispatch, Monotonic B2, R817 purpose decoupling, R8
     if (!sendForged.ok) return;
     // Subject comes from stored 'outside_expertise' template, NOT forged 'conflict'
     expect(sendForged.outboxRecord.subject).not.toContain('unable to act');
-    expect(sendForged.outboxRecord.subject).toContain('Not A Law Firm LLP');
+    expect(sendForged.outboxRecord.subject).toContain(getActiveTenantConfiguration().displayName);
   }, 45_000);
 
   it('9. R835: engagement & non-engagement sends are end-to-end idempotent across retries and concurrent races', async () => {
