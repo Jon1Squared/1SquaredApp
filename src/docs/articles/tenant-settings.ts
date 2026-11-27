@@ -6,7 +6,7 @@ export const tenantSettingsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Per-tenant configuration settings in base.json and environment overlays, their defaults, runtime enforcement, and reserved status.',
-  updated: '2026-11-26',
+  updated: '2026-11-27',
   body: `
 Every tenant deployment is configured through \`config/base.json\` and optional per-environment overlays (\`config/environments/dev.json\`, \`test.json\`, \`training.json\`, \`demo.json\`, \`live.json\`). Settings are validated at startup against \`core/schemas/tenant-config.schema.json\` and the core Zod configuration engine.
 
@@ -169,5 +169,14 @@ Firm engagement wording and automated chase timings are shown read-only under **
 | Engagement & quote/retainer chase schedule | Disabled in core (7, 14 and 21 days in demo) | Active | Controls whether automated chasing is active, whether client reminder emails send at the first and second intervals (7 and 14 days by default), and when the fee-earner follow-up task opens (21 days by default) |
 | Client Care & Non-Engagement wording | Firm standard wording in demo config | Active | Supplies introductory text, standard terms of business (including Legal Ombudsman complaints wording), signature instructions, and Non-Engagement templates matched by close reason without revealing confidential conflict details |
 | Email Outbox inspection & attachment downloads | Active (Administrator access + MFA) | Active | Lists queued, sent, and blocked messages linked to matters, quotes, and enquiries the administrator is permitted to see, logging every view and PDF attachment download to the audit trail |
+
+### Money on Account & client bank details
+
+If your firm has turned on Money on Account, its active status, payment reference prefix, and masked client account bank details are shown read-only under **Administration → Email Outbox** (requiring multi-factor authentication; see [Money on Account requests, receipts & opening checks](/docs/money-on-account)):
+
+| Setting | Default | Status | Notes |
+|---|---|---|---|
+| Money on Account workflow | Disabled in core (enabled in demo) | Active | Enables Payment on Account PDF requests, unique short transfer references, manual and Practice Management System client ledger receipt matching, and receipt reversals |
+| Client account bank details & reference prefix | Empty in core (example demo account in non-live demo) | Active | Changing client account bank details requires administrator multi-factor authentication and writes an audit log entry masking all but the last two digits of the sort code and account number; demonstration placeholder details are rejected in live environments |
 `.trim(),
 };

@@ -37,6 +37,7 @@ import { keyDatesVerificationArticle } from './articles/key-dates-verification';
 import { leaversAndReassignmentArticle } from './articles/leavers-and-reassignment';
 import { matterOpeningAndRiskArticle } from './articles/matter-opening-and-risk';
 import { mattersEnquiriesTasksNavigationArticle } from './articles/matters-enquiries-tasks-and-navigation';
+import { moneyOnAccountArticle } from './articles/money-on-account';
 import { quickConflictCheck } from './articles/quick-conflict-check';
 import { quotesAndPricingArticle } from './articles/quotes-and-pricing';
 import { registersEngineArticle } from './articles/registers-engine';
@@ -74,6 +75,7 @@ export const ARTICLES: DocArticle[] = [
   aboutDocs,
   homeAndProfileScreensArticle,
   matterOpeningAndRiskArticle,
+  moneyOnAccountArticle,
   aiMatterExtractionArticle,
   mattersEnquiriesTasksNavigationArticle,
   globalSearchArticle,

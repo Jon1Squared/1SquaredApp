@@ -243,51 +243,59 @@ foreach ($JobName in @("caj-provision-demo", "caj-migrate-demo", "caj-seed-demo-
   az containerapp job update --name "caj-seed-demo-demo" --resource-group $RG --remove-env-vars "SEED_DEMO_FORCE" | Out-Null
   ```
 
-### In-Place Upgrade & Rollback Rule for Migrations `0029` (`S1-07`), `0028` (`S1-06`) & `0027` (`S1-12`, `R821` Option B, `R853`)
+### In-Place Upgrade & Rollback Rule for Migrations `0030` (`S1-08`), `0029` (`S1-07`), `0028` (`S1-06`) & `0027` (`S1-12`, `R821` Option B, `R853`)
 
 - **In-place demo conversion (`S1-12`, `0027`):** Deploying `S1-12` upgrades the existing demo tenant in place via `caj-migrate-demo` (`0027_pms_money_and_retainer_pence_expand`, zero automatic re-seeding). After `caj-migrate-demo` finishes, inspect `ContainerAppConsoleLogs_CL` (and Application Insights) for `job.migrate.pms_pence_verified` and confirm `mismatchCount: 0` across all 21 verified monetary columns (`maxColumnTotalDiffPence: 0`; logs contain counts and per-column differences only). Re-seeding is used only as a manual fallback if conversion verification fails and only with owner approval.
-- **In-place engagement & quote schema expands (`0028`, `0029`):** Deploying `S1-06` applies `0028_engagement_and_chasing_expand`, and deploying `S1-07` applies `0029_quotes_poa_and_dispatch_expand` cleanly over `0028` with zero backfill onto pre-existing `'Sent'` quotes or matters.
-- **Mandatory newest-first rollback rule (`R828`, `R853`):** Because migrate-down executes strictly **newest first, one version at a time** (non-newest targets are refused) and earlier container images do not contain newer `downSql` scripts, **always run migrate-down using the newest deployed image (`S1-07` when deployed) before rolling back application containers**:
-  - **Rolling back only `S1-07` (to `S1-06`):** Undo migration `0029` first and confirm every tenant returns to schema version `0028` (`--down --target 0029 --confirm-rollback`) before rolling web and scheduled-job containers back to `<s1-06-release-tag>`.
-  - **Rolling back both `S1-07` and `S1-06` (to `S1-12`):** Undo `0029` (`0029 -> 0028`), then undo `0028` (`0028 -> 0027`) still on the newest (`S1-07`) image before rolling containers back to `<s1-12-release-tag>`.
-  - **Rolling back through `S1-12` (to a pre-`S1-12` release):** Undo `0029 -> 0028 -> 0027 -> 0026` sequentially in newest-first order on the newest (`S1-07`) image before rolling containers back to `<pre-s1-12-release-tag>`. *(While `S1-12` reads solely from integer-pence columns, it still dual-writes legacy float columns so rolling back `0027` -> `0026` remains reversible.)*
+- **In-place engagement, quote & MOA schema expands (`0028`, `0029`, `0030`):** Deploying `S1-06` applies `0028_engagement_and_chasing_expand`, deploying `S1-07` applies `0029_quotes_poa_and_dispatch_expand` cleanly over `0028` with zero backfill onto pre-existing `'Sent'` quotes or matters, and deploying `S1-08` applies `0030_money_on_account_expand` (`money_on_account_requests`, `money_on_account_receipts`, and `uq_moa_receipts_tenant_pms_tx`) cleanly over `0029`.
+- **Mandatory newest-first rollback rule (`R828`, `R853`):** Because migrate-down executes strictly **newest first, one version at a time** (non-newest targets are refused) and earlier container images do not contain newer `downSql` scripts, **always run migrate-down using the newest deployed image (`S1-08` when deployed) before rolling back application containers**:
+  - **Rolling back only `S1-08` (to `S1-07`):** Run Step A (`0030 -> 0029`), confirm every tenant returns to schema version `0029`, then skip Steps B–D and roll containers back to `<s1-07-release-tag>`.
+  - **Rolling back `S1-08` and `S1-07` (to `S1-06`):** Run Step A (`0030 -> 0029`) then Step B (`0029 -> 0028`) on the newest (`S1-08`) image, confirm schema version `0028`, then skip Steps C–D and roll containers back to `<s1-06-release-tag>`.
+  - **Rolling back through `S1-06` (to `S1-12`):** Run Step A (`0030 -> 0029`), Step B (`0029 -> 0028`), and Step C (`0028 -> 0027`) on the newest (`S1-08`) image, confirm schema version `0027`, then skip Step D and roll containers back to `<s1-12-release-tag>`.
+  - **Rolling back through `S1-12` (to a pre-`S1-12` release):** Run Step A -> Step B -> Step C -> Step D (`0030 -> 0029 -> 0028 -> 0027 -> 0026`) sequentially on the newest (`S1-08`) image, confirming schema version after every step (`0029`, `0028`, `0027`, `0026`), before rolling containers back to `<pre-s1-12-release-tag>`. *(While `S1-12` reads solely from integer-pence columns, it still dual-writes legacy float columns so rolling back `0027 -> 0026` remains reversible.)*
 
-Execute the rollback steps in this exact order (replace `<placeholders>` with the environment values):
+Execute the rollback steps in this exact newest-first order (replace `<placeholders>` with the environment values):
   1. **Stop traffic or scale app containers to zero:**
      ```powershell
      az containerapp update --name <web-app-name> --resource-group <resource-group> --min-replicas 0 --max-replicas 0
      ```
-  2. **Step A — Run migrate-down for `0028` using the newest (`S1-06`) image and confirm schema version `0027`:**
+  2. **Step A — Undo `0030` (`0030 -> 0029`, when rolling back from `S1-08`):**
+     ```powershell
+     az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=0030" "PLATFORM_MIGRATE_DOWN_CONFIRM=true" | Out-Null
+     az containerapp job start --name <migrate-job-name> --resource-group <resource-group>
+     az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=" "PLATFORM_MIGRATE_DOWN_CONFIRM=false" | Out-Null
+     ```
+     Confirm execution status `Succeeded` and `job.migrate.down` log showing `"previousVersion":"0030"`, `"resultingVersion":"0029"`, `"outcome":"rolled_back"` across every tenant before continuing or rolling back to `<s1-07-release-tag>`.
+  3. **Step B — Undo `0029` (`0029 -> 0028`, when rolling back past `S1-07`):**
+     ```powershell
+     az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=0029" "PLATFORM_MIGRATE_DOWN_CONFIRM=true" | Out-Null
+     az containerapp job start --name <migrate-job-name> --resource-group <resource-group>
+     az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=" "PLATFORM_MIGRATE_DOWN_CONFIRM=false" | Out-Null
+     ```
+     Confirm execution status `Succeeded` and `job.migrate.down` log showing `"previousVersion":"0029"`, `"resultingVersion":"0028"`, `"outcome":"rolled_back"` across every tenant before continuing or rolling back to `<s1-06-release-tag>`.
+  4. **Step C — Undo `0028` (`0028 -> 0027`, when rolling back past `S1-06`):**
      ```powershell
      az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=0028" "PLATFORM_MIGRATE_DOWN_CONFIRM=true" | Out-Null
      az containerapp job start --name <migrate-job-name> --resource-group <resource-group>
      az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=" "PLATFORM_MIGRATE_DOWN_CONFIRM=false" | Out-Null
      ```
-     Confirm execution status and schema version `0027` before continuing:
-     ```powershell
-     az containerapp job execution show --name <migrate-job-name> --resource-group <resource-group> --job-execution-name <execution-name> --query "properties.status" -o tsv
-     az containerapp job logs show --name <migrate-job-name> --resource-group <resource-group> --job-execution-name <execution-name>
-     ```
-     Verify `Succeeded` and the `job.migrate.down` log showing `"previousVersion":"0028"`, `"resultingVersion":"0027"`, and `"outcome":"rolled_back"` for every tenant.
-     *(If rolling back **only `S1-06`** to `S1-12`, skip Step 3 and proceed directly to Step 4 using `<s1-12-release-tag>`.)*
-  3. **Step B (only when rolling back past `S1-12` to a pre-`S1-12` release) — Run migrate-down for `0027` still using the newest (`S1-06`) image and confirm schema version `0026`:**
+     Confirm `Succeeded` and `job.migrate.down` log showing `"previousVersion":"0028"`, `"resultingVersion":"0027"`, and `"outcome":"rolled_back"` for every tenant (`az containerapp job execution show ...` / `az containerapp job logs show ...`) before continuing or rolling back to `<s1-12-release-tag>`.
+  5. **Step D (only when rolling back past `S1-12` to a pre-`S1-12` release) — Undo `0027` (`0027 -> 0026`) still using the newest image and confirm schema version `0026`:**
      ```powershell
      az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=0027" "PLATFORM_MIGRATE_DOWN_CONFIRM=true" | Out-Null
      az containerapp job start --name <migrate-job-name> --resource-group <resource-group>
      az containerapp job update --name <migrate-job-name> --resource-group <resource-group> --set-env-vars "PLATFORM_MIGRATE_DOWN_TARGET=" "PLATFORM_MIGRATE_DOWN_CONFIRM=false" | Out-Null
      ```
-     *(Direct CLI invocation on the newest image: `node dist/jobs/run-job.mjs migrate --down --target 0028 --confirm-rollback` then `--target 0027 --confirm-rollback`. The tenant list always comes from the tenant registry, never a free-text flag, and non-newest or unconfirmed rollbacks are refused.)*
-     Confirm execution status and schema version `0026` before rolling containers back:
+     *(Direct CLI invocation on the newest image: `node dist/jobs/run-job.mjs migrate --down --target 0030 --confirm-rollback`, then `--target 0029 --confirm-rollback`, `--target 0028 --confirm-rollback`, and `--target 0027 --confirm-rollback`, verifying schema version after each step. The tenant list always comes from the tenant registry, never a free-text flag, and non-newest or unconfirmed rollbacks are refused.)*
+     Confirm execution status `Succeeded` and the `job.migrate.down` log showing `"previousVersion":"0027"`, `"resultingVersion":"0026"`, and `"outcome":"rolled_back"` before rolling containers back:
      ```powershell
      az containerapp job execution show --name <migrate-job-name> --resource-group <resource-group> --job-execution-name <execution-name> --query "properties.status" -o tsv
      az containerapp job logs show --name <migrate-job-name> --resource-group <resource-group> --job-execution-name <execution-name>
      ```
-     Verify `Succeeded` and the `job.migrate.down` log showing `"previousVersion":"0027"`, `"resultingVersion":"0026"`, and `"outcome":"rolled_back"` for every tenant.
-  4. **Roll application and scheduled-job containers back to the target release and restore traffic (`<s1-12-release-tag>` or `<pre-s1-12-release-tag>`):**
+  6. **Roll application and scheduled-job containers back to the target release (`<s1-07-release-tag>`, `<s1-06-release-tag>`, `<s1-12-release-tag>`, or `<pre-s1-12-release-tag>`) and restore traffic:**
      ```powershell
      az containerapp update --name <web-app-name> --resource-group <resource-group> --image <acr-login-server>/<web-image>:<target-release-tag> --min-replicas 1 --max-replicas <max-replicas>
      ```
-     Repeat for any scheduled-job Container Apps jobs on `<target-release-tag>`. Re-deploying later runs `0027` / `0028` up cleanly from live tables.
+     Repeat for any scheduled-job Container Apps jobs on `<target-release-tag>`. Re-deploying later runs `0027` / `0028` / `0029` / `0030` up cleanly from live tables.
 
 ---
 

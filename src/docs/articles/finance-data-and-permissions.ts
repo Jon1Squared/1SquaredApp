@@ -6,7 +6,7 @@ export const financeDataAndPermissionsArticle: DocArticle = {
   section: 'architecture-security',
   summary:
     'Which roles can view matter-level and firm-wide Practice Management System (PMS) finance figures, how unlinked and restricted matters are handled, how credit-control actions are gated, and how quotes, matter costs, and PMS figures reconcile to the exact penny.',
-  updated: '2026-11-26',
+  updated: '2026-11-27',
   body: `
 1Squared delivers Practice Management System (PMS) financial figures through dedicated, permission-checked views backed by your firm’s isolated database. Each firm’s database stores its own PMS extract datasets, credit-control history, and record links separately from every other firm; your 1Squared support contact can provide technical notes on the import tool. Financial figures are never loaded on unrelated pages or in the shared navigation bar, which checks only whether you hold permission to view firm finance, matter finance, or credit-control features.
 
@@ -96,5 +96,11 @@ Conditional Fee Agreements (\`CFA\`) and Damages-Based Agreements (\`DBA\`) are 
 3. **Fail-closed enforcement with no override path**:
    - Wherever CFA or DBA terms are saved or revised on a **matter** (\`saveMatterRecord\`), **partner cost sign-off** (\`signOffMatterCostsRecord\`), or **quote** (\`saveQuoteRecord\`, \`reviseQuoteRecord\`), the server reads live work-type and matter-costs configuration inside the same transaction and blocks invalid terms fail closed with typed codes \`FEE_CAP_CATEGORY_UNMAPPED\` (missing work type or unmapped category—never guessing \`general civil\`), \`FEE_CAP_BASE_MISMATCH\`, \`FEE_CAP_EXCEEDED_WORK_TYPE\`, \`FEE_CAP_EXCEEDED_FIRM\`, or \`FEE_CAP_EXCEEDED_STATUTORY\`.
    - **No Risk & Compliance or Partner sign-off override exists above any CFA/DBA cap**—sign-off itself enforces the cap check inside the transaction. All firm cap updates, work-type cap updates, and matter/quote CFA/DBA changes write structured entries in the firm audit log inside the same transaction.
+
+## 7. Money on Account permissions and Client Due Diligence separation
+
+- **Role segregation for client money receipts:** While accessible matter team members (including fee earners, supervisors, legal secretaries, finance, partners, managing partners, and administrators) can view and send Money on Account requests, **recording manual receipts, matching Practice Management System client ledger entries, and reversing receipts is strictly reserved for \`finance\`, \`partner\`, and \`managing_partner\` roles**. Administrators, fee earners, legal secretaries, and risk and compliance officers cannot record or reverse Money on Account receipts or upload Money on Account proof files.
+- **Exact-penny reconciliation:** Every Money on Account request, manual receipt, Practice Management System client-ledger receipt match, and opening gate check uses exact integer pennies. Outgoing client payments and negative ledger adjustments cannot be matched as receipts, and each Practice Management System ledger entry can back only one unreversed receipt at a time.
+- **Client Due Diligence privacy & separate payment proof:** On Money on Account and opening checklist views, confidential Client Due Diligence outcomes and identity documents stay hidden from \`finance\` users as **Not available to you**. Optional bank transfer advice or remittance proof uploads are tagged strictly for Money on Account verification and remain separate from Client Due Diligence files (see [Money on Account requests, receipts & opening checks](/docs/money-on-account)).
 `,
 };
